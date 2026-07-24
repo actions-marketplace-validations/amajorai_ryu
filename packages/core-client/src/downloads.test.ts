@@ -107,7 +107,9 @@ describe("state predicates", () => {
 
 describe("listDownloads", () => {
 	test("returns the downloads array from the snapshot", async () => {
-		const cap = stub(JSON.stringify({ downloads: [{ id: "d1" }, { id: "d2" }] }));
+		const cap = stub(
+			JSON.stringify({ downloads: [{ id: "d1" }, { id: "d2" }] })
+		);
 		const tasks = await listDownloads(target);
 		expect(tasks.map((t) => t.id)).toEqual(["d1", "d2"]);
 		expect(cap.url).toBe("http://127.0.0.1:7980/api/downloads");
@@ -121,10 +123,9 @@ describe("listDownloads", () => {
 
 describe("control actions", () => {
 	test("each control POSTs to /:id/<action>", async () => {
-		const cases: Array<[
-			(t: ApiTarget, id: string) => Promise<unknown>,
-			string,
-		]> = [
+		const cases: Array<
+			[(t: ApiTarget, id: string) => Promise<unknown>, string]
+		> = [
 			[pauseDownload, "pause"],
 			[resumeDownload, "resume"],
 			[retryDownload, "retry"],
@@ -164,10 +165,7 @@ describe("streamDownloads — SSE parsing", () => {
 	});
 
 	test("stitches a payload split across two reader chunks", async () => {
-		const seen = await collect([
-			'data: {"type":"remo',
-			'ved","id":"d7"}\n\n',
-		]);
+		const seen = await collect(['data: {"type":"remo', 'ved","id":"d7"}\n\n']);
 		expect(seen).toEqual([{ type: "removed", id: "d7" }]);
 	});
 

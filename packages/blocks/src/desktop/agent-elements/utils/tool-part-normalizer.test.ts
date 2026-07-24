@@ -21,7 +21,7 @@ describe("normalizeToolPart", () => {
 			type: "tool-Bash",
 			input: '{"command":"ls"}',
 			output: '{"stdout":"a"}',
-			result: '[1,2]',
+			result: "[1,2]",
 		};
 		const normalized = normalizeToolPart(part) as Record<string, unknown>;
 		expect(normalized).not.toBe(part);

@@ -7,13 +7,13 @@
 // implements the privileged `listAgents` service. The plugin (in the iframe) sees
 // none of that: it only gets RPC results for granted methods.
 
+import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
+import { examplePluginSrcdoc } from "@ryu/app-host/example-plugin";
+import type { Capability, HostServices } from "@ryu/app-host/rpc";
 import { useMemo, useState } from "react";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
-import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
-import { examplePluginSrcdoc } from "@ryu/app-host/example-plugin";
-import type { Capability, HostServices } from "@ryu/app-host/rpc";
 
 export function ExamplePluginPanel() {
 	const getActiveNode = useNodeStore((s) => s.getActiveNode);

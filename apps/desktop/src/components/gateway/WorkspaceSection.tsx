@@ -204,7 +204,8 @@ function RoleFormDialog({
 								value={values.key}
 							/>
 							<p className="text-muted-foreground text-xs">
-								Kebab-case, unique within this workspace. Cannot be changed later.
+								Kebab-case, unique within this workspace. Cannot be changed
+								later.
 							</p>
 						</div>
 					) : null}
@@ -230,7 +231,11 @@ function RoleFormDialog({
 					{err ? <p className="text-destructive text-sm">{err}</p> : null}
 				</div>
 				<DialogFooter>
-					<Button disabled={saving} onClick={() => setOpen(false)} variant="ghost">
+					<Button
+						disabled={saving}
+						onClick={() => setOpen(false)}
+						variant="ghost"
+					>
 						Cancel
 					</Button>
 					<Button disabled={saving} onClick={() => handleSubmit()}>
@@ -441,8 +446,7 @@ function MemberRolesControl({
 	const assigned = assignedQuery.data ?? [];
 
 	const setMutation = useMutation({
-		mutationFn: (roleKeys: string[]) =>
-			setMemberRoles(orgId, userId, roleKeys),
+		mutationFn: (roleKeys: string[]) => setMemberRoles(orgId, userId, roleKeys),
 		onSuccess: async () => {
 			await queryClient.invalidateQueries({
 				queryKey: ["workspace-member-roles", orgId, userId],
@@ -696,11 +700,7 @@ export function WorkspaceSection() {
 						</div>
 					</SettingsSection>
 				) : (
-					<RolesMatrix
-						canManage={canManageRoles}
-						orgId={orgId}
-						roles={roles}
-					/>
+					<RolesMatrix canManage={canManageRoles} orgId={orgId} roles={roles} />
 				)
 			) : null}
 

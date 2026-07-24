@@ -248,10 +248,7 @@ export function buildAgentPublishBody(
 		],
 	};
 
-	const capabilities = deriveCapabilities(
-		source.tools,
-		source.composioActions
-	);
+	const capabilities = deriveCapabilities(source.tools, source.composioActions);
 	const runnablesView: PublishRunnableView[] = [
 		{ id: runnableId, name: displayName, kind: "agent", enabled: true },
 	];
@@ -275,8 +272,7 @@ export function buildAgentPublishBody(
 		// on install (mirrors the SDK CLI publish body).
 		descriptor: manifest,
 		grants: [],
-		description:
-			trimOrNull(listing.description) ?? source.description ?? null,
+		description: trimOrNull(listing.description) ?? source.description ?? null,
 		tagline: trimOrNull(listing.tagline),
 		category: trimOrNull(listing.category),
 		developer: null,

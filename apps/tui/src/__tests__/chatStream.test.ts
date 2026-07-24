@@ -262,7 +262,9 @@ test("a non-2xx response reports HTTP <status> and reads no body", async () => {
 
 test("a 200 with a null body resolves immediately via onDone", async () => {
 	globalThis.fetch = (() =>
-		Promise.resolve(new Response(null, { status: 200 }))) as unknown as typeof fetch;
+		Promise.resolve(
+			new Response(null, { status: 200 })
+		)) as unknown as typeof fetch;
 
 	const c = collector();
 	await streamChat(target, noTurns, noOpts, c.handlers);

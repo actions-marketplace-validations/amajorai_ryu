@@ -47,10 +47,9 @@ describe("loadHiddenSections / persistHiddenSections", () => {
 	test("round-trips a set through storage as a JSON array", () => {
 		persistHiddenSections(new Set(["a", "b"]));
 		expect([...loadHiddenSections()].sort()).toEqual(["a", "b"]);
-		expect(JSON.parse(localStorage.getItem(SECTION_HIDDEN_KEY) ?? "[]")).toEqual([
-			"a",
-			"b",
-		]);
+		expect(
+			JSON.parse(localStorage.getItem(SECTION_HIDDEN_KEY) ?? "[]")
+		).toEqual(["a", "b"]);
 	});
 
 	test("an empty / absent key reads back an empty set", () => {

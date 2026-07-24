@@ -50,17 +50,17 @@ function linesOf(value: string): string[] {
 }
 
 export interface PublishDialogProps {
-	/** Human label for the thing being published, e.g. "agent". Used in copy. */
-	kindLabel: string;
-	/** Default display name (from the Runnable). */
-	defaultDisplayName: string;
-	/** Default long description (from the Runnable), or empty. */
-	defaultDescription?: string;
 	/** Package the collected listing into the wire body. Owned by the caller so
 	 *  the dialog stays kind-agnostic. */
 	buildBody: (listing: PublishListing) => PublishRequest;
-	open: boolean;
+	/** Default long description (from the Runnable), or empty. */
+	defaultDescription?: string;
+	/** Default display name (from the Runnable). */
+	defaultDisplayName: string;
+	/** Human label for the thing being published, e.g. "agent". Used in copy. */
+	kindLabel: string;
 	onOpenChange: (open: boolean) => void;
+	open: boolean;
 }
 
 export function PublishDialog({
@@ -201,11 +201,11 @@ export function PublishDialog({
 					</div>
 				) : (
 					<div className="flex flex-col gap-4 py-1">
-						{!signedIn ? (
+						{signedIn ? null : (
 							<p className="rounded-xl bg-destructive/10 p-3 text-destructive text-sm">
 								Sign in to your Ryu account to publish to the marketplace.
 							</p>
-						) : null}
+						)}
 
 						<div className="flex flex-col gap-1.5">
 							<Label htmlFor="publish-name">Display name</Label>
@@ -271,7 +271,9 @@ export function PublishDialog({
 								className="min-h-20"
 								id="publish-prompts"
 								onChange={(e) => setExamplePromptsText(e.target.value)}
-								placeholder={"One per line, e.g.\nSummarize this PDF\nDraft a reply"}
+								placeholder={
+									"One per line, e.g.\nSummarize this PDF\nDraft a reply"
+								}
 								value={examplePromptsText}
 							/>
 							<p className="text-muted-foreground text-xs">
@@ -303,9 +305,7 @@ export function PublishDialog({
 							/>
 						</div>
 
-						{error ? (
-							<p className="text-destructive text-sm">{error}</p>
-						) : null}
+						{error ? <p className="text-destructive text-sm">{error}</p> : null}
 
 						<DialogFooter>
 							<Button onClick={close} variant="ghost">

@@ -54,7 +54,8 @@ async function activate(context) {
 	host
 		.sideModel({
 			system: "You are concise.",
-			prompt: "In one short sentence, say hello to a developer building a Ryu app.",
+			prompt:
+				"In one short sentence, say hello to a developer building a Ryu app.",
 		})
 		.then((text) => setBody(modelBox, String(text)))
 		.catch((e) => setBody(modelBox, `unavailable: ${errText(e)}`));
@@ -128,7 +129,11 @@ function renderFeedback(box, host) {
 		btn.style.cursor = "pointer";
 		btn.addEventListener("click", () => {
 			host.storage
-				.set({ namespace: "feedback", key: `vote-${Date.now()}`, value: signal })
+				.set({
+					namespace: "feedback",
+					key: `vote-${Date.now()}`,
+					value: signal,
+				})
 				.then(() => setBody(box, `Recorded: ${signal}. Thanks!`))
 				.catch((e) => setBody(box, `could not record: ${errText(e)}`));
 		});

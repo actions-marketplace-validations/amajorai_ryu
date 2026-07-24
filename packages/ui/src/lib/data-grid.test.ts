@@ -326,7 +326,11 @@ describe("getColumnBorderVisibility", () => {
 
 	test("the first right-pinned column shows a start border", () => {
 		const result = getColumnBorderVisibility({
-			column: fakeColumn({ pinned: "right", firstRight: true, lastRight: true }),
+			column: fakeColumn({
+				pinned: "right",
+				firstRight: true,
+				lastRight: true,
+			}),
 			isLastColumn: true,
 			nextColumn: undefined,
 		});

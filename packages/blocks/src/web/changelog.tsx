@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { SearchInput } from "./blog.tsx";
+import { SeededGrainientBanner } from "./seeded-grainient-banner.tsx";
 
 /**
  * Block-local changelog-entry shape, the subset the presentational layer needs.
@@ -31,13 +32,20 @@ export function ChangelogCard({ entry }: { entry: ChangelogEntryData }) {
 		<div className="group transition-all duration-200">
 			<div className="flex flex-col gap-1 pb-3">
 				<Link className="block" href={`/changelog/${entry.slug}`}>
-					{entry.banner && (
+					{entry.banner ? (
 						<div className="mb-4 aspect-video w-full overflow-hidden rounded-md">
 							{/* biome-ignore lint/performance/noImgElement: Notion banner served via the app's notion-image proxy route */}
 							<img
 								alt={entry.title}
 								className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
 								src={`/api/notion-image?pageId=${entry.id}&prop=banner`}
+							/>
+						</div>
+					) : (
+						<div className="mb-4 aspect-video w-full overflow-hidden rounded-md">
+							<SeededGrainientBanner
+								className="h-full w-full"
+								seed={entry.id}
 							/>
 						</div>
 					)}
@@ -120,13 +128,20 @@ export function ChangelogEntry({ entry }: { entry: ChangelogEntryData }) {
 						</div>
 
 						{/* Banner */}
-						{entry.banner && (
+						{entry.banner ? (
 							<div className="relative aspect-video w-full max-w-2xl overflow-hidden rounded-lg">
 								{/* biome-ignore lint/performance/noImgElement: Notion banner served via the app's notion-image proxy route */}
 								<img
 									alt={entry.title}
 									className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
 									src={`/api/notion-image?pageId=${entry.id}&prop=banner`}
+								/>
+							</div>
+						) : (
+							<div className="relative aspect-video w-full max-w-2xl overflow-hidden rounded-lg">
+								<SeededGrainientBanner
+									className="h-full w-full"
+									seed={entry.id}
 								/>
 							</div>
 						)}

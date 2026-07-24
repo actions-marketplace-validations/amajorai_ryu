@@ -17,10 +17,10 @@ import {
 	MAIL_LIFECYCLE,
 	managedInferenceAvailable,
 	PLANS,
-	resolveInboxLifecycle,
 	type PolarBinding,
 	planLimit,
 	resolveEntitlement,
+	resolveInboxLifecycle,
 	resolveProductId,
 	usdToMicro,
 } from "./plans.ts";

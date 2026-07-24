@@ -106,7 +106,10 @@ describe("areToolPropsEqual", () => {
 		const id = nextId();
 		const part = { toolCallId: id, type: "tool-Bash", input: { a: 1 } };
 		// prime cache with an identical snapshot
-		areToolPropsEqual({ part, chatStatus: "streaming" }, { part, chatStatus: "streaming" });
+		areToolPropsEqual(
+			{ part, chatStatus: "streaming" },
+			{ part, chatStatus: "streaming" }
+		);
 		const equal = areToolPropsEqual(
 			{ part, chatStatus: "streaming" },
 			{ part, chatStatus: "ready" }

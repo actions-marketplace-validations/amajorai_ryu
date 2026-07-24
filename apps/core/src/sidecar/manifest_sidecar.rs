@@ -849,7 +849,7 @@ async fn ensure_local_sidecar_present(
     //    command and let the spawn surface a missing-binary error as it always has.
     #[cfg(not(debug_assertions))]
     {
-        let base = std::env::var("RYU_SIDECAR_RELEASE_BASE").unwrap_or_else(|| {
+        let base = std::env::var("RYU_SIDECAR_RELEASE_BASE").unwrap_or_else(|_| {
             format!(
                 "https://github.com/{}/releases/latest/download",
                 crate::update::RYU_REPO

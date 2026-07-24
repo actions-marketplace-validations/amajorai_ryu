@@ -47,14 +47,14 @@ export interface ChatStreamHandlers {
 	onDone: () => void;
 	/** A stream-level error. After this the stream is finished. */
 	onError: (message: string) => void;
+	/** An out-of-band note from a Core plugin turn-hook (goal/proof/double-check). */
+	onPluginNote?: (text: string) => void;
 	/** A text delta from the assistant. */
 	onTextDelta: (delta: string) => void;
 	/** A tool call started (the agent's tool loop). */
 	onToolInput?: (toolName: string) => void;
 	/** A tool result arrived (status string when present). */
 	onToolOutput?: (status: string) => void;
-	/** An out-of-band note from a Core plugin turn-hook (goal/proof/double-check). */
-	onPluginNote?: (text: string) => void;
 }
 
 const TRAILING_CR = /\r$/;

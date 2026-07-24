@@ -67,7 +67,10 @@ describe("grant-mapping completeness invariant", () => {
 	// via some grant string in GRANT_CAPABILITY — otherwise the whole method family
 	// is functionally dead: the Gateway-approved grant maps to nothing, the granted
 	// set is empty, and every call is denied (the `timeline.read` regression).
-	const LOCAL_HOST_CAPS = new Set<Capability>(["widget.state", "ui.displayMode"]);
+	const LOCAL_HOST_CAPS = new Set<Capability>([
+		"widget.state",
+		"ui.displayMode",
+	]);
 
 	it("every capability reachable from METHOD_CAPABILITY has a grant mapping", () => {
 		const grantable = new Set<Capability>(Object.values(GRANT_CAPABILITY));

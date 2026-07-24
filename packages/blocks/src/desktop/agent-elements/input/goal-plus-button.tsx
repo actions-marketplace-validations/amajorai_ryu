@@ -313,7 +313,9 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 								<button
 									className={cn(PLUS_MENU_ITEM, "flex hover:bg-accent")}
 									key={control.id}
-									onClick={() => control.onToggle(control.flag, !control.enabled)}
+									onClick={() =>
+										control.onToggle(control.flag, !control.enabled)
+									}
 									title={control.description ?? control.label}
 									type="button"
 								>

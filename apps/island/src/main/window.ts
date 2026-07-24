@@ -10,7 +10,7 @@ import {
 	isMaterialAppearance,
 } from "../shared/appearance.ts";
 import { getEdgeOffset } from "./edge-offset.ts";
-import { restorePosition, restingPill } from "./position.ts";
+import { restingPill, restorePosition } from "./position.ts";
 import { DEFAULT_DOCK_ZONE, zoneWindowPosition } from "./zones.ts";
 
 // `mica-electron` is a Windows-only NATIVE module (Win11 Mica/Acrylic via DWM).

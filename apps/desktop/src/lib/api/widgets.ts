@@ -15,10 +15,7 @@
 // are resolved server-side from the instance record (spec §4.1), never trusted
 // from the client.
 
-import {
-	CodedRpcError,
-	type WidgetRpcErrorCode,
-} from "@ryu/app-host/rpc";
+import { CodedRpcError, type WidgetRpcErrorCode } from "@ryu/app-host/rpc";
 import {
 	type ApiTarget,
 	apiUrl,

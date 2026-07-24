@@ -40,7 +40,9 @@ export function CopyableId({
 	};
 
 	return (
-		<div className={`group flex items-center justify-end gap-2 ${className ?? ""}`}>
+		<div
+			className={`group flex items-center justify-end gap-2 ${className ?? ""}`}
+		>
 			<code
 				className="max-w-[240px] select-all truncate rounded bg-muted px-2 py-1 font-mono text-muted-foreground text-xs blur-[5px] transition-[filter] duration-150 group-focus-within:blur-0 group-hover:blur-0"
 				title={value}

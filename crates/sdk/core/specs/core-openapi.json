@@ -17,9 +17,7 @@
   "paths": {
     "/api/activity": {
       "get": {
-        "tags": [
-          "Activity"
-        ],
+        "tags": ["Activity"],
         "summary": "recent feed items, newest first.",
         "operationId": "list_activity",
         "responses": {
@@ -34,9 +32,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Activity"
-        ],
+        "tags": ["Activity"],
         "summary": "record a manual feed item.",
         "operationId": "create_activity",
         "requestBody": {
@@ -61,9 +57,7 @@
     },
     "/api/activity/stream": {
       "get": {
-        "tags": [
-          "Activity"
-        ],
+        "tags": ["Activity"],
         "summary": "SSE: a full snapshot on connect, then a frame per",
         "operationId": "activity_stream",
         "responses": {
@@ -80,9 +74,7 @@
     },
     "/api/agents": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "List installed agents",
         "operationId": "list_agents",
         "responses": {
@@ -97,9 +89,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Create an agent",
         "operationId": "create_agent",
         "requestBody": {
@@ -124,9 +114,7 @@
     },
     "/api/agents/catalog": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "List the agent catalog (detected CLIs)",
         "operationId": "list_agent_catalog",
         "responses": {
@@ -143,9 +131,7 @@
     },
     "/api/agents/catalog/install": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Install an agent from the catalog",
         "operationId": "install_agent_handler",
         "requestBody": {
@@ -170,9 +156,7 @@
     },
     "/api/agents/catalog/uninstall": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Uninstall a catalog agent",
         "operationId": "uninstall_agent_handler",
         "requestBody": {
@@ -197,9 +181,7 @@
     },
     "/api/agents/import": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Import an agent from a template",
         "description": "Creates a new agent from a portable agent template (as produced by\n`GET /api/agents/:id/export`). The imported agent always gets a fresh\nserver-assigned id and starts unlocked \u2014 the caller owns their copy and\ncan edit it freely. Name, version, system prompt, tools, engine, and\nper-attribute slots are all round-tripped from the template.",
         "operationId": "import_agent",
@@ -225,9 +207,7 @@
     },
     "/api/agents/{id}": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Get an agent by id",
         "operationId": "get_agent",
         "parameters": [
@@ -252,9 +232,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Update an agent",
         "operationId": "update_agent",
         "parameters": [
@@ -287,9 +265,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Delete an agent",
         "operationId": "delete_agent",
         "parameters": [
@@ -316,9 +292,7 @@
     },
     "/api/agents/{id}/acp-config": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "acp config",
         "description": "Opens a throwaway ACP session (no prompt) and returns `{ modes, models,\nconfigOptions }` exactly as the agent reports them at `session/new` (each\n`null` when unsupported). This is the data the desktop's per-agent permission\nmode / reasoning effort / model pickers are built from \u2014 fully agent-driven,\nnothing hardcoded. Non-ACP agents return all-null. Cached per spawn command.",
         "operationId": "acp_config",
@@ -346,9 +320,7 @@
     },
     "/api/agents/{id}/authenticate": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Authenticate to an ACP agent (login)",
         "operationId": "acp_authenticate",
         "parameters": [
@@ -384,9 +356,7 @@
     },
     "/api/agents/{id}/capabilities": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "agent capabilities",
         "description": "Detection branches by plane: an ACP agent's reasoning support is read from its\n`session/new` config options (tools always supported via the MCP bridge); a\nlocal / openai-compat agent's flags are read from the bound model's GGUF chat\ntemplate ([`crate::model_catalog::capabilities`]). The auto-detected result is\nthe default; a persisted per-agent override (set via PUT) wins. The desktop\ngates its composer and edit-page controls on the effective flags. Nothing is\nhardcoded \u2014 detection is data-driven from the agent's own model/probe.",
         "operationId": "agent_capabilities",
@@ -412,9 +382,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "set agent capabilities",
         "operationId": "set_agent_capabilities",
         "parameters": [
@@ -449,9 +417,7 @@
     },
     "/api/agents/{id}/export": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Export an agent as a template",
         "description": "Returns a portable agent template JSON that captures name, version, system\nprompt, tools, engine, and per-attribute slots. The template can be imported\nvia `POST /api/agents/import` to create a new, unlocked copy with a fresh id.",
         "operationId": "export_agent",
@@ -479,9 +445,7 @@
     },
     "/api/agents/{id}/logout": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Log out of an ACP agent",
         "operationId": "acp_logout",
         "parameters": [
@@ -509,9 +473,7 @@
     },
     "/api/agents/{id}/migrate-to-ryu": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Migrate an agent onto the Ryu engine",
         "description": "Reads the source agent (persona/tools/model), then creates-or-updates the\nRyu agent (id = \"ryu\", engine = \"acp:pi\") with those slots. The source\nagent is never modified; migration is a copy. Returns the updated Ryu agent\nand a summary of the fields that were carried over.",
         "operationId": "migrate_to_ryu",
@@ -539,9 +501,7 @@
     },
     "/api/agents/{id}/sessions": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "List an ACP agent's sessions",
         "operationId": "list_acp_sessions_handler",
         "parameters": [
@@ -569,9 +529,7 @@
     },
     "/api/agents/{id}/sessions/{sid}": {
       "delete": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Delete an ACP agent session",
         "operationId": "delete_acp_session_handler",
         "parameters": [
@@ -608,9 +566,7 @@
     },
     "/api/agents/{id}/sessions/{sid}/load": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Resume an ACP agent session (session/load)",
         "operationId": "load_acp_session_handler",
         "parameters": [
@@ -655,9 +611,7 @@
     },
     "/api/agents/{id}/threads": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "List an agent's importable native threads",
         "operationId": "list_agent_threads_handler",
         "parameters": [
@@ -693,9 +647,7 @@
     },
     "/api/agents/{id}/threads/import": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Import a native thread into a Ryu conversation",
         "operationId": "import_agent_thread_handler",
         "parameters": [
@@ -730,9 +682,7 @@
     },
     "/api/agents/{id}/tools": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "List an agent's tools + MCP tools",
         "operationId": "list_tools",
         "parameters": [
@@ -759,9 +709,7 @@
     },
     "/api/agents/{id}/update": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Update an agent runtime to the latest version",
         "operationId": "agent_update",
         "parameters": [
@@ -789,9 +737,7 @@
     },
     "/api/agents/{id}/update-check": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Check an agent runtime for updates",
         "operationId": "agent_update_check",
         "parameters": [
@@ -819,9 +765,7 @@
     },
     "/api/agents/{id}/usage": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Per-agent subscription usage (5h + weekly windows)",
         "description": "The `{id}` may be an ACP id containing a colon (`acp:claude`); clients must\npercent-encode it (`encodeURIComponent`), which axum decodes into the single\n`:id` segment.",
         "operationId": "agent_usage",
@@ -850,9 +794,7 @@
     },
     "/api/alerts/delivery": {
       "get": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "get alert delivery",
         "operationId": "get_alert_delivery",
         "responses": {
@@ -867,9 +809,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "put alert delivery",
         "operationId": "put_alert_delivery",
         "requestBody": {
@@ -894,9 +834,7 @@
     },
     "/api/approvals": {
       "get": {
-        "tags": [
-          "Approvals"
-        ],
+        "tags": ["Approvals"],
         "summary": "list approval requests, newest first.",
         "operationId": "list_approvals",
         "responses": {
@@ -913,9 +851,7 @@
     },
     "/api/approvals/events": {
       "get": {
-        "tags": [
-          "Approvals"
-        ],
+        "tags": ["Approvals"],
         "summary": "SSE feed of approval events (created / decided).",
         "operationId": "approval_events",
         "responses": {
@@ -932,9 +868,7 @@
     },
     "/api/approvals/mode": {
       "get": {
-        "tags": [
-          "Approvals"
-        ],
+        "tags": ["Approvals"],
         "summary": "the global approval mode (Layer B): `off` /",
         "operationId": "get_mode",
         "responses": {
@@ -949,9 +883,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Approvals"
-        ],
+        "tags": ["Approvals"],
         "summary": "set the global approval mode.",
         "operationId": "set_mode",
         "requestBody": {
@@ -976,9 +908,7 @@
     },
     "/api/approvals/{id}": {
       "get": {
-        "tags": [
-          "Approvals"
-        ],
+        "tags": ["Approvals"],
         "summary": "fetch a single request.",
         "operationId": "get_approval",
         "parameters": [
@@ -1005,9 +935,7 @@
     },
     "/api/approvals/{id}/approve": {
       "post": {
-        "tags": [
-          "Approvals"
-        ],
+        "tags": ["Approvals"],
         "summary": "approve a request (runs its action).",
         "operationId": "approve_approval",
         "parameters": [
@@ -1042,9 +970,7 @@
     },
     "/api/approvals/{id}/reject": {
       "post": {
-        "tags": [
-          "Approvals"
-        ],
+        "tags": ["Approvals"],
         "summary": "reject a request (fails a workflow gate).",
         "operationId": "reject_approval",
         "parameters": [
@@ -1079,9 +1005,7 @@
     },
     "/api/apps/ui/{slug}": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "serve a built-in app's self-contained widget HTML",
         "operationId": "apps_ui_bundle",
         "parameters": [
@@ -1108,9 +1032,7 @@
     },
     "/api/auth/accounts": {
       "get": {
-        "tags": [
-          "Auth"
-        ],
+        "tags": ["Auth"],
         "summary": "List signed-in accounts (tokens never included)",
         "operationId": "auth_accounts_list",
         "responses": {
@@ -1127,9 +1049,7 @@
     },
     "/api/auth/accounts/remove": {
       "post": {
-        "tags": [
-          "Auth"
-        ],
+        "tags": ["Auth"],
         "summary": "Sign out one account by userId",
         "operationId": "auth_accounts_remove",
         "requestBody": {
@@ -1154,9 +1074,7 @@
     },
     "/api/auth/accounts/switch": {
       "post": {
-        "tags": [
-          "Auth"
-        ],
+        "tags": ["Auth"],
         "summary": "Switch the active account",
         "operationId": "auth_accounts_switch",
         "requestBody": {
@@ -1181,9 +1099,7 @@
     },
     "/api/auth/login": {
       "post": {
-        "tags": [
-          "Auth"
-        ],
+        "tags": ["Auth"],
         "summary": "Start the device authorization flow",
         "operationId": "auth_login",
         "requestBody": {
@@ -1208,9 +1124,7 @@
     },
     "/api/auth/logout": {
       "post": {
-        "tags": [
-          "Auth"
-        ],
+        "tags": ["Auth"],
         "summary": "Sign out the active account (or all with { all: true })",
         "operationId": "auth_logout",
         "requestBody": {
@@ -1235,9 +1149,7 @@
     },
     "/api/auth/status": {
       "get": {
-        "tags": [
-          "Auth"
-        ],
+        "tags": ["Auth"],
         "summary": "Device authorization status",
         "operationId": "auth_status",
         "responses": {
@@ -1254,9 +1166,7 @@
     },
     "/api/btw": {
       "post": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "btw handler",
         "operationId": "btw_handler",
         "requestBody": {
@@ -1281,9 +1191,7 @@
     },
     "/api/btw/{id}": {
       "delete": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "Delete a persisted side chat",
         "operationId": "delete_btw_handler",
         "parameters": [
@@ -1308,9 +1216,7 @@
     },
     "/api/catalog": {
       "get": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "List the sidecar (engine/tool/agent) catalog",
         "operationId": "get_catalog",
         "responses": {
@@ -1327,9 +1233,7 @@
     },
     "/api/catalog/sources": {
       "get": {
-        "tags": [
-          "Catalog"
-        ],
+        "tags": ["Catalog"],
         "summary": "List catalog sources for a kind + the active one",
         "operationId": "catalog_sources_list",
         "responses": {
@@ -1344,9 +1248,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Catalog"
-        ],
+        "tags": ["Catalog"],
         "summary": "Add a custom catalog source",
         "operationId": "catalog_sources_add",
         "requestBody": {
@@ -1371,9 +1273,7 @@
     },
     "/api/catalog/sources/select": {
       "post": {
-        "tags": [
-          "Catalog"
-        ],
+        "tags": ["Catalog"],
         "summary": "Select the active source for a kind",
         "operationId": "catalog_sources_select",
         "requestBody": {
@@ -1398,9 +1298,7 @@
     },
     "/api/channels/run": {
       "post": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "Run a channel-bot inbound message turn",
         "description": "Channel bots (Telegram, Slack, WhatsApp, Discord) call this endpoint with a\n`(conversation_id, agent_id, text)` turn and receive the assembled reply as a\nplain JSON `{ \"reply\": \"...\" }`. Model calls still flow Core \u2192 Gateway so the\nmoat (firewall, DLP, budgets, audit) governs every bot-initiated call.",
         "operationId": "channel_run",
@@ -1426,9 +1324,7 @@
     },
     "/api/chat/cancel": {
       "post": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "Cancel a conversation's in-flight ACP turn",
         "operationId": "chat_cancel",
         "requestBody": {
@@ -1453,9 +1349,7 @@
     },
     "/api/chat/permission": {
       "post": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "chat permission",
         "operationId": "chat_permission",
         "requestBody": {
@@ -1480,9 +1374,7 @@
     },
     "/api/chat/stream": {
       "post": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "Stream a chat turn (SSE, Vercel AI format)",
         "operationId": "chat_stream",
         "requestBody": {
@@ -1502,9 +1394,7 @@
     },
     "/api/chat/stream/resume/{conversation_id}": {
       "get": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "chat stream resume",
         "operationId": "chat_stream_resume",
         "parameters": [
@@ -1531,9 +1421,7 @@
     },
     "/api/chat/suggestions": {
       "post": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "best-effort next-prompt chips. Never errors:",
         "operationId": "chat_suggestions",
         "requestBody": {
@@ -1558,9 +1446,7 @@
     },
     "/api/clips": {
       "get": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "list clips (proxied from Shadow).",
         "operationId": "list_clips",
         "responses": {
@@ -1577,9 +1463,7 @@
     },
     "/api/clips/ingest": {
       "post": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "turn a watched URL or a local video file into a clip",
         "description": "Placement (CLAUDE.md \u00a71): binary management + ingest orchestration + bundle\nbuild are \"what runs\" \u2192 Core/Shadow. Routing the Whisper model call is \"what\nis measured/paid\" \u2192 the Gateway (Shadow selects `sttEngine`; Core only emits\nslot headers in `voice::transcribe_wav`).",
         "operationId": "ingest",
@@ -1605,9 +1489,7 @@
     },
     "/api/clips/recent-activity": {
       "get": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "proxy Shadow's ephemeral",
         "operationId": "recent_activity",
         "responses": {
@@ -1624,9 +1506,7 @@
     },
     "/api/clips/sources": {
       "get": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "the displays + windows a clip can capture from",
         "operationId": "get_sources",
         "responses": {
@@ -1643,9 +1523,7 @@
     },
     "/api/clips/start": {
       "post": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "start a clip (proxied from Shadow).",
         "operationId": "start_clip",
         "requestBody": {
@@ -1670,9 +1548,7 @@
     },
     "/api/clips/{id}/context": {
       "get": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "the clip manifest; rewrites `framesEndpoint`.",
         "operationId": "get_context",
         "parameters": [
@@ -1699,9 +1575,7 @@
     },
     "/api/clips/{id}/diagnostics": {
       "post": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "append diagnostics (proxied from Shadow).",
         "operationId": "post_diagnostics",
         "parameters": [
@@ -1736,9 +1610,7 @@
     },
     "/api/clips/{id}/file": {
       "get": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "stream the clip.mp4 bytes from Shadow.",
         "operationId": "get_file",
         "parameters": [
@@ -1765,9 +1637,7 @@
     },
     "/api/clips/{id}/frame": {
       "get": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "stream a JPEG frame from Shadow.",
         "operationId": "get_frame",
         "parameters": [
@@ -1794,9 +1664,7 @@
     },
     "/api/clips/{id}/pause": {
       "post": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "pause the in-progress clip (proxied from Shadow).",
         "operationId": "pause_clip",
         "parameters": [
@@ -1831,9 +1699,7 @@
     },
     "/api/clips/{id}/resume": {
       "post": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "resume a paused clip (proxied from Shadow).",
         "operationId": "resume_clip",
         "parameters": [
@@ -1868,9 +1734,7 @@
     },
     "/api/clips/{id}/stop": {
       "post": {
-        "tags": [
-          "Clips"
-        ],
+        "tags": ["Clips"],
         "summary": "finalize a clip; rewrites `framesEndpoint`.",
         "operationId": "stop_clip",
         "parameters": [
@@ -1905,9 +1769,7 @@
     },
     "/api/composio/actions": {
       "get": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "List Composio actions for a toolkit",
         "operationId": "composio_actions",
         "responses": {
@@ -1924,9 +1786,7 @@
     },
     "/api/composio/connections": {
       "get": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "List the user's Composio connected accounts",
         "operationId": "composio_connections",
         "responses": {
@@ -1943,9 +1803,7 @@
     },
     "/api/composio/connections/initiate": {
       "post": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "Initiate a Composio account connection for a toolkit",
         "operationId": "composio_connection_initiate",
         "requestBody": {
@@ -1970,9 +1828,7 @@
     },
     "/api/composio/connections/{id}": {
       "get": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "Poll a Composio connection's status",
         "operationId": "composio_connection_status",
         "parameters": [
@@ -1999,9 +1855,7 @@
     },
     "/api/composio/status": {
       "get": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "Composio integration status",
         "operationId": "composio_status",
         "responses": {
@@ -2018,9 +1872,7 @@
     },
     "/api/composio/toolkits": {
       "get": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "Browse Composio toolkits",
         "operationId": "composio_toolkits",
         "responses": {
@@ -2037,9 +1889,7 @@
     },
     "/api/composio/trigger-subscriptions": {
       "get": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "List Composio trigger subscriptions",
         "operationId": "composio_trigger_list",
         "responses": {
@@ -2056,9 +1906,7 @@
     },
     "/api/composio/trigger-subscriptions/{id}": {
       "delete": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "Delete a Composio trigger subscription",
         "operationId": "composio_trigger_delete",
         "parameters": [
@@ -2085,9 +1933,7 @@
     },
     "/api/composio/triggers": {
       "get": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "List Composio trigger types for a toolkit",
         "operationId": "composio_triggers",
         "responses": {
@@ -2104,9 +1950,7 @@
     },
     "/api/composio/triggers/subscribe": {
       "post": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "Subscribe an agent to a Composio event trigger",
         "operationId": "composio_trigger_subscribe",
         "requestBody": {
@@ -2131,9 +1975,7 @@
     },
     "/api/composio/webhook": {
       "post": {
-        "tags": [
-          "Composio"
-        ],
+        "tags": ["Composio"],
         "summary": "Composio trigger webhook receiver (HMAC-authenticated)",
         "description": "This route is **public** (it sits outside `require_auth`) because an external\nComposio delivery cannot send Core's bearer token. It is instead authenticated\n**fail-closed** with an HMAC-SHA256 signature over the raw body keyed by\n`COMPOSIO_WEBHOOK_SECRET` (see [`crate::composio_triggers::verify_webhook_signature`]):\nwhen the secret is unset, or the `webhook-signature` header is absent/invalid,\nthe request is rejected with 401 and nothing fires.",
         "operationId": "composio_webhook",
@@ -2162,9 +2004,7 @@
     },
     "/api/connections": {
       "get": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "list connections",
         "description": "Presence/attribution only: identities are self-declared behind the shared\ntoken and the data model is single-tenant, so this answers \"who is here\", not\n\"who is allowed to see what\" (see [`crate::connections`]). `user_count` counts\ndistinct declared users (anonymous clients each count once by `client_id`).",
         "operationId": "list_connections",
@@ -2182,9 +2022,7 @@
     },
     "/api/conversations": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "List conversations",
         "operationId": "list_conversations",
         "responses": {
@@ -2201,9 +2039,7 @@
     },
     "/api/conversations/search": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Semantic search over past chat messages",
         "operationId": "search_conversations_handler",
         "parameters": [
@@ -2241,9 +2077,7 @@
     },
     "/api/conversations/{id}": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Get a conversation with messages",
         "operationId": "get_conversation",
         "parameters": [
@@ -2268,9 +2102,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Delete a conversation",
         "operationId": "delete_conversation",
         "parameters": [
@@ -2297,9 +2129,7 @@
     },
     "/api/conversations/{id}/archived": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Archive or unarchive a conversation",
         "operationId": "set_conversation_archived_handler",
         "parameters": [
@@ -2334,9 +2164,7 @@
     },
     "/api/conversations/{id}/btw": {
       "get": {
-        "tags": [
-          "Core"
-        ],
+        "tags": ["Core"],
         "summary": "list btw handler",
         "operationId": "list_btw_handler",
         "parameters": [
@@ -2363,9 +2191,7 @@
     },
     "/api/conversations/{id}/feedback": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Get thumbs feedback for a conversation",
         "operationId": "get_conversation_feedback_handler",
         "parameters": [
@@ -2392,9 +2218,7 @@
     },
     "/api/conversations/{id}/fork": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Fork a conversation",
         "description": "ChatGPT-style \"Branch in new chat\": copy this conversation's history up to a\nchosen message into a fresh, independent conversation and return its summary.\nThe caller opens the returned conversation to continue the branch.",
         "operationId": "fork_conversation",
@@ -2430,9 +2254,7 @@
     },
     "/api/conversations/{id}/messages/{message_id}/edit": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Edit a user message into a new version",
         "description": "In-place version-tree edit (ChatGPT/Claude-style): create a new sibling of\nthe named user message carrying `content` and switch the active thread to it.\nThe caller then streams a normal chat turn (with `skip_user_append`) so the\nreply attaches beneath the edit. Returns the new sibling's id.",
         "operationId": "edit_message_handler",
@@ -2476,9 +2298,7 @@
     },
     "/api/conversations/{id}/messages/{message_id}/feedback": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Thumbs up/down an assistant message",
         "operationId": "set_message_feedback_handler",
         "parameters": [
@@ -2521,9 +2341,7 @@
     },
     "/api/conversations/{id}/messages/{message_id}/regenerate": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Prepare to regenerate an assistant message",
         "description": "Point the active leaf at the user turn above the named assistant message so a\nsubsequent stream (with `skip_user_append`) appends a fresh assistant sibling.\nReturns the parent (user) message id the reply will attach beneath.",
         "operationId": "regenerate_message_handler",
@@ -2559,9 +2377,7 @@
     },
     "/api/conversations/{id}/messages/{message_id}/select": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Select a message version",
         "description": "Switch the active version at a branch point to the given sibling and descend\nto its leaf. The caller re-reads the active path to re-render the thread.",
         "operationId": "select_version_handler",
@@ -2597,9 +2413,7 @@
     },
     "/api/conversations/{id}/participants": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "List conversation participants",
         "operationId": "get_participants_handler",
         "parameters": [
@@ -2624,9 +2438,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Add a participant agent",
         "operationId": "add_participant_handler",
         "parameters": [
@@ -2661,9 +2473,7 @@
     },
     "/api/conversations/{id}/participants/{agent_id}": {
       "delete": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Remove a participant agent",
         "operationId": "remove_participant_handler",
         "parameters": [
@@ -2698,9 +2508,7 @@
     },
     "/api/conversations/{id}/pinned": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Pin or unpin a conversation",
         "operationId": "set_conversation_pinned_handler",
         "parameters": [
@@ -2735,9 +2543,7 @@
     },
     "/api/conversations/{id}/sessions": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "List a conversation's sessions",
         "operationId": "list_sessions_for_conversation_handler",
         "parameters": [
@@ -2764,9 +2570,7 @@
     },
     "/api/conversations/{id}/title": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Rename a conversation",
         "operationId": "set_conversation_title_handler",
         "parameters": [
@@ -2801,9 +2605,7 @@
     },
     "/api/dashboards": {
       "get": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "list all dashboards.",
         "operationId": "list_dashboards",
         "responses": {
@@ -2818,9 +2620,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "create a dashboard.",
         "operationId": "create_dashboard",
         "requestBody": {
@@ -2845,9 +2645,7 @@
     },
     "/api/dashboards/catalog": {
       "get": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "the widget kinds + curated source names the",
         "operationId": "catalog",
         "responses": {
@@ -2864,9 +2662,7 @@
     },
     "/api/dashboards/events": {
       "get": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "SSE feed of live widget values + definition",
         "operationId": "dashboard_events",
         "responses": {
@@ -2883,9 +2679,7 @@
     },
     "/api/dashboards/{id}": {
       "get": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "a dashboard with its widgets.",
         "operationId": "get_dashboard",
         "parameters": [
@@ -2910,9 +2704,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "rename a dashboard.",
         "operationId": "update_dashboard",
         "parameters": [
@@ -2945,9 +2737,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "remove a dashboard and its widgets.",
         "operationId": "delete_dashboard",
         "parameters": [
@@ -2974,9 +2764,7 @@
     },
     "/api/dashboards/{id}/widgets": {
       "get": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "the widgets on a dashboard.",
         "operationId": "list_widgets",
         "parameters": [
@@ -3001,9 +2789,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "add a widget.",
         "operationId": "create_widget",
         "parameters": [
@@ -3038,9 +2824,7 @@
     },
     "/api/dashboards/{id}/widgets/{wid}": {
       "put": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "edit a widget (partial patch).",
         "operationId": "update_widget",
         "parameters": [
@@ -3081,9 +2865,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "remove a widget.",
         "operationId": "delete_widget",
         "parameters": [
@@ -3118,9 +2900,7 @@
     },
     "/api/dashboards/{id}/widgets/{wid}/layout": {
       "put": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "persist drag/resize only.",
         "operationId": "update_widget_layout",
         "parameters": [
@@ -3163,9 +2943,7 @@
     },
     "/api/dashboards/{id}/widgets/{wid}/refresh": {
       "post": {
-        "tags": [
-          "Dashboards"
-        ],
+        "tags": ["Dashboards"],
         "summary": "resolve the source now.",
         "operationId": "refresh_widget",
         "parameters": [
@@ -3208,9 +2986,7 @@
     },
     "/api/data-path": {
       "get": {
-        "tags": [
-          "Data"
-        ],
+        "tags": ["Data"],
         "summary": "get data path",
         "operationId": "get_data_path",
         "responses": {
@@ -3227,9 +3003,7 @@
     },
     "/api/data-path/export": {
       "post": {
-        "tags": [
-          "Data"
-        ],
+        "tags": ["Data"],
         "summary": "export data path",
         "operationId": "export_data_path",
         "requestBody": {
@@ -3254,9 +3028,7 @@
     },
     "/api/data-path/reset": {
       "post": {
-        "tags": [
-          "Data"
-        ],
+        "tags": ["Data"],
         "summary": "reset data path",
         "operationId": "reset_data_path",
         "requestBody": {
@@ -3281,9 +3053,7 @@
     },
     "/api/data-path/switch": {
       "post": {
-        "tags": [
-          "Data"
-        ],
+        "tags": ["Data"],
         "summary": "switch data path",
         "operationId": "switch_data_path",
         "requestBody": {
@@ -3308,9 +3078,7 @@
     },
     "/api/data-path/validate": {
       "post": {
-        "tags": [
-          "Data"
-        ],
+        "tags": ["Data"],
         "summary": "validate data path",
         "operationId": "validate_data_path",
         "requestBody": {
@@ -3335,9 +3103,7 @@
     },
     "/api/data/clear": {
       "post": {
-        "tags": [
-          "Data"
-        ],
+        "tags": ["Data"],
         "summary": "Delete all items in a data category",
         "description": "Irreversibly delete every item in one category. Returns `{ removed: N }` with\nthe number of top-level items deleted. Monitors and meetings are cleared by\nlooping the existing per-item delete so their side effects (scheduler-job\nteardown, SSE) fire; the rest use the store's transactional `clear_all`.",
         "operationId": "data_clear",
@@ -3363,9 +3129,7 @@
     },
     "/api/data/counts": {
       "get": {
-        "tags": [
-          "Data"
-        ],
+        "tags": ["Data"],
         "summary": "Counts of deletable user-data categories",
         "description": "How many items each danger-zone category currently holds, so the desktop can\nrender \"Delete all 42 chats?\" before the user commits. Best-effort per field:\na store error surfaces as `0` for that category rather than failing the whole\nresponse (the worst case is an under-count in the confirm dialog).",
         "operationId": "data_counts",
@@ -3383,9 +3147,7 @@
     },
     "/api/delegate/stream": {
       "post": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "Stream a sub-agent delegation (SSE)",
         "description": "Each delegate's `started`/`finished` event is emitted as an SSE line as it\nhappens, so the client sees same-depth delegates progress concurrently. A\nterminal `done` event carries the ordered result array.",
         "operationId": "delegate_stream",
@@ -3406,9 +3168,7 @@
     },
     "/api/dependencies/check": {
       "get": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Check for git/rust/bun/python on PATH",
         "operationId": "check_dependencies",
         "responses": {
@@ -3425,9 +3185,7 @@
     },
     "/api/dependencies/install": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Best-effort install of missing deps",
         "operationId": "install_dependencies",
         "responses": {
@@ -3444,9 +3202,7 @@
     },
     "/api/downloads": {
       "get": {
-        "tags": [
-          "Downloads"
-        ],
+        "tags": ["Downloads"],
         "summary": "List downloads (download center)",
         "operationId": "list_downloads",
         "responses": {
@@ -3463,9 +3219,7 @@
     },
     "/api/downloads/history": {
       "get": {
-        "tags": [
-          "Downloads"
-        ],
+        "tags": ["Downloads"],
         "summary": "List previously finished downloads (durable history)",
         "operationId": "downloads_history",
         "responses": {
@@ -3482,9 +3236,7 @@
     },
     "/api/downloads/stream": {
       "get": {
-        "tags": [
-          "Downloads"
-        ],
+        "tags": ["Downloads"],
         "summary": "Download center SSE stream",
         "operationId": "downloads_stream",
         "responses": {
@@ -3496,9 +3248,7 @@
     },
     "/api/downloads/{id}": {
       "delete": {
-        "tags": [
-          "Downloads"
-        ],
+        "tags": ["Downloads"],
         "summary": "Clear a download entry",
         "operationId": "download_clear",
         "parameters": [
@@ -3525,9 +3275,7 @@
     },
     "/api/downloads/{id}/cancel": {
       "post": {
-        "tags": [
-          "Downloads"
-        ],
+        "tags": ["Downloads"],
         "summary": "Cancel a download",
         "operationId": "download_cancel",
         "parameters": [
@@ -3554,9 +3302,7 @@
     },
     "/api/downloads/{id}/pause": {
       "post": {
-        "tags": [
-          "Downloads"
-        ],
+        "tags": ["Downloads"],
         "summary": "Pause a download",
         "operationId": "download_pause",
         "parameters": [
@@ -3583,9 +3329,7 @@
     },
     "/api/downloads/{id}/resume": {
       "post": {
-        "tags": [
-          "Downloads"
-        ],
+        "tags": ["Downloads"],
         "summary": "Resume a download",
         "operationId": "download_resume",
         "parameters": [
@@ -3612,9 +3356,7 @@
     },
     "/api/downloads/{id}/retry": {
       "post": {
-        "tags": [
-          "Downloads"
-        ],
+        "tags": ["Downloads"],
         "summary": "Retry a download",
         "operationId": "download_retry",
         "parameters": [
@@ -3641,9 +3383,7 @@
     },
     "/api/email/test": {
       "post": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "post email test",
         "operationId": "post_email_test",
         "requestBody": {
@@ -3668,9 +3408,7 @@
     },
     "/api/email/transport": {
       "get": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "get email transport",
         "operationId": "get_email_transport",
         "responses": {
@@ -3685,9 +3423,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "put email transport",
         "operationId": "put_email_transport",
         "requestBody": {
@@ -3712,9 +3448,7 @@
     },
     "/api/embeddings/model": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Get the active embedding model",
         "operationId": "get_embedding_model",
         "responses": {
@@ -3729,9 +3463,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Set the embedding model",
         "operationId": "set_embedding_model",
         "requestBody": {
@@ -3756,9 +3488,7 @@
     },
     "/api/embeddings/reindex": {
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Trigger a re-index",
         "operationId": "trigger_reindex",
         "responses": {
@@ -3775,9 +3505,7 @@
     },
     "/api/embeddings/reindex/status": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Re-index progress",
         "operationId": "reindex_status",
         "responses": {
@@ -3794,9 +3522,7 @@
     },
     "/api/engine/active": {
       "get": {
-        "tags": [
-          "Engines"
-        ],
+        "tags": ["Engines"],
         "summary": "Get the active resident engine",
         "operationId": "get_active_engine",
         "responses": {
@@ -3811,9 +3537,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Engines"
-        ],
+        "tags": ["Engines"],
         "summary": "Swap the active resident engine",
         "operationId": "set_active_engine",
         "requestBody": {
@@ -3838,9 +3562,7 @@
     },
     "/api/engine/concurrency": {
       "get": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Local-engine admission-queue + slot depth",
         "description": "Merges two sources, both best-effort (a missing one is simply omitted):\n  - the **gateway** admission snapshot (`/v1/concurrency`) \u2014 in-flight vs\n    queued, with the interactive/background split \u2014 the priority queue Core's\n    fan-out traffic flows through; and\n  - the resident **llama.cpp** engine's own `/slots` \u2014 how many slots the\n    engine reports busy (covers the direct, ungated LocalEngine path too).\n\nAlways returns 200 with whatever is reachable, so the panel degrades to\n\"unknown\" instead of erroring when the gateway or engine is down.",
         "operationId": "engine_concurrency",
@@ -3858,9 +3580,7 @@
     },
     "/api/engines": {
       "get": {
-        "tags": [
-          "Engines"
-        ],
+        "tags": ["Engines"],
         "summary": "List engine runtimes",
         "operationId": "list_engines",
         "responses": {
@@ -3877,9 +3597,7 @@
     },
     "/api/engines/models": {
       "get": {
-        "tags": [
-          "Engines"
-        ],
+        "tags": ["Engines"],
         "summary": "Per-engine chat-model options",
         "operationId": "engine_models",
         "responses": {
@@ -3896,9 +3614,7 @@
     },
     "/api/events/all": {
       "get": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "all events stream",
         "operationId": "all_events_stream",
         "responses": {
@@ -3915,9 +3631,7 @@
     },
     "/api/events/notifications/stream": {
       "get": {
-        "tags": [
-          "Events"
-        ],
+        "tags": ["Events"],
         "summary": "Desktop notifications SSE stream",
         "operationId": "notifications_stream",
         "responses": {
@@ -3929,9 +3643,7 @@
     },
     "/api/experience/list": {
       "get": {
-        "tags": [
-          "Learning"
-        ],
+        "tags": ["Learning"],
         "summary": "most-recent captured turns (cap 200).",
         "operationId": "list",
         "responses": {
@@ -3948,9 +3660,7 @@
     },
     "/api/finetune/adapters": {
       "get": {
-        "tags": [
-          "Finetune"
-        ],
+        "tags": ["Finetune"],
         "summary": "the installed trained adapters (Unit 3), with",
         "operationId": "list_adapters",
         "responses": {
@@ -3967,9 +3677,7 @@
     },
     "/api/finetune/capability": {
       "get": {
-        "tags": [
-          "Finetune"
-        ],
+        "tags": ["Finetune"],
         "summary": "what this node can train, for the desktop's",
         "operationId": "capability",
         "responses": {
@@ -3986,9 +3694,7 @@
     },
     "/api/finetune/list": {
       "get": {
-        "tags": [
-          "Finetune"
-        ],
+        "tags": ["Finetune"],
         "summary": "the durable job list. Refreshes each job's state",
         "operationId": "list",
         "responses": {
@@ -4005,9 +3711,7 @@
     },
     "/api/finetune/merge": {
       "post": {
-        "tags": [
-          "Finetune"
-        ],
+        "tags": ["Finetune"],
         "summary": "merge a trained adapter into a GGUF (Unit 4),",
         "operationId": "merge",
         "requestBody": {
@@ -4032,9 +3736,7 @@
     },
     "/api/finetune/start": {
       "post": {
-        "tags": [
-          "Finetune"
-        ],
+        "tags": ["Finetune"],
         "summary": "start a fine-tune job. Gates local training on",
         "operationId": "start",
         "requestBody": {
@@ -4059,9 +3761,7 @@
     },
     "/api/finetune/{id}": {
       "get": {
-        "tags": [
-          "Finetune"
-        ],
+        "tags": ["Finetune"],
         "summary": "one job. Prefers the sidecar's live snapshot (and",
         "operationId": "get",
         "parameters": [
@@ -4086,9 +3786,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Finetune"
-        ],
+        "tags": ["Finetune"],
         "summary": "cooperative cancel. Proxies to the sidecar and",
         "operationId": "cancel",
         "parameters": [
@@ -4115,9 +3813,7 @@
     },
     "/api/finetune/{id}/stream": {
       "get": {
-        "tags": [
-          "Finetune"
-        ],
+        "tags": ["Finetune"],
         "summary": "proxy the sidecar's SSE progress stream",
         "operationId": "stream",
         "parameters": [
@@ -4144,9 +3840,7 @@
     },
     "/api/gateway/audit": {
       "get": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Query the gateway audit log (proxied)",
         "operationId": "gateway_audit",
         "responses": {
@@ -4163,9 +3857,7 @@
     },
     "/api/gateway/config": {
       "get": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Get the gateway config (proxied)",
         "operationId": "gateway_get_config",
         "responses": {
@@ -4180,9 +3872,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Update the gateway config (proxied)",
         "operationId": "gateway_put_config",
         "requestBody": {
@@ -4207,9 +3897,7 @@
     },
     "/api/gateway/evals/run": {
       "post": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Run a gateway eval dataset (proxied)",
         "description": "Forwards to the gateway's POST /v1/evals/run. An OPTIONAL run-level `evaluators: [\"id\", \u2026]` array of registry evaluator ids is forwarded to the gateway, which scores each dataset case against those built-in/LLM-judge evaluators and returns per-evaluator scores + aggregates. A separate OPTIONAL `code_evaluators: [{ id, lang, source }]` field (lang = \"js\" | \"python\") is stripped before forwarding: Core runs those user functions locally (JS in the deny-all Deno sandbox, Python via the sandbox backend or a host fallback) and merges the real `executed:true` scores into each case's `evaluators` array, re-aggregating the affected ids. A request without either field behaves exactly as before.",
         "operationId": "gateway_run_evals",
@@ -4235,9 +3923,7 @@
     },
     "/api/gateway/evaluators": {
       "get": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Get the gateway evaluator catalog (proxied)",
         "description": "Forwards to the gateway's GET /v1/evaluators. Returns the full shared evaluator catalog (8 categories) with `capabilities` + `enforced` flags: the built-in seed table merged with any user-authored `custom_evaluators` (custom entries override a built-in by `id` and report `builtin: false`). Fail-closed: a 502 is returned when the gateway is unreachable.",
         "operationId": "gateway_get_evaluators",
@@ -4255,9 +3941,7 @@
     },
     "/api/gateway/providers": {
       "put": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Set a BYOK provider key (proxied)",
         "operationId": "gateway_set_provider",
         "requestBody": {
@@ -4282,9 +3966,7 @@
     },
     "/api/gateway/restart": {
       "post": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Restart the managed gateway (recovery)",
         "operationId": "gateway_restart",
         "responses": {
@@ -4301,9 +3983,7 @@
     },
     "/api/gateway/status": {
       "get": {
-        "tags": [
-          "Gateway"
-        ],
+        "tags": ["Gateway"],
         "summary": "Gateway status (proxied)",
         "description": "Always responds `200`. When the gateway is unreachable it returns\n`{ \"reachable\": false, ... }` rather than an error status, so the desktop\nstatus spine can distinguish \"gateway down (Core up)\" from \"Core down\" \u2014 the\ntyped client treats any non-2xx as Core being unreachable.\n\nForwards the gateway bearer token (`RYU_GATEWAY_TOKEN`) when configured, in\ncase the gateway runs with auth enabled.",
         "operationId": "gateway_status",
@@ -4321,9 +4001,7 @@
     },
     "/api/gifs/search": {
       "get": {
-        "tags": [
-          "Media"
-        ],
+        "tags": ["Media"],
         "summary": "search (or, with empty `q`, trending) GIFs",
         "operationId": "search",
         "responses": {
@@ -4340,9 +4018,7 @@
     },
     "/api/git/branches": {
       "get": {
-        "tags": [
-          "Git"
-        ],
+        "tags": ["Git"],
         "summary": "API endpoint",
         "description": "Lists local branches plus the currently checked-out one so the desktop's\ncomposer branch selector can offer a switch. Returns `{is_repo:false}` (HTTP\n200) for any non-repo or missing folder, matching `git_status` semantics.",
         "operationId": "git_branches",
@@ -4360,9 +4036,7 @@
     },
     "/api/git/checkout": {
       "post": {
-        "tags": [
-          "Git"
-        ],
+        "tags": ["Git"],
         "summary": "{ cwd, branch }",
         "description": "Switches the workspace to an existing local branch via `git switch` (which\nrefuses pathspec/file behavior, so a stray branch name can't restore files).\nThe branch is validated against the actual branch list to reject typos and\nargument injection. On failure the raw git stderr is returned (HTTP 409) so\nthe desktop can surface it (e.g. uncommitted-changes conflicts).",
         "operationId": "git_checkout",
@@ -4388,9 +4062,7 @@
     },
     "/api/git/commit-push": {
       "post": {
-        "tags": [
-          "Git"
-        ],
+        "tags": ["Git"],
         "summary": "{ cwd, message?, action?, include_unstaged? }",
         "description": "Commits, pushes, or does both. This is Core (it runs what the user asked; the\nGateway is not on the raw-git path). Returns `{ success, committed, pushed,\ncommit, error? }` so the desktop pinned-summary popover can report exactly\nwhat happened.",
         "operationId": "git_commit_push",
@@ -4416,9 +4088,7 @@
     },
     "/api/git/create-branch": {
       "post": {
-        "tags": [
-          "Git"
-        ],
+        "tags": ["Git"],
         "summary": "{ cwd, branch }",
         "description": "Create a new branch off the current HEAD and switch to it (`git switch -c`).\nThe desktop only exposes this when the working tree is clean, but we re-check\nserver-side: `git switch -c` refuses to carry a dirty index into a new branch\nonly on conflict, so we guard explicitly and return the raw git stderr (HTTP\n409) on any failure (e.g. the branch already exists) for the desktop to show.",
         "operationId": "git_create_branch",
@@ -4444,9 +4114,7 @@
     },
     "/api/git/status": {
       "get": {
-        "tags": [
-          "Git"
-        ],
+        "tags": ["Git"],
         "summary": "API endpoint",
         "description": "Returns `{is_repo:false}` (HTTP 200) for any non-repo or missing folder so\nthe desktop header can distinguish \"not a repo\" from \"Core unreachable.\"\nTracks ahead/behind relative to the upstream branch when one is configured.",
         "operationId": "git_status",
@@ -4464,9 +4132,7 @@
     },
     "/api/graph": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Global document-link graph",
         "operationId": "get_global_graph",
         "responses": {
@@ -4483,9 +4149,7 @@
     },
     "/api/hardware/devices": {
       "get": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "list paired devices with presence + battery.",
         "operationId": "list_devices",
         "responses": {
@@ -4502,9 +4166,7 @@
     },
     "/api/hardware/devices/{id}": {
       "delete": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "revoke a device (delete it + its token).",
         "operationId": "delete_device",
         "parameters": [
@@ -4529,9 +4191,7 @@
         }
       },
       "patch": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "update a device's name / prefs.",
         "operationId": "update_device",
         "parameters": [
@@ -4566,9 +4226,7 @@
     },
     "/api/hardware/devices/{id}/dashboard": {
       "get": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "the device's dashboard config",
         "operationId": "get_device_dashboard",
         "parameters": [
@@ -4593,9 +4251,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "set the device's poll interval and/or",
         "operationId": "set_device_dashboard",
         "parameters": [
@@ -4630,9 +4286,7 @@
     },
     "/api/hardware/display/{device_id}": {
       "get": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "the display manifest. Returns the",
         "operationId": "display_manifest",
         "parameters": [
@@ -4659,9 +4313,7 @@
     },
     "/api/hardware/display/{device_id}/image": {
       "get": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "the rendered image bytes",
         "operationId": "display_image",
         "parameters": [
@@ -4688,9 +4340,7 @@
     },
     "/api/hardware/pair": {
       "post": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "register a device from a pairing nonce. **Public**.",
         "operationId": "pair_device",
         "requestBody": {
@@ -4715,9 +4365,7 @@
     },
     "/api/hardware/ws": {
       "get": {
-        "tags": [
-          "Hardware"
-        ],
+        "tags": ["Hardware"],
         "summary": "upgrade to the RHP WebSocket. The Bearer device token",
         "operationId": "hardware_ws",
         "responses": {
@@ -4734,9 +4382,7 @@
     },
     "/api/healing/config": {
       "get": {
-        "tags": [
-          "Healing"
-        ],
+        "tags": ["Healing"],
         "summary": "resolved healing config (switches + caps + model).",
         "operationId": "config",
         "responses": {
@@ -4751,9 +4397,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Healing"
-        ],
+        "tags": ["Healing"],
         "summary": "set any provided `healing.*` prefs. Body accepts",
         "operationId": "set_config",
         "requestBody": {
@@ -4778,9 +4422,7 @@
     },
     "/api/healing/simulate-failure": {
       "post": {
-        "tags": [
-          "Healing"
-        ],
+        "tags": ["Healing"],
         "summary": "DEBUG: create a throwaway conversation",
         "operationId": "simulate_failure",
         "requestBody": {
@@ -4805,9 +4447,7 @@
     },
     "/api/healing/status": {
       "get": {
-        "tags": [
-          "Healing"
-        ],
+        "tags": ["Healing"],
         "summary": "the in-memory per-source attempt map.",
         "operationId": "status",
         "responses": {
@@ -4824,9 +4464,7 @@
     },
     "/api/health": {
       "get": {
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "summary": "Service health check",
         "operationId": "health",
         "responses": {
@@ -4843,9 +4481,7 @@
     },
     "/api/identities": {
       "get": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "List identity profiles + connections (status only, no state)",
         "operationId": "list_identities",
         "responses": {
@@ -4862,9 +4498,7 @@
     },
     "/api/identities/connections": {
       "post": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Create a per-domain connection (starts NEEDS_AUTH)",
         "operationId": "create_connection",
         "requestBody": {
@@ -4889,9 +4523,7 @@
     },
     "/api/identities/connections/{id}": {
       "get": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Poll a connection's status (status only, no state)",
         "operationId": "poll_connection",
         "parameters": [
@@ -4917,9 +4549,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Delete a connection",
         "operationId": "delete_connection",
         "parameters": [
@@ -4947,9 +4577,7 @@
     },
     "/api/identities/connections/{id}/import": {
       "post": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Import + seal manual credential state \u2192 AUTHENTICATED",
         "operationId": "import_connection",
         "parameters": [
@@ -4985,9 +4613,7 @@
     },
     "/api/identities/connections/{id}/login": {
       "post": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Begin a login flow \u2192 {flow_id, kind: hosted{url} | manual}",
         "operationId": "begin_login",
         "parameters": [
@@ -5015,9 +4641,7 @@
     },
     "/api/images/generate": {
       "post": {
-        "tags": [
-          "Media"
-        ],
+        "tags": ["Media"],
         "summary": "text-to-image via sd-server's OpenAI-compatible",
         "operationId": "generate_image",
         "requestBody": {
@@ -5042,9 +4666,7 @@
     },
     "/api/knowledge/catalog": {
       "get": {
-        "tags": [
-          "Knowledge"
-        ],
+        "tags": ["Knowledge"],
         "summary": "Browse the knowledge (OKF) catalog",
         "operationId": "knowledge_catalog_list",
         "responses": {
@@ -5061,9 +4683,7 @@
     },
     "/api/knowledge/catalog/detail": {
       "get": {
-        "tags": [
-          "Knowledge"
-        ],
+        "tags": ["Knowledge"],
         "summary": "Knowledge concept detail",
         "operationId": "knowledge_catalog_detail",
         "responses": {
@@ -5080,9 +4700,7 @@
     },
     "/api/knowledge/catalog/install": {
       "post": {
-        "tags": [
-          "Knowledge"
-        ],
+        "tags": ["Knowledge"],
         "summary": "Install (clone + ingest) a knowledge bundle from the catalog",
         "operationId": "knowledge_catalog_install",
         "requestBody": {
@@ -5107,9 +4725,7 @@
     },
     "/api/learn/config": {
       "get": {
-        "tags": [
-          "Learning"
-        ],
+        "tags": ["Learning"],
         "summary": "resolved, secret-free learning config.",
         "operationId": "config",
         "responses": {
@@ -5126,9 +4742,7 @@
     },
     "/api/learn/cycle": {
       "post": {
-        "tags": [
-          "Learning"
-        ],
+        "tags": ["Learning"],
         "summary": "sweep + score + assemble the reward-filtered SFT",
         "operationId": "cycle",
         "requestBody": {
@@ -5153,9 +4767,7 @@
     },
     "/api/learn/exclude": {
       "post": {
-        "tags": [
-          "Learning"
-        ],
+        "tags": ["Learning"],
         "summary": "per-conversation opt-out. Body:",
         "operationId": "exclude",
         "requestBody": {
@@ -5180,9 +4792,7 @@
     },
     "/api/learn/score": {
       "post": {
-        "tags": [
-          "Learning"
-        ],
+        "tags": ["Learning"],
         "summary": "PRM-score unscored samples (cap 256/call).",
         "operationId": "score",
         "requestBody": {
@@ -5207,9 +4817,7 @@
     },
     "/api/learn/sweep": {
       "post": {
-        "tags": [
-          "Learning"
-        ],
+        "tags": ["Learning"],
         "summary": "capture new turns from the conversation store.",
         "operationId": "sweep",
         "requestBody": {
@@ -5234,9 +4842,7 @@
     },
     "/api/learn/synthesize": {
       "post": {
-        "tags": [
-          "Learning"
-        ],
+        "tags": ["Learning"],
         "summary": "distill + activate a skill from a conversation.",
         "operationId": "synthesize",
         "requestBody": {
@@ -5261,9 +4867,7 @@
     },
     "/api/mcp/catalog": {
       "get": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "Browse the MCP server catalog",
         "operationId": "mcp_catalog_list",
         "responses": {
@@ -5280,9 +4884,7 @@
     },
     "/api/mcp/catalog/detail": {
       "get": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "MCP server detail",
         "operationId": "mcp_catalog_detail",
         "responses": {
@@ -5299,9 +4901,7 @@
     },
     "/api/mcp/catalog/install": {
       "post": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "Install an MCP server from the catalog",
         "description": "Security: the entry is written **disabled** so install never auto-launches a\nregistry-supplied command. The resolved command/url is returned in the\nresponse so the user can review it before enabling/starting the server through\nthe existing explicit path. The package identifier + version were validated by\n[`crate::mcp_catalog::plan_install`] (no shell metacharacters / path traversal).",
         "operationId": "mcp_catalog_install",
@@ -5327,9 +4927,7 @@
     },
     "/api/mcp/resources/read": {
       "post": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "resolve a widget resource by uri (used on",
         "operationId": "mcp_resources_read",
         "requestBody": {
@@ -5354,9 +4952,7 @@
     },
     "/api/mcp/sandbox/disable": {
       "post": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "Disable MCP tool sandboxing",
         "operationId": "sandbox_disable",
         "responses": {
@@ -5373,9 +4969,7 @@
     },
     "/api/mcp/sandbox/enable": {
       "post": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "Enable MCP tool sandboxing",
         "operationId": "sandbox_enable",
         "responses": {
@@ -5392,9 +4986,7 @@
     },
     "/api/mcp/sandbox/status": {
       "get": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "MCP sandbox availability + state",
         "operationId": "sandbox_status",
         "responses": {
@@ -5411,9 +5003,7 @@
     },
     "/api/mcp/servers": {
       "get": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "List configured MCP servers",
         "operationId": "list_mcp_servers",
         "responses": {
@@ -5428,9 +5018,7 @@
         }
       },
       "post": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "Register an MCP server",
         "description": "Validation:\n- `name` must be non-empty and must not contain `__` (the tool-id separator\n  that `split_tool_id` uses to route calls).\n- `command` must be non-empty.\n- `name` must not already be registered (built-ins included).\n\nWrite strategy: read the current `mcp.json` user map (parse-fail \u2192 400 to\navoid clobbering a hand-edited file), insert the new entry, write back\natomically via `write_secret_file` + rename, then call `McpRegistry::reload`\nso the change takes effect without a restart.",
         "operationId": "create_mcp_server",
@@ -5456,9 +5044,7 @@
     },
     "/api/mcp/tools": {
       "get": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "List available MCP tools",
         "description": "## App-enable filtering (AC3)\n\nTools whose slug is *declared* by at least one loaded App manifest (via\n`permission_grants: [\"mcp:<slug>\"]`) are only included when at least one\napp that claims them is currently **enabled**. Tools not claimed by any\napp are always included \u2014 they are standalone/built-in MCP tools.\n\n## Core-vs-Gateway boundary\n\nThis is a list-time *visibility* filter, not a policy gate. Grant\n*enforcement* \u2014 whether the agent is actually allowed to call the tool \u2014\nbelongs to the Gateway. Core decides what *runs*; Gateway decides what\nis *allowed*.",
         "operationId": "list_mcp_tools",
@@ -5476,9 +5062,7 @@
     },
     "/api/mcp/tools/call": {
       "post": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "Call an MCP tool",
         "operationId": "call_mcp_tool",
         "requestBody": {
@@ -5503,9 +5087,7 @@
     },
     "/api/mcp/updates": {
       "get": {
-        "tags": [
-          "MCP"
-        ],
+        "tags": ["MCP"],
         "summary": "Installed MCP servers with a newer catalog version",
         "operationId": "mcp_updates",
         "responses": {
@@ -5522,9 +5104,7 @@
     },
     "/api/media/upload": {
       "post": {
-        "tags": [
-          "Media"
-        ],
+        "tags": ["Media"],
         "summary": "store raw request-body bytes as a local media",
         "operationId": "upload_media",
         "requestBody": {
@@ -5549,9 +5129,7 @@
     },
     "/api/media/{file}": {
       "get": {
-        "tags": [
-          "Media"
-        ],
+        "tags": ["Media"],
         "summary": "serve a stored media object with a long immutable",
         "operationId": "serve_media",
         "parameters": [
@@ -5578,9 +5156,7 @@
     },
     "/api/meetings": {
       "get": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "list all meetings, newest first.",
         "operationId": "list_meetings",
         "responses": {
@@ -5595,9 +5171,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "start a meeting (and best-effort begin Shadow capture).",
         "operationId": "create_meeting",
         "requestBody": {
@@ -5622,9 +5196,7 @@
     },
     "/api/meetings/detect": {
       "post": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "Shadow's mic-in-use detection hook. Shadow",
         "operationId": "detect",
         "requestBody": {
@@ -5649,9 +5221,7 @@
     },
     "/api/meetings/detection-config": {
       "get": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "the detection toggle + meeting-app list.",
         "operationId": "get_detection_config",
         "responses": {
@@ -5666,9 +5236,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "update the toggle and/or app list.",
         "operationId": "put_detection_config",
         "requestBody": {
@@ -5693,9 +5261,7 @@
     },
     "/api/meetings/import": {
       "post": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "create a meeting from an uploaded audio file",
         "operationId": "import_meeting",
         "requestBody": {
@@ -5720,9 +5286,7 @@
     },
     "/api/meetings/stream": {
       "get": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "SSE feed of meeting events (detected / started /",
         "operationId": "meetings_stream",
         "responses": {
@@ -5739,9 +5303,7 @@
     },
     "/api/meetings/templates": {
       "get": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "the built-in notes templates for the picker.",
         "operationId": "list_templates",
         "responses": {
@@ -5758,9 +5320,7 @@
     },
     "/api/meetings/{id}": {
       "get": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "one meeting (without the transcript body).",
         "operationId": "get_meeting",
         "parameters": [
@@ -5785,9 +5345,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "remove a meeting and its transcript.",
         "operationId": "delete_meeting",
         "parameters": [
@@ -5814,9 +5372,7 @@
     },
     "/api/meetings/{id}/chunk": {
       "post": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "ingest one captured WAV chunk (multipart",
         "operationId": "ingest_chunk",
         "parameters": [
@@ -5851,9 +5407,7 @@
     },
     "/api/meetings/{id}/finalize": {
       "post": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "stop capture, generate notes, mark done,",
         "operationId": "finalize_meeting",
         "parameters": [
@@ -5888,9 +5442,7 @@
     },
     "/api/meetings/{id}/title": {
       "post": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "manually rename a meeting. Marks the title",
         "operationId": "rename_meeting",
         "parameters": [
@@ -5925,9 +5477,7 @@
     },
     "/api/meetings/{id}/transcript": {
       "get": {
-        "tags": [
-          "Meetings"
-        ],
+        "tags": ["Meetings"],
         "summary": "the full transcript (segments + text).",
         "operationId": "get_transcript",
         "parameters": [
@@ -5954,9 +5504,7 @@
     },
     "/api/memory": {
       "get": {
-        "tags": [
-          "Memory"
-        ],
+        "tags": ["Memory"],
         "summary": "list memory",
         "operationId": "list_memory",
         "responses": {
@@ -5973,9 +5521,7 @@
     },
     "/api/memory/{id}": {
       "get": {
-        "tags": [
-          "Memory"
-        ],
+        "tags": ["Memory"],
         "summary": "get memory",
         "operationId": "get_memory",
         "parameters": [
@@ -6000,9 +5546,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Memory"
-        ],
+        "tags": ["Memory"],
         "summary": "update memory",
         "operationId": "update_memory",
         "parameters": [
@@ -6037,9 +5581,7 @@
     },
     "/api/mesh/status": {
       "get": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Mesh (Tailscale/Headscale) reachability + peers",
         "description": "Returns the canonical Contract 6 superset. When the mesh is disabled\n(`RYU_MESH_ENABLED` unset) this is the all-default object with HTTP 200\n(never 500), so a vanilla install reports `enabled:false` without amber.",
         "operationId": "mesh_status",
@@ -6057,9 +5599,7 @@
     },
     "/api/models/active": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Get the active served local chat model",
         "description": "Reports the user-selected active model override (the local stem persisted in\npreferences and its originating Hugging Face repo when known) plus the\nregistry default it falls back to. `active` is the default when no override\nis set, so a client always learns the effective served model.",
         "operationId": "get_active_model",
@@ -6075,9 +5615,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Switch the active served local chat model",
         "description": "`id` is resolved to the local stem of a file present on disk; switching to a\nmodel the user never downloaded is refused (400). The choice is persisted in\npreferences, then the resident local engine (if any) is restarted so it\nreloads with the new `--model`, and the gateway's `local` provider is\nrefreshed. When no local engine is currently resident the choice still\npersists and takes effect on next start.",
         "operationId": "set_active_model",
@@ -6103,9 +5641,7 @@
     },
     "/api/models/catalog": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Browse the model catalog (HF GGUF)",
         "operationId": "models_catalog_list",
         "responses": {
@@ -6122,9 +5658,7 @@
     },
     "/api/models/catalog/detail": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Model detail: README + per-quant files",
         "operationId": "models_catalog_detail",
         "responses": {
@@ -6141,9 +5675,7 @@
     },
     "/api/models/catalog/install": {
       "post": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Install a GGUF model file",
         "description": "Source-aware install. For an HF-compatible active model source (the default),\n`id` is the Hub `author/name` repo and `file` the GGUF filename, downloaded\nvia the HF resolve URL. For a Ryu **model-index** active source (#461), the\nsource resolves a descriptor (download URL + sha) for `id`; Core validates\nthe descriptor URL against the SSRF guard and downloads it through the same\nprivileged [`crate::model_catalog::install_from_descriptor`] path. Either\nway Core stays the only code that touches the disk.",
         "operationId": "models_catalog_install",
@@ -6169,9 +5701,7 @@
     },
     "/api/models/catalog/uninstall": {
       "post": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Uninstall a model file",
         "description": "Delete a downloaded GGUF and clear its catalog provenance. Source-agnostic:\ninstalled models live in one on-disk dir regardless of which source fetched\nthem, so this routes straight to [`crate::model_catalog::uninstall_file`]\n(no per-source branch like install needs).",
         "operationId": "models_catalog_uninstall",
@@ -6197,9 +5727,7 @@
     },
     "/api/models/context-window": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Resolve a model's context window (models.dev)",
         "operationId": "models_context_window",
         "parameters": [
@@ -6227,9 +5755,7 @@
     },
     "/api/models/device": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Detect local device RAM/VRAM for fit verdicts",
         "operationId": "models_device",
         "responses": {
@@ -6246,9 +5772,7 @@
     },
     "/api/models/engines": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Format \u2192 engine capability map + node support",
         "operationId": "models_engines",
         "responses": {
@@ -6265,9 +5789,7 @@
     },
     "/api/models/installed": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "List installed models by stem (with fine-tune provenance)",
         "operationId": "models_installed",
         "responses": {
@@ -6284,9 +5806,7 @@
     },
     "/api/models/llmfit-estimate": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "On-demand llmfit fit + tok/s estimate for one model",
         "operationId": "models_llmfit_estimate",
         "responses": {
@@ -6303,9 +5823,7 @@
     },
     "/api/models/updates": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Installed GGUF models with a newer file available upstream",
         "description": "Snapshot (safetensors/MLX) models are skipped for now \u2014 they are multi-file\nrepos with no single `size_bytes` to compare.",
         "operationId": "models_updates",
@@ -6323,9 +5841,7 @@
     },
     "/api/models/{id}/launch-config": {
       "get": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Get a model's advanced launch config",
         "operationId": "get_model_launch_config",
         "parameters": [
@@ -6350,9 +5866,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Models"
-        ],
+        "tags": ["Models"],
         "summary": "Set a model's advanced launch config",
         "operationId": "set_model_launch_config",
         "parameters": [
@@ -6387,9 +5901,7 @@
     },
     "/api/monitors": {
       "get": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "list all monitors.",
         "operationId": "list_monitors",
         "responses": {
@@ -6404,9 +5916,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "create a monitor (and its backing scheduled job).",
         "operationId": "create_monitor",
         "requestBody": {
@@ -6431,9 +5941,7 @@
     },
     "/api/monitors/alerts": {
       "get": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "alerts.",
         "operationId": "list_all_alerts",
         "responses": {
@@ -6450,9 +5958,7 @@
     },
     "/api/monitors/alerts/stream": {
       "get": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "SSE feed of new alerts as they fire.",
         "operationId": "alerts_stream",
         "responses": {
@@ -6469,9 +5975,7 @@
     },
     "/api/monitors/alerts/{id}/ack": {
       "post": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "acknowledge an alert.",
         "operationId": "ack_alert",
         "parameters": [
@@ -6506,9 +6010,7 @@
     },
     "/api/monitors/push-tokens": {
       "post": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "register a mobile Expo push token.",
         "operationId": "register_push_token",
         "requestBody": {
@@ -6533,9 +6035,7 @@
     },
     "/api/monitors/push-tokens/{token}": {
       "delete": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "unregister a push token.",
         "operationId": "remove_push_token",
         "parameters": [
@@ -6562,9 +6062,7 @@
     },
     "/api/monitors/{id}": {
       "get": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "one monitor.",
         "operationId": "get_monitor",
         "parameters": [
@@ -6589,9 +6087,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "replace a monitor's definition.",
         "operationId": "update_monitor",
         "parameters": [
@@ -6624,9 +6120,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "remove a monitor, its history, and its job.",
         "operationId": "delete_monitor",
         "parameters": [
@@ -6653,9 +6147,7 @@
     },
     "/api/monitors/{id}/alerts": {
       "get": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "List alerts for one monitor",
         "operationId": "list_monitor_alerts",
         "parameters": [
@@ -6682,9 +6174,7 @@
     },
     "/api/monitors/{id}/run": {
       "post": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "run one check immediately and return the status.",
         "operationId": "run_monitor",
         "parameters": [
@@ -6719,9 +6209,7 @@
     },
     "/api/monitors/{id}/snapshots": {
       "get": {
-        "tags": [
-          "Monitors"
-        ],
+        "tags": ["Monitors"],
         "summary": "recent check history.",
         "operationId": "list_snapshots",
         "parameters": [
@@ -6748,9 +6236,7 @@
     },
     "/api/node/init": {
       "post": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Initialize or fetch this node's token",
         "operationId": "node_init",
         "responses": {
@@ -6767,9 +6253,7 @@
     },
     "/api/notifications": {
       "get": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "a member's inbox, newest first.",
         "operationId": "list_notifications",
         "responses": {
@@ -6786,9 +6270,7 @@
     },
     "/api/notifications/stream": {
       "get": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "SSE feed of live notifications for",
         "operationId": "notifications_stream",
         "responses": {
@@ -6805,9 +6287,7 @@
     },
     "/api/notifications/{id}/ack": {
       "post": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "acknowledge a notification. When it is a",
         "description": "Only the notification's own recipient may ack it: the actor is the verified\ncaller and must equal `row.user_id` (an org-bound node rejects an\nunauthenticated or cross-member ack, so a gate cannot be resumed by a\nnon-target). The verified actor \u2014 not the stored row id \u2014 is what\n[`crate::workflow::notify_user::ack_gate`] records.",
         "operationId": "ack_notification",
@@ -6843,9 +6323,7 @@
     },
     "/api/notifications/{id}/read": {
       "post": {
-        "tags": [
-          "Notifications"
-        ],
+        "tags": ["Notifications"],
         "summary": "mark a notification read.",
         "description": "Only the notification's own recipient may mark it read: the row is fetched and\nthe verified caller is authorized against `row.user_id` BEFORE any mutation\n(mirrors [`ack_notification`]), so a cross-member id cannot flip another\nrecipient's inbox row.",
         "operationId": "read_notification",
@@ -6881,9 +6359,7 @@
     },
     "/api/okf/export": {
       "post": {
-        "tags": [
-          "Knowledge"
-        ],
+        "tags": ["Knowledge"],
         "summary": "Export indexed knowledge as an OKF bundle directory",
         "description": "The concrete path is scope `\"bundle\"`: reconstruct the concepts previously\ningested under `bundle_id` from the retrieval index (via\n[`RetrievalStore::reconstruct_okf_concepts`]), map each to an [`crate::okf::Concept`],\ngenerate `index.md` + `log.md`, and write the bundle to `target_dir`. Broader\nmemory export is a follow-up.",
         "operationId": "okf_export",
@@ -6909,9 +6385,7 @@
     },
     "/api/openapi.json": {
       "get": {
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "summary": "OpenAPI specification for this Core node",
         "operationId": "serve_openapi",
         "responses": {
@@ -6928,9 +6402,7 @@
     },
     "/api/pi-config": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Get the Ryu-managed Pi configuration",
         "operationId": "get_pi_config",
         "responses": {
@@ -6945,9 +6417,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Update the Ryu-managed Pi configuration",
         "operationId": "put_pi_config",
         "requestBody": {
@@ -6972,9 +6442,7 @@
     },
     "/api/pi-config/catalog": {
       "get": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "List supported Pi providers and models",
         "operationId": "get_pi_config_catalog",
         "responses": {
@@ -6991,9 +6459,7 @@
     },
     "/api/pi-config/discover-models": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Discover a provider's models (with static fallback)",
         "operationId": "discover_pi_models",
         "requestBody": {
@@ -7018,9 +6484,7 @@
     },
     "/api/pi-config/providers": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Configure a Pi provider without activating it",
         "operationId": "configure_pi_provider",
         "requestBody": {
@@ -7045,9 +6509,7 @@
     },
     "/api/pi-config/providers/check": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Live-check a Pi provider's connectivity",
         "operationId": "check_pi_provider",
         "requestBody": {
@@ -7072,9 +6534,7 @@
     },
     "/api/pi-config/providers/model-enabled": {
       "post": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Toggle a Pi provider's model on/off",
         "operationId": "set_pi_model_enabled",
         "requestBody": {
@@ -7099,9 +6559,7 @@
     },
     "/api/pi-config/providers/{id}": {
       "delete": {
-        "tags": [
-          "Agents"
-        ],
+        "tags": ["Agents"],
         "summary": "Remove a Pi provider's stored credential",
         "operationId": "delete_pi_provider",
         "parameters": [
@@ -7129,9 +6587,7 @@
     },
     "/api/plugins": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "List installed plugins with state",
         "description": "Each entry includes:\n- `id` \u2014 manifest id\n- `kinds` \u2014 deduplicated list of [`RunnableKind`] strings bundled by this app\n- `enabled` \u2014 current enabled flag from the lifecycle store\n- `permission_grants` \u2014 verbatim declared grants from `ryu.json` (declarations\n  only; enforcement is Gateway scope \u2014 Core never gates calls on grants)\n\nReturns the manifests loaded at startup via [`PluginManifestLoader`]. The list is\nstable for the lifetime of this Core process; a restart is required for newly\ninstalled apps to appear.",
         "operationId": "list_apps",
@@ -7149,9 +6605,7 @@
     },
     "/api/plugins/activation-event": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "fire activation event handler",
         "description": "Core today has **no** command-invocation endpoint of its own \u2014 plugin slash\ncommands are surfaced read-only via `GET /api/plugins/contributions` and are\ndispatched from the desktop palette, a separate process that cannot call the\nin-process `fire_activation_event` fn across the boundary. This endpoint is\nthat seam: the palette POSTs `{ \"event\": \"onCommand:<id>\" }` when it runs a\ncommand, and the gated plugins activate.\n\nScoped deliberately to the `onCommand:` prefix so it stays the onCommand\nseam and cannot be used to spoof `onStartup`/`onChat`/arbitrary events. The\nfiring is awaited here (this is not the hot chat path) and is idempotent.",
         "operationId": "fire_activation_event_handler",
@@ -7177,9 +6631,7 @@
     },
     "/api/plugins/catalog": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "List the plugin catalog",
         "description": "TTL-cached in `ServerState::catalog_client`; falls back to a stale cache or\nan empty list when the registry is unreachable. Built-in apps are always\ndiscoverable via `GET /api/apps`, so an offline machine is never blank.",
         "operationId": "list_apps_catalog",
@@ -7197,9 +6649,7 @@
     },
     "/api/plugins/catalog/browse": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "Browse the active plugin catalog source",
         "operationId": "plugin_catalog_browse",
         "responses": {
@@ -7216,9 +6666,7 @@
     },
     "/api/plugins/catalog/detail": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "Plugin catalog entry detail",
         "operationId": "plugin_catalog_detail",
         "responses": {
@@ -7235,9 +6683,7 @@
     },
     "/api/plugins/catalog/install": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "install plugin from catalog",
         "operationId": "install_plugin_from_catalog",
         "requestBody": {
@@ -7262,9 +6708,7 @@
     },
     "/api/plugins/contributions": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "plugin contributions",
         "operationId": "plugin_contributions",
         "responses": {
@@ -7281,9 +6725,7 @@
     },
     "/api/plugins/install": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "Install a plugin from a URL",
         "description": "## Security (SSRF guard)\n\nOnly `https://` URLs are accepted. The host is resolved with `getaddrinfo`\nand rejected if *any* resolved IP is loopback / private / link-local / ULA /\nCGNAT (so a DNS name pointing at an internal address is caught, not just\nliteral IPs). The fetch client is then pinned to those validated IPs (no\nre-resolution, defeating DNS rebinding) and redirects are disabled so a\nremote cannot bounce the request to an internal host after the check.",
         "operationId": "install_app_from_url",
@@ -7309,9 +6751,7 @@
     },
     "/api/plugins/install-bundle": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "install app bundle",
         "description": "Trusted, local path: the bundle is provided directly by the caller (the\ndesktop over the token'd Core API), so there is no SSRF surface. The manifest\nid is still validated before being used as a filesystem path component, and a\nduplicate id is rejected (never clobber an installed plugin).",
         "operationId": "install_app_bundle",
@@ -7337,9 +6777,7 @@
     },
     "/api/plugins/reload": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "Reload plugin manifests from disk",
         "operationId": "reload_app_manifests",
         "responses": {
@@ -7356,9 +6794,7 @@
     },
     "/api/plugins/{id}/disable": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "Disable a plugin",
         "operationId": "disable_app_handler",
         "parameters": [
@@ -7385,9 +6821,7 @@
     },
     "/api/plugins/{id}/enable": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "Enable a plugin (activate its runnables)",
         "description": "Fails closed: if the Gateway is unreachable the app stays disabled and a\nclear 503 error is returned. If the Gateway denies a grant a 403 is returned.\n\nAfter a successful enable the manifest's Runnables are activated via\n[`crate::runnable::RunnableRegistry`]. Per-Runnable results are included in\nthe response so the caller can see which Runnables were registered and which\n(if any) encountered a partial failure. A partial failure does NOT roll back\nthe enable \u2014 Core-owned kinds (Agent, Workflow, Tool) are activated; kinds\nwithout a built-in handler (Policy, Engine \u2014 Gateway's domain) produce an\nobservable \"no handler\" error.",
         "operationId": "enable_app_handler",
@@ -7415,9 +6849,7 @@
     },
     "/api/plugins/{id}/grants": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "set app grants handler",
         "operationId": "set_app_grants_handler",
         "parameters": [
@@ -7452,9 +6884,7 @@
     },
     "/api/plugins/{id}/host": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "dispatch one host-capability call for an",
         "operationId": "plugin_bridge_dispatch",
         "parameters": [
@@ -7497,9 +6927,7 @@
     },
     "/api/plugins/{id}/host/stream": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "stream a tool-using `agent.run` to a",
         "operationId": "plugin_bridge_stream",
         "parameters": [
@@ -7542,9 +6970,7 @@
     },
     "/api/plugins/{id}/install": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "Install a built-in plugin by id",
         "operationId": "install_app_handler",
         "parameters": [
@@ -7571,9 +6997,7 @@
     },
     "/api/plugins/{id}/ui-bundle": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "plugin ui bundle",
         "operationId": "plugin_ui_bundle",
         "parameters": [
@@ -7600,9 +7024,7 @@
     },
     "/api/plugins/{id}/update": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "Update a plugin",
         "description": "Refuses a downgrade unless `force = true`.",
         "operationId": "update_app_handler",
@@ -7638,9 +7060,7 @@
     },
     "/api/predict/complete": {
       "post": {
-        "tags": [
-          "Predict"
-        ],
+        "tags": ["Predict"],
         "summary": "Predict the inline continuation for caret context",
         "operationId": "complete",
         "requestBody": {
@@ -7665,9 +7085,7 @@
     },
     "/api/predict/config": {
       "get": {
-        "tags": [
-          "Predict"
-        ],
+        "tags": ["Predict"],
         "summary": "Get predictive-typing config",
         "operationId": "get_config",
         "responses": {
@@ -7682,9 +7100,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Predict"
-        ],
+        "tags": ["Predict"],
         "summary": "Update predictive-typing config",
         "operationId": "put_config",
         "requestBody": {
@@ -7709,9 +7125,7 @@
     },
     "/api/preferences/stream": {
       "get": {
-        "tags": [
-          "Preferences"
-        ],
+        "tags": ["Preferences"],
         "summary": "Preferences SSE stream",
         "operationId": "preferences_stream",
         "responses": {
@@ -7723,9 +7137,7 @@
     },
     "/api/preferences/{key}": {
       "get": {
-        "tags": [
-          "Preferences"
-        ],
+        "tags": ["Preferences"],
         "summary": "Get a preference value",
         "operationId": "get_preference",
         "parameters": [
@@ -7750,9 +7162,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Preferences"
-        ],
+        "tags": ["Preferences"],
         "summary": "Set a preference value",
         "operationId": "set_preference",
         "parameters": [
@@ -7787,9 +7197,7 @@
     },
     "/api/quests": {
       "get": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "list all quests.",
         "operationId": "list_quests",
         "responses": {
@@ -7804,9 +7212,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "create a quest (and its backing detection job).",
         "operationId": "create_quest",
         "requestBody": {
@@ -7831,9 +7237,7 @@
     },
     "/api/quests/detection-config": {
       "get": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "the current detection knobs.",
         "operationId": "get_detection_config",
         "responses": {
@@ -7848,9 +7252,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "set the detection mode + judge model.",
         "operationId": "set_detection_config",
         "requestBody": {
@@ -7875,9 +7277,7 @@
     },
     "/api/quests/events": {
       "get": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "SSE feed of quest events (suggested / completed).",
         "operationId": "quest_events",
         "responses": {
@@ -7894,9 +7294,7 @@
     },
     "/api/quests/{id}": {
       "get": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "one quest.",
         "operationId": "get_quest",
         "parameters": [
@@ -7921,9 +7319,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "edit a quest's title / detail / completion condition.",
         "operationId": "update_quest",
         "parameters": [
@@ -7956,9 +7352,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "remove a quest, its history, and its job.",
         "operationId": "delete_quest",
         "parameters": [
@@ -7985,9 +7379,7 @@
     },
     "/api/quests/{id}/complete": {
       "post": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "mark a quest done (manual check-off). The",
         "operationId": "complete_quest",
         "parameters": [
@@ -8022,9 +7414,7 @@
     },
     "/api/quests/{id}/dismiss": {
       "post": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "abandon a quest entirely.",
         "operationId": "dismiss_quest",
         "parameters": [
@@ -8059,9 +7449,7 @@
     },
     "/api/quests/{id}/judge": {
       "post": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "run one detection pass immediately.",
         "operationId": "judge_quest",
         "parameters": [
@@ -8096,9 +7484,7 @@
     },
     "/api/quests/{id}/suggestion/accept": {
       "post": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "confirm a pending detection.",
         "operationId": "accept_suggestion",
         "parameters": [
@@ -8133,9 +7519,7 @@
     },
     "/api/quests/{id}/suggestion/dismiss": {
       "post": {
-        "tags": [
-          "Quests"
-        ],
+        "tags": ["Quests"],
         "summary": "reject the pending suggestion but",
         "operationId": "dismiss_suggestion",
         "parameters": [
@@ -8170,9 +7554,7 @@
     },
     "/api/realtime/ws": {
       "get": {
-        "tags": [
-          "Core"
-        ],
+        "tags": ["Core"],
         "summary": "upgrade to the room gateway. Node admittance + the",
         "operationId": "realtime_ws",
         "responses": {
@@ -8189,9 +7571,7 @@
     },
     "/api/recipes": {
       "get": {
-        "tags": [
-          "Recipes"
-        ],
+        "tags": ["Recipes"],
         "summary": "list installed recipes (summary form).",
         "operationId": "list_recipes",
         "responses": {
@@ -8206,9 +7586,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Recipes"
-        ],
+        "tags": ["Recipes"],
         "summary": "install (create or overwrite) a recipe.",
         "operationId": "save_recipe",
         "requestBody": {
@@ -8233,9 +7611,7 @@
     },
     "/api/recipes/record/start": {
       "post": {
-        "tags": [
-          "Recipes"
-        ],
+        "tags": ["Recipes"],
         "summary": "begin observing user input.",
         "operationId": "record_start",
         "requestBody": {
@@ -8260,9 +7636,7 @@
     },
     "/api/recipes/record/status": {
       "get": {
-        "tags": [
-          "Recipes"
-        ],
+        "tags": ["Recipes"],
         "summary": "poll the active recording.",
         "operationId": "record_status",
         "responses": {
@@ -8279,9 +7653,7 @@
     },
     "/api/recipes/record/stop": {
       "post": {
-        "tags": [
-          "Recipes"
-        ],
+        "tags": ["Recipes"],
         "summary": "stop recording and return captured events.",
         "operationId": "record_stop",
         "requestBody": {
@@ -8306,9 +7678,7 @@
     },
     "/api/recipes/{name}": {
       "get": {
-        "tags": [
-          "Recipes"
-        ],
+        "tags": ["Recipes"],
         "summary": "one recipe's full definition.",
         "operationId": "get_recipe",
         "parameters": [
@@ -8333,9 +7703,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Recipes"
-        ],
+        "tags": ["Recipes"],
         "summary": "remove a recipe.",
         "operationId": "delete_recipe",
         "parameters": [
@@ -8362,9 +7730,7 @@
     },
     "/api/recipes/{name}/run": {
       "post": {
-        "tags": [
-          "Recipes"
-        ],
+        "tags": ["Recipes"],
         "summary": "replay a recipe against native apps.",
         "operationId": "run_recipe",
         "parameters": [
@@ -8399,9 +7765,7 @@
     },
     "/api/research/status": {
       "get": {
-        "tags": [
-          "Research"
-        ],
+        "tags": ["Research"],
         "summary": "report install/run state and the sidecar's",
         "operationId": "research_status",
         "responses": {
@@ -8418,9 +7782,7 @@
     },
     "/api/research/workspace": {
       "post": {
-        "tags": [
-          "Research"
-        ],
+        "tags": ["Research"],
         "summary": "init a new experiment workspace. Lazily",
         "operationId": "research_init_workspace",
         "requestBody": {
@@ -8445,9 +7807,7 @@
     },
     "/api/research/workspace/{id}/ledger": {
       "get": {
-        "tags": [
-          "Research"
-        ],
+        "tags": ["Research"],
         "summary": "proxy the sidecar's ledger read.",
         "operationId": "research_ledger",
         "parameters": [
@@ -8474,9 +7834,7 @@
     },
     "/api/retrieval/index": {
       "post": {
-        "tags": [
-          "Retrieval"
-        ],
+        "tags": ["Retrieval"],
         "summary": "Index a retrieval chunk",
         "operationId": "index_retrieval_chunk",
         "requestBody": {
@@ -8501,9 +7859,7 @@
     },
     "/api/retrieval/search": {
       "post": {
-        "tags": [
-          "Retrieval"
-        ],
+        "tags": ["Retrieval"],
         "summary": "Search indexed chunks + memory",
         "operationId": "search_retrieval",
         "requestBody": {
@@ -8528,9 +7884,7 @@
     },
     "/api/runs": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "List runs",
         "operationId": "list_runs_handler",
         "responses": {
@@ -8547,9 +7901,7 @@
     },
     "/api/runs/stream": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Background-runs SSE stream",
         "operationId": "runs_stream",
         "responses": {
@@ -8561,9 +7913,7 @@
     },
     "/api/runs/{id}/trace": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Get a run's trace spans",
         "description": "`:id` is the `conversation_id` used as the run key.  Returns `{ \"spans\": [...] }`.\nReturns an empty list (not 404) when the run exists but has no recorded spans yet\nso the desktop can poll during an active run without error handling.",
         "operationId": "get_run_trace_handler",
@@ -8591,9 +7941,7 @@
     },
     "/api/sandbox/backend": {
       "get": {
-        "tags": [
-          "Sandboxes"
-        ],
+        "tags": ["Sandboxes"],
         "summary": "Get the default sandbox backend and available backends",
         "operationId": "get_sandbox_backend",
         "responses": {
@@ -8608,9 +7956,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Sandboxes"
-        ],
+        "tags": ["Sandboxes"],
         "summary": "Set the default sandbox backend",
         "operationId": "set_sandbox_backend",
         "requestBody": {
@@ -8635,9 +7981,7 @@
     },
     "/api/sandboxes": {
       "get": {
-        "tags": [
-          "Sandboxes"
-        ],
+        "tags": ["Sandboxes"],
         "summary": "list sandboxes",
         "description": "Sibling of [`list_connections`]: a read-only visibility surface for the node\nselector so a client can see which metered sandboxes a node is running (and\ntheir elapsed/accrued figures) before routing work to it. Populated by the\nsandbox metering registry (`crate::sidecar::sandbox::heartbeat`).",
         "operationId": "list_sandboxes",
@@ -8655,9 +7999,7 @@
     },
     "/api/sandboxes/{run_id}": {
       "delete": {
-        "tags": [
-          "Sandboxes"
-        ],
+        "tags": ["Sandboxes"],
         "summary": "destroy sandbox",
         "operationId": "destroy_sandbox",
         "parameters": [
@@ -8684,9 +8026,7 @@
     },
     "/api/sandboxes/{run_id}/exec": {
       "post": {
-        "tags": [
-          "Sandboxes"
-        ],
+        "tags": ["Sandboxes"],
         "summary": "exec sandbox",
         "operationId": "exec_sandbox",
         "parameters": [
@@ -8721,9 +8061,7 @@
     },
     "/api/sessions": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Create a session",
         "operationId": "create_session_handler",
         "requestBody": {
@@ -8748,9 +8086,7 @@
     },
     "/api/sessions/{id}": {
       "get": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Get a session",
         "operationId": "get_session_handler",
         "parameters": [
@@ -8777,9 +8113,7 @@
     },
     "/api/sessions/{id}/status": {
       "post": {
-        "tags": [
-          "Conversations"
-        ],
+        "tags": ["Conversations"],
         "summary": "Update a session's status",
         "operationId": "update_session_status_handler",
         "parameters": [
@@ -8814,9 +8148,7 @@
     },
     "/api/setup/check/{name}": {
       "get": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Check whether a sidecar is installed",
         "operationId": "check_installed",
         "parameters": [
@@ -8843,9 +8175,7 @@
     },
     "/api/setup/list": {
       "get": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "List installed sidecars",
         "operationId": "list_installed",
         "responses": {
@@ -8862,9 +8192,7 @@
     },
     "/api/setup/status": {
       "get": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Install status for all sidecars",
         "operationId": "get_install_status",
         "responses": {
@@ -8881,9 +8209,7 @@
     },
     "/api/setup/status/{name}": {
       "get": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Install status for one sidecar",
         "operationId": "get_install_status_by_name",
         "parameters": [
@@ -8910,9 +8236,7 @@
     },
     "/api/setup/{name}/install": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Install a sidecar (SSE progress)",
         "operationId": "install_sidecar",
         "parameters": [
@@ -8934,9 +8258,7 @@
     },
     "/api/setup/{name}/uninstall": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Uninstall a sidecar",
         "operationId": "uninstall_sidecar",
         "parameters": [
@@ -8963,9 +8285,7 @@
     },
     "/api/setup/{name}/uninstall-with-data": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Uninstall a sidecar and its data",
         "operationId": "uninstall_sidecar_with_data",
         "parameters": [
@@ -8992,9 +8312,7 @@
     },
     "/api/sidecar/start-all": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Start all sidecars",
         "operationId": "sidecar_start_all",
         "responses": {
@@ -9011,9 +8329,7 @@
     },
     "/api/sidecar/status": {
       "get": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Status of all sidecars",
         "operationId": "sidecar_status",
         "responses": {
@@ -9030,9 +8346,7 @@
     },
     "/api/sidecar/stop-all": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Stop all sidecars",
         "operationId": "sidecar_stop_all",
         "responses": {
@@ -9049,9 +8363,7 @@
     },
     "/api/sidecar/{name}/restart": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Restart a sidecar",
         "operationId": "sidecar_restart",
         "parameters": [
@@ -9078,9 +8390,7 @@
     },
     "/api/sidecar/{name}/start": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Start a sidecar",
         "operationId": "sidecar_start",
         "parameters": [
@@ -9107,9 +8417,7 @@
     },
     "/api/sidecar/{name}/stop": {
       "post": {
-        "tags": [
-          "Sidecars"
-        ],
+        "tags": ["Sidecars"],
         "summary": "Stop a sidecar",
         "operationId": "sidecar_stop",
         "parameters": [
@@ -9136,9 +8444,7 @@
     },
     "/api/skills": {
       "get": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "List installed skills",
         "description": "Skills live in the universal `~/.claude/skills/<id>/SKILL.md`. This endpoint lets agents and\nUIs discover available skills (AC1). Each entry carries a `kind = \"skill\"`\nfield so the listing is heterogeneous-runnable compatible.",
         "operationId": "list_skills",
@@ -9156,9 +8462,7 @@
     },
     "/api/skills/activate": {
       "post": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "Toggle a skill active (injection gate)",
         "operationId": "skills_activate",
         "requestBody": {
@@ -9183,9 +8487,7 @@
     },
     "/api/skills/catalog": {
       "get": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "Browse the skills catalog (skills.sh)",
         "description": "Source-aware (#463): the active Skill source (skills.sh by default, or a\ncustom Claude plugin marketplace) owns search. The installed-only view is\nalways source-agnostic (it scans the on-disk skills dir), so it uses the\nskills.sh helper which reads local state.",
         "operationId": "skills_catalog_list",
@@ -9203,9 +8505,7 @@
     },
     "/api/skills/catalog/detail": {
       "get": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "Skill detail: SKILL.md + file list",
         "operationId": "skills_catalog_detail",
         "responses": {
@@ -9222,9 +8522,7 @@
     },
     "/api/skills/catalog/install": {
       "post": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "Install a skill from the catalog",
         "description": "Source-aware (#463): skills.sh installs via the `owner/repo/slug` download\npath; a custom Claude marketplace source resolves the chosen item to its\nrepo+subdir and installs through Unit #462's from-source fetcher. Either way\nthe registry hot-reloads.",
         "operationId": "skills_catalog_install",
@@ -9250,9 +8548,7 @@
     },
     "/api/skills/install-from-source": {
       "post": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "Install a skill directly from a source spec",
         "operationId": "skills_install_from_source",
         "requestBody": {
@@ -9277,9 +8573,7 @@
     },
     "/api/skills/updates": {
       "get": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "Installed skills with a newer upstream SKILL.md",
         "operationId": "skills_updates",
         "responses": {
@@ -9296,9 +8590,7 @@
     },
     "/api/skills/{id}": {
       "put": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "update skill handler",
         "operationId": "update_skill_handler",
         "parameters": [
@@ -9333,9 +8625,7 @@
     },
     "/api/skills/{id}/source": {
       "get": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "get skill source",
         "description": "Returns both the decomposed form fields (name/description/allowed_tools/\nalways_on/body) and the raw `source` string (the diff baseline for version\nhistory).",
         "operationId": "get_skill_source",
@@ -9363,9 +8653,7 @@
     },
     "/api/skills/{id}/versions": {
       "get": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "list skill versions handler",
         "operationId": "list_skill_versions_handler",
         "parameters": [
@@ -9392,9 +8680,7 @@
     },
     "/api/skills/{id}/versions/{version_id}": {
       "get": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "get skill version handler",
         "operationId": "get_skill_version_handler",
         "parameters": [
@@ -9429,9 +8715,7 @@
     },
     "/api/skills/{id}/versions/{version_id}/restore": {
       "post": {
-        "tags": [
-          "Skills"
-        ],
+        "tags": ["Skills"],
         "summary": "restore skill version handler",
         "operationId": "restore_skill_version_handler",
         "parameters": [
@@ -9474,9 +8758,7 @@
     },
     "/api/spaces": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "List spaces",
         "operationId": "list_spaces",
         "responses": {
@@ -9491,9 +8773,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Create a space",
         "operationId": "create_space",
         "requestBody": {
@@ -9518,9 +8798,7 @@
     },
     "/api/spaces/{id}": {
       "delete": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Delete a space",
         "operationId": "delete_space",
         "parameters": [
@@ -9547,9 +8825,7 @@
     },
     "/api/spaces/{id}/databases": {
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Create a database document",
         "operationId": "create_database",
         "parameters": [
@@ -9584,9 +8860,7 @@
     },
     "/api/spaces/{id}/documents": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "List documents in a space",
         "operationId": "list_documents",
         "parameters": [
@@ -9611,9 +8885,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Ingest a document into a space",
         "operationId": "ingest_document",
         "parameters": [
@@ -9648,9 +8920,7 @@
     },
     "/api/spaces/{id}/documents/{doc_id}": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Get a document",
         "operationId": "get_document",
         "parameters": [
@@ -9683,9 +8953,7 @@
         }
       },
       "put": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Update a document",
         "operationId": "update_document",
         "parameters": [
@@ -9726,9 +8994,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Delete a document",
         "operationId": "delete_document",
         "parameters": [
@@ -9763,9 +9029,7 @@
     },
     "/api/spaces/{id}/documents/{doc_id}/backlinks": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "List backlinks to a document",
         "operationId": "get_document_backlinks",
         "parameters": [
@@ -9800,9 +9064,7 @@
     },
     "/api/spaces/{id}/documents/{doc_id}/blob": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Download a file document's bytes",
         "operationId": "get_file_blob",
         "parameters": [
@@ -9832,9 +9094,7 @@
     },
     "/api/spaces/{id}/documents/{doc_id}/links": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "List outgoing links from a document",
         "operationId": "get_document_links",
         "parameters": [
@@ -9869,9 +9129,7 @@
     },
     "/api/spaces/{id}/documents/{doc_id}/versions": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "List document versions",
         "operationId": "list_document_versions",
         "parameters": [
@@ -9904,9 +9162,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Snapshot a document version",
         "operationId": "create_document_version",
         "parameters": [
@@ -9949,9 +9205,7 @@
     },
     "/api/spaces/{id}/documents/{doc_id}/versions/{version_id}": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Get a document version",
         "operationId": "get_document_version",
         "parameters": [
@@ -9994,9 +9248,7 @@
     },
     "/api/spaces/{id}/documents/{doc_id}/versions/{version_id}/restore": {
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Restore a document version",
         "operationId": "restore_document_version",
         "parameters": [
@@ -10039,9 +9291,7 @@
     },
     "/api/spaces/{id}/files": {
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Store a binary file document",
         "operationId": "create_file",
         "parameters": [
@@ -10076,9 +9326,7 @@
     },
     "/api/spaces/{id}/graph": {
       "get": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Document-link graph for a space",
         "operationId": "get_space_graph",
         "parameters": [
@@ -10105,9 +9353,7 @@
     },
     "/api/spaces/{id}/pages": {
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Create a page document",
         "operationId": "create_page",
         "parameters": [
@@ -10142,9 +9388,7 @@
     },
     "/api/spaces/{id}/search": {
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Search a space (RAG)",
         "operationId": "search_space",
         "parameters": [
@@ -10179,9 +9423,7 @@
     },
     "/api/spaces/{id}/whiteboards": {
       "post": {
-        "tags": [
-          "Spaces"
-        ],
+        "tags": ["Spaces"],
         "summary": "Create a whiteboard document",
         "operationId": "create_whiteboard",
         "parameters": [
@@ -10216,9 +9458,7 @@
     },
     "/api/support-access/audit": {
       "get": {
-        "tags": [
-          "Support"
-        ],
+        "tags": ["Support"],
         "summary": "support access audit",
         "operationId": "support_access_audit",
         "responses": {
@@ -10235,9 +9475,7 @@
     },
     "/api/support-access/diagnostics": {
       "get": {
-        "tags": [
-          "Support"
-        ],
+        "tags": ["Support"],
         "summary": "support access diagnostics",
         "description": "Refuses (403) unless the user has granted the local support channel\n(`support-access-local-enabled`) AND the hard expiry has not passed \u2014 checked\nlive so a grant that expired since startup is also refused (and lazily swept).\nOn grant it returns ONLY the allowlist [`crate::support_access::DiagnosticBundle`]\n(version, active engine, sidecar liveness, set-pref KEYS, redacted spans) \u2014\nnever prompt/agent content, never credentials/`auth.json`. Every call (grant\nor refusal) is recorded in the local append-only audit log with the actor\n(`x-ryu-support-actor` header) stamped.",
         "operationId": "support_access_diagnostics",
@@ -10255,9 +9493,7 @@
     },
     "/api/system/info": {
       "get": {
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "summary": "Live CPU/RAM/disk/GPU snapshot for this node",
         "operationId": "system_info_handler",
         "responses": {
@@ -10274,9 +9510,7 @@
     },
     "/api/system/status": {
       "get": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Merged system status (engine + sidecars + gateway + mesh)",
         "description": "Composes the active-engine, sidecar, gateway, and mesh probes Core already\nexposes individually, applying the degrade rules in one place so every client\n(desktop, CLI, extension, island, mobile) renders the same reachable/down view\ninstead of each firing 4+ requests and re-deriving the merge. If this endpoint\nanswers at all, Core is reachable; the client adds only the device-local\nShadow probe (Shadow is a sensor and is never routed through Core).",
         "operationId": "system_status",
@@ -10294,9 +9528,7 @@
     },
     "/api/teams": {
       "get": {
-        "tags": [
-          "Teams"
-        ],
+        "tags": ["Teams"],
         "summary": "List agent teams",
         "operationId": "list_teams",
         "responses": {
@@ -10311,9 +9543,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Teams"
-        ],
+        "tags": ["Teams"],
         "summary": "Create a team",
         "operationId": "create_team",
         "requestBody": {
@@ -10338,9 +9568,7 @@
     },
     "/api/teams/{id}": {
       "get": {
-        "tags": [
-          "Teams"
-        ],
+        "tags": ["Teams"],
         "summary": "Get a team by id",
         "operationId": "get_team",
         "parameters": [
@@ -10365,9 +9593,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Teams"
-        ],
+        "tags": ["Teams"],
         "summary": "Delete a team",
         "operationId": "delete_team",
         "parameters": [
@@ -10392,9 +9618,7 @@
         }
       },
       "patch": {
-        "tags": [
-          "Teams"
-        ],
+        "tags": ["Teams"],
         "summary": "Update a team",
         "operationId": "update_team",
         "parameters": [
@@ -10429,9 +9653,7 @@
     },
     "/api/teams/{id}/members": {
       "post": {
-        "tags": [
-          "Teams"
-        ],
+        "tags": ["Teams"],
         "summary": "Add a member agent to a team",
         "operationId": "add_team_member",
         "parameters": [
@@ -10466,9 +9688,7 @@
     },
     "/api/teams/{id}/members/{agent_id}": {
       "delete": {
-        "tags": [
-          "Teams"
-        ],
+        "tags": ["Teams"],
         "summary": "Remove a member from a team",
         "operationId": "remove_team_member",
         "parameters": [
@@ -10503,9 +9723,7 @@
     },
     "/api/tools/describe": {
       "get": {
-        "tags": [
-          "Tools"
-        ],
+        "tags": ["Tools"],
         "summary": "Describe a tool's argument schema",
         "operationId": "tools_describe",
         "parameters": [
@@ -10539,9 +9757,7 @@
     },
     "/api/tools/exec": {
       "post": {
-        "tags": [
-          "Tools"
-        ],
+        "tags": ["Tools"],
         "summary": "Run a programmatic tool-calling program",
         "operationId": "tools_exec",
         "requestBody": {
@@ -10569,9 +9785,7 @@
     },
     "/api/tools/exec/resume": {
       "post": {
-        "tags": [
-          "Tools"
-        ],
+        "tags": ["Tools"],
         "summary": "Resume a paused programmatic execution",
         "operationId": "tools_exec_resume",
         "requestBody": {
@@ -10602,9 +9816,7 @@
     },
     "/api/tools/search": {
       "get": {
-        "tags": [
-          "Tools"
-        ],
+        "tags": ["Tools"],
         "summary": "Search the unified tool catalog",
         "operationId": "tools_search",
         "parameters": [
@@ -10660,9 +9872,7 @@
     },
     "/api/update/apply": {
       "post": {
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "summary": "Download and apply an update (headless binaries)",
         "operationId": "update_apply",
         "requestBody": {
@@ -10687,9 +9897,7 @@
     },
     "/api/update/check": {
       "get": {
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "summary": "Compare installed version against the latest release",
         "operationId": "update_check",
         "responses": {
@@ -10706,9 +9914,7 @@
     },
     "/api/version": {
       "get": {
-        "tags": [
-          "Health"
-        ],
+        "tags": ["Health"],
         "summary": "Installed version and per-component builds",
         "operationId": "get_version",
         "responses": {
@@ -10725,9 +9931,7 @@
     },
     "/api/video/generate": {
       "post": {
-        "tags": [
-          "Media"
-        ],
+        "tags": ["Media"],
         "summary": "text/image-to-video via sd-server's native",
         "operationId": "generate_video",
         "requestBody": {
@@ -10752,9 +9956,7 @@
     },
     "/api/video/jobs/{id}": {
       "get": {
-        "tags": [
-          "Media"
-        ],
+        "tags": ["Media"],
         "summary": "poll a cloud video-generation job submitted via",
         "operationId": "poll_video_job",
         "parameters": [
@@ -10781,9 +9983,7 @@
     },
     "/api/voice/speak": {
       "post": {
-        "tags": [
-          "Voice"
-        ],
+        "tags": ["Voice"],
         "summary": "synthesize speech from text, returning a `audio/wav",
         "operationId": "speak",
         "requestBody": {
@@ -10808,9 +10008,7 @@
     },
     "/api/voice/transcribe": {
       "post": {
-        "tags": [
-          "Voice"
-        ],
+        "tags": ["Voice"],
         "summary": "Transcribe an uploaded audio file",
         "operationId": "transcribe",
         "requestBody": {
@@ -10835,9 +10033,7 @@
     },
     "/api/voice/tts-engines": {
       "get": {
-        "tags": [
-          "Voice"
-        ],
+        "tags": ["Voice"],
         "summary": "list available TTS engines for the desktop",
         "operationId": "tts_engines",
         "responses": {
@@ -10854,9 +10050,7 @@
     },
     "/api/voice/tts-models": {
       "get": {
-        "tags": [
-          "Voice"
-        ],
+        "tags": ["Voice"],
         "summary": "the curated, installable TTS model catalog (the",
         "operationId": "tts_models",
         "responses": {
@@ -10873,9 +10067,7 @@
     },
     "/api/voice/tts-models/install": {
       "post": {
-        "tags": [
-          "Voice"
-        ],
+        "tags": ["Voice"],
         "summary": "download a curated model into the",
         "operationId": "tts_models_install",
         "requestBody": {
@@ -10900,9 +10092,7 @@
     },
     "/api/voice/ws": {
       "get": {
-        "tags": [
-          "Voice"
-        ],
+        "tags": ["Voice"],
         "summary": "upgrade to the voice-mode socket. Node admittance is",
         "operationId": "voice_ws",
         "responses": {
@@ -10919,9 +10109,7 @@
     },
     "/api/webhook-ingress/backend": {
       "get": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Get the configured webhook ingress backend",
         "operationId": "webhook_ingress_get_backend",
         "responses": {
@@ -10936,9 +10124,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Set the active webhook ingress backend",
         "operationId": "webhook_ingress_set_backend",
         "requestBody": {
@@ -10963,9 +10149,7 @@
     },
     "/api/webhook-ingress/status": {
       "get": {
-        "tags": [
-          "Nodes"
-        ],
+        "tags": ["Nodes"],
         "summary": "Webhook ingress backend + public URL",
         "operationId": "webhook_ingress_status",
         "responses": {
@@ -10982,9 +10166,7 @@
     },
     "/api/whiteboard/generate": {
       "post": {
-        "tags": [
-          "Core"
-        ],
+        "tags": ["Core"],
         "summary": "whiteboard generate handler",
         "operationId": "whiteboard_generate_handler",
         "requestBody": {
@@ -11009,9 +10191,7 @@
     },
     "/api/widgets/follow-up": {
       "post": {
-        "tags": [
-          "Widgets"
-        ],
+        "tags": ["Widgets"],
         "summary": "provenance gate + firewall/DLP scan + audit,",
         "operationId": "widget_follow_up",
         "requestBody": {
@@ -11036,9 +10216,7 @@
     },
     "/api/widgets/state": {
       "post": {
-        "tags": [
-          "Widgets"
-        ],
+        "tags": ["Widgets"],
         "summary": "persist a `widgetState` snapshot server-side (D4)",
         "operationId": "widget_state",
         "requestBody": {
@@ -11063,9 +10241,7 @@
     },
     "/api/widgets/tools/call": {
       "post": {
-        "tags": [
-          "Widgets"
-        ],
+        "tags": ["Widgets"],
         "summary": "provenance gate then forward to the Gateway.",
         "operationId": "widget_call_tool",
         "requestBody": {
@@ -11090,9 +10266,7 @@
     },
     "/api/workflows/catalog": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "List workflow templates",
         "operationId": "list_workflow_templates",
         "responses": {
@@ -11109,9 +10283,7 @@
     },
     "/api/workflows/catalog/install": {
       "post": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Install a workflow template",
         "operationId": "install_workflow_template",
         "requestBody": {
@@ -11136,9 +10308,7 @@
     },
     "/api/workflows/catalog/{id}": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Get a workflow template",
         "operationId": "get_workflow_template",
         "parameters": [
@@ -11165,9 +10335,7 @@
     },
     "/api/workflows/{id}/webhook": {
       "post": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Fire a workflow from an inbound webhook (HMAC-authenticated)",
         "description": "Public inbound trigger for a workflow that declares a `WorkflowTrigger::Webhook`.\nThe external caller (an integration, app, or any service that can POST) cannot\nsend the node bearer, so the route is unauthenticated at the router level and\ninstead authenticates the raw body with an HMAC-SHA256 over the trigger's own\n`secret`. Fail-closed: a workflow with no webhook trigger, or a webhook trigger\nwith no configured secret, never fires. On success the raw JSON body is seeded\nas the run's `trigger` state (readable in node templates as `{{trigger.<field>}}`).",
         "operationId": "workflow_webhook",
@@ -11212,9 +10380,7 @@
     },
     "/api/workspace/list": {
       "get": {
-        "tags": [
-          "Git"
-        ],
+        "tags": ["Git"],
         "summary": "list the sub-directories of a folder ON",
         "description": "Placement rationale: this is Core \u2014 it reads *what is* on the node's own\nfilesystem, no policy. Read-only: it returns directory names only, never file\ncontents. `~` is expanded; a missing/blank path defaults to the home directory.\nReturns `{ path, parent, home, entries: [{ name, path }] }` (directories only,\nsorted, hidden entries excluded).",
         "operationId": "list_directory",
@@ -11232,9 +10398,7 @@
     },
     "/api/workspace/new-folder": {
       "post": {
-        "tags": [
-          "Git"
-        ],
+        "tags": ["Git"],
         "summary": "{ name }",
         "description": "Create a fresh, empty project folder under `~/Documents/Ryu/<name>` and return\nits absolute path so the desktop's \"Start from scratch\" flow can open it. This\nis Core: it owns the local filesystem (the desktop's Tauri fs ACL is\nintentionally narrow), so folder creation lives here rather than in the client.\n`name` is validated to a single path segment \u2014 no separators, `..`, or control\ncharacters \u2014 so it can never escape the Ryu projects root. Returns HTTP 409\nwhen a folder of that name already exists (so the picker asks for another).",
         "operationId": "create_project_folder",
@@ -11260,9 +10424,7 @@
     },
     "/api/worktree/{run_id}/apply": {
       "post": {
-        "tags": [
-          "Worktree"
-        ],
+        "tags": ["Worktree"],
         "summary": "Apply/merge a run's worktree",
         "operationId": "worktree_apply_handler",
         "parameters": [
@@ -11297,9 +10459,7 @@
     },
     "/api/worktree/{run_id}/diff": {
       "get": {
-        "tags": [
-          "Worktree"
-        ],
+        "tags": ["Worktree"],
         "summary": "Diff a run's worktree",
         "operationId": "worktree_diff_handler",
         "parameters": [
@@ -11326,9 +10486,7 @@
     },
     "/api/worktree/{run_id}/status": {
       "get": {
-        "tags": [
-          "Worktree"
-        ],
+        "tags": ["Worktree"],
         "summary": "Status of a conversation's persistent worktree",
         "operationId": "worktree_status_handler",
         "parameters": [
@@ -11355,9 +10513,7 @@
     },
     "/heartbeat/jobs": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "list jobs",
         "operationId": "list_jobs",
         "responses": {
@@ -11374,9 +10530,7 @@
     },
     "/heartbeat/jobs/{id}": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "get job",
         "operationId": "get_job",
         "parameters": [
@@ -11403,9 +10557,7 @@
     },
     "/v1/chat/completions": {
       "post": {
-        "tags": [
-          "Chat"
-        ],
+        "tags": ["Chat"],
         "summary": "OpenAI-compatible chat completions (proxied)",
         "operationId": "oai_chat_completions",
         "requestBody": {
@@ -11430,9 +10582,7 @@
     },
     "/workflows": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "List workflows",
         "operationId": "list_workflows",
         "responses": {
@@ -11447,9 +10597,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Create a workflow",
         "operationId": "create_workflow",
         "requestBody": {
@@ -11474,9 +10622,7 @@
     },
     "/workflows/runs/{run_id}": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Get a workflow run",
         "operationId": "get_workflow_run",
         "parameters": [
@@ -11503,9 +10649,7 @@
     },
     "/workflows/runs/{run_id}/resume": {
       "post": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Resume a workflow run (HITL)",
         "description": "Acceptance criteria:\n- 404 when the run does not exist.\n- 409 when the run is not in `awaiting_input` status.\n- Completes the Awakeable gate with the caller-supplied `payload`, persists,\n  re-invokes the executor (which skips all already-Completed nodes and\n  continues from the gate's successor), and returns the final run state.",
         "operationId": "resume_workflow_run",
@@ -11541,9 +10685,7 @@
     },
     "/workflows/{id}": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Get a workflow",
         "operationId": "get_workflow",
         "parameters": [
@@ -11568,9 +10710,7 @@
         }
       },
       "delete": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Delete a workflow",
         "operationId": "delete_workflow",
         "parameters": [
@@ -11597,9 +10737,7 @@
     },
     "/workflows/{id}/run": {
       "post": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Run a workflow",
         "description": "Routes through the durable engine selected by `durable::select_engine()` \u2014\nthe in-process petgraph topological executor with file-backed resumable\nstate, crash-recoverable at the node checkpoint level. Re-POST with the same\n`run_id` to resume a run after a Core restart (already-Completed nodes are\nskipped and their output reused).\n\nReturns 503 when the gateway is unreachable and fail-closed is in effect.",
         "operationId": "run_workflow",
@@ -11635,9 +10773,7 @@
     },
     "/workflows/{id}/versions": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "List workflow versions",
         "operationId": "list_workflow_versions",
         "parameters": [
@@ -11662,9 +10798,7 @@
         }
       },
       "post": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Snapshot a workflow version",
         "operationId": "create_workflow_version",
         "parameters": [
@@ -11699,9 +10833,7 @@
     },
     "/workflows/{id}/versions/{version_id}": {
       "get": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Get a workflow version",
         "operationId": "get_workflow_version",
         "parameters": [
@@ -11736,9 +10868,7 @@
     },
     "/workflows/{id}/versions/{version_id}/restore": {
       "post": {
-        "tags": [
-          "Workflows"
-        ],
+        "tags": ["Workflows"],
         "summary": "Restore a workflow version",
         "operationId": "restore_workflow_version",
         "parameters": [
@@ -11773,9 +10903,7 @@
     },
     "/api/apps": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) List installed plugins with state",
         "description": "Deprecated alias for `/api/plugins`. Prefer `/api/plugins` routes.\n\nEach entry includes:\n- `id` \u2014 manifest id\n- `kinds` \u2014 deduplicated list of [`RunnableKind`] strings bundled by this app\n- `enabled` \u2014 current enabled flag from the lifecycle store\n- `permission_grants` \u2014 verbatim declared grants from `ryu.json` (declarations\n  only; enforcement is Gateway scope \u2014 Core never gates calls on grants)\n\nReturns the manifests loaded at startup via [`PluginManifestLoader`]. The list is\nstable for the lifetime of this Core process; a restart is required for newly\ninstalled apps to appear.",
         "operationId": "list_apps_apps_alias",
@@ -11793,9 +10921,7 @@
     },
     "/api/apps/catalog": {
       "get": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) List the plugin catalog",
         "description": "Deprecated alias for `/api/plugins/catalog`. Prefer `/api/plugins` routes.\n\nTTL-cached in `ServerState::catalog_client`; falls back to a stale cache or\nan empty list when the registry is unreachable. Built-in apps are always\ndiscoverable via `GET /api/apps`, so an offline machine is never blank.",
         "operationId": "list_apps_catalog_apps_alias",
@@ -11813,9 +10939,7 @@
     },
     "/api/apps/install": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) Install a plugin from a URL",
         "description": "Deprecated alias for `/api/plugins/install`. Prefer `/api/plugins` routes.\n\n## Security (SSRF guard)\n\nOnly `https://` URLs are accepted. The host is resolved with `getaddrinfo`\nand rejected if *any* resolved IP is loopback / private / link-local / ULA /\nCGNAT (so a DNS name pointing at an internal address is caught, not just\nliteral IPs). The fetch client is then pinned to those validated IPs (no\nre-resolution, defeating DNS rebinding) and redirects are disabled so a\nremote cannot bounce the request to an internal host after the check.",
         "operationId": "install_app_from_url_apps_alias",
@@ -11841,9 +10965,7 @@
     },
     "/api/apps/reload": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) Reload plugin manifests from disk",
         "operationId": "reload_app_manifests_apps_alias",
         "responses": {
@@ -11861,9 +10983,7 @@
     },
     "/api/apps/{id}/install": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) Install a built-in plugin by id",
         "operationId": "install_app_handler_apps_alias",
         "parameters": [
@@ -11891,9 +11011,7 @@
     },
     "/api/apps/{id}/enable": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) Enable a plugin (activate its runnables)",
         "description": "Deprecated alias for `/api/plugins/{id}/enable`. Prefer `/api/plugins` routes.\n\nFails closed: if the Gateway is unreachable the app stays disabled and a\nclear 503 error is returned. If the Gateway denies a grant a 403 is returned.\n\nAfter a successful enable the manifest's Runnables are activated via\n[`crate::runnable::RunnableRegistry`]. Per-Runnable results are included in\nthe response so the caller can see which Runnables were registered and which\n(if any) encountered a partial failure. A partial failure does NOT roll back\nthe enable \u2014 Core-owned kinds (Agent, Workflow, Tool) are activated; kinds\nwithout a built-in handler (Policy, Engine \u2014 Gateway's domain) produce an\nobservable \"no handler\" error.",
         "operationId": "enable_app_handler_apps_alias",
@@ -11921,9 +11039,7 @@
     },
     "/api/apps/{id}/grants": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) set app grants handler",
         "operationId": "set_app_grants_handler_apps_alias",
         "parameters": [
@@ -11959,9 +11075,7 @@
     },
     "/api/apps/{id}/disable": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) Disable a plugin",
         "operationId": "disable_app_handler_apps_alias",
         "parameters": [
@@ -11989,9 +11103,7 @@
     },
     "/api/apps/{id}/update": {
       "post": {
-        "tags": [
-          "Plugins"
-        ],
+        "tags": ["Plugins"],
         "summary": "(Deprecated alias) Update a plugin",
         "description": "Deprecated alias for `/api/plugins/{id}/update`. Prefer `/api/plugins` routes.\n\nRefuses a downgrade unless `force = true`.",
         "operationId": "update_app_handler_apps_alias",

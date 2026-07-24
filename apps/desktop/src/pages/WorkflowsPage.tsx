@@ -262,8 +262,8 @@ export default function WorkflowsPage({
 							</h1>
 							<p className="text-muted-foreground text-sm">
 								Describe what you want to automate in the Ask Ryu panel and Ryu
-								builds the graph. Open it in the canvas to fine-tune, run, or add
-								triggers.
+								builds the graph. Open it in the canvas to fine-tune, run, or
+								add triggers.
 							</p>
 						</div>
 						<Button

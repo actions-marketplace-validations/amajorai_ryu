@@ -52,7 +52,10 @@ interface CatalogItemWire {
 // Build a ListTab loader over /api/catalog filtered to one category, mapped to the
 // generic ListRow (title=name, subtitle=description, badge=install state).
 function catalogLoader(category: string): ListLoader {
-	return async (target: ApiTarget, signal?: AbortSignal): Promise<ListRow[]> => {
+	return async (
+		target: ApiTarget,
+		signal?: AbortSignal
+	): Promise<ListRow[]> => {
 		const resp = await fetch(apiUrl(target, "/api/catalog"), {
 			headers: makeHeaders(target.token),
 			signal,
@@ -67,7 +70,11 @@ function catalogLoader(category: string): ListLoader {
 				const rec = item.recommended ? "★ " : "";
 				const state = item.install_state;
 				const badge =
-					state && state !== "not_installed" ? state : rec ? "recommended" : undefined;
+					state && state !== "not_installed"
+						? state
+						: rec
+							? "recommended"
+							: undefined;
 				return {
 					id: item.name ?? "",
 					title: item.name ?? "—",

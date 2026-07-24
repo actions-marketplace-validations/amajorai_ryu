@@ -248,10 +248,81 @@ export function getAssetUrl(
 	platformId: string,
 	arch: DownloadArch
 ) {
-	return (
-		findReleaseAsset(release, platformId, arch)?.browser_download_url ??
-		release.html_url
-	);
+	const asset = findReleaseAsset(release, platformId, arch);
+	if (asset) {
+		return asset.browser_download_url;
+	}
+	// Fallback: link to the release's assets section instead of generic releases page
+	return `${release.html_url}#assets`;
+}
+
+/**
+ * Verify a download URL is reachable (HEAD request).
+ * Returns true if the URL returns 2xx, false otherwise.
+ */
+export async function verifyDownloadUrl(url: string): Promise<boolean> {
+	try {
+		const response = await fetch(url, { method: "HEAD" });
+		return response.ok;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Build a direct download URL for a specific platform/arch.
+ * Falls back through releases to find a valid, downloadable asset.
+ */
+export function buildDownloadUrl(
+	releases: Release[],
+	platformId: string,
+	arch: DownloadArch
+): { url: string; version: string } | null {
+	const found = findReleaseWithAsset(releases, platformId, arch);
+	if (found) {
+		return {
+			url: found.asset.browser_download_url,
+			version: found.release.tag_name,
+		};
+	}
+	return null;
+}
+
+/**
+ * Fetch releases from GitHub API with retry logic.
+ * Handles rate limiting and network errors with exponential backoff.
+ */
+export async function fetchReleasesWithRetry(
+	maxRetries = 3,
+	baseDelay = 1000
+): Promise<Release[]> {
+	for (let attempt = 0; attempt < maxRetries; attempt++) {
+		try {
+			const response = await fetch(RELEASES_API);
+			if (response.ok) {
+				const data = await response.json();
+				if (Array.isArray(data)) {
+					return data.filter((r: Release) => !r.draft);
+				}
+				return [];
+			}
+			// If rate limited, wait and retry
+			if (response.status === 403 || response.status === 429) {
+				const delay = baseDelay * 2 ** attempt;
+				await new Promise((resolve) => setTimeout(resolve, delay));
+				continue;
+			}
+			// Other errors, don't retry
+			return [];
+		} catch {
+			// Network error, retry with backoff
+			if (attempt < maxRetries - 1) {
+				const delay = baseDelay * 2 ** attempt;
+				await new Promise((resolve) => setTimeout(resolve, delay));
+			}
+		}
+	}
+	return [];
 }
 
 export function archLabel(platformId: string, arch: DownloadArch) {
@@ -301,7 +372,9 @@ function ArchButtons({
 						render={
 							<a
 								download={asset?.name}
-								href={asset?.browser_download_url ?? release.html_url}
+								href={
+									asset?.browser_download_url ?? `${release.html_url}#assets`
+								}
 								rel="noopener noreferrer"
 							/>
 						}
@@ -421,7 +494,7 @@ export default function DownloadBlock({
 											download={downloadable?.asset.name}
 											href={
 												downloadable?.asset.browser_download_url ??
-												latestRelease.html_url
+												`${latestRelease.html_url}#assets`
 											}
 											rel="noopener noreferrer"
 										/>

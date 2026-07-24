@@ -15,6 +15,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 if (typeof globalThis.window === "undefined") {
 	GlobalRegistrator.register();
 }
+
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import { getAgentModel, modelsForAgent, setAgentModel } from "./models.ts";
@@ -35,7 +36,12 @@ beforeEach(() => {
 describe("modelsForAgent — engine resolution", () => {
 	test("resolves an acp: id to its engine and returns the offline fallback", () => {
 		const models = modelsForAgent("acp:claude", []);
-		expect(models.map((m) => m.id)).toEqual(["opus", "sonnet", "fable", "haiku"]);
+		expect(models.map((m) => m.id)).toEqual([
+			"opus",
+			"sonnet",
+			"fable",
+			"haiku",
+		]);
 	});
 
 	test("resolves a custom agent's acp: engine binding", () => {
@@ -66,7 +72,9 @@ describe("modelsForAgent — precedence ladder", () => {
 	});
 
 	test("falls back to the agent's own bound model for an unknown engine", () => {
-		const agents = [agent({ id: "weird", engine: "nonesuch", model: "mystery-1" })];
+		const agents = [
+			agent({ id: "weird", engine: "nonesuch", model: "mystery-1" }),
+		];
 		expect(modelsForAgent("weird", agents)).toEqual([
 			{ id: "mystery-1", name: "mystery-1" },
 		]);

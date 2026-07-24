@@ -146,54 +146,55 @@ export default function StoreCatalogLayout({
 						<div className="mx-auto w-full max-w-4xl shrink-0">{header}</div>
 					) : null}
 
-					{search ? (
-						<div className="mx-auto w-full max-w-4xl shrink-0">
-							<LibraryToolbar
-								filterSlot={
-									filter ? (
-										<Popover>
-											<PopoverTrigger
-												render={
-													<Button
-														className="gap-1.5"
-														size="sm"
-														variant={
-															filter.activeCount ? "secondary" : "outline"
-														}
-													>
-														<HugeiconsIcon
-															className="size-3.5"
-															icon={filter.icon ?? SlidersHorizontalIcon}
-														/>
-														{filter.label ?? "Filters"}
-														{filter.activeCount ? (
-															<span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-foreground px-1 text-[10px] text-background">
-																{filter.activeCount}
-															</span>
-														) : null}
-													</Button>
-												}
-											/>
-											<PopoverContent
-												align="end"
-												className="w-[min(30rem,90vw)] p-0"
-											>
-												{filter.panel}
-											</PopoverContent>
-										</Popover>
-									) : null
-								}
-								onQueryChange={search.onChange}
-								query={search.value}
-								searchPlaceholder={search.placeholder ?? "Search…"}
-							/>
-						</div>
-					) : null}
-
 					{/* Card grid — the same centered max-width so selecting an item
-					    never reflows it; the preview is a FIXED-width pane beside. */}
-					<div className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto px-4 pb-24">
-						<div className="mx-auto w-full max-w-4xl px-4">{list}</div>
+					    never reflows it; the preview is a FIXED-width pane beside.
+					    The search toolbar is sticky inside the scroll area so it
+					    pins to the top and the scroll-fade appears below it. */}
+					<div className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto">
+						{search ? (
+							<div className="sticky top-0 z-10 mx-auto w-full max-w-4xl bg-background px-4 pt-2 pb-1">
+								<LibraryToolbar
+									filterSlot={
+										filter ? (
+											<Popover>
+												<PopoverTrigger
+													render={
+														<Button
+															className="gap-1.5"
+															size="sm"
+															variant={
+																filter.activeCount ? "secondary" : "outline"
+															}
+														>
+															<HugeiconsIcon
+																className="size-3.5"
+																icon={filter.icon ?? SlidersHorizontalIcon}
+															/>
+															{filter.label ?? "Filters"}
+															{filter.activeCount ? (
+																<span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-foreground px-1 text-[10px] text-background">
+																	{filter.activeCount}
+																</span>
+															) : null}
+														</Button>
+													}
+												/>
+												<PopoverContent
+													align="end"
+													className="w-[min(30rem,90vw)] p-0"
+												>
+													{filter.panel}
+												</PopoverContent>
+											</Popover>
+										) : null
+									}
+									onQueryChange={search.onChange}
+									query={search.value}
+									searchPlaceholder={search.placeholder ?? "Search…"}
+								/>
+							</div>
+						) : null}
+						<div className="mx-auto w-full max-w-4xl px-4 pb-24">{list}</div>
 					</div>
 				</div>
 

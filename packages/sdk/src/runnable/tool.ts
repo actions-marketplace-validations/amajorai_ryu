@@ -153,9 +153,6 @@ export interface ToolRunnable<
 	TInput extends Record<string, unknown> = Record<string, unknown>,
 	TOutput = unknown,
 > extends Runnable<TInput, TOutput> {
-	readonly kind: "tool";
-	/** JSON Schema for this tool's input — compatible with Core's ToolInfo.schema. */
-	readonly schema: ToolSchema;
 	/**
 	 * The `run` body serialized for Core's `inline_deno` tool backend — the exact
 	 * same technique `defineTurnHook` uses for its `code`. This is what makes a
@@ -174,6 +171,9 @@ export interface ToolRunnable<
 	 * the sandbox form is the second parameter aliased to `host`.
 	 */
 	readonly code: string;
+	readonly kind: "tool";
+	/** JSON Schema for this tool's input — compatible with Core's ToolInfo.schema. */
+	readonly schema: ToolSchema;
 }
 
 // ── Factory ───────────────────────────────────────────────────────────────────

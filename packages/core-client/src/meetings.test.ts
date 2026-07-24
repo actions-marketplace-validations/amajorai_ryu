@@ -101,9 +101,7 @@ describe("single-meeting endpoints throw on an absent meeting", () => {
 
 	test("getMeeting throws a default when neither field is present", async () => {
 		stub("{}");
-		await expect(getMeeting(target, "m1")).rejects.toThrow(
-			"meeting not found"
-		);
+		await expect(getMeeting(target, "m1")).rejects.toThrow("meeting not found");
 	});
 
 	test("startMeeting POSTs the input and returns the meeting", async () => {

@@ -19,14 +19,14 @@ import { app, BrowserWindow, type Display, screen } from "electron";
 /** One narrated Ghost input action (mirrors apps/ghost `GhostEvent` + the agent id
  * carried in the `x-ghost-agent` header). */
 export interface GhostCursorEvent {
-	seq: number;
-	phase: "move" | "down" | "up" | "type" | "scroll" | "done";
-	x: number;
-	y: number;
-	tool: string;
-	ts: number;
 	/** The emitting agent's pid (from `x-ghost-agent`); drives the per-agent hue. */
 	agent: string;
+	phase: "move" | "down" | "up" | "type" | "scroll" | "done";
+	seq: number;
+	tool: string;
+	ts: number;
+	x: number;
+	y: number;
 }
 
 // Self-contained overlay document. Exposes one global the main process calls:

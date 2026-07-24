@@ -16,7 +16,10 @@
 import { useQuery } from "@tanstack/react-query";
 
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import { fetchNodeSandboxes, type SandboxRun } from "@/src/lib/api/sandboxes.ts";
+import {
+	fetchNodeSandboxes,
+	type SandboxRun,
+} from "@/src/lib/api/sandboxes.ts";
 
 const REFRESH_MS = 7000;
 const TIMEOUT_MS = 6000;

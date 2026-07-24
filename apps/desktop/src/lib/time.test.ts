@@ -7,7 +7,14 @@
 // setSystemTime and restore it in afterEach so no frozen clock leaks into
 // sibling test files sharing this bun process.
 
-import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	setSystemTime,
+} from "bun:test";
 import { compactAge } from "./time.ts";
 
 const NOW = new Date("2026-01-15T12:00:00.000Z").getTime();

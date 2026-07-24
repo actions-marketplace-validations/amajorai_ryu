@@ -10,9 +10,9 @@ import { afterEach, expect, test } from "bun:test";
 import type { ApiTarget } from "@ryuhq/core-client/client";
 import {
 	SEARCH_REALMS,
-	sectionFromPath,
 	STORE_SECTIONS,
 	type StoreSection,
+	sectionFromPath,
 } from "../surfaces/store/sections.ts";
 
 const realFetch = globalThis.fetch;
@@ -107,7 +107,9 @@ test("the plugins realm loader reads the configured container key and title fiel
 		capturedUrl = String(url);
 		return Promise.resolve(
 			new Response(
-				JSON.stringify({ apps: [{ id: "com.ryu.mail", name: "Mail", version: "2.0.0" }] }),
+				JSON.stringify({
+					apps: [{ id: "com.ryu.mail", name: "Mail", version: "2.0.0" }],
+				}),
 				{ status: 200 }
 			)
 		);

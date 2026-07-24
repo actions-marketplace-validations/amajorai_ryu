@@ -97,14 +97,17 @@ function dataUrlToBytes(dataUrl: string): {
 		}
 		return { bytes, mediaType };
 	}
-	return { bytes: new TextEncoder().encode(decodeURIComponent(payload)), mediaType };
+	return {
+		bytes: new TextEncoder().encode(decodeURIComponent(payload)),
+		mediaType,
+	};
 }
 
 /** Encode raw bytes as a `data:<mediaType>;base64,...` URL. */
 function bytesToDataUrl(bytes: Uint8Array, mediaType: string): string {
 	let binary = "";
 	// Chunk to stay well under the argument-count ceiling of String.fromCharCode.
-	const chunk = 0x8000;
+	const chunk = 0x80_00;
 	for (let i = 0; i < bytes.length; i += chunk) {
 		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
 	}
@@ -236,9 +239,7 @@ export function httpPrimitiveTransport(
 			data?: Array<{ url?: string; b64_json?: string }>;
 		};
 		return (parsed.data ?? []).map((item) =>
-			item.url
-				? item.url
-				: `data:image/png;base64,${item.b64_json ?? ""}`
+			item.url ? item.url : `data:image/png;base64,${item.b64_json ?? ""}`
 		);
 	};
 

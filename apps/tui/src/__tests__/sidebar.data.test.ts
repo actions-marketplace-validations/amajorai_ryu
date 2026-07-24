@@ -22,12 +22,12 @@ afterEach(() => {
 interface RouteOverrides {
 	agents?: unknown;
 	conversations?: unknown;
+	/** Endpoints (by key) that should answer 500 instead of their payload. */
+	fail?: string[];
 	meetings?: unknown;
 	spaces?: unknown;
 	teams?: unknown;
 	workflows?: unknown;
-	/** Endpoints (by key) that should answer 500 instead of their payload. */
-	fail?: string[];
 }
 
 const DEFAULTS: Record<string, unknown> = {
@@ -169,7 +169,9 @@ test("a blank/whitespace title degrades to 'untitled'", async () => {
 });
 
 test("reads a wrapped { conversations: [...] } envelope as well as a bare array", async () => {
-	server({ conversations: { conversations: [{ id: "w1", title: "Wrapped" }] } });
+	server({
+		conversations: { conversations: [{ id: "w1", title: "Wrapped" }] },
+	});
 	const data = await loadSidebarData(target);
 	expect(data.chats.map((c) => c.id)).toEqual(["w1"]);
 });
@@ -242,7 +244,14 @@ test("a single source failing empties only its section, not the whole load", asy
 
 test("all sources failing yields the empty sidebar shape (no throw)", async () => {
 	server({
-		fail: ["agents", "teams", "spaces", "meetings", "workflows", "conversations"],
+		fail: [
+			"agents",
+			"teams",
+			"spaces",
+			"meetings",
+			"workflows",
+			"conversations",
+		],
 	});
 	const data = await loadSidebarData(target);
 	expect(data).toEqual(emptySidebarData);

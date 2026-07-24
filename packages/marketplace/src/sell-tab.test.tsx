@@ -10,7 +10,7 @@ import {
 	MarketplaceHostProvider,
 	type SellerState,
 } from "./host.tsx";
-import { SellTab, payoutButtonLabel } from "./sell-tab.tsx";
+import { payoutButtonLabel, SellTab } from "./sell-tab.tsx";
 import type { SellerStatus } from "./types.ts";
 
 describe("payoutButtonLabel", () => {

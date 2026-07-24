@@ -59,7 +59,11 @@ type LoadedManifest = ReturnType<typeof PluginManifestSchema.parse>;
 // (`plugin_manifest::MANIFEST_FILE_NAMES`). `manifest.json` is canonical; the
 // legacy `plugin.json` / `ryu.json` are still accepted so an author's existing
 // project directory keeps packing without a rename.
-const MANIFEST_FILE_NAMES = ["manifest.json", "plugin.json", "ryu.json"] as const;
+const MANIFEST_FILE_NAMES = [
+	"manifest.json",
+	"plugin.json",
+	"ryu.json",
+] as const;
 
 // Read + parse + validate the manifest in `dir`. Exits with the failing
 // field on any error. Shared by pack and publish so both validate identically.

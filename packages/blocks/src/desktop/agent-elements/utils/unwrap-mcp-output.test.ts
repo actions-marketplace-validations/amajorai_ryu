@@ -40,7 +40,7 @@ describe("unwrapMcpOutput", () => {
 	});
 
 	it("parses a JSON string, or returns the raw string on parse failure", () => {
-		expect(unwrapMcpOutput('[1,2,3]')).toEqual([1, 2, 3]);
+		expect(unwrapMcpOutput("[1,2,3]")).toEqual([1, 2, 3]);
 		expect(unwrapMcpOutput("not json")).toBe("not json");
 	});
 

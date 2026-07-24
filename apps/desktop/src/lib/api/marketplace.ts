@@ -463,7 +463,9 @@ function grantToCapability(grant: string): string {
 	if (mapped) {
 		return mapped;
 	}
-	const body = grant.includes(":") ? grant.slice(grant.indexOf(":") + 1) : grant;
+	const body = grant.includes(":")
+		? grant.slice(grant.indexOf(":") + 1)
+		: grant;
 	const words = body
 		.split(/[._\-/\s]+/)
 		.filter(Boolean)
@@ -476,7 +478,9 @@ function toStringArray(value: unknown): string[] {
 	if (!Array.isArray(value)) {
 		return [];
 	}
-	return value.filter((v): v is string => typeof v === "string" && v.length > 0);
+	return value.filter(
+		(v): v is string => typeof v === "string" && v.length > 0
+	);
 }
 
 /** Defense-in-depth href allowlist: return the value only if it is a string with

@@ -10,23 +10,34 @@
 // DOM-free: none of these three functions touches `document`/`DOMParser`.
 
 import { describe, expect, it } from "bun:test";
-import { buildThemeTokenStyle, sanitizeCspOrigin } from "./third-party-plugin.ts";
+import {
+	buildThemeTokenStyle,
+	sanitizeCspOrigin,
+} from "./third-party-plugin.ts";
 import { sanitizeProxyOrigin } from "./widget-bootstrap.ts";
 
 // ── sanitizeCspOrigin: public-https allowlist sanitizer ─────────────────────────
 
 describe("sanitizeCspOrigin (widget/companion resource_domains allowlist)", () => {
 	it("accepts a bare public host and assumes https", () => {
-		expect(sanitizeCspOrigin("cdn.example.com")).toBe("https://cdn.example.com");
+		expect(sanitizeCspOrigin("cdn.example.com")).toBe(
+			"https://cdn.example.com"
+		);
 	});
 
 	it("accepts an explicit https origin and preserves a port", () => {
-		expect(sanitizeCspOrigin("https://cdn.example.com")).toBe("https://cdn.example.com");
-		expect(sanitizeCspOrigin("https://cdn.example.com:8443")).toBe("https://cdn.example.com:8443");
+		expect(sanitizeCspOrigin("https://cdn.example.com")).toBe(
+			"https://cdn.example.com"
+		);
+		expect(sanitizeCspOrigin("https://cdn.example.com:8443")).toBe(
+			"https://cdn.example.com:8443"
+		);
 	});
 
 	it("drops the path/query, keeping only scheme://host[:port]", () => {
-		expect(sanitizeCspOrigin("https://cdn.example.com/assets?x=1")).toBe("https://cdn.example.com");
+		expect(sanitizeCspOrigin("https://cdn.example.com/assets?x=1")).toBe(
+			"https://cdn.example.com"
+		);
 	});
 
 	it("rejects any entry carrying CSP-delimiter chars (no directive injection)", () => {
@@ -67,16 +78,22 @@ describe("sanitizeProxyOrigin (Core /api/widgets/asset proxy origin)", () => {
 		// This is the security seam: the proxy origin is the host-controlled Core node
 		// URL (loopback http), so it MUST be accepted here even though a widget-declared
 		// resource_domain of the same shape is rejected by sanitizeCspOrigin.
-		expect(sanitizeProxyOrigin("http://127.0.0.1:7980")).toBe("http://127.0.0.1:7980");
+		expect(sanitizeProxyOrigin("http://127.0.0.1:7980")).toBe(
+			"http://127.0.0.1:7980"
+		);
 		expect(sanitizeCspOrigin("http://127.0.0.1:7980")).toBeNull(); // pinned both ways
 	});
 
 	it("accepts https too and normalizes to bare scheme://host[:port]", () => {
-		expect(sanitizeProxyOrigin("https://node.example.com/api")).toBe("https://node.example.com");
+		expect(sanitizeProxyOrigin("https://node.example.com/api")).toBe(
+			"https://node.example.com"
+		);
 	});
 
 	it("rejects CSP-delimiter chars so the node URL cannot inject a directive", () => {
-		expect(sanitizeProxyOrigin("http://127.0.0.1:7980; script-src *")).toBeNull();
+		expect(
+			sanitizeProxyOrigin("http://127.0.0.1:7980; script-src *")
+		).toBeNull();
 		expect(sanitizeProxyOrigin("http://127.0.0.1:7980 x")).toBeNull();
 		expect(sanitizeProxyOrigin("http://127.0.0.1'")).toBeNull();
 	});
@@ -104,7 +121,9 @@ describe("buildThemeTokenStyle (theme-token → :root style bridge)", () => {
 			"--color-bg": "#18181b",
 			"--radius": "0.625rem",
 		});
-		expect(style).toBe("<style>html:root{--color-bg: #18181b;--radius: 0.625rem;}</style>");
+		expect(style).toBe(
+			"<style>html:root{--color-bg: #18181b;--radius: 0.625rem;}</style>"
+		);
 	});
 
 	it("drops a token whose NAME is not exactly --<kebab> (no stray selector injection)", () => {
@@ -118,9 +137,9 @@ describe("buildThemeTokenStyle (theme-token → :root style bridge)", () => {
 	});
 
 	it("drops a token whose VALUE contains a CSS-structural char ({ } ; < >)", () => {
-		expect(
-			buildThemeTokenStyle({ "--x": "red; } body{display:none" })
-		).toBe(""); // only unsafe token → nothing emitted, no <style> at all
+		expect(buildThemeTokenStyle({ "--x": "red; } body{display:none" })).toBe(
+			""
+		); // only unsafe token → nothing emitted, no <style> at all
 		expect(buildThemeTokenStyle({ "--x": "</style><script>" })).toBe("");
 		expect(buildThemeTokenStyle({ "--x": "a{b}" })).toBe("");
 	});

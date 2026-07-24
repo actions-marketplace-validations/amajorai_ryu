@@ -23,7 +23,6 @@
 // and this tab never both react (parity with apps.tsx).
 
 import { useKeyboard } from "@opentui/react";
-import type { ApiTarget } from "@ryuhq/core-client/client";
 import {
 	type AppInfo,
 	type AppLifecycleError,
@@ -161,7 +160,10 @@ export function PluginsTab({ active }: TabProps) {
 		(verb: string, app: AppInfo, err: unknown) => {
 			const e = asLifecycleError(err);
 			pendingCascade.current = null;
-			if (blockedByDependents(e) && (verb === "disable" || verb === "uninstall")) {
+			if (
+				blockedByDependents(e) &&
+				(verb === "disable" || verb === "uninstall")
+			) {
 				pendingCascade.current = { id: app.id, kind: verb, name: app.name };
 				notify(`${e.message} — press C to ${verb} dependents too.`, "warning");
 				return;
@@ -280,9 +282,14 @@ export function PluginsTab({ active }: TabProps) {
 			return;
 		}
 		if (pending.kind === "disable") {
-			mutate("disable", app, () => disableApp(target, app.id, { cascade: true }), {
-				keepCascade: true,
-			});
+			mutate(
+				"disable",
+				app,
+				() => disableApp(target, app.id, { cascade: true }),
+				{
+					keepCascade: true,
+				}
+			);
 		} else {
 			mutate(
 				"uninstall",
@@ -347,12 +354,12 @@ export function PluginsTab({ active }: TabProps) {
 					no plugins — press r to refresh
 				</text>
 			) : (
-				<PluginList busy={busy} index={index} apps={apps} theme={theme} />
+				<PluginList apps={apps} busy={busy} index={index} theme={theme} />
 			)}
 			<box paddingTop={1}>
 				<text fg={theme.colors.mutedForeground}>
-					↑↓ navigate · i install · e enable/disable · D uninstall · u update · C
-					cascade · r refresh
+					↑↓ navigate · i install · e enable/disable · D uninstall · u update ·
+					C cascade · r refresh
 				</text>
 			</box>
 		</box>

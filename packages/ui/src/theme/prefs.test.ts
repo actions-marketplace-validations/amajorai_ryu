@@ -6,13 +6,13 @@
 
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_CONTRAST, DEFAULT_RADIUS } from "./apply.ts";
-import { DEFAULT_DARK_ID, DEFAULT_LIGHT_ID } from "./presets.ts";
 import {
 	activePresetId,
 	defaultThemePrefs,
 	normalizeThemePrefs,
 	THEME_PREFS_VERSION,
 } from "./prefs.ts";
+import { DEFAULT_DARK_ID, DEFAULT_LIGHT_ID } from "./presets.ts";
 
 describe("defaultThemePrefs", () => {
 	test("returns the documented light-first defaults", () => {
@@ -87,9 +87,9 @@ describe("normalizeThemePrefs", () => {
 	});
 
 	test("customThemes must be an array; a non-array falls back to empty", () => {
-		expect(normalizeThemePrefs({ customThemes: { id: "x" } }).customThemes).toEqual(
-			[]
-		);
+		expect(
+			normalizeThemePrefs({ customThemes: { id: "x" } }).customThemes
+		).toEqual([]);
 		const arr = [{ id: "z" }];
 		expect(normalizeThemePrefs({ customThemes: arr }).customThemes).toBe(arr);
 	});

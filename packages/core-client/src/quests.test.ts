@@ -107,15 +107,13 @@ describe("deleteQuest", () => {
 });
 
 describe("mutateQuest-backed actions", () => {
-	const cases: Array<[
-		(t: ApiTarget, id: string) => Promise<unknown>,
-		string,
-	]> = [
-		[completeQuest, "complete"],
-		[dismissQuest, "dismiss"],
-		[acceptSuggestion, "suggestion/accept"],
-		[dismissSuggestion, "suggestion/dismiss"],
-	];
+	const cases: Array<[(t: ApiTarget, id: string) => Promise<unknown>, string]> =
+		[
+			[completeQuest, "complete"],
+			[dismissQuest, "dismiss"],
+			[acceptSuggestion, "suggestion/accept"],
+			[dismissSuggestion, "suggestion/dismiss"],
+		];
 
 	test("each POSTs to its sub-path and returns the quest", async () => {
 		for (const [fn, suffix] of cases) {

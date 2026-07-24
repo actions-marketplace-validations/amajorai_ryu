@@ -144,7 +144,9 @@ describe("route - explicit prefixes have no alternatives", () => {
 	it("forces search with a leading ? but offers AI as an alternative", () => {
 		const r = route("?best editor");
 		expect(r.primary).toMatchObject({ kind: "search", query: "best editor" });
-		expect(r.alternatives).toEqual([{ kind: "ai", prompt: "best editor", label: "Ask Ryu" }]);
+		expect(r.alternatives).toEqual([
+			{ kind: "ai", prompt: "best editor", label: "Ask Ryu" },
+		]);
 	});
 });
 
@@ -173,7 +175,10 @@ describe("route - implicit classification with cyclable fallbacks", () => {
 
 	it("searches plain keywords, with AI as the fallback", () => {
 		const r = route("rust ownership");
-		expect(r.primary).toMatchObject({ kind: "search", query: "rust ownership" });
+		expect(r.primary).toMatchObject({
+			kind: "search",
+			query: "rust ownership",
+		});
 		expect(r.alternatives.map((a) => a.kind)).toEqual(["ai"]);
 	});
 

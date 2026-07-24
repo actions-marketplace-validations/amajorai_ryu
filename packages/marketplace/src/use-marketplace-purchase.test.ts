@@ -37,8 +37,10 @@ describe("purchaseAction", () => {
 	});
 
 	test("a not-owned result with an empty URL is an error", () => {
-		expect(purchaseAction(result({ alreadyLicensed: false, url: "" }))).toEqual({
-			kind: "error",
-		});
+		expect(purchaseAction(result({ alreadyLicensed: false, url: "" }))).toEqual(
+			{
+				kind: "error",
+			}
+		);
 	});
 });

@@ -6,6 +6,7 @@ import { Search } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { SeededGrainientBanner } from "./seeded-grainient-banner.tsx";
 
 /**
  * Block-local author shape. The live app's Notion `Author` type is a structural
@@ -181,8 +182,8 @@ export function BlogPostCard({ post }: { post: BlogPostData }) {
 		<div className="group transition-all duration-200">
 			<div className="flex flex-col gap-1 pb-3">
 				<a className="block" href={`/blog/${post.slug}`}>
-					{post.banner && (
-						<div className="mb-4 aspect-video w-full overflow-hidden rounded-md">
+					<div className="mb-4 aspect-video w-full overflow-hidden rounded-md">
+						{post.banner ? (
 							<Image
 								alt={post.title}
 								className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
@@ -191,8 +192,10 @@ export function BlogPostCard({ post }: { post: BlogPostData }) {
 								unoptimized
 								width={600}
 							/>
-						</div>
-					)}
+						) : (
+							<SeededGrainientBanner className="h-full w-full" seed={post.id} />
+						)}
+					</div>
 					<div className="flex flex-col gap-2">
 						<h2 className="font-medium text-xl transition-colors hover:text-primary">
 							{post.title}
@@ -275,11 +278,34 @@ export function BlogPostsSearch({
 						</div>
 					)}
 					{unpinnedPosts.length > 0 && (
-						<div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-							{unpinnedPosts.map((post) => (
-								<BlogPostCard key={post.id} post={post} />
-							))}
-						</div>
+						<>
+							{unpinnedPosts.length >= 3 ? (
+								<div className="grid grid-cols-1 gap-6 md:grid-cols-4 lg:grid-cols-6">
+									<div className="md:col-span-2 md:row-span-2 lg:col-span-3">
+										<BlogPostCard post={unpinnedPosts[0]} />
+									</div>
+									<div className="md:col-span-2 lg:col-span-3 lg:col-start-4 lg:row-start-1">
+										<BlogPostCard post={unpinnedPosts[1]} />
+									</div>
+									<div className="md:col-span-2 lg:col-span-3 lg:col-start-4 lg:row-start-2">
+										<BlogPostCard post={unpinnedPosts[2]} />
+									</div>
+								</div>
+							) : (
+								<div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+									{unpinnedPosts.map((post) => (
+										<BlogPostCard key={post.id} post={post} />
+									))}
+								</div>
+							)}
+							{unpinnedPosts.length > 3 && (
+								<div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+									{unpinnedPosts.slice(3).map((post) => (
+										<BlogPostCard key={post.id} post={post} />
+									))}
+								</div>
+							)}
+						</>
 					)}
 				</div>
 			)}

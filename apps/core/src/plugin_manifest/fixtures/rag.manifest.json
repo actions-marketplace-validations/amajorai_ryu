@@ -4,9 +4,7 @@
   "version": "1.0.0",
   "runnables": [],
   "requires": {
-    "capabilities": [
-      { "capability": "engines" }
-    ]
+    "capabilities": [{ "capability": "engines" }]
   },
   "provides": [
     {

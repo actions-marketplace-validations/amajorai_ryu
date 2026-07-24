@@ -14,6 +14,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 if (typeof globalThis.window === "undefined") {
 	GlobalRegistrator.register();
 }
+
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
 	DEFAULT_RELEASE_CHANNEL,

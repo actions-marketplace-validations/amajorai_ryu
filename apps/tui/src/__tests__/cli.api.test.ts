@@ -56,7 +56,5 @@ test("execAppCommand issues the request for a safe path", async () => {
 	);
 	expect(res.status).toBe(200);
 	expect(res.body).toBe("ok");
-	expect(calledUrl).toBe(
-		"http://node:7980/api/ext/mail/status?args=%5B%5D"
-	);
+	expect(calledUrl).toBe("http://node:7980/api/ext/mail/status?args=%5B%5D");
 });

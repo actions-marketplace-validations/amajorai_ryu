@@ -13,12 +13,12 @@
 // SSE socket keyed by `user_id`, read with fetch + ReadableStream so the bearer
 // token can be attached (EventSource can't set headers).
 
-import { apiUrl, type ApiTarget, makeHeaders, request } from "./client.ts";
+import { type ApiTarget, apiUrl, makeHeaders, request } from "./client.ts";
 
 /** A stored inbox notification row (newest first from the list endpoint). */
 export interface AppNotification {
-	acked: boolean;
 	ack_required: boolean;
+	acked: boolean;
 	body?: string | null;
 	created_at: string;
 	id: string;

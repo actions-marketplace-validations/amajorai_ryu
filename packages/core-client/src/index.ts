@@ -15,7 +15,7 @@ export {
 	makeHeaders,
 	type RequestOptions,
 	request,
+	SURFACE_HEADER,
 	setBuyerTokenProvider,
 	setSurfaceProvider,
-	SURFACE_HEADER,
 } from "./client.ts";

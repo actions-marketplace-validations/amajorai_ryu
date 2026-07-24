@@ -26,10 +26,10 @@ export interface WhiteboardDoc {
 }
 
 export interface UseWhiteboardDocs {
-	whiteboards: WhiteboardDoc[];
 	createWhiteboard: () => Promise<{ id: string; spaceId: string } | null>;
 	deleteWhiteboard: (id: string) => void;
 	isLoading: boolean;
+	whiteboards: WhiteboardDoc[];
 }
 
 /**

@@ -25,4 +25,6 @@ paths = [
   # Editor keymap: `keys: "mod+shift+enter"` is a keyboard shortcut that happens to
   # match generic-api-key's key/value heuristic.
   '''packages/ui/src/components/editor/plugins/.*-kit\.tsx''',
+  # App scaffold README: `dev-token` in a curl example is a placeholder, not a secret.
+  '''packages/create-ryu-app/template/app/README\.md''',
 ]

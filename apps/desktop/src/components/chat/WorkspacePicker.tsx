@@ -681,9 +681,7 @@ function CreateBranchDialog({
 				/>
 				{error && <p className="text-[12px] text-destructive">{error}</p>}
 				<DialogFooter>
-					<DialogClose render={<Button variant="ghost" />}>
-						Cancel
-					</DialogClose>
+					<DialogClose render={<Button variant="ghost" />}>Cancel</DialogClose>
 					<Button
 						disabled={creating || name.trim().length === 0}
 						onClick={handleCreate}

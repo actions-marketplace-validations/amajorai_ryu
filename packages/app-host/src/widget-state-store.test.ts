@@ -40,7 +40,9 @@ describe("useWidgetStateStore", () => {
 		const store = useWidgetStateStore.getState();
 		store.set("call-1", { v: "first" });
 		store.set("call-1", { v: "second" });
-		expect(useWidgetStateStore.getState().get("call-1")).toEqual({ v: "second" });
+		expect(useWidgetStateStore.getState().get("call-1")).toEqual({
+			v: "second",
+		});
 	});
 
 	it("set produces a NEW byToolCall map (immutable update, does not mutate prior)", () => {

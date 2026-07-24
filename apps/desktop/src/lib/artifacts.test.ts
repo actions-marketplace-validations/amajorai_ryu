@@ -119,9 +119,7 @@ describe("extractArtifacts — the LARGE_CODE gate", () => {
 	it("never promotes a large NON_CODE_LANGS block (markdown/log/diff)", () => {
 		const big = Array.from({ length: 40 }, (_, i) => `row ${i}`).join("\n");
 		for (const lang of ["markdown", "md", "log", "diff", "patch", "text"]) {
-			expect(
-				extractArtifacts([msg("m1", [fence(lang, big)])])
-			).toHaveLength(0);
+			expect(extractArtifacts([msg("m1", [fence(lang, big)])])).toHaveLength(0);
 		}
 	});
 
@@ -145,7 +143,9 @@ describe("extractArtifacts — ids, ordering, provenance", () => {
 	it("advances blockIndex for skipped blocks, leaving ids non-contiguous", () => {
 		// A skipped `text` block (index 0), then a real html block (index 1).
 		const [art] = extractArtifacts([
-			msg("m1", [`${fence("text", "just prose")}\n${fence("html", "<h1>Hi</h1>")}`]),
+			msg("m1", [
+				`${fence("text", "just prose")}\n${fence("html", "<h1>Hi</h1>")}`,
+			]),
 		]);
 		expect(art?.id).toBe("m1-artifact-1");
 	});
@@ -179,9 +179,9 @@ describe("extractArtifacts — defensive shapes", () => {
 	});
 
 	it("ignores an empty-bodied fence", () => {
-		expect(
-			extractArtifacts([msg("m1", ["```html\n   \n```"])])
-		).toHaveLength(0);
+		expect(extractArtifacts([msg("m1", ["```html\n   \n```"])])).toHaveLength(
+			0
+		);
 	});
 
 	it("tolerates null messages, missing parts, and non-text parts", () => {
@@ -205,9 +205,7 @@ describe("extractArtifacts — defensive shapes", () => {
 	});
 
 	it("strips trailing whitespace from the captured content but keeps the body", () => {
-		const [art] = extractArtifacts([
-			msg("m1", [fence("svg", "<svg/>   ")]),
-		]);
+		const [art] = extractArtifacts([msg("m1", [fence("svg", "<svg/>   ")])]);
 		expect(art?.content).toBe("<svg/>");
 	});
 });

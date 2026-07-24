@@ -14,10 +14,7 @@
 // Core resolves into drives); other nodes start at the home directory. Both
 // roots open expanded so the tree shows folders immediately.
 
-import {
-	ArrowRight01Icon,
-	Folder03Icon,
-} from "@hugeicons/core-free-icons";
+import { ArrowRight01Icon, Folder03Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {

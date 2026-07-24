@@ -63,7 +63,9 @@ describe("extractCitations - WebFetch", () => {
 
 	it("truncates the description to 240 chars", () => {
 		const long = "x".repeat(500);
-		const [c] = extractCitations([webFetch({ url: "https://x.io" }, { summary: long })]);
+		const [c] = extractCitations([
+			webFetch({ url: "https://x.io" }, { summary: long }),
+		]);
 		expect(c.description).toHaveLength(240);
 	});
 
@@ -111,7 +113,12 @@ describe("extractCitations - aggregate behavior", () => {
 	it("dedupes by url and numbers in first-seen order", () => {
 		const parts = [
 			webFetch({ url: "https://a.io" }, { title: "first" }),
-			webSearch({ results: [{ url: "https://a.io", title: "dup" }, { url: "https://c.io" }] }),
+			webSearch({
+				results: [
+					{ url: "https://a.io", title: "dup" },
+					{ url: "https://c.io" },
+				],
+			}),
 		];
 		const cs = extractCitations(parts);
 		expect(cs.map((c) => c.url)).toEqual(["https://a.io", "https://c.io"]);

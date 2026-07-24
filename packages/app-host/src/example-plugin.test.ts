@@ -15,13 +15,17 @@ describe("examplePluginSrcdoc", () => {
 		// The frame announces readiness echoing the nonce…
 		expect(doc).toContain('{ kind: "ryu-plugin-ready", nonce: NONCE');
 		// …and accepts the transferred port ONLY when the message carries that nonce.
-		expect(doc).toContain('msg.kind !== "ryu-plugin-host-port" || msg.nonce !== NONCE');
+		expect(doc).toContain(
+			'msg.kind !== "ryu-plugin-host-port" || msg.nonce !== NONCE'
+		);
 		expect(doc).toContain('var NONCE = "nonce-abc123";');
 	});
 
 	it("advertises the current HOST_API_VERSION in the handshake", () => {
 		const doc = examplePluginSrcdoc("n");
-		expect(doc).toContain(`hostApiVersion: ${JSON.stringify(HOST_API_VERSION)}`);
+		expect(doc).toContain(
+			`hostApiVersion: ${JSON.stringify(HOST_API_VERSION)}`
+		);
 	});
 
 	it("JSON-encodes the nonce so a quote-bearing value cannot break out of the string literal", () => {

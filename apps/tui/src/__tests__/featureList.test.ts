@@ -23,16 +23,17 @@ afterEach(() => {
 });
 
 // Serve one JSON payload; capture the URL + headers the reader built.
-function serve(payload: unknown, status = 200): { url: () => string; auth: () => string | undefined } {
+function serve(
+	payload: unknown,
+	status = 200
+): { url: () => string; auth: () => string | undefined } {
 	let capturedUrl = "";
 	let capturedAuth: string | undefined;
 	globalThis.fetch = ((url: string | URL, init?: RequestInit) => {
 		capturedUrl = String(url);
 		capturedAuth = (init?.headers as Record<string, string> | undefined)
 			?.Authorization;
-		return Promise.resolve(
-			new Response(JSON.stringify(payload), { status })
-		);
+		return Promise.resolve(new Response(JSON.stringify(payload), { status }));
 	}) as unknown as typeof fetch;
 	return { url: () => capturedUrl, auth: () => capturedAuth };
 }
@@ -67,7 +68,9 @@ test("resolves the array from the first matching container key", async () => {
 		...baseConfig,
 		containerKeys: ["missing", "rows"],
 	});
-	expect(rows).toEqual([{ id: "a", title: "Alpha", subtitle: undefined, badge: undefined }]);
+	expect(rows).toEqual([
+		{ id: "a", title: "Alpha", subtitle: undefined, badge: undefined },
+	]);
 });
 
 test("falls back to a bare top-level array when no container key matches", async () => {

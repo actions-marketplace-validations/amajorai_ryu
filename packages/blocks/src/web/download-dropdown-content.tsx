@@ -17,7 +17,6 @@ import {
 	ArrowUpRight,
 	Blocks,
 	BookOpen,
-	Bot,
 	Cloud,
 	Plug,
 	Sparkles,
@@ -29,25 +28,18 @@ import { useEffect, useMemo, useState } from "react";
 import { DOCS_URL } from "./data/resources.tsx";
 import {
 	archLabel,
-	BROWSERS,
 	type DownloadArch,
 	type DownloadOS,
+	fetchReleasesWithRetry,
 	findReleaseWithAsset,
 	GITHUB_REPO,
 	osName,
 	PLATFORMS,
-	RELEASES_API,
 	RELEASES_PAGE,
 	type Release,
 	WEBAPP_URL,
 } from "./download.tsx";
-import {
-	BROWSER_SVGL,
-	GITHUB_SVGL,
-	MOBILE_SVGL,
-	OS_SVGL,
-	SvglIcon,
-} from "./svgl-icon.tsx";
+import { GITHUB_SVGL, OS_SVGL, SvglIcon } from "./svgl-icon.tsx";
 
 const SETUP_SKILL_PATH = "/api/skills/setup-ryu";
 
@@ -117,7 +109,12 @@ function downloadAnchorProps(
 	// the newest release that actually carries ITS binary.
 	const found = findReleaseWithAsset(releases, platformId, arch);
 	if (!found) {
-		return { href: releases[0]?.html_url ?? RELEASES_PAGE };
+		// Fallback: link to the latest release's assets section instead of generic releases page
+		const latestRelease = releases[0];
+		if (latestRelease) {
+			return { href: `${latestRelease.html_url}#assets` };
+		}
+		return { href: RELEASES_PAGE };
 	}
 	return {
 		href: found.asset.browser_download_url,
@@ -178,15 +175,12 @@ export function DownloadDropdownContent({
 	}, []);
 
 	useEffect(() => {
-		fetch(RELEASES_API)
-			.then((res) => res.json())
+		fetchReleasesWithRetry()
 			.then((data) => {
-				if (Array.isArray(data)) {
-					// Keep several: the newest release often has no binaries yet (they
-					// upload when its build finishes), so we need older ones to fall
-					// back to instead of linking the user at a dead download.
-					setReleases(data.filter((r: Release) => !r.draft).slice(0, 8));
-				}
+				// Keep several: the newest release often has no binaries yet (they
+				// upload when its build finishes), so we need older ones to fall
+				// back to instead of linking the user at a dead download.
+				setReleases(data.slice(0, 8));
 			})
 			.catch(() => {
 				// Best-effort; menu still links to GitHub releases.
@@ -235,7 +229,11 @@ export function DownloadDropdownContent({
 										href: desktopAsset.browser_download_url,
 										download: desktopAsset.name,
 									}
-								: { href: latestRelease?.html_url ?? RELEASES_PAGE })}
+								: {
+										href: latestRelease
+											? `${latestRelease.html_url}#assets`
+											: RELEASES_PAGE,
+									})}
 							rel="noopener noreferrer"
 						/>
 					}
@@ -311,10 +309,7 @@ export function DownloadDropdownContent({
 							{platform.name}
 						</DropdownMenuSubTrigger>
 						<DropdownMenuSubContent>
-							<PlatformArchItems
-								platformId={platform.id}
-								releases={releases}
-							/>
+							<PlatformArchItems platformId={platform.id} releases={releases} />
 						</DropdownMenuSubContent>
 					</DropdownMenuSub>
 				))}

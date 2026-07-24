@@ -54,12 +54,18 @@
         "icon": "ai-image",
         "spec": {
           "source": {
-            "http": { "method": "GET", "path": "/api/apps/com.ryu.canvas/docs" },
+            "http": {
+              "method": "GET",
+              "path": "/api/apps/com.ryu.canvas/docs"
+            },
             "items": "documents"
           },
           "itemTarget": "/spaces/{{item.space_id}}/app/com.ryu.canvas/{{item.id}}",
           "create": {
-            "http": { "method": "POST", "path": "/api/apps/com.ryu.canvas/docs" },
+            "http": {
+              "method": "POST",
+              "path": "/api/apps/com.ryu.canvas/docs"
+            },
             "targetFrom": "id",
             "label": "New canvas"
           },

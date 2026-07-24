@@ -32,10 +32,10 @@ import {
 import { parseVoicePrefs } from "../shared/voice.ts";
 import { initAutoJump, jumpNow, setAutoJump } from "./auto-jump.ts";
 import { startControlServer, stopControlServer } from "./control.ts";
-import { destroyGhostCursor } from "./ghost-cursor.ts";
 import { attachCursorTracking } from "./cursor-tracker.ts";
 import { setEdgeOffset } from "./edge-offset.ts";
 import { initFullscreenHide, setHideOnFullscreen } from "./fullscreen.ts";
+import { destroyGhostCursor } from "./ghost-cursor.ts";
 import { registerIpc } from "./ipc/index.ts";
 import { initZoneOverlay, setOverlayContentProtection } from "./overlay.ts";
 import { applyEdgeOffset } from "./position.ts";

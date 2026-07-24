@@ -24,7 +24,7 @@ function Command({
 	return (
 		<CommandPrimitive
 			className={cn(
-				"flex size-full flex-col overflow-hidden rounded-4xl bg-popover p-1 text-popover-foreground",
+				"flex size-full flex-col overflow-hidden rounded-4xl p-1 text-popover-foreground",
 				className
 			)}
 			data-slot="command"
@@ -100,7 +100,7 @@ function CommandList({
 	return (
 		<CommandPrimitive.List
 			className={cn(
-				"no-scrollbar max-h-72 scroll-py-1 overflow-y-auto overflow-x-hidden outline-none",
+				"scroll-fade-effect-y no-scrollbar max-h-72 scroll-py-1 overflow-y-auto overflow-x-hidden outline-none",
 				className
 			)}
 			data-slot="command-list"
@@ -159,7 +159,7 @@ function CommandItem({
 	return (
 		<CommandPrimitive.Item
 			className={cn(
-				"group/command-item relative flex cursor-default select-none items-center gap-1.5 in-data-[slot=dialog-content]:rounded-3xl rounded-2xl px-1.5 py-1 font-medium text-sm outline-hidden data-[disabled=true]:pointer-events-none data-selected:bg-background data-selected:text-foreground data-[disabled=true]:opacity-50 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0 data-selected:*:[svg]:text-foreground",
+				"group/command-item relative flex cursor-default select-none items-center gap-1.5 in-data-[slot=dialog-content]:rounded-3xl rounded-2xl px-1.5 py-1 font-medium text-sm outline-hidden data-[disabled=true]:pointer-events-none data-selected:bg-accent data-selected:text-foreground data-[disabled=true]:opacity-50 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0 data-selected:*:[svg]:text-foreground",
 				className
 			)}
 			data-slot="command-item"

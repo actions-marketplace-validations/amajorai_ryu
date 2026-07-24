@@ -265,39 +265,39 @@ export function ProjectPickerContent({
 			{/* Browse ▸ { Open existing folder · Start from scratch }. Hidden when the
 			    host offers neither action (e.g. the empty-state popover). */}
 			{(onBrowse || onStartFromScratch) && (
-			<DropdownMenuSub>
-				<DropdownMenuSubTrigger>
-					<HugeiconsIcon
-						className="size-4 shrink-0 text-foreground/40"
-						icon={FolderAddIcon}
-					/>
-					<span className="text-foreground/70">New project</span>
-				</DropdownMenuSubTrigger>
-				<DropdownMenuSubContent className="w-64">
-					{onBrowse && (
-						<DropdownMenuItem onClick={handleBrowse}>
-							<HugeiconsIcon
-								className="size-4 shrink-0 text-foreground/40"
-								icon={FolderOpenIcon}
-							/>
-							Open existing folder
-						</DropdownMenuItem>
-					)}
-
-					{/* Start from scratch: opens a dialog to name a new folder created
-					    under Documents/Ryu (the dialog is owned by the parent so it
-					    survives this menu closing). */}
-					{onStartFromScratch && (
-					<DropdownMenuItem onClick={onStartFromScratch}>
+				<DropdownMenuSub>
+					<DropdownMenuSubTrigger>
 						<HugeiconsIcon
 							className="size-4 shrink-0 text-foreground/40"
-							icon={Add01Icon}
+							icon={FolderAddIcon}
 						/>
-						Start from scratch
-					</DropdownMenuItem>
-					)}
-				</DropdownMenuSubContent>
-			</DropdownMenuSub>
+						<span className="text-foreground/70">New project</span>
+					</DropdownMenuSubTrigger>
+					<DropdownMenuSubContent className="w-64">
+						{onBrowse && (
+							<DropdownMenuItem onClick={handleBrowse}>
+								<HugeiconsIcon
+									className="size-4 shrink-0 text-foreground/40"
+									icon={FolderOpenIcon}
+								/>
+								Open existing folder
+							</DropdownMenuItem>
+						)}
+
+						{/* Start from scratch: opens a dialog to name a new folder created
+					    under Documents/Ryu (the dialog is owned by the parent so it
+					    survives this menu closing). */}
+						{onStartFromScratch && (
+							<DropdownMenuItem onClick={onStartFromScratch}>
+								<HugeiconsIcon
+									className="size-4 shrink-0 text-foreground/40"
+									icon={Add01Icon}
+								/>
+								Start from scratch
+							</DropdownMenuItem>
+						)}
+					</DropdownMenuSubContent>
+				</DropdownMenuSub>
 			)}
 
 			{folder && (
@@ -399,9 +399,7 @@ export function CreateFolderDialog({
 				/>
 				{error && <p className="text-[12px] text-destructive">{error}</p>}
 				<DialogFooter>
-					<DialogClose render={<Button variant="ghost" />}>
-						Cancel
-					</DialogClose>
+					<DialogClose render={<Button variant="ghost" />}>Cancel</DialogClose>
 					<Button
 						disabled={creating || name.trim().length === 0}
 						onClick={handleCreate}
