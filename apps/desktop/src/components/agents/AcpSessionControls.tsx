@@ -181,7 +181,7 @@ function AcpSessionsSection({ agentId }: { agentId: string }) {
 			caption="Sessions this agent has persisted. Deleting one removes it from the agent's own store."
 			title="Sessions"
 		>
-			<SettingsCard className="flex flex-col gap-3">
+			<SettingsCard className="flex max-h-80 flex-col gap-3 overflow-y-auto">
 				{data.sessions.map((session) => {
 					const busy = removing && pendingId === session.sessionId;
 					const subtext = [

@@ -727,7 +727,7 @@ function InstalledAppDetail({
 							disabled={busy}
 							onClick={() => onInstall(app)}
 							size="sm"
-							variant="default"
+							variant="ghost"
 						>
 							{busy ? (
 								<Spinner className="size-4" />
@@ -916,7 +916,7 @@ function BuiltInAppDetail({
 							disabled={pending !== null || !isConfigured}
 							onClick={() => run("install", installSidecar)}
 							size="sm"
-							variant="default"
+							variant="ghost"
 						>
 							{pending === "install" ? (
 								<Spinner className="size-4" />

@@ -96,6 +96,118 @@ seedBuiltinRoutes();
 
 const isMac = navigator.userAgent.includes("Mac");
 
+// Hover-reveal header shown at the top of each split pane. Appears when the
+// pointer is near the top edge of the pane, showing the tab's icon and title.
+// Uses the same frosted pill style as the titlebar actions container.
+function PaneHeader({
+	activeSplit,
+	containerRef,
+	focused,
+	tab,
+}: {
+	activeSplit: boolean;
+	containerRef: React.RefObject<HTMLElement | null>;
+	focused: boolean;
+	tab: Tab;
+}) {
+	const headerRef = useRef<HTMLDivElement>(null);
+	const [visible, setVisible] = useState(false);
+	const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	// biome-ignore lint/correctness/useExhaustiveDependencies: containerRef is stable
+	useEffect(() => {
+		if (!activeSplit) {
+			return;
+		}
+		const container = containerRef.current;
+		if (!container) {
+			return;
+		}
+
+		const PROXIMITY_THRESHOLD = 48;
+		const HIDE_DELAY = 300;
+
+		const onMove = (e: PointerEvent) => {
+			const pane = headerRef.current?.parentElement;
+			if (!pane) {
+				return;
+			}
+			const rect = pane.getBoundingClientRect();
+			const distFromTop = e.clientY - rect.top;
+			if (distFromTop < PROXIMITY_THRESHOLD && distFromTop >= 0) {
+				if (hideTimer.current) {
+					clearTimeout(hideTimer.current);
+					hideTimer.current = null;
+				}
+				setVisible(true);
+			} else if (visible && !hideTimer.current) {
+				hideTimer.current = setTimeout(() => {
+					setVisible(false);
+					hideTimer.current = null;
+				}, HIDE_DELAY);
+			}
+		};
+
+		const onLeave = (e: PointerEvent) => {
+			const pane = headerRef.current?.parentElement;
+			if (!pane) {
+				return;
+			}
+			const related = e.relatedTarget as HTMLElement | null;
+			if (!(related && pane.contains(related))) {
+				if (hideTimer.current) {
+					clearTimeout(hideTimer.current);
+					hideTimer.current = null;
+				}
+				setVisible(false);
+			}
+		};
+
+		container.addEventListener("pointermove", onMove);
+		container.addEventListener("pointerout", onLeave);
+		return () => {
+			container.removeEventListener("pointermove", onMove);
+			container.removeEventListener("pointerout", onLeave);
+			if (hideTimer.current) {
+				clearTimeout(hideTimer.current);
+			}
+		};
+	}, [activeSplit, containerRef, visible]);
+
+	if (!activeSplit) {
+		return null;
+	}
+
+	return (
+		<div
+			className="pointer-events-none absolute top-1.5 left-0 z-10 flex w-full justify-center"
+			ref={headerRef}
+		>
+			<div
+				className={cn(
+					"pointer-events-auto flex items-center gap-1.5 rounded-full px-2.5 py-1 shadow-lg backdrop-blur-sm transition-all duration-200",
+					focused
+						? "bg-background/80 text-foreground ring-1 ring-border/40"
+						: "bg-muted/70 text-muted-foreground ring-1 ring-border/20",
+					visible ? "translate-y-0 opacity-100" : "-translate-y-2 opacity-0"
+				)}
+			>
+				<TabGlyph
+					className={cn(
+						"size-3 shrink-0",
+						focused ? "text-foreground" : "text-muted-foreground"
+					)}
+					logoSize="12px"
+					path={tab.path}
+				/>
+				<span className="max-w-40 truncate font-medium text-xs">
+					{tab.title}
+				</span>
+			</div>
+		</div>
+	);
+}
+
 // Distance-based floating badge shown at the bottom-left of each split pane.
 // Fades to invisible as the pointer moves away so the user can reach content
 // behind it; fully opaque when the pointer is near the badge.
@@ -135,8 +247,14 @@ function PaneBadge({
 			setOpacity(Math.max(0, 1 - dist / 120));
 		};
 
+		const onLeave = () => setOpacity(1);
+
 		container.addEventListener("pointermove", onMove);
-		return () => container.removeEventListener("pointermove", onMove);
+		container.addEventListener("pointerleave", onLeave);
+		return () => {
+			container.removeEventListener("pointermove", onMove);
+			container.removeEventListener("pointerleave", onLeave);
+		};
 	}, [activeSplit, containerRef]);
 
 	if (!activeSplit) {
@@ -146,10 +264,10 @@ function PaneBadge({
 	return (
 		<div
 			className={cn(
-				"pointer-events-none absolute bottom-2 left-2 z-10 flex items-center gap-1.5 rounded-full px-2.5 py-1 ring-1 backdrop-blur-sm transition-opacity duration-300",
+				"pointer-events-none absolute bottom-2 left-2 z-10 flex items-center gap-1.5 rounded-full px-2.5 py-1 backdrop-blur-sm transition-opacity duration-300",
 				focused
-					? "bg-primary/15 text-primary ring-primary/30"
-					: "bg-muted/70 text-muted-foreground ring-border/30"
+					? "bg-primary text-primary-foreground"
+					: "bg-muted/70 text-muted-foreground ring-1 ring-border/20"
 			)}
 			ref={badgeRef}
 			style={{ opacity }}
@@ -157,7 +275,7 @@ function PaneBadge({
 			<TabGlyph
 				className={cn(
 					"size-3 shrink-0",
-					focused ? "text-primary" : "text-muted-foreground"
+					focused ? "text-primary-foreground" : "text-muted-foreground"
 				)}
 				logoSize="12px"
 				path={tab.path}
@@ -680,6 +798,12 @@ function LayoutContent({
 												}
 												style={style}
 											>
+												<PaneHeader
+													activeSplit={!!activeSplit && visible}
+													containerRef={contentRef}
+													focused={focused}
+													tab={tab}
+												/>
 												<RouteOutlet
 													onClose={() => closeTab(tab.id)}
 													tab={tab}

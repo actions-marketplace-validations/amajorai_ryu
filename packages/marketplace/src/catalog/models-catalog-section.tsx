@@ -1762,6 +1762,7 @@ function SnapshotInstall({
 					<InstallButton
 						busyLabel="Installing…"
 						disabled={blocked || installing}
+						idleVariant="ghost"
 						installing={installing}
 						onClick={() => {
 							onInstall().catch(() => undefined);
@@ -2147,7 +2148,7 @@ function FileRow({
 
 	const installButton = (
 		<InstallButton
-			idleVariant={tooBig ? "outline" : "default"}
+			idleVariant={tooBig ? "outline" : "ghost"}
 			installing={isInstalling}
 			onClick={handleInstall}
 			progress={{ kinds: ["model"], name: file.filename }}

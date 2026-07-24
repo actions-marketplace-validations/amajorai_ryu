@@ -71,8 +71,8 @@ function CommandInput({
 	...props
 }: React.ComponentProps<typeof CommandPrimitive.Input>) {
 	return (
-		<div className="p-1 pb-0" data-slot="command-input-wrapper">
-			<InputGroup className="h-9 bg-input/50">
+		<div data-slot="command-input-wrapper">
+			<InputGroup className="h-9 border-0 bg-transparent">
 				<CommandPrimitive.Input
 					className={cn(
 						"w-full text-sm outline-hidden disabled:cursor-not-allowed disabled:opacity-50",

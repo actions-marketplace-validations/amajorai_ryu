@@ -2055,7 +2055,7 @@ function AgentsSection({
 									openAgent(agent.id, agent.name, true);
 								}
 							}}
-							onClick={() => openAgent(agent.id, agent.name)}
+							onClick={() => startChatWithAgent(agent.id)}
 							onDragStart={(e) => {
 								// Drag an agent onto a team in the Teams section to add it.
 								e.dataTransfer.effectAllowed = "copy";
@@ -2065,7 +2065,7 @@ function AgentsSection({
 							}}
 							onKeyDown={(e) => {
 								if (e.key === "Enter") {
-									openAgent(agent.id, agent.name);
+									startChatWithAgent(agent.id);
 								}
 							}}
 							role="button"
@@ -2094,19 +2094,19 @@ function AgentsSection({
 								<TooltipTrigger
 									render={
 										<button
-											aria-label={`New chat with ${agent.name}`}
+											aria-label={`Edit ${agent.name}`}
 											className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
 											onClick={(e) => {
 												e.stopPropagation();
-												startChatWithAgent(agent.id);
+												openAgent(agent.id, agent.name);
 											}}
 											type="button"
 										>
-											<HugeiconsIcon icon={Add01Icon} size={14} />
+											<HugeiconsIcon icon={PencilEdit01Icon} size={14} />
 										</button>
 									}
 								/>
-								<TooltipContent>New chat</TooltipContent>
+								<TooltipContent>Edit agent</TooltipContent>
 							</Tooltip>
 						</div>
 					</ContextMenuTrigger>

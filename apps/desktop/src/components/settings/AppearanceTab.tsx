@@ -62,6 +62,10 @@ import {
 	useFileTreePrefs,
 } from "@/src/hooks/useFileTreePrefs.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
+import {
+	setInvertedBackgrounds,
+	useInvertedBackgrounds,
+} from "@/src/hooks/useInvertedBackgrounds.ts";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import {
 	setPointerCursor,
@@ -726,6 +730,7 @@ export function AppearanceTab() {
 	const pointerCursorEnabled = usePointerCursor();
 	const chromeShadowsEnabled = useChromeShadows();
 	const dialogOverlayBlurEnabled = useDialogOverlayBlur();
+	const invertedBackgroundsEnabled = useInvertedBackgrounds();
 	const [friendlyNames, setFriendlyNames] = useFriendlyMode();
 	const [groupChatsByDate, setGroupChatsByDate] = useChatDateGrouping();
 	const [sidebarMode, setSidebarMode] = useSidebarMode();
@@ -1396,6 +1401,17 @@ export function AppearanceTab() {
 						}
 						description="Dim and blur the app behind dialogs, action dialogs, sheets, and drawers. Off uses a flat transparent look with no backdrop or panel shadow."
 						title="Blur dialog backgrounds"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={invertedBackgroundsEnabled}
+								id="inverted-backgrounds-toggle"
+								onCheckedChange={setInvertedBackgrounds}
+							/>
+						}
+						description="Use the page background instead of muted/popover colors for tooltips, dropdowns, popovers, selects, and menus."
+						title="Invert overlay backgrounds"
 					/>
 					<SettingsItem
 						actions={

@@ -105,7 +105,7 @@ export const THEME_VARIANTS: ThemeVariant[] = [
 		preview: {
 			bg: "#ffffff",
 			surface: "#fafafa",
-			primary: "#0088ff",
+			primary: "#0099ff",
 			text: "#18181b",
 		},
 		tokens: {
@@ -115,7 +115,7 @@ export const THEME_VARIANTS: ThemeVariant[] = [
 			"--card-foreground": "oklch(0.141 0.005 285.823)",
 			"--popover": "oklch(1 0 0)",
 			"--popover-foreground": "oklch(0.141 0.005 285.823)",
-			"--primary": "oklch(0.6321 0.2018 254.09)",
+			"--primary": "oklch(0.6690 0.1837 248.81)",
 			"--primary-foreground": "oklch(0.97 0.014 254.604)",
 			"--secondary": "oklch(0.9249 0 0)",
 			"--secondary-foreground": "oklch(0.21 0.006 285.885)",
@@ -186,7 +186,7 @@ export const THEME_VARIANTS: ThemeVariant[] = [
 		preview: {
 			bg: "#1c1c1f",
 			surface: "#27272b",
-			primary: "#0088ff",
+			primary: "#0099ff",
 			text: "#fafafa",
 		},
 		tokens: {
@@ -196,7 +196,7 @@ export const THEME_VARIANTS: ThemeVariant[] = [
 			"--card-foreground": "oklch(0.985 0 0)",
 			"--popover": "oklch(0.21 0.006 285.885)",
 			"--popover-foreground": "oklch(0.985 0 0)",
-			"--primary": "oklch(0.6321 0.2018 254.09)",
+			"--primary": "oklch(0.6690 0.1837 248.81)",
 			"--primary-foreground": "oklch(0.97 0.014 254.604)",
 			"--secondary": "oklch(0.274 0.006 286.033)",
 			"--secondary-foreground": "oklch(0.985 0 0)",

@@ -391,6 +391,7 @@ function McpDetailPanel({
 						</Badge>
 					) : (
 						<InstallProgressButton
+							idleVariant="ghost"
 							installing={isInstalling}
 							onClick={() => {
 								install().catch(() => undefined);

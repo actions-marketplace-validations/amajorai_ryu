@@ -118,7 +118,10 @@ function NavigationMenuPositioner({
 				sideOffset={sideOffset}
 				{...props}
 			>
-				<NavigationMenuPrimitive.Popup className="data-[ending-style]:easing-[ease] relative h-(--popup-height) w-(--popup-width) xs:w-(--popup-width) origin-(--transform-origin) rounded-3xl border border-border/50 bg-popover/70 text-popover-foreground outline-none backdrop-blur-2xl backdrop-saturate-150 transition-[opacity,transform,width,height,scale,translate] duration-[0.35s] ease-[cubic-bezier(0.22,1,0.36,1)] before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-ending-style:scale-90 data-starting-style:scale-90 data-ending-style:opacity-0 data-starting-style:opacity-0 data-ending-style:duration-150">
+				<NavigationMenuPrimitive.Popup
+					className="data-[ending-style]:easing-[ease] relative h-(--popup-height) w-(--popup-width) xs:w-(--popup-width) origin-(--transform-origin) rounded-3xl border border-border/50 bg-popover/70 text-popover-foreground outline-none backdrop-blur-2xl backdrop-saturate-150 transition-[opacity,transform,width,height,scale,translate] duration-[0.35s] ease-[cubic-bezier(0.22,1,0.36,1)] before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-ending-style:scale-90 data-starting-style:scale-90 data-ending-style:opacity-0 data-starting-style:opacity-0 data-ending-style:duration-150"
+					data-slot="navigation-menu-popup"
+				>
 					<NavigationMenuPrimitive.Viewport className="relative size-full overflow-hidden" />
 				</NavigationMenuPrimitive.Popup>
 			</NavigationMenuPrimitive.Positioner>

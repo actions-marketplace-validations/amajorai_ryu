@@ -106,13 +106,13 @@ function section(root, title) {
 }
 
 function setBody(sectionEl, text) {
-	if (sectionEl && sectionEl._body) {
+	if (sectionEl?._body) {
 		sectionEl._body.textContent = text;
 	}
 }
 
 function errText(e) {
-	return e && e.message ? e.message : String(e);
+	return e?.message ? e.message : String(e);
 }
 
 function renderFeedback(box, host) {

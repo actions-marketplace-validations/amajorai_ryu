@@ -990,8 +990,8 @@ function SplitBracketHeader({
 							render={
 								<button
 									className={cn(
-										"flex h-6 shrink-0 items-center justify-center rounded-full px-1.5 text-primary/70 transition-colors hover:text-primary",
-										joinHover && "bg-primary/20 text-primary"
+										"flex h-6 shrink-0 items-center justify-center rounded-full px-1.5 text-muted-foreground/70 transition-colors hover:text-muted-foreground",
+										joinHover && "bg-muted/50 text-muted-foreground"
 									)}
 									onDragLeave={() => setJoinHover(false)}
 									onDragOver={(e: DragEvent) => {
@@ -1140,6 +1140,12 @@ export function TitleBar() {
 	const pinnedTabs = tabs.filter((t) => t.pinned);
 	const unpinnedTabs = tabs.filter((t) => !t.pinned);
 	const segments = buildSegments(unpinnedTabs, groups, splits);
+
+	// Hide the special actions bar when the active tab is in a split — each
+	// split pane has its own hover-reveal header instead.
+	const activeInSplit = activeTabId
+		? !!findSplit(tabs, splits, activeTabId)
+		: false;
 
 	// The frosted scroll-under titlebar is used by the chat page, the empty
 	// no-tab launchpad, and the store / marketplace family — all let their
@@ -1355,7 +1361,7 @@ export function TitleBar() {
 											if (seg.type === "split") {
 												return (
 													<div
-														className="flex shrink-0 items-center gap-1 rounded-2xl bg-primary/5 px-1 py-0.5 ring-1 ring-primary/30"
+														className="flex shrink-0 items-center gap-1 rounded-2xl px-1 py-0.5 ring-1 ring-border/40"
 														key={seg.split.id}
 													>
 														<SplitBracketHeader
@@ -1506,11 +1512,13 @@ export function TitleBar() {
 					style={{ minWidth: 0 }}
 				/>
 
-				{/* Right-side page actions — offset clears Windows titlebar buttons */}
-				{actions && (
+				{/* Right-side page actions — offset clears Windows titlebar buttons.
+				    Hidden when the active tab is in a split: each pane gets its own
+				    hover-reveal header instead. */}
+				{actions && !activeInSplit && (
 					<div
 						className={cn(
-							"ryu-chrome-shadow relative inset-shadow-sm z-50 flex shrink-0 flex-row items-center gap-1 rounded-2xl bg-background/50 px-1 shadow-lg ring-1 ring-black/5 dark:ring-white/10",
+							"ryu-chrome-shadow relative inset-shadow-sm z-50 flex shrink-0 flex-row items-center gap-1 rounded-2xl bg-background/50 px-1 shadow-lg",
 							// Windows caption buttons (min/max/close) sit at the top-right;
 							// give the page actions wide clearance so they never crowd them.
 							// macOS keeps its controls on the left, so only a small inset.

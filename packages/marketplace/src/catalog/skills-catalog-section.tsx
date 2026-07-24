@@ -913,6 +913,7 @@ function SkillDetailAction({
 		const InstallButton = installLayer.InstallButton;
 		return (
 			<InstallButton
+				idleVariant="ghost"
 				installing={installing === card.id}
 				onClick={() => {
 					install().catch(() => undefined);

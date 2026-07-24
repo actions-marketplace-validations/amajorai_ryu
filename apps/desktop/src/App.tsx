@@ -30,6 +30,7 @@ import { PageWrapper } from "./components/layout/PageWrapper.tsx";
 import { initBackgroundCustomization } from "./hooks/useBackgroundCustomization.ts";
 import { initChromeShadows } from "./hooks/useChromeShadows.ts";
 import { initDialogOverlayBlur } from "./hooks/useDialogOverlayBlur.ts";
+import { initInvertedBackgrounds } from "./hooks/useInvertedBackgrounds.ts";
 import { initPointerCursor } from "./hooks/usePointerCursor.ts";
 import { initTheme, useThemePreset } from "./hooks/useThemePreset.ts";
 import CompanionPage from "./pages/CompanionPage.tsx";
@@ -404,6 +405,7 @@ function MainApp() {
 		initPointerCursor();
 		initChromeShadows();
 		initDialogOverlayBlur();
+		initInvertedBackgrounds();
 		initBackgroundCustomization();
 	}, []);
 

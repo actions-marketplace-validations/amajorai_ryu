@@ -50,7 +50,7 @@ function authorized(req) {
 	if (!EXT_TOKEN) {
 		return true; // no token configured (never in a real spawn) → do not lock out
 	}
-	const header = req.headers["authorization"] || "";
+	const header = req.headers.authorization || "";
 	const provided = header.startsWith("Bearer ") ? header.slice(7) : "";
 	return provided === EXT_TOKEN;
 }
@@ -189,7 +189,7 @@ async function handle(req, res) {
 			res,
 			500,
 			undefined,
-			JSON.stringify({ error: String(err && err.message ? err.message : err) })
+			JSON.stringify({ error: String(err?.message ? err.message : err) })
 		);
 	}
 }
@@ -235,7 +235,7 @@ async function main() {
 		});
 		process.exit(3);
 	}
-	const activate = mod.activate || (mod.default && mod.default.activate);
+	const activate = mod.activate || mod.default?.activate;
 	if (typeof activate !== "function") {
 		log("entry module has no exported activate()", {
 			level: "error",
@@ -257,8 +257,7 @@ async function main() {
 	// is aspirational today — it fires only if the process receives a catchable signal
 	// (e.g. a future graceful-stop that sends SIGTERM first, or a manual kill).
 	const shutdown = async () => {
-		const deactivate =
-			mod.deactivate || (mod.default && mod.default.deactivate);
+		const deactivate = mod.deactivate || mod.default?.deactivate;
 		if (typeof deactivate === "function") {
 			try {
 				await deactivate(context);

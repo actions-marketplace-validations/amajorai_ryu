@@ -84,7 +84,7 @@ export function ModelMenuContent({
 
 	return (
 		<div className="flex max-h-80 flex-col">
-			<div className="sticky top-0 z-10 border-border/60 border-b bg-popover p-2">
+			<div className="sticky top-0 z-10">
 				<Input
 					aria-label="Filter models"
 					className="h-8 text-[13px]"

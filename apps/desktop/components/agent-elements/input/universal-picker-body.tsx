@@ -1040,7 +1040,7 @@ export function UniversalPickerBody({
 	return (
 		<div className="flex flex-col">
 			{showSearch && (
-				<div className="bg-popover px-2 pt-2 pb-1">
+				<div>
 					<Input
 						aria-label="Search agents, providers and models"
 						className="h-8 border-0 bg-transparent px-1 text-[13px] shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"

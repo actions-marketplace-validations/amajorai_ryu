@@ -123,9 +123,7 @@ describe("listDownloads", () => {
 
 describe("control actions", () => {
 	test("each control POSTs to /:id/<action>", async () => {
-		const cases: Array<
-			[(t: ApiTarget, id: string) => Promise<unknown>, string]
-		> = [
+		const cases: [(t: ApiTarget, id: string) => Promise<unknown>, string][] = [
 			[pauseDownload, "pause"],
 			[resumeDownload, "resume"],
 			[retryDownload, "retry"],

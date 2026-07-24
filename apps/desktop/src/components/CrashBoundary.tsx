@@ -21,6 +21,7 @@ import {
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { isDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
 import { getConsoleBufferText } from "@/src/lib/console-buffer.ts";
 import { reportError } from "@/src/lib/crash.ts";
 import { getCrashRoute } from "@/src/lib/crash-context.ts";
@@ -185,7 +186,7 @@ export class CrashBoundary extends Component<
 								<Button onClick={this.handleReload} size="sm">
 									Reload
 								</Button>
-								{import.meta.env.DEV ? (
+								{import.meta.env.DEV || isDeveloperMode() ? (
 									<Button
 										onClick={this.handleCopyConsole}
 										size="sm"

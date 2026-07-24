@@ -886,6 +886,7 @@ function AppActions({
 		const InstallButton = installLayer.InstallButton;
 		action = (
 			<InstallButton
+				idleVariant="ghost"
 				installing={installing}
 				onClick={runInstall}
 				progress={{ kinds: ["tool", "other"], name: entry.name }}

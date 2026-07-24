@@ -72,7 +72,7 @@ export default function StoreItemAction({
 		return (
 			<InstallProgressButton
 				className={className}
-				idleVariant="default"
+				idleVariant="ghost"
 				installing={busy}
 				onClick={onInstall}
 				percent={percent}

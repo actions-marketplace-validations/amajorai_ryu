@@ -15,6 +15,7 @@ import { FRONTEND_URL } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useRecentUpdates } from "@/src/hooks/useRecentUpdates.ts";
 import type { RecentUpdateItem } from "@/src/lib/api/updates.ts";
+import { OverflowTooltip } from "./overflow-tooltip.tsx";
 
 const TRAILING_SLASH_RE = /\/$/;
 
@@ -75,7 +76,7 @@ export function UpdatesSubmenu() {
 				<HugeiconsIcon className="mr-2 size-4" icon={NewReleasesIcon} />
 				Updates
 			</DropdownMenuSubTrigger>
-			<DropdownMenuSubContent className="max-h-80 min-w-72 overflow-y-auto">
+			<DropdownMenuSubContent className="max-h-80 min-w-72 max-w-80 overflow-y-auto">
 				{loading ? (
 					<div className="flex items-center justify-center px-3 py-6">
 						<Spinner className="size-4" />
@@ -91,12 +92,16 @@ export function UpdatesSubmenu() {
 							onClick={() => openUpdate(item, frontendBase)}
 						>
 							<span className="flex min-w-0 flex-1 flex-col gap-0.5">
-								<span className="truncate font-medium text-sm">
-									{item.title}
-								</span>
-								<span className="truncate text-[11px] text-muted-foreground">
-									{itemMeta(item)}
-								</span>
+								<OverflowTooltip
+									className="min-w-0 flex-1 overflow-hidden whitespace-nowrap font-medium text-sm"
+									fade
+									text={item.title}
+								/>
+								<OverflowTooltip
+									className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[11px] text-muted-foreground"
+									fade
+									text={itemMeta(item)}
+								/>
 							</span>
 							<HugeiconsIcon
 								className="ml-2 size-3.5 shrink-0 text-muted-foreground"

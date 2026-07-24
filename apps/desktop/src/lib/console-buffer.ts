@@ -1,13 +1,14 @@
 // apps/desktop/src/lib/console-buffer.ts
 //
-// A tiny in-memory ring buffer that captures console output in DEVELOPMENT ONLY.
-// It exists purely to power the dev-only "Copy console" action on the crash screen
-// (CrashBoundary.tsx), so a developer can grab recent logs + the crash stack in one
-// click instead of scrolling the devtools console.
+// A tiny in-memory ring buffer that captures console output for the crash screen's
+// "Copy console" action (CrashBoundary.tsx) and the developer-mode diagnostics
+// bundle. Active in development builds and when the user enables Developer Mode in
+// Settings → Developer.
 //
-// Privacy note: this deliberately mirrors nothing to the network. It is gated on
-// `import.meta.env.DEV`, so it is a no-op in production builds and does not run
-// counter to crash.ts's posture of stripping console content from crash reports.
+// Privacy note: this deliberately mirrors nothing to the network. In production
+// builds it is a no-op unless the user explicitly opted into Developer Mode, and
+// does not run counter to crash.ts's posture of stripping console content from
+// crash reports.
 
 const MAX_ENTRIES = 500;
 
@@ -44,13 +45,22 @@ const serializeArg = (arg: unknown): string => {
 	}
 };
 
+const DEV_MODE_KEY = "ryu_developer_mode";
+
+const shouldCapture = (): boolean =>
+	!!import.meta.env.DEV || localStorage.getItem(DEV_MODE_KEY) === "true";
+
 /**
  * Wrap the console methods so their output is recorded into a bounded ring buffer.
- * Idempotent and a no-op outside development. Original console behaviour is
- * preserved — each call still forwards to the native method.
+ * Idempotent. Active in development builds or when Developer Mode is on. Original
+ * console behaviour is preserved — each call still forwards to the native method.
+ *
+ * Call with `force: true` to re-install after the user enables Developer Mode at
+ * runtime (the idempotency guard is bypassed but the patch is still safe to apply
+ * twice since it wraps the already-wrapped method).
  */
-export const installConsoleCapture = (): void => {
-	if (installed || !import.meta.env.DEV) {
+export const installConsoleCapture = (force = false): void => {
+	if ((!force && installed) || !shouldCapture()) {
 		return;
 	}
 	installed = true;
@@ -78,3 +88,6 @@ export const getConsoleBufferText = (): string =>
 			(entry) => `[${entry.time}] ${entry.level.toUpperCase()} ${entry.text}`
 		)
 		.join("\n");
+
+/** Whether console capture is currently active (dev build or developer mode). */
+export const isConsoleCaptureActive = (): boolean => installed;

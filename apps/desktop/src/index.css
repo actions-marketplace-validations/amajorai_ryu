@@ -249,11 +249,54 @@ html:not([data-dialog-overlay-blur="on"]) [data-slot="dialog-content"],
 html:not([data-dialog-overlay-blur="on"]) [data-slot="alert-dialog-content"],
 html:not([data-dialog-overlay-blur="on"]) [data-slot="sheet-content"],
 html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"] {
+	border: 1px solid var(--border) !important;
 	box-shadow: none !important;
 }
 
 html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"]::before {
 	box-shadow: none !important;
+}
+
+/* Inverted backgrounds mode — swaps muted/popover overlay backgrounds to
+   background. Enabled via the Appearance → Interface toggle. */
+[data-inverted-backgrounds] [data-slot="tooltip-content"] {
+	background-color: color-mix(
+		in oklch,
+		var(--background) 80%,
+		transparent
+	) !important;
+}
+
+[data-inverted-backgrounds] [data-slot="dropdown-menu-content"],
+[data-inverted-backgrounds] [data-slot="dropdown-menu-sub-content"],
+[data-inverted-backgrounds] [data-slot="select-content"],
+[data-inverted-backgrounds]
+	[data-slot="select-content"]
+	[data-slot="select-scroll-up-button"],
+[data-inverted-backgrounds]
+	[data-slot="select-content"]
+	[data-slot="select-scroll-down-button"],
+[data-inverted-backgrounds] [data-slot="select-content"] .sticky {
+	background-color: color-mix(
+		in oklch,
+		var(--background) 90%,
+		transparent
+	) !important;
+}
+
+[data-inverted-backgrounds] [data-slot="popover-content"],
+[data-inverted-backgrounds] [data-slot="context-menu-content"],
+[data-inverted-backgrounds] [data-slot="menubar-content"],
+[data-inverted-backgrounds] [data-slot="navigation-menu-popup"] {
+	background-color: color-mix(
+		in oklch,
+		var(--background) 70%,
+		transparent
+	) !important;
+}
+
+[data-inverted-backgrounds] [data-slot="command-item"][data-selected] {
+	background-color: var(--background) !important;
 }
 
 /* Pointer cursor mode — enabled via the Appearance setting */
@@ -315,8 +358,21 @@ div[data-tauri-decorum-tb] {
 	padding-right: 0 !important;
 }
 
+/* Windowed mode: round both right corners of the close button */
 button#decorum-tb-close {
 	border-top-right-radius: 20px !important;
+	border-bottom-right-radius: 20px !important;
+}
+
+/* Maximized mode: minimize+close form a rounded pill group */
+body.maximized button#decorum-tb-minimize {
+	border-top-left-radius: 20px !important;
+	border-bottom-left-radius: 20px !important;
+}
+
+body.maximized button#decorum-tb-close {
+	border-top-right-radius: 20px !important;
+	border-bottom-right-radius: 20px !important;
 }
 
 div[data-tauri-decorum-tb] {

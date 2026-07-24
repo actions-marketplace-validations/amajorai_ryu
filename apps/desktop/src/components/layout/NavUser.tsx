@@ -1,12 +1,14 @@
 import {
 	Add01Icon,
 	ArrowUpRight01Icon,
+	ComputerIcon,
 	Logout01Icon,
+	Moon01Icon,
 	PieChartIcon,
 	Settings01Icon,
+	Sun01Icon,
 	Tick02Icon,
 	UserGroupIcon,
-	UserSwitchIcon,
 	ViewOffSlashIcon,
 	Wallet01Icon,
 } from "@hugeicons/core-free-icons";
@@ -40,6 +42,7 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
 import { useQuery } from "@tanstack/react-query";
+import { useTheme } from "next-themes";
 import { useState } from "react";
 import { useAuthContext } from "@/contexts/auth-context.tsx";
 import {
@@ -150,7 +153,7 @@ function formatDate(value: string | null | undefined): string {
 // name/email, a check on the active one), switches on click, adds another
 // account via the existing device-auth flow, and signs an account out. Tokens
 // stay local (the vault in auth-client); this only ever renders the safe fields.
-function AccountSwitcher() {
+function AccountList() {
 	const [accounts, setAccounts] = useState<StoredAccount[]>(() =>
 		listAccounts()
 	);
@@ -169,8 +172,6 @@ function AccountSwitcher() {
 			return;
 		}
 		await switchAccount(userId);
-		// Reload so the whole app re-hydrates (session, entitlements, wallet) under
-		// the newly active account's bearer token.
 		window.location.reload();
 	};
 
@@ -178,14 +179,11 @@ function AccountSwitcher() {
 		event: React.MouseEvent,
 		account: StoredAccount
 	) => {
-		// Keep the menu open and prevent the row's switch handler from firing.
 		event.preventDefault();
 		event.stopPropagation();
 		const wasActive = account.userId === activeId;
 		await signOutAccount(account.userId);
 		if (wasActive) {
-			// Active account removed: reload to re-hydrate as the fallback account
-			// (or the logged-out state when none remain).
 			window.location.reload();
 			return;
 		}
@@ -210,7 +208,6 @@ function AccountSwitcher() {
 			onAdded: () => {
 				setAdding(false);
 				toast.success("Account added");
-				// The new account is now active — reload to switch into it.
 				window.location.reload();
 			},
 			onError: (err) => {
@@ -223,21 +220,19 @@ function AccountSwitcher() {
 		});
 	};
 
-	const activeAccount = accounts.find((a) => a.userId === activeId);
-	const activeLabel =
-		activeAccount?.name || activeAccount?.email || "Switch account";
-
-	const accountList = (
-		<>
+	return (
+		<DropdownMenuGroup>
 			{accounts.map((account) => {
 				const isActive = account.userId === activeId;
 				const label = account.name || account.email || "Account";
 				return (
 					<DropdownMenuItem
+						className="group/item gap-2"
+						closeOnClick={false}
 						key={account.userId}
 						onClick={() => handleSwitch(account.userId)}
 					>
-						<Avatar className="mr-2 size-6 shrink-0 rounded-full">
+						<Avatar className="size-6 shrink-0 rounded-full">
 							<AvatarImage
 								alt={account.name ?? account.email}
 								src={account.image ?? undefined}
@@ -257,28 +252,29 @@ function AccountSwitcher() {
 								</span>
 							) : null}
 						</span>
-						{isActive ? (
-							<HugeiconsIcon
-								className="ml-2 size-4 shrink-0 text-primary"
-								icon={Tick02Icon}
-							/>
-						) : null}
-						<button
-							aria-label={`Sign out ${label}`}
-							className="ml-1 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-							onClick={(event) => handleSignOutAccount(event, account)}
-							title="Sign out"
-							type="button"
-						>
-							<HugeiconsIcon icon={Logout01Icon} size={14} />
-						</button>
+						<span className="relative ml-1 flex size-5 shrink-0 items-center justify-center">
+							{isActive ? (
+								<span className="absolute transition-all duration-150 group-hover/item:scale-50 group-hover/item:opacity-0">
+									<HugeiconsIcon
+										className="size-4 text-primary"
+										icon={Tick02Icon}
+									/>
+								</span>
+							) : null}
+							<button
+								aria-label={`Sign out ${label}`}
+								className="absolute flex size-5 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all duration-150 hover:bg-accent hover:text-destructive group-hover/item:scale-100 group-hover/item:opacity-100"
+								onClick={(event) => handleSignOutAccount(event, account)}
+								type="button"
+							>
+								<HugeiconsIcon icon={Logout01Icon} size={14} />
+							</button>
+						</span>
 					</DropdownMenuItem>
 				);
 			})}
 			<DropdownMenuItem
 				onClick={(event: React.MouseEvent) => {
-					// Keep the menu logic simple: don't let the click close before the
-					// flow starts (device auth opens the browser).
 					event.preventDefault();
 					handleAddAccount();
 				}}
@@ -290,28 +286,7 @@ function AccountSwitcher() {
 				)}
 				Add account
 			</DropdownMenuItem>
-		</>
-	);
-
-	// A single account needs no switcher list, but keep the entry so the user can
-	// still add another account from here.
-	return (
-		<DropdownMenuSub>
-			<DropdownMenuSubTrigger>
-				<HugeiconsIcon className="mr-2 size-4" icon={UserSwitchIcon} />
-				<span className="flex min-w-0 flex-1 flex-col">
-					<span className="truncate">Switch account</span>
-					{activeAccount ? (
-						<span className="truncate text-[11px] text-muted-foreground">
-							{activeLabel}
-						</span>
-					) : null}
-				</span>
-			</DropdownMenuSubTrigger>
-			<DropdownMenuSubContent className="min-w-56">
-				{accountList}
-			</DropdownMenuSubContent>
-		</DropdownMenuSub>
+		</DropdownMenuGroup>
 	);
 }
 
@@ -323,6 +298,7 @@ export function NavUser({
 	hiddenChrome: Set<string>;
 	onHideChrome: (key: FooterChromeKey) => void;
 }) {
+	const { setTheme } = useTheme();
 	const settingsOpen = useSettingsDialog((s) => s.open);
 	const settingsSection = useSettingsDialog((s) => s.section);
 	const setSettingsOpen = useSettingsDialog((s) => s.setOpen);
@@ -341,7 +317,7 @@ export function NavUser({
 		queryKey: ["billing-status-nav"],
 		queryFn: fetchEntitlementStatus,
 	});
-	const { isSigningOut, handleSignOut } = useAuthContext();
+	useAuthContext();
 	const isAuthenticated = useAppStore((s) => s.isAuthenticated);
 	const oidcUser = useAppStore((s) => s.oidcUser);
 	const sessionUser = session?.user;
@@ -454,7 +430,7 @@ export function NavUser({
 											side="bottom"
 											sideOffset={4}
 										>
-											<AccountSwitcher />
+											<AccountList />
 											<DropdownMenuSeparator />
 											<DropdownMenuGroup>
 												<DropdownMenuItem onClick={() => openTab("/profile")}>
@@ -473,6 +449,38 @@ export function NavUser({
 												</DropdownMenuItem>
 												<UpdatesSubmenu />
 											</DropdownMenuGroup>
+											<DropdownMenuSub>
+												<DropdownMenuSubTrigger>
+													<HugeiconsIcon
+														className="mr-2 size-4"
+														icon={Sun01Icon}
+													/>
+													Theme
+												</DropdownMenuSubTrigger>
+												<DropdownMenuSubContent>
+													<DropdownMenuItem onClick={() => setTheme("light")}>
+														<HugeiconsIcon
+															className="mr-2 size-4"
+															icon={Sun01Icon}
+														/>
+														Light
+													</DropdownMenuItem>
+													<DropdownMenuItem onClick={() => setTheme("dark")}>
+														<HugeiconsIcon
+															className="mr-2 size-4"
+															icon={Moon01Icon}
+														/>
+														Dark
+													</DropdownMenuItem>
+													<DropdownMenuItem onClick={() => setTheme("system")}>
+														<HugeiconsIcon
+															className="mr-2 size-4"
+															icon={ComputerIcon}
+														/>
+														System
+													</DropdownMenuItem>
+												</DropdownMenuSubContent>
+											</DropdownMenuSub>
 											<DropdownMenuSeparator />
 											<DropdownMenuGroup>
 												<DropdownMenuItem disabled>
@@ -531,20 +539,6 @@ export function NavUser({
 													{upgradeLabel ?? "See all plans"}
 												</DropdownMenuItem>
 											</DropdownMenuGroup>
-											<DropdownMenuItem
-												disabled={isSigningOut}
-												onClick={handleSignOut}
-											>
-												{isSigningOut ? (
-													<Spinner className="mr-2 size-4" />
-												) : (
-													<HugeiconsIcon
-														className="mr-2 size-4"
-														icon={Logout01Icon}
-													/>
-												)}
-												Log out
-											</DropdownMenuItem>
 										</DropdownMenuContent>
 									</DropdownMenu>
 								</div>

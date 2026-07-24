@@ -3047,7 +3047,7 @@ export function WorkspacePanels({
 			    over it. display:none when hidden, same as the bottom panel, so it
 			    never flashes on first mount. */}
 			<div
-				className="absolute top-12 bottom-0 z-10"
+				className="absolute top-[58px] bottom-0 z-10"
 				style={{
 					right: rightDockWidth,
 					width: pinnedColumnWidth,
@@ -3066,7 +3066,7 @@ export function WorkspacePanels({
 			    it back. */}
 			{pinnedFloating && (
 				<div
-					className="pointer-events-none absolute top-14 z-20"
+					className="pointer-events-none absolute top-[64px] z-20"
 					style={{ right: rightDockWidth + PANEL_GUTTER }}
 				>
 					{renderPinnedSummary?.({ floating: true })}
@@ -3080,7 +3080,7 @@ export function WorkspacePanels({
 			    is open — otherwise this z-20 layer covers the z-10 titlebar and you
 			    can no longer reach the button that hides it. */}
 			<div
-				className="absolute top-12 right-0 bottom-0 z-20 flex flex-row"
+				className="absolute top-[58px] right-0 bottom-0 z-20 flex flex-row"
 				onMouseEnter={rightOpen || isMobile ? undefined : showRightPeek}
 				onMouseLeave={rightOpen || isMobile ? undefined : hideRightPeek}
 				style={{
@@ -3100,7 +3100,7 @@ export function WorkspacePanels({
 			    where it would also swallow the edge-swipe back gesture. */}
 			{!(rightOpen || isMobile) && (
 				<div
-					className="absolute top-12 right-0 bottom-0 z-30 w-2"
+					className="absolute top-[58px] right-0 bottom-0 z-30 w-2"
 					onMouseEnter={showRightPeek}
 					onMouseLeave={hideRightPeek}
 				/>

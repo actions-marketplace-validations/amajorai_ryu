@@ -378,13 +378,13 @@ function EmojiPickerSearchBar({
 	children: ReactNode;
 } & Pick<UseEmojiPickerType, "i18n" | "searchValue" | "setSearch">) {
 	return (
-		<div className="flex items-center px-2">
+		<div className="flex items-center">
 			<div className="relative flex grow items-center">
 				<input
 					aria-label="Search"
 					autoComplete="off"
 					autoFocus
-					className="block w-full appearance-none rounded-full border-0 bg-muted px-10 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:outline-none"
+					className="block w-full appearance-none rounded-full border-0 bg-transparent px-10 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:outline-none"
 					onChange={(event) => setSearch(event.target.value)}
 					placeholder={i18n.search}
 					type="text"

@@ -12,7 +12,6 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Switch } from "@ryu/ui/components/switch";
-import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { AudioDevicesSettings } from "@/src/components/settings/AudioDevicesSettings.tsx";
 import { ChatRenameSettings } from "@/src/components/settings/ChatRenameSettings.tsx";
@@ -21,43 +20,14 @@ import { TtsEngineSettings } from "@/src/components/settings/TtsEngineSettings.t
 import { UpdatesSettings } from "@/src/components/settings/UpdatesSettings.tsx";
 import { VoiceInputSettings } from "@/src/components/settings/VoiceInputSettings.tsx";
 import { VoiceReadbackSettings } from "@/src/components/settings/VoiceReadbackSettings.tsx";
+import { useDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 
-const DEVELOPER_MODE_KEY = "ryu_developer_mode";
-
-export function getDeveloperMode(): boolean {
-	try {
-		return localStorage.getItem(DEVELOPER_MODE_KEY) === "true";
-	} catch {
-		return false;
-	}
-}
-
 export default function SettingsPage() {
-	const [developerMode, setDeveloperMode] = useState<boolean>(() =>
-		getDeveloperMode()
-	);
+	const [developerMode, setDeveloperMode] = useDeveloperMode();
 	const openGateway = useGatewayDialog((s) => s.openGateway);
 	const openSettings = useSettingsDialog((s) => s.openSettings);
-
-	useEffect(() => {
-		try {
-			localStorage.setItem(
-				DEVELOPER_MODE_KEY,
-				developerMode ? "true" : "false"
-			);
-			// Dispatch a storage event so other components can react
-			window.dispatchEvent(
-				new StorageEvent("storage", {
-					key: DEVELOPER_MODE_KEY,
-					newValue: developerMode ? "true" : "false",
-				})
-			);
-		} catch {
-			// ignore
-		}
-	}, [developerMode]);
 
 	const advancedLinks: {
 		to?: string;

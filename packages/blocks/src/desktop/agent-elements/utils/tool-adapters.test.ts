@@ -61,7 +61,7 @@ describe("mapToolInvocationToStep - naming + detail", () => {
 	});
 
 	it("truncates a long Bash command in the detail", () => {
-		const cmd = "echo " + "x".repeat(200);
+		const cmd = `echo ${"x".repeat(200)}`;
 		const step = mapToolInvocationToStep("4", {
 			toolName: "Bash",
 			args: { command: cmd },

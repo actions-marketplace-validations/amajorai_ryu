@@ -131,7 +131,7 @@ export const ModelPicker = memo(function ModelPicker({
 				sideOffset={6}
 			>
 				{showSearch && (
-					<div className="sticky top-0 z-10 mb-1 bg-muted/90 pb-1 backdrop-blur-2xl">
+					<div className="sticky top-0 z-10 mb-1">
 						<div className="relative">
 							<HugeiconsIcon
 								className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground"
@@ -139,7 +139,7 @@ export const ModelPicker = memo(function ModelPicker({
 							/>
 							<Input
 								aria-label="Filter models"
-								className="h-7 border-transparent bg-transparent pl-7 text-[12px]"
+								className="h-7 border-0 bg-transparent pl-7 text-[12px]"
 								onChange={(e) => setQuery(e.target.value)}
 								onKeyDown={(e) => e.stopPropagation()}
 								placeholder="Search models"

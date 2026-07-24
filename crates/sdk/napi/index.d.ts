@@ -42,11 +42,11 @@ export interface ChatDelta {
 /** One embedding vector with its position in the input batch. */
 export interface Embedding {
 	index: number;
-	vector: Array<number>;
+	vector: number[];
 }
 /** The result of an embedding request: one vector per input (in input order). */
 export interface EmbeddingResult {
-	embeddings: Array<Embedding>;
+	embeddings: Embedding[];
 	promptTokens?: number;
 	totalTokens?: number;
 }
@@ -65,7 +65,7 @@ export declare class ModelClient {
 		token?: string | undefined | null
 	);
 	/** Non-streaming chat completion. Resolves with the full reply. */
-	chat(messages: Array<ChatMessage>): Promise<ChatResult>;
+	chat(messages: ChatMessage[]): Promise<ChatResult>;
 	/**
 	 * Streaming chat completion. Invokes `callback(err, delta)` for each SSE
 	 * delta, then once more with `delta = null` to signal clean completion;
@@ -73,7 +73,7 @@ export declare class ModelClient {
 	 * drains on the addon's tokio runtime).
 	 */
 	stream(
-		messages: Array<ChatMessage>,
+		messages: ChatMessage[],
 		callback: (err: Error | null, arg: ChatDelta | undefined | null) => any
 	): void;
 }
@@ -92,5 +92,5 @@ export declare class EmbeddingClient {
 		token?: string | undefined | null
 	);
 	/** Embed a batch of texts, resolving with one vector per input (in order). */
-	embed(inputs: Array<string>): Promise<EmbeddingResult>;
+	embed(inputs: string[]): Promise<EmbeddingResult>;
 }

@@ -833,7 +833,7 @@ function PiModelPicker({
 				className="w-[min(300px,var(--radix-popover-content-available-width))] p-0"
 			>
 				<div className="flex max-h-80 flex-col">
-					<div className="sticky top-0 z-10 border-border/60 border-b bg-popover p-2">
+					<div className="sticky top-0 z-10">
 						<Input
 							aria-label="Filter models"
 							className="h-8 text-[13px]"
@@ -2125,7 +2125,7 @@ function ProfileHeader({
 	return (
 		<section
 			aria-label="Agent profile"
-			className="overflow-hidden rounded-lg border bg-card"
+			className="overflow-hidden rounded-lg bg-card"
 		>
 			<div
 				className="relative min-h-48 overflow-hidden"
@@ -2257,14 +2257,11 @@ function ProfileHeader({
 						{agentIcon ?? <RyuLogo className="text-foreground" size="42px" />}
 					</div>
 					<div className="flex shrink-0 items-center gap-2 pb-3">
-						<Button onClick={onCancel} size="sm" variant="outline">
-							Cancel
-						</Button>
 						<Button
 							disabled={saveDisabled}
 							onClick={onCreateAndChat}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							{saving ? <Spinner className="size-3" /> : null}
 							Chat

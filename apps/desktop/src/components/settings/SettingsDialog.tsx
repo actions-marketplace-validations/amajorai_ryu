@@ -32,6 +32,7 @@ import { AppearanceTab } from "./AppearanceTab.tsx";
 import { AppUpdatesSettings } from "./AppUpdatesSettings.tsx";
 import { AudioDevicesSettings } from "./AudioDevicesSettings.tsx";
 import { BillingTab } from "./BillingTab.tsx";
+import { DeveloperTab } from "./DeveloperTab.tsx";
 import { EntitySettings } from "./EntitySettings.tsx";
 import { ExperimentalSettings } from "./ExperimentalSettings.tsx";
 import { GeneralTab } from "./GeneralTab.tsx";
@@ -96,6 +97,7 @@ const NAV_GROUPS: NavGroup[] = [
 			{ value: "shadow", label: "Shadow" },
 			{ value: "voice", label: "Voice" },
 			{ value: "experimental", label: "Experimental" },
+			{ value: "developer", label: "Developer" },
 		],
 	},
 	{
@@ -147,6 +149,8 @@ function SectionContent({ value }: { value: SectionValue }) {
 			return <CreditsTab />;
 		case "experimental":
 			return <ExperimentalSettings />;
+		case "developer":
+			return <DeveloperTab />;
 		case "voice":
 			return (
 				<div className="space-y-4">

@@ -4868,7 +4868,7 @@ const GATEWAY_SECTIONS: {
 	{ value: "overview", label: "Overview", icon: Activity01Icon },
 	{ value: "workspace", label: "Workspace", icon: UserGroupIcon },
 	{ value: "defaults", label: "Defaults", icon: SparklesIcon },
-	{ value: "providers", label: "LLM Providers", icon: CpuIcon },
+	{ value: "providers", label: "Providers", icon: CpuIcon },
 	{ value: "routing", label: "Routing", icon: GitBranchIcon },
 	{ value: "guardrails", label: "Guardrails", icon: Shield01Icon },
 	{ value: "budgets", label: "Budgets", icon: Dollar01Icon },

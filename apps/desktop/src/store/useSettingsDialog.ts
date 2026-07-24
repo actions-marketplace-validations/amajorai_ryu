@@ -29,7 +29,8 @@ export type SettingsSectionValue =
 	| "voice"
 	| "goals"
 	| "double-check"
-	| "experimental";
+	| "experimental"
+	| "developer";
 
 interface SettingsDialogState {
 	/** Whether the App Settings dialog is open. */

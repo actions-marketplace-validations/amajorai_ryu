@@ -77,11 +77,7 @@ describe("createPrimitives — transport routing mirrors rpc.ts", () => {
 		let seen: { url: string; init: RequestInit } | undefined;
 		const fetchImpl = ((url: string, init: RequestInit) => {
 			seen = { url, init };
-			return Promise.resolve(
-				new Response(JSON.stringify({ text: "  hello world  " }), {
-					headers: { "content-type": "application/json" },
-				})
-			);
+			return Promise.resolve(Response.json({ text: "  hello world  " }));
 		}) as unknown as typeof fetch;
 
 		const transport = httpPrimitiveTransport({
