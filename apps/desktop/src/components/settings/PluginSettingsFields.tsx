@@ -27,8 +27,16 @@ import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
 import { type ReactNode, useEffect, useState } from "react";
 import { AgentModelPickerField } from "@/components/agent-elements/input/agent-model-picker-field.tsx";
+import { AgentSelectionField } from "@/components/agent-elements/input/agent-selection-field.tsx";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import { getPreference, setPreference } from "@/src/lib/api/preferences.ts";
+import {
+	type AgentSelection,
+	EMPTY_AGENT_SELECTION,
+	getAgentSelection,
+	getPreference,
+	setAgentSelection,
+	setPreference,
+} from "@/src/lib/api/preferences.ts";
 import {
 	type PluginSettingsField,
 	type PluginSettingsTab,
@@ -232,6 +240,55 @@ function ModelPickerField({ field, target }: FieldControlProps) {
 	);
 }
 
+function AgentPickerField({ field, target }: FieldControlProps) {
+	const [value, setValue] = useState<AgentSelection>(EMPTY_AGENT_SELECTION);
+
+	useEffect(() => {
+		let cancelled = false;
+		getAgentSelection(target, field.prefKey).then((stored) => {
+			if (!cancelled) {
+				setValue(stored);
+			}
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [target, field.prefKey]);
+
+	// The FULL composer target — agent, provider, model, thinking, effort, access
+	// mode — persisted as one selection. A plugin that can be served by an agent
+	// (not only a raw model call) declares this instead of `model_picker`; left
+	// unset, it inherits the node-wide default from the Gateway dialog.
+	const commit = (next: AgentSelection) => {
+		const previous = value;
+		setValue(next);
+		setAgentSelection(target, field.prefKey, next)
+			.then((ok) => {
+				if (!ok) {
+					setValue(previous);
+					toast.error("Couldn't save this setting", {
+						description: "Check your connection and try again.",
+					});
+				}
+			})
+			.catch(() => {
+				setValue(previous);
+			});
+	};
+
+	return (
+		<SettingsItem title={field.label}>
+			<AgentSelectionField
+				ariaLabel={field.label}
+				onChange={commit}
+				placeholder={field.placeholder ?? "Use the default"}
+				target={target}
+				value={value}
+			/>
+		</SettingsItem>
+	);
+}
+
 function FieldControl(props: FieldControlProps) {
 	switch (props.field.type) {
 		case "toggle":
@@ -244,6 +301,8 @@ function FieldControl(props: FieldControlProps) {
 			);
 		case "model_picker":
 			return <ModelPickerField {...props} />;
+		case "agent_picker":
+			return <AgentPickerField {...props} />;
 		default:
 			// text, textarea, number, and any unrecognized type render as text.
 			return <TextField {...props} />;
@@ -257,6 +316,22 @@ interface PluginSettingsFieldsProps {
 	hideTabTitles?: boolean;
 	tabs: PluginSettingsTab[];
 	target: ApiTarget;
+}
+
+/**
+ * Footer caption for a picker field the plugin didn't describe itself. Both
+ * picker types say the same load-bearing thing — blank inherits the node-wide
+ * default set in the Gateway dialog, so "blank" is a real choice, not an
+ * oversight.
+ */
+function defaultFieldDescription(type: string): string | undefined {
+	if (type === "model_picker") {
+		return "Any model the Gateway can route. Leave blank to use the node's default.";
+	}
+	if (type === "agent_picker") {
+		return "An agent, or a provider and model. Leave blank to use the node's default.";
+	}
+	return undefined;
 }
 
 /**
@@ -279,10 +354,7 @@ export function PluginSettingsFields({
 						{tab.fields.map((field) => (
 							<FieldControl
 								description={
-									field.type === "model_picker"
-										? (field.description ??
-											"Any model the Gateway can route. Leave blank to use the default.")
-										: field.description
+									field.description ?? defaultFieldDescription(field.type)
 								}
 								field={field}
 								key={field.prefKey}

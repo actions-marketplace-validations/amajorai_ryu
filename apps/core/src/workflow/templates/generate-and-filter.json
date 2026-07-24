@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "id": "generate-and-filter",
+    "name": "Generate & Filter",
+    "description": "Generate N proposals in parallel, then score and select the best.",
+    "category": "quality",
+    "pattern": "generate-and-filter",
+    "icon": "Filter",
+    "node_count": 4,
+    "tags": ["generate", "filter", "select", "best-of-n"]
+  },
+  "primary": {
+    "id": "generate-and-filter",
+    "name": "Generate & Filter",
+    "description": "N proposals → score → select best.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "proposals",
+        "type": "agent_delegate",
+        "delegates": [
+          {
+            "id": "p1",
+            "task": "Generate a distinct proposal for this task:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "p2",
+            "task": "Generate a second, meaningfully different proposal:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "p3",
+            "task": "Generate a third proposal exploring another direction:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          }
+        ],
+        "caps": null
+      },
+      {
+        "id": "select",
+        "type": "prompt",
+        "prompt": "Score each proposal against the task on a 0–10 scale, then return ONLY the best one (with its score).\n\nTask: {{input}}\n\nProposals: {{nodes.proposals}}",
+        "agent_id": null
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "proposals"
+      },
+      {
+        "from": "proposals",
+        "to": "select"
+      },
+      {
+        "from": "select",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

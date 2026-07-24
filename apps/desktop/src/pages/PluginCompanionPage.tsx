@@ -30,6 +30,40 @@ import {
 	useExperimentalFlag,
 } from "@/src/lib/experimental.ts";
 
+/**
+ * The shared "this app isn't here" state for every route that resolves to a companion.
+ *
+ * Exported because TWO paths reach it and they must not drift: mounting a companion by
+ * id that the feed no longer reports (a disabled plugin), and the short-path alias
+ * route in `contributions/builtins.ts`, which resolves a path like `/inbox` against the
+ * feed and finds no owner. That second path used to render `null` — a truly blank tab —
+ * which is worse than it sounds: most apps ship default-OFF, so on a fresh install the
+ * palette's "Inbox" row, an OS notification click, the Timeline hotkey and the tray's
+ * "Open Timeline" all landed on blank with nothing to explain it or act on.
+ *
+ * The copy is deliberately cause-neutral ("not enabled" rather than "no longer
+ * enabled") because both causes reach it — never-enabled and since-disabled — and it
+ * names the Store so the state is actionable instead of a dead end.
+ */
+export function CompanionUnavailable() {
+	return (
+		<div className="flex h-full items-center justify-center p-6">
+			<Empty>
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={PuzzleIcon} />
+					</EmptyMedia>
+					<EmptyTitle>App not enabled</EmptyTitle>
+					<EmptyDescription>
+						No enabled app provides this view. Enable it from the Store, or it
+						may have been disabled.
+					</EmptyDescription>
+				</EmptyHeader>
+			</Empty>
+		</div>
+	);
+}
+
 export default function PluginCompanionPage({
 	companionId,
 	mountContext,
@@ -55,26 +89,13 @@ export default function PluginCompanionPage({
 	// The single decision gate for running third-party code. OFF (default) or a
 	// plugin with no bundle → the benign summary below; never a fetch, never code.
 	if (companion && shouldLoadThirdPartyUi(runtimeFlagOn, companion.hasUi)) {
-		return <PluginHostPanel companion={companion} mountContext={stableContext} />;
+		return (
+			<PluginHostPanel companion={companion} mountContext={stableContext} />
+		);
 	}
 
 	if (!companion) {
-		return (
-			<div className="flex h-full items-center justify-center p-6">
-				<Empty>
-					<EmptyHeader>
-						<EmptyMedia variant="icon">
-							<HugeiconsIcon icon={PuzzleIcon} />
-						</EmptyMedia>
-						<EmptyTitle>Companion unavailable</EmptyTitle>
-						<EmptyDescription>
-							This plugin companion is no longer enabled, or the plugin that
-							provided it has been disabled.
-						</EmptyDescription>
-					</EmptyHeader>
-				</Empty>
-			</div>
-		);
+		return <CompanionUnavailable />;
 	}
 
 	// `app__<runnable id>` — strip the `app__` prefix for a cleaner owning-plugin

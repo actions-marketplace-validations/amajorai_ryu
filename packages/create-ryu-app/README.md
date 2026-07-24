@@ -5,9 +5,17 @@
 [![License](https://shieldcn.dev/badge/License-Apache--2.0-73DC8C.svg?logo=apache&logoColor=white)](./LICENSE)
 [![Stack](https://shieldcn.dev/badge/TypeScript-CLI-3178C6.svg?logo=typescript&logoColor=white)](../../README.md)
 
-`create-ryu-app` is the project scaffolder for the Ryu SDK. Running it generates a starter project with a Runnable, a gateway-pointed model config, and a `manifest.json` (legacy `ryu.json`) manifest validated against the PluginManifest schema, so a new plugin compiles and packs out of the box. It depends on `@ryuhq/sdk` by semver.
+`create-ryu-app` is the project scaffolder for Ryu extensions. Running it generates a starter project with a `manifest.json` validated against the PluginManifest schema, so it installs out of the box.
 
-Pick a starter with `--template` (default `agent`):
+Ryu extensions come in two shapes, and `--template` picks which one you get.
+
+**Apps** are self-contained `apps-store/<app>` satellites: a manifest plus an out-of-process `sidecar/`, driven through the generic ext-proxy (`/api/ext/<plugin_id>/*`). Shipping one never requires a change to Ryu Core or the Gateway.
+
+| Template | Emits | Runtime |
+|---|---|---|
+| `app` | A manifest declaring a lazy local sidecar + a grant-gated capability, and the loopback HTTP sidecar that serves it | Bun/Node, dependency-free |
+
+**Plugins** are manifest contributions Ryu renders in-process — runnables, turn hooks, widgets, composer controls, a companion panel. No sidecar, no port. They are authored against `@ryuhq/sdk` and shipped with `ryu pack`.
 
 | Template | Emits | Factory |
 |---|---|---|
@@ -27,6 +35,9 @@ bunx create-ryu-app <name>
 # scaffold a specific template
 bunx create-ryu-app <name> --template ryu-app
 
+# scaffold an apps-store satellite (manifest + sidecar)
+bunx create-ryu-app <name> --template app
+
 # build from source
 bun run build   # tsup → dist/
 bun test
@@ -35,8 +46,9 @@ bun test
 ## What it provides
 
 - A one-command scaffolder (`create-ryu-app <name> [--template <t>]`) bundled with a `template/<name>/` tree per starter.
-- A generated starter Runnable plus a gateway-pointed model config.
-- A `manifest.json` / `ryu.json` manifest validated against the PluginManifest schema, ready for `ryu pack`.
+- For plugins: a starter Runnable plus a gateway-pointed model config, and a manifest ready for `ryu pack`.
+- For apps: a satellite tree — `manifest.json` (sidecar + capability + grant) and a fail-closed, bearer-gated loopback sidecar that owns no dependency on this repo.
+- A `manifest.json` validated against the PluginManifest schema at scaffold time.
 
 ## License
 

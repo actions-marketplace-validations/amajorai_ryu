@@ -463,12 +463,16 @@ mod tests {
     #[test]
     fn registry_has_correct_count() {
         let r = static_registry();
-        // 21 base entries + 4 sandbox backends (wasmtime, docker, microsandbox,
+        // 20 base entries + 4 sandbox backends (wasmtime, docker, microsandbox,
         // opensandbox). The nano/pico/nemo/iron-claw + temporal + qmd rows were
         // dropped and unsloth/docker-model-runner/apfel added since the old count
-        // of 30. NOTE: this is a global count over a shared tree — if a concurrent
-        // feature adds a catalog row, rebase this number with it.
-        assert_eq!(r.len(), 25);
+        // of 30; `spider` then left the managed-sidecar catalog when it became a
+        // BYO declarative `command` plugin, taking the base count 21 → 20 (its
+        // sibling assertions in `registry_recommended_entries` and the tool count
+        // moved with it — this one did not, hence the rebase). NOTE: this is a
+        // global count over a shared tree — if a concurrent feature adds a catalog
+        // row, rebase this number with it.
+        assert_eq!(r.len(), 24);
     }
 
     #[test]

@@ -34,16 +34,13 @@ use serde_json::{json, Value};
 
 use ryu_activity::{ActivityItem, ActivityLevel, ActivityStore};
 
+use crate::plugins::builtins::QUESTS_PLUGIN_ID;
 use crate::scheduler::store::{self as job_store, JobTarget, Schedule, ScheduledJob};
 use crate::sidecar::ext_proxy::{ext_token, node_token};
 
-/// The built-in Quests app id (matches the `quests.manifest.json` fixture id and
-/// `plugins::builtins`).
-const QUESTS_PLUGIN_ID: &str = "com.ryu.quests";
-/// Fallback loopback port if the manifest is somehow absent — matches the
-/// `quests.manifest.json` fixture `port`. Core injects this as `RYU_QUESTS_PORT` at
-/// spawn.
-const QUESTS_FALLBACK_PORT: u16 = 7991;
+/// The `ryu-quests` sidecar's name inside the Quests manifest — the other half of the
+/// `(plugin id, sidecar name)` key the port resolves through.
+const QUESTS_SIDECAR: &str = "ryu-quests";
 
 /// Default detection interval when the sidecar reports none — mirrors the crate's
 /// `ryu_quests::DEFAULT_INTERVAL`.
@@ -63,15 +60,15 @@ fn job_id_for(quest_id: &str) -> String {
 }
 
 /// Resolve the `ryu-quests` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]).
+/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
+/// port comes from the manifest and ONLY the manifest — see
+/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
+/// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    let raw = manifests
-        .iter()
-        .find(|m| m.id == QUESTS_PLUGIN_ID)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == "ryu-quests"))
-        .map(|s| s.port)
-        .unwrap_or(QUESTS_FALLBACK_PORT);
-    crate::profile::port(raw)
+    crate::sidecar::ext_proxy::sidecar_port(manifests, QUESTS_PLUGIN_ID, QUESTS_SIDECAR).expect(
+        "built-in quests.manifest.json must declare the ryu-quests sidecar (see \
+         plugin_manifest::BUILTIN_MANIFESTS)",
+    )
 }
 
 /// Process-global quests client, so the scheduler (`JobTarget::Quest`) — which

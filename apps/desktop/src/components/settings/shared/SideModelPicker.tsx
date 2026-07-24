@@ -1,16 +1,16 @@
 // apps/desktop/src/components/settings/shared/SideModelPicker.tsx
 //
-// Shared "provider + model + effort" picker for side models — used by both the
-// double-check reviewer and the goal judge. The provider/model dropdowns are
-// SUGGESTIONS, never a hard constraint: the stored model is a free,
-// gateway-routable id (you can type any model the Gateway can route, e.g.
-// `openrouter/google/gemini-...`), and the provider/effort lists come from the
-// Pi config catalog (`/api/pi-config/catalog`) only to help pick. Effort is
-// forwarded as `reasoning_effort` by Core (reaches OpenAI-compatible / local /
-// OpenRouter providers; Anthropic-direct ignores it).
+// Shared "model + effort" picker for side models — used by the double-check
+// reviewer, the goal judge, meetings and chat-rename settings. The model field
+// is the SAME universal provider→model picker the chat composer and plugin
+// settings use (`AgentModelPickerField`), so every surface gets one consistent
+// picker: brand logos, per-provider model lists, live discovery, and a
+// free-text custom row for anything gateway-routable the catalog doesn't list
+// (e.g. `openrouter/google/gemini-...`). Picking from a provider's list also
+// records that provider as the routing hint; a free-typed id clears it. Effort
+// is forwarded as `reasoning_effort` by Core (reaches OpenAI-compatible /
+// local / OpenRouter providers; Anthropic-direct ignores it).
 
-import { Button } from "@ryu/ui/components/button";
-import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import {
 	Select,
@@ -20,13 +20,13 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { useQuery } from "@tanstack/react-query";
+import { AgentModelPickerField } from "@/components/agent-elements/input/agent-model-picker-field.tsx";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { fetchPiCatalog } from "@/src/lib/api/pi-config.ts";
 import type { SideModelConfig } from "@/src/lib/api/preferences.ts";
 
-// Non-empty sentinels: Base UI Select is unreliable with empty-string values, so
-// "any provider" / "provider default" use real tokens mapped to "" at the edge.
-const ANY_PROVIDER = "__any__";
+// Non-empty sentinel: Base UI Select is unreliable with empty-string values, so
+// "provider default" uses a real token mapped to "" at the edge.
 const DEFAULT_EFFORT = "__default__";
 
 interface SelItem {
@@ -36,8 +36,6 @@ interface SelItem {
 
 export interface SideModelPickerProps {
 	onChange: (cfg: SideModelConfig) => void;
-	/** Show the provider suggestion dropdown (default true). */
-	showProvider?: boolean;
 	target: ApiTarget;
 	value: SideModelConfig;
 }
@@ -46,83 +44,33 @@ export function SideModelPicker({
 	value,
 	onChange,
 	target,
-	showProvider = true,
 }: SideModelPickerProps) {
 	const { data: catalog } = useQuery({
 		queryKey: ["pi-catalog", target.url],
 		queryFn: () => fetchPiCatalog(target),
 	});
 
-	const providers = catalog?.providers ?? [];
-	const providerItems: SelItem[] = [
-		{ value: ANY_PROVIDER, label: "Any provider" },
-		...providers.map((p) => ({ value: p.id, label: p.label })),
-	];
-	const selectedProvider = providers.find((p) => p.id === value.provider);
-	const suggestions = selectedProvider?.suggestedModels ?? [];
 	const effortItems: SelItem[] = [
 		{ value: DEFAULT_EFFORT, label: "Provider default" },
 		...(catalog?.thinkingLevels ?? []).map((l) => ({ value: l, label: l })),
 	];
-
-	const providerValue = value.provider || ANY_PROVIDER;
 	const effortValue = value.effort || DEFAULT_EFFORT;
 
 	return (
 		<div className="space-y-3">
-			{showProvider && (
-				<div className="flex flex-col gap-1.5">
-					<Label className="text-muted-foreground text-xs">
-						Provider (suggestions)
-					</Label>
-					<Select
-						items={providerItems}
-						onValueChange={(v) =>
-							onChange({
-								...value,
-								provider: v && v !== ANY_PROVIDER ? v : "",
-							})
-						}
-						value={providerValue}
-					>
-						<SelectTrigger className="h-8 text-sm">
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{providerItems.map((it) => (
-								<SelectItem className="text-sm" key={it.value} value={it.value}>
-									{it.label}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-				</div>
-			)}
-
 			<div className="flex flex-col gap-1.5">
 				<Label className="text-muted-foreground text-xs">Model</Label>
-				<Input
-					className="h-8 text-sm"
-					onChange={(e) => onChange({ ...value, model: e.target.value })}
+				<AgentModelPickerField
+					ariaLabel="Model"
+					mode="model"
+					onChange={(model) => onChange({ ...value, model })}
+					onModelPick={(providerId, model) =>
+						onChange({ ...value, provider: providerId ?? "", model })
+					}
 					placeholder="Use default model"
+					target={target}
 					value={value.model}
 				/>
-				{suggestions.length > 0 && (
-					<div className="flex flex-wrap gap-1">
-						{suggestions.map((m) => (
-							<Button
-								className="h-6 rounded-full px-2 text-xs"
-								key={m}
-								onClick={() => onChange({ ...value, model: m })}
-								size="sm"
-								type="button"
-								variant={value.model === m ? "secondary" : "ghost"}
-							>
-								{m}
-							</Button>
-						))}
-					</div>
-				)}
 			</div>
 
 			<div className="flex flex-col gap-1.5">

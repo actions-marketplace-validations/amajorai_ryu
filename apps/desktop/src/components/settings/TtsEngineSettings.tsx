@@ -21,6 +21,13 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
+	DESKTOP_TTS_ENGINE_KEY,
+	DESKTOP_TTS_VOICE_KEY,
+	getDesktopTtsPrefs,
+	setDesktopTtsPref,
+	subscribeDesktopTtsPrefs,
+} from "@/src/lib/api/preferences.ts";
+import {
 	installTtsModel,
 	listTtsEngines,
 	listTtsModels,
@@ -35,37 +42,29 @@ import {
 	SettingsSection,
 } from "./shared/settings-items.tsx";
 
-const ENGINE_PREF_KEY = "ryu.tts.engine";
-const VOICE_PREF_KEY = "ryu.tts.voice";
 const SAMPLE_TEXT = "Hi, this is Ryu speaking with the selected voice engine.";
 // The optional multi-engine TTS sidecar lives in the catalog's `voice` category;
 // installing/starting it is what unlocks the non-OuteTTS voices.
 const VOICE_CATEGORIES = ["voice"] as const;
 
-function readPref(key: string): string | null {
-	try {
-		return localStorage.getItem(key);
-	} catch {
-		return null;
-	}
-}
-
-function writePref(key: string, value: string): void {
-	try {
-		localStorage.setItem(key, value);
-	} catch {
-		// Ignore storage failures — the picker still works for this session.
-	}
-}
-
 export function TtsEngineSettings() {
 	const node = useActiveNode();
 	const [engines, setEngines] = useState<TtsEngine[]>([]);
 	const [engineId, setEngineId] = useState<string>(
-		() => readPref(ENGINE_PREF_KEY) ?? "kokoro"
+		() => getDesktopTtsPrefs().engine
 	);
-	const [voice, setVoice] = useState<string>(
-		() => readPref(VOICE_PREF_KEY) ?? ""
+	const [voice, setVoice] = useState<string>(() => getDesktopTtsPrefs().voice);
+
+	// The node selector's Text-to-speech layer writes the same two keys, so pull
+	// them back in when it changes them while this screen is open.
+	useEffect(
+		() =>
+			subscribeDesktopTtsPrefs(() => {
+				const next = getDesktopTtsPrefs();
+				setEngineId(next.engine);
+				setVoice(next.voice);
+			}),
+		[]
 	);
 	const [loadFailed, setLoadFailed] = useState(false);
 	const [_reloadNonce, setReloadNonce] = useState(0);
@@ -152,20 +151,20 @@ export function TtsEngineSettings() {
 
 	const handleEngine = (value: string) => {
 		setEngineId(value);
-		writePref(ENGINE_PREF_KEY, value);
+		setDesktopTtsPref(DESKTOP_TTS_ENGINE_KEY, value);
 		// Reset the voice to the new engine's default if the current one is invalid.
 		const next = engines.find((e) => e.id === value);
 		const stillValid = next?.voices.includes(voice);
 		if (!stillValid) {
 			const fallback = next?.default_voice ?? "";
 			setVoice(fallback);
-			writePref(VOICE_PREF_KEY, fallback);
+			setDesktopTtsPref(DESKTOP_TTS_VOICE_KEY, fallback);
 		}
 	};
 
 	const handleVoice = (value: string) => {
 		setVoice(value);
-		writePref(VOICE_PREF_KEY, value);
+		setDesktopTtsPref(DESKTOP_TTS_VOICE_KEY, value);
 	};
 
 	const handleTest = useCallback(async () => {

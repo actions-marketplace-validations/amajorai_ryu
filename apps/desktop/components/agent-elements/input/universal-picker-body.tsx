@@ -1,23 +1,26 @@
 "use client";
 
-// The universal picker's dropdown BODY — the grouped
-// `Ryu Portal · Providers · External Agents` layout that replaces the old
-// sibling-submenu list (Agent / Model / Approval as peers). Fed to
-// `ComposerSettingsMenu` via its `renderBody` prop, so the trigger summary
-// (`Ryu · Sonnet · Plan`) is unchanged; only the popover body is new.
+// The universal picker's dropdown BODY. Fed to `ComposerSettingsMenu` via its
+// `renderBody` prop, so the trigger summary (`Ryu · Sonnet · Plan`) is unchanged;
+// only the popover body is owned here.
 //
-// Three sections, one search box on top:
-//   1. Ryu Portal   — the flagship `ryu` agent (Pi + Gateway). When it's the
-//                      active target its live model + thinking pickers nest under it.
-//   2. Providers    — every Pi provider the Ryu agent can route to. A configured
-//                      provider drills into its models + thinking; an unconfigured
-//                      one offers a single "Configure credentials" row that opens
-//                      the Gateway → Providers dialog.
-//   3. External agents — installed ACP harnesses (Claude Code, Codex, Gemini CLI,
+// Compact root (no search query) — one row per TARGET, everything else nested:
+//   1. Ryu          — the flagship `ryu` agent, ONE row. Its submenu holds
+//                      "Use Ryu", the live model + thinking pickers when it's the
+//                      active target, and the full Providers list (every Pi
+//                      provider the Ryu agent can route to — they are routes OF
+//                      the Ryu agent, not sibling targets). A configured provider
+//                      drills into its models + thinking; an unconfigured one
+//                      offers a single "Configure credentials" row.
+//   2. External agents — installed ACP harnesses (Claude Code, Codex, Gemini CLI,
 //                      …) drill into their advertised model / thinking / approval,
 //                      probed LAZILY on submenu-open (one subprocess, not a storm).
-//                      Not-installed catalog entries render greyed with an Install
-//                      button on the right.
+//   3. Install agents — not-installed catalog entries collapsed behind ONE
+//                      submenu row (greyed rows with an Install button inside).
+//
+// Typing in the search box flattens everything back out (providers and
+// installable agents surface as top-level matches) so nesting never hides a
+// target from search.
 //
 // The lazy probe is the load-bearing detail: `DropdownMenuSubContent` (Base UI,
 // `keepMounted={false}`) unmounts a closed submenu's children, so
@@ -122,6 +125,12 @@ export interface UniversalPickerData {
 	agents: AgentSummary[];
 	/** Not-installed external agents (catalog entries with `added === false`). */
 	availableExternal: AgentCatalogEntry[];
+	/**
+	 * Plain selectable agents that are neither the flagship nor ACP externals
+	 * (custom store agents, `transport` null). Rendered as flat pick rows — they
+	 * advertise no model/thinking config to drill into. Defaults to none.
+	 */
+	customAgents?: AgentSummary[];
 	/**
 	 * Suppress the "Auto" (Plane B) row. The composer always offers Auto so a turn
 	 * can be routed per-rule; a controlled settings *field* (which persists one
@@ -827,6 +836,7 @@ export function UniversalPickerBody({
 		activeModelSection,
 		activeExtraSections,
 		availableExternal,
+		customAgents = [],
 		installedExternal,
 		installPendingId,
 		onConfigureAuto,
@@ -847,11 +857,13 @@ export function UniversalPickerBody({
 	} = data;
 
 	// Total rows across all sections — the search box only earns its space once the
-	// list is long enough to need filtering.
+	// list is long enough to need filtering. Counts the FLATTENED search space
+	// (providers, installable agents), not the compact root.
 	const totalRows =
 		(ryuAgent ? 1 : 0) +
 		providers.length +
 		installedExternal.length +
+		customAgents.length +
 		availableExternal.length +
 		teams.length;
 	const showSearch = totalRows >= SEARCH_THRESHOLD;
@@ -860,22 +872,27 @@ export function UniversalPickerBody({
 	const filteredInstalled = installedExternal.filter((a) =>
 		matches(q, a.name, a.id, a.description)
 	);
+	const filteredCustom = customAgents.filter((a) =>
+		matches(q, a.name, a.id, a.description)
+	);
 	const filteredAvailable = availableExternal.filter((a) =>
 		matches(q, a.name, a.id, a.description)
 	);
 	const filteredTeams = teams.filter((t) => matches(q, t.name, t.id));
-	const ryuVisible = ryuAgent
-		? matches(q, ryuAgent.name, "ryu portal ryu")
-		: false;
+	const ryuVisible = ryuAgent ? matches(q, ryuAgent.name, "ryu") : false;
 	// The "Auto" row is always offered (empty query) and stays findable by search —
 	// unless a settings field suppresses it (`hideAuto`).
 	const autoVisible =
 		!data.hideAuto && matches(q, "auto routes best agent by your rules");
 	const autoActive = data.activeAgentId === AUTO_AGENT_ID;
 
+	// The Ryu agent is the active target whether it routes through the portal
+	// (gateway/local) or through one of its providers — the root row reflects both.
+	const ryuRowActive = ryuActive || providers.some((p) => p.isActive);
+
 	// The active agent's LIVE model/approval/thinking sections (wired to the host's
-	// live handlers). Rendered under whichever row is the active target — Ryu Portal
-	// or the active external agent — so tuning the current target updates the running
+	// live handlers). Rendered under whichever row is the active target — Ryu or
+	// the active external agent — so tuning the current target updates the running
 	// turn directly, instead of a second `useComposerAcpSections` instance whose picks
 	// wouldn't reach the host until a remount.
 	const activeSections: ComposerSettingsSection[] = [
@@ -887,8 +904,138 @@ export function UniversalPickerBody({
 		!(autoVisible || ryuVisible) &&
 		filteredProviders.length === 0 &&
 		filteredInstalled.length === 0 &&
+		filteredCustom.length === 0 &&
 		filteredAvailable.length === 0 &&
 		filteredTeams.length === 0;
+
+	const providerSub = (provider: ProviderEntry) => (
+		<TargetSub
+			engineKey={provider.engineKey}
+			isActive={provider.isActive}
+			key={provider.id}
+			label={provider.label}
+			providerId={provider.id}
+		>
+			<ProviderSubBody
+				close={close}
+				onConfigure={onConfigureCredentials}
+				onModel={(modelId) => onSelectProviderModel(provider.id, modelId)}
+				onThinking={(level) => onSelectProviderThinking(provider.id, level)}
+				onUpgrade={onUpgrade}
+				onUse={() => onUseProvider(provider.id)}
+				provider={provider}
+				thinkingLevels={thinkingLevels}
+			/>
+		</TargetSub>
+	);
+
+	const externalSub = (agent: AgentSummary) => {
+		const isActive = agent.id === data.activeAgentId;
+		return (
+			<TargetSub
+				avatarUrl={agent.avatarUrl}
+				engineKey={agent.engine ?? agent.id}
+				isActive={isActive}
+				key={agent.id}
+				label={agent.name}
+			>
+				{isActive && activeSections.length > 0 ? (
+					<>
+						<UseTargetItem
+							isActive
+							label={`Use ${agent.name}`}
+							onSelect={close}
+						/>
+						{activeSections.map((section) => (
+							<SettingSub close={close} key={section.key} section={section} />
+						))}
+					</>
+				) : (
+					// No live sections from the host (settings-field mode, or a
+					// non-active agent) — probe the agent's own advertised
+					// model/thinking/approval lazily instead.
+					<ExternalAgentSettings
+						agent={agent}
+						agents={agents}
+						close={close}
+						isActive={isActive}
+						onSelect={() => onSelectAgent(agent.id)}
+					/>
+				)}
+			</TargetSub>
+		);
+	};
+
+	const customAgentRow = (agent: AgentSummary) => {
+		const isActive = agent.id === data.activeAgentId;
+		return (
+			<DropdownMenuItem
+				className={cn("gap-2", isActive && "bg-foreground/10")}
+				key={agent.id}
+				onClick={() => {
+					onSelectAgent(agent.id);
+					close();
+				}}
+			>
+				{agent.avatarUrl ? (
+					// biome-ignore lint/performance/noImgElement: Tauri/Vite, data URL avatar
+					// biome-ignore lint/correctness/useImageSize: sized via class
+					<img
+						alt=""
+						className="size-4 shrink-0 rounded-full object-cover"
+						src={agent.avatarUrl}
+					/>
+				) : (
+					<AgentLogo
+						className="size-4 shrink-0"
+						engine={agent.engine ?? null}
+						size="16px"
+					/>
+				)}
+				<span className="flex-1 truncate">{agent.name}</span>
+				{isActive && (
+					<HugeiconsIcon
+						className="shrink-0 text-muted-foreground"
+						icon={Tick02Icon}
+						size={16}
+						strokeWidth={2}
+					/>
+				)}
+			</DropdownMenuItem>
+		);
+	};
+
+	const ryuSub = ryuAgent && (
+		<TargetSub
+			avatarUrl={ryuAgent.avatarUrl}
+			engineKey="ryu"
+			isActive={ryuRowActive}
+			label={ryuAgent.name}
+		>
+			<UseTargetItem
+				isActive={ryuActive}
+				label={`Use ${ryuAgent.name}`}
+				onSelect={() => {
+					onSelectAgent(ryuAgent.id);
+					close();
+				}}
+			/>
+			{ryuActive &&
+				activeSections.map((section) => (
+					<SettingSub close={close} key={section.key} section={section} />
+				))}
+			{providers.length > 0 && (
+				<>
+					<div className="my-1 border-border/60 border-t" />
+					<SectionHeader
+						label="Providers"
+						tooltip="Routes Ryu can send your turns through. Pick a provider to use its models with your own credentials or subscription."
+					/>
+					{providers.map(providerSub)}
+				</>
+			)}
+		</TargetSub>
+	);
 
 	return (
 		<div className="flex flex-col">
@@ -913,7 +1060,7 @@ export function UniversalPickerBody({
 					</p>
 				)}
 
-				{/* 0. Auto (Plane B — Core picks the agent per-turn) */}
+				{/* Auto (Plane B — Core picks the agent per-turn) */}
 				{autoVisible && (
 					<AutoTargetRow
 						isActive={autoActive}
@@ -928,119 +1075,71 @@ export function UniversalPickerBody({
 					/>
 				)}
 
-				{/* 1. Ryu Portal */}
-				{ryuAgent && ryuVisible && (
+				{q ? (
+					// ── Search results: flattened so nesting never hides a match ──
 					<>
-						<SectionHeader label="Ryu Portal" />
-						<TargetSub
-							avatarUrl={ryuAgent.avatarUrl}
-							engineKey="ryu"
-							isActive={ryuActive}
-							label={ryuAgent.name}
-						>
-							<UseTargetItem
-								isActive={ryuActive}
-								label={`Use ${ryuAgent.name}`}
-								onSelect={() => {
-									onSelectAgent(ryuAgent.id);
-									close();
-								}}
-							/>
-							{ryuActive &&
-								activeSections.map((section) => (
-									<SettingSub
-										close={close}
-										key={section.key}
-										section={section}
+						{ryuVisible && ryuSub}
+						{filteredProviders.length > 0 && (
+							<>
+								<SectionHeader label="Providers" />
+								{filteredProviders.map(providerSub)}
+							</>
+						)}
+						{(filteredInstalled.length > 0 || filteredCustom.length > 0) && (
+							<>
+								<SectionHeader label="Agents" />
+								{filteredInstalled.map(externalSub)}
+								{filteredCustom.map(customAgentRow)}
+							</>
+						)}
+						{filteredAvailable.length > 0 && (
+							<>
+								<SectionHeader label="Not installed" />
+								{filteredAvailable.map((entry) => (
+									<AvailableAgentRow
+										entry={entry}
+										installing={installPendingId === entry.id}
+										key={entry.id}
+										onInstall={() => onInstallExternal(entry.id)}
 									/>
 								))}
-						</TargetSub>
+							</>
+						)}
 					</>
-				)}
-
-				{/* 2. Providers */}
-				{filteredProviders.length > 0 && (
+				) : (
+					// ── Compact root: one row per target ──
 					<>
-						<SectionHeader label="Providers" />
-						{filteredProviders.map((provider) => (
-							<TargetSub
-								engineKey={provider.engineKey}
-								isActive={provider.isActive}
-								key={provider.id}
-								label={provider.label}
-								providerId={provider.id}
-							>
-								<ProviderSubBody
-									close={close}
-									onConfigure={onConfigureCredentials}
-									onModel={(modelId) =>
-										onSelectProviderModel(provider.id, modelId)
-									}
-									onThinking={(level) =>
-										onSelectProviderThinking(provider.id, level)
-									}
-									onUpgrade={onUpgrade}
-									onUse={() => onUseProvider(provider.id)}
-									provider={provider}
-									thinkingLevels={thinkingLevels}
-								/>
-							</TargetSub>
-						))}
-					</>
-				)}
-
-				{/* 3. External agents */}
-				{(filteredInstalled.length > 0 || filteredAvailable.length > 0) && (
-					<>
-						<SectionHeader
-							label="External Agents"
-							tooltip="Third-party coding agents (Claude Code, Codex, Gemini CLI, …) that run as their own process. Ryu governs their tool calls; pick one to use its own models and approval modes."
-						/>
-						{filteredInstalled.map((agent) => {
-							const isActive = agent.id === data.activeAgentId;
-							return (
-								<TargetSub
-									avatarUrl={agent.avatarUrl}
-									engineKey={agent.engine ?? agent.id}
-									isActive={isActive}
-									key={agent.id}
-									label={agent.name}
-								>
-									{isActive ? (
-										<>
-											<UseTargetItem
-												isActive
-												label={`Use ${agent.name}`}
-												onSelect={close}
-											/>
-											{activeSections.map((section) => (
-												<SettingSub
-													close={close}
-													key={section.key}
-													section={section}
-												/>
-											))}
-										</>
-									) : (
-										<ExternalAgentSettings
-											agent={agent}
-											agents={agents}
-											close={close}
-											isActive={false}
-											onSelect={() => onSelectAgent(agent.id)}
+						{ryuSub}
+						{filteredInstalled.map(externalSub)}
+						{filteredCustom.map(customAgentRow)}
+						{availableExternal.length > 0 && (
+							<DropdownMenuSub>
+								<DropdownMenuSubTrigger>
+									<span className="flex min-w-0 flex-1 items-center gap-2 text-muted-foreground">
+										<HugeiconsIcon
+											className="shrink-0"
+											icon={Download04Icon}
+											size={16}
+											strokeWidth={2}
 										/>
-									)}
-								</TargetSub>
-							);
-						})}
-						{filteredAvailable.map((entry) => (
-							<AvailableAgentRow
-								entry={entry}
-								installing={installPendingId === entry.id}
-								key={entry.id}
-								onInstall={() => onInstallExternal(entry.id)}
-							/>
-						))}
+										<span className="truncate">Install agents</span>
+									</span>
+									<span className="mr-1 shrink-0 text-[11px] text-muted-foreground tabular-nums">
+										{availableExternal.length}
+									</span>
+								</DropdownMenuSubTrigger>
+								<DropdownMenuSubContent className="max-h-80 min-w-[240px] max-w-[320px] overflow-y-auto p-1">
+									{availableExternal.map((entry) => (
+										<AvailableAgentRow
+											entry={entry}
+											installing={installPendingId === entry.id}
+											key={entry.id}
+											onInstall={() => onInstallExternal(entry.id)}
+										/>
+									))}
+								</DropdownMenuSubContent>
+							</DropdownMenuSub>
+						)}
 					</>
 				)}
 

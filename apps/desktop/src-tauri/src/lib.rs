@@ -5,6 +5,7 @@ mod permissions;
 mod profile;
 mod secrets;
 mod shadow_auth;
+mod startup;
 mod tray;
 mod win_process;
 // M7 companion spike — compiled only when companion-spike feature is active.
@@ -105,8 +106,25 @@ fn resolve_core_binary() -> Option<std::path::PathBuf> {
 		.or_else(|| {
 			Some(profile::ryu_home_dir().join("bin").join(bin_name)).filter(|p| p.exists())
 		})
-		// 3. PATH
-		.or_else(|| which::which(bin_name.strip_suffix(".exe").unwrap_or(bin_name)).ok())
+		// 3. PATH — but never another profile's installed binary. Installers put
+		//    `~/.ryu/bin` AND `~/.ryu-dev/bin` on PATH, so a dev profile whose own
+		//    `~/.ryu-dev/bin/ryu-core` is missing would otherwise fall through to the
+		//    RELEASE exe here and silently run a Core of a different (usually older)
+		//    build against the dev data dir — the exact leak step 2's comment forbids.
+		//    Rejecting it here is only safe because `install::is_installed` rejects the
+		//    same hit, so the missing binary is downloaded rather than left unresolved.
+		.or_else(|| {
+			let hit = which::which(bin_name.strip_suffix(".exe").unwrap_or(bin_name)).ok()?;
+			if profile::is_foreign_profile_bin(&hit) {
+				tracing::warn!(
+					"ignoring {} on PATH — it belongs to another Ryu profile, not {}",
+					hit.display(),
+					profile::name()
+				);
+				return None;
+			}
+			Some(hit)
+		})
 		// 4. Dev build: navigate from exe to workspace root
 		.or_else(|| {
 			if !cfg!(debug_assertions) {
@@ -1073,7 +1091,14 @@ pub fn run() {
 		// update *verdict* + the auto-update toggle live in Core. plugin-process
 		// provides `relaunch()` after a successful install.
 		.plugin(tauri_plugin_updater::Builder::new().build())
-		.plugin(tauri_plugin_process::init());
+		.plugin(tauri_plugin_process::init())
+		// Launch at login. The registration carries `--autostart` so a
+		// login-launched instance is distinguishable from a user-opened one —
+		// that is what gates the "start hidden" preference (see `startup.rs`).
+		.plugin(tauri_plugin_autostart::init(
+			tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+			Some(vec![startup::AUTOSTART_ARG]),
+		));
 
 	// MCP bridge (Tauri MCP server) is a dev/test-only tool — never ship in release.
 	#[cfg(debug_assertions)]
@@ -1083,6 +1108,13 @@ pub fn run() {
 
 	builder.setup(|app| {
             let win = app.get_webview_window("main").unwrap();
+            // Login-launched with "start hidden" on: take the window off screen
+            // before anything else runs, so there is no flash of an empty frame.
+            // Deliberately first: a manual launch never takes this branch, so no
+            // later failure in setup can strand the user with no visible window.
+            if startup::should_start_hidden(app) {
+                let _ = win.hide();
+            }
             win.create_overlay_titlebar().unwrap();
             #[cfg(target_os = "macos")]
             {
@@ -1270,6 +1302,8 @@ pub fn run() {
             open_tab_window,
             tray::get_hide_tray_icon,
             tray::set_hide_tray_icon,
+            startup::get_start_hidden,
+            startup::set_start_hidden,
             shell_execute,
             read_project_file,
             write_project_file,
@@ -1328,6 +1362,26 @@ pub fn run() {
                 };
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, _event| {
+            // macOS: clicking the dock icon (or re-opening from Spotlight) does
+            // not spawn a second process, so the single-instance handler never
+            // fires. Without this, an instance started hidden at login — or one
+            // whose window was closed to the tray — has no way back on screen if
+            // the tray icon is also hidden. Windows/Linux recover through the
+            // single-instance path instead.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = _event
+            {
+                if let Some(win) = _app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            }
+        });
 }

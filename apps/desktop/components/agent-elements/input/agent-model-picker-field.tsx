@@ -8,10 +8,14 @@
 // Unlike `useUniversalPicker` (which drives the RUNNING turn by calling Pi
 // `save()`), this is a controlled value field: it reads a stored string and emits
 // the pick via `onChange`, mutating nothing live. Two shapes:
-//   - mode="model": Providers → model list. Emits the bare model id. Thinking is
+//   - mode="model": Providers → model list. Emits the bare model id (and the
+//     owning provider via `onModelPick` when the caller wants it). Thinking is
 //     hidden (a plain model-id field has nowhere to persist it) and the Auto row
 //     is suppressed.
-//   - mode="agent": Agents + installed external agents. Emits the agent id.
+//   - mode="agent": the SAME target list the composer shows — Ryu (flagship),
+//     installed external ACP agents with their advertised model / reasoning /
+//     approval submenus (picks persist as that agent's defaults, exactly like
+//     the composer), and custom agents. Emits the agent id.
 //
 // The trigger mimics the surrounding settings inputs (a full-width bordered
 // button) rather than the composer's ghost pill, so it blends into settings cards.
@@ -60,6 +64,13 @@ export interface AgentModelPickerFieldProps {
 	/** "model" → emit a model id; "agent" → emit an agent id. */
 	mode: "model" | "agent";
 	onChange: (next: string) => void;
+	/**
+	 * Model mode only: when set, provider-list picks call THIS instead of
+	 * `onChange`, carrying the owning provider id (null for a free-typed custom
+	 * model). Lets callers that persist `{provider, model}` pairs (side-model
+	 * configs) record both from one pick.
+	 */
+	onModelPick?: (providerId: string | null, modelId: string) => void;
 	placeholder?: string;
 	/** The Core node this field's catalog/agents are read from. */
 	target: ApiTarget;
@@ -171,6 +182,7 @@ export function AgentModelPickerField({
 	target,
 	value,
 	onChange,
+	onModelPick,
 	placeholder = mode === "agent" ? "Select an agent" : "Select a model",
 	ariaLabel,
 	className,
@@ -208,6 +220,14 @@ export function AgentModelPickerField({
 	);
 
 	const data: UniversalPickerData = useMemo(() => {
+		// Provider-aware emit: callers persisting `{provider, model}` get both.
+		const emit = (providerId: string | null, modelId: string) => {
+			if (onModelPick) {
+				onModelPick(providerId, modelId);
+			} else {
+				onChange(modelId);
+			}
+		};
 		if (mode === "model") {
 			const providers: ProviderEntry[] = (catalogQuery.data?.providers ?? [])
 				// The synthetic gateway pseudo-provider carries no models of its own.
@@ -253,13 +273,14 @@ export function AgentModelPickerField({
 				// thinking submenu is hidden.
 				thinkingLevels: [],
 				onSelectAgent: NOOP,
-				onSelectProviderModel: (_providerId, modelId) => onChange(modelId),
+				onSelectProviderModel: (providerId, modelId) =>
+					emit(providerId, modelId),
 				onSelectProviderThinking: NOOP,
 				onUseProvider: (providerId) => {
 					const p = providers.find((x) => x.id === providerId);
 					const first = p?.currentModel ?? p?.models[0]?.id;
 					if (first) {
-						onChange(first);
+						emit(providerId, first);
 					}
 				},
 				onConfigureAuto: NOOP,
@@ -271,27 +292,34 @@ export function AgentModelPickerField({
 			};
 		}
 
-		// Agent mode: real agents + installed external ACP agents, no providers.
-		// The flagship (`recommended`) is always a selectable target even if its
-		// transport is "acp", so it never falls through the cracks between the two
-		// buckets.
+		// Agent mode: the SAME target buckets the composer's picker shows. The
+		// flagship heads the list; installed external ACP agents keep their
+		// advertised model / reasoning / approval submenus (`ExternalAgentSettings`
+		// probes lazily and persists picks as that agent's defaults — identical to
+		// the composer); everything else is a flat custom-agent row. No Pi
+		// providers: this field persists one agent id, never a live Pi route.
+		const flagship =
+			agents.find((a) => a.id === "ryu") ??
+			agents.find((a) => a.recommended) ??
+			null;
 		const installedExternal = agents.filter(
-			(a) => a.transport === "acp" && !a.recommended
+			(a) => a.transport === "acp" && a.id !== flagship?.id
 		);
-		const pickable = agents.filter(
-			(a) => a.transport !== "acp" || a.recommended
+		const customAgents = agents.filter(
+			(a) => a.transport !== "acp" && a.id !== flagship?.id
 		);
 		return {
 			activeAgentId: value || null,
-			agents: pickable,
+			agents,
 			activeModelSection: null,
 			activeExtraSections: [],
 			availableExternal: [],
+			customAgents,
 			installedExternal,
 			installPendingId: null,
 			hideAuto: true,
-			ryuAgent: null,
-			ryuActive: false,
+			ryuAgent: flagship,
+			ryuActive: value !== "" && value === flagship?.id,
 			providers: [],
 			teams: [],
 			thinkingLevels: [],
@@ -306,9 +334,11 @@ export function AgentModelPickerField({
 			onSelectTeam: undefined,
 			onUpgrade: NOOP,
 		};
-	}, [mode, catalogQuery.data, agents, value, onChange]);
+	}, [mode, catalogQuery.data, agents, value, onChange, onModelPick]);
 
-	const label = value || placeholder;
+	// Agent mode shows the picked agent's display name; model mode the raw id.
+	const label =
+		((mode === "agent" ? activeAgent?.name : null) ?? value) || placeholder;
 
 	return (
 		<ComposerSettingsMenu
@@ -320,7 +350,12 @@ export function AgentModelPickerField({
 						<CustomModelRow
 							current={value}
 							onCommit={(id) => {
-								onChange(id);
+								// Free-typed id — no owning provider to report.
+								if (onModelPick) {
+									onModelPick(null, id);
+								} else {
+									onChange(id);
+								}
 								close();
 							}}
 						/>

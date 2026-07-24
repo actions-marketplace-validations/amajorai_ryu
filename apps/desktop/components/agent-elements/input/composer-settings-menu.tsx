@@ -95,7 +95,7 @@ export interface ComposerSettingsMenuProps {
 	/**
 	 * Replaces the default sibling-submenu body (one `DropdownMenuSub` per
 	 * section) with a caller-owned dropdown body — the universal picker's
-	 * grouped `Ryu Portal · Providers · External Agents` layout. The trigger
+	 * grouped `Ryu (providers nested) · External Agents` layout. The trigger
 	 * summary still derives from `sections` (so `Ryu · Sonnet · Plan` stays
 	 * glanceable); only the popover body changes. `close` collapses the menu
 	 * after a selection. When omitted, the sections render as before.
@@ -322,71 +322,71 @@ export function ComposerSettingsMenu({
 				{renderBody
 					? renderBody(() => setOpen(false))
 					: visibleSections.map((section) => {
-					const loadingEmpty = isLoadingEmpty(section);
-					const activeDeco = section.decorate?.(
-						activeItem(section) ?? {
-							id: "",
-							name: "",
-						}
-					);
-					let sectionBody: ReactNode;
-					if (loadingEmpty) {
-						sectionBody = (
-							<div className="flex items-center gap-2 px-2.5 py-2 text-[13px] text-muted-foreground">
-								<HugeiconsIcon
-									className="shrink-0 animate-spin"
-									icon={Loading03Icon}
-									size={14}
-									strokeWidth={2}
-								/>
-								<span>Detecting available options…</span>
-							</div>
-						);
-					} else if (section.renderContent) {
-						sectionBody = section.renderContent(closeAfter(section));
-					} else {
-						sectionBody = section.items.map(renderRow(section));
-					}
-					return (
-						<DropdownMenuSub key={section.key}>
-							<DropdownMenuSubTrigger>
-								<span className="flex-1 text-[13px] text-muted-foreground">
-									{section.label}
-								</span>
-								<span
-									className={cn(
-										"flex max-w-[160px] items-center gap-1.5 text-[13px] text-muted-foreground",
-										!loadingEmpty && activeDeco?.className
-									)}
-								>
-									{loadingEmpty ? (
+							const loadingEmpty = isLoadingEmpty(section);
+							const activeDeco = section.decorate?.(
+								activeItem(section) ?? {
+									id: "",
+									name: "",
+								}
+							);
+							let sectionBody: ReactNode;
+							if (loadingEmpty) {
+								sectionBody = (
+									<div className="flex items-center gap-2 px-2.5 py-2 text-[13px] text-muted-foreground">
 										<HugeiconsIcon
 											className="shrink-0 animate-spin"
 											icon={Loading03Icon}
 											size={14}
 											strokeWidth={2}
 										/>
-									) : (
-										activeDeco && (
-											<HugeiconsIcon
-												className="shrink-0"
-												icon={activeDeco.icon}
-												size={14}
-												strokeWidth={2}
-											/>
-										)
-									)}
-									<span className="truncate">
-										{loadingEmpty ? "Detecting…" : activeItemName(section)}
-									</span>
-								</span>
-							</DropdownMenuSubTrigger>
-							<DropdownMenuSubContent className="max-h-80 min-w-[220px] max-w-[300px] overflow-hidden p-0">
-								{sectionBody}
-							</DropdownMenuSubContent>
-						</DropdownMenuSub>
-					);
-				})}
+										<span>Detecting available options…</span>
+									</div>
+								);
+							} else if (section.renderContent) {
+								sectionBody = section.renderContent(closeAfter(section));
+							} else {
+								sectionBody = section.items.map(renderRow(section));
+							}
+							return (
+								<DropdownMenuSub key={section.key}>
+									<DropdownMenuSubTrigger>
+										<span className="flex-1 text-[13px] text-muted-foreground">
+											{section.label}
+										</span>
+										<span
+											className={cn(
+												"flex max-w-[160px] items-center gap-1.5 text-[13px] text-muted-foreground",
+												!loadingEmpty && activeDeco?.className
+											)}
+										>
+											{loadingEmpty ? (
+												<HugeiconsIcon
+													className="shrink-0 animate-spin"
+													icon={Loading03Icon}
+													size={14}
+													strokeWidth={2}
+												/>
+											) : (
+												activeDeco && (
+													<HugeiconsIcon
+														className="shrink-0"
+														icon={activeDeco.icon}
+														size={14}
+														strokeWidth={2}
+													/>
+												)
+											)}
+											<span className="truncate">
+												{loadingEmpty ? "Detecting…" : activeItemName(section)}
+											</span>
+										</span>
+									</DropdownMenuSubTrigger>
+									<DropdownMenuSubContent className="max-h-80 min-w-[220px] max-w-[300px] overflow-hidden p-0">
+										{sectionBody}
+									</DropdownMenuSubContent>
+								</DropdownMenuSub>
+							);
+						})}
 				{footer && (
 					<div className="mt-1 border-border/60 border-t px-2 pt-2 pb-1 empty:hidden">
 						{footer}

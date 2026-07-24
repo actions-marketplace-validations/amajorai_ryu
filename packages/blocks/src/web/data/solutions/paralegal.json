@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Reusable skills",
-      "description": "Package repeatable tasks like deposition summaries and cite-checks as skills you can run on any matter, the same way each time."
+      "description": "Package repeatable tasks like deposition summaries and cite-checks as skills you can run on any matter, the same way each time.",
+      "icon": "Sparkles"
     },
     {
       "title": "Cites the source",
-      "description": "Ground agents on the matter's filings and records with Spaces and RAG, so every summary points back to the page and document."
+      "description": "Ground agents on the matter's filings and records with Spaces and RAG, so every summary points back to the page and document.",
+      "icon": "Eye"
     },
     {
       "title": "Matter data stays private",
-      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request."
+      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request.",
+      "icon": "Shield"
     },
     {
       "title": "Auditable by default",
-      "description": "Every model and tool call is logged in the Gateway audit trail, so the attorney can see exactly what the assistant worked from."
+      "description": "Every model and tool call is logged in the Gateway audit trail, so the attorney can see exactly what the assistant worked from.",
+      "icon": "Eye"
     }
   ],
   "useCases": [

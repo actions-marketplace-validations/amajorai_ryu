@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Enforces your style guide",
-      "description": "Ground checks on your house style and term list with Spaces and RAG so spelling, capitalization, and usage stay consistent throughout."
+      "description": "Ground checks on your house style and term list with Spaces and RAG so spelling, capitalization, and usage stay consistent throughout.",
+      "icon": "Sparkles"
     },
     {
       "title": "Explains every change",
-      "description": "Each suggestion comes with the reason and the rule it applies, so you decide rather than accept a black-box rewrite."
+      "description": "Each suggestion comes with the reason and the rule it applies, so you decide rather than accept a black-box rewrite.",
+      "icon": "Plug"
     },
     {
       "title": "Consistency across a document",
-      "description": "Flag the same term spelled or capitalized two ways, mismatched tense, and drifting tone across a long manuscript."
+      "description": "Flag the same term spelled or capitalized two ways, mismatched tense, and drifting tone across a long manuscript.",
+      "icon": "Terminal"
     },
     {
       "title": "Confidential manuscripts stay home",
-      "description": "Proofread unpublished books, filings, and reports on a local model with no telemetry so the text never leaves your device."
+      "description": "Proofread unpublished books, filings, and reports on a local model with no telemetry so the text never leaves your device.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

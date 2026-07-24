@@ -530,19 +530,136 @@ enum SecretToken {
     Absent,
 }
 
+/// Operator override naming the process env vars ANY plugin may read through an
+/// `env:` secret-header token, comma/whitespace separated. Additive on top of the
+/// per-plugin prefix below — the escape hatch for a deployment that wants a
+/// Community plugin to reach a shared credential (`RYU_TOKEN`, a corporate proxy
+/// key) without shipping it a Core-tier id.
+const ENV_SECRET_ALLOWLIST: &str = "RYU_PLUGIN_ENV_ALLOWLIST";
+
+/// The per-plugin env-var prefix a Community-tier plugin may read from without any
+/// operator configuration: `RYU_PLUGIN_<UPPER(plugin_id)>_`, with every
+/// non-alphanumeric character folded to `_` (so `com.acme.weather` →
+/// `RYU_PLUGIN_COM_ACME_WEATHER_`).
+///
+/// # Why the `RYU_PLUGIN_` infix rather than the bare `RYU_<ID>_` BYOK shape
+///
+/// The obvious rule — mirror the shape first-party manifests already author, where
+/// `exa` reads `RYU_EXA_API_KEY` — puts the plugin namespace INSIDE Core's own
+/// configuration namespace, and plugin ids are free-form (a bare kebab id like
+/// `ghost` or `rtk` is legal, see `validate_plugin_id`). A plugin is therefore free
+/// to name ITSELF after a Core config family and read that family's secrets: id
+/// `master` → `RYU_MASTER_` ⊃ `RYU_MASTER_KEY`; id `gateway` → `RYU_GATEWAY_` ⊃
+/// `RYU_GATEWAY_TOKEN`/`RYU_GATEWAY_KEY`; id `ext` → `RYU_EXT_TOKEN`; id `github` →
+/// `RYU_GITHUB_TOKEN`; id `marketplace` → `RYU_MARKETPLACE_SIGNING_KEY`. None of
+/// those ids is taken by a compiled-in fixture, so all are claimable by a disk
+/// manifest, and the gate would have read as a fence while granting exactly the
+/// credentials it exists to protect.
+///
+/// A denylist of Core's ~270 `RYU_*` vars would be hand-maintained and stale the
+/// moment someone adds a var — the same failure mode the audit flagged for the
+/// Gateway's hand-listed grant allowlist. Carving out a sub-namespace Core never
+/// uses for its own configuration is structural instead: nothing in Core reads a
+/// `RYU_PLUGIN_*` var except [`ENV_SECRET_ALLOWLIST`], which this gate refuses
+/// explicitly.
+///
+/// Nothing first-party regresses: every in-repo manifest that authors an `env:`
+/// secret header is compiled in, so it takes the provenance arm above and never
+/// reaches this prefix at all. The rule binds only third-party disk plugins, which
+/// simply name their BYOK var `RYU_PLUGIN_<THEIR_ID>_API_KEY`.
+fn plugin_env_prefix(plugin_id: &str) -> String {
+    let mut out = String::with_capacity(plugin_id.len() + 12);
+    out.push_str("RYU_PLUGIN_");
+    for ch in plugin_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out.push('_');
+    out
+}
+
+/// Whether `plugin_id` may read the process env var `var` through an `env:`
+/// secret-header token.
+///
+/// # Why this gate exists
+///
+/// `secret_headers` resolves server-side and its VALUES are deliberately excluded
+/// from the firewall/DLP scan and the audit trail (a secret must not land in a log),
+/// so an `env:` read is an invisible transfer. Unrestricted, a manifest in the
+/// user-writable `~/.ryu/plugins` could pair `secret_headers: {"X-K":
+/// "env:ANTHROPIC_API_KEY"}` (or `RYU_MASTER_KEY`, or a gateway token) with a URL it
+/// controls and exfiltrate a credential the user never knew it could see.
+///
+/// The discriminator is manifest **provenance**, not tier
+/// ([`crate::plugins::builtins::is_compiled_in_manifest`]):
+///
+/// - A **compiled-in** manifest (`plugin_manifest/fixtures/*.manifest.json`, embedded
+///   with `include_str!`) reads any var. Its bytes ship inside the binary, and
+///   several of them legitimately read a SHARED var that fits no per-plugin prefix:
+///   `com.ryuhq.advisor` and `shadow` both authenticate to loopback Core with
+///   `env:RYU_TOKEN`. Note this is deliberately NOT `tier_for` — `exa`, `rtk` and
+///   `com.ryuhq.advisor` are all Community-tier yet compiled in, so a tier check
+///   would break three first-party tools while protecting nothing extra.
+/// - A **disk** manifest (`~/.ryu/plugins/<id>/manifest.json`, which the loader
+///   validates for semver + id uniqueness and nothing else) reads only its own
+///   [`plugin_env_prefix`] namespace, plus whatever an operator names in
+///   [`ENV_SECRET_ALLOWLIST`]. Fail-closed.
+///
+/// Provenance rather than a grant because there is no per-var approval to read: the
+/// Gateway vets grant STRINGS, and no grant vocabulary describes "may read env var
+/// X". Tightening the namespace is the control that exists.
+fn may_read_env_secret(plugin_id: &str, var: &str) -> bool {
+    if crate::plugins::builtins::is_compiled_in_manifest(plugin_id) {
+        return true;
+    }
+    // The allowlist var itself is never readable through the gate it configures:
+    // a plugin whose id folds to `env` would otherwise sit exactly on
+    // `RYU_PLUGIN_ENV_` and read the policy naming its own escape hatch.
+    if var == ENV_SECRET_ALLOWLIST {
+        return false;
+    }
+    if var.starts_with(&plugin_env_prefix(plugin_id)) {
+        return true;
+    }
+    std::env::var(ENV_SECRET_ALLOWLIST)
+        .ok()
+        .is_some_and(|raw| {
+            raw.split([',', ' ', '\t', '\n', ';'])
+                .map(str::trim)
+                .any(|entry| !entry.is_empty() && entry == var)
+        })
+}
+
 /// Resolve a single whitespace-delimited `word` against the secret grammar.
 /// A `word` that does not carry a known prefix is [`SecretToken::Literal`] —
 /// surrounding scheme text (e.g. `Bearer`) passes through untouched.
-///   - `env:VARNAME`    → `std::env::var` (the BYOK seam); empty/unset → absent.
+///   - `env:VARNAME`    → `std::env::var` (the BYOK seam), gated by
+///     [`may_read_env_secret`]; empty/unset/ungated → absent.
 ///   - `vault:<domain>` → the governed `identity::read_credential` (grant
 ///     `identity.read` + audit) for the connection bound to `<domain>` among the
 ///     agent's `profile_ids`.
 async fn resolve_secret_token(
     word: &str,
+    plugin_id: &str,
     profile_ids: &[String],
     session_id: Option<&str>,
 ) -> SecretToken {
     if let Some(var) = word.strip_prefix("env:") {
+        // Ungated var → treated exactly like "unset": the header is omitted and the
+        // tool surfaces its own auth error. Refusing loudly here would leak which
+        // env vars this Core process happens to carry.
+        if !may_read_env_secret(plugin_id, var) {
+            tracing::warn!(
+                "plugin '{plugin_id}' requested env var '{var}' in a secret header, but it is \
+                 outside the plugin's '{}' namespace and not on the '{ENV_SECRET_ALLOWLIST}' \
+                 operator allowlist; the header is omitted",
+                plugin_env_prefix(plugin_id)
+            );
+            return SecretToken::Absent;
+        }
         return match std::env::var(var).ok().filter(|v| !v.is_empty()) {
             Some(v) => SecretToken::Value(v),
             None => SecretToken::Absent,
@@ -585,7 +702,8 @@ async fn resolve_secret_token(
 /// prefix the wire wants), and the degenerate whole-value `"env:RYU_EXA_API_KEY"`
 /// still resolves to the bare secret (back-compat). Grammar mirrors
 /// `run_command_tool`'s `env:` seam plus a governed `vault:<domain>` read:
-///   - `env:VARNAME`    → `std::env::var` (the BYOK seam).
+///   - `env:VARNAME`    → `std::env::var` (the BYOK seam), scoped to what
+///     `plugin_id` may read (see [`may_read_env_secret`]).
 ///   - `vault:<domain>` → the governed `identity::read_credential` (grant
 ///     `identity.read` + audit) for the connection bound to `<domain>` among the
 ///     agent's `profile_ids`.
@@ -597,6 +715,7 @@ async fn resolve_secret_token(
 async fn resolve_secret_header_source(
     header_name: &str,
     source: &str,
+    plugin_id: &str,
     profile_ids: &[String],
     session_id: Option<&str>,
 ) -> Result<Option<String>, String> {
@@ -618,7 +737,7 @@ async fn resolve_secret_header_source(
         let word_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let word = &rest[..word_len];
         cursor += word_len;
-        match resolve_secret_token(word, profile_ids, session_id).await {
+        match resolve_secret_token(word, plugin_id, profile_ids, session_id).await {
             SecretToken::Literal => out.push_str(word),
             SecretToken::Value(v) => {
                 saw_token = true;
@@ -644,10 +763,14 @@ async fn resolve_secret_header_source(
 /// the call: a fail-closed budget check and the opt-in firewall/DLP scan, with a
 /// post-call audit. Only then does Core make the outbound request.
 ///
-/// `grants` is the owning plugin's grant set (resolved by the dispatcher from the
-/// enabled manifest); it must contain `tool:http-egress:<domain>` (or the `*`
-/// wildcard). This tool reaches an EXTERNAL service — it never reads local user
-/// data — so it needs no ACL principal.
+/// `grants` is the owning plugin's grant set — for a Community-tier plugin the
+/// RECORD's Gateway-approved grants, resolved by the dispatcher (see
+/// `McpRegistry::resolve_app_tool_backend` / `effective_tool_grants`), not the
+/// manifest's self-declaration. It must contain `tool:http-egress:<domain>` (or the
+/// `*` wildcard). This tool reaches an EXTERNAL service — it never reads local user
+/// data — so it needs no ACL principal. `agent_id` is the owning **plugin id** at
+/// this seam; it names the audit principal AND scopes which process env vars the
+/// `secret_headers` `env:` tokens may read.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_http_tool(
     url: &str,
@@ -669,10 +792,13 @@ pub async fn run_http_tool(
     //    stays PURE (no env, no await) — the same testability reason the allowlist
     //    parse was extracted. Secret VALUES never enter the args map, so they never
     //    reach the path/query/body or the model-visible schema.
+    //    The `env:` arm is scoped to what the OWNING PLUGIN may read (`agent_id` is
+    //    the owning plugin id at this seam — see `resolve_app_tool_backend`), so a
+    //    disk manifest cannot name an unrelated credential var.
     let mut resolved_secret_headers: Vec<(String, String)> = Vec::new();
     for (name, source) in secret_headers {
         if let Some(value) =
-            resolve_secret_header_source(name, source, profile_ids, session_id).await?
+            resolve_secret_header_source(name, source, agent_id, profile_ids, session_id).await?
         {
             resolved_secret_headers.push((name.clone(), value));
         }
@@ -852,6 +978,20 @@ static BUILTIN_COMMAND_SEED: std::sync::OnceLock<BTreeMap<String, std::path::Pat
 /// degrade gracefully to "not installed" rather than fail-closed) — only genuinely
 /// unknown built-in keys map to `None`. Honors the same dev-override envs the
 /// deleted native providers did (`RYU_SPIDER_BIN`, `RYU_RTK_BIN`).
+///
+/// # No PATH discovery
+///
+/// Both arms resolve to an operator-set absolute override or Ryu's OWN
+/// `~/.ryu/bin/<name>`, never to a `$PATH` walk. [`parse_command_allowlist`]
+/// enforces "only absolute targets — never a PATH-relative name an attacker could
+/// shadow" for env-supplied entries, and this seed feeds the SAME allowlist, so it
+/// has to honour the same invariant. `rtk` used to fall through to
+/// [`crate::rtk_config::rtk_bin_path`], which returns the first `rtk` on `$PATH`
+/// (resolved once at startup) — a writable directory earlier on Core's PATH was
+/// enough to make an attacker-planted binary the allowlisted `rtk`. That module
+/// keeps its PATH probe for the Phase-2 auto-wrap availability check, which spawns
+/// `rtk init` for a user-driven toggle rather than admitting a bin to the
+/// model-reachable tool allowlist.
 fn trusted_builtin_bin_path(bin_key: &str) -> Option<std::path::PathBuf> {
     let ryu_bin = || crate::paths::ryu_dir().join("bin");
     match bin_key {
@@ -863,7 +1003,6 @@ fn trusted_builtin_bin_path(bin_key: &str) -> Option<std::path::PathBuf> {
         "rtk" => Some(
             std::env::var_os("RYU_RTK_BIN")
                 .map(std::path::PathBuf::from)
-                .or_else(crate::rtk_config::rtk_bin_path)
                 .unwrap_or_else(|| ryu_bin().join("rtk")),
         ),
         _ => None,
@@ -1238,6 +1377,22 @@ pub async fn run_command_tool(
     for (child_key, source) in env_map {
         // v1 supports only `env:VARNAME` — read Core's process env.
         if let Some(var) = source.strip_prefix("env:") {
+            // SAME gate as the http tool's `secret_headers` (see `may_read_env_secret`).
+            // This arm is the second `env:` reader in the crate and it is the more
+            // dangerous of the two: a header value at least stays inside a request Core
+            // builds, whereas this hands the raw value to a spawned child process that
+            // can do anything with it. Without the gate a disk manifest could declare
+            // `{"env": {"X": "env:ANTHROPIC_API_KEY"}}` on an allowlisted binary and
+            // read any Core env var. Ungated → skipped, exactly like a missing var, so
+            // Core's env inventory is not disclosed by a distinguishable error.
+            if !may_read_env_secret(plugin_id, var) {
+                tracing::warn!(
+                    plugin_id,
+                    var,
+                    "command tool: refused an out-of-namespace env source"
+                );
+                continue;
+            }
             if let Ok(val) = std::env::var(var) {
                 child_env.insert(child_key.clone(), val);
             }
@@ -2012,11 +2167,20 @@ mod tests {
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
         std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "env=/usr/bin/env");
-        std::env::set_var("RYU_CMD_TEST_SRC", "injected-value");
+        // The source var sits in THIS plugin's own `RYU_PLUGIN_<ID>_` namespace, which
+        // is what `may_read_env_secret` admits for a disk manifest. It used to be a
+        // bare `RYU_CMD_TEST_SRC`; that only worked because the child-env `env:` arm
+        // was ungated, so keeping it would mean this test silently asserted the hole.
+        // The gate's REFUSAL path has its own test
+        // (`a_command_tools_child_env_obeys_the_same_namespace_gate_as_headers`).
+        std::env::set_var("RYU_PLUGIN_COM_TEST_CMD_SRC", "injected-value");
         // A secret-shaped inherited var that must be scrubbed from the child.
         std::env::set_var("RYU_CMD_TEST_SECRET_TOKEN", "leak-me");
         let mut env_map = BTreeMap::new();
-        env_map.insert("RYU_CMD_TEST_DEST".to_string(), "env:RYU_CMD_TEST_SRC".to_string());
+        env_map.insert(
+            "RYU_CMD_TEST_DEST".to_string(),
+            "env:RYU_PLUGIN_COM_TEST_CMD_SRC".to_string(),
+        );
         let out = run_command_tool(
             "env",
             &[],
@@ -2395,6 +2559,7 @@ mod tests {
         let v = resolve_secret_header_source(
             "Authorization",
             "env:RYU_TEST_SECRET_TOK",
+            SECRET_HEADER_TEST_PLUGIN,
             &[],
             None,
         )
@@ -2402,13 +2567,19 @@ mod tests {
         .unwrap();
         assert_eq!(v.as_deref(), Some("Bearer topsecret"));
         // A missing env var resolves to "absent" (header omitted), NOT an error.
-        let none = resolve_secret_header_source("X", "env:RYU_TEST_MISSING_XYZ", &[], None)
+        let none = resolve_secret_header_source(
+            "X",
+            "env:RYU_TEST_MISSING_XYZ",
+            SECRET_HEADER_TEST_PLUGIN,
+            &[],
+            None,
+        )
             .await
             .unwrap();
         assert!(none.is_none());
         // An unsupported prefix is a hard error (never a silent skip).
         assert!(
-            resolve_secret_header_source("X", "foo:bar", &[], None)
+            resolve_secret_header_source("X", "foo:bar", SECRET_HEADER_TEST_PLUGIN, &[], None)
                 .await
                 .is_err()
         );
@@ -2675,6 +2846,12 @@ mod tests {
 
     // ── `secret_headers` value-TEMPLATE resolution ───────────────────────────
 
+    /// The plugin id every template-grammar test resolves under. A COMPILED-IN id,
+    /// so `may_read_env_secret` is unrestricted and these tests keep exercising the
+    /// template grammar (literal text, multi-token, absent → omit) rather than the
+    /// env-namespace gate, which has its own tests below.
+    const SECRET_HEADER_TEST_PLUGIN: &str = "shadow";
+
     #[tokio::test]
     async fn secret_header_bearer_scheme_substitutes_env_token() {
         // "Bearer env:X" → "Bearer <resolved>": the scheme prefix is literal text
@@ -2683,6 +2860,7 @@ mod tests {
         let out = resolve_secret_header_source(
             "Authorization",
             "Bearer env:RYU_HDR_TEST_BEARER",
+            SECRET_HEADER_TEST_PLUGIN,
             &[],
             None,
         )
@@ -2700,6 +2878,7 @@ mod tests {
         let out = resolve_secret_header_source(
             "X-Auth",
             "Token env:RYU_HDR_TEST_ID env:RYU_HDR_TEST_SECRET",
+            SECRET_HEADER_TEST_PLUGIN,
             &[],
             None,
         )
@@ -2714,7 +2893,13 @@ mod tests {
     async fn secret_header_whole_value_backcompat() {
         // The degenerate whole-value `env:NAME` still yields the bare secret.
         std::env::set_var("RYU_HDR_TEST_WHOLE", "bare-value");
-        let out = resolve_secret_header_source("X-Api-Key", "env:RYU_HDR_TEST_WHOLE", &[], None)
+        let out = resolve_secret_header_source(
+            "X-Api-Key",
+            "env:RYU_HDR_TEST_WHOLE",
+            SECRET_HEADER_TEST_PLUGIN,
+            &[],
+            None,
+        )
             .await
             .expect("whole-value template resolves");
         assert_eq!(out.as_deref(), Some("bare-value"));
@@ -2729,6 +2914,7 @@ mod tests {
         let out = resolve_secret_header_source(
             "Authorization",
             "Bearer env:RYU_HDR_TEST_UNSET",
+            SECRET_HEADER_TEST_PLUGIN,
             &[],
             None,
         )
@@ -2741,10 +2927,317 @@ mod tests {
     async fn secret_header_no_token_is_rejected() {
         // A value carrying no `env:`/`vault:` token at all is an unsupported
         // source (never a silent skip) — mirrors the command `env:` rejection.
-        let err = resolve_secret_header_source("Authorization", "Bearer static", &[], None)
+        let err = resolve_secret_header_source(
+            "Authorization",
+            "Bearer static",
+            SECRET_HEADER_TEST_PLUGIN,
+            &[],
+            None,
+        )
             .await
             .expect_err("a token-less value must be rejected");
         assert!(err.contains("unsupported secret source"), "got: {err}");
+    }
+
+    // ── `env:` secret-header namespace gate ──────────────────────────────────
+
+    /// Serializes the tests that mutate process-global env vars. Reuses the SAME
+    /// guard the rest of this module already takes (`lock_gateway_env`) rather than
+    /// a private mutex — two independent locks would not serialize against each
+    /// other, and `RYU_RTK_BIN` in particular is set by both the built-in-seed test
+    /// and the PATH-shadowing test below.
+    fn lock_env_secret() -> std::sync::MutexGuard<'static, ()> {
+        crate::sidecar::gateway::lock_gateway_env()
+    }
+
+    /// A Community-tier manifest naming an unrelated credential var must resolve to
+    /// "absent" — the header is omitted rather than shipped. `secret_headers` values
+    /// are excluded from the firewall/DLP scan and the audit trail by design, so an
+    /// unrestricted `env:` read would be an invisible credential transfer to
+    /// whatever URL the same manifest names.
+    #[tokio::test]
+    async fn community_plugin_cannot_read_an_unrelated_env_secret() {
+        let _lock = lock_env_secret();
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-victim");
+        std::env::remove_var(ENV_SECRET_ALLOWLIST);
+
+        let out = resolve_secret_header_source(
+            "X-K",
+            "env:ANTHROPIC_API_KEY",
+            "com.evil.plugin",
+            &[],
+            None,
+        )
+        .await
+        .expect("an ungated var is a soft omit, not an Err");
+        assert_eq!(
+            out, None,
+            "a Community plugin must not read a credential outside its own namespace"
+        );
+
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    /// A third-party plugin's OWN `RYU_PLUGIN_<UPPER(id)>_*` namespace resolves with
+    /// no operator configuration at all — the BYOK seam still works, it just lives
+    /// in a namespace Core does not use for its own configuration.
+    #[tokio::test]
+    async fn community_plugin_reads_its_own_prefixed_env_secret() {
+        let _lock = lock_env_secret();
+        std::env::set_var("RYU_PLUGIN_COM_ACME_WEATHER_API_KEY", "acme-key");
+        std::env::remove_var(ENV_SECRET_ALLOWLIST);
+
+        let out = resolve_secret_header_source(
+            "Authorization",
+            "Bearer env:RYU_PLUGIN_COM_ACME_WEATHER_API_KEY",
+            "com.acme.weather",
+            &[],
+            None,
+        )
+        .await
+        .expect("own-namespace var resolves");
+        assert_eq!(out.as_deref(), Some("Bearer acme-key"));
+
+        std::env::remove_var("RYU_PLUGIN_COM_ACME_WEATHER_API_KEY");
+    }
+
+    /// NAMESPACE SQUATTING: plugin ids are free-form (a bare kebab id is legal), so
+    /// a `RYU_<UPPER(id)>_` prefix would let a plugin name ITSELF after a Core
+    /// config family and read that family's secrets — id `master` covering
+    /// `RYU_MASTER_KEY` is the worst case, and `gateway`/`ext`/`github`/
+    /// `marketplace` are all equally claimable (none is a compiled-in fixture id).
+    /// The prefix must therefore live under `RYU_PLUGIN_`, which Core never uses for
+    /// its own configuration.
+    #[test]
+    fn a_plugin_cannot_squat_a_core_env_namespace_by_choosing_its_id() {
+        for (squatter_id, core_var) in [
+            ("master", "RYU_MASTER_KEY"),
+            ("gateway", "RYU_GATEWAY_TOKEN"),
+            ("gateway", "RYU_GATEWAY_KEY"),
+            ("ext", "RYU_EXT_TOKEN"),
+            ("github", "RYU_GITHUB_TOKEN"),
+            ("marketplace", "RYU_MARKETPLACE_SIGNING_KEY"),
+            ("default-llm", "RYU_DEFAULT_LLM_API_KEY"),
+        ] {
+            assert!(
+                !crate::plugins::builtins::is_compiled_in_manifest(squatter_id),
+                "'{squatter_id}' must be claimable by a disk manifest for this test to mean \
+                 anything — if it became a built-in id, pick another squatter"
+            );
+            assert!(
+                !may_read_env_secret(squatter_id, core_var),
+                "a plugin calling itself '{squatter_id}' must not reach Core's '{core_var}'"
+            );
+        }
+    }
+
+    /// The allowlist var is never readable through the gate it configures (a plugin
+    /// whose id folds to `env` sits exactly on `RYU_PLUGIN_ENV_`).
+    #[test]
+    fn the_env_allowlist_var_is_not_itself_plugin_readable() {
+        assert!(!may_read_env_secret("env", ENV_SECRET_ALLOWLIST));
+    }
+
+    /// The COMMAND tool's child-env is the crate's SECOND `env:` reader, and the
+    /// more dangerous one: a header value stays inside a request Core builds, while
+    /// this hands the raw secret to a spawned child that can do anything with it.
+    /// It must obey the same namespace gate as `secret_headers` — a disk manifest
+    /// declaring `{"env": {"KEY": "env:ANTHROPIC_API_KEY"}}` on an allowlisted binary
+    /// must not read Core's env.
+    ///
+    /// This SPAWNS `/usr/bin/env` and reads the child's actual environment rather
+    /// than asserting `may_read_env_secret` directly. Asserting the predicate would
+    /// be vacuous: it passes whether or not the spawn path consults it, which is
+    /// exactly the bug being guarded against (the gate existed for `secret_headers`
+    /// and this path simply did not call it).
+    #[tokio::test]
+    async fn a_command_tools_child_env_obeys_the_same_namespace_gate_as_headers() {
+        let _lock = crate::sidecar::gateway::lock_gateway_env();
+        let _env = CmdEnvGuard::armed();
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "env=/usr/bin/env");
+
+        let disk_plugin = "evil";
+        assert!(
+            !crate::plugins::builtins::is_compiled_in_manifest(disk_plugin),
+            "'{disk_plugin}' must be a disk-manifest id for this test to mean anything"
+        );
+        // This models the ACTUAL attack. The child inherits Core's env with
+        // `scrub_child_env` applied, which already strips secret-SHAPED keys — so a
+        // real secret (ANTHROPIC_API_KEY, RYU_MASTER_KEY, RYU_TOKEN) never rides in
+        // by inheritance. The declared `env:` map was the way to put one BACK, under
+        // a fresh name the scrubber has no opinion about. So the victim var here must
+        // itself be secret-shaped (hence `_TOKEN`): that proves the gate closes the
+        // re-introduction path rather than re-proving what the scrubber already does.
+        std::env::set_var("RYU_CMD_VICTIM_TOKEN", "victim-secret");
+        let mut env_map = BTreeMap::new();
+        env_map.insert(
+            "STOLEN".to_string(),
+            "env:RYU_CMD_VICTIM_TOKEN".to_string(),
+        );
+
+        let out = run_command_tool(
+            "env",
+            &[],
+            None,
+            &env_map,
+            None,
+            10,
+            CommandOutput::Stdout,
+            None,
+            &BTreeMap::new(),
+            serde_json::json!({}),
+            &grants(&["tool:command:env"]),
+            disk_plugin,
+            None,
+        )
+        .await
+        .expect("env runs");
+        let stdout = out.get("stdout").and_then(|v| v.as_str()).unwrap_or_default();
+        assert!(
+            !stdout.contains("victim-secret") && !stdout.contains("STOLEN="),
+            "an out-of-namespace env source must never reach the child, got: {stdout}"
+        );
+        std::env::remove_var("RYU_CMD_VICTIM_TOKEN");
+    }
+
+    /// The operator escape hatch: a var named in `RYU_PLUGIN_ENV_ALLOWLIST` is
+    /// readable by any plugin, so a deployment can share a credential without
+    /// handing out a Core-tier id.
+    #[tokio::test]
+    async fn operator_allowlist_opens_a_shared_env_secret() {
+        let _lock = lock_env_secret();
+        std::env::set_var("RYU_SHARED_PROXY_KEY", "shared");
+        std::env::set_var(ENV_SECRET_ALLOWLIST, "OTHER_VAR, RYU_SHARED_PROXY_KEY");
+
+        let out = resolve_secret_header_source(
+            "X-K",
+            "env:RYU_SHARED_PROXY_KEY",
+            "com.acme.weather",
+            &[],
+            None,
+        )
+        .await
+        .expect("allowlisted var resolves");
+        assert_eq!(out.as_deref(), Some("shared"));
+
+        std::env::remove_var(ENV_SECRET_ALLOWLIST);
+        std::env::remove_var("RYU_SHARED_PROXY_KEY");
+    }
+
+    /// First-party regression: `com.ryuhq.advisor` and `shadow` authenticate to
+    /// loopback Core with the SHARED `env:RYU_TOKEN`, which by construction fits no
+    /// per-plugin prefix. Both ship as compiled-in fixtures, so the gate must not
+    /// touch them — and `com.ryuhq.advisor` is Community-TIER, which is exactly why
+    /// the gate keys on provenance rather than tier.
+    #[tokio::test]
+    async fn compiled_in_plugins_still_read_the_shared_ryu_token() {
+        let _lock = lock_env_secret();
+        std::env::set_var("RYU_TOKEN", "core-token");
+        std::env::remove_var(ENV_SECRET_ALLOWLIST);
+
+        for plugin_id in ["shadow", "com.ryuhq.advisor"] {
+            let out =
+                resolve_secret_header_source("Authorization", "Bearer env:RYU_TOKEN", plugin_id, &[], None)
+                    .await
+                    .expect("core-tier read resolves");
+            assert_eq!(
+                out.as_deref(),
+                Some("Bearer core-token"),
+                "{plugin_id} must keep reading the shared RYU_TOKEN"
+            );
+        }
+
+        std::env::remove_var("RYU_TOKEN");
+    }
+
+    /// The prefix is a BYOK seam of the same SHAPE first-party manifests author
+    /// (`exa` reads `env:RYU_EXA_API_KEY`), but rooted one level deeper so it cannot
+    /// reach into Core's own configuration namespace. `exa` is compiled in and takes
+    /// the provenance arm at runtime; a third-party plugin authored the same way
+    /// names its var `RYU_PLUGIN_<ID>_API_KEY` and needs no operator configuration.
+    #[test]
+    fn the_prefix_rule_is_rooted_under_the_plugin_namespace() {
+        assert_eq!(plugin_env_prefix("exa"), "RYU_PLUGIN_EXA_");
+        assert!("RYU_PLUGIN_EXA_API_KEY".starts_with(&plugin_env_prefix("exa")));
+        // Crucially NOT Core's own `RYU_EXA_API_KEY` namespace — which `exa` still
+        // reads, but by PROVENANCE (it is compiled in), not by prefix. Every in-repo
+        // manifest that authors an `env:` secret header (`exa`, `shadow`, `advisor`)
+        // is a compiled-in fixture, so narrowing the prefix regresses none of them.
+        assert!(!"RYU_EXA_API_KEY".starts_with(&plugin_env_prefix("exa")));
+        assert!(may_read_env_secret("exa", "RYU_EXA_API_KEY"));
+        // Dots and dashes in a reverse-DNS id fold to `_`.
+        assert_eq!(
+            plugin_env_prefix("com.acme.my-app"),
+            "RYU_PLUGIN_COM_ACME_MY_APP_"
+        );
+        // And the rule is a real fence: the shared loopback token fits no prefix.
+        assert!(!may_read_env_secret("com.acme.weather", "RYU_TOKEN"));
+    }
+
+    // ── built-in command-bin allowlist seed ──────────────────────────────────
+
+    /// The `rtk` allowlist entry must resolve to an operator-set absolute override
+    /// or Ryu's own `~/.ryu/bin/rtk` — never to a `$PATH` walk. `parse_command_allowlist`
+    /// documents "never a PATH-relative name an attacker could shadow" and enforces
+    /// it for env-supplied entries; the built-in seed feeds the same allowlist, so a
+    /// writable directory early on Core's PATH must not be able to plant the bin the
+    /// model can then invoke.
+    #[test]
+    fn rtk_builtin_bin_never_resolves_through_path() {
+        let _lock = lock_env_secret();
+
+        let planted_dir = std::env::temp_dir().join(format!("ryu-rtk-shadow-{}", std::process::id()));
+        std::fs::create_dir_all(&planted_dir).expect("temp dir");
+        let exe = if cfg!(windows) { "rtk.exe" } else { "rtk" };
+        let planted = planted_dir.join(exe);
+        std::fs::write(&planted, b"#!/bin/sh\n").expect("plant a shadowing rtk");
+
+        let prev_path = std::env::var_os("PATH");
+        let prev_bin = std::env::var_os("RYU_RTK_BIN");
+        std::env::remove_var("RYU_RTK_BIN");
+        std::env::set_var("PATH", &planted_dir);
+
+        let resolved = trusted_builtin_bin_path("rtk").expect("rtk is a known built-in key");
+
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        if let Some(v) = prev_bin {
+            std::env::set_var("RYU_RTK_BIN", v);
+        }
+        let _ = std::fs::remove_dir_all(&planted_dir);
+
+        assert_ne!(
+            resolved, planted,
+            "a PATH-planted rtk must never become the allowlisted binary"
+        );
+        assert_eq!(
+            resolved,
+            crate::paths::ryu_dir().join("bin").join("rtk"),
+            "rtk must fall back to Ryu's own bin dir, like spider"
+        );
+    }
+
+    /// The operator override still wins, and `spider`'s arm is untouched.
+    #[test]
+    fn builtin_bin_env_overrides_still_win() {
+        let _lock = lock_env_secret();
+
+        let prev = std::env::var_os("RYU_RTK_BIN");
+        let abs = if cfg!(windows) {
+            "C:\\ops\\rtk.exe"
+        } else {
+            "/opt/ops/rtk"
+        };
+        std::env::set_var("RYU_RTK_BIN", abs);
+        let resolved = trusted_builtin_bin_path("rtk").expect("rtk key");
+        match prev {
+            Some(v) => std::env::set_var("RYU_RTK_BIN", v),
+            None => std::env::remove_var("RYU_RTK_BIN"),
+        }
+        assert_eq!(resolved, std::path::PathBuf::from(abs));
+        assert!(trusted_builtin_bin_path("nope").is_none());
     }
 
     // ── command SUCCESS merges child stderr into the text output ──────────────

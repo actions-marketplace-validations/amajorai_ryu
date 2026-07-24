@@ -26,7 +26,7 @@ import {
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
-import { toTarget } from "@/src/lib/api/client.ts";
+import { ApiError, toTarget } from "@/src/lib/api/client.ts";
 import {
 	clearDataCategory,
 	type DataCategory,
@@ -89,6 +89,33 @@ const CATEGORIES: CategoryDef[] = [
 	},
 ];
 
+/**
+ * Turn a failed `POST /api/node/reset` into copy that names the actual cause.
+ *
+ * The distinction that matters in practice is 404: `/api/node/reset` is newer than
+ * some shipped Cores, so a node running an older build has no such route and the
+ * reset can never succeed until Core is updated. Blaming "shared node" for that
+ * (the previous catch-all) sent people looking in the wrong place entirely.
+ */
+function resetFailureReason(e: unknown): string {
+	if (!(e instanceof ApiError)) {
+		return "Could not reach this node. Check that Core is running and try again.";
+	}
+	if (e.status === 404) {
+		return "This node's Core is too old to support resetting — it has no /api/node/reset route. Update Core on this node, then try again.";
+	}
+	if (e.status === 403) {
+		return (
+			e.serverMessage ??
+			"Resetting is not allowed on a shared (org-bound) node — it would wipe every user's data."
+		);
+	}
+	if (e.status === 400) {
+		return "The confirmation did not match this node's name.";
+	}
+	return e.serverMessage ?? `Core returned ${e.status}.`;
+}
+
 export function DangerZoneSettings() {
 	const getNode = useActiveNodeGetter();
 	const queryClient = useQueryClient();
@@ -128,8 +155,7 @@ export function DangerZoneSettings() {
 			console.error("Failed to reset node", e);
 			sileo.error({
 				title: "Could not reset node",
-				description:
-					"Something went wrong. A node reset is not allowed on a shared node, and needs a connection to this node.",
+				description: resetFailureReason(e),
 			});
 		} finally {
 			setResetBusy(false);

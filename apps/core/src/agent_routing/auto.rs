@@ -126,14 +126,22 @@ impl AgentAutoConfig {
         }
     }
 
-    /// The fail-open target: `default_agent_id` when set, else the flagship `ryu`.
+    /// The fail-open target: this config's own `default_agent_id`, else the
+    /// node-wide default selection's agent, else the flagship `ryu`.
     fn fallback_agent(&self) -> String {
+        self.fallback_agent_with(crate::agent_selection::default_agent_id())
+    }
+
+    /// [`fallback_agent`](Self::fallback_agent) with the node-wide default passed
+    /// in, so the precedence is testable without touching process-global state.
+    fn fallback_agent_with(&self, node_default: Option<String>) -> String {
         let d = self.default_agent_id.trim();
-        if d.is_empty() {
-            DEFAULT_FALLBACK_AGENT.to_owned()
-        } else {
-            d.to_owned()
+        if !d.is_empty() {
+            return d.to_owned();
         }
+        node_default
+            .filter(|a| !a.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_FALLBACK_AGENT.to_owned())
     }
 
     /// Resolve a matched rule index (or the no-match case) to a concrete agent id,
@@ -595,9 +603,26 @@ mod tests {
     fn fallback_agent_defaults_to_ryu_when_unset() {
         let mut c = cfg(RouteStrategy::Keyword);
         c.default_agent_id = String::new();
-        assert_eq!(c.fallback_agent(), DEFAULT_FALLBACK_AGENT);
+        assert_eq!(c.fallback_agent_with(None), DEFAULT_FALLBACK_AGENT);
         c.default_agent_id = "gemini".into();
-        assert_eq!(c.fallback_agent(), "gemini");
+        assert_eq!(c.fallback_agent_with(None), "gemini");
+    }
+
+    #[test]
+    fn node_default_fills_in_only_when_this_config_names_none() {
+        let mut c = cfg(RouteStrategy::Keyword);
+        c.default_agent_id = String::new();
+        // Node-wide default wins over the flagship…
+        assert_eq!(c.fallback_agent_with(Some("claude".into())), "claude");
+        // …but never over this config's own explicit choice.
+        c.default_agent_id = "gemini".into();
+        assert_eq!(c.fallback_agent_with(Some("claude".into())), "gemini");
+        // A blank node default is no default.
+        c.default_agent_id = String::new();
+        assert_eq!(
+            c.fallback_agent_with(Some("  ".into())),
+            DEFAULT_FALLBACK_AGENT
+        );
     }
 
     #[test]

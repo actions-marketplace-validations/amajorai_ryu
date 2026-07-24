@@ -40,17 +40,14 @@ use serde_json::{json, Value};
 
 use ryu_healing::{apply_verdict, HealSource, HealVerdict, HealingHost};
 
+use crate::plugins::builtins::HEALING_PLUGIN_ID;
 use crate::server::conversations::ConversationSummary;
 use crate::server::ServerState;
 use crate::sidecar::ext_proxy::{ext_token, node_token};
 
-/// The built-in Self-Healing app id (matches the `healing.manifest.json` fixture id
-/// and `plugins::builtins::HEALING_PLUGIN_ID`).
-const HEALING_PLUGIN_ID: &str = "com.ryu.healing";
-/// Fallback loopback port if the manifest is somehow absent — matches the
-/// `healing.manifest.json` fixture `port`. Core injects this as `RYU_HEALING_PORT` at
-/// spawn.
-const HEALING_FALLBACK_PORT: u16 = 8001;
+/// The `ryu-healing` sidecar's name inside the Self-Healing manifest — the other half
+/// of the `(plugin id, sidecar name)` key the port resolves through.
+const HEALING_SIDECAR: &str = "ryu-healing";
 
 // ---------------------------------------------------------------------------
 // CoreHealingHost — the welded-coupling side (approvals write + re-run)
@@ -262,15 +259,16 @@ pub fn global_client() -> Option<&'static HealingClient> {
 }
 
 /// Resolve the `ryu-healing` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]).
+/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
+/// port comes from the manifest and ONLY the manifest — see
+/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
+/// build-time invariant rather than a runtime fallback. (This is orthogonal to the
+/// fail-open posture above: that covers an *unreachable* sidecar, checked per call.)
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    let raw = manifests
-        .iter()
-        .find(|m| m.id == HEALING_PLUGIN_ID)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == "ryu-healing"))
-        .map(|s| s.port)
-        .unwrap_or(HEALING_FALLBACK_PORT);
-    crate::profile::port(raw)
+    crate::sidecar::ext_proxy::sidecar_port(manifests, HEALING_PLUGIN_ID, HEALING_SIDECAR).expect(
+        "built-in healing.manifest.json must declare the ryu-healing sidecar (see \
+         plugin_manifest::BUILTIN_MANIFESTS)",
+    )
 }
 
 // ---------------------------------------------------------------------------

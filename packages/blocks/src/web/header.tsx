@@ -311,22 +311,20 @@ export default function Header({
 						</MotionNavigationMenu>
 					)}
 
-					{signedIn ? null : (
-						<a
-							className={cn(
-								buttonVariants({ variant: "ghost" }),
-								"gap-2 rounded-4xl px-3 font-medium hover:bg-muted hover:text-foreground"
-							)}
-							href={GITHUB_CORE_URL}
-							rel="noopener noreferrer"
-							target="_blank"
-						>
-							Open Source
-							{githubStargazersCount != null && githubStargazersCount > 0 ? (
-								<GitHubStars stargazersCount={githubStargazersCount} />
-							) : null}
-						</a>
-					)}
+					<a
+						className={cn(
+							buttonVariants({ variant: "ghost" }),
+							"gap-2 rounded-4xl px-3 font-medium hover:bg-muted hover:text-foreground"
+						)}
+						href={GITHUB_CORE_URL}
+						rel="noopener noreferrer"
+						target="_blank"
+					>
+						Open Source
+						{githubStargazersCount != null && githubStargazersCount > 0 ? (
+							<GitHubStars stargazersCount={githubStargazersCount} />
+						) : null}
+					</a>
 
 					{links.map(({ to, label, external }) => {
 						const isActive = !external && pathname.startsWith(to);

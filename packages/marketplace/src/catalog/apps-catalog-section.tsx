@@ -52,12 +52,19 @@ import {
 } from "@ryu/ui/components/select.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import {
+	Tabs,
+	TabsContent,
+	TabsIndicator,
+	TabsList,
+	TabsTrigger,
+} from "@ryu/ui/components/tabs.tsx";
+import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
-import { type ReactNode, useEffect, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import CommunityTrustNotice from "./chrome/community-trust-notice.tsx";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
@@ -65,6 +72,18 @@ import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
 import StoreItemAction from "./chrome/store-item-action.tsx";
+import {
+	ApiReferencePanel,
+	hasApiSurface,
+} from "./detail/api-reference-panel.tsx";
+import {
+	DependenciesPanel,
+	DetailMetaStrip,
+	hasDependencies,
+	ReadmePanel,
+	VersionsPanel,
+} from "./detail/detail-panels.tsx";
+import { ScorecardBadge, ScorecardPanel } from "./detail/scorecard-panel.tsx";
 import { grantDescription, grantLabel } from "./grant-labels.ts";
 import {
 	type CatalogHost,
@@ -74,6 +93,8 @@ import {
 } from "./host.tsx";
 import { resolveCardIcon } from "./icon-url.ts";
 import { REALM_ICONS } from "./realm-icons.ts";
+import { safeHttpUrl } from "./safe-url.ts";
+import { runScorecard } from "./scorecard.ts";
 import type {
 	AddMarketplaceParams,
 	AppCatalogItem,
@@ -949,6 +970,16 @@ function GrantList({ grants }: { grants: string[] }) {
 	);
 }
 
+/** The detail panel's tab set. Every tab except Overview is conditional on the
+ *  listing actually having that content — see the `tabs` array below. */
+type DetailTabId =
+	| "overview"
+	| "readme"
+	| "api"
+	| "versions"
+	| "dependencies"
+	| "health";
+
 function AppDetailPanel({
 	selectedId,
 	item,
@@ -978,6 +1009,25 @@ function AppDetailPanel({
 	noun: string;
 	renderAffordance: CatalogHost["renderAffordance"];
 }) {
+	const { Markdown } = useCatalogHost();
+	const [tab, setTab] = useState<DetailTabId>("overview");
+	// Reset to Overview when the selection changes, so opening a second listing
+	// never lands on a tab that listing does not have.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: resetting is keyed
+	// on the selection changing, not on the setter.
+	useEffect(() => setTab("overview"), [selectedId]);
+
+	// The scan needs the DETAIL payload, not just the card: half its checks read
+	// fields only the detail fetch carries (README, licence, timestamps, declared
+	// permissions). Grading a card alone would score every listing on a read-only
+	// surface as "undocumented, unlicensed" — technically true of the card, and
+	// completely misleading about the listing. So no detail ⇒ no grade shown.
+	// Memoized so scrolling the panel does not re-run every check per frame.
+	const scorecard = useMemo(
+		() => (detail ? runScorecard(item?.entry ?? null, detail) : null),
+		[item?.entry, detail]
+	);
+
 	if (!(selectedId && item)) {
 		return (
 			<Empty className="h-full">
@@ -1001,6 +1051,87 @@ function AppDetailPanel({
 	const showHero =
 		!entry.descriptor_only &&
 		Boolean(entry.banner || entry.icon_url || entry.icon_background);
+	// An integrations.sh reference entry is descriptor-only AND carries an
+	// integration kind. A community GitHub listing is also descriptor-only but has
+	// no integration kind — it is a real plugin with a real manifest, so it gets
+	// the full tab set rather than the integration blurb.
+	const isIntegrationDescriptor = Boolean(
+		entry.descriptor_only && entry.integration_kind
+	);
+	const readme = detail?.readme?.trim() ?? "";
+	const versions = detail?.versions ?? [];
+	const tabs: { id: DetailTabId; label: string }[] = [
+		{ id: "overview", label: "Overview" },
+		...(readme ? [{ id: "readme" as const, label: "README" }] : []),
+		...(hasApiSurface(detail?.apiSurface)
+			? [{ id: "api" as const, label: "API" }]
+			: []),
+		...(versions.length > 0
+			? [{ id: "versions" as const, label: "Versions" }]
+			: []),
+		...(hasDependencies(detail, entry)
+			? [{ id: "dependencies" as const, label: "Dependencies" }]
+			: []),
+		...(scorecard && scorecard.score !== null
+			? [{ id: "health" as const, label: "Health" }]
+			: []),
+	];
+	// Guard against a tab that vanished while it was selected (the detail request
+	// resolving can remove tabs as well as add them).
+	const activeTab = tabs.some((t) => t.id === tab) ? tab : "overview";
+
+	const overview = (
+		<div className="flex flex-col gap-6">
+			{entry.description ? (
+				<section className="flex flex-col gap-2">
+					<h3 className="flex items-center gap-1.5 font-medium text-sm">
+						<HugeiconsIcon
+							className="size-4 text-muted-foreground"
+							icon={InformationCircleIcon}
+						/>
+						About
+					</h3>
+					<p className="text-muted-foreground text-sm leading-relaxed">
+						{entry.description}
+					</p>
+				</section>
+			) : null}
+
+			{isIntegrationDescriptor ? (
+				<DescriptorDetail
+					detail={detail}
+					detailError={detailError}
+					detailLoading={detailLoading}
+					integrationUrl={integrationUrl}
+				/>
+			) : (
+				<>
+					<AppIncludedSection
+						runnables={detail?.runnables ?? entry.runnables}
+					/>
+
+					<section className="flex flex-col gap-2">
+						<h3 className="flex items-center gap-1.5 font-medium text-sm">
+							<HugeiconsIcon
+								className="size-4 text-muted-foreground"
+								icon={SquareLock01Icon}
+							/>
+							Permissions
+						</h3>
+						{grants.length === 0 ? (
+							<p className="text-muted-foreground text-sm">
+								This plugin requests no special permissions.
+							</p>
+						) : (
+							<GrantList grants={grants} />
+						)}
+					</section>
+
+					<AppInformationSection detail={detail} entry={entry} />
+				</>
+			)}
+		</div>
+	);
 
 	return (
 		<div className="flex flex-col gap-6 p-4">
@@ -1009,23 +1140,31 @@ function AppDetailPanel({
 				<div className="flex items-start justify-between gap-3">
 					<div className="min-w-0">
 						<h2 className="truncate font-semibold text-xl">{entry.name}</h2>
-						<p className="text-muted-foreground text-sm">
-							{entry.descriptor_only
-								? (entry.integration_kind?.toUpperCase() ?? "Integration")
-								: `v${entry.version}`}
-						</p>
+						{entry.tagline || detail?.tagline ? (
+							<p className="truncate text-muted-foreground text-sm">
+								{entry.tagline ?? detail?.tagline}
+							</p>
+						) : null}
 					</div>
-					{entry.descriptor_only ? (
-						<Badge className="shrink-0" variant="outline">
-							Descriptor
-						</Badge>
-					) : (
-						<AppStatusBadge enabled={enabled} installed={installed} />
-					)}
+					<div className="flex shrink-0 items-center gap-2">
+						{scorecard ? (
+							<ScorecardBadge
+								onClick={() => setTab("health")}
+								scorecard={scorecard}
+							/>
+						) : null}
+						{entry.descriptor_only ? (
+							<Badge variant="outline">
+								{entry.integration_kind?.toUpperCase() ?? "Descriptor"}
+							</Badge>
+						) : (
+							<AppStatusBadge enabled={enabled} installed={installed} />
+						)}
+					</div>
 				</div>
-				{entry.descriptor_only && entry.description ? (
-					<p className="text-muted-foreground text-sm">{entry.description}</p>
-				) : null}
+
+				<DetailMetaStrip detail={detail} entry={entry} />
+
 				<div className="flex flex-wrap items-center gap-1">
 					{entry.built_in && (
 						<Badge className="text-xs" variant="outline">
@@ -1073,55 +1212,61 @@ function AppDetailPanel({
 				setEnabled={setEnabled}
 			/>
 
-			{entry.descriptor_only ? (
-				<DescriptorDetail
-					detail={detail}
-					detailError={detailError}
-					detailLoading={detailLoading}
-					integrationUrl={integrationUrl}
-				/>
+			{detailLoading && !isIntegrationDescriptor ? (
+				<Spinner className="size-4" />
+			) : null}
+			{detailError && !isIntegrationDescriptor ? (
+				<p className="text-destructive text-sm">{detailError}</p>
+			) : null}
+
+			{tabs.length === 1 ? (
+				overview
 			) : (
-				<>
-					{entry.description ? (
-						<section className="flex flex-col gap-2">
-							<h3 className="flex items-center gap-1.5 font-medium text-sm">
-								<HugeiconsIcon
-									className="size-4 text-muted-foreground"
-									icon={InformationCircleIcon}
-								/>
-								About
-							</h3>
-							<p className="text-muted-foreground text-sm leading-relaxed">
-								{entry.description}
-							</p>
-						</section>
-					) : null}
-
-					<AppIncludedSection
-						runnables={detail?.runnables ?? entry.runnables}
-					/>
-
-					<RequiredAppsSection requires={entry.requires} />
-
-					<section className="flex flex-col gap-2">
-						<h3 className="flex items-center gap-1.5 font-medium text-sm">
-							<HugeiconsIcon
-								className="size-4 text-muted-foreground"
-								icon={SquareLock01Icon}
+				<Tabs
+					onValueChange={(value) => setTab(value as DetailTabId)}
+					value={activeTab}
+				>
+					<TabsList variant="line">
+						{tabs.map((t) => (
+							<TabsTrigger key={t.id} value={t.id}>
+								{t.label}
+							</TabsTrigger>
+						))}
+						<TabsIndicator />
+					</TabsList>
+					<TabsContent className="pt-2" value="overview">
+						{overview}
+					</TabsContent>
+					{readme ? (
+						<TabsContent className="pt-2" value="readme">
+							<ReadmePanel
+								Markdown={Markdown}
+								readme={readme}
+								readmeUrl={detail?.readmeUrl}
 							/>
-							Permissions
-						</h3>
-						{grants.length === 0 ? (
-							<p className="text-muted-foreground text-sm">
-								This plugin requests no special permissions.
-							</p>
-						) : (
-							<GrantList grants={grants} />
-						)}
-					</section>
-
-					<AppInformationSection detail={detail} entry={entry} />
-				</>
+						</TabsContent>
+					) : null}
+					{detail?.apiSurface ? (
+						<TabsContent className="pt-2" value="api">
+							<ApiReferencePanel surface={detail.apiSurface} />
+						</TabsContent>
+					) : null}
+					{versions.length > 0 ? (
+						<TabsContent className="pt-2" value="versions">
+							<VersionsPanel versions={versions} />
+						</TabsContent>
+					) : null}
+					{hasDependencies(detail, entry) ? (
+						<TabsContent className="pt-2" value="dependencies">
+							<DependenciesPanel detail={detail} entry={entry} />
+						</TabsContent>
+					) : null}
+					{scorecard && scorecard.score !== null ? (
+						<TabsContent className="pt-2" value="health">
+							<ScorecardPanel scorecard={scorecard} />
+						</TabsContent>
+					) : null}
+				</Tabs>
 			)}
 		</div>
 	);
@@ -1202,84 +1347,14 @@ function AppIncludedSection({
 	);
 }
 
-/** Prettify a plugin id ("com.ryu.spaces" → "Spaces") for display.
- *  Exported for unit tests — see the note on {@link isCompanionApp}. */
-export function prettyPluginId(id: string): string {
-	const leaf = id.split(".").pop() ?? id;
-	return leaf.charAt(0).toUpperCase() + leaf.slice(1);
-}
+/** Re-exported from `./plugin-id.ts` (shared with the detail tabs) because it is
+ *  part of this module's tested surface — see the note on {@link isCompanionApp}. */
+export { prettyPluginId } from "./plugin-id.ts";
 
-/** The app's plugin dependencies (`requires`) — the apps that must be enabled for
- *  this one to run. Rendered before install so the dependency chain is clear:
- *  enabling this app auto-enables these, and uninstalling one of these later prompts
- *  the disable cascade. Absent/empty ⇒ nothing rendered (self-contained app). */
-function RequiredAppsSection({
-	requires,
-}: {
-	requires?: CatalogEntry["requires"];
-}) {
-	const apps = requires?.apps ?? [];
-	if (apps.length === 0) {
-		return null;
-	}
-	return (
-		<section className="flex flex-col gap-2">
-			<h3 className="flex items-center gap-1.5 font-medium text-sm">
-				<HugeiconsIcon
-					className="size-4 text-muted-foreground"
-					icon={Link01Icon}
-				/>
-				Requires these apps
-			</h3>
-			<ul className="flex flex-col gap-1.5">
-				{apps.map((dep) => (
-					<li
-						className="flex items-center gap-2.5 rounded-md border px-3 py-2"
-						key={dep.id}
-					>
-						<HugeiconsIcon
-							className="size-4 shrink-0 text-muted-foreground"
-							icon={Link01Icon}
-						/>
-						<span className="min-w-0 flex-1 truncate text-sm">
-							{prettyPluginId(dep.id)}
-						</span>
-						{dep.min_version ? (
-							<span className="shrink-0 truncate text-muted-foreground text-xs">
-								≥ {dep.min_version}
-							</span>
-						) : null}
-						<span className="shrink-0 truncate font-mono text-muted-foreground text-xs">
-							{dep.id}
-						</span>
-					</li>
-				))}
-			</ul>
-			<p className="text-muted-foreground text-xs">
-				Enabling this app turns these on automatically.
-			</p>
-		</section>
-	);
-}
-
-/** Return `u` only when it parses as an http(s) URL, else null — a render-layer
- *  guard so an untrusted publisher's `javascript:`/`data:` link never reaches an
- *  `<a href>` even if a backend source forgot to allowlist the scheme.
- *  Exported for unit tests — see the note on {@link isCompanionApp}. */
-export function safeHttpUrl(u?: string | null): string | null {
-	if (!u) {
-		return null;
-	}
-	try {
-		const parsed = new URL(u);
-		if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-			return parsed.toString();
-		}
-		return null;
-	} catch {
-		return null;
-	}
-}
+/** The render-layer href guard now lives in `./safe-url.ts` so the detail panels
+ *  share one copy. Re-exported here because it is part of this module's tested
+ *  surface — see the note on {@link isCompanionApp}. */
+export { safeHttpUrl } from "./safe-url.ts";
 
 /** One label/value row in the Information table. Renders the value as a safe
  *  external link only when `href` is a valid http(s) URL; otherwise plain text. */

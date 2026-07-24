@@ -978,7 +978,8 @@ async fn validate_grants_via_gateway(
     // Stub mode: opt-in allow-all for environments where the Gateway endpoint
     // is not yet available. Always logged at WARN so it is visible. In a RELEASE
     // build the stub seam never approves an arbitrary-code-execution grant
-    // (`sidecar:process`): a shipped/misconfigured `RYU_STUB_GRANT_VALIDATION=1`
+    // (`sidecar:process`, `runtime:external`): a shipped/misconfigured
+    // `RYU_STUB_GRANT_VALIDATION=1`
     // must not become unsandboxed node-sidecar RCE. Debug builds (the integration
     // harness) keep the full allow-all so node-sidecar spawn tests still exercise
     // the path.
@@ -1072,13 +1073,41 @@ fn is_stub_mode() -> bool {
 }
 
 /// Whether the stub allow-all seam may auto-approve `grant`. In a RELEASE build it
-/// refuses `sidecar:process` (running an unsandboxed managed process from a manifest
-/// = arbitrary code execution) so a misconfigured `RYU_STUB_GRANT_VALIDATION=1`
-/// cannot become node-sidecar RCE; in a debug build (integration harness) every
-/// grant is allowed so node-sidecar tests still spawn.
+/// refuses every arbitrary-code-execution grant — `sidecar:process` (download +
+/// spawn an unsandboxed managed process from a manifest), `runtime:external`
+/// (create a venv and `pip install` a manifest's declared packages), and
+/// `mcp:server` (register a manifest-declared MCP server, which is spawned with
+/// the manifest's own `command`/`args` on the next tool listing) — so a
+/// misconfigured `RYU_STUB_GRANT_VALIDATION=1` cannot become RCE by any of them;
+/// in a debug build (integration harness) every grant is allowed so node-sidecar
+/// tests still spawn.
+///
+/// They are listed together deliberately: the Gateway's capability grammar
+/// reserves the `sidecar`, `runtime` and `mcp` namespaces for the same reason, and
+/// a stub seam that refused only some of them would be the softest door. Any FUTURE
+/// grant that ends in "a process the manifest chose gets executed" belongs here too
+/// — that is the membership rule for this list, not the specific three.
 fn stub_may_approve(grant: &str) -> bool {
-    !(cfg!(not(debug_assertions))
-        && grant == crate::sidecar::manifest_sidecar::GRANT_SIDECAR_PROCESS)
+    !(cfg!(not(debug_assertions)) && is_arbitrary_code_execution_grant(grant))
+}
+
+/// The membership rule behind [`stub_may_approve`], split out so it is testable on
+/// its own. [`stub_may_approve`] itself cannot be meaningfully asserted from the test
+/// suite: it is gated on `cfg!(not(debug_assertions))`, which is always false under
+/// `cargo test`, so every grant looks approvable there and a test would pass whether
+/// or not a grant is on this list. Testing the predicate directly is what actually
+/// pins the set.
+///
+/// A grant belongs here when holding it means "a process of the manifest's own
+/// choosing gets executed":
+///   - `sidecar:process`  — download + spawn an unsandboxed managed process
+///   - `runtime:external` — create a venv and `pip install` declared packages
+///   - `mcp:server`       — register a manifest-declared MCP server, which is spawned
+///                          with the manifest's `command`/`args` on the next tool listing
+fn is_arbitrary_code_execution_grant(grant: &str) -> bool {
+    grant == crate::sidecar::manifest_sidecar::GRANT_SIDECAR_PROCESS
+        || grant == crate::sidecar::external_runtime::GRANT_EXTERNAL_RUNTIME
+        || grant == crate::sidecar::mcp::GRANT_MCP_SERVER
 }
 
 #[cfg(test)]
@@ -1087,6 +1116,47 @@ mod tests {
     use crate::plugin_manifest::schema::RunnableEntry;
     use crate::plugin_manifest::PluginManifest;
     use crate::runnable::RunnableKind;
+
+    /// Pins the arbitrary-code-execution set the release-build stub seam refuses.
+    ///
+    /// Each of these grants ends in "a process the manifest chose gets executed", so
+    /// a shipped `RYU_STUB_GRANT_VALIDATION=1` that auto-approved any one of them
+    /// would be RCE. `mcp:server` was the door this test was written for: it was added
+    /// to gate manifest-declared MCP servers (which are spawned with the manifest's own
+    /// `command`/`args`) but was initially missed here, leaving the stub seam able to
+    /// approve it while it refused its two siblings.
+    #[test]
+    fn every_arbitrary_code_execution_grant_is_refused_by_the_release_stub() {
+        for grant in [
+            crate::sidecar::manifest_sidecar::GRANT_SIDECAR_PROCESS,
+            crate::sidecar::external_runtime::GRANT_EXTERNAL_RUNTIME,
+            crate::sidecar::mcp::GRANT_MCP_SERVER,
+        ] {
+            assert!(
+                is_arbitrary_code_execution_grant(grant),
+                "'{grant}' spawns a manifest-chosen process, so the release-build stub \
+                 seam must refuse it — add it to is_arbitrary_code_execution_grant"
+            );
+        }
+    }
+
+    /// The negative half: an ordinary data scope must NOT be swept into the refusal
+    /// set, or `RYU_STUB_GRANT_VALIDATION=1` would stop being a working test seam.
+    #[test]
+    fn ordinary_data_grants_are_not_treated_as_code_execution() {
+        for grant in [
+            "memory.read",
+            "spaces.write",
+            "model.chat",
+            "tool:http-egress:api.exa.ai",
+            "widget:render",
+        ] {
+            assert!(
+                !is_arbitrary_code_execution_grant(grant),
+                "'{grant}' does not spawn a process and must stay stub-approvable"
+            );
+        }
+    }
 
     fn make_manifest(id: &str, version: &str, grants: Vec<&str>) -> PluginManifest {
         PluginManifest {

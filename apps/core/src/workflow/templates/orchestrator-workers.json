@@ -1,0 +1,85 @@
+{
+  "meta": {
+    "id": "orchestrator-workers",
+    "name": "Orchestrator–Workers",
+    "description": "An orchestrator LLM plans subtasks, delegates them to workers, then integrates the results.",
+    "category": "orchestration",
+    "pattern": "orchestrator-workers",
+    "icon": "Workflow",
+    "node_count": 5,
+    "tags": ["orchestrator", "planning", "sub-agents"]
+  },
+  "primary": {
+    "id": "orchestrator-workers",
+    "name": "Orchestrator–Workers",
+    "description": "Plan → delegate → integrate.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "plan",
+        "type": "prompt",
+        "prompt": "You are an orchestrator. Break this goal into 3 clearly-scoped, parallelizable subtasks. Return a numbered list.\n\n{{input}}",
+        "agent_id": null
+      },
+      {
+        "id": "workers",
+        "type": "agent_delegate",
+        "delegates": [
+          {
+            "id": "sub-1",
+            "task": "Complete subtask 1 of this plan. Plan:\n\n{{nodes.plan}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "sub-2",
+            "task": "Complete subtask 2 of this plan. Plan:\n\n{{nodes.plan}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "sub-3",
+            "task": "Complete subtask 3 of this plan. Plan:\n\n{{nodes.plan}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          }
+        ],
+        "caps": null
+      },
+      {
+        "id": "synth",
+        "type": "prompt",
+        "prompt": "Integrate the workers' results into one deliverable that satisfies the original goal.\n\nGoal: {{input}}\n\nResults: {{nodes.workers}}",
+        "agent_id": null
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "plan"
+      },
+      {
+        "from": "plan",
+        "to": "workers"
+      },
+      {
+        "from": "workers",
+        "to": "synth"
+      },
+      {
+        "from": "synth",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

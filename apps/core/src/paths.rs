@@ -131,11 +131,19 @@ pub fn is_custom() -> bool {
 /// Marker filename requesting a wipe on the next Core start (see [`request_node_reset`]).
 const RESET_MARKER: &str = ".reset-pending";
 
-/// Files inside the data dir that a reset must PRESERVE. The encryption-key custody
-/// files live in the data dir when no OS keychain is available; deleting them would
-/// change the node's identity and (on keychain-less machines) orphan the key needed
-/// to boot. Everything else — every DB, download, and cache — is wiped.
-const RESET_PRESERVE: &[&str] = &["master.key", "memory.key"];
+/// Entries inside the data dir that a reset must PRESERVE. Everything else — every
+/// DB, download, and cache — is wiped.
+///
+/// - `master.key` / `memory.key`: the encryption-key custody files live in the data
+///   dir when no OS keychain is available; deleting them would change the node's
+///   identity and (on keychain-less machines) orphan the key needed to boot.
+/// - `bin`: this is *installed program code*, not user data. On a release install
+///   `~/.ryu/bin` holds `ryu-core` ITSELF plus the gateway and every downloaded app
+///   sidecar. Wiping it deletes the binary the desktop resolves on the next launch
+///   (`resolve_core_binary`), so the node would come back unstartable and need a
+///   reinstall — the opposite of "fresh, just-installed state", which has `bin`
+///   populated.
+const RESET_PRESERVE: &[&str] = &["master.key", "memory.key", "bin"];
 
 /// Path of the reset marker inside the active data dir.
 pub fn reset_marker_path() -> PathBuf {
@@ -300,6 +308,10 @@ mod tests {
         // Custody files to preserve.
         std::fs::write(base.join("master.key"), b"k").unwrap();
         std::fs::write(base.join("memory.key"), b"m").unwrap();
+        // Installed program code to preserve — on a release install this dir holds
+        // `ryu-core` itself, so wiping it would leave the node unstartable.
+        std::fs::create_dir_all(base.join("bin")).unwrap();
+        std::fs::write(base.join("bin").join("ryu-core"), b"elf").unwrap();
         // The marker that arms the wipe.
         std::fs::write(base.join(RESET_MARKER), b"1").unwrap();
 
@@ -310,6 +322,10 @@ mod tests {
         assert!(!base.join(RESET_MARKER).exists());
         assert!(base.join("master.key").exists());
         assert!(base.join("memory.key").exists());
+        assert!(
+            base.join("bin").join("ryu-core").exists(),
+            "reset must not delete the installed binaries it needs to reboot"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

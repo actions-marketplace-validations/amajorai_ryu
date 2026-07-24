@@ -35,7 +35,7 @@ use crate::recipes_host::CoreRecipesHost;
 use crate::server::ServerState;
 use crate::sidecar::ext_proxy::authenticate_sidecar;
 
-/// Shared front half of every `/api/host/recipes/*` handler: authenticate the
+/// Shared front half of every `ghost.*` kernel-capability handler: authenticate the
 /// sidecar callback and assert it IS the Recipes app. Returns the error `Response`
 /// to short-circuit on failure.
 async fn authorize(state: &ServerState, headers: &HeaderMap) -> Result<(), Response> {
@@ -55,7 +55,7 @@ async fn authorize(state: &ServerState, headers: &HeaderMap) -> Result<(), Respo
     Ok(())
 }
 
-/// `POST /api/host/recipes/run` — replay a recipe through the live Ghost MCP
+/// `POST /api/host/capability/ghost.replay` — replay a recipe through the live Ghost MCP
 /// registry. Body `{ recipe, params }`; returns the RAW ghost MCP `tools/call`
 /// envelope (the sidecar's `run()` wrapper unwraps it with `extract_mcp_json`).
 pub(crate) async fn host_recipes_run(
@@ -85,7 +85,7 @@ pub(crate) async fn host_recipes_run(
     }
 }
 
-/// `POST /api/host/recipes/record-start` — spawn the ghost recorder into Core's
+/// `POST /api/host/capability/ghost.recordStart` — spawn the ghost recorder into Core's
 /// process-global slot. Body `{ task }`; returns the raw [`ryu_recipes::RecorderStarted`].
 pub(crate) async fn host_recipes_record_start(
     State(state): State<ServerState>,
@@ -106,7 +106,7 @@ pub(crate) async fn host_recipes_record_start(
     }
 }
 
-/// `POST /api/host/recipes/record-status` — poll Core's held recorder. Returns the
+/// `POST /api/host/capability/ghost.recordStatus` — poll Core's held recorder. Returns the
 /// raw `Option<`[`ryu_recipes::RecorderStatus`]`>` (JSON `null` when idle).
 pub(crate) async fn host_recipes_record_status(
     State(state): State<ServerState>,
@@ -125,7 +125,7 @@ pub(crate) async fn host_recipes_record_status(
     }
 }
 
-/// `POST /api/host/recipes/record-stop` — stop and tear down Core's held recorder.
+/// `POST /api/host/capability/ghost.recordStop` — stop and tear down Core's held recorder.
 /// Returns the raw [`ryu_recipes::RecorderStopped`].
 pub(crate) async fn host_recipes_record_stop(
     State(state): State<ServerState>,

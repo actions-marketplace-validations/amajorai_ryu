@@ -5,7 +5,6 @@ import {
 	ArrowDown01Icon,
 	ArrowUp01Icon,
 	ArrowUpRight01Icon,
-	BookOpen01Icon,
 	BubbleChatIcon,
 	Cancel01Icon,
 	ChatAdd01Icon,
@@ -37,7 +36,6 @@ import {
 	SlidersHorizontalIcon,
 	Square01Icon,
 	Store01Icon,
-	Target01Icon,
 	Tick02Icon,
 	UserGroupIcon,
 	ViewOffSlashIcon,
@@ -217,13 +215,36 @@ import { CustomizeSidebarDialog } from "./CustomizeSidebarDialog.tsx";
 import { NavUser } from "./NavUser.tsx";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { SidebarSectionNav } from "./SidebarSectionNav.tsx";
+// The section vocabulary (built-in keys + labels + glyphs) and the order
+// persistence/reconciliation that goes with it. Kept in its own module so the
+// part that must never lose a user's saved layout is unit-testable without a DOM.
+import {
+	type BuiltinSectionKey,
+	DEFAULT_SECTION_ORDER,
+	isSectionKey,
+	loadSectionOrder,
+	SECTION_ICONS,
+	SECTION_LABELS,
+	type SectionKey,
+	saveSectionOrder,
+} from "./sidebar-sections.ts";
 import { TabGlyph } from "./TitleBar.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
+
+// Re-exported so the sidebar stays the single import surface for its own types
+// (CustomizeSidebarDialog and friends import them from here, not from the
+// vocabulary module).
+export type {
+	DynamicSectionKey,
+	SectionKey,
+} from "./sidebar-sections.ts";
 
 const UNREAD_KEY = "ryu:unread-convs";
 const PINNED_KEY = "ryu:pinned-convs";
 const ARCHIVED_KEY = "ryu:archived-convs";
-const SECTION_ORDER_KEY = "ryu:sidebar-section-order";
+// The section order key + its reconciliation live in `sidebar-sections.ts`
+// (loadSectionOrder/saveSectionOrder), next to the section vocabulary they
+// reconcile against; read/write it through those rather than by key here.
 const SECTION_COLLAPSED_KEY = "ryu:sidebar-collapsed-sections";
 // The hidden-sections set is owned by `lib/features.ts` (the single source of
 // truth shared with onboarding + Settings → Features); read/write it via
@@ -269,78 +290,6 @@ function saveIdSet(key: string, ids: Set<string>) {
 	}
 }
 
-/** The fixed, built-in sidebar sections (always present). All workspace
- *  projects/folders live nested under the single "projects" section. */
-type BuiltinSectionKey =
-	| "tabs"
-	| "agents"
-	| "teams"
-	| "spaces"
-	| "workflows"
-	| "channels"
-	| "integrations"
-	| "identities"
-	| "skills"
-	| "mcp"
-	| "tools"
-	| "plugins"
-	| "companions"
-	| "engines"
-	| "pinned"
-	| "projects"
-	| "chats"
-	| "archived";
-
-/** A dynamic, app-registered section key: `plugin:<pluginId>:<sectionId>`, minted
- *  from a `sidebar_sections` contribution. Namespaced so it never collides with a
- *  built-in key and is recognisable by prefix in the order/persistence machinery. */
-export type DynamicSectionKey = `plugin:${string}`;
-
-/** The reorderable top-level sidebar sections — the fixed built-ins plus any
- *  app-registered dynamic sections from the contributions feed. */
-export type SectionKey = BuiltinSectionKey | DynamicSectionKey;
-
-const DEFAULT_SECTION_ORDER: BuiltinSectionKey[] = [
-	"tabs",
-	"agents",
-	"teams",
-	"projects",
-	"pinned",
-	"chats",
-	"spaces",
-	"channels",
-	"integrations",
-	"plugins",
-	"companions",
-	"identities",
-	"workflows",
-	"skills",
-	"mcp",
-	"tools",
-	"engines",
-	"archived",
-];
-
-const LEGACY_DEFAULT_SECTION_ORDER: BuiltinSectionKey[] = [
-	"tabs",
-	"agents",
-	"teams",
-	"projects",
-	"chats",
-	"spaces",
-	"channels",
-	"integrations",
-	"plugins",
-	"identities",
-	"workflows",
-	"skills",
-	"mcp",
-	"tools",
-	"engines",
-	"pinned",
-	"archived",
-];
-
 const PATH_SEP_RE = /[\\/]/;
 
 /** Status-dot color class for a conversation's run status. */
@@ -358,64 +307,6 @@ function runStatusDotClass(status: string | undefined): string {
 function projectName(path: string): string {
 	return path.split(PATH_SEP_RE).pop() ?? path;
 }
-
-/** A dynamic app-registered section key (`plugin:<pluginId>:<sectionId>`). */
-function isDynamicSectionKey(value: string): value is DynamicSectionKey {
-	return value.startsWith("plugin:");
-}
-
-function isSectionKey(value: string): value is SectionKey {
-	// Accept dynamic `plugin:` keys too, so a persisted order keeps an app's section
-	// in place across reloads (it renders nothing when that app is disabled/absent).
-	return (
-		isDynamicSectionKey(value) ||
-		(DEFAULT_SECTION_ORDER as string[]).includes(value)
-	);
-}
-
-/** Human labels for the built-in sections, shared by the customize dialog. */
-const SECTION_LABELS: Record<BuiltinSectionKey, string> = {
-	tabs: "Tabs",
-	agents: "Agents",
-	teams: "Teams",
-	spaces: "Spaces",
-	workflows: "Workflows",
-	channels: "Channels",
-	integrations: "Integrations",
-	identities: "Identities",
-	skills: "Skills",
-	mcp: "MCP",
-	tools: "Tools",
-	plugins: "Plugins",
-	companions: "Apps",
-	engines: "Engines",
-	pinned: "Pinned",
-	projects: "Projects",
-	chats: "Chats",
-	archived: "Archived",
-};
-
-/** Glyphs for the tabbed-mode button bar (one per built-in section). */
-const SECTION_ICONS: Record<BuiltinSectionKey, IconSvgElement> = {
-	tabs: GridIcon,
-	agents: Target01Icon,
-	teams: UserGroupIcon,
-	spaces: DeliverySecure01Icon,
-	workflows: WorkflowCircle06Icon,
-	channels: BubbleChatIcon,
-	integrations: ConnectIcon,
-	identities: Key01Icon,
-	skills: Mortarboard01Icon,
-	mcp: ServerStack01Icon,
-	tools: Wrench01Icon,
-	plugins: PuzzleIcon,
-	companions: GridIcon,
-	engines: CpuIcon,
-	pinned: PinIcon,
-	projects: FolderOpenIcon,
-	chats: BookOpen01Icon,
-	archived: Archive01Icon,
-};
 
 /** Adapt a hugeicons glyph into the lucide-shaped IconComponent the TabsSubtle
  *  tab item expects — it renders its icon by calling it with
@@ -1017,54 +908,6 @@ function ShowLessButton({
 			Show {count} less
 		</button>
 	);
-}
-
-// The stored order can drift from the code (sections added/removed across
-// versions); reconcile by keeping the stored order for known keys, dropping
-// unknown ones, and splicing any section the user has never seen back into its
-// default neighbourhood (so a newly-added section like Workflows lands next to
-// Spaces rather than at the very bottom).
-function loadSectionOrder(): SectionKey[] {
-	try {
-		const stored = localStorage.getItem(SECTION_ORDER_KEY);
-		if (!stored) {
-			return [...DEFAULT_SECTION_ORDER];
-		}
-		const parsed = JSON.parse(stored) as string[];
-		const order = [...new Set(parsed.filter(isSectionKey))];
-		if (
-			order.length === LEGACY_DEFAULT_SECTION_ORDER.length &&
-			order.every((key, index) => key === LEGACY_DEFAULT_SECTION_ORDER[index])
-		) {
-			return [...DEFAULT_SECTION_ORDER];
-		}
-		const missing = DEFAULT_SECTION_ORDER.filter((k) => !order.includes(k));
-		for (const key of missing) {
-			const defaultIdx = DEFAULT_SECTION_ORDER.indexOf(key);
-			// Anchor to the nearest already-present predecessor in the default order;
-			// insert right after it, or at the front when there is none.
-			let insertAt = 0;
-			for (let i = defaultIdx - 1; i >= 0; i--) {
-				const idx = order.indexOf(DEFAULT_SECTION_ORDER[i]);
-				if (idx !== -1) {
-					insertAt = idx + 1;
-					break;
-				}
-			}
-			order.splice(insertAt, 0, key);
-		}
-		return order;
-	} catch {
-		return [...DEFAULT_SECTION_ORDER];
-	}
-}
-
-function saveSectionOrder(order: SectionKey[]) {
-	try {
-		localStorage.setItem(SECTION_ORDER_KEY, JSON.stringify(order));
-	} catch {
-		// best-effort
-	}
 }
 
 /** Shared callbacks/state threaded into every chat row, regardless of group. */
@@ -2071,7 +1914,7 @@ function VerticalSplitBlock({
 					dnd.onEnd();
 				}}
 			>
-				<HugeiconsIcon className="size-3" icon={GridIcon} />
+				<HugeiconsIcon className="size-3" icon={Folder01Icon} />
 				<span className="font-medium text-xs">
 					{canJoin && joinHover
 						? "Drop to add"
@@ -3911,10 +3754,18 @@ function PluginsSection({
 					role="button"
 					tabIndex={0}
 				>
-					<HugeiconsIcon
-						className="size-4 shrink-0 text-muted-foreground"
-						icon={PuzzleIcon}
-					/>
+					{app.companion?.icon ? (
+						<Icon
+							className="size-4 shrink-0 text-muted-foreground"
+							icon={app.companion.icon}
+							size={16}
+						/>
+					) : (
+						<HugeiconsIcon
+							className="size-4 shrink-0 text-muted-foreground"
+							icon={PuzzleIcon}
+						/>
+					)}
 					<OverflowTooltip
 						className="min-w-0 flex-1 truncate text-sm"
 						text={app.name}

@@ -34,6 +34,7 @@ const EMPTY: PluginContributions = {
 	views: [],
 	sidebar_sections: [],
 	sidebar_buttons: [],
+	dock_panels: [],
 	channels: [],
 	companions: [],
 };
@@ -49,6 +50,13 @@ export function pluginCompanionPath(companionId: string): string {
  *  at. The view id is scoped by its owning plugin so two apps can reuse an id. */
 export function pluginViewPath(pluginId: string, viewId: string): string {
 	return `/plugin-view/${encodeURIComponent(pluginId)}/${encodeURIComponent(viewId)}`;
+}
+
+/** The dock-tab key a contributed workspace panel is identified by. Namespaced by the
+ *  owning plugin (mirroring the Rust `DockPanelContribution` doc) so two apps may reuse
+ *  a panel id, and prefixed so it can never collide with a built-in tab kind. */
+export function pluginDockPanelKey(pluginId: string, panelId: string): string {
+	return `plugin:${pluginId}:${panelId}`;
 }
 
 /** The dev/storybook harness route rendering the shared `hello list-detail` example

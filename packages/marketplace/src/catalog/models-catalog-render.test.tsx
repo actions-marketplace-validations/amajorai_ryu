@@ -17,11 +17,7 @@ import {
 	type CatalogInstall,
 } from "./host.tsx";
 import ModelsCatalogSection from "./models-catalog-section.tsx";
-import type {
-	ModelCard,
-	ModelCatalogState,
-	ModelDetail,
-} from "./types.ts";
+import type { ModelCard, ModelCatalogState, ModelDetail } from "./types.ts";
 
 const MOCK_INSTALL: CatalogInstall = {
 	InstallButton: ({ children }) => (

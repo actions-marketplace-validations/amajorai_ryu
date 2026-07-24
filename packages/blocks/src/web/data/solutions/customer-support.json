@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Answers from your docs",
-      "description": "Agents pull from your help center, macros, and past tickets with Spaces and RAG, so replies cite a real source."
+      "description": "Agents pull from your help center, macros, and past tickets with Spaces and RAG, so replies cite a real source.",
+      "icon": "Bot"
     },
     {
       "title": "Customer data stays safe",
-      "description": "The Gateway redacts names, emails, and account details on egress, and can run fully local for sensitive queues."
+      "description": "The Gateway redacts names, emails, and account details on egress, and can run fully local for sensitive queues.",
+      "icon": "Shield"
     },
     {
       "title": "Wired into your help desk",
-      "description": "Connect to Zendesk, Intercom, or your stack to tag, route, and update tickets, not just suggest text."
+      "description": "Connect to Zendesk, Intercom, or your stack to tag, route, and update tickets, not just suggest text.",
+      "icon": "Plug"
     },
     {
       "title": "Human stays in the loop",
-      "description": "Every draft is a suggestion your agent reviews and sends, with the reasoning and sources visible."
+      "description": "Every draft is a suggestion your agent reviews and sends, with the reasoning and sources visible.",
+      "icon": "Bot"
     }
   ],
   "useCases": [

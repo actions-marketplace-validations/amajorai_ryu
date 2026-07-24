@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Numbers stay on your machine",
-      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request."
+      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request.",
+      "icon": "Shield"
     },
     {
       "title": "Pulls real figures",
-      "description": "Agents authenticate into spreadsheets, ERPs, and reporting tools to read actuals and assemble drafts for your review."
+      "description": "Agents authenticate into spreadsheets, ERPs, and reporting tools to read actuals and assemble drafts for your review.",
+      "icon": "Key"
     },
     {
       "title": "Cost under control",
-      "description": "The Gateway sets per-task budgets and routes each call to the right model, so heavy analysis never runs up a surprise bill."
+      "description": "The Gateway sets per-task budgets and routes each call to the right model, so heavy analysis never runs up a surprise bill.",
+      "icon": "Cpu"
     },
     {
       "title": "Cites the source",
-      "description": "Ground agents on your reporting packs and policy docs with Spaces and RAG, so every figure points back to its source."
+      "description": "Ground agents on your reporting packs and policy docs with Spaces and RAG, so every figure points back to its source.",
+      "icon": "Bot"
     }
   ],
   "useCases": [

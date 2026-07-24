@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Books stay on your machine",
-      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request."
+      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request.",
+      "icon": "Shield"
     },
     {
       "title": "Connects to your ledger",
-      "description": "Agents authenticate into QuickBooks, Xero, and spreadsheets to pull real transactions and post drafts for your review."
+      "description": "Agents authenticate into QuickBooks, Xero, and spreadsheets to pull real transactions and post drafts for your review.",
+      "icon": "Plug"
     },
     {
       "title": "Auditable by default",
-      "description": "Every model and tool call is logged in the Gateway audit trail, so you can show exactly what an agent touched."
+      "description": "Every model and tool call is logged in the Gateway audit trail, so you can show exactly what an agent touched.",
+      "icon": "Eye"
     },
     {
       "title": "Cites the source",
-      "description": "Ground agents on your chart of accounts and policy docs with Spaces and RAG, so answers point back to the record."
+      "description": "Ground agents on your chart of accounts and policy docs with Spaces and RAG, so answers point back to the record.",
+      "icon": "Eye"
     }
   ],
   "useCases": [

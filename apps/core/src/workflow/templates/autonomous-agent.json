@@ -1,0 +1,84 @@
+{
+  "meta": {
+    "id": "autonomous-agent",
+    "name": "Autonomous Agent",
+    "description": "A tool-using agent runs its own loop, wrapped in a bounded durable loop until it is done.",
+    "category": "orchestration",
+    "pattern": "autonomous-agent",
+    "icon": "Bot",
+    "node_count": 3,
+    "tags": ["agent", "autonomous", "loop", "tools"]
+  },
+  "primary": {
+    "id": "autonomous-agent",
+    "name": "Autonomous Agent",
+    "description": "A tool-using agent in a bounded loop.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "loop",
+        "type": "while",
+        "expr": "input nonempty",
+        "body_workflow_id": "auto_body",
+        "max_iterations": 8
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "loop"
+      },
+      {
+        "from": "loop",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": [
+    [
+      "auto_body",
+      {
+        "id": "auto_body",
+        "name": "Autonomous step",
+        "description": "One autonomous agent turn using its own tools.",
+        "nodes": [
+          {
+            "id": "ain",
+            "type": "input",
+            "key": "input"
+          },
+          {
+            "id": "worker",
+            "type": "agent",
+            "agent_id": "ryu",
+            "task": "Continue working autonomously toward the goal using your available tools. Report progress or the final result. Goal/context:\n\n{{input}}"
+          },
+          {
+            "id": "aout",
+            "type": "output",
+            "key": "result"
+          }
+        ],
+        "edges": [
+          {
+            "from": "ain",
+            "to": "worker"
+          },
+          {
+            "from": "worker",
+            "to": "aout"
+          }
+        ]
+      }
+    ]
+  ]
+}

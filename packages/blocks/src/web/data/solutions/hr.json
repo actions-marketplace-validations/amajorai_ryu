@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "People data stays put",
-      "description": "Run a local model for sensitive work, so salaries, reviews, and complaints never leave your device."
+      "description": "Run a local model for sensitive work, so salaries, reviews, and complaints never leave your device.",
+      "icon": "Shield"
     },
     {
       "title": "Answers from your handbook",
-      "description": "Ground agents on your real policies and benefits docs with Spaces, so answers cite the actual source."
+      "description": "Ground agents on your real policies and benefits docs with Spaces, so answers cite the actual source.",
+      "icon": "Bot"
     },
     {
       "title": "Redacted and logged",
-      "description": "When you use a cloud model, the Gateway strips PII on egress and records the call for compliance."
+      "description": "When you use a cloud model, the Gateway strips PII on egress and records the call for compliance.",
+      "icon": "Eye"
     },
     {
       "title": "Configurable per task",
-      "description": "Build an HR agent as a card with the right model, tools, and access for each kind of work."
+      "description": "Build an HR agent as a card with the right model, tools, and access for each kind of work.",
+      "icon": "Cpu"
     }
   ],
   "useCases": [

@@ -51,6 +51,14 @@ static WRAP_CLAUDE: AtomicBool = AtomicBool::new(false);
 /// auto-wrap (this module) is its only remaining consumer. The declarative
 /// `rtk__run` tool does NOT use this — the generic `command` backend resolves its
 /// bin through the Core command-tool allowlist (`RYU_COMMAND_TOOL_ALLOWLIST`).
+///
+/// **Never feed this into the command-tool allowlist.** The PATH walk below is
+/// deliberately fuzzy — it exists so the BYO auto-wrap toggle can say "rtk is
+/// installed" for whatever `rtk` the user has — and its result is NOT a trusted
+/// absolute target. `tool_exec::parse_command_allowlist` requires absolute,
+/// unshadowable paths precisely because an allowlisted bin is model-reachable;
+/// `tool_exec::trusted_builtin_bin_path` therefore resolves the `rtk` KEY from
+/// `RYU_RTK_BIN` / `~/.ryu/bin/rtk` only, and used to call this by mistake.
 pub fn rtk_bin_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("RYU_RTK_BIN") {
         let path = PathBuf::from(p);

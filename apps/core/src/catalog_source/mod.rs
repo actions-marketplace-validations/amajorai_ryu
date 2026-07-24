@@ -13,7 +13,9 @@
 //! methods (not object-safe), and heterogeneous storage is done via the closed
 //! [`sources::Source`] enum, match-dispatched. See `sources.rs`.
 
+mod github_enrich;
 mod github_topic;
+pub(crate) mod manifest_surface;
 mod registry;
 mod sources;
 

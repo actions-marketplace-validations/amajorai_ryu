@@ -1,0 +1,110 @@
+{
+  "meta": {
+    "id": "adversarial-verification",
+    "name": "Adversarial Verification",
+    "description": "Generate an answer, have N independent verifiers vote, and accept on majority — else revise.",
+    "category": "quality",
+    "pattern": "adversarial-verification",
+    "icon": "ShieldCheck",
+    "node_count": 7,
+    "tags": ["verification", "voting", "quality", "sub-agents"]
+  },
+  "primary": {
+    "id": "adversarial-verification",
+    "name": "Adversarial Verification",
+    "description": "Generate → N verifiers vote → accept or revise.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "generate",
+        "type": "prompt",
+        "prompt": "Answer this as accurately as you can:\n\n{{input}}",
+        "agent_id": null
+      },
+      {
+        "id": "verify",
+        "type": "agent_delegate",
+        "delegates": [
+          {
+            "id": "v1",
+            "task": "Independently verify this answer. Reply PASS or FAIL with a one-line reason.\n\nAnswer: {{nodes.generate}}",
+            "agent_id": "ryu",
+            "preset": "research"
+          },
+          {
+            "id": "v2",
+            "task": "Independently verify this answer, looking for a different failure mode. Reply PASS or FAIL with a reason.\n\nAnswer: {{nodes.generate}}",
+            "agent_id": "ryu",
+            "preset": "research"
+          },
+          {
+            "id": "v3",
+            "task": "Independently verify this answer, checking facts and edge cases. Reply PASS or FAIL with a reason.\n\nAnswer: {{nodes.generate}}",
+            "agent_id": "ryu",
+            "preset": "research"
+          }
+        ],
+        "caps": null
+      },
+      {
+        "id": "tally",
+        "type": "prompt",
+        "prompt": "Here are independent verifier verdicts. If a MAJORITY say PASS, return exactly `PASS`; otherwise return exactly `FAIL`.\n\n{{nodes.verify}}",
+        "agent_id": null
+      },
+      {
+        "id": "gate",
+        "type": "condition",
+        "expr": "input contains \"PASS\""
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      },
+      {
+        "id": "revise",
+        "type": "prompt",
+        "prompt": "The answer failed verification. Produce a corrected answer.\n\nOriginal: {{nodes.generate}}\n\nVerdicts: {{nodes.verify}}",
+        "agent_id": null
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "generate"
+      },
+      {
+        "from": "generate",
+        "to": "verify"
+      },
+      {
+        "from": "verify",
+        "to": "tally"
+      },
+      {
+        "from": "tally",
+        "to": "gate"
+      },
+      {
+        "from": "gate",
+        "to": "out",
+        "branch": "true"
+      },
+      {
+        "from": "gate",
+        "to": "revise",
+        "branch": "false"
+      },
+      {
+        "from": "revise",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

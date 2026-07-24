@@ -51,10 +51,9 @@ use crate::server::spaces::{self, SpaceStore};
 use crate::server::ServerState;
 use crate::sidecar::ext_proxy::{authenticate_sidecar, ext_token, node_token};
 
-/// Fallback loopback port if the manifest is somehow absent — matches the
-/// `meetings.manifest.json` fixture `port`. Core injects this as `RYU_MEETINGS_PORT`
-/// at spawn.
-const MEETINGS_FALLBACK_PORT: u16 = 7998;
+/// The `ryu-meetings` sidecar's name inside the Meetings manifest — the other half of
+/// the `(plugin id, sidecar name)` key the port resolves through.
+const MEETINGS_SIDECAR: &str = "ryu-meetings";
 
 /// The ambient app label recorded on a hardware-opened meeting (matches the old
 /// in-process `open_or_resume_ambient` call).
@@ -66,15 +65,16 @@ const AMBIENT_APP: &str = "ryu-hardware";
 const MEETINGS_SPACE_NAME: &str = "Meetings";
 
 /// Resolve the `ryu-meetings` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]).
+/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
+/// port comes from the manifest and ONLY the manifest — see
+/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
+/// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    let raw = manifests
-        .iter()
-        .find(|m| m.id == MEETINGS_PLUGIN_ID)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == "ryu-meetings"))
-        .map(|s| s.port)
-        .unwrap_or(MEETINGS_FALLBACK_PORT);
-    crate::profile::port(raw)
+    crate::sidecar::ext_proxy::sidecar_port(manifests, MEETINGS_PLUGIN_ID, MEETINGS_SIDECAR)
+        .expect(
+            "built-in meetings.manifest.json must declare the ryu-meetings sidecar (see \
+             plugin_manifest::BUILTIN_MANIFESTS)",
+        )
 }
 
 /// Typed loopback client for the `ryu-meetings` sidecar. Cheap to clone (holds only
@@ -337,7 +337,7 @@ pub(crate) struct SaveNotesBody {
     markdown: String,
 }
 
-/// `POST /api/host/meetings/save-notes` — file a finalized meeting's notes markdown
+/// `POST /api/host/capability/spaces.fileNotes` — file a finalized meeting's notes markdown
 /// into the "Meetings" Space on the sidecar's behalf, under the background owner. The
 /// sidecar cannot host Core's `SpaceStore` + tenancy, so this runs the Spaces filing
 /// Core-side and returns `{ space_id, doc_id }` for the sidecar to persist onto the

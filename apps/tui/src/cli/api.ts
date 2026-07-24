@@ -1,7 +1,9 @@
 // The real {@link CoreApi} bundle: the typed core-client plugin-lifecycle calls
 // plus the tui's own SSE chat client. Handlers receive this via the CliContext, so
 // nothing here is imported by them directly — that indirection is the test seam
-// (bun tests pass a fake CoreApi and never touch the network).
+// (bun tests pass a fake CoreApi and never touch the network). The `ryu init`
+// scaffold runner rides the same seam for the same reason: it is injected, so the
+// tests exercise the command without ever spawning a process.
 
 import type { ApiTarget } from "@ryuhq/core-client/client";
 import { apiUrl, makeHeaders } from "@ryuhq/core-client/client";
@@ -15,7 +17,7 @@ import {
 	uninstallApp,
 } from "@ryuhq/core-client/plugins";
 import { streamChat } from "../core/chatStream.ts";
-import type { CoreApi } from "./types.ts";
+import type { CoreApi, ScaffoldResult, ScaffoldRunner } from "./types.ts";
 
 /** HTTP verbs that carry a request body; the rest encode args in the query. */
 const BODY_METHODS = new Set(["POST", "PUT", "PATCH"]);
@@ -54,6 +56,58 @@ async function execAppCommand(
 	return { status: resp.status, body: await resp.text() };
 }
 
+/** The scaffolder invoked by `ryu init`, as a user would run it themselves.
+ *  `create-ryu-app` owns every template; shelling out keeps it that way — importing
+ *  it would give the tui a build-time dependency on a package it does not own and
+ *  would freeze that package's template list into this binary at release time, so a
+ *  template added upstream would silently not exist here. */
+const SCAFFOLD_CMD = ["bunx", "create-ryu-app"];
+
+/** Env override for the scaffolder command, mirroring the `RYU_*_BIN` convention
+ *  the Core/Gateway bootstrap already uses (see core/bootstrap.ts). Lets a monorepo
+ *  or air-gapped checkout point `ryu init` at a local build instead of the npm
+ *  registry, without the command layer growing a second code path. */
+function scaffoldCommand(): string[] {
+	const override = process.env.RYU_CREATE_APP_BIN;
+	return override ? [override] : SCAFFOLD_CMD;
+}
+
+/** Spawn the scaffolder and CAPTURE its output (never inherit — see
+ *  {@link ScaffoldResult}). `argv` elements are passed as separate arguments with
+ *  no shell, so a project name can never be interpreted as a command. A spawn
+ *  failure (no Bun on PATH) is rethrown with the fix in the message rather than a
+ *  bare ENOENT, since that is the one failure a user can actually act on. */
+const runScaffold: ScaffoldRunner = async (
+	argv: string[]
+): Promise<ScaffoldResult> => {
+	const cmd = [...scaffoldCommand(), ...argv];
+	// The stdio generics are spelled out so `proc.stdout`/`proc.stderr` type as the
+	// piped ReadableStreams they are, not the union `Bun.spawn` widens to.
+	let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+	try {
+		proc = Bun.spawn({
+			cmd,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+	} catch (err) {
+		// Point at whichever half the user actually controls: a broken override is a
+		// different fix from a missing Bun, and a message naming the wrong one sends
+		// them off installing something they already have.
+		const fix = process.env.RYU_CREATE_APP_BIN
+			? "Check RYU_CREATE_APP_BIN."
+			: "Install Bun (https://bun.sh), or set RYU_CREATE_APP_BIN to a local scaffolder.";
+		throw new Error(`could not run '${cmd[0]}': ${String(err)}. ${fix}`);
+	}
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	return { exitCode, stdout, stderr };
+};
+
 /** The production CoreApi wired to a live Core node over HTTP. */
 export const realCoreApi: CoreApi = {
 	disableApp,
@@ -65,3 +119,6 @@ export const realCoreApi: CoreApi = {
 	streamChat,
 	uninstallApp,
 };
+
+/** The production scaffold runner, injected alongside {@link realCoreApi}. */
+export const realScaffold: ScaffoldRunner = runScaffold;

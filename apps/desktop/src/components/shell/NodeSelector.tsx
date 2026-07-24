@@ -2,16 +2,21 @@ import {
 	Add01Icon,
 	Alert02Icon,
 	ArrowDown01Icon,
+	ArrowUp01Icon,
 	Cancel01Icon,
 	CloudServerIcon,
 	Copy01Icon,
 	CpuIcon,
 	Delete01Icon,
 	DollarCircleIcon,
+	Download04Icon,
+	Mic01Icon,
+	PackageIcon,
 	Settings01Icon,
 	Share08Icon,
 	ViewIcon,
 	ViewOffSlashIcon,
+	VolumeHighIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -64,7 +69,7 @@ import {
 	fetchConnections,
 } from "@/src/lib/api/connections.ts";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
-import { fetchActiveEngine } from "@/src/lib/api/engines.ts";
+import { fetchActiveEngine, setActiveEngine } from "@/src/lib/api/engines.ts";
 import { fetchGatewayStatus } from "@/src/lib/api/gateway.ts";
 import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
 import type {
@@ -87,17 +92,35 @@ import {
 	stopSidecar,
 } from "@/src/lib/api/plugins.ts";
 import {
+	DEFAULT_VOICE_PREFS,
+	DESKTOP_TTS_ENGINE_KEY,
+	DESKTOP_TTS_VOICE_KEY,
+	getDesktopTtsPrefs,
+	getVoiceInputPrefs,
+	setDesktopTtsPref,
+	setVoiceInputPrefs,
+	subscribeDesktopTtsPrefs,
+	VOICE_ENGINES,
+} from "@/src/lib/api/preferences.ts";
+import {
+	fetchSandboxBackends,
+	setSandboxBackend,
+} from "@/src/lib/api/sandbox.ts";
+import {
 	createSandbox,
 	destroySandbox,
 	type SandboxRun,
 	type SandboxSpec,
 } from "@/src/lib/api/sandboxes.ts";
 import type { SystemInfo } from "@/src/lib/api/system.ts";
+import { listTtsEngines, type TtsEngine } from "@/src/lib/api/voice.ts";
 import {
 	type CatalogItem,
 	fetchCatalog,
 	fetchDependencies,
 	installMissingDeps,
+	installSidecar,
+	uninstallSidecar,
 } from "@/src/lib/services-api.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import {
@@ -108,6 +131,12 @@ import {
 } from "@/src/store/useNodeStore.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { AutoScrollText } from "./AutoScrollText.tsx";
+import {
+	type LayerAction,
+	type LayerOption,
+	NodeLayerMenu,
+	startStopAction,
+} from "./NodeLayerMenu.tsx";
 
 interface NodeSelectorProps {
 	mode: "persistent-sidebar" | "compact-dropdown";
@@ -1005,6 +1034,13 @@ function usageCaption(detail: SidecarDetail | undefined): string | null {
 	return `${mem} · ${Math.round(detail.cpuPercent)}%`;
 }
 
+/**
+ * One service layer (Core / Gateway / Shadow / Island) as a submenu: the trigger
+ * carries the health dot, name, live usage and version; Start / Stop / Update /
+ * Launch sit at the top of the submenu instead of crowding the row with inline
+ * buttons. A service is a singleton — nothing to swap to — so it passes no
+ * installed/available lists.
+ */
 function ServiceRow({
 	label,
 	running,
@@ -1044,158 +1080,94 @@ function ServiceRow({
 	 *  `readOnly`. */
 	onLaunch?: () => Promise<void>;
 }) {
-	const [pending, setPending] = useState<"start" | "stop" | null>(null);
-	const [updating, setUpdating] = useState(false);
-	const [launching, setLaunching] = useState(false);
-
-	const handleUpdate = async (e: React.MouseEvent) => {
-		e.stopPropagation();
+	const handleUpdate = async () => {
 		if (!onUpdate) {
 			return;
 		}
-		setUpdating(true);
-		try {
-			await onUpdate();
-			await onChanged();
-		} catch {
-			// Status reconciles on the next poll tick; nothing to surface inline here.
-		} finally {
-			setUpdating(false);
-		}
+		await onUpdate();
+		await onChanged();
 	};
 
-	const handleLaunch = async (e: React.MouseEvent) => {
-		e.stopPropagation();
+	const handleLaunch = async () => {
 		if (!onLaunch) {
 			return;
 		}
-		setLaunching(true);
-		try {
-			await onLaunch();
-			// Electron cold start + binding :7989 takes a few seconds, so give it a
-			// beat before re-probing; the 5s status poll flips the dot regardless.
-			await new Promise<void>((resolve) => setTimeout(resolve, 1000));
-			await onChanged();
-		} catch {
-			// Status reconciles on the next poll tick; nothing to surface inline here.
-		} finally {
-			setLaunching(false);
-		}
+		await onLaunch();
+		// Electron cold start + binding :7989 takes a few seconds, so give it a
+		// beat before re-probing; the 5s status poll flips the dot regardless.
+		await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+		await onChanged();
 	};
 
-	const handleToggle = async (e: React.MouseEvent) => {
-		e.stopPropagation();
-		const action = running ? "stop" : "start";
-		setPending(action);
-		try {
-			if (running) {
-				await stopSidecar(target, sidecarKey);
-			} else {
-				await startSidecar(target, sidecarKey);
-			}
-			// Give the process a moment to settle before re-polling status.
-			await new Promise<void>((resolve) => setTimeout(resolve, 1000));
-			await onChanged();
-		} catch {
-			// Status reconciles on the next poll tick; nothing to surface inline here.
-		} finally {
-			setPending(null);
+	const handleToggle = async (next: boolean) => {
+		if (next) {
+			await startSidecar(target, sidecarKey);
+		} else {
+			await stopSidecar(target, sidecarKey);
 		}
+		// Give the process a moment to settle before re-polling status.
+		await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+		await onChanged();
 	};
-
-	const dotColor =
-		running === null
-			? "bg-muted-foreground/30"
-			: running
-				? "bg-success"
-				: "bg-destructive";
-
-	const label2 =
-		pending === "stop"
-			? "Stopping…"
-			: pending === "start"
-				? "Starting…"
-				: running
-					? "Stop"
-					: "Start";
 
 	const usage = running ? usageCaption(detail) : null;
-	const showUpdate = updateAvailable && onUpdate != null;
+	const actions: LayerAction[] = [];
+	if (running !== null && !readOnly) {
+		actions.push(startStopAction(running, handleToggle));
+	}
+	if (updateAvailable && onUpdate) {
+		actions.push({
+			id: "update",
+			label: "Update",
+			busyLabel: "Updating…",
+			icon: ArrowUp01Icon,
+			tone: "warning",
+			run: handleUpdate,
+		});
+	}
+	if (onLaunch && running === false) {
+		actions.push({
+			id: "launch",
+			label: "Install / Launch",
+			busyLabel: "Launching…",
+			icon: Download04Icon,
+			run: handleLaunch,
+		});
+	}
+
+	let caption: string;
+	if (running === null) {
+		caption = "Status unknown";
+	} else if (running) {
+		caption = usage ? `Running · ${usage}` : "Running";
+	} else {
+		caption = "Stopped";
+	}
 
 	return (
-		<div className="flex items-center gap-2 px-2 py-1 text-xs">
-			<span
-				aria-hidden
-				className={cn("size-1.5 shrink-0 rounded-full", dotColor)}
-			/>
-			<AutoScrollText className="flex-1 text-muted-foreground" title={label}>
-				{label}
-			</AutoScrollText>
-			{version && (
-				<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
-					v{version}
-				</span>
-			)}
-			{usage && (
-				<span className="shrink-0 text-[10px] text-muted-foreground/60 tabular-nums">
-					{usage}
-				</span>
-			)}
-			{showUpdate && (
-				<button
-					className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-warning hover:bg-warning/10 disabled:opacity-50 dark:text-warning"
-					disabled={updating}
-					onClick={handleUpdate}
-					type="button"
-				>
-					{updating ? "Updating…" : "Update"}
-				</button>
-			)}
-			{onLaunch && running === false && (
-				<button
-					className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-					disabled={launching}
-					onClick={handleLaunch}
-					type="button"
-				>
-					{launching ? "Launching…" : "Install / Launch"}
-				</button>
-			)}
-			{running !== null && !readOnly && (
-				<button
-					className={cn(
-						"shrink-0 rounded-md px-1.5 py-0.5 text-[10px] hover:bg-accent disabled:opacity-50",
-						running
-							? "text-muted-foreground hover:text-destructive"
-							: "text-muted-foreground hover:text-foreground"
-					)}
-					disabled={pending !== null}
-					onClick={handleToggle}
-					type="button"
-				>
-					{label2}
-				</button>
-			)}
-		</div>
+		<NodeLayerMenu
+			actions={actions}
+			caption={caption}
+			currentLabel={label}
+			label={label}
+			running={running}
+			trailing={usage ?? (running === false ? "stopped" : null)}
+			version={version}
+		/>
 	);
 }
 
-/** Modality groups for the engines list, in display order. Categories map to
- *  the catalog's SidecarCategory: provider=chat, voice=speech, media=image,
- *  embedding=embeddings. Agents/tools are not engines and are excluded. */
-const ENGINE_GROUPS: Array<{
-	categories: CatalogItem["category"][];
+/** The run-alongside modality groups, in display order. These map to the
+ *  catalog's SidecarCategory: voice=speech, media=image, embedding=embeddings.
+ *  The `provider` (chat) category is NOT here — it is the single mutually-
+ *  exclusive slot and gets its own swap layer. Agents/tools aren't engines. */
+const RUN_ALONGSIDE_GROUPS: Array<{
+	category: CatalogItem["category"];
 	label: string;
-	/** Chat engines are swap-managed (mutually exclusive), so this panel shows
-	 *  their status + usage but no start/stop toggle — switching the resident
-	 *  chat engine is a Store action (`setActiveEngine`), not a sidecar stop. The
-	 *  run-alongside engines (speech/image/embeddings) toggle freely. */
-	readOnly: boolean;
 }> = [
-	{ label: "Chat", categories: ["provider"], readOnly: true },
-	{ label: "Speech", categories: ["voice"], readOnly: false },
-	{ label: "Image", categories: ["media"], readOnly: false },
-	{ label: "Embeddings", categories: ["embedding"], readOnly: false },
+	{ label: "Speech", category: "voice" },
+	{ label: "Image", category: "media" },
+	{ label: "Embeddings", category: "embedding" },
 ];
 
 /**
@@ -1236,7 +1208,14 @@ function EngineQueueBadge({
 	);
 }
 
-function EnginesSection({ target }: { target: ApiTarget }) {
+/**
+ * The node's engine spine: the catalog (what's installed), a live sidecar sample
+ * (running + memory/CPU), the resident chat engine and the admission-queue depth.
+ *
+ * Both engine-bearing sections share this ONE query — same key, same fetcher, so
+ * React Query serves them from a single 5s poll instead of two.
+ */
+function useNodeEngines(target: ApiTarget) {
 	const query = useQuery({
 		queryKey: ["node-engines", target.url],
 		queryFn: async () => {
@@ -1261,39 +1240,140 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 		refetchInterval: 5000,
 	});
 
-	const catalog = query.data?.catalog ?? [];
-	const details = query.data?.details ?? {};
-	const activeChat = query.data?.active ?? null;
-	const concurrency = query.data?.concurrency ?? null;
-	// Only installed engines are actionable here — not-installed runtimes live in
-	// the Store, not this status panel.
-	const installed = catalog.filter((item) => item.installState === "installed");
-	const groups = ENGINE_GROUPS.map((group) => {
-		const isChat = group.categories.includes("provider");
-		let engines = installed.filter((item) =>
-			group.categories.includes(item.category)
-		);
-		// Chat is a single mutually-exclusive slot, so show ONLY the engine the
-		// user actually picked — never the installed-but-idle alternatives
-		// (Ollama / vLLM / SGLang / MLX). Prefer the reported active engine; fall
-		// back to whichever provider is currently running if that's unavailable.
-		if (isChat) {
-			engines = engines.filter((item) =>
-				activeChat
-					? item.name === activeChat
-					: (details[item.name]?.running ?? false)
-			);
-		}
-		return { label: group.label, readOnly: group.readOnly, isChat, engines };
-	}).filter((g) => g.engines.length > 0);
+	return {
+		catalog: query.data?.catalog ?? [],
+		details: query.data?.details ?? {},
+		activeChat: query.data?.active ?? null,
+		concurrency: query.data?.concurrency ?? null,
+		refresh: async () => {
+			await query.refetch();
+		},
+	};
+}
 
-	if (groups.length === 0) {
+/** Install a catalog engine on `target`, reporting either outcome. */
+async function installEngine(target: ApiTarget, item: CatalogItem) {
+	try {
+		await installSidecar(target.url, target.token, item.name);
+		sileo.success({ title: `Installing ${item.displayName}` });
+	} catch (e) {
+		sileo.error({
+			title:
+				e instanceof Error ? e.message : `Couldn't install ${item.displayName}`,
+		});
+	}
+}
+
+function EnginesSection({ target }: { target: ApiTarget }) {
+	const { catalog, details, activeChat, concurrency, refresh } =
+		useNodeEngines(target);
+
+	/** Install a not-yet-present engine, then reconcile the list. */
+	const install = async (item: CatalogItem) => {
+		await installEngine(target, item);
+		await refresh();
+	};
+
+	const uninstall = async (item: CatalogItem) => {
+		try {
+			await uninstallSidecar(target.url, target.token, item.name);
+			sileo.success({ title: `Removed ${item.displayName}` });
+		} catch (e) {
+			sileo.error({
+				title:
+					e instanceof Error
+						? e.message
+						: `Couldn't remove ${item.displayName}`,
+			});
+		}
+		await refresh();
+	};
+
+	/** Swap the resident chat engine. NOT a sidecar start/stop — the mutually-
+	 *  exclusive slot moves via `/api/engine/active`, which also stops the engine
+	 *  it displaced and refreshes the gateway's model list. */
+	const activate = async (item: CatalogItem) => {
+		try {
+			const swap = await setActiveEngine(target, item.name);
+			if (!swap.unchanged) {
+				sileo.success({ title: `Chat engine → ${item.displayName}` });
+			}
+		} catch (e) {
+			sileo.error({
+				title:
+					e instanceof Error
+						? e.message
+						: `Couldn't switch to ${item.displayName}`,
+			});
+		}
+		await refresh();
+	};
+
+	/** Start/stop one run-alongside engine (speech / image / embeddings). */
+	const toggleEngine = async (item: CatalogItem, next: boolean) => {
+		try {
+			if (next) {
+				await startSidecar(target, item.name);
+			} else {
+				await stopSidecar(target, item.name);
+			}
+			// Give the process a moment to settle before re-polling status.
+			await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+		} catch (e) {
+			sileo.error({
+				title:
+					e instanceof Error
+						? e.message
+						: `Couldn't ${next ? "start" : "stop"} ${item.displayName}`,
+			});
+		}
+		await refresh();
+	};
+
+	/** Not-installed rows, shared by every engine layer. Unsupported entries stay
+	 *  visible but inert, with the reason where the version badge would go. */
+	const availableOptions = (items: CatalogItem[]): LayerOption[] =>
+		items
+			.filter((item) => item.installState !== "installed")
+			.map((item) => ({
+				name: item.name,
+				label: item.displayName,
+				detail:
+					item.installState === "installing"
+						? "installing…"
+						: item.latestVersion,
+				disabled: !item.supported,
+				disabledReason: "unsupported here",
+				select: () => install(item),
+			}));
+
+	const providers = catalog.filter((item) => item.category === "provider");
+	const chatInstalled = providers.filter(
+		(item) => item.installState === "installed"
+	);
+	// Prefer the engine Core reports as resident; fall back to whichever provider
+	// is actually running, so a Core without the surface still reads correctly.
+	const activeChatName =
+		activeChat ??
+		chatInstalled.find((item) => details[item.name]?.running)?.name ??
+		null;
+	const activeChatItem =
+		chatInstalled.find((item) => item.name === activeChatName) ?? null;
+	const chatRunning = activeChatItem
+		? (details[activeChatItem.name]?.running ?? false)
+		: null;
+	const chatUsage = activeChatItem
+		? usageCaption(details[activeChatItem.name])
+		: null;
+
+	const groups = RUN_ALONGSIDE_GROUPS.map((group) => ({
+		...group,
+		items: catalog.filter((item) => item.category === group.category),
+	})).filter((group) => group.items.length > 0);
+
+	if (providers.length === 0 && groups.length === 0) {
 		return null;
 	}
-
-	const refresh = async () => {
-		await query.refetch();
-	};
 
 	return (
 		<div className="px-1 py-0.5">
@@ -1303,36 +1383,83 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 				</p>
 				<EngineQueueBadge concurrency={concurrency} />
 			</div>
-			{groups.map((group) => (
-				<div key={group.label}>
-					{/* The chat engine sits directly under the "Engines" header and is
-					    the single active slot, so its "Chat" sub-label is redundant —
-					    only the run-alongside groups (Speech/Image/Embeddings) get one. */}
-					{!group.isChat && (
-						<p className="px-2 pt-1 pb-0.5 text-[9px] text-muted-foreground/40 uppercase tracking-wider">
-							{group.label}
-						</p>
+			{providers.length > 0 && (
+				// The single mutually-exclusive chat slot. No start/stop and no
+				// per-engine update: engine downloads are pinned to a compile-time
+				// target (the catalog's upstream `latestVersion` is informational) and
+				// they upgrade with the app.
+				<NodeLayerMenu
+					available={availableOptions(providers)}
+					caption={
+						activeChatItem
+							? `Resident chat engine${chatRunning ? ` · ${chatUsage ?? "running"}` : " · idle"}`
+							: "No chat engine selected"
+					}
+					currentLabel={activeChatItem?.displayName ?? "None"}
+					icon={CpuIcon}
+					installed={chatInstalled.map(
+						(item): LayerOption => ({
+							name: item.name,
+							label: item.displayName,
+							active: item.name === activeChatName,
+							detail: item.installedVersion,
+							select: () => activate(item),
+							// Never offer to remove the engine currently bound to local
+							// agents — swap off it first, then it becomes removable.
+							uninstall:
+								item.name === activeChatName
+									? undefined
+									: () => uninstall(item),
+						})
 					)}
-					{group.engines.map((engine) => (
-						// Show the installed engine build (e.g. llama.cpp "b9670") as a
-						// version badge. No per-engine "update" action: engine downloads
-						// are pinned to a compile-time target, so the catalog's upstream
-						// `latestVersion` is informational only — re-install can't move an
-						// installed engine off its pin, and engines upgrade with the app.
-						<ServiceRow
-							detail={details[engine.name]}
-							key={engine.name}
-							label={engine.displayName}
-							onChanged={refresh}
-							readOnly={group.readOnly}
-							running={details[engine.name]?.running ?? false}
-							sidecarKey={engine.name}
-							target={target}
-							version={engine.installedVersion}
-						/>
-					))}
-				</div>
-			))}
+					label="Chat engine"
+					running={chatRunning}
+					version={activeChatItem?.installedVersion}
+				/>
+			)}
+			{groups.map((group) => {
+				const installed = group.items.filter(
+					(item) => item.installState === "installed"
+				);
+				const runningItems = installed.filter(
+					(item) => details[item.name]?.running
+				);
+				let currentLabel: string;
+				if (runningItems.length > 0) {
+					currentLabel = runningItems.map((i) => i.displayName).join(", ");
+				} else if (installed.length > 0) {
+					currentLabel = "None running";
+				} else {
+					currentLabel = "Not installed";
+				}
+				return (
+					<NodeLayerMenu
+						available={availableOptions(group.items)}
+						caption={
+							installed.length > 0
+								? `${runningItems.length} of ${installed.length} running · these run alongside the chat engine`
+								: "Nothing installed yet"
+						}
+						currentLabel={currentLabel}
+						installed={installed.map(
+							(item): LayerOption => ({
+								name: item.name,
+								label: item.displayName,
+								active: details[item.name]?.running ?? false,
+								detail:
+									usageCaption(details[item.name]) ?? item.installedVersion,
+								select: () =>
+									toggleEngine(item, !(details[item.name]?.running ?? false)),
+								uninstall: () => uninstall(item),
+							})
+						)}
+						key={group.label}
+						label={group.label}
+						running={installed.length === 0 ? null : runningItems.length > 0}
+						selectionMode="toggle"
+					/>
+				);
+			})}
 		</div>
 	);
 }
@@ -1502,6 +1629,325 @@ function SandboxesSection({
 							target={target}
 						/>
 					))
+				)}
+			</div>
+		</>
+	);
+}
+
+/**
+ * The remaining swappable layers of a node that aren't catalog sidecars: the
+ * text-to-speech engine + voice, the speech-to-text engine, and the sandbox
+ * backend the agent's `sandbox_exec` tool runs in.
+ *
+ * These share ONE poll (TTS engines + STT preference + sandbox backends + a
+ * sidecar sample) so adding three layers to the dropdown costs one request, not
+ * four. Each layer renders as the same submenu as the engines above it.
+ *
+ * The sandbox backend answers "which sandbox am I actually using" — it defaults
+ * to wasmtime and is distinct from the Running Sandboxes list below, which is
+ * the live runs, not the runtime choice.
+ */
+function VoiceAndSandboxSection({
+	target,
+	enabled,
+}: {
+	target: ApiTarget;
+	enabled: boolean;
+}) {
+	// The TTS default is device-local (localStorage), so it is not reactive on its
+	// own — mirror it into state and re-read whenever any surface writes it.
+	const [ttsPrefs, setTtsPrefs] = useState(getDesktopTtsPrefs);
+	useEffect(
+		() => subscribeDesktopTtsPrefs(() => setTtsPrefs(getDesktopTtsPrefs())),
+		[]
+	);
+
+	// The catalog + live sidecar sample, shared with the Engines section above (same
+	// query key ⇒ one poll). Both voice layers are backed by catalog sidecars —
+	// `ryutts` for the extra TTS voices, `whispercpp`/`parakeet` for transcription —
+	// so install/uninstall here goes through the same generic endpoints.
+	const { catalog, details, refresh: refreshEngines } = useNodeEngines(target);
+
+	const query = useQuery({
+		queryKey: ["node-voice-sandbox", target.url],
+		queryFn: async () => {
+			const [ttsEngines, sttPrefs, sandboxBackends] = await Promise.all([
+				listTtsEngines(target).catch(() => [] as TtsEngine[]),
+				getVoiceInputPrefs(target).catch(() => DEFAULT_VOICE_PREFS),
+				// Absent on an older Core → no sandbox layer rather than a fake one.
+				fetchSandboxBackends(target).catch(() => null),
+			]);
+			return { ttsEngines, sttPrefs, sandboxBackends };
+		},
+		enabled,
+		refetchInterval: 15_000,
+		retry: false,
+	});
+
+	const refresh = async () => {
+		await Promise.all([query.refetch(), refreshEngines()]);
+	};
+
+	const ttsEngines = query.data?.ttsEngines ?? [];
+	const sttPrefs = query.data?.sttPrefs ?? DEFAULT_VOICE_PREFS;
+	const sandboxBackends = query.data?.sandboxBackends ?? null;
+
+	/** Start/stop/install one voice sidecar by catalog name, then reconcile. */
+	const catalogItem = (name: string) =>
+		catalog.find((item) => item.name === name) ?? null;
+
+	const toggleSidecar = async (name: string, label: string, next: boolean) => {
+		try {
+			if (next) {
+				await startSidecar(target, name);
+			} else {
+				await stopSidecar(target, name);
+			}
+			await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+		} catch (e) {
+			sileo.error({
+				title:
+					e instanceof Error
+						? e.message
+						: `Couldn't ${next ? "start" : "stop"} ${label}`,
+			});
+		}
+		await refresh();
+	};
+
+	/** The install/start action a voice layer needs before it can actually run —
+	 *  null once its sidecar is installed AND up. Mirrors the Voice settings tab's
+	 *  "Install / Start Ryu TTS engine" prompt, so the dropdown isn't a dead end
+	 *  for an engine the node hasn't downloaded yet. */
+	const sidecarReadyAction = (
+		name: string,
+		label: string
+	): LayerAction | null => {
+		const item = catalogItem(name);
+		if (!item) {
+			return null;
+		}
+		if (item.installState !== "installed") {
+			return {
+				id: `install-${name}`,
+				label: `Install ${label}`,
+				busyLabel: "Installing…",
+				icon: Download04Icon,
+				run: async () => {
+					await installEngine(target, item);
+					await refresh();
+				},
+			};
+		}
+		if (!details[name]?.running) {
+			return {
+				id: `start-${name}`,
+				label: `Start ${label}`,
+				busyLabel: "Starting…",
+				run: () => toggleSidecar(name, label, true),
+			};
+		}
+		return null;
+	};
+
+	// ---- Text-to-speech -----------------------------------------------------
+	const selectedTts = ttsEngines.find((e) => e.id === ttsPrefs.engine) ?? null;
+	const activeVoice = ttsPrefs.voice || selectedTts?.default_voice || "";
+
+	const pickTtsEngine = (engine: TtsEngine) => {
+		setDesktopTtsPref(DESKTOP_TTS_ENGINE_KEY, engine.id);
+		// Reset the voice when the current one doesn't exist on the new engine.
+		if (!engine.voices.includes(activeVoice)) {
+			setDesktopTtsPref(DESKTOP_TTS_VOICE_KEY, engine.default_voice ?? "");
+		}
+	};
+
+	// The multi-engine TTS sidecar that serves every non-built-in voice.
+	const ttsReadyAction = sidecarReadyAction("ryutts", "Ryu TTS engine");
+
+	// ---- Speech-to-text -----------------------------------------------------
+	const selectedStt =
+		VOICE_ENGINES.find((e) => e.engine === sttPrefs.engine) ?? VOICE_ENGINES[0];
+	const sttRunning = details[selectedStt.sidecar]?.running ?? false;
+
+	const pickStt = async (entry: (typeof VOICE_ENGINES)[number]) => {
+		try {
+			// Switching engine also moves to that engine's bundled model.
+			await setVoiceInputPrefs(target, {
+				...sttPrefs,
+				engine: entry.engine,
+				model: entry.model,
+			});
+		} catch (e) {
+			sileo.error({
+				title: e instanceof Error ? e.message : "Couldn't switch voice engine",
+			});
+		}
+		await refresh();
+	};
+
+	const toggleStt = (next: boolean) =>
+		toggleSidecar(selectedStt.sidecar, selectedStt.label, next);
+
+	// Transcription needs its sidecar present before Start means anything, so an
+	// uninstalled engine offers Install first.
+	const sttActions: LayerAction[] = [];
+	const sttReady = sidecarReadyAction(selectedStt.sidecar, selectedStt.label);
+	if (sttReady) {
+		sttActions.push(sttReady);
+	} else {
+		sttActions.push(startStopAction(sttRunning, toggleStt));
+	}
+	const sttInstalled =
+		catalogItem(selectedStt.sidecar)?.installState === "installed";
+
+	// ---- Sandbox backend ----------------------------------------------------
+	const activeBackend =
+		sandboxBackends?.available.find((b) => b.name === sandboxBackends.active) ??
+		null;
+
+	const pickBackend = async (name: string, label: string) => {
+		try {
+			await setSandboxBackend(target, name);
+			sileo.success({ title: `Sandbox → ${label}` });
+		} catch (e) {
+			sileo.error({
+				title: e instanceof Error ? e.message : `Couldn't switch to ${label}`,
+			});
+		}
+		await refresh();
+	};
+
+	// Speech-to-text is a fixed, always-valid list, so it shows on any reachable
+	// node — its visibility is deliberately NOT tied to the TTS/sandbox probes.
+	if (!enabled) {
+		return null;
+	}
+
+	return (
+		<>
+			<DropdownMenuSeparator />
+			<div className="px-1 py-0.5">
+				<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
+					Voice &amp; Sandbox
+				</p>
+				{ttsEngines.length > 0 && (
+					<NodeLayerMenu
+						// The extra (non-built-in) voices only exist once the `ryutts`
+						// sidecar is installed and up, so surface that bring-up here rather
+						// than sending the user to the Voice settings tab for it.
+						actions={ttsReadyAction ? [ttsReadyAction] : []}
+						caption={
+							selectedTts
+								? `Speaks as ${activeVoice || "default voice"}`
+								: "Engine not available on this node"
+						}
+						currentLabel={selectedTts?.display_name ?? ttsPrefs.engine}
+						icon={VolumeHighIcon}
+						installed={ttsEngines.map(
+							(engine): LayerOption => ({
+								name: engine.id,
+								label: engine.display_name,
+								active: engine.id === ttsPrefs.engine,
+								detail: engine.installed
+									? `${engine.voices.length} voices`
+									: "not installed",
+								select: () => pickTtsEngine(engine),
+							})
+						)}
+						label="Text-to-speech"
+						running={selectedTts?.loaded ?? null}
+						trailing={selectedTts?.display_name ?? ttsPrefs.engine}
+					>
+						{/* The voice is a second dimension of the SAME layer, so it nests
+						    inside the engine's submenu instead of claiming a sibling row. */}
+						{selectedTts && selectedTts.voices.length > 0 && (
+							<>
+								<DropdownMenuSeparator />
+								<NodeLayerMenu
+									currentLabel={activeVoice || "Default"}
+									installed={selectedTts.voices.map(
+										(voice): LayerOption => ({
+											name: voice,
+											label: voice,
+											active: voice === activeVoice,
+											select: () =>
+												setDesktopTtsPref(DESKTOP_TTS_VOICE_KEY, voice),
+										})
+									)}
+									label="Voice"
+								/>
+							</>
+						)}
+					</NodeLayerMenu>
+				)}
+				<NodeLayerMenu
+					actions={sttActions}
+					caption={
+						sttInstalled
+							? `Transcribes with ${sttPrefs.model}`
+							: "Engine not installed on this node"
+					}
+					currentLabel={selectedStt.label}
+					icon={Mic01Icon}
+					installed={VOICE_ENGINES.map((entry): LayerOption => {
+						const item = catalogItem(entry.sidecar);
+						let detail = entry.model;
+						if (details[entry.sidecar]?.running) {
+							detail = "running";
+						} else if (item && item.installState !== "installed") {
+							detail = "not installed";
+						}
+						return {
+							name: entry.engine,
+							label: entry.label,
+							active: entry.engine === sttPrefs.engine,
+							detail,
+							select: () => pickStt(entry),
+							// Only the engine that is NOT selected is removable — dropping
+							// the one transcription is bound to would break voice input.
+							uninstall:
+								entry.engine === sttPrefs.engine || !item
+									? undefined
+									: async () => {
+											await uninstallSidecar(
+												target.url,
+												target.token,
+												item.name
+											);
+											await refresh();
+										},
+						};
+					})}
+					label="Speech-to-text"
+					running={sttRunning}
+				/>
+				{sandboxBackends && (
+					// Which isolated runtime `sandbox_exec` uses by default. wasmtime is
+					// the built-in; a per-call `backend` argument still overrides this.
+					<NodeLayerMenu
+						caption={
+							activeBackend?.detected
+								? "Default runtime for sandboxed execution"
+								: "Runtime not detected on this node"
+						}
+						currentLabel={activeBackend?.displayName ?? "None"}
+						icon={PackageIcon}
+						installed={sandboxBackends.available.map(
+							(backend): LayerOption => ({
+								name: backend.name,
+								label: backend.displayName,
+								active: backend.name === sandboxBackends.active,
+								detail: backend.detected ? "ready" : "not detected",
+								disabled: !backend.supported,
+								disabledReason: "unsupported here",
+								select: () => pickBackend(backend.name, backend.displayName),
+							})
+						)}
+						label="Sandbox"
+						running={activeBackend?.detected ?? null}
+					/>
 				)}
 			</div>
 		</>
@@ -2252,6 +2698,10 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 						)}
 					</div>
 					<EnginesSection target={target} />
+					<VoiceAndSandboxSection
+						enabled={coreReachable === true}
+						target={target}
+					/>
 					<SandboxesSection enabled={coreReachable === true} target={target} />
 					<MeshSection
 						ingress={ingress ?? null}

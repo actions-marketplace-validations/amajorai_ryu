@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Writes in your voice",
-      "description": "Ground drafts on your style guide and published articles with Spaces and RAG so the tone matches what readers already know."
+      "description": "Ground drafts on your style guide and published articles with Spaces and RAG so the tone matches what readers already know.",
+      "icon": "Sparkles"
     },
     {
       "title": "Research that cites",
-      "description": "Pull facts from the web and your own source material with connected tools, with each claim pointing back to where it came from."
+      "description": "Pull facts from the web and your own source material with connected tools, with each claim pointing back to where it came from.",
+      "icon": "Plug"
     },
     {
       "title": "Outline before draft",
-      "description": "Turn a brief into a structured outline you approve first, so the long-form draft follows the angle you actually want."
+      "description": "Turn a brief into a structured outline you approve first, so the long-form draft follows the angle you actually want.",
+      "icon": "Plug"
     },
     {
       "title": "Embargo-safe drafting",
-      "description": "Keep unannounced launches and unpublished pieces on a local model with no telemetry so nothing leaks early."
+      "description": "Keep unannounced launches and unpublished pieces on a local model with no telemetry so nothing leaks early.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Taxpayer data stays private",
-      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request."
+      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request.",
+      "icon": "Shield"
     },
     {
       "title": "Grounded in your references",
-      "description": "Ground agents on your internal guidance and a client's prior returns with Spaces and RAG, so answers cite the source."
+      "description": "Ground agents on your internal guidance and a client's prior returns with Spaces and RAG, so answers cite the source.",
+      "icon": "Bot"
     },
     {
       "title": "Auditable by default",
-      "description": "Every model and tool call is logged in the Gateway audit trail, so each position has a record of what the agent considered."
+      "description": "Every model and tool call is logged in the Gateway audit trail, so each position has a record of what the agent considered.",
+      "icon": "Eye"
     },
     {
       "title": "Connects to your tools",
-      "description": "Agents authenticate into spreadsheets, document stores, and email to gather source documents and draft summaries for review."
+      "description": "Agents authenticate into spreadsheets, document stores, and email to gather source documents and draft summaries for review.",
+      "icon": "Plug"
     }
   ],
   "useCases": [

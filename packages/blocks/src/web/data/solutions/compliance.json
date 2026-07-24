@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Governed by the Gateway",
-      "description": "Every model and tool call routes through the Gateway with PII and DLP redaction, budgets, and policy controls on egress."
+      "description": "Every model and tool call routes through the Gateway with PII and DLP redaction, budgets, and policy controls on egress.",
+      "icon": "Shield"
     },
     {
       "title": "Auditable by default",
-      "description": "Every call is logged in the Gateway audit trail, so you can show a regulator exactly what an agent saw and produced."
+      "description": "Every call is logged in the Gateway audit trail, so you can show a regulator exactly what an agent saw and produced.",
+      "icon": "Eye"
     },
     {
       "title": "Grounded in your framework",
-      "description": "Ground agents on your policies, regulations, and control library with Spaces and RAG, so answers cite the requirement."
+      "description": "Ground agents on your policies, regulations, and control library with Spaces and RAG, so answers cite the requirement.",
+      "icon": "Bot"
     },
     {
       "title": "Data stays on your machine",
-      "description": "Run a local Gemma 4 on install for fully private analysis, or route to a cloud model with redaction when you need more power."
+      "description": "Run a local Gemma 4 on install for fully private analysis, or route to a cloud model with redaction when you need more power.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

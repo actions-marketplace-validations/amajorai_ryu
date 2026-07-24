@@ -88,6 +88,7 @@ export type SolutionCategory =
 
 export interface SolutionHighlight {
 	description: string;
+	icon?: string;
 	title: string;
 }
 

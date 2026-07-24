@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Processes as workflows",
-      "description": "Chain agents and tools into a pipeline that runs the same steps every time, on a schedule or a trigger."
+      "description": "Chain agents and tools into a pipeline that runs the same steps every time, on a schedule or a trigger.",
+      "icon": "Bot"
     },
     {
       "title": "Moves data across tools",
-      "description": "Agents connect to your stack to read, transform, and write data between systems without manual copy-paste."
+      "description": "Agents connect to your stack to read, transform, and write data between systems without manual copy-paste.",
+      "icon": "Plug"
     },
     {
       "title": "Exceptions, not everything",
-      "description": "Workflows handle the routine and pause for a human only when something falls outside the rules."
+      "description": "Workflows handle the routine and pause for a human only when something falls outside the rules.",
+      "icon": "Sparkles"
     },
     {
       "title": "Governed and on budget",
-      "description": "The Gateway logs every call, sets spend limits, and keeps an audit trail of what each process did."
+      "description": "The Gateway logs every call, sets spend limits, and keeps an audit trail of what each process did.",
+      "icon": "Eye"
     }
   ],
   "useCases": [

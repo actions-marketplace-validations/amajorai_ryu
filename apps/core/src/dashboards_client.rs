@@ -37,15 +37,12 @@ use ryu_hardware::feed::{
     DashboardFeed, DeviceBinding, DeviceManifest, RenderedImage, ScreenProfile, SetDeviceResult,
 };
 
+use crate::plugins::builtins::DASHBOARDS_PLUGIN_ID;
 use crate::sidecar::ext_proxy::{ext_token, node_token};
 
-/// The built-in Dashboards app id (matches `plugins::builtins::DASHBOARDS_PLUGIN_ID`
-/// and the `dashboards.manifest.json` fixture).
-const DASHBOARDS_PLUGIN_ID: &str = "com.ryu.dashboards";
-/// Fallback loopback port if the manifest is somehow absent — matches the
-/// `dashboards.manifest.json` fixture `port`. Core injects this as
-/// `RYU_DASHBOARDS_PORT` at spawn.
-const DASHBOARDS_FALLBACK_PORT: u16 = 7997;
+/// The `ryu-dashboards` sidecar's name inside the Dashboards manifest — the other half
+/// of the `(plugin id, sidecar name)` key the port resolves through.
+const DASHBOARDS_SIDECAR: &str = "ryu-dashboards";
 /// Backoff between SSE reconnect attempts for the nudge subscription.
 const SSE_RECONNECT_EVERY: Duration = Duration::from_secs(5);
 
@@ -65,15 +62,16 @@ pub fn global_client() -> Option<&'static DashboardsClient> {
 }
 
 /// Resolve the `ryu-dashboards` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]).
+/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
+/// port comes from the manifest and ONLY the manifest — see
+/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
+/// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    let raw = manifests
-        .iter()
-        .find(|m| m.id == DASHBOARDS_PLUGIN_ID)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == "ryu-dashboards"))
-        .map(|s| s.port)
-        .unwrap_or(DASHBOARDS_FALLBACK_PORT);
-    crate::profile::port(raw)
+    crate::sidecar::ext_proxy::sidecar_port(manifests, DASHBOARDS_PLUGIN_ID, DASHBOARDS_SIDECAR)
+        .expect(
+            "built-in dashboards.manifest.json must declare the ryu-dashboards sidecar (see \
+             plugin_manifest::BUILTIN_MANIFESTS)",
+        )
 }
 
 /// Typed loopback client for the `ryu-dashboards` sidecar. Cheap to clone (holds

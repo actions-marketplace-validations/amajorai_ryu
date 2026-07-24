@@ -37,6 +37,50 @@ describe("IslandViewPanel", () => {
 		expect(html).not.toContain("Alpha");
 	});
 
+	// A KNOWN view kind whose payload is missing the collection that kind is made of.
+	// `spec` is opaque to Core (that is what lets a new view kind ship without a Core
+	// change), so a manifest can declare this and Core will serve it verbatim — the
+	// renderer is the only gate. Before `validateView` was wired in, each of these fell
+	// through the `view` switch into `spec.<collection>.map(...)` and threw, which in
+	// the island takes down the whole overlay rather than one pane.
+	test.each([
+		["list-detail", "items"],
+		["data-table", "rows"],
+		["form", "fields"],
+		["action-panel", "actions"],
+		["filter-bar", "filters"],
+		["stat-card-row", "stats"],
+	])("degrades a malformed %s spec instead of crashing", (view, collection) => {
+		const render = () =>
+			renderToStaticMarkup(
+				<IslandViewPanel
+					view={{
+						id: "malformed",
+						view,
+						plugin: "com.evil.app",
+						// Deliberately omits the required collection for this kind.
+						spec: { view } as never,
+					}}
+				/>
+			);
+		expect(render).not.toThrow();
+		expect(render()).toContain(collection);
+	});
+
+	test("degrades an unknown view kind to a readable row", () => {
+		const html = renderToStaticMarkup(
+			<IslandViewPanel
+				view={{
+					id: "futuristic",
+					view: "holo-deck",
+					plugin: "com.ryu.future",
+					spec: { view: "holo-deck" } as never,
+				}}
+			/>
+		);
+		expect(html).toContain("unknown view kind");
+	});
+
 	test("shell-fetched sourceItems replace the spec's static items", () => {
 		const html = renderToStaticMarkup(
 			<IslandViewPanel

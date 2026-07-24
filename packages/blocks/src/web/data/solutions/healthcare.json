@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Patient data stays on-device",
-      "description": "Run a local model with no telemetry by default, so protected information never leaves the machine unless you allow it."
+      "description": "Run a local model with no telemetry by default, so protected information never leaves the machine unless you allow it.",
+      "icon": "Shield"
     },
     {
       "title": "Governed and logged",
-      "description": "Every model and tool call passes through the Gateway with PII and DLP redaction and a full audit trail you can review."
+      "description": "Every model and tool call passes through the Gateway with PII and DLP redaction and a full audit trail you can review.",
+      "icon": "Eye"
     },
     {
       "title": "Grounded in your protocols",
-      "description": "Spaces and RAG let agents answer from your own clinical guidelines and SOPs, citing the exact source."
+      "description": "Spaces and RAG let agents answer from your own clinical guidelines and SOPs, citing the exact source.",
+      "icon": "Bot"
     },
     {
       "title": "A human decides",
-      "description": "Ryu drafts and summarizes for review; clinicians make every diagnostic and treatment decision."
+      "description": "Ryu drafts and summarizes for review; clinicians make every diagnostic and treatment decision.",
+      "icon": "Terminal"
     }
   ],
   "useCases": [

@@ -13,6 +13,7 @@ import {
 	CpuIcon,
 	Delete02Icon,
 	DeliverySecure01Icon,
+	Folder01Icon,
 	GridIcon,
 	Home01Icon,
 	InboxIcon,
@@ -65,6 +66,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
+import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	type DragEvent,
@@ -1013,7 +1015,7 @@ function SplitBracketHeader({
 									}}
 									type="button"
 								>
-									<HugeiconsIcon className="size-3.5" icon={GridIcon} />
+									<HugeiconsIcon className="size-3.5" icon={Folder01Icon} />
 								</button>
 							}
 						/>
@@ -1101,6 +1103,17 @@ function buildSegments(
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
 export function TitleBar() {
 	const { open } = useSidebar();
+	// At phone widths the sidebar is never docked, so the strip always has to
+	// leave room for the fixed nav cluster (see Layout) — but only for the two
+	// buttons it keeps there, not the full desktop four-button + traffic-light
+	// reservation.
+	const isMobile = useIsMobile();
+	let navClusterReserve = "w-40";
+	if (isMobile) {
+		navClusterReserve = "w-[4.5rem]";
+	} else if (isMac) {
+		navClusterReserve = "w-48";
+	}
 	const { actions } = useTitleBarContext();
 	const {
 		tabs,
@@ -1273,10 +1286,10 @@ export function TitleBar() {
 					    no offset. When collapsed the titlebar spans the full window, so
 					    reserve room on the left for the cluster (and, on macOS, the
 					    traffic lights). */}
-				{!open && (
+				{(isMobile || !open) && (
 					<div
 						aria-hidden
-						className={cn("shrink-0", isMac ? "w-48" : "w-40")}
+						className={cn("shrink-0", navClusterReserve)}
 						data-tauri-drag-region
 					/>
 				)}
@@ -1501,7 +1514,10 @@ export function TitleBar() {
 							// Windows caption buttons (min/max/close) sit at the top-right;
 							// give the page actions wide clearance so they never crowd them.
 							// macOS keeps its controls on the left, so only a small inset.
-							isMac ? "mr-2" : "mr-48"
+							// A phone width is always the browser build — no caption
+							// buttons to clear, and 12rem of dead margin would push the
+							// actions off screen.
+							isMac || isMobile ? "mr-2" : "mr-48"
 						)}
 						data-tauri-drag-region={false}
 					>

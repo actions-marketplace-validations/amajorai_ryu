@@ -101,6 +101,37 @@ fn fire_lazy_activation(state: &ServerState, event: &'static str) {
     });
 }
 
+// ── Sidecar port resolution ───────────────────────────────────────────────────
+
+/// Resolve a manifest-declared sidecar's loopback port, profile-shifted EXACTLY the
+/// way [`ext_proxy`] forwards ([`crate::profile::port`]) — so a Core-side loopback
+/// driver hits the same shifted port the sidecar was told to bind under a dev/custom
+/// profile.
+///
+/// This is the single seam every Core-side reverse-coupling (`*_client.rs`) resolves
+/// its port through. It exists so no Core module re-declares an app's port: AGENTS.md
+/// forbids baking a `com.ryu.<app>` fallback port into Core, and each of those clients
+/// used to carry its own `*_FALLBACK_PORT` const that could silently drift from the
+/// fixture it claimed to mirror.
+///
+/// `None` means the manifest does not declare that sidecar at all. For a **built-in**
+/// that is a build-time invariant, not a runtime condition — the fixture is
+/// `include_str!`d into `BUILTIN_MANIFESTS` and `load()` always parses it — so built-in
+/// callers `expect` rather than invent a port. (The runtime fail-open those clients
+/// document is a separate failure mode: an *unreachable* sidecar, still handled per
+/// call.)
+pub fn sidecar_port(
+    manifests: &[crate::plugin_manifest::PluginManifest],
+    plugin_id: &str,
+    sidecar_name: &str,
+) -> Option<u16> {
+    manifests
+        .iter()
+        .find(|m| m.id == plugin_id)
+        .and_then(|m| m.sidecars.iter().find(|s| s.name == sidecar_name))
+        .map(|s| crate::profile::port(s.port))
+}
+
 // ── Token derivation ──────────────────────────────────────────────────────────
 
 /// The node token (`RYU_TOKEN`), trimmed + non-empty, or `None` (loopback dev with
@@ -628,56 +659,28 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
 
 /// The host-API sub-router (sidecar → Core). Registered on the PUBLIC router because
 /// the sidecar process holds only its minted [`ext_token`], not the node bearer;
-/// [`authorize_host_call`] does the auth + grant intersection in-handler. Start
-/// MINIMAL: one proven endpoint (`/api/host/model/complete`), the same
-/// grant-scoped seam any future host endpoint reuses.
+/// [`authorize_host_call`] does the auth + grant intersection in-handler.
+///
+/// **Three routes, no app names.** Every sidecar → Core callback in the product goes
+/// through one of them:
+/// - `/api/host/model/complete` — the proven single-purpose model callback;
+/// - `/api/host/rpc` — the extension-host RPC vocabulary (`ryu-kernel-contracts`);
+/// - `/api/host/capability/:cap` — the capability broker, which serves BOTH the
+///   app-provided capabilities (proxied to the bound provider's sidecar) AND the
+///   **kernel** capabilities Core itself implements ([`KERNEL_CAPABILITIES`]).
+///
+/// This used to carry seven more rows — `/api/host/monitors/{spider,alert}`,
+/// `/api/host/meetings/save-notes` and `/api/host/recipes/{run,record-start,
+/// record-status,record-stop}` — i.e. an app id baked into Core's route table right
+/// next to the generic seam built to replace it. They are now
+/// [`KERNEL_CAPABILITIES`] rows reached as `POST /api/host/capability/<cap>`: the
+/// sidecar names the *capability* it needs, Core dispatches from a table, and adding
+/// an app never adds a route again.
 pub fn host_routes() -> Router<ServerState> {
     Router::new()
         .route("/api/host/model/complete", post(host_model_complete))
         .route("/api/host/rpc", post(host_rpc))
         .route("/api/host/capability/:cap", post(host_capability))
-        // Monitors sidecar callbacks: Spider fetch through Core's McpRegistry, and
-        // fired-alert fan-out through the kernel notify store + activity feed. Both
-        // authenticate the sidecar with its minted ext token (see
-        // [`authenticate_sidecar`]); the handlers live in `crate::monitors_client`.
-        .route(
-            "/api/host/monitors/spider",
-            post(crate::monitors_client::host_spider_crawl),
-        )
-        .route(
-            "/api/host/monitors/alert",
-            post(crate::monitors_client::host_monitor_alert),
-        )
-        // Meetings sidecar callback: file a finalized meeting's notes into the
-        // "Meetings" Space under the background owner (Core owns the SpaceStore +
-        // tenancy the sidecar cannot host). Ext-token authed; handler in
-        // `crate::meetings_client`.
-        .route(
-            "/api/host/meetings/save-notes",
-            post(crate::meetings_client::host_save_notes),
-        )
-        // Recipes sidecar callbacks: replay + the recording session need the LIVE
-        // Ghost engine — the shared MCP registry and a dedicated recorder subprocess
-        // (`McpSession`) held across start..stop in Core's process-global slot. Both
-        // are kernel machinery the sidecar cannot host, so the out-of-process
-        // `ryu-recipes` app proxies these four verbs back here. Ext-token authed;
-        // handlers in `crate::recipes_client`.
-        .route(
-            "/api/host/recipes/run",
-            post(crate::recipes_client::host_recipes_run),
-        )
-        .route(
-            "/api/host/recipes/record-start",
-            post(crate::recipes_client::host_recipes_record_start),
-        )
-        .route(
-            "/api/host/recipes/record-status",
-            post(crate::recipes_client::host_recipes_record_status),
-        )
-        .route(
-            "/api/host/recipes/record-stop",
-            post(crate::recipes_client::host_recipes_record_stop),
-        )
 }
 
 /// The grant a sidecar must hold (declared in `host_api.grants` AND Gateway-approved)
@@ -859,6 +862,239 @@ struct HostRpcBody {
     args: serde_json::Value,
 }
 
+// ── Kernel capabilities (Core-implemented rows of the broker) ─────────────────
+
+/// One **kernel capability** — a host primitive Core itself implements, invoked over
+/// the SAME `POST /api/host/capability/<cap>` seam an app-provided capability uses.
+///
+/// # Why these are not `provides` entries
+///
+/// The broker's provider path resolves a capability to another *app*'s sidecar route
+/// through [`crate::plugins::binding`]. A kernel capability has no provider app: the
+/// implementation is Core's own MCP registry / notify store / Spaces store /
+/// recorder subprocess, so there is nothing to bind, nothing to wake, and no hop to
+/// forward. It is dispatched IN-PROCESS from [`KERNEL_CAPABILITIES`] *before* the
+/// binding registry is consulted.
+///
+/// Symmetrically, a sidecar must **not** name one in `requires.capabilities`: that
+/// field lowers to a concrete app-id graph edge ([`crate::plugins::binding::lower_manifests`])
+/// and an unbindable entry fails enable with `Unprovided`. A sidecar declares what it
+/// needs through its `sidecars[].host_api.grants` instead — the same declaration
+/// `/api/host/model/complete` and `/api/host/rpc` already read.
+struct KernelCapability {
+    /// The capability name the sidecar POSTs to (`/api/host/capability/<cap>`).
+    /// Named for the **host primitive**, never for the calling app — that is the
+    /// whole point of retiring the per-app `/api/host/<app>/*` rows.
+    cap: &'static str,
+    /// The grant the caller must hold: DECLARED in its `sidecars[].host_api.grants`
+    /// **and** Gateway-approved (the [`authorize_host_call`] intersection — never the
+    /// manifest claim alone).
+    ///
+    /// `None` means "the Gateway's reviewed host-primitive vocabulary has no word for
+    /// this yet", NOT "unguarded". Every kernel capability is still (a) authenticated
+    /// by the caller's minted [`ext_token`] and (b) pinned to its owning app by the
+    /// handler itself (each one re-runs [`authenticate_sidecar`] and 403s a caller
+    /// that is not the app it serves). That pair IS the gate the retired per-app route
+    /// had, so a `None` row is exactly as tight as before and never looser. Adding the
+    /// missing vocabulary is a Gateway governance change (`reserved_namespaces` +
+    /// `default_grant_allowlist`), not a Core one.
+    grant: Option<&'static str>,
+}
+
+/// The kernel-capability table — the Core-implemented half of the broker.
+///
+/// Every row here replaces one retired `/api/host/<app>/*` route. The handlers still
+/// live in the `*_client.rs` loopback shims and still pin their calling app, so the
+/// *routing* is generic today and the *tenancy* stays single-app until those shims
+/// are retired; nothing in this table names an app.
+const KERNEL_CAPABILITIES: &[KernelCapability] = &[
+    // Run one MCP tool through Core's shared `McpRegistry`, which no sidecar can host
+    // (it owns the stdio child processes). Body `{ tool, args }` → `{ result }`.
+    // `tools.invoke` is the reviewed MCP tool-plane scope in the Gateway allowlist;
+    // the `tools` namespace is reserved, so it can never be self-granted by name.
+    KernelCapability {
+        cap: "mcp.callTool",
+        grant: Some("tools.invoke"),
+    },
+    // Raise a host notification: fan it out through the kernel notify store (per-app
+    // channels + mobile push + `notification` plugin hooks) and record it on the
+    // unified activity feed. Body `{ alert, targets }`.
+    //
+    // The one `grant: None` row. There is no host-primitive scope for "raise a
+    // notification" in the Gateway's reviewed vocabulary (`notifications.*` maps to
+    // `approvals:crud`, which is owner-scoped to the Approvals app and not a
+    // notification-raising grant), and minting one is a Gateway change. Requiring an
+    // ill-fitting scope here would be worse than none: fan-out reaches every channel
+    // the user has configured, so it must not ride a grant an unrelated app can hold.
+    // Until the vocabulary exists, the gate stays exactly what the retired
+    // `/api/host/monitors/alert` had — minted token + the handler's app pin.
+    KernelCapability {
+        cap: "notify.fanout",
+        grant: None,
+    },
+    // File a notes document into a Core-owned system Space under the background
+    // owner. Core owns the `SpaceStore` + its tenancy, so a sidecar cannot do this
+    // itself. Body `{ title, markdown }` → `{ space_id, doc_id }`.
+    KernelCapability {
+        cap: "spaces.fileNotes",
+        grant: Some("spaces:docs"),
+    },
+    // Ghost capture/replay — the live native-desktop engine. Replay needs the shared
+    // MCP registry; the recording session holds a dedicated recorder subprocess
+    // (`McpSession`) in Core's process-global slot ACROSS separate HTTP calls, which
+    // is precisely why it cannot live in a stateless sidecar. All four share
+    // `ghost:record`, the Gateway's reviewed capture/replay scope.
+    KernelCapability {
+        cap: "ghost.replay",
+        grant: Some("ghost:record"),
+    },
+    KernelCapability {
+        cap: "ghost.recordStart",
+        grant: Some("ghost:record"),
+    },
+    KernelCapability {
+        cap: "ghost.recordStatus",
+        grant: Some("ghost:record"),
+    },
+    KernelCapability {
+        cap: "ghost.recordStop",
+        grant: Some("ghost:record"),
+    },
+];
+
+/// The [`KernelCapability`] row for `cap`, or `None` when the name belongs to the
+/// app-provided (binding-registry) half of the broker.
+fn kernel_capability(cap: &str) -> Option<&'static KernelCapability> {
+    KERNEL_CAPABILITIES.iter().find(|k| k.cap == cap)
+}
+
+/// Whether `plugin_id` may exercise `grant`: the same declared∩approved intersection
+/// [`authorize_host_call`] enforces, but taking the already-authenticated caller's
+/// approved set so the kernel path does not re-run [`authenticate_sidecar`].
+async fn holds_host_api_grant(
+    state: &ServerState,
+    plugin_id: &str,
+    approved: &HashSet<String>,
+    grant: &str,
+) -> bool {
+    let manifests = state.app_manifests.read().await;
+    let Some(manifest) = manifests.iter().find(|m| m.id == plugin_id) else {
+        return false;
+    };
+    host_api_grant_usable(manifest, approved, grant)
+}
+
+/// The pure predicate behind [`holds_host_api_grant`]: `grant` must be BOTH declared
+/// in the manifest's `sidecars[].host_api.grants` (the app's own stated ceiling) AND
+/// present in `approved` (what the Gateway actually approved at enable, as stored on
+/// the app record). Either alone is not enough — a manifest cannot widen itself, and
+/// an approval the app never asked for is not a licence to use it.
+fn host_api_grant_usable(
+    manifest: &crate::plugin_manifest::PluginManifest,
+    approved: &HashSet<String>,
+    grant: &str,
+) -> bool {
+    approved.contains(grant)
+        && manifest
+            .sidecars
+            .iter()
+            .filter_map(|s| s.host_api.as_ref())
+            .any(|h| h.grants.iter().any(|g| g == grant))
+}
+
+/// Dispatch an authenticated + grant-checked kernel capability to its in-Core
+/// implementation.
+///
+/// The handlers keep their existing `(State, HeaderMap, Json<Body>)` shape and are
+/// called directly — no HTTP hop, no signature change (they are still the same
+/// functions the retired per-app routes pointed at, which is what makes this a
+/// re-routing rather than a rewrite). Each re-runs [`authenticate_sidecar`] and
+/// refuses a caller that is not the app it serves; that pin is deliberately preserved
+/// (see [`KernelCapability::grant`]).
+async fn dispatch_kernel_capability(
+    cap: &str,
+    state: ServerState,
+    headers: HeaderMap,
+    body: &[u8],
+) -> Response {
+    /// Deserialize a kernel-capability body, 400ing with the serde message rather
+    /// than letting a malformed body surface as a bare rejection.
+    fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
+        // An empty body is a valid `{}` for the arg-less verbs.
+        let raw = if body.is_empty() { b"{}".as_slice() } else { body };
+        serde_json::from_slice::<T>(raw).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid capability body: {e}") })),
+            )
+                .into_response()
+        })
+    }
+
+    macro_rules! body {
+        ($t:ty) => {
+            match parse::<$t>(body) {
+                Ok(v) => Json(v),
+                Err(resp) => return resp,
+            }
+        };
+    }
+
+    match cap {
+        "mcp.callTool" => {
+            crate::monitors_client::host_spider_crawl(
+                State(state),
+                headers,
+                body!(serde_json::Value),
+            )
+            .await
+        }
+        "notify.fanout" => {
+            crate::monitors_client::host_monitor_alert(
+                State(state),
+                headers,
+                body!(crate::monitors_client::AlertFanoutBody),
+            )
+            .await
+        }
+        "spaces.fileNotes" => {
+            crate::meetings_client::host_save_notes(
+                State(state),
+                headers,
+                body!(crate::meetings_client::SaveNotesBody),
+            )
+            .await
+        }
+        "ghost.replay" => {
+            crate::recipes_client::host_recipes_run(State(state), headers, body!(serde_json::Value))
+                .await
+        }
+        "ghost.recordStart" => {
+            crate::recipes_client::host_recipes_record_start(
+                State(state),
+                headers,
+                body!(serde_json::Value),
+            )
+            .await
+        }
+        "ghost.recordStatus" => {
+            crate::recipes_client::host_recipes_record_status(State(state), headers).await
+        }
+        "ghost.recordStop" => {
+            crate::recipes_client::host_recipes_record_stop(State(state), headers).await
+        }
+        // Unreachable: the caller only gets here after `kernel_capability` matched,
+        // and that reads the same table this match implements. Fail closed anyway so
+        // a future row added to one and not the other cannot 500 or, worse, fall
+        // through to the provider path ungated.
+        _ => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "kernel capability has no implementation", "capability": cap })),
+        )
+            .into_response(),
+    }
+}
+
 // ── Capability broker (/api/host/capability/:cap) ─────────────────────────────
 
 /// `POST /api/host/capability/:cap` — the **capability broker**. A consumer sidecar
@@ -867,12 +1103,21 @@ struct HostRpcBody {
 /// token (the consumer never sees it). This is where a `requires: [rag]` edge turns
 /// into a real call to whichever provider is bound.
 ///
-/// The three-way check, fail-closed at each step:
+/// Two kinds of capability share this one route:
+///
+/// - **Kernel** capabilities ([`KERNEL_CAPABILITIES`]) — host primitives Core itself
+///   implements. Authenticated caller + the row's declared∩approved grant, then
+///   dispatched IN-PROCESS. This is where the retired `/api/host/<app>/*` callbacks
+///   now live.
+/// - **App-provided** capabilities — resolved to a bound provider app and proxied to
+///   its sidecar route with the PROVIDER's minted token (the consumer never sees it).
+///   This is where a `requires: [rag]` edge turns into a real call.
+///
+/// The provider path's three-way check, fail-closed at each step:
 /// 1. the CALLER **declared** the edge (its `requires.capabilities` names `cap`) —
 ///    else 404;
 /// 2. the bound **PROVIDER** `provides` `cap`, resolved via the binding registry
-///    over the enabled set (Unprovided ⇒ 404, Ambiguous ⇒ 409) — kernel primitives
-///    keep the dedicated `/api/host/*` endpoints; only app-provided caps route here;
+///    over the enabled set (Unprovided ⇒ 404, Ambiguous ⇒ 409);
 /// 3. the caller **holds** the provider's declared `grant` (Gateway-approved) —
 ///    else 403.
 ///
@@ -889,6 +1134,28 @@ async fn host_capability(
         Ok(v) => v,
         Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
     };
+
+    // 1b. KERNEL capability — Core is the implementation, so there is no provider to
+    //     bind and the binding registry (which would answer `Unprovided`) must never
+    //     be reached. Gate on the row's grant, then dispatch in-process and return.
+    if let Some(kernel) = kernel_capability(&cap) {
+        if let Some(grant) = kernel.grant {
+            if !holds_host_api_grant(&state, &caller_id, &caller_grants, grant).await {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "capability grant not granted", "capability": cap, "grant": grant })),
+                )
+                    .into_response();
+            }
+        }
+        let bytes = match axum::body::to_bytes(body, DEFAULT_MAX_PROXY_BYTES).await {
+            Ok(b) => b,
+            Err(_) => {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "capability body too large").into_response()
+            }
+        };
+        return dispatch_kernel_capability(&cap, state, parts.headers, &bytes).await;
+    }
 
     // 2. The caller must have DECLARED this capability edge; capture its version floor.
     let required = {
@@ -1596,5 +1863,223 @@ mod tests {
         };
         let resp = resolve_provider_route(&m, &in_proc, "com.ryu.rag").unwrap_err();
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    /// Every Core-side loopback driver resolves its port from the built-in manifest
+    /// ALONE — no `*_FALLBACK_PORT` const survives in Core (AGENTS.md: never bake a
+    /// `com.ryu.<app>` port into Core outside the fixture).
+    ///
+    /// This locks the invariant those `expect`s rest on. Each `sidecar_port` panics
+    /// when its fixture stops declaring the sidecar, so without this test that
+    /// regression would first surface as a Core **boot panic** on a developer's
+    /// machine; here it is a red build. `load_builtins` (not `load`) so the assertion
+    /// does not depend on whatever the developer happens to have in `~/.ryu/plugins`.
+    #[test]
+    fn every_loopback_driver_resolves_its_port_from_the_builtin_manifest() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let resolved = [
+            ("dashboards", crate::dashboards_client::sidecar_port(&manifests)),
+            ("finetune", crate::finetune_client::sidecar_port(&manifests)),
+            ("healing", crate::healing_client::sidecar_port(&manifests)),
+            ("meetings", crate::meetings_client::sidecar_port(&manifests)),
+            ("monitors", crate::monitors_client::sidecar_port(&manifests)),
+            ("quests", crate::quests_client::sidecar_port(&manifests)),
+            ("teams", crate::teams_client::sidecar_port(&manifests)),
+        ];
+        for (app, port) in resolved {
+            assert_ne!(port, 0, "{app}: manifest must declare a real sidecar port");
+        }
+        // Two sidecars sharing a port means whichever binds second dies and its
+        // driver silently talks to the wrong app — worth catching at fixture-edit
+        // time rather than at runtime.
+        let mut ports: Vec<u16> = resolved.iter().map(|(_, p)| *p).collect();
+        ports.sort_unstable();
+        let before = ports.len();
+        ports.dedup();
+        assert_eq!(
+            ports.len(),
+            before,
+            "two built-in sidecars declare the same port: {resolved:?}"
+        );
+    }
+
+    /// An app whose manifest does not declare the named sidecar resolves to `None`
+    /// rather than to an invented port — the property that lets the built-in callers
+    /// treat absence as a build-time invariant instead of carrying a fallback.
+    #[test]
+    fn sidecar_port_is_none_for_an_undeclared_sidecar() {
+        let m = provider_manifest(9099, None);
+        assert!(sidecar_port(std::slice::from_ref(&m), &m.id, "no-such-sidecar").is_none());
+        assert!(sidecar_port(&[], "com.ryu.teams", "ryu-teams").is_none());
+    }
+
+    // ── Kernel capabilities (the retired per-app /api/host/<app>/* rows) ─────────
+
+    /// Parse one built-in fixture. Compiled in with `include_str!` so a fixture that
+    /// stops declaring the grant its kernel capability needs is a BUILD-time link to
+    /// the real file, not a path this test can silently fail to find.
+    fn fixture(raw: &str) -> crate::plugin_manifest::PluginManifest {
+        serde_json::from_str(raw).expect("built-in fixture parses")
+    }
+
+    /// Every kernel capability resolves from the table, and an app-provided name does
+    /// NOT — it must fall through to the binding-registry half of the broker.
+    #[test]
+    fn kernel_capability_table_lookup_is_exact() {
+        for k in KERNEL_CAPABILITIES {
+            assert_eq!(
+                kernel_capability(k.cap).map(|r| r.cap),
+                Some(k.cap),
+                "'{}' must resolve from its own table",
+                k.cap
+            );
+        }
+        // An app-provided capability (the `rag` case the broker was built for) and a
+        // near-miss must not be captured by the kernel branch.
+        assert!(kernel_capability("rag").is_none());
+        assert!(kernel_capability("ghost.record").is_none());
+        assert!(kernel_capability("").is_none());
+    }
+
+    /// Pin the table to the seven capabilities that replaced the seven retired
+    /// `/api/host/<app>/*` routes.
+    ///
+    /// `dispatch_kernel_capability` implements the same names in a `match`, and the two
+    /// can drift: a row added here with no arm falls to the fail-closed `_ => 501`, which
+    /// is safe but silently dead. Pinning the list forces whoever adds a row to touch
+    /// this test, which points at the match.
+    #[test]
+    fn kernel_capability_table_is_the_seven_retired_callbacks() {
+        let names: Vec<&str> = KERNEL_CAPABILITIES.iter().map(|k| k.cap).collect();
+        assert_eq!(
+            names,
+            vec![
+                "mcp.callTool",
+                "notify.fanout",
+                "spaces.fileNotes",
+                "ghost.replay",
+                "ghost.recordStart",
+                "ghost.recordStatus",
+                "ghost.recordStop",
+            ],
+            "KERNEL_CAPABILITIES changed — add the matching arm to \
+             `dispatch_kernel_capability` (a missing arm 501s) and update this list"
+        );
+    }
+
+    /// The naming invariant that IS the point of this table: a kernel capability is
+    /// named for the host primitive it exposes, never for the app that happens to call
+    /// it. A row called `monitors.spider` would just be the retired per-app route with
+    /// extra steps.
+    #[test]
+    fn kernel_capability_names_carry_no_app_name() {
+        for k in KERNEL_CAPABILITIES {
+            for app in ["monitors", "meetings", "recipes", "com.ryu"] {
+                assert!(
+                    !k.cap.contains(app),
+                    "kernel capability '{}' names the app '{app}' — name the primitive instead",
+                    k.cap
+                );
+            }
+        }
+    }
+
+    /// The gate is the declared∩approved intersection, and BOTH halves are load-bearing:
+    /// a manifest cannot widen itself past what the Gateway approved, and an approval the
+    /// sidecar never declared in `host_api.grants` is not a licence to use it.
+    #[test]
+    fn host_api_grant_needs_both_declaration_and_approval() {
+        let manifest = fixture(include_str!(
+            "../plugin_manifest/fixtures/recipes.manifest.json"
+        ));
+        let approved: HashSet<String> = ["ghost:record".to_owned()].into_iter().collect();
+        assert!(host_api_grant_usable(&manifest, &approved, "ghost:record"));
+
+        // Approved but NOT declared by the sidecar ⇒ denied.
+        let over_approved: HashSet<String> = ["ghost:record".to_owned(), "spaces:docs".to_owned()]
+            .into_iter()
+            .collect();
+        assert!(!host_api_grant_usable(&manifest, &over_approved, "spaces:docs"));
+
+        // Declared but NOT approved (revoked, or never validated) ⇒ denied.
+        assert!(!host_api_grant_usable(
+            &manifest,
+            &HashSet::new(),
+            "ghost:record"
+        ));
+    }
+
+    /// Drift guard: each sidecar that calls a grant-bearing kernel capability must
+    /// DECLARE that grant in `sidecars[].host_api.grants`, or every call 403s at
+    /// runtime. Fails if a fixture drops the declaration (or a table row changes its
+    /// grant without the manifests following).
+    #[test]
+    fn callers_declare_the_grant_their_kernel_capability_requires() {
+        let cases: [(&str, &str, &crate::plugin_manifest::PluginManifest); 3] = [
+            (
+                "mcp.callTool",
+                "monitors",
+                &fixture(include_str!(
+                    "../plugin_manifest/fixtures/monitors.manifest.json"
+                )),
+            ),
+            (
+                "spaces.fileNotes",
+                "meetings",
+                &fixture(include_str!(
+                    "../plugin_manifest/fixtures/meetings.manifest.json"
+                )),
+            ),
+            (
+                "ghost.recordStart",
+                "recipes",
+                &fixture(include_str!(
+                    "../plugin_manifest/fixtures/recipes.manifest.json"
+                )),
+            ),
+        ];
+        for (cap, app, manifest) in cases {
+            let grant = kernel_capability(cap)
+                .unwrap_or_else(|| panic!("'{cap}' is not in KERNEL_CAPABILITIES"))
+                .grant
+                .unwrap_or_else(|| panic!("'{cap}' unexpectedly needs no grant"));
+            let approved: HashSet<String> = [grant.to_owned()].into_iter().collect();
+            assert!(
+                host_api_grant_usable(manifest, &approved, grant),
+                "the '{app}' sidecar must declare host_api.grants = [\"{grant}\"] for '{cap}'"
+            );
+            // ...and the app must be able to HOLD it: the Gateway only approves a
+            // grant the manifest also lists in `permission_grants`.
+            assert!(
+                manifest.permission_grants.iter().any(|g| g == grant),
+                "'{app}' declares '{grant}' on its sidecar but not in permission_grants, \
+                 so the Gateway can never approve it"
+            );
+        }
+    }
+
+    /// A **default-on** caller never goes through `enable_app` on a fresh install —
+    /// `plugins::seed` writes its record directly with a hardcoded grant list. So the
+    /// seed table must carry the grant its kernel capability requires, or the app ships
+    /// broken out of the box (403 on every call) with no user-visible cause. Recipes is
+    /// the default-on caller here; monitors/meetings are opt-in and get their grants
+    /// from the Gateway-validated enable path instead.
+    #[test]
+    fn default_on_callers_are_seeded_with_their_kernel_capability_grant() {
+        let grant = kernel_capability("ghost.replay")
+            .expect("ghost.replay is a kernel capability")
+            .grant
+            .expect("ghost.replay is grant-gated");
+        let specs = crate::plugins::seed::default_on_specs();
+        let recipes = specs
+            .iter()
+            .find(|s| s.id == crate::plugins::builtins::RECIPES_PLUGIN_ID)
+            .expect("recipes is default-on, so it must be in the seed table");
+        assert!(
+            recipes.grants.contains(&grant),
+            "the default-on seed for recipes must include '{grant}' \
+             (seeded grants were {:?}) or a fresh install 403s on every replay/record",
+            recipes.grants
+        );
     }
 }

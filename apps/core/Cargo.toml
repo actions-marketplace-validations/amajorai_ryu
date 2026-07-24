@@ -1,6 +1,6 @@
 [package]
 name = "ryu-core"
-version = "0.0.9"
+version = "0.0.10"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -582,7 +582,7 @@ tool-exec-deno = ["ryu-tool-exec/tool-exec-deno", "ryu-eval-code/tool-exec-deno"
 # a NON-optional dependency: the workflow executor's `Recipe`/`GhostAction` nodes call
 # `ryu_recipes::run`/`extract_mcp_json` in every build (in-process, no HTTP), and Core
 # installs the live-ghost `RecipesHost` (`recipes_host::CoreRecipesHost`) at boot —
-# reached by that executor path AND by the sidecar via `/api/host/recipes/*`
+# reached by that executor path AND by the sidecar via `/api/host/capability/ghost.*`
 # (`recipes_client`). The recorder subprocess + shared MCP registry stay Core-side.
 # Teams is now OUT-OF-PROCESS: the `ryu-teams` sidecar owns `teams.db` and serves
 # `/api/teams/*` via the manifest `public_mount` (generic ext-proxy loader), so there is

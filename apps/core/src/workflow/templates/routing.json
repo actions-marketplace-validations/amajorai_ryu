@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "id": "routing",
+    "name": "Routing",
+    "description": "Classify the input, then branch to the specialized handler for that class.",
+    "category": "orchestration",
+    "pattern": "routing",
+    "icon": "Split",
+    "node_count": 6,
+    "tags": ["routing", "classify", "branch"]
+  },
+  "primary": {
+    "id": "routing",
+    "name": "Routing",
+    "description": "Classify then branch to a specialized handler.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "classify",
+        "type": "prompt",
+        "prompt": "Classify this request as exactly one word — `billing`, `technical`, or `general`. Return only that word.\n\n{{input}}",
+        "agent_id": null
+      },
+      {
+        "id": "route",
+        "type": "condition",
+        "expr": "input == \"billing\""
+      },
+      {
+        "id": "billing",
+        "type": "prompt",
+        "prompt": "You are a billing specialist. Answer this request:\n\n{{nodes.in}}",
+        "agent_id": null
+      },
+      {
+        "id": "other",
+        "type": "prompt",
+        "prompt": "You are a general support agent. Answer this request:\n\n{{nodes.in}}",
+        "agent_id": null
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "classify"
+      },
+      {
+        "from": "classify",
+        "to": "route"
+      },
+      {
+        "from": "route",
+        "to": "billing",
+        "branch": "true"
+      },
+      {
+        "from": "route",
+        "to": "other",
+        "branch": "false"
+      },
+      {
+        "from": "billing",
+        "to": "out"
+      },
+      {
+        "from": "other",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

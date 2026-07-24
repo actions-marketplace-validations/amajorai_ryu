@@ -107,6 +107,13 @@
 	}
 	body {
 		overflow: hidden;
+		/* The web build runs on phones, where a rubber-band scroll on the shell
+		   drags the whole app away from the viewport edges and, in Safari, arms
+		   the pull-to-refresh. The shell owns its own scrollers, so nothing here
+		   should ever bounce. */
+		overscroll-behavior: none;
+		/* iOS inflates font sizes on rotate unless told not to. */
+		-webkit-text-size-adjust: 100%;
 		/* Keep the window body transparent so the rounded root div's corners show
 		   through (the visible surface is painted by that div, not the body).
 		   Declared last and standalone so a formatter reordering @apply can't

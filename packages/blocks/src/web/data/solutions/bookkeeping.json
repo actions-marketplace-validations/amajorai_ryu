@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Runs on a schedule",
-      "description": "Chain agents and tools into workflows with triggers, so weekly categorization and reconciliation runs without you starting it."
+      "description": "Chain agents and tools into workflows with triggers, so weekly categorization and reconciliation runs without you starting it.",
+      "icon": "Bot"
     },
     {
       "title": "Connects to your ledger",
-      "description": "Agents authenticate into QuickBooks, Xero, banks, and spreadsheets to read transactions and post drafts for your review."
+      "description": "Agents authenticate into QuickBooks, Xero, banks, and spreadsheets to read transactions and post drafts for your review.",
+      "icon": "Plug"
     },
     {
       "title": "Books stay on your machine",
-      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request."
+      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request.",
+      "icon": "Shield"
     },
     {
       "title": "Auditable by default",
-      "description": "Every run is logged in the Gateway audit trail, so you can show exactly what a workflow touched and when."
+      "description": "Every run is logged in the Gateway audit trail, so you can show exactly what a workflow touched and when.",
+      "icon": "Eye"
     }
   ],
   "useCases": [

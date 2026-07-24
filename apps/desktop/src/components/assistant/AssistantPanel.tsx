@@ -863,11 +863,14 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 
 	// Docked sidebar: an inset, floating rounded card wearing the same treatment
 	// as the chat page's right panel (rounded-xl + shadow + ring, inset from the
-	// edges), rather than a flush full-height rail.
+	// edges), rather than a flush full-height rail. Below `md` a 380px rail
+	// would be wider than the page it is supposed to sit beside, so the card
+	// spans the viewport instead — Layout drops its 388px reservation at the
+	// same breakpoint, so nothing is left holding empty space.
 	return (
 		<aside
 			aria-label={builder ? "Ryu builder" : "Ask Ryu assistant"}
-			className="fixed top-12 right-2 bottom-2 z-[55] flex w-[380px] flex-col overflow-hidden rounded-xl bg-sidebar text-sidebar-foreground shadow-2xl ring-1 ring-border/40"
+			className="fixed top-12 right-2 bottom-2 left-2 z-[55] flex flex-col overflow-hidden rounded-xl bg-sidebar text-sidebar-foreground shadow-2xl ring-1 ring-border/40 md:left-auto md:w-[380px]"
 		>
 			{body}
 		</aside>

@@ -120,14 +120,14 @@ export default function DownloadsPage() {
 			) : (
 				<>
 					{updates.length > 0 && (
-						<div className="rounded-lg border">
+						<div className="rounded-2xl border bg-card/40">
 							<AvailableUpdates />
 						</div>
 					)}
 
 					<Section title="Active">
 						{active.length > 0 ? (
-							<div className="divide-y rounded-lg border">
+							<div className="flex flex-col rounded-2xl border bg-card/40 p-1">
 								{active.map((task) => (
 									<DownloadRow friendly={friendly} key={task.id} task={task} />
 								))}
@@ -141,7 +141,7 @@ export default function DownloadsPage() {
 
 					{history.length > 0 && (
 						<Section title="History">
-							<div className="divide-y rounded-lg border">
+							<div className="flex flex-col rounded-2xl border bg-card/40 p-1">
 								{history.map((task) => (
 									<DownloadRow friendly={friendly} key={task.id} task={task} />
 								))}

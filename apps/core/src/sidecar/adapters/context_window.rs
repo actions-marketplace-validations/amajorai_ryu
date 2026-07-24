@@ -22,6 +22,12 @@
 //!   block. Adds one blocking summarization round-trip per over-budget turn
 //!   (cached by the dropped-message set so an unchanged tail is not re-summarized).
 //!
+//! Both modes are observable and steerable by plugins: whenever turns are about to
+//! leave the window the `session_before_compact` phase fires (detached), and a
+//! produced summary is offered to `session_compact` (awaited, bounded) before it is
+//! merged back. Both fire on BOTH planes — the OpenAI-compat array and the ACP
+//! short-term replay — so one plugin governs every agent.
+//!
 //! Token accounting is a deliberately conservative `len / 3.5` char heuristic
 //! (no tokenizer), matching Jan. Base64 image payloads are **not** counted —
 //! a flat per-image cost is used so a vision chat does not look like 100k tokens.
@@ -35,6 +41,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use super::{message_image_parts, UiMessage};
+use crate::plugin_host::{self, HookContext, HookDirective, HookMessage};
 use crate::server::conversations::ConversationStore;
 
 /// Conservative chars-per-token divisor (Jan uses the same 3.5).
@@ -130,6 +137,144 @@ fn window_count(estimates: &[usize], budget: usize) -> usize {
     kept.clamp(1, estimates.len().max(1)).min(estimates.len())
 }
 
+// ── Plugin compaction hooks (`session_before_compact` / `session_compact`) ────
+//
+// Both planes below (the OpenAI-compat array and the ACP short-term replay) drop
+// the same shape of turns, so both fire the same two phases through the
+// process-global dispatcher — these functions have no `ServerState` handle, and
+// deliberately don't take one (that is why summarization talks to the gateway
+// directly instead of going through `server::call_side_model`).
+
+tokio::task_local! {
+    /// Set while a compaction hook runs, so a hook whose own side effects reach
+    /// back into the chat path — `host.runAgent` spawns a real sub-agent turn,
+    /// which assembles its own context window — cannot re-enter compaction in the
+    /// SAME task and recurse. Mirrors `sidecar::mcp`'s `IN_TOOL_HOOK`.
+    ///
+    /// Task-locals do not propagate across `tokio::spawn`, so a delegated
+    /// sub-agent's own compaction IS still governed: that is intentional (the
+    /// sub-agent is a real turn a plugin should see), and the recursion it allows
+    /// is bounded by the delegation wall-time/depth caps rather than by this flag.
+    static IN_COMPACT_HOOK: ();
+}
+
+fn in_compact_hook() -> bool {
+    IN_COMPACT_HOOK.try_with(|()| ()).is_ok()
+}
+
+/// How long the `session_compact` hooks may run before the ORIGINAL summary is
+/// used anyway. Mirrors the 8s tool-hook budget in `sidecar::mcp`
+/// (`PRE_TOOL_HOOK_TIMEOUT` / `TOOL_RESULT_HOOK_TIMEOUT`): a stuck rewriting hook
+/// must never wedge a turn, and must never lose the real summary.
+const COMPACT_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// The dropped turns in the hook wire shape. Built from the same flattened
+/// `(role, text)` view the summarizer sends to the side model, so a hook inspects
+/// exactly what compaction acted on rather than a second, differently-derived one.
+fn hook_messages(convo: &[(String, String)]) -> Vec<HookMessage> {
+    convo
+        .iter()
+        .map(|(role, content)| HookMessage {
+            role: role.clone(),
+            content: content.clone(),
+        })
+        .collect()
+}
+
+/// Fire `session_before_compact` DETACHED, once the set of turns to drop is known.
+///
+/// Observation-only, so it must add exactly zero latency to the turn that
+/// triggered the compaction; directives are ignored here. A plugin that wants to
+/// *change* the outcome declares `session_compact` instead, which is awaited.
+///
+/// Fired for BOTH modes — trim drops the turns outright — because the phase is
+/// "Ryu is about to drop these turns", not "Ryu is about to summarize them".
+/// Gating it on `auto_compact` would mean an observer plugin silently never fires
+/// for the majority (trim) case.
+///
+/// Because it is detached, this can land *after* the awaited `session_compact`
+/// dispatch below has already completed. That ordering skew is deliberate and
+/// harmless: nothing downstream reads the observers' result.
+fn fire_before_compact_hooks(conversation_id: Option<String>, convo: &[(String, String)]) {
+    if in_compact_hook() {
+        return;
+    }
+    let dropped = hook_messages(convo);
+    tokio::spawn(async move {
+        let ctx = HookContext {
+            conversation_id,
+            dropped: Some(dropped),
+            ..Default::default()
+        };
+        let _ = IN_COMPACT_HOOK
+            .scope(
+                (),
+                plugin_host::dispatch_global(plugin_host::ON_SESSION_BEFORE_COMPACT, ctx),
+            )
+            .await;
+    });
+}
+
+/// Run the awaited `session_compact` hooks over a produced `summary` and return the
+/// text to actually merge back into the window. Returns `summary` unchanged when no
+/// plugin subscribes, on timeout, on a hook error, and when the code-exec backend is
+/// absent — every failure mode leaves compaction byte-identical to the un-hooked path.
+///
+/// `ctx.output` is the summary *as it will be merged*, i.e. the already-labelled
+/// `[Earlier conversation summary]` block, so a hook that returns
+/// [`HookDirective::Replace`] owns the label too. A blank replacement is ignored
+/// rather than allowed to erase the summary, mirroring the blank-summary guard in
+/// [`summarize`].
+///
+/// First writer wins: only the FIRST `Replace` is applied and the rewrite is not
+/// re-fed through the remaining hooks, so what every hook inspects is the real
+/// model summary and plugin install order cannot silently defeat another plugin.
+///
+/// **Cache interaction (deliberate, do not move this inside [`summarize`]).** This
+/// runs strictly *after* `summarize` has memoized, so `summary_cache` always holds
+/// the untouched side-model summary and never a plugin's rewrite. The cache key
+/// hashes only `(model, dropped turns)` — not the installed plugin set — so a cached
+/// rewrite would keep being served after that plugin was disabled or replaced, and
+/// re-feeding a rewrite into the hook on the next identical compaction would let a
+/// non-idempotent hook compound its own output. Keeping the memo a pure record of
+/// what the model said, and re-applying the hook to it every time, is stable under
+/// both.
+async fn apply_compact_hooks(
+    conversation_id: Option<String>,
+    convo: &[(String, String)],
+    summary: String,
+) -> String {
+    if in_compact_hook() {
+        return summary;
+    }
+    let ctx = HookContext {
+        conversation_id,
+        dropped: Some(hook_messages(convo)),
+        output: Some(summary.clone()),
+        ..Default::default()
+    };
+    let fut = IN_COMPACT_HOOK.scope(
+        (),
+        plugin_host::dispatch_global(plugin_host::ON_SESSION_COMPACT, ctx),
+    );
+    let directives = match tokio::time::timeout(COMPACT_HOOK_TIMEOUT, fut).await {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!(
+                "plugin_host: session_compact hook timed out; using the original summary"
+            );
+            return summary;
+        }
+    };
+    directives
+        .into_iter()
+        .find_map(|d| match d {
+            HookDirective::Replace { text } if !text.trim().is_empty() => Some(text),
+            _ => None,
+        })
+        .unwrap_or(summary)
+}
+
 /// Trim the OpenAI-compat message list in place to the input budget.
 ///
 /// Every `system` message is preserved (and moved to the front); the remaining
@@ -169,14 +314,32 @@ pub async fn apply_openai(
     messages.extend(system_msgs);
     messages.append(&mut turns);
 
-    if !cfg.auto_compact || dropped.is_empty() {
+    if dropped.is_empty() {
         return None;
     }
+    // Flatten once and reuse: the `session_before_compact` observers, the summarizer
+    // and the `session_compact` hooks all want the same `(role, text)` view. Built by
+    // consuming `dropped` (it is discarded either way), so this is strictly cheaper
+    // than the borrow-and-clone it replaces.
     let convo: Vec<(String, String)> = dropped
-        .iter()
-        .map(|m| (m.role.clone(), ui_message_text(m)))
+        .into_iter()
+        .map(|m| {
+            let text = ui_message_text(&m);
+            (m.role, text)
+        })
         .collect();
-    summarize(&convo, cfg).await
+    // Fired before the `auto_compact` check: in trim mode these turns are dropped
+    // outright, and an observer must see that too. No conversation id on this plane
+    // — the OpenAI-compat request carries a client-supplied array, not a Ryu
+    // conversation, so there is genuinely none to hand the hook.
+    fire_before_compact_hooks(None, &convo);
+    if !cfg.auto_compact {
+        return None;
+    }
+    let summary = summarize(&convo, cfg).await?;
+    // Hook applied OUTSIDE `summarize` on purpose — see `apply_compact_hooks`: the
+    // cache stays a pure memo of the model's summary, never a plugin's rewrite.
+    Some(apply_compact_hooks(None, &convo, summary).await)
 }
 
 /// Assemble a token-budgeted short-term context block for the ACP path (the Pi
@@ -217,14 +380,25 @@ pub async fn budgeted_short_term(
     let (dropped, kept) = prefix.split_at(drop_count);
 
     let mut block = String::from("Conversation so far:\n");
-    if cfg.auto_compact && !dropped.is_empty() {
+    if !dropped.is_empty() {
         let convo: Vec<(String, String)> = dropped
             .iter()
             .map(|m| (m.role.clone(), m.content.clone()))
             .collect();
-        if let Some(summary) = summarize(&convo, cfg).await {
-            block.push_str(summary.trim());
-            block.push('\n');
+        // Observers first, and outside the `auto_compact` branch: with compaction off
+        // these turns are still dropped from the replay, which is what the phase
+        // reports. Detached, so it costs the ACP turn nothing.
+        fire_before_compact_hooks(Some(conversation_id.to_string()), &convo);
+        if cfg.auto_compact {
+            if let Some(summary) = summarize(&convo, cfg).await {
+                // Hook applied OUTSIDE `summarize` on purpose — see
+                // `apply_compact_hooks`: the cache stays a pure memo of the model's
+                // summary, never a plugin's rewrite.
+                let summary =
+                    apply_compact_hooks(Some(conversation_id.to_string()), &convo, summary).await;
+                block.push_str(summary.trim());
+                block.push('\n');
+            }
         }
     }
     for msg in kept {
@@ -558,5 +732,36 @@ mod tests {
             "over-budget prefix keeps only the newest turn"
         );
         assert!(!block.contains("current"), "current turn excluded");
+    }
+
+    // ── Compaction hooks ──────────────────────────────────────────────────────
+
+    #[test]
+    fn hook_messages_mirror_the_flattened_summarizer_view() {
+        // The hook must see the same rows the side model was handed, in order —
+        // deriving a second view would let a hook act on turns that were not the
+        // ones actually dropped.
+        let convo = vec![
+            ("user".to_owned(), "remember 42".to_owned()),
+            ("assistant".to_owned(), "noted".to_owned()),
+        ];
+        let msgs = hook_messages(&convo);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content, "remember 42");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].content, "noted");
+    }
+
+    #[tokio::test]
+    async fn compact_hook_reentrancy_keeps_the_original_summary() {
+        // A hook whose side effects re-enter compaction in the same task must not
+        // dispatch again (and must not lose the summary it was handed).
+        let convo = vec![("user".to_owned(), "hi".to_owned())];
+        let original = "[Earlier conversation summary]\n- said hi".to_owned();
+        let out = IN_COMPACT_HOOK
+            .scope((), apply_compact_hooks(None, &convo, original.clone()))
+            .await;
+        assert_eq!(out, original);
     }
 }

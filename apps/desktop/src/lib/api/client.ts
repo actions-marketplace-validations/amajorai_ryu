@@ -218,9 +218,43 @@ function appDisabledFromBody(
 }
 
 /**
+ * A non-2xx response from a node. Carries the HTTP `status` and, when Core sent
+ * one, the `{ "error": "…" }` body as {@link serverMessage}, so a caller can tell
+ * "this Core is too old to have the route" (404) apart from "Core refused"
+ * (403) instead of guessing from a bare message string.
+ *
+ * `message` keeps the historical `"<path> failed: <status>"` shape — callers that
+ * only log or match on the text are unaffected.
+ */
+export class ApiError extends Error {
+	readonly status: number;
+	readonly serverMessage?: string;
+
+	constructor(path: string, status: number, serverMessage?: string) {
+		super(`${path} failed: ${status}`);
+		this.name = "ApiError";
+		this.status = status;
+		this.serverMessage = serverMessage;
+	}
+}
+
+/** Pull Core's `{ "error": "…" }` message out of an error body, if it has one. */
+function serverErrorFromBody(text: string): string | undefined {
+	if (!text) {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(text) as { error?: unknown };
+		return typeof parsed.error === "string" ? parsed.error : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Perform a JSON request against a node and parse the response.
  *
- * Throws an {@link Error} with the status code on a non-2xx response so callers
+ * Throws an {@link ApiError} with the status code on a non-2xx response so callers
  * can degrade gracefully (the status spine relies on this to flag Core as down).
  * A `503 app_disabled` body throws the typed {@link AppDisabledError} instead so
  * a gated feature (Meetings, Spaces, …) can render an actionable "Enable" prompt.
@@ -248,7 +282,7 @@ export async function request<T>(
 		if (disabled) {
 			throw disabled;
 		}
-		throw new Error(`${path} failed: ${resp.status}`);
+		throw new ApiError(path, resp.status, serverErrorFromBody(text));
 	}
 	// Some endpoints (DELETE, no-content) return an empty body.
 	const text = await resp.text();

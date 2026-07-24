@@ -174,6 +174,21 @@ pub enum HookDirective {
     ///
     /// [`Replace`]: HookDirective::Replace
     Rewrite { messages: Vec<serde_json::Value> },
+    /// Fully handle the user's turn: `text` becomes the assistant reply and **no
+    /// model call is made** (an [`ON_PRE_USER_TURN`] directive; ignored elsewhere).
+    ///
+    /// This is the piece [`Replace`] and [`Inject`] could not express — both still
+    /// run the turn, they only reshape the prompt. `Handled` ends it. That is what
+    /// makes a plugin able to own a slash command, answer from cache, or refuse a
+    /// prompt outright without burning a model call.
+    ///
+    /// The reply is persisted like any assistant message so a reload is faithful.
+    /// First writer wins: once one hook handles a turn, later hooks do not run, so
+    /// two plugins cannot both claim the same prompt.
+    ///
+    /// [`Replace`]: HookDirective::Replace
+    /// [`Inject`]: HookDirective::Inject
+    Handled { text: String },
 }
 
 impl Default for HookDirective {

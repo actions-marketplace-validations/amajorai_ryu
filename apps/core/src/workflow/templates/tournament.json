@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "id": "tournament",
+    "name": "Tournament",
+    "description": "Generate N candidates in parallel, then pick a winner by pairwise comparison.",
+    "category": "quality",
+    "pattern": "tournament",
+    "icon": "Trophy",
+    "node_count": 4,
+    "tags": ["tournament", "compare", "best-of-n"]
+  },
+  "primary": {
+    "id": "tournament",
+    "name": "Tournament",
+    "description": "N candidates → pairwise judge → winner.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "candidates",
+        "type": "agent_delegate",
+        "delegates": [
+          {
+            "id": "c1",
+            "task": "Produce candidate solution A to this task:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "c2",
+            "task": "Produce candidate solution B, taking a different approach:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "c3",
+            "task": "Produce candidate solution C, optimizing for a different tradeoff:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "c4",
+            "task": "Produce candidate solution D, the simplest thing that could work:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          }
+        ],
+        "caps": null
+      },
+      {
+        "id": "judge",
+        "type": "prompt",
+        "prompt": "Compare these candidate solutions pairwise and pick the single best. Return the winning solution in full, with a one-line justification.\n\nTask: {{input}}\n\nCandidates: {{nodes.candidates}}",
+        "agent_id": null
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "candidates"
+      },
+      {
+        "from": "candidates",
+        "to": "judge"
+      },
+      {
+        "from": "judge",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

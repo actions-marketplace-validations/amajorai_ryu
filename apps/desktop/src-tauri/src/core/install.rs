@@ -183,7 +183,13 @@ fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
 		}
 	}
 	// 3. Anywhere else on PATH — an external install we don't manage; respect it.
-	which::which(spec.bin_name).is_ok()
+	//    EXCEPT another profile's install: `~/.ryu/bin` and `~/.ryu-dev/bin` are both
+	//    on PATH, so counting the release binary as "installed" here is what leaves a
+	//    dev profile with no `ryu-core` of its own (and silently running the release
+	//    one against `~/.ryu-dev`). Treat it as absent so it gets downloaded — this
+	//    must stay in lockstep with the same rejection in `resolve_core_binary`.
+	which::which(spec.bin_name)
+		.is_ok_and(|hit| !crate::profile::is_foreign_profile_bin(&hit))
 }
 
 /// Download `asset` from the release hub into `~/.ryu/bin/<dest_file>` and return

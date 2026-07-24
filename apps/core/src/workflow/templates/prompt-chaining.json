@@ -1,0 +1,66 @@
+{
+  "meta": {
+    "id": "prompt-chaining",
+    "name": "Prompt Chaining",
+    "description": "Decompose a task into a fixed sequence of LLM steps, each feeding the next (outline → draft → polish).",
+    "category": "orchestration",
+    "pattern": "prompt-chaining",
+    "icon": "Link",
+    "node_count": 5,
+    "tags": ["chaining", "sequential", "decomposition"]
+  },
+  "primary": {
+    "id": "prompt-chaining",
+    "name": "Prompt Chaining",
+    "description": "Sequential LLM steps, each feeding the next.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "outline",
+        "type": "prompt",
+        "prompt": "Break this task into a concise outline of steps:\n\n{{input}}",
+        "agent_id": null
+      },
+      {
+        "id": "draft",
+        "type": "prompt",
+        "prompt": "Write a full first draft that follows this outline:\n\n{{nodes.outline}}",
+        "agent_id": null
+      },
+      {
+        "id": "polish",
+        "type": "prompt",
+        "prompt": "Polish this draft for clarity and correctness; return only the final text:\n\n{{nodes.draft}}",
+        "agent_id": null
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "outline"
+      },
+      {
+        "from": "outline",
+        "to": "draft"
+      },
+      {
+        "from": "draft",
+        "to": "polish"
+      },
+      {
+        "from": "polish",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

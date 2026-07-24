@@ -8,6 +8,7 @@
 // app so `../../src/...` and any `@/...` imports resolve to `apps/desktop`.
 
 import path from "node:path";
+import tailwindcss from "@tailwindcss/postcss";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
@@ -16,6 +17,15 @@ const desktopRoot = path.resolve(harnessDir, "../..");
 
 export default defineConfig({
 	plugins: [react()],
+	// Mirror the app's PostCSS pipeline so the stories render with the REAL
+	// utilities. Without it every Tailwind class is a no-op here, which makes a
+	// story useless for judging layout (and silently changes any behavior that
+	// depends on a class actually clipping or scrolling).
+	css: {
+		postcss: {
+			plugins: [tailwindcss()],
+		},
+	},
 	root: harnessDir,
 	clearScreen: false,
 	resolve: {

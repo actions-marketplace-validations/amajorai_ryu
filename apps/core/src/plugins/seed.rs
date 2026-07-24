@@ -64,7 +64,7 @@ pub struct SeedSpec {
 /// really does write Space documents, so its approved grants must match the
 /// `permission_grants` its manifest declares — otherwise the record would claim
 /// less than the app does.
-fn seed_overrides() -> [SeedSpec; 14] {
+fn seed_overrides() -> [SeedSpec; 15] {
     use crate::plugin_manifest::{
         ACTIVITY_UI_HTML, APPROVALS_UI_HTML, CALENDAR_UI_HTML, CANVAS_PLUGIN_ID, CANVAS_UI_HTML,
         FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, LEARNING_UI_HTML, MEETINGS_UI_HTML, MONITORS_UI_HTML,
@@ -119,7 +119,11 @@ fn seed_overrides() -> [SeedSpec; 14] {
             id: crate::plugins::builtins::MONITORS_PLUGIN_ID,
             // Its sandboxed frame drives Core's `/api/monitors/*` orchestration via
             // the `monitors:crud` bridge capability. Ships a prebuilt companion UI.
-            grants: &["monitors:crud"],
+            // `tools.invoke` is what its OUT-OF-PROCESS sidecar needs: the Spider fetch
+            // backend reaches Core's `McpRegistry` through the `mcp.callTool` kernel
+            // capability, which is gated on the declared∩approved intersection — so a
+            // seeded record missing this grant would 403 every crawl.
+            grants: &["monitors:crud", "tools.invoke"],
             ui_code: Some(MONITORS_UI_HTML),
         },
         SeedSpec {
@@ -253,6 +257,19 @@ fn seed_overrides() -> [SeedSpec; 14] {
             // NOT declare `sidecar:process` (the Gateway denies that grant at enable).
             grants: &["skills:crud", "shell:integrate"],
             ui_code: Some(SKILL_EDITOR_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::RECIPES_PLUGIN_ID,
+            // Recipes ships NO frame (no `ui_code`) — it is here purely for the grant.
+            // Its out-of-process sidecar proxies replay + the recording session back to
+            // Core over the `ghost.{replay,recordStart,recordStatus,recordStop}` kernel
+            // capabilities, which are gated on `ghost:record` (declared ∩ approved). It
+            // is default-on, and the default-on seed writes the record directly, so
+            // without this override it would seed with `grants: &[]` and every
+            // replay/record call would 403 on a fresh install. Mirrors the
+            // `permission_grants` its manifest declares, per the rule above.
+            grants: &["ghost:record"],
+            ui_code: None,
         },
     ]
 }
@@ -481,6 +498,209 @@ async fn seed_optin_companion_ui(store: &PluginStore, manifests: &[PluginManifes
             "opt-in companion seed: seeded ui_code for '{}' (disabled)",
             c.id
         );
+    }
+}
+
+/// The store schema version this build expects. Bump when adding a migration below.
+const STORE_SCHEMA_VERSION: i64 = 1;
+
+/// One-time data migrations for ALREADY-INSTALLED stores.
+///
+/// # Why this exists (and why it is not part of the seed loop)
+///
+/// [`seed_default_on`] deliberately short-circuits on `Ok(Some(_)) => continue`: a
+/// plugin with any existing record is left alone, because the user's choice wins.
+/// That is right for enable/disable, but it means a built-in that starts REQUIRING a
+/// grant it never needed before is broken on every pre-existing install — the record
+/// was written when the grant did not exist, and nothing else rewrites
+/// `approved_grants` (`set_enabled` is its only writer; `update_app` explicitly
+/// leaves it untouched).
+///
+/// That is exactly what happened when the per-app `/api/host/<app>/*` reverse
+/// callbacks moved onto the generic `/api/host/capability/<cap>` seam: those routes
+/// previously required NO grant (the gate was the minted sidecar token plus a
+/// hardcoded app-id pin), and the generic seam correctly requires the capability
+/// grant the manifest declares. Fresh installs are fine. `recipes` — default-on, and
+/// the only default-on caller — would 403 on `ghost.*` on every existing install
+/// until the user manually disabled and re-enabled it.
+///
+/// # Why a one-time migration rather than a boot reconcile
+///
+/// A reconcile that ran on EVERY boot would re-grant a capability the user had
+/// deliberately revoked, silently overriding them forever. Gating on the store's
+/// `PRAGMA user_version` runs the backfill exactly once per install, so it repairs
+/// the upgrade and then never fights the user again.
+///
+/// # Scope (deliberately narrow)
+///
+/// Only COMPILED-IN built-ins (`is_compiled_in_manifest`) — a disk manifest under
+/// `~/.ryu/plugins` must never self-approve, which is the whole point of the Gateway
+/// gate. Only grants the built-in's own fixture declares, and only ADDITIVE
+/// (`add_approved_grants` can never revoke).
+pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginManifest]) {
+    let current = match store.schema_version().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("store migration: reading schema version failed: {e}");
+            return;
+        }
+    };
+    if current >= STORE_SCHEMA_VERSION {
+        return;
+    }
+
+    for manifest in manifests {
+        if !crate::plugins::builtins::is_compiled_in_manifest(&manifest.id) {
+            continue;
+        }
+        // The grants a sidecar needs for its host callbacks, which is the set the
+        // capability seam now enforces. `permission_grants` is the manifest-level
+        // declaration the Gateway validates; the intersection is what a fresh
+        // install would have ended up with.
+        let needed: Vec<String> = manifest
+            .sidecars
+            .iter()
+            .flat_map(|s| s.host_api.iter())
+            .flat_map(|h| h.grants.iter())
+            .filter(|g| manifest.permission_grants.iter().any(|p| p == *g))
+            .cloned()
+            .collect();
+        if needed.is_empty() {
+            continue;
+        }
+        match store.get(&manifest.id).await {
+            // No record = nothing installed yet; the seed will do the right thing.
+            Ok(None) | Err(_) => continue,
+            Ok(Some(record)) => {
+                let missing: Vec<String> = needed
+                    .iter()
+                    .filter(|g| !record.approved_grants.iter().any(|a| a == *g))
+                    .cloned()
+                    .collect();
+                if missing.is_empty() {
+                    continue;
+                }
+                match store.add_approved_grants(&manifest.id, &missing).await {
+                    Ok(_) => tracing::info!(
+                        "store migration v{STORE_SCHEMA_VERSION}: backfilled host-api grant(s) \
+                         {missing:?} for built-in '{}' (its host callbacks became \
+                         capability-gated; a pre-existing record predates the grant)",
+                        manifest.id
+                    ),
+                    Err(e) => tracing::warn!(
+                        "store migration: backfilling grants for '{}' failed: {e}",
+                        manifest.id
+                    ),
+                }
+            }
+        }
+    }
+
+    if let Err(e) = store.set_schema_version(STORE_SCHEMA_VERSION).await {
+        // Not fatal: the backfill is additive and idempotent, so a failed version
+        // write only means it is attempted again next boot.
+        tracing::warn!("store migration: recording schema version failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    const RECIPES: &str = "com.ryu.recipes";
+
+    /// Reproduces the actual upgrade: a store seeded BEFORE the per-app
+    /// `/api/host/recipes/*` callbacks moved onto the capability seam. Its record is
+    /// enabled with NO grants, because those routes required none. After the move,
+    /// `ghost.*` needs `ghost:record`, so without this migration every pre-existing
+    /// install 403s on recipe replay/record until the user toggles the app off and on.
+    #[tokio::test]
+    async fn backfills_a_host_api_grant_onto_a_pre_existing_record() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        // The pre-upgrade state: installed + enabled, empty approved_grants.
+        store.insert(RECIPES, "1.0.0").await.unwrap();
+        store.set_enabled(RECIPES, &[]).await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        let record = store.get(RECIPES).await.unwrap().unwrap();
+        assert!(
+            record.approved_grants.iter().any(|g| g == "ghost:record"),
+            "recipes must regain the grant its host callbacks now require, got {:?}",
+            record.approved_grants
+        );
+        assert!(record.enabled, "the backfill must not disturb enabled state");
+    }
+
+    /// The property that makes running this at boot safe: it happens ONCE. A user who
+    /// revokes a grant afterwards must keep it revoked across every later restart —
+    /// a reconcile that re-asserted the grant on every boot would silently override
+    /// them forever, which is why this is version-gated rather than unconditional.
+    #[tokio::test]
+    async fn a_later_revocation_is_never_undone_by_a_second_run() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+        store.insert(RECIPES, "1.0.0").await.unwrap();
+        store.set_enabled(RECIPES, &[]).await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+        // The user revokes it.
+        store.set_enabled(RECIPES, &[]).await.unwrap();
+        // Every subsequent boot.
+        run_one_time_migrations(&store, &manifests).await;
+        run_one_time_migrations(&store, &manifests).await;
+
+        let record = store.get(RECIPES).await.unwrap().unwrap();
+        assert!(
+            record.approved_grants.is_empty(),
+            "a revoked grant must stay revoked, got {:?}",
+            record.approved_grants
+        );
+    }
+
+    /// A disk manifest must never self-approve — that is the entire point of the
+    /// Gateway grant gate, and a migration that ignored it would be a way to bypass
+    /// the capability grammar by shipping a manifest that declares its own host_api.
+    #[tokio::test]
+    async fn a_non_compiled_in_plugin_is_never_backfilled() {
+        let store = PluginStore::open_in_memory().unwrap();
+        let evil = "com.evil.app";
+        assert!(
+            !crate::plugins::builtins::is_compiled_in_manifest(evil),
+            "'{evil}' must not be a built-in for this test to mean anything"
+        );
+        store.insert(evil, "1.0.0").await.unwrap();
+        store.set_enabled(evil, &[]).await.unwrap();
+
+        // A manifest that declares a sidecar host_api grant AND the matching
+        // permission_grant — i.e. it has done everything a built-in does.
+        let mut manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
+            .into_iter()
+            .find(|m| m.id == RECIPES)
+            .expect("recipes fixture");
+        manifest.id = evil.to_owned();
+
+        run_one_time_migrations(&store, &[manifest]).await;
+
+        let record = store.get(evil).await.unwrap().unwrap();
+        assert!(
+            record.approved_grants.is_empty(),
+            "a disk manifest must never self-approve a host-api grant, got {:?}",
+            record.approved_grants
+        );
+    }
+
+    /// An app the user never installed must not be conjured into existence.
+    #[tokio::test]
+    async fn an_absent_record_is_left_absent() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        assert!(store.get(RECIPES).await.unwrap().is_none());
     }
 }
 

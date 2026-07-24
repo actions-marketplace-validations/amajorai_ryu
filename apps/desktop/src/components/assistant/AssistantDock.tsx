@@ -33,13 +33,22 @@ export function AssistantDock() {
 	const close = useAssistantStore((s) => s.close);
 
 	// Clamp the morph target to the viewport, matching the panel's
-	// `h-[min(620px,calc(100vh-2rem))]`.
-	const [panelHeight, setPanelHeight] = useState(PANEL_MAX_HEIGHT);
+	// `h-[min(620px,calc(100vh-2rem))]`. Width is clamped the same way: the panel
+	// is anchored to the right edge, so on a phone an unclamped 400px frame runs
+	// off the left of a 390px viewport.
+	const [panelSize, setPanelSize] = useState({
+		width: PANEL_WIDTH,
+		height: PANEL_MAX_HEIGHT,
+	});
 	useEffect(() => {
 		const measure = () =>
-			setPanelHeight(
-				Math.min(PANEL_MAX_HEIGHT, window.innerHeight - PANEL_VIEWPORT_MARGIN)
-			);
+			setPanelSize({
+				width: Math.min(PANEL_WIDTH, window.innerWidth - PANEL_VIEWPORT_MARGIN),
+				height: Math.min(
+					PANEL_MAX_HEIGHT,
+					window.innerHeight - PANEL_VIEWPORT_MARGIN
+				),
+			});
 		measure();
 		window.addEventListener("resize", measure);
 		return () => window.removeEventListener("resize", measure);
@@ -57,8 +66,8 @@ export function AssistantDock() {
 			bgClassName={ISLAND_FILL}
 			chromeClassName={ISLAND_CHROME}
 			className="fixed right-4 bottom-4 z-50"
-			contentHeight={panelHeight}
-			contentWidth={PANEL_WIDTH}
+			contentHeight={panelSize.height}
+			contentWidth={panelSize.width}
 			dismissable={false}
 			isOpen={mode === "floating"}
 			onOpenChange={(next) => (next ? open("floating") : close())}

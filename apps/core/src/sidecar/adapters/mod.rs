@@ -780,6 +780,34 @@ fn acp_question_input(title: &str, input: &Value) -> Option<Value> {
 }
 
 /// `finish` part — marks the assistant message complete.
+/// A complete synthetic assistant message as UI frames: `start` → `text-start` →
+/// one `text-delta` → `text-end` → `finish`.
+///
+/// For a reply Ryu produces WITHOUT calling a model — today, a `pre_user_turn`
+/// hook returning [`HookDirective::Handled`], which ends the turn and supplies the
+/// answer itself. Such a reply must be indistinguishable on the wire from a
+/// streamed one or the client renders a turn that never opens or never closes.
+///
+/// Lives here, next to the private `ui_*` part builders, rather than at the call
+/// site: the frame vocabulary has exactly one definition, so a change to the part
+/// shape cannot leave a second hand-rolled copy behind to drift. The terminal
+/// `[DONE]` is deliberately NOT included — the caller owns that, because one
+/// response may carry several turns but only ever one `[DONE]`.
+///
+/// [`HookDirective::Handled`]: crate::plugin_host::HookDirective::Handled
+pub(crate) fn synthetic_assistant_frames(text: &str) -> Vec<Vec<u8>> {
+    // A stable id shared by the three text parts, matching how a real streamed
+    // block is framed. Distinct prefix so these are traceable in a capture.
+    let id = format!("hook-{}", uuid::Uuid::new_v4());
+    vec![
+        ui_start(),
+        ui_text_start(&id),
+        ui_text_delta(&id, text),
+        ui_text_end(&id),
+        ui_finish(),
+    ]
+}
+
 fn ui_finish() -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": "finish" }))
 }
@@ -875,6 +903,50 @@ impl PartsAccumulator {
             "mediaType": media_type,
             "url": url,
         }));
+    }
+
+    /// Collapse every text part into ONE part carrying `text`, positioned where
+    /// the first text part was (appended when the turn produced no text at all).
+    ///
+    /// Called exactly once, at finalization, when a `message_end` hook rewrote the
+    /// reply. Rewriting only `messages.content` would leave the sealed parts
+    /// holding the pre-hook text, and the desktop renders `parts` whenever they
+    /// exist — so a reloaded conversation would disagree with the message the user
+    /// is looking at. Collapsing rather than patching each block is deliberate: the
+    /// hook returns one finalized string, so which of several streamed text blocks
+    /// a given slice of it belonged to is no longer knowable.
+    ///
+    /// Dropping parts shifts every later index, so both id→index maps are rebuilt
+    /// from the new vector instead of patched. `text_idx` is intentionally left
+    /// empty: the block ids that were collapsed no longer name anything, and a
+    /// later delta must not append to the rewritten part. Safe because this runs
+    /// after the close-out frames, with nothing left to accumulate.
+    fn replace_text(&mut self, text: &str) {
+        let new_part = serde_json::json!({ "type": "text", "text": text, "state": "done" });
+        let old = std::mem::take(&mut self.parts);
+        let mut rebuilt: Vec<Value> = Vec::with_capacity(old.len() + 1);
+        let mut placed = false;
+        for part in old {
+            if part.get("type").and_then(Value::as_str) == Some("text") {
+                if !placed {
+                    rebuilt.push(new_part.clone());
+                    placed = true;
+                }
+                continue;
+            }
+            rebuilt.push(part);
+        }
+        if !placed {
+            rebuilt.push(new_part);
+        }
+        self.parts = rebuilt;
+        self.text_idx.clear();
+        self.tool_idx.clear();
+        for (i, part) in self.parts.iter().enumerate() {
+            if let Some(id) = part.get("toolCallId").and_then(Value::as_str) {
+                self.tool_idx.insert(id.to_owned(), i);
+            }
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -2250,6 +2322,14 @@ async fn run_auto_recall(
 ///
 /// Returns `Err` only when the underlying route produces an SSE error frame;
 /// a missing reply (empty model response) returns `Ok("")`.
+///
+/// This is a REAL user turn — a human typed it into Telegram/WhatsApp/Slack — so
+/// it carries the full turn-boundary hook treatment ([`run_pre_user_turn_hooks`],
+/// [`run_post_assistant_turn_hooks`]), unlike the internal sub-turns that share
+/// [`run_text_turn_in`] underneath. The hooks are fired HERE rather than in
+/// `run_text_turn_in` for exactly that reason: the same inner function also serves
+/// the workflow `AgentRunner`, the coordinator-thread worker, and the app
+/// host-bridge, none of which are a user opening a turn.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_reply_text(
     conversation_id: String,
@@ -2266,25 +2346,88 @@ pub async fn run_reply_text(
     skills: SkillRegistry,
     traces: TraceStore,
 ) -> anyhow::Result<String> {
+    // Pre-turn: a plugin may rewrite the inbound message, fold context into it, or
+    // answer it outright. A `Handled` turn makes no model call, so it must persist
+    // both rows itself (see `persist_handled_turn`).
+    let pre =
+        run_pre_user_turn_hooks(text.clone(), Some(&conversation_id), agent_id.as_deref()).await;
+    let mut prompt = match pre {
+        PreUserTurn::Prompt(p) => p,
+        PreUserTurn::Handled(reply) => {
+            persist_handled_turn(
+                &conversations,
+                &conversation_id,
+                &text,
+                &reply,
+                agent_id.as_deref(),
+                author_name.as_deref(),
+            )
+            .await;
+            return Ok(reply);
+        }
+    };
+
     // The channel path persists: each inbound bot turn becomes conversation
     // history so multi-turn exchanges share context.
-    run_text_turn(
-        conversation_id,
-        agent_id,
-        text,
-        author_name,
-        true,
-        registry,
-        conversations,
-        agent_store,
-        manager,
-        memory,
-        worktree_diffs,
-        mcp,
-        skills,
-        traces,
-    )
-    .await
+    //
+    // The loop is the `continue` directive (the server-side goal loop), capped by
+    // the same [`crate::plugin_host::MAX_CONTINUE_TURNS`] the HTTP wrapper uses so
+    // one cap governs every transport. Each looped turn persists like a normal one;
+    // what the channel DELIVERS is every turn joined, not just the last, because
+    // the HTTP wrapper streams all of them into one response and a channel that
+    // showed only the final turn would render a conversation the transcript
+    // disagrees with.
+    let mut delivered = String::new();
+    let mut turn: u32 = 0;
+    loop {
+        let turn_result = run_text_turn(
+            conversation_id.clone(),
+            agent_id.clone(),
+            prompt,
+            author_name.clone(),
+            true,
+            Arc::clone(&registry),
+            conversations.clone(),
+            agent_store.clone(),
+            Arc::clone(&manager),
+            memory.clone(),
+            Arc::clone(&worktree_diffs),
+            Arc::clone(&mcp),
+            skills.clone(),
+            traces.clone(),
+        )
+        .await;
+        let reply = match turn_result {
+            Ok(reply) => reply,
+            // The FIRST turn failing is the turn failing — the caller must hear
+            // about it. A later turn is a hook's `continue`: the user already has a
+            // real answer in hand, so a failed follow-up ends the loop rather than
+            // erasing a reply that did land.
+            Err(e) if delivered.is_empty() => return Err(e),
+            Err(e) => {
+                tracing::warn!(
+                    "plugin_host: a continue turn failed after a delivered reply: {e:#}"
+                );
+                break;
+            }
+        };
+        if !reply.is_empty() {
+            if !delivered.is_empty() {
+                delivered.push_str("\n\n");
+            }
+            delivered.push_str(&reply);
+        }
+
+        turn += 1;
+        match run_post_assistant_turn_hooks(&conversations, &conversation_id, agent_id.as_deref())
+            .await
+        {
+            Some(next) if turn < crate::plugin_host::MAX_CONTINUE_TURNS => prompt = next,
+            _ => break,
+        }
+    }
+
+    Ok(delivered)
 }
 
 /// Non-streaming team reply for the channel-bot path: fan out to the team's
@@ -2295,6 +2438,12 @@ pub async fn run_reply_text(
 /// Like the channel agent path, this persists the user turn and one combined
 /// assistant turn (attributed to the team) so a later desktop reload of the
 /// same conversation renders the same merged content.
+///
+/// Turn hooks: `pre_user_turn` fires ONCE here, before the single persisted user
+/// row and before the fan-out, so a plugin's rewrite/redaction governs the text
+/// every member sees and the text the transcript keeps. `post_assistant_turn` does
+/// NOT fire — see the note on [`route_team_chat_stream`], whose reasoning is
+/// identical and applies verbatim to this non-streaming twin.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_team_reply_text(
     conversation_id: String,
@@ -2330,6 +2479,26 @@ pub async fn run_team_reply_text(
         mcp,
         skills,
         traces,
+    };
+
+    // Pre-turn hooks run before anything is persisted or fanned out: one rewrite
+    // for one user turn, whatever the member count. A `Handled` turn answers
+    // without waking a single member, and owns both transcript rows itself.
+    let inbound = text.clone();
+    let text = match run_pre_user_turn_hooks(text, Some(&conversation_id), Some(&team.id)).await {
+        PreUserTurn::Prompt(p) => p,
+        PreUserTurn::Handled(reply) => {
+            persist_handled_turn(
+                &conversations,
+                &conversation_id,
+                &inbound,
+                &reply,
+                Some(&team.id),
+                author_name.as_deref(),
+            )
+            .await;
+            return Ok(reply);
+        }
     };
 
     let original_messages = vec![UiMessage {
@@ -2495,6 +2664,16 @@ pub async fn run_team_reply_text(
 /// final assistant text. `persist` decides whether the turn is written to the
 /// conversation store: the channel path ([`run_reply_text`]) persists; internal
 /// callers (the workflow `AgentRunner`) do not, so they leave no orphan history.
+///
+/// Turn-boundary plugin hooks are deliberately NOT fired here, and must not be
+/// added: this is the shared core, and its callers are not all the same kind of
+/// turn. A caller that IS a user opening a turn opts in at its own entry
+/// ([`run_reply_text`] does). Firing here instead would give a `post_assistant_turn`
+/// hook a `continue` loop around every workflow step and every delegated sub-agent
+/// — turns whose caller already owns the "what runs next" decision — and a
+/// `pre_user_turn` rewrite of prompts no user ever wrote. The message-plane and
+/// tool hooks still fire for these turns inside [`route_chat_stream`], so nothing
+/// here escapes a plugin's context engineering or its tool-result redaction.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_text_turn(
     conversation_id: String,
@@ -2540,6 +2719,12 @@ pub(crate) async fn run_text_turn(
 /// isolated worktree (each worker gets a dedicated branch/worktree, reused across
 /// turns by `route_chat_stream`'s persistent-session logic). When `cwd` is `None`
 /// and `worktree_isolation` is `false` this is identical to `run_text_turn`.
+///
+/// No turn-boundary hooks here either, for the reason spelled out on
+/// [`run_text_turn`]: a coordinator worker's turn is opened by the coordinator, not
+/// by a user, and it is also the landing site of a hook's own `host.runAgent` — so
+/// firing the phases here is the one shape that could re-enter itself across the
+/// spawned task boundary the `IN_CHAT_HOOK` guard cannot see.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_text_turn_in(
     conversation_id: String,
@@ -2631,6 +2816,12 @@ pub(crate) async fn run_text_turn_in(
 /// Used by the app host-bridge streaming endpoint so a full-page Companion app can
 /// render an agent's reply token-by-token. `background: true` keeps it yielding to a
 /// directly-typing user on the shared local engine, exactly like the drained path.
+///
+/// No turn-boundary hooks (same rule as [`run_text_turn`]): the caller is a plugin
+/// or app driving an agent through the host bridge, and its own turn is already
+/// governed at whatever entry point the user actually typed into. Firing here would
+/// let one plugin's app surface trigger another plugin's turn hooks on a stream it
+/// owns, and a `continue` would loop a response the calling app is mid-render on.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_text_turn_stream(
     conversation_id: String,
@@ -2836,6 +3027,29 @@ pub struct TeamRunDeps {
 /// orchestrator persists one combined turn itself. A real `conversation_id` is
 /// still passed so ACP members get short-term context (recent turns) for the
 /// conversation; `target_agent_id` binds the call to this member.
+///
+/// Turn-boundary hooks deliberately do NOT fire per member, and adding them here
+/// would be a bug, not a fix. One user turn fans out to N members, so a
+/// `post_assistant_turn` hook would run N times for it: N notes for one question,
+/// and N independent `continue` loops each allowed [`crate::plugin_host::MAX_CONTINUE_TURNS`]
+/// — a cap written for one turn, silently multiplied by the member count. A
+/// per-member `pre_user_turn` is just as wrong: it would rewrite the same prompt N
+/// times, once per member, each rewrite invisible to the others. The single
+/// legitimate rewrite happens once, upstream, in [`route_team_chat_stream`].
+///
+/// A member turn is also not a state a post-turn hook can read: members run with
+/// `persist = false`, so the transcript such a hook loaded would show the PREVIOUS
+/// turn — it would review an answer that is not the one it was fired for.
+///
+/// What still governs each member: `context` and the tool phases
+/// (`pre_tool_use` / `tool_result` / `post_tool_use`) fire inside
+/// [`route_chat_stream`] and the tool-dispatch core for every member individually,
+/// so a context-engineering plugin and a tool-result redaction plugin both apply
+/// here in full. Only the turn-boundary loop is suppressed. (`message_end` fires
+/// too, but its rewrite targets persistence, which a `persist = false` member does
+/// not do — a member's text reaches the combined message ungoverned by that phase.
+/// That is a gap in how the team path persists, not something this decision
+/// creates or can close.)
 async fn run_member_text(
     member_id: &str,
     messages: Vec<UiMessage>,
@@ -2945,9 +3159,12 @@ fn push_member_block(
 
 /// Orchestrate a team turn: fan out to members per the coordination strategy and
 /// stream one merged, attributed assistant message. Logic lives entirely in Core.
+///
+/// This is the ONE place a team turn meets the turn-boundary plugin hooks; the
+/// per-member path stays clear of them on purpose ([`run_member_text`] says why).
 #[allow(clippy::too_many_arguments)]
 pub async fn route_team_chat_stream(
-    req: ChatStreamRequest,
+    mut req: ChatStreamRequest,
     team: ryu_teams::TeamRecord,
     registry: Arc<AcpAgentRegistry>,
     conversations: ConversationStore,
@@ -2979,6 +3196,64 @@ pub async fn route_team_chat_stream(
         skills,
         traces,
     };
+
+    // Turn-boundary hooks for a team turn fire exactly ONCE, here, over the whole
+    // turn — never per member. A `Replace`/`Inject` is applied to the outgoing
+    // messages before either the single persisted user row or the fan-out reads
+    // them, so every member sees the governed prompt and the transcript keeps the
+    // text that actually ran.
+    //
+    // `post_assistant_turn` is deliberately NOT wired for a team turn. Its
+    // `continue` directive means "run another assistant turn", and on this path an
+    // assistant turn is a whole N-member fan-out: one user message could become
+    // MAX_CONTINUE_TURNS × N model calls, with the team's coordination strategy —
+    // which already owns the who-runs-next decision — and the hook loop each
+    // driving it. A team that wants iteration expresses it as a coordination
+    // strategy; a plugin loop wrapped around one multiplies rather than composes.
+    let inbound_text = last_user_message(&req.messages);
+    // Bound to a local before the match so the borrow of `req` taken by the
+    // dispatch ends here — the `Prompt` arm rewrites `req.messages` in place.
+    let pre = run_pre_user_turn_hooks(
+        inbound_text.clone(),
+        req.conversation_id.as_deref(),
+        Some(&team.id),
+    )
+    .await;
+    match pre {
+        PreUserTurn::Prompt(prompt) => {
+            if prompt != inbound_text && !set_last_user_text(&mut req.messages, prompt) {
+                tracing::warn!(
+                    "plugin_host: team turn has no user message to rewrite; sending it unchanged"
+                );
+            }
+        }
+        PreUserTurn::Handled(reply) => {
+            // No member runs at all. Both rows are written here because
+            // `route_chat_stream` — the only site that persists the user turn — is
+            // never reached, and the reply is framed exactly like a streamed turn so
+            // the client cannot tell the difference (it must not: a client that gets
+            // a turn which never opens or never closes hangs).
+            if req.persist {
+                if let Some(conv_id) = req.conversation_id.as_deref() {
+                    persist_handled_turn(
+                        &conversations,
+                        conv_id,
+                        &inbound_text,
+                        &reply,
+                        Some(&team.id),
+                        req.author_name.as_deref(),
+                    )
+                    .await;
+                }
+            }
+            let mut payload = Vec::new();
+            for frame in synthetic_assistant_frames(&reply) {
+                payload.extend_from_slice(&frame);
+            }
+            payload.extend_from_slice(&done_sse_frame());
+            return sse_response(Body::from(payload));
+        }
+    }
 
     let user_text = last_user_message(&req.messages);
     let conversation_id = req.conversation_id.clone();
@@ -4429,6 +4704,31 @@ where
     let active_skill_ids =
         skills.inject_into_messages_filtered(&mut oai_messages, &skills_allowlist);
 
+    // Per-request plugin flags, copied out of `req` because the SSE generator below
+    // is `'static` and cannot borrow it. A hook reads its own composer flag to
+    // decide whether to act this turn.
+    let plugin_flags = req.plugin_flags.clone();
+
+    // The `context` phase — the last stop before the assembled window leaves Ryu.
+    // Placed AFTER skill injection on purpose: a context-engineering plugin has to
+    // see the array exactly as the model will, skills included, or it would rewrite
+    // a window that no longer exists by the time the request goes out. (A hook that
+    // drops the injected skill blocks is free to; `active_skill_ids` still reports
+    // what Core selected, which is what the gateway attributes budget/audit rows
+    // to — an attribution record, not a claim about the final prompt.)
+    // Bound to its own local first so the borrow of `oai_messages` ends before the
+    // rewrite can replace it.
+    let rewritten_context = run_context_hooks_messages(
+        &oai_messages,
+        req.conversation_id.as_deref(),
+        agent_id.as_deref(),
+        &plugin_flags,
+    )
+    .await;
+    if let Some(rewritten) = rewritten_context {
+        oai_messages = rewritten;
+    }
+
     // The conversation id doubles as the session correlation key forwarded to the
     // gateway via `x-ryu-session-id` so audit rows can be grouped per chat run
     // without a separate session store (M4 / #176).
@@ -4694,6 +4994,22 @@ where
             // guard), so the loop is bounded to MAX_TOOL_ITERATIONS + 1 requests.
             let should_execute = offer_tools && !tool_calls.is_empty();
             if !should_execute {
+                // Finalize point on this plane. `message_end` runs before the
+                // persist closure fires, so a `Replace` is what lands in the
+                // transcript and what a reload shows. Deliberately NOT fired on the
+                // connect-error exit above: that turn never produced a finalized
+                // message, and handing a hook a half-stream as "the answer" would
+                // let it rewrite an error into a reply.
+                let rewritten_reply = run_message_end_hooks(
+                    &reply_all,
+                    session_id.as_deref(),
+                    agent_id.as_deref(),
+                    &plugin_flags,
+                )
+                .await;
+                if let Some(replacement) = rewritten_reply {
+                    reply_all = replacement;
+                }
                 if let Some(p) = persist.take() {
                     p(std::mem::take(&mut reply_all), "completed").await;
                 }
@@ -4810,6 +5126,552 @@ struct AccToolCall {
 fn shared_http_client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
+// ── Plugin turn hooks on the chat path (`context` / `message_end`) ─────────────
+//
+// Both phases fire from Ryu's OWN outbound sites rather than being proxied out of
+// Pi. A Pi-side proxy would only ever fire for Pi-routed turns and would silently
+// do nothing for Claude, Codex, or any other ACP agent; dispatching here means one
+// installed plugin governs every agent.
+//
+// Neither `route_openai_stream` nor `route_acp_stream` is handed a `ServerState`
+// (both are free functions that receive only the pieces of the request they need),
+// so these go through the process-global dispatcher. It returns an empty vec when
+// no dispatcher is installed (unit tests / headless), and its DB-free
+// `any_manifest_declares` gate returns instantly when no loaded manifest declares
+// the phase — so a node with no context/message_end plugin pays nothing, and every
+// helper below is a no-op that leaves the turn byte-identical.
+
+tokio::task_local! {
+    /// Set while a chat-path hook runs, so a hook that itself starts a turn (via
+    /// `host.runAgent`) does not re-enter the same phase and recurse forever.
+    ///
+    /// Same-task only, exactly like the `IN_TOOL_HOOK` guard in
+    /// `crate::sidecar::mcp`: task-locals do not propagate into spawned tasks, so
+    /// a hook whose turn lands in the DETACHED ACP completion task is not caught
+    /// here. That path is bounded instead by the delegation wall-time and depth
+    /// caps — the same trade the tool hooks make, rather than building cross-task
+    /// machinery whose only job is to re-derive a bound that already exists.
+    static IN_CHAT_HOOK: ();
+}
+
+fn in_chat_hook() -> bool {
+    IN_CHAT_HOOK.try_with(|()| ()).is_ok()
+}
+
+/// How long the `context` hooks may run before the ORIGINAL context is sent
+/// anyway. Fail-open, mirroring the tool-hook budgets in `crate::sidecar::mcp`:
+/// a stuck context-engineering plugin must never wedge a turn, and must never lose
+/// the prompt Ryu actually assembled.
+const CONTEXT_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// How long the `message_end` hooks may run before the ORIGINAL reply is persisted
+/// anyway. Same budget and the same fail-open rule as [`CONTEXT_HOOK_TIMEOUT`] —
+/// a slow hook must never cost the user a finished answer.
+const MESSAGE_END_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Run the `context` hooks over the outbound OpenAI-compat message array and
+/// return a replacement array if a hook asked for one.
+///
+/// `None` means "send the array we built" — on no subscriber, on timeout, on
+/// error, and while already inside a hook. The array crosses the boundary as raw
+/// provider JSON and never as `HookMessage`s: it carries multimodal `image_url`
+/// parts and tool rows that a `{role, content}` struct would silently drop, so a
+/// lossy round-trip would delete every image in the window.
+async fn run_context_hooks_messages(
+    messages: &[Value],
+    conversation_id: Option<&str>,
+    agent_id: Option<&str>,
+    flags: &std::collections::HashMap<String, bool>,
+) -> Option<Vec<Value>> {
+    if in_chat_hook() {
+        return None;
+    }
+    let ctx = crate::plugin_host::HookContext {
+        conversation_id: conversation_id.map(str::to_string),
+        agent_id: agent_id.map(str::to_string),
+        flags: flags.clone(),
+        messages: Some(messages.to_vec()),
+        ..Default::default()
+    };
+    let fut = IN_CHAT_HOOK.scope(
+        (),
+        crate::plugin_host::dispatch_global(crate::plugin_host::ON_CONTEXT, ctx),
+    );
+    let directives = match tokio::time::timeout(CONTEXT_HOOK_TIMEOUT, fut).await {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!(
+                "plugin_host: context hook timed out; sending the original message array"
+            );
+            return None;
+        }
+    };
+    // First writer wins: a rewrite is never fed back through the remaining hooks,
+    // so what every hook inspects is the context Ryu actually assembled and no
+    // plugin can be silently defeated by another one that happens to be installed
+    // ahead of it. `Replace` is the ACP plane's directive and is ignored here.
+    directives.into_iter().find_map(|d| match d {
+        crate::plugin_host::HookDirective::Rewrite { messages } => Some(messages),
+        _ => None,
+    })
+}
+
+/// Run the `context` hooks over the flattened ACP prompt and return a replacement
+/// string if a hook asked for one. `None` means "send the prompt we built".
+///
+/// The ACP plane has no array to rewrite: [`build_acp_prompt`] collapses the whole
+/// window into ONE string that `acp.rs` sends as a single text block. So the prompt
+/// rides in `ctx.input` and a hook answers with [`HookDirective::Replace`]; a
+/// `Rewrite` aimed at the other plane is ignored rather than guessed at.
+///
+/// Dispatching from the call site instead of making `build_acp_prompt` async is
+/// deliberate — that helper stays a pure, directly-unit-tested string builder, and
+/// the fail-open/timeout policy stays next to its message-array sibling above.
+///
+/// [`HookDirective::Replace`]: crate::plugin_host::HookDirective::Replace
+async fn run_context_hooks_prompt(
+    prompt: &str,
+    conversation_id: Option<&str>,
+    agent_id: Option<&str>,
+    flags: &std::collections::HashMap<String, bool>,
+) -> Option<String> {
+    if in_chat_hook() {
+        return None;
+    }
+    let ctx = crate::plugin_host::HookContext {
+        conversation_id: conversation_id.map(str::to_string),
+        agent_id: agent_id.map(str::to_string),
+        flags: flags.clone(),
+        input: Some(prompt.to_owned()),
+        ..Default::default()
+    };
+    let fut = IN_CHAT_HOOK.scope(
+        (),
+        crate::plugin_host::dispatch_global(crate::plugin_host::ON_CONTEXT, ctx),
+    );
+    let directives = match tokio::time::timeout(CONTEXT_HOOK_TIMEOUT, fut).await {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!("plugin_host: context hook timed out; sending the original ACP prompt");
+            return None;
+        }
+    };
+    // First writer wins, for the same reason as the message-array plane.
+    directives.into_iter().find_map(|d| match d {
+        crate::plugin_host::HookDirective::Replace { text } => Some(text),
+        _ => None,
+    })
+}
+
+/// Run the `message_end` hooks over a finalized assistant reply and return the
+/// replacement text if a hook asked for one. `None` means "persist what the model
+/// produced" — on no subscriber, on timeout, on error, and inside a hook.
+///
+/// Fires at the finalize point on BOTH planes, before any persistence, so a
+/// `Replace` reaches every write the turn is about to make. It cannot un-stream
+/// the deltas the client already rendered: a message is only "finalized" after its
+/// text has streamed, which is exactly why Pi puts this phase at `message_end`
+/// rather than on each delta. A plugin that must gate text before the user ever
+/// sees it belongs on `context`, not here.
+async fn run_message_end_hooks(
+    reply: &str,
+    conversation_id: Option<&str>,
+    agent_id: Option<&str>,
+    flags: &std::collections::HashMap<String, bool>,
+) -> Option<String> {
+    if in_chat_hook() {
+        return None;
+    }
+    let ctx = crate::plugin_host::HookContext {
+        conversation_id: conversation_id.map(str::to_string),
+        agent_id: agent_id.map(str::to_string),
+        flags: flags.clone(),
+        output: Some(reply.to_owned()),
+        ..Default::default()
+    };
+    let fut = IN_CHAT_HOOK.scope(
+        (),
+        crate::plugin_host::dispatch_global(crate::plugin_host::ON_MESSAGE_END, ctx),
+    );
+    let directives = match tokio::time::timeout(MESSAGE_END_HOOK_TIMEOUT, fut).await {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!(
+                "plugin_host: message_end hook timed out; persisting the original reply"
+            );
+            return None;
+        }
+    };
+    // First writer wins: two plugins cannot both claim the final answer, and the
+    // rewrite is not re-fed to the remaining hooks, so each one sees the reply the
+    // model actually produced.
+    directives.into_iter().find_map(|d| match d {
+        crate::plugin_host::HookDirective::Replace { text } => Some(text),
+        _ => None,
+    })
+}
+
+/// Fire the `model_select` hooks DETACHED for a per-turn model pick.
+///
+/// Observation-only by definition — no directive can change a model — so the
+/// returned directives are dropped and nothing downstream waits on the result.
+/// That is also why there is no timeout here: a timeout exists to bound a caller
+/// that is blocked, and this caller never blocks.
+fn fire_model_select_hooks(model: String, conversation_id: Option<String>, agent_id: String) {
+    if in_chat_hook() {
+        return;
+    }
+    tokio::spawn(async move {
+        let ctx = crate::plugin_host::HookContext {
+            conversation_id,
+            agent_id: Some(agent_id),
+            event: Some(serde_json::json!({ "model": model, "source": "turn" })),
+            ..Default::default()
+        };
+        let _ = IN_CHAT_HOOK
+            .scope(
+                (),
+                crate::plugin_host::dispatch_global(crate::plugin_host::ON_MODEL_SELECT, ctx),
+            )
+            .await;
+    });
+}
+
+// ── Turn-boundary hooks on the OFF-HTTP chat paths ────────────────────────────
+//
+// `server::run_chat_with_hooks` wraps the HTTP chat entry, and until now that was
+// the ONLY site firing the turn-BOUNDARY phases (`pre_user_turn`,
+// `post_assistant_turn`/`stop`). Every other caller of `route_chat_stream` — the
+// voice loop, the channel-bot reply, the team orchestrator — went straight to the
+// model, so a plugin's prompt rewrite, its injected context, and its outright
+// refusal silently did not apply to those turns.
+//
+// What is NOT missing on those paths, and is therefore deliberately not
+// re-dispatched here: every message-plane phase above (`context`, `message_end`,
+// `model_select`) and every tool phase (`pre_tool_use`, `tool_result`,
+// `post_tool_use`) fires INSIDE `route_chat_stream` / the shared tool-dispatch
+// core, which each bypassing caller does go through. Context engineering and
+// tool-result redaction already govern those turns. Only the turn boundary needed
+// a site — which is why the "no" decisions below cost a plugin its loop, never its
+// redaction.
+//
+// `session_start` stays HTTP-only on purpose. It is defined as the first turn of a
+// conversation, and these transports pin one long-lived conversation id per
+// channel/WS session (a Telegram chat id outlives every process), so "the store
+// has no prior messages" would fire once in the lifetime of a channel and never
+// again — a boundary that does not correspond to a session on these surfaces.
+
+/// The transcript window an off-HTTP turn hook sees. The same 20 as the HTTP
+/// wrapper's `build_hook_context`, so a hook reads the same amount of history no
+/// matter which transport opened the turn.
+const OFF_HTTP_HOOK_TRANSCRIPT: usize = 20;
+
+/// How long the turn-boundary hooks may run before the turn proceeds unchanged.
+/// The same fail-open budget as [`CONTEXT_HOOK_TIMEOUT`], for a sharper reason:
+/// voice is a realtime surface and a channel bot has a delivery deadline, so a
+/// stuck hook must cost a directive, never the turn.
+const TURN_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// What the `pre_user_turn` hooks decided about an off-HTTP turn's prompt.
+pub(crate) enum PreUserTurn {
+    /// Send this to the model. Byte-identical to the caller's prompt unless a hook
+    /// returned `Replace` (rewrite) or `Inject` (append context).
+    Prompt(String),
+    /// A hook answered the turn itself (`Handled`): make NO model call and treat
+    /// this text as the assistant's reply.
+    ///
+    /// The caller then owns persistence. `route_chat_stream` is what normally
+    /// writes BOTH the user row and the assistant row, so a caller that skips it
+    /// must write both itself — persisting only the reply would drop the user's
+    /// own message from history and a reload would show an answer to nothing.
+    Handled(String),
+}
+
+/// Run the `pre_user_turn` hooks for a turn that did not enter through the HTTP
+/// chat handler (voice, channel bot, team fan-out).
+///
+/// Honours the same directives as the HTTP wrapper, in the same order: the first
+/// non-empty `Replace` wins and stops the walk (a second rewrite would fight over
+/// the same message), every `Inject` is appended as additional context, and
+/// `Handled` ends the turn without a model call. Fail-open everywhere — already
+/// inside a hook, on timeout, on a hook error — by returning the caller's prompt
+/// untouched.
+///
+/// The prompt is passed as BOTH `ctx.input` (what a hook rewrites) and a
+/// one-message transcript, because a hook's declarative `run_when.commands` gate
+/// is evaluated against the last user message of `ctx.transcript`: leaving that
+/// empty would silently mis-gate every slash-command hook to "never run" on these
+/// transports. `ctx.flags` stays empty on purpose — flags are a per-request
+/// composer toggle that no off-HTTP transport has, so a flag-gated hook correctly
+/// does not fire here.
+pub(crate) async fn run_pre_user_turn_hooks(
+    prompt: String,
+    conversation_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> PreUserTurn {
+    if in_chat_hook() {
+        return PreUserTurn::Prompt(prompt);
+    }
+    let ctx = crate::plugin_host::HookContext {
+        conversation_id: conversation_id.map(str::to_string),
+        agent_id: agent_id.map(str::to_string),
+        transcript: vec![crate::plugin_host::HookMessage {
+            role: "user".to_owned(),
+            content: prompt.clone(),
+        }],
+        input: Some(prompt.clone()),
+        ..Default::default()
+    };
+    let fut = IN_CHAT_HOOK.scope(
+        (),
+        crate::plugin_host::dispatch_global(crate::plugin_host::ON_PRE_USER_TURN, ctx),
+    );
+    let directives = match tokio::time::timeout(TURN_HOOK_TIMEOUT, fut).await {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!(
+                "plugin_host: pre_user_turn hook timed out; sending the original prompt"
+            );
+            return PreUserTurn::Prompt(prompt);
+        }
+    };
+    let mut out = prompt;
+    for directive in directives {
+        match directive {
+            crate::plugin_host::HookDirective::Replace { text } => {
+                let t = text.trim();
+                if !t.is_empty() {
+                    out = t.to_owned();
+                    break;
+                }
+            }
+            crate::plugin_host::HookDirective::Inject { text } => {
+                let t = text.trim();
+                if !t.is_empty() {
+                    // Same join as `append_last_user_text`, which is what the HTTP
+                    // wrapper uses — an injected block must read the same way on
+                    // every transport or a hook's prompt engineering drifts.
+                    if out.is_empty() {
+                        out = t.to_owned();
+                    } else {
+                        out.push_str("\n\n");
+                        out.push_str(t);
+                    }
+                }
+            }
+            crate::plugin_host::HookDirective::Handled { text } => {
+                let t = text.trim();
+                if !t.is_empty() {
+                    // First writer wins: once a hook owns the turn no later hook may
+                    // claim it, or rewrite a prompt for a model call that is no
+                    // longer going to happen.
+                    return PreUserTurn::Handled(t.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    PreUserTurn::Prompt(out)
+}
+
+/// Persist a turn a `pre_user_turn` hook answered itself ([`PreUserTurn::Handled`])
+/// — the user's message and the hook's reply, in that order.
+///
+/// Off-HTTP callers must do this explicitly because `route_chat_stream` is the
+/// only site that writes the user row (see its `skip_user_append` block) and a
+/// handled turn never reaches it. Persisting just the reply would reload the
+/// thread as an answer to nothing.
+///
+/// Best-effort, like every other persistence site on these paths: a write error
+/// costs a transcript row, never the reply the caller is about to deliver.
+pub(crate) async fn persist_handled_turn(
+    conversations: &ConversationStore,
+    conversation_id: &str,
+    user_text: &str,
+    reply: &str,
+    agent_id: Option<&str>,
+    author_name: Option<&str>,
+) {
+    if !user_text.trim().is_empty() {
+        if let Err(e) = conversations
+            .append_message_as(
+                conversation_id,
+                "user",
+                user_text,
+                agent_id,
+                // No verified human author on these transports (the channel caller
+                // is unauthenticated, the voice WS carries the session's identity
+                // upstream); `author_name` is the connector-supplied display name.
+                None,
+                author_name,
+                // The row exists and its owner was stamped upstream; the choke
+                // point COALESCEs, so this preserves it.
+                Tenancy::Unattributed,
+            )
+            .await
+        {
+            tracing::warn!("plugin_host: could not persist the user turn a hook handled: {e:#}");
+        }
+    }
+    if let Err(e) = conversations
+        .append_message_as(
+            conversation_id,
+            "assistant",
+            reply,
+            agent_id,
+            None,
+            None,
+            Tenancy::Unattributed,
+        )
+        .await
+    {
+        tracing::warn!("plugin_host: could not persist a hook-handled reply: {e:#}");
+    }
+}
+
+/// Whether a post-turn dispatch is worth the transcript read it needs.
+///
+/// The dispatcher's own DB-free `any_manifest_declares` gate sits BEHIND the
+/// trait, so by the time it can say "no plugin declares this phase" the caller has
+/// already paid `get_active_messages` (which decrypts the whole thread). This is
+/// the state-free half of that gate we can check from out here: with no code-exec
+/// backend no hook can run at all, so a node without the sandbox never pays a read
+/// per channel/voice turn. The HTTP wrapper gets the same protection from its own
+/// `collect_enabled_hooks` gate before it builds any context.
+fn post_turn_hooks_possible() -> bool {
+    crate::tool_exec::is_available()
+}
+
+/// Build the `post_assistant_turn` context for an off-HTTP turn from the
+/// PERSISTED transcript, exactly like the HTTP wrapper's `build_hook_context`.
+/// Reading the store (rather than the request) is what lets a hook review the
+/// reply that just landed. Fail-open: a store error yields an empty transcript, so
+/// hooks still run and simply see nothing to act on.
+async fn build_post_turn_hook_context(
+    conversations: &ConversationStore,
+    conversation_id: &str,
+    agent_id: Option<&str>,
+) -> crate::plugin_host::HookContext {
+    let transcript = match conversations.get_active_messages(conversation_id).await {
+        Ok(msgs) => {
+            let skip = msgs.len().saturating_sub(OFF_HTTP_HOOK_TRANSCRIPT);
+            msgs.into_iter()
+                .skip(skip)
+                .map(|m| crate::plugin_host::HookMessage {
+                    role: m.role,
+                    content: m.content,
+                })
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!("plugin_host: could not load transcript for turn hooks: {e:#}");
+            Vec::new()
+        }
+    };
+    crate::plugin_host::HookContext {
+        conversation_id: Some(conversation_id.to_owned()),
+        agent_id: agent_id.map(str::to_string),
+        transcript,
+        ..Default::default()
+    }
+}
+
+/// Run the `post_assistant_turn` hooks for a completed off-HTTP turn and return
+/// the first `Continue` text, or `None` when the turn is finished.
+///
+/// The caller owns the loop AND its cap ([`crate::plugin_host::MAX_CONTINUE_TURNS`]);
+/// this helper deliberately does not loop, because "how a follow-up turn is run"
+/// differs per transport and a helper that ran the turn itself would have to
+/// guess. Fail-open on timeout/error → `None` (the turn ends), which is the safe
+/// direction: a hook that cannot answer must never be able to wedge a bot into an
+/// unbounded loop.
+///
+/// `Note` is dropped with a log. These transports have no out-of-band channel — a
+/// channel bot delivers exactly one message and the voice protocol has no note
+/// frame — so surfacing a note would mean folding it into the reply itself, which
+/// is precisely what a note must not do (it is "not in chat history"). A plugin
+/// that needs to say something on these surfaces uses `continue` or `replace`.
+async fn run_post_assistant_turn_hooks(
+    conversations: &ConversationStore,
+    conversation_id: &str,
+    agent_id: Option<&str>,
+) -> Option<String> {
+    if in_chat_hook() || !post_turn_hooks_possible() {
+        return None;
+    }
+    let ctx = build_post_turn_hook_context(conversations, conversation_id, agent_id).await;
+    let fut = IN_CHAT_HOOK.scope(
+        (),
+        crate::plugin_host::dispatch_global(crate::plugin_host::ON_POST_ASSISTANT_TURN, ctx),
+    );
+    let directives = match tokio::time::timeout(TURN_HOOK_TIMEOUT, fut).await {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!("plugin_host: post_assistant_turn hook timed out; ending the turn");
+            return None;
+        }
+    };
+    let mut next: Option<String> = None;
+    for directive in directives {
+        match directive {
+            crate::plugin_host::HookDirective::Continue { text } if next.is_none() => {
+                next = Some(text);
+            }
+            crate::plugin_host::HookDirective::Note { text } => {
+                tracing::debug!(
+                    conversation_id = %conversation_id,
+                    "plugin_host: dropping a post-turn note on a transport with no out-of-band channel: {text}"
+                );
+            }
+            _ => {}
+        }
+    }
+    next
+}
+
+/// Fire the `post_assistant_turn` hooks DETACHED for a completed voice turn —
+/// observation only, so a `stop`-phase observer (session logging, the learning
+/// loop, a goal plugin's state keeping) sees voice turns like any other.
+///
+/// Detached, and directives dropped, because voice is the one surface that can
+/// honour none of them. `Note` has no frame in the voice protocol, and `Continue`
+/// would have to re-enter the realtime loop that owns barge-in, the sentence
+/// accumulator and the TTS state machine — restarting a spoken turn from inside
+/// that loop is the unbounded-talking hazard the cap exists to bound, and it is
+/// the one directive the surface gains least from. So the turn ends when the
+/// speaking ends, and the hooks observe it without the user waiting up to
+/// [`TURN_HOOK_TIMEOUT`] for `state:idle`.
+pub(crate) fn fire_voice_post_turn_hooks(
+    conversations: ConversationStore,
+    conversation_id: String,
+    agent_id: Option<String>,
+) {
+    if in_chat_hook() || !post_turn_hooks_possible() {
+        return;
+    }
+    tokio::spawn(async move {
+        let ctx =
+            build_post_turn_hook_context(&conversations, &conversation_id, agent_id.as_deref())
+                .await;
+        let directives = IN_CHAT_HOOK
+            .scope(
+                (),
+                crate::plugin_host::dispatch_global(
+                    crate::plugin_host::ON_POST_ASSISTANT_TURN,
+                    ctx,
+                ),
+            )
+            .await;
+        if !directives.is_empty() {
+            tracing::debug!(
+                conversation_id = %conversation_id,
+                count = directives.len(),
+                "plugin_host: post_assistant_turn directives are observation-only on the voice path"
+            );
+        }
+    });
 }
 
 // ── ACP subprocess streaming ───────────────────────────────────────────────────
@@ -4993,6 +5855,16 @@ async fn route_acp_stream(
             // `apfel` engine resident so the gateway's `local` provider forwards
             // there; switching away restores the default local engine.
             sync_ryu_local_engine(model.to_string());
+            // The `model_select` phase. Fired DETACHED because it is purely
+            // observational — a plugin can watch the per-turn pick (telemetry, a
+            // cost guard's ledger, a "you switched off your local model" nudge) but
+            // nothing it returns can change the model, so making the turn wait on it
+            // would buy latency for no decision.
+            fire_model_select_hooks(
+                model.to_string(),
+                req.conversation_id.clone(),
+                agent_id.clone(),
+            );
         }
     }
 
@@ -5011,6 +5883,23 @@ async fn route_acp_stream(
         model_id: req.acp_model.clone().filter(|s| !s.is_empty()),
         interactive: true,
     };
+
+    // The `context` phase on the ACP plane — the last stop before the assembled
+    // window leaves Ryu, hence its position immediately above the spawn. There is
+    // no message array to hand a hook here: the whole window is already flattened
+    // into this ONE string, which `acp.rs` sends as a single text block. So the
+    // prompt rides in `ctx.input` and a hook answers with `Replace`. This is what
+    // makes context engineering govern Claude/Codex/Pi and not just the
+    // OpenAI-compat route. Bound to its own local first so the borrow of `prompt`
+    // ends before the rewrite can replace it.
+    let rewritten_prompt = run_context_hooks_prompt(
+        &prompt,
+        req.conversation_id.as_deref(),
+        req.agent_id.as_deref(),
+        &req.plugin_flags,
+    )
+    .await;
+    let prompt = rewritten_prompt.unwrap_or(prompt);
 
     // ACP event channel — the completion task is the sole consumer.
     let mut acp_rx = acp::spawn_acp_task(
@@ -5047,6 +5936,10 @@ async fn route_acp_stream(
     // disconnects.  Frame sequence on the happy path is unchanged:
     //   start → text-start/delta/end (interleaved with tool frames) → finish → [DONE]
     let ui_tx_clone = ui_tx;
+    // Per-request plugin flags, copied out of `req` before the spawn: the detached
+    // task outlives this function, and a `message_end` hook reads its own composer
+    // flag to decide whether to act this turn.
+    let plugin_flags = req.plugin_flags.clone();
     tokio::spawn(async move {
         // After stream completes the guard is transferred into WorktreeRun
         // (so the worktree survives for apply). If abandoned before completion
@@ -5525,6 +6418,24 @@ async fn route_acp_stream(
             }
         }
 
+        // The `message_end` phase, at the ACP finalize point: the event loop has
+        // drained, so `reply` is the whole answer, and nothing has been written yet
+        // — both the update path and the create-a-row fallback below see the
+        // rewrite. Deliberately NOT fired on the `AcpEvent::Error` exit above: that
+        // turn produced no finalized message, and handing a hook a truncated reply
+        // as "the answer" would let it rewrite a failure into a success.
+        let rewritten_reply = run_message_end_hooks(
+            &reply,
+            persist_conversation_id.as_deref(),
+            persist_agent_id.as_deref(),
+            &plugin_flags,
+        )
+        .await;
+        let rewrote_reply = rewritten_reply.is_some();
+        if let Some(replacement) = rewritten_reply {
+            reply = replacement;
+        }
+
         // Normal completion: final flush of the reply text and mark completed.
         if let Some(ref conv_id) = persist_conversation_id {
             if let Some(ref mid) = persisted_msg_id {
@@ -5571,6 +6482,15 @@ async fn route_acp_stream(
         // reload back to text-only. This is what restores the transcript's tool
         // rows + the cowork context (Progress / Sources / Subagents) on reload.
         if let Some(ref mid) = persisted_msg_id {
+            // A `message_end` rewrite has to land in the sealed parts too — the
+            // desktop renders `parts` whenever they exist, so rewriting only the
+            // row's content would make a reloaded conversation disagree with the
+            // message the user is looking at. Applied here, last, once every
+            // close-out frame has been folded into `acc`, so nothing can reopen the
+            // stale text afterwards.
+            if rewrote_reply {
+                acc.replace_text(&reply);
+            }
             if !acc.is_empty() {
                 if let Err(e) = persist_store
                     .update_message_parts(mid, &acc.to_json())
@@ -5670,6 +6590,49 @@ pub trait AgentAdapter: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hook-handled turn is framed exactly like a streamed one. Getting this
+    /// wrong is not cosmetic: a missing `start`/`finish` leaves the client
+    /// rendering a turn that never opens or never closes, and a stray `[DONE]`
+    /// here would truncate a multi-turn response — so the sequence, the shared
+    /// text id, and the ABSENCE of a terminal frame are all pinned.
+    #[test]
+    fn synthetic_assistant_frames_are_a_complete_well_formed_turn() {
+        let frames = synthetic_assistant_frames("answered from cache");
+        let parsed: Vec<serde_json::Value> = frames
+            .iter()
+            .map(|f| {
+                let text = std::str::from_utf8(f).expect("utf8");
+                assert!(text.starts_with("data: "), "each frame is an SSE data line");
+                assert!(text.ends_with("\n\n"), "each frame is terminated");
+                serde_json::from_str(
+                    text.trim_start_matches("data: ").trim_end_matches("\n\n"),
+                )
+                .expect("frame carries JSON")
+            })
+            .collect();
+
+        let kinds: Vec<&str> = parsed.iter().map(|v| v["type"].as_str().unwrap()).collect();
+        assert_eq!(
+            kinds,
+            vec!["start", "text-start", "text-delta", "text-end", "finish"],
+            "the client's expected open → text → close sequence"
+        );
+        assert_eq!(parsed[2]["delta"], "answered from cache");
+
+        // The three text parts must share one id or the client cannot assemble them.
+        let id = parsed[1]["id"].as_str().expect("text-start carries an id");
+        assert!(!id.is_empty());
+        assert_eq!(parsed[2]["id"], id);
+        assert_eq!(parsed[3]["id"], id);
+
+        // The caller owns [DONE]: one response may carry several turns but only
+        // ever one terminal frame.
+        assert!(
+            !frames.iter().any(|f| is_done_frame(f)),
+            "synthetic frames must not include the terminal [DONE]"
+        );
+    }
 
     fn acp_reg() -> AcpAgentRegistry {
         AcpAgentRegistry::new()

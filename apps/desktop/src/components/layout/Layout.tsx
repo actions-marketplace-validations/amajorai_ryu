@@ -5,19 +5,20 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { HotkeysProvider, useHotkey } from "@ryu/hotkeys/react";
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	SidebarInset,
 	SidebarProvider,
 	useSidebar,
-} from "@ryu/ui/components/sidebar";
+} from "@ryu/ui/components/sidebar.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/tooltip.tsx";
+import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatDisplayPrefs } from "@/src/components/chat/ChatDisplayPrefsProvider.tsx";
@@ -32,7 +33,7 @@ import {
 } from "@/src/contexts/ChatHistoryContext.tsx";
 import { SpacesProvider } from "@/src/contexts/SpacesContext.tsx";
 import { SystemStatusProvider } from "@/src/contexts/SystemStatusContext.tsx";
-import type { InitialTab } from "@/src/contexts/TabsContext.tsx";
+import type { InitialTab, Tab } from "@/src/contexts/TabsContext.tsx";
 import {
 	CurrentTabIdProvider,
 	findSplit,
@@ -84,7 +85,7 @@ import {
 	paneRectStyle,
 	SplitGutters,
 } from "./SplitView.tsx";
-import { TitleBar } from "./TitleBar.tsx";
+import { TabGlyph, TitleBar } from "./TitleBar.tsx";
 import { TabDndProvider } from "./tabDnd.tsx";
 import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
 
@@ -94,6 +95,77 @@ import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
 seedBuiltinRoutes();
 
 const isMac = navigator.userAgent.includes("Mac");
+
+// Distance-based floating badge shown at the bottom-left of each split pane.
+// Fades to invisible as the pointer moves away so the user can reach content
+// behind it; fully opaque when the pointer is near the badge.
+function PaneBadge({
+	activeSplit,
+	containerRef,
+	focused,
+	tab,
+}: {
+	activeSplit: boolean;
+	containerRef: React.RefObject<HTMLElement | null>;
+	focused: boolean;
+	tab: Tab;
+}) {
+	const badgeRef = useRef<HTMLDivElement>(null);
+	const [opacity, setOpacity] = useState(1);
+
+	// biome-ignore lint/correctness/useExhaustiveDependencies: containerRef is stable
+	useEffect(() => {
+		if (!activeSplit) {
+			return;
+		}
+		const container = containerRef.current;
+		if (!container) {
+			return;
+		}
+
+		const onMove = (e: PointerEvent) => {
+			const badge = badgeRef.current;
+			if (!badge) {
+				return;
+			}
+			const rect = badge.getBoundingClientRect();
+			const cx = rect.left + rect.width / 2;
+			const cy = rect.top + rect.height / 2;
+			const dist = Math.hypot(e.clientX - cx, e.clientY - cy);
+			setOpacity(Math.max(0, 1 - dist / 120));
+		};
+
+		container.addEventListener("pointermove", onMove);
+		return () => container.removeEventListener("pointermove", onMove);
+	}, [activeSplit, containerRef]);
+
+	if (!activeSplit) {
+		return null;
+	}
+
+	return (
+		<div
+			className={cn(
+				"pointer-events-none absolute bottom-2 left-2 z-10 flex items-center gap-1.5 rounded-full px-2.5 py-1 ring-1 backdrop-blur-sm transition-opacity duration-300",
+				focused
+					? "bg-primary/15 text-primary ring-primary/30"
+					: "bg-muted/70 text-muted-foreground ring-border/30"
+			)}
+			ref={badgeRef}
+			style={{ opacity }}
+		>
+			<TabGlyph
+				className={cn(
+					"size-3 shrink-0",
+					focused ? "text-primary" : "text-muted-foreground"
+				)}
+				logoSize="12px"
+				path={tab.path}
+			/>
+			<span className="max-w-32 truncate font-medium text-xs">{tab.title}</span>
+		</div>
+	);
+}
 
 interface LayoutContentProps {
 	onSidebarWidthChange: (w: number) => void;
@@ -160,7 +232,18 @@ function LayoutContent({
 	// nodes fail-soft to the stale-window poll above.
 	usePluginContributionsLiveRefresh();
 
-	const { open, setOpen, toggleSidebar } = useSidebar();
+	const { open, openMobile, setOpen, toggleSidebar } = useSidebar();
+	// The desktop app is also served as a web app, so it has to survive phone
+	// widths. `isMobile` (<768px) is the single layout-mode switch: the sidebar
+	// stops being dockable and becomes the primitive's Sheet, and everything
+	// that needs a second column beside the content (assistant rail, split
+	// panes, hover-peek) stands down. It is a *width* test, not a Tauri test —
+	// native window chrome (traffic lights, drag regions) still keys off
+	// `isMac`. The two never collide because the Tauri window's minWidth is
+	// 800px, so `isMobile` only ever fires in a browser.
+	const isMobile = useIsMobile();
+	// On mobile the sidebar is a Sheet, so its open state is `openMobile`.
+	const sidebarShown = isMobile ? openMobile : open;
 	// Reserve room on the right when the "Ask Ryu" assistant is docked as a
 	// sidebar, so the page content slides in beside it rather than under it.
 	const assistantMode = useAssistantStore((s) => s.mode);
@@ -199,7 +282,11 @@ function LayoutContent({
 	// geometry, and the ids of the panes to show (in the tree's pane order).
 	// With no split, only the focused tab is shown — exactly as before. Every
 	// other tab stays mounted but hidden so its state survives.
-	const activeSplit = findSplit(tabs, splits, activeTabId);
+	// Splits need two readable columns side by side, which a phone width has no
+	// room for, so the focused tab takes the whole pane area and every split
+	// member stays mounted-but-hidden. The split tree itself is untouched —
+	// widening the viewport brings the layout straight back.
+	const activeSplit = isMobile ? null : findSplit(tabs, splits, activeTabId);
 	const splitLayout = activeSplit ? computeSplitLayout(activeSplit.root) : null;
 	let paneIds: string[] = [];
 	if (activeSplit) {
@@ -333,6 +420,16 @@ function LayoutContent({
 	useHotkey("nav.timeline", () => openTab("/timeline"));
 	useHotkey("nav.library", () => openTab("/library"));
 
+	// Where the fixed nav cluster sits: clear of the macOS traffic lights, at
+	// the standard 16px inset elsewhere, and tight into the corner on a phone
+	// (no native chrome to clear, and every pixel of the strip counts).
+	let navClusterPosition = "top-4 left-6";
+	if (isMobile) {
+		navClusterPosition = "top-2 left-2";
+	} else if (isMac) {
+		navClusterPosition = "top-4 left-24";
+	}
+
 	return (
 		<TabDndProvider>
 			<CommandPalette />
@@ -351,60 +448,69 @@ function LayoutContent({
 			    or collapsed, and out of the tab strip entirely. On macOS it sits just
 			    right of the traffic lights; on Windows it uses the same 16px inset as
 			    top-4 so the cluster clears the window edge and lines up with the
-			    sidebar card's inner padding. */}
+			    sidebar card's inner padding. At phone widths there is no native
+			    chrome to clear and no room for four buttons, so the cluster hugs the
+			    top-left corner and drops to the two that can't be reached any other
+			    way: the sidebar (Sheet) toggle and search. Back/forward stay
+			    available on the platform's own back gesture and via the hotkeys. */}
 			<div
 				className={cn(
 					"fixed z-[60] flex flex-row items-center gap-1",
-					"top-4",
-					isMac ? "left-24" : "left-6"
+					navClusterPosition
 				)}
 				data-tauri-drag-region={false}
 			>
+				{!isMobile && (
+					<>
+						<Tooltip>
+							<TooltipTrigger
+								render={
+									<Button
+										aria-label="Go back"
+										className="size-8"
+										disabled={!canGoBack}
+										onClick={goBack}
+										size="icon"
+										variant="ghost"
+									>
+										<HugeiconsIcon className="size-4" icon={ArrowLeft01Icon} />
+									</Button>
+								}
+							/>
+							<TooltipContent>Go back</TooltipContent>
+						</Tooltip>
+						<Tooltip>
+							<TooltipTrigger
+								render={
+									<Button
+										aria-label="Go forward"
+										className="size-8"
+										disabled={!canGoForward}
+										onClick={goForward}
+										size="icon"
+										variant="ghost"
+									>
+										<HugeiconsIcon className="size-4" icon={ArrowRight01Icon} />
+									</Button>
+								}
+							/>
+							<TooltipContent>Go forward</TooltipContent>
+						</Tooltip>
+					</>
+				)}
 				<Tooltip>
 					<TooltipTrigger
 						render={
 							<Button
-								aria-label="Go back"
-								className="size-8"
-								disabled={!canGoBack}
-								onClick={goBack}
-								size="icon"
-								variant="ghost"
-							>
-								<HugeiconsIcon className="size-4" icon={ArrowLeft01Icon} />
-							</Button>
-						}
-					/>
-					<TooltipContent>Go back</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger
-						render={
-							<Button
-								aria-label="Go forward"
-								className="size-8"
-								disabled={!canGoForward}
-								onClick={goForward}
-								size="icon"
-								variant="ghost"
-							>
-								<HugeiconsIcon className="size-4" icon={ArrowRight01Icon} />
-							</Button>
-						}
-					/>
-					<TooltipContent>Go forward</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger
-						render={
-							<Button
-								aria-label="Toggle sidebar"
+								aria-label={
+									sidebarShown ? "Close navigation" : "Open navigation"
+								}
 								className="size-8"
 								onClick={toggleSidebar}
 								size="icon"
 								variant="ghost"
 							>
-								{open ? (
+								{sidebarShown ? (
 									<IconSidebarOpen className="size-4" />
 								) : (
 									<IconSidebarClosed className="size-4" />
@@ -413,7 +519,7 @@ function LayoutContent({
 						}
 					/>
 					<TooltipContent>
-						{open ? "Hide sidebar" : "Show sidebar"}
+						{sidebarShown ? "Hide sidebar" : "Show sidebar"}
 					</TooltipContent>
 				</Tooltip>
 				<Tooltip>
@@ -438,8 +544,9 @@ function LayoutContent({
 				</Tooltip>
 			</div>
 
-			{/* Resize handle for the docked sidebar */}
-			{open && (
+			{/* Resize handle for the docked sidebar. Pointer-only, and there is no
+			    docked sidebar to resize at phone widths. */}
+			{open && !isMobile && (
 				// biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: sidebar resize handle
 				<div
 					className="fixed top-0 z-20 h-full w-2 cursor-col-resize opacity-0 transition-opacity hover:bg-sidebar-border hover:opacity-100"
@@ -448,8 +555,11 @@ function LayoutContent({
 				/>
 			)}
 
-			{/* Left-edge hover zone for floating sidebar */}
-			{!open && (
+			{/* Left-edge hover zone for floating sidebar. Hover-to-peek has no touch
+			    equivalent, and a 288px panel pinned over a 375px viewport would just
+			    shadow the Sheet that `<AppSidebar>` already renders at this width —
+			    so the whole hand-rolled float stands down on mobile. */}
+			{!(open || isMobile) && (
 				<div
 					className="fixed top-0 left-0 z-50 h-full"
 					style={{ pointerEvents: "none", width: `${sidebarWidth + 16}px` }}
@@ -495,8 +605,11 @@ function LayoutContent({
 				style={{
 					// Reserves room for the docked assistant's inset floating card
 					// (380px wide + 8px right inset) so page content sits beside it
-					// rather than under it.
-					paddingRight: assistantMode === "sidebar" ? 388 : undefined,
+					// rather than under it. On a phone the card goes full-width instead
+					// of docking, so reserving 388px would leave the page with negative
+					// room — skip the reservation entirely there.
+					paddingRight:
+						assistantMode === "sidebar" && !isMobile ? 388 : undefined,
 				}}
 			>
 				{/* Tab panels fill the entire inset and scroll UNDER the frosted
@@ -550,12 +663,13 @@ function LayoutContent({
 												className={cn(
 													"flex flex-col overflow-hidden",
 													needsClearance && "pt-12",
-													// In a split, ring the focused pane so it's obvious
-													// which one keyboard + titlebar actions target.
+													// Card background + rounded corners for split panes
+													activeSplit && visible && "rounded-lg bg-card",
+													// Subtle border for non-active split panes
 													activeSplit &&
 														visible &&
-														focused &&
-														"ring-2 ring-primary/40 ring-inset"
+														!focused &&
+														"ring-1 ring-border/20"
 												)}
 												// Clicking anywhere in a non-focused pane focuses it
 												// (no nav-history entry) before the inner UI reacts.
@@ -568,6 +682,12 @@ function LayoutContent({
 											>
 												<RouteOutlet
 													onClose={() => closeTab(tab.id)}
+													tab={tab}
+												/>
+												<PaneBadge
+													activeSplit={!!activeSplit && visible}
+													containerRef={contentRef}
+													focused={focused}
 													tab={tab}
 												/>
 											</div>
@@ -583,7 +703,7 @@ function LayoutContent({
 					{/* Warp-style drop zones: while a tab chip/row is dragged, hovering
 					    a pane edge previews + creates a split there; the center swaps
 					    panes. Renders nothing outside a drag. */}
-					<SplitDropZones containerRef={contentRef} />
+					{!isMobile && <SplitDropZones containerRef={contentRef} />}
 				</div>
 				{/* Frosted titlebar overlays the content (absolute, z-10). */}
 				<TitleBar />

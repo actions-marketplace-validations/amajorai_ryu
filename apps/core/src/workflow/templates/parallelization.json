@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "id": "parallelization",
+    "name": "Parallelization",
+    "description": "Fan the task out to independent clean-context workers, then synthesize their results.",
+    "category": "orchestration",
+    "pattern": "parallelization",
+    "icon": "Network",
+    "node_count": 4,
+    "tags": ["parallel", "fan-out", "sub-agents"]
+  },
+  "primary": {
+    "id": "parallelization",
+    "name": "Parallelization",
+    "description": "Fan out to clean-context workers, then synthesize.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "workers",
+        "type": "agent_delegate",
+        "delegates": [
+          {
+            "id": "worker-a",
+            "task": "Analyze the following from a correctness angle:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "research"
+          },
+          {
+            "id": "worker-b",
+            "task": "Analyze the following from a risk/edge-case angle:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "research"
+          },
+          {
+            "id": "worker-c",
+            "task": "Analyze the following from a clarity/UX angle:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "research"
+          }
+        ],
+        "caps": null
+      },
+      {
+        "id": "synth",
+        "type": "prompt",
+        "prompt": "Synthesize these independent analyses into one coherent answer:\n\n{{nodes.workers}}",
+        "agent_id": null
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "workers"
+      },
+      {
+        "from": "workers",
+        "to": "synth"
+      },
+      {
+        "from": "synth",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

@@ -12,6 +12,27 @@
  */
 
 /**
+ * One selectable option for a [`SettingsFieldType::Select`] field.
+ *
+ * Accepts both spellings the desktop's `parseOptions` accepts: a bare string
+ * (value and label are the same) or an object with an explicit `label`. Keeping
+ * both is not indulgence — the bare-string form is what every hand-written
+ * manifest reaches for, and rejecting it would push authors into boilerplate for
+ * the common case.
+ */
+export type SettingsFieldOption =
+	| string
+	| {
+			/**
+			 * Display label. Absent = show the raw `value`.
+			 */
+			label?: string | null;
+			/**
+			 * The value persisted to the preference key.
+			 */
+			value: string;
+	  };
+/**
  * A host surface a plugin can declare support for via `targets`.
  *
  * `core` is the headless node (a Core running with no UI at all).
@@ -390,12 +411,61 @@ export interface Contributes {
 	commands?: ContributionId[];
 	/**
 	 * Declarative **native** UI widgets the plugin contributes to the desktop
-	 * composer (e.g. a `toggle` that sets a `plugin_flags` entry, or a `chip`).
-	 * Core stores these verbatim and serves them via `GET /api/plugins/contributions`;
-	 * the desktop renders the known widget types. Opaque to Core (the renderer
-	 * owns interpretation) so new widget types need no Core change.
+	 * composer. Core stores these verbatim and serves them via
+	 * `GET /api/plugins/contributions` (tagged with the owning `plugin` id); the
+	 * desktop renders the known control types. Opaque to Core (the renderer owns
+	 * interpretation) so a new control type needs no Core change — an entry Core has
+	 * never heard of is forwarded byte-for-byte, so a desktop newer than the node it
+	 * talks to still gets everything it was shipped to render.
+	 *
+	 * # The control vocabulary
+	 *
+	 * Every entry is an object carrying `id`, a `type` discriminant, a `label` and a
+	 * `flag`; the remaining keys belong to that type. `flag` is universal because the
+	 * per-request `plugin_flags` map is the composer's ONLY channel to the turn — a
+	 * control the turn hook cannot observe would do nothing. `type` is deliberately NOT
+	 * an enum (same reasoning as [`ViewContribution::view`]): an unknown member must
+	 * reach a newer shell intact rather than being rejected at load by an older Core.
+	 * The vocabulary the desktop composer understands today:
+	 *
+	 * - `"toggle"` — a switch row in the composer "+" menu, with an optional
+	 *   `description`. Flipping it puts `flag: true` into `plugin_flags`. This is the
+	 *   original — and until now the ONLY — rendered type.
+	 * - `"select"` — a menu/segmented picker. Carries an `options` array of
+	 *   `{ value, label, description?, icon? }` plus an optional `default`. The chosen
+	 *   `value` (a string, not a bool) lands in `plugin_flags[flag]`, so a plugin can
+	 *   offer modes ("fast" / "thorough") instead of on/off.
+	 * - `"chip"` — an inline pill in the composer bar showing a LIVE value rather than
+	 *   a menu row. Carries an optional `icon` and a `source` (the same
+	 *   `@ryu/app-host/views` `ViewSource` a declarative view uses) the shell polls for
+	 *   the displayed text, and exposes/clears its value through `flag`. This is what a
+	 *   rich bespoke control (a recording indicator, a selected-clip pill) needs in
+	 *   order to stop being hand-written host code.
+	 * - `"action"` — a button that DISPATCHES rather than holding state. Carries an
+	 *   optional `icon` and a `capability` (+ optional `args`) the shell invokes
+	 *   through the plugin's granted capability seam — never inline code, and never a
+	 *   capability the owning plugin was not granted — then marks `flag` so the turn
+	 *   hook sees that it fired.
+	 *
+	 * A control may also carry `placement` (`"menu"`, the default, or `"bar"`) and
+	 * `order`; the renderer, not Core, decides what to do with an unknown key.
+	 *
+	 * Renderers MUST ignore an entry whose `type` they do not know (the desktop
+	 * filters by `type`), so shipping a new control type degrades to "not shown on
+	 * older shells" instead of breaking the composer.
 	 */
 	composer_controls?: unknown[];
+	/**
+	 * App-registered **workspace dock panels** — a tab in the desktop's bottom or
+	 * right dock (Terminal / Code Review / Browser / Simulator live there today).
+	 * This is the seam that lets an app OWN its dock tab instead of the shell
+	 * welding the app into a closed `TabKind` union: `com.ryu.browser` and
+	 * `com.ryu.simulator` are apps, and their tabs are contributions, not enum
+	 * variants. Self-contained + opaque `spec` (see [`DockPanelContribution`]), so a
+	 * new panel capability needs no Core change; served + tagged with the owning
+	 * `plugin` id at `GET /api/plugins/contributions`.
+	 */
+	dock_panels?: DockPanelContribution[];
 	/**
 	 * Gateway policies the plugin contributes (referenced by runnable id).
 	 */
@@ -403,8 +473,21 @@ export interface Contributes {
 	/**
 	 * Declarative settings tabs the plugin contributes (model pickers, text
 	 * fields bound to preference keys). Served + rendered the same way.
+	 *
+	 * The **contract** for each entry is [`SettingsTabContribution`] — that is what
+	 * the published JSON Schema advertises (`schemars(with = …)`) and what the
+	 * loader holds every manifest to at import (see `validate_settings_tab`), so a
+	 * malformed tab is rejected with a diagnostic instead of reaching the desktop
+	 * and being silently dropped by the renderer's defensive parser.
+	 *
+	 * The *stored* type stays `serde_json::Value` on purpose. `GET
+	 * /api/plugins/contributions` tags each entry in place with its owning `plugin`
+	 * id and forwards it verbatim; deserializing into the struct here would silently
+	 * DROP any key this Core build does not know about, so a desktop newer than the
+	 * node it talks to would lose exactly the fields it was shipped to render. Parse
+	 * once at the validation chokepoint, forward the original bytes.
 	 */
-	settings_tabs?: unknown[];
+	settings_tabs?: SettingsTabContribution[];
 	/**
 	 * App-registered sidebar **buttons** — a single nav row (e.g. Memory →
 	 * `/library/memory`). The button-shaped sibling of [`Contributes::sidebar_sections`]
@@ -426,6 +509,17 @@ export interface Contributes {
 	 * the resulting message. Served + rendered the same way.
 	 */
 	slash_commands?: unknown[];
+	/**
+	 * Tools this plugin wants **hidden** from the model's offered tool list —
+	 * the declarative half of a tool firewall (see [`ToolFilterContribution`]).
+	 *
+	 * Purely declarative here: this contract defines and validates the shape, and
+	 * the filter is applied where tools are offered to the model. Like
+	 * [`Contributes::turn_hooks`] this is self-contained (the ids name tools from
+	 * *other* plugins/servers by design — hiding your own tool is just not
+	 * declaring it), so it is NOT cross-validated against `runnables`.
+	 */
+	tool_filters?: ToolFilterContribution[];
 	/**
 	 * Callable tools the plugin contributes (referenced by runnable id).
 	 */
@@ -480,6 +574,190 @@ export interface ContributionId {
 	 * Optional display title (e.g. the palette label for a command).
 	 */
 	title?: string | null;
+}
+/**
+ * One app-registered **workspace dock panel** — a tab in the desktop's bottom or
+ * right dock (see [`Contributes::dock_panels`]).
+ *
+ * The dock sibling of [`ViewContribution`] / [`SidebarSectionContribution`]: a typed
+ * envelope (`id` / `title` / `icon` / `placement`) around an OPAQUE description of
+ * what the tab renders. Core stores it verbatim, tags it with the owning `plugin` id
+ * at `GET /api/plugins/contributions`, and never interprets `panel` or `spec` — so a
+ * new panel capability is a renderer change, never a Core change.
+ *
+ * # The `panel` vocabulary
+ *
+ * `panel` is the render-mode discriminant the desktop's dock renderer switches on.
+ * It is a plain `String` (not an enum) for the same reason [`ViewContribution::view`]
+ * is: an unknown member must reach a newer shell intact rather than being rejected at
+ * load by an older Core. The vocabulary the desktop understands today:
+ *
+ * - `"companion"` — mount the app's sandboxed companion surface in the dock. The
+ *   `spec` names it: `{ "companion": "<runnable id>" }`. This is the third-party
+ *   path: an app ships one companion UI and can surface it in the dock, the sidebar,
+ *   or a full tab without any host code.
+ * - `"view"` — render one of the plugin's own [`Contributes::views`] entries inside
+ *   the dock chrome: `{ "view": "<view id>" }`. Data-only, drawn with the host's own
+ *   `@ryu/ui` components, so a dock panel gets the Raycast tier for free.
+ * - `"native"` — the shell's OWN component, registered under `<plugin>/<id>`. This is
+ *   the migration seam for first-party apps whose panel is hand-written React driving
+ *   their sidecar through the ext-proxy (`com.ryu.browser`, `com.ryu.simulator`): the
+ *   *component* stays in the shell, but its existence, label, icon and placement stop
+ *   being a hardcoded `TabKind` variant and become the app's own declaration, so
+ *   disabling the app removes the tab. An unknown `<plugin>/<id>` simply renders
+ *   nothing — a native panel is never a code channel.
+ *
+ * The full `spec` shape is owned by the shared TS vocabulary (`@ryu/app-host/views`
+ * `DockPanelSpec`), NOT by this contract.
+ */
+export interface DockPanelContribution {
+	/**
+	 * Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+	 */
+	icon?: string | null;
+	/**
+	 * Stable id for this panel within the plugin (the dock's tab key, namespaced by
+	 * the shell as `plugin:<pluginId>:<id>` so two apps can reuse an id).
+	 */
+	id: string;
+	/**
+	 * Optional ordering hint within the dock's tab-type menu (lower = earlier).
+	 */
+	order?: number | null;
+	/**
+	 * The render-mode discriminant (`"companion"`, `"view"`, `"native"`, …). Opaque
+	 * to Core; an unknown member is passed through so a newer shell can render it.
+	 */
+	panel: string;
+	/**
+	 * Which dock the panel opens in. Defaults to [`DockPanelPlacement::Bottom`], the
+	 * drawer a terminal-shaped panel belongs in — and falls back to it for an
+	 * unrecognised dock too, rather than failing the whole manifest
+	 * (see [`deserialize_dock_panel_placement`]).
+	 */
+	placement?: "bottom" | "right" | "both";
+	/**
+	 * The payload for the render mode (`{ "companion": … }` / `{ "view": … }` / any
+	 * future panel capability). Opaque to Core — the desktop dock renderer interprets
+	 * it per `panel`. Absent = the mode needs no payload (the `"native"` case).
+	 */
+	spec?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Tab label shown on the dock tab strip and in the "new tab" menu.
+	 */
+	title: string;
+}
+/**
+ * One **settings tab** a plugin contributes (see [`Contributes::settings_tabs`]).
+ *
+ * A tab is EITHER declarative (`fields`, rendered by the shared plugin-settings
+ * renderer against Core's preference store) OR a named `view` the shell resolves to
+ * a bespoke component — for an app whose settings genuinely cannot be expressed as
+ * a list of fields. A tab with neither renders as an empty section, which the
+ * desktop's defensive parser drops on the floor; the loader rejects it instead so
+ * the author gets told.
+ */
+export interface SettingsTabContribution {
+	/**
+	 * The declarative fields this tab renders. Empty is only legal alongside a
+	 * `view`.
+	 */
+	fields?: SettingsFieldContribution[];
+	/**
+	 * Stable id for this tab within the plugin — the settings nav routes to it and
+	 * the renderer keys by it. Required: the desktop's fallback (`<plugin>.settings`)
+	 * collides the moment a plugin declares a second tab.
+	 */
+	id: string;
+	/**
+	 * Which settings dialog this tab lands in. Absent/unrecognised = `node`.
+	 */
+	scope?: "node" | "user";
+	/**
+	 * Header label for the section. Absent = `"Settings"`, matching the renderer.
+	 */
+	title?: string;
+	/**
+	 * A rich settings view this app ships instead of declarative `fields`. Opaque
+	 * here — the settings renderer owns the vocabulary and resolves the name to a
+	 * component (first-party) or a sandboxed UI (third-party).
+	 */
+	view?: string | null;
+}
+/**
+ * One configurable field inside a [`SettingsTabContribution`], bound to exactly
+ * one preference key.
+ *
+ * `pref_key` is both the storage binding (`GET/PUT /api/preferences/:key`) **and**
+ * the field's identity — the renderer keys its React elements by it — so two
+ * fields sharing one `pref_key` inside a tab is a bug, not a shorthand, and the
+ * loader rejects it.
+ *
+ * The `default`/`required`/`min`/`max`/`min_length`/`max_length` block is
+ * validation metadata: declaring it is how a plugin gets its settings checked at
+ * *import* instead of discovering at runtime that a user typed `"maybe"` into what
+ * the hook reads as a number. It is cross-checked against `type` at load, because
+ * validation metadata that is silently ignored (a `min` on a toggle) is worse than
+ * none — it reads as a guarantee that was never enforced.
+ */
+export interface SettingsFieldContribution {
+	/**
+	 * Default value, in the field's own JSON type (bool for a toggle, number for
+	 * a number, string elsewhere) — NOT the stringified form preferences are
+	 * stored in, so a manifest stays readable and the type is checkable.
+	 */
+	default?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Helper caption shown under the field.
+	 */
+	description?: string | null;
+	/**
+	 * Display label. Absent = the renderer shows the `pref_key`.
+	 */
+	label?: string | null;
+	/**
+	 * Inclusive upper bound for a [`SettingsFieldType::Number`].
+	 */
+	max?: number | null;
+	/**
+	 * Maximum length for a text/textarea value.
+	 */
+	max_length?: number | null;
+	/**
+	 * Inclusive lower bound for a [`SettingsFieldType::Number`].
+	 */
+	min?: number | null;
+	/**
+	 * Minimum length for a text/textarea value.
+	 */
+	min_length?: number | null;
+	/**
+	 * Choices for a [`SettingsFieldType::Select`]; required for that type and
+	 * inert for every other one.
+	 */
+	options?: SettingsFieldOption[];
+	/**
+	 * Placeholder for text / model-picker inputs.
+	 */
+	placeholder?: string | null;
+	/**
+	 * The preference key this field reads/writes. Required, non-empty, and
+	 * restricted to a path-safe alphabet (it becomes a URL path segment).
+	 */
+	pref_key: string;
+	/**
+	 * Whether the user must supply a value (advisory: enforced by the renderer,
+	 * declared here so the contract is one place).
+	 */
+	required?: boolean;
+	/**
+	 * The control to render. Absent or unrecognised = a plain text input.
+	 */
+	type?: "text" | "textarea" | "number" | "toggle" | "select" | "model_picker" | "agent_picker";
 }
 /**
  * One app-registered **sidebar button** — a single nav row (the button-shaped
@@ -544,6 +822,36 @@ export interface SidebarSectionContribution {
 	 * Header label shown in the sidebar and the Customize dialog.
 	 */
 	title: string;
+}
+/**
+ * One **tool filter**: a fully-qualified tool id a plugin wants withheld from the
+ * model's offered tool list.
+ *
+ * Tools are namespaced `<server>__<tool>` (e.g. `browser__navigate`), so `tool`
+ * must carry the namespace — a bare `navigate` would be ambiguous across servers
+ * and is rejected at load. A **trailing** `*` is a prefix wildcard, which is how a
+ * plugin withholds a whole server (`shadow__*`); it is the only wildcard position
+ * allowed, because an interior or leading `*` invites a pattern that silently
+ * matches far more than the author pictured.
+ *
+ * This type is declaration + validation only. The filter is **applied** where the
+ * tool list is assembled for the model (the MCP offer site in
+ * `apps/core/src/sidecar/mcp`), which calls [`ToolFilterContribution::matches`] so
+ * the wildcard rule has exactly one implementation. Hiding a tool from the model
+ * is not a security boundary — it does not revoke the capability, it only stops the
+ * tool being advertised; enforcement stays with permissions and grants.
+ */
+export interface ToolFilterContribution {
+	/**
+	 * Why the plugin hides it — surfaced in the plugin's listing so a user can see
+	 * what a plugin is removing from the model's view before installing it.
+	 */
+	reason?: string | null;
+	/**
+	 * Fully-qualified tool id (`<server>__<tool>`), optionally ending in `*` to
+	 * hide every tool whose id starts with the preceding prefix.
+	 */
+	tool: string;
 }
 /**
  * A server-side chat turn hook contributed by a plugin. The `code` is a JS body

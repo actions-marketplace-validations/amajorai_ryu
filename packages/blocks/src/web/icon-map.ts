@@ -1,0 +1,71 @@
+import type { LucideIcon } from "lucide-react";
+import {
+	Blocks,
+	Bot,
+	Box,
+	Boxes,
+	Bug,
+	Cable,
+	Chrome,
+	Cloud,
+	Cpu,
+	Eye,
+	Gem,
+	GitBranch,
+	Globe,
+	HeartHandshake,
+	Key,
+	Layers,
+	Mic,
+	Monitor,
+	Plug,
+	Puzzle,
+	Radio,
+	RefreshCw,
+	Shield,
+	Smartphone,
+	Sparkles,
+	Store,
+	Terminal,
+	Users,
+	Zap,
+} from "lucide-react";
+
+const iconMap: Record<string, LucideIcon> = {
+	Blocks,
+	Bot,
+	Box,
+	Boxes,
+	Bug,
+	Cable,
+	Chrome,
+	Cloud,
+	Cpu,
+	Eye,
+	Gem,
+	GitBranch,
+	Globe,
+	HeartHandshake,
+	Key,
+	Layers,
+	Mic,
+	Monitor,
+	Plug,
+	Puzzle,
+	Radio,
+	RefreshCw,
+	Shield,
+	Smartphone,
+	Sparkles,
+	Store,
+	Terminal,
+	Users,
+	Zap,
+};
+
+export function resolveIcon(name: string | undefined): LucideIcon | undefined {
+	if (!name) {
+		return undefined;
+	}
+	return iconMap[name];
+}

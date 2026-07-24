@@ -276,6 +276,12 @@ export const ContributesSchema = z.object({
 	 *  `Contributes.sidebar_sections` / `Contributes.sidebar_buttons`. */
 	sidebar_sections: z.array(z.record(z.string(), z.unknown())).default([]),
 	sidebar_buttons: z.array(z.record(z.string(), z.unknown())).default([]),
+	/** App-registered workspace dock panels (a tab in the desktop's bottom/right
+	 *  dock). Loosely typed for the same reason as the surfaces above — the shell
+	 *  owns the `panel` render-mode vocabulary and the `spec` payload. Mirrors the
+	 *  Rust-side `Contributes.dock_panels`; without it the CLI's zod parse would
+	 *  strip the dock panel an app declares here. */
+	dock_panels: z.array(z.record(z.string(), z.unknown())).default([]),
 });
 
 export type Contributes = z.infer<typeof ContributesSchema>;

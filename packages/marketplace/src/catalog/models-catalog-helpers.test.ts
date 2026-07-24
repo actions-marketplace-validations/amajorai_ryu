@@ -119,9 +119,14 @@ describe("filterModelsByTokens", () => {
 
 describe("buildModelChips", () => {
 	test("no org and no tokens yields no chips", () => {
-		expect(buildModelChips("", new Set(), () => undefined, () => undefined)).toEqual(
-			[]
-		);
+		expect(
+			buildModelChips(
+				"",
+				new Set(),
+				() => undefined,
+				() => undefined
+			)
+		).toEqual([]);
 	});
 
 	test("an org produces a removable Org chip that clears the org", () => {

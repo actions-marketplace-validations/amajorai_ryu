@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Adversarial by nature",
-      "description": "Agents enumerate boundary, error, and concurrency cases you might miss, then write tests that try to break the feature."
+      "description": "Agents enumerate boundary, error, and concurrency cases you might miss, then write tests that try to break the feature.",
+      "icon": "Bot"
     },
     {
       "title": "Tests land as a diff",
-      "description": "New and updated tests come back on a git branch, so you review the additions before they merge into the suite."
+      "description": "New and updated tests come back on a git branch, so you review the additions before they merge into the suite.",
+      "icon": "GitBranch"
     },
     {
       "title": "Reproduces real bugs",
-      "description": "Hand over a report and an agent builds a failing test that captures it, so the fix has something to prove against."
+      "description": "Hand over a report and an agent builds a failing test that captures it, so the fix has something to prove against.",
+      "icon": "Bot"
     },
     {
       "title": "Knows your conventions",
-      "description": "Ground agents on your existing test suite with Spaces, so generated tests match your framework and patterns."
+      "description": "Ground agents on your existing test suite with Spaces, so generated tests match your framework and patterns.",
+      "icon": "Bot"
     }
   ],
   "useCases": [

@@ -38,8 +38,15 @@ export interface GlobalFlags {
 	help: boolean;
 	/** `--json` — machine-readable output for agents/CI instead of a human table. */
 	json: boolean;
+	/** `--kind app|plugin|all` — narrow `list`/`catalog` to one classification.
+	 *  Null = unset, which resolves to `"all"` (see `parseKindFilter`). */
+	kind: string | null;
 	/** `--node <url>` — target an arbitrary node URL for this one invocation. */
 	node: string | null;
+	/** `--template <t>` — the `ryu init` scaffold template. Null = unset, in which
+	 *  case create-ryu-app picks its own default; the tui deliberately does not
+	 *  mirror that default so the two can never disagree. */
+	template: string | null;
 	/** `--version`. */
 	version: boolean;
 }
@@ -90,12 +97,31 @@ export interface CoreApi {
 	) => Promise<AppUninstallResult>;
 }
 
+/** The captured result of one out-of-process scaffold run. Output is CAPTURED
+ *  rather than inherited so it flows back through {@link CliIO}: a child writing
+ *  straight to the real stdout would corrupt a `--json` envelope, and an inherited
+ *  stream is invisible to the tests. */
+export interface ScaffoldResult {
+	exitCode: number;
+	stderr: string;
+	stdout: string;
+}
+
+/** Runs the external scaffolder with `argv` (already the create-ryu-app argv:
+ *  `<name> [--template <t>]`). Kept as an injected function for the same reason
+ *  {@link CoreApi} is: it is the only side-effecting escape hatch in the command
+ *  layer, so tests swap in a fake and `ryu init` never spawns a process. */
+export type ScaffoldRunner = (argv: string[]) => Promise<ScaffoldResult>;
+
 /** Everything a command handler needs for one invocation. */
 export interface CliContext {
 	api: CoreApi;
 	args: string[];
 	flags: GlobalFlags;
 	io: CliIO;
+	/** Out-of-process project scaffolding (`ryu init`). Not part of {@link CoreApi}
+	 *  because it never touches the node — it is a local developer action. */
+	scaffold: ScaffoldRunner;
 	target: ApiTarget;
 }
 
@@ -103,12 +129,12 @@ export interface CliContext {
 export interface Command {
 	aliases?: string[];
 	name: string;
+	/** Run the command; resolve to the process exit code (0 = success). */
+	run: (ctx: CliContext) => Promise<number>;
 	/** One-line summary shown in `ryu help`. */
 	summary: string;
 	/** Usage string shown in `ryu help` (e.g. `ryu add <id>`). */
 	usage: string;
-	/** Run the command; resolve to the process exit code (0 = success). */
-	run: (ctx: CliContext) => Promise<number>;
 }
 
 /** Thrown by a handler for a bad/missing argument. The dispatcher maps it to exit

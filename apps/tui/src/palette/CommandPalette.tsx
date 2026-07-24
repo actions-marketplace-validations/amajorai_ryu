@@ -3,9 +3,10 @@
 // analog). Destinations mirror the desktop NAV_ITEMS (openTab), plus overlay
 // entries (Gateway/Settings, reached by Channels/Identities/Credits aliases) and
 // global actions (New chat, Switch node, Quit). Navigation destinations are
-// merged with any surface registered in the router, and extra actions can be
-// contributed via registerPaletteAction (the registration hook downstream code
-// uses without editing this file).
+// merged with any surface registered in the router PLUS every declarative view an
+// enabled plugin contributes (each opens at its /plugin-view/<plugin>/<viewId>
+// route), and extra actions can be contributed via registerPaletteAction (the
+// registration hook downstream code uses without editing this file).
 //
 // The shell owns the open/closed state (it binds Ctrl+K) and passes it in; the
 // palette owns its query + selection and its keyboard (gated on `open`).
@@ -14,6 +15,8 @@ import type { KeyEvent } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
 import { useMemo, useState } from "react";
 import { useTheme } from "@/components/ui/theme-provider.tsx";
+import { useContributions } from "../core/ContributionsContext.tsx";
+import { pluginViewPath, surfaceClaimToken } from "../core/contributions.ts";
 import { useOverlay } from "../overlays/OverlayHost.tsx";
 import { listSurfaces } from "../workspace/router.ts";
 import { useWorkspace } from "../workspace/WorkspaceContext.tsx";
@@ -70,6 +73,9 @@ export function CommandPalette({
 	const theme = useTheme();
 	const { openTab } = useWorkspace();
 	const { openOverlay } = useOverlay();
+	// Declarative views contributed by the enabled plugins. Each becomes a jump-to
+	// destination the moment Core reports it — the palette never names an app.
+	const { views } = useContributions();
 
 	const [query, setQuery] = useState("");
 	const [index, setIndex] = useState(0);
@@ -84,6 +90,27 @@ export function CommandPalette({
 				close();
 			},
 		}));
+		// A view that CLAIMS a built-in surface is already reachable under that
+		// surface's own entry, so only the extra ones get their own destination.
+		// The comparison is against the CLAIM TOKEN, not the bare surface id: a
+		// claiming view is called `surface:calendar`, so matching `surface.id`
+		// directly would never hit and every claim would list twice.
+		const contributedNav: PaletteAction[] = views
+			.filter(
+				(view) =>
+					view.plugin.length > 0 &&
+					!listSurfaces().some(
+						(surface) => surfaceClaimToken(surface.id) === view.id
+					)
+			)
+			.map((view) => ({
+				id: `view:${view.plugin}:${view.id}`,
+				label: `Go to ${view.title ?? view.id}`,
+				run: () => {
+					openTab(pluginViewPath(view.plugin, view.id));
+					close();
+				},
+			}));
 		const actions: PaletteAction[] = [
 			{
 				id: "action:new-chat",
@@ -133,13 +160,13 @@ export function CommandPalette({
 				},
 			})),
 		];
-		const all = [...nav, ...actions];
+		const all = [...nav, ...contributedNav, ...actions];
 		const q = query.trim().toLowerCase();
 		if (q.length === 0) {
 			return all;
 		}
 		return all.filter((entry) => entry.label.toLowerCase().includes(q));
-	}, [query, openTab, openOverlay, onClose, onSwitchNode, onQuit]);
+	}, [query, views, openTab, openOverlay, onClose, onSwitchNode, onQuit]);
 
 	const handleKey = (key: KeyEvent) => {
 		if (key.name === "escape" || (key.ctrl && key.name === "k")) {

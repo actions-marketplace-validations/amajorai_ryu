@@ -58,7 +58,7 @@ export interface ComposerSlot {
 	/** Stable `InputBar` slot for `AgentChat`'s `slots.InputBar`. */
 	inputBar: (props: InputBarProps) => ReactNode;
 	/**
-	 * The universal picker body (Ryu Portal · Providers · External Agents) — pass
+	 * The universal picker body (Ryu (providers nested) · External Agents) — pass
 	 * to `EmptyStateHeader`'s `renderBody` so its logo opens the identical grouped
 	 * dropdown as the composer's settings trigger.
 	 */

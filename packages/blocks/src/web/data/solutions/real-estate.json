@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Acts in your tools",
-      "description": "Connections let an agent update your CRM, send email, and book showings in Google Workspace and your calendar."
+      "description": "Connections let an agent update your CRM, send email, and book showings in Google Workspace and your calendar.",
+      "icon": "Plug"
     },
     {
       "title": "Listings in minutes",
-      "description": "Turn property facts and photos into polished listing copy, social posts, and email blasts in your voice."
+      "description": "Turn property facts and photos into polished listing copy, social posts, and email blasts in your voice.",
+      "icon": "Sparkles"
     },
     {
       "title": "Never miss a lead",
-      "description": "Workflows triggered by a new inquiry draft an instant, personalized reply and queue the follow-up sequence."
+      "description": "Workflows triggered by a new inquiry draft an instant, personalized reply and queue the follow-up sequence.",
+      "icon": "Zap"
     },
     {
       "title": "Client data stays yours",
-      "description": "Local-first by default with no telemetry, so buyer and seller details are not handed to a public chatbot."
+      "description": "Local-first by default with no telemetry, so buyer and seller details are not handed to a public chatbot.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

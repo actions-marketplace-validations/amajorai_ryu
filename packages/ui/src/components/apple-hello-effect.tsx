@@ -28,18 +28,43 @@ export type AppleHelloEffectProps = Omit<
 	durationScale?: number;
 	/** Called when the full handwriting animation completes. */
 	onAnimationComplete?: () => void;
+	/** Custom text to display instead of the default "hello" SVG. */
+	text?: string;
 };
 
 export function AppleHelloEffect({
 	className,
 	durationScale = 1,
 	onAnimationComplete,
+	text,
 	...props
 }: AppleHelloEffectProps) {
 	const containerRef = useRef<SVGSVGElement>(null);
-	const inView = useInView(containerRef, { once: true, amount: 0.2 });
+	const textContainerRef = useRef<HTMLDivElement>(null);
+	const inView = useInView(text ? textContainerRef : containerRef, {
+		once: true,
+		amount: 0.2,
+	});
 	const calc = (x: number) => x * durationScale;
 	const animate = inView ? animateProps : initialProps;
+
+	if (text) {
+		return (
+			<motion.div
+				animate={inView ? { opacity: 1, y: 0 } : { opacity: 0, y: 10 }}
+				className={cn("h-20 font-light italic tracking-tight", className)}
+				initial={{ opacity: 0, y: 10 }}
+				ref={textContainerRef}
+				transition={{
+					duration: calc(1.2),
+					ease: "easeOut",
+					onAnimationComplete,
+				}}
+			>
+				{text}
+			</motion.div>
+		);
+	}
 
 	return (
 		<motion.svg

@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "PII stays protected",
-      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request."
+      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request.",
+      "icon": "Shield"
     },
     {
       "title": "Grounded in your policies",
-      "description": "Ground agents on your policy wordings and underwriting guidelines with Spaces and RAG, so coverage answers cite the clause."
+      "description": "Ground agents on your policy wordings and underwriting guidelines with Spaces and RAG, so coverage answers cite the clause.",
+      "icon": "Bot"
     },
     {
       "title": "Auditable by default",
-      "description": "Every model and tool call is logged in the Gateway audit trail, so each claim decision has a clear record of what the agent saw."
+      "description": "Every model and tool call is logged in the Gateway audit trail, so each claim decision has a clear record of what the agent saw.",
+      "icon": "Eye"
     },
     {
       "title": "Connects to your systems",
-      "description": "Agents authenticate into your inbox, document stores, and spreadsheets to gather claim files and draft updates for review."
+      "description": "Agents authenticate into your inbox, document stores, and spreadsheets to gather claim files and draft updates for review.",
+      "icon": "Plug"
     }
   ],
   "useCases": [

@@ -47,6 +47,121 @@ export async function setPreference(
 	}
 }
 
+// --- Agent selection (the shared "who runs this" value) ---------------------
+// One value shape for every setting that names an agent/model, mirroring what
+// the chat composer's universal picker can express: agent, provider, model,
+// thinking level, reasoning effort, and ACP access (permission) mode. Stored as
+// a JSON object under a single preference key.
+//
+// Core's `agent_selection` module is the other half of this contract and parses
+// these exact snake_case fields, so a rename here silently breaks resolution.
+// It also accepts a LEGACY bare model-id string (read as `{ model }`), which is
+// what every one of these keys held before — hence `parseAgentSelection` below
+// accepts both and nothing needs migrating.
+
+/** A target as the universal picker can express it. Empty string = not chosen. */
+export interface AgentSelection {
+	/** ACP access (permission) mode, e.g. `acceptEdits`. Agent picks only. */
+	access_mode: string;
+	/** Agent id (`ryu`, an installed external agent, a custom agent). */
+	agent_id: string;
+	/** Reasoning effort, forwarded as `reasoning_effort`. */
+	effort: string;
+	/** Model id, gateway-routable. */
+	model: string;
+	/** Pi provider owning `model`. A routing hint; Core routes by model id. */
+	provider: string;
+	/** Pi thinking level for the picked provider/model. */
+	thinking_level: string;
+}
+
+/** The all-unset selection — what "inherit the default" looks like. */
+export const EMPTY_AGENT_SELECTION: AgentSelection = {
+	agent_id: "",
+	provider: "",
+	model: "",
+	thinking_level: "",
+	effort: "",
+	access_mode: "",
+};
+
+/** True when nothing is chosen (so the consumer falls back to the default). */
+export function isAgentSelectionEmpty(selection: AgentSelection): boolean {
+	return !(
+		selection.agent_id ||
+		selection.provider ||
+		selection.model ||
+		selection.thinking_level ||
+		selection.effort ||
+		selection.access_mode
+	);
+}
+
+function selectionString(value: unknown): string {
+	return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Parse a stored preference value into a selection. Accepts the JSON object
+ * form and — permanently — a legacy bare model id. An unreadable value reads as
+ * unset rather than throwing: a corrupt preference must not break its settings
+ * page.
+ */
+export function parseAgentSelection(raw: string | null): AgentSelection {
+	const trimmed = raw?.trim() ?? "";
+	if (!trimmed) {
+		return EMPTY_AGENT_SELECTION;
+	}
+	if (!trimmed.startsWith("{")) {
+		return { ...EMPTY_AGENT_SELECTION, model: trimmed };
+	}
+	try {
+		const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+		return {
+			agent_id: selectionString(parsed.agent_id),
+			provider: selectionString(parsed.provider),
+			model: selectionString(parsed.model),
+			thinking_level: selectionString(parsed.thinking_level),
+			effort: selectionString(parsed.effort),
+			access_mode: selectionString(parsed.access_mode),
+		};
+	} catch {
+		return EMPTY_AGENT_SELECTION;
+	}
+}
+
+/** Serialize for storage. Always the JSON object form (readers accept both). */
+export function serializeAgentSelection(selection: AgentSelection): string {
+	return JSON.stringify(selection);
+}
+
+/**
+ * The node-wide default selection: what every agent/model setting that is left
+ * unset falls back to, for plugins and built-in features alike. Node-scoped
+ * (edited in the Gateway dialog) because it is inherited by everyone on the node.
+ */
+export const DEFAULT_AGENT_SELECTION_PREF_KEY = "default-agent-selection";
+
+/** Read any selection-valued preference (legacy bare model ids included). */
+export async function getAgentSelection(
+	target: ApiTarget,
+	key: string
+): Promise<AgentSelection> {
+	return parseAgentSelection(await getPreference(target, key));
+}
+
+/** Write a selection-valued preference. An empty selection clears the key. */
+export function setAgentSelection(
+	target: ApiTarget,
+	key: string,
+	selection: AgentSelection
+): Promise<boolean> {
+	const value = isAgentSelectionEmpty(selection)
+		? ""
+		: serializeAgentSelection(selection);
+	return setPreference(target, key, value);
+}
+
 // --- Island appearance ----------------------------------------------------
 // The island companion's background treatment, shared cross-process via Core
 // (the island reads this key on startup and reconfigures its window). The shape
@@ -522,7 +637,7 @@ export function setVoiceModeReadbackPrefs(
 
 export const DESKTOP_TTS_ENGINE_KEY = "ryu.tts.engine";
 export const DESKTOP_TTS_VOICE_KEY = "ryu.tts.voice";
-const DEFAULT_DESKTOP_TTS_ENGINE = "kokoro";
+export const DEFAULT_DESKTOP_TTS_ENGINE = "kokoro";
 
 /** Desktop default TTS engine + voice from localStorage. */
 export function getDesktopTtsPrefs(): { engine: string; voice: string } {
@@ -535,6 +650,35 @@ export function getDesktopTtsPrefs(): { engine: string; voice: string } {
 		};
 	} catch {
 		return { engine: DEFAULT_DESKTOP_TTS_ENGINE, voice: "" };
+	}
+}
+
+// Two surfaces now WRITE these keys — the Voice settings tab and the node
+// selector's Text-to-speech layer — so the write goes through one setter that
+// also wakes whichever surface is open. localStorage fires no same-document
+// `storage` event, so the notification is explicit.
+const desktopTtsListeners = new Set<() => void>();
+
+/** Subscribe to desktop TTS preference changes. Returns an unsubscribe fn. */
+export function subscribeDesktopTtsPrefs(listener: () => void): () => void {
+	desktopTtsListeners.add(listener);
+	return () => {
+		desktopTtsListeners.delete(listener);
+	};
+}
+
+/** Persist one desktop TTS preference and notify every subscribed surface. */
+export function setDesktopTtsPref(
+	key: typeof DESKTOP_TTS_ENGINE_KEY | typeof DESKTOP_TTS_VOICE_KEY,
+	value: string
+): void {
+	try {
+		localStorage.setItem(key, value);
+	} catch {
+		// Ignore storage failures — the picker still works for this session.
+	}
+	for (const listener of desktopTtsListeners) {
+		listener();
 	}
 }
 

@@ -1,14 +1,19 @@
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Select,
 	SelectContent,
 	SelectItem,
 	SelectTrigger,
 	SelectValue,
-} from "@ryu/ui/components/select";
-import { toast } from "@ryu/ui/components/sileo";
-import { Switch } from "@ryu/ui/components/switch";
+} from "@ryu/ui/components/select.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
+import { Switch } from "@ryu/ui/components/switch.tsx";
 import { invoke } from "@tauri-apps/api/core";
+import {
+	disable as disableAutostart,
+	enable as enableAutostart,
+	isEnabled as isAutostartEnabled,
+} from "@tauri-apps/plugin-autostart";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { TAB_UNLOAD_MINUTES_KEY } from "@/src/contexts/TabsContext.tsx";
@@ -108,6 +113,51 @@ export function GeneralTab() {
 				// Non-Tauri context or command unavailable: keep the default.
 			});
 	}, []);
+
+	// "Launch at login" is an OS registration (macOS LaunchAgent, Windows Run key,
+	// Linux ~/.config/autostart), so the OS — not a local mirror — is the source
+	// of truth: seed the toggle from the plugin. "Start hidden" is a local desktop
+	// preference read during startup, and only applies to a login-launched
+	// instance, so a manual launch is always visible.
+	const [launchAtLogin, setLaunchAtLogin] = useState(false);
+	const [startHidden, setStartHidden] = useState(false);
+	useEffect(() => {
+		isAutostartEnabled()
+			.then(setLaunchAtLogin)
+			.catch(() => {
+				// Non-Tauri context or unsupported platform: keep the default.
+			});
+		invoke<boolean>("get_start_hidden")
+			.then(setStartHidden)
+			.catch(() => {
+				// Non-Tauri context or command unavailable: keep the default.
+			});
+	}, []);
+
+	const handleLaunchAtLogin = async (enabled: boolean) => {
+		setLaunchAtLogin(enabled);
+		try {
+			await (enabled ? enableAutostart() : disableAutostart());
+		} catch {
+			setLaunchAtLogin(!enabled);
+			toast.error("Couldn't update the launch-at-login setting", {
+				description:
+					"Your change wasn't saved. You may need to allow Ryu to start at login in your system settings.",
+			});
+		}
+	};
+
+	const handleStartHidden = async (hidden: boolean) => {
+		setStartHidden(hidden);
+		try {
+			await invoke("set_start_hidden", { hidden });
+		} catch {
+			setStartHidden(!hidden);
+			toast.error("Couldn't update the start-hidden setting", {
+				description: "Your change wasn't saved. Please try again.",
+			});
+		}
+	};
 
 	const handleHideTrayIcon = async (hidden: boolean) => {
 		setHideTrayIcon(hidden);
@@ -344,6 +394,29 @@ export function GeneralTab() {
 				title="System"
 			>
 				<SettingsGroup>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={launchAtLogin}
+								id="launch-at-login-toggle"
+								onCheckedChange={handleLaunchAtLogin}
+							/>
+						}
+						description="Start Ryu automatically when you sign in to your computer, so your agents and background work are ready without opening it yourself. Works on macOS, Windows, and Linux."
+						title="Start Ryu on startup"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={startHidden}
+								disabled={!launchAtLogin}
+								id="start-hidden-toggle"
+								onCheckedChange={handleStartHidden}
+							/>
+						}
+						description="When Ryu starts at login, run it in the background with no window on screen — open it later from the tray icon, the dock or taskbar, or its global shortcut. Launching Ryu yourself always opens the window."
+						title="Start hidden"
+					/>
 					<SettingsItem
 						actions={
 							<Switch

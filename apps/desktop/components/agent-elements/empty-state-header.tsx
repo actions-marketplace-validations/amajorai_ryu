@@ -103,7 +103,7 @@ export interface EmptyStateHeaderProps {
 	 */
 	/**
 	 * The universal picker body (from `useComposerAgentControls().renderBody`). When
-	 * provided, the logo opens the SAME grouped `Ryu Portal · Providers · External
+	 * provided, the logo opens the SAME grouped `Ryu (providers nested) · External
 	 * Agents` dropdown as the composer. Omit to fall back to the sibling-section list.
 	 */
 	renderBody?: (close: () => void) => ReactNode;

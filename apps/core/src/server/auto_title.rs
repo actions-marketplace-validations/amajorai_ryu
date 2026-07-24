@@ -16,6 +16,13 @@
 //! (tagged `x-ryu-priority: background` so it can't starve the interactive
 //! reply).
 //!
+//! The model is resolved through [`crate::agent_selection`], so the chain is
+//! `auto-title-model` → the node-wide default selection → this local-direct
+//! path. Privacy consequence worth knowing: configuring a node-wide default
+//! *does* route titling through the Gateway with it. The local-direct guarantee
+//! holds whenever nothing is configured at either level, which is the default
+//! state.
+//!
 //! [`ConversationStore`]: super::conversations::ConversationStore
 //! [`append_message`]: super::conversations::ConversationStore::append_message
 
@@ -157,18 +164,15 @@ async fn generate(
     system: &str,
     user_input: &str,
 ) -> Option<String> {
-    if let Ok(Some(pref)) = preferences.get(AUTO_TITLE_MODEL_PREF).await {
-        let model = pref.trim().to_string();
-        if !model.is_empty() {
-            let effort = preferences
-                .get(AUTO_TITLE_EFFORT_PREF)
-                .await
-                .ok()
-                .flatten()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            return gateway_title(client, &model, effort.as_deref(), system, user_input).await;
-        }
+    if let Some(resolved) = crate::agent_selection::resolve_side_model(
+        preferences,
+        AUTO_TITLE_MODEL_PREF,
+        Some(AUTO_TITLE_EFFORT_PREF),
+    )
+    .await
+    {
+        let effort = Some(resolved.effort.as_str()).filter(|e| !e.is_empty());
+        return gateway_title(client, &resolved.model, effort, system, user_input).await;
     }
     local_title(client, system, user_input).await
 }

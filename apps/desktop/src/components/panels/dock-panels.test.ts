@@ -1,0 +1,181 @@
+// apps/desktop/src/components/panels/dock-panels.test.ts
+//
+// Tests for the app-contributed dock tabs. The load-bearing behaviours are the
+// ones that decide whether a user's workspace still works after the shell stopped
+// welding apps into its `TabKind` union:
+//   - a contributed panel lands in the dock(s) its `placement` names (`both` fans
+//     out) and in `order`;
+//   - the shell's OWN panels resolve regardless of what any app contributes (a
+//     saved workspace full of terminal/files/codereview tabs is untouched by the
+//     contributions feed, empty or not);
+//   - a tab whose panel left the feed (app disabled, node briefly unreachable)
+//     resolves to "no panel" so the renderer shows a placeholder — it must never
+//     throw, and it must never be mistaken for a built-in;
+//   - an unknown `panel` discriminant is reported as unknown rather than assumed
+//     renderable, which is what keeps a newer manifest from breaking an older shell.
+
+import { describe, expect, test } from "bun:test";
+import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
+import {
+	type BuiltinTabKind,
+	type DockTabKind,
+	dockPanelsFor,
+	dockTabKind,
+	findDockPanel,
+	isKnownDockPanelKind,
+	isPluginTabKind,
+	nativeDockPanelKey,
+	panelDocksIn,
+} from "./dock-panels.ts";
+
+function panel(over: Partial<PluginDockPanel> = {}): PluginDockPanel {
+	return {
+		id: "browser",
+		plugin: "com.ryu.browser",
+		title: "Browser",
+		panel: "native",
+		placement: "both",
+		...over,
+	};
+}
+
+/** The shell's own tab kinds — these must survive any contributions state. */
+const BUILTIN_KINDS: BuiltinTabKind[] = [
+	"terminal",
+	"codereview",
+	"files",
+	"cowork",
+	"subagent",
+	"artifact",
+	"inspector",
+];
+
+describe("tab kinds", () => {
+	test("a contributed panel's kind is namespaced by its owning plugin", () => {
+		expect(dockTabKind(panel())).toBe("plugin:com.ryu.browser:browser");
+		// Two apps may reuse a panel id without colliding.
+		expect(dockTabKind({ plugin: "com.acme.tools", id: "browser" })).toBe(
+			"plugin:com.acme.tools:browser"
+		);
+	});
+
+	test("no built-in kind is ever mistaken for a contributed one", () => {
+		for (const kind of BUILTIN_KINDS) {
+			expect(isPluginTabKind(kind)).toBe(false);
+		}
+		expect(isPluginTabKind(dockTabKind(panel()))).toBe(true);
+	});
+
+	test("the native registry key is <plugin>/<id>", () => {
+		expect(nativeDockPanelKey(panel())).toBe("com.ryu.browser/browser");
+	});
+});
+
+describe("placement", () => {
+	test('"both" offers the panel in each dock', () => {
+		const p = panel({ placement: "both" });
+		expect(panelDocksIn(p, "bottom")).toBe(true);
+		expect(panelDocksIn(p, "right")).toBe(true);
+	});
+
+	test("a single-dock placement is honoured", () => {
+		expect(panelDocksIn(panel({ placement: "right" }), "right")).toBe(true);
+		expect(panelDocksIn(panel({ placement: "right" }), "bottom")).toBe(false);
+		expect(panelDocksIn(panel({ placement: "bottom" }), "bottom")).toBe(true);
+		expect(panelDocksIn(panel({ placement: "bottom" }), "right")).toBe(false);
+	});
+
+	test("an unknown placement falls back to the bottom dock, never nowhere", () => {
+		// Mirrors the Rust lenient deserializer: a placement from a newer manifest
+		// must leave the panel reachable rather than silently unopenable.
+		const rogue = panel({
+			placement: "floating" as PluginDockPanel["placement"],
+		});
+		expect(panelDocksIn(rogue, "bottom")).toBe(true);
+		expect(panelDocksIn(rogue, "right")).toBe(false);
+	});
+});
+
+describe("dockPanelsFor", () => {
+	test("filters by dock and sorts by order, then title", () => {
+		const panels = [
+			panel({ id: "z", plugin: "p", title: "Zed", placement: "bottom" }),
+			panel({ id: "a", plugin: "p", title: "Alpha", placement: "bottom" }),
+			panel({
+				id: "first",
+				plugin: "p",
+				title: "Ordered",
+				placement: "bottom",
+				order: 1,
+			}),
+			panel({ id: "r", plugin: "p", title: "RightOnly", placement: "right" }),
+		];
+		expect(dockPanelsFor(panels, "bottom").map((p) => p.title)).toEqual([
+			// Explicit order leads; the rest fall back to alphabetical.
+			"Ordered",
+			"Alpha",
+			"Zed",
+		]);
+		expect(dockPanelsFor(panels, "right").map((p) => p.title)).toEqual([
+			"RightOnly",
+		]);
+	});
+
+	test("drops entries with no owning plugin or id", () => {
+		const panels = [
+			panel({ plugin: "" }),
+			panel({ id: "", plugin: "com.ryu.simulator" }),
+			panel(),
+		];
+		expect(dockPanelsFor(panels, "bottom")).toHaveLength(1);
+	});
+
+	test("does not mutate the (query-cached) contributions array", () => {
+		const panels = [
+			panel({ id: "b", plugin: "p", title: "B" }),
+			panel({ id: "a", plugin: "p", title: "A" }),
+		];
+		dockPanelsFor(panels, "bottom");
+		expect(panels.map((p) => p.title)).toEqual(["B", "A"]);
+	});
+});
+
+describe("findDockPanel", () => {
+	const panels = [
+		panel(),
+		panel({ id: "simulator", plugin: "com.ryu.simulator", title: "Simulator" }),
+	];
+
+	test("resolves an open tab back to its contributed panel", () => {
+		const found = findDockPanel(panels, "plugin:com.ryu.simulator:simulator");
+		expect(found?.title).toBe("Simulator");
+	});
+
+	test("a built-in kind never resolves to a contributed panel", () => {
+		for (const kind of BUILTIN_KINDS) {
+			expect(findDockPanel(panels, kind)).toBeUndefined();
+		}
+	});
+
+	test("a disabled app's tab degrades to undefined instead of throwing", () => {
+		// The user's workspace still holds the tab; the feed no longer offers it
+		// (Core serves only ENABLED plugins' contributions). The renderer shows a
+		// placeholder — it does not crash, and the tab is not silently repurposed.
+		const kind: DockTabKind = "plugin:com.ryu.browser:browser";
+		expect(findDockPanel([], kind)).toBeUndefined();
+		expect(() => findDockPanel([], kind)).not.toThrow();
+	});
+});
+
+describe("panel render modes", () => {
+	test("the documented vocabulary is recognised", () => {
+		expect(isKnownDockPanelKind("native")).toBe(true);
+		expect(isKnownDockPanelKind("companion")).toBe(true);
+		expect(isKnownDockPanelKind("view")).toBe(true);
+	});
+
+	test("a newer render mode is reported unknown, not assumed renderable", () => {
+		expect(isKnownDockPanelKind("hologram")).toBe(false);
+		expect(isKnownDockPanelKind("")).toBe(false);
+	});
+});

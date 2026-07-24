@@ -7,7 +7,7 @@
 //! re-exports them for manifest authoring/validation across language bindings).
 //! It performs no I/O and links no runtime — serde/schemars/semver only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -529,6 +529,11 @@ impl PluginManifest {
         }
         self.validate_capabilities()?;
         self.validate_surface_commands()?;
+        if let Some(contributes) = &self.contributes {
+            contributes
+                .validate_settings_contributions()
+                .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+        }
         if let Some(permissions) = &self.permissions {
             permissions
                 .validate()
@@ -739,17 +744,80 @@ pub struct Contributes {
     pub turn_hooks: Vec<TurnHookContribution>,
 
     /// Declarative **native** UI widgets the plugin contributes to the desktop
-    /// composer (e.g. a `toggle` that sets a `plugin_flags` entry, or a `chip`).
-    /// Core stores these verbatim and serves them via `GET /api/plugins/contributions`;
-    /// the desktop renders the known widget types. Opaque to Core (the renderer
-    /// owns interpretation) so new widget types need no Core change.
+    /// composer. Core stores these verbatim and serves them via
+    /// `GET /api/plugins/contributions` (tagged with the owning `plugin` id); the
+    /// desktop renders the known control types. Opaque to Core (the renderer owns
+    /// interpretation) so a new control type needs no Core change — an entry Core has
+    /// never heard of is forwarded byte-for-byte, so a desktop newer than the node it
+    /// talks to still gets everything it was shipped to render.
+    ///
+    /// # The control vocabulary
+    ///
+    /// Every entry is an object carrying `id`, a `type` discriminant, a `label` and a
+    /// `flag`; the remaining keys belong to that type. `flag` is universal because the
+    /// per-request `plugin_flags` map is the composer's ONLY channel to the turn — a
+    /// control the turn hook cannot observe would do nothing. `type` is deliberately NOT
+    /// an enum (same reasoning as [`ViewContribution::view`]): an unknown member must
+    /// reach a newer shell intact rather than being rejected at load by an older Core.
+    /// The vocabulary the desktop composer understands today:
+    ///
+    /// - `"toggle"` — a switch row in the composer "+" menu, with an optional
+    ///   `description`. Flipping it puts `flag: true` into `plugin_flags`. This is the
+    ///   original — and until now the ONLY — rendered type.
+    /// - `"select"` — a menu/segmented picker. Carries an `options` array of
+    ///   `{ value, label, description?, icon? }` plus an optional `default`. The chosen
+    ///   `value` (a string, not a bool) lands in `plugin_flags[flag]`, so a plugin can
+    ///   offer modes ("fast" / "thorough") instead of on/off.
+    /// - `"chip"` — an inline pill in the composer bar showing a LIVE value rather than
+    ///   a menu row. Carries an optional `icon` and a `source` (the same
+    ///   `@ryu/app-host/views` `ViewSource` a declarative view uses) the shell polls for
+    ///   the displayed text, and exposes/clears its value through `flag`. This is what a
+    ///   rich bespoke control (a recording indicator, a selected-clip pill) needs in
+    ///   order to stop being hand-written host code.
+    /// - `"action"` — a button that DISPATCHES rather than holding state. Carries an
+    ///   optional `icon` and a `capability` (+ optional `args`) the shell invokes
+    ///   through the plugin's granted capability seam — never inline code, and never a
+    ///   capability the owning plugin was not granted — then marks `flag` so the turn
+    ///   hook sees that it fired.
+    ///
+    /// A control may also carry `placement` (`"menu"`, the default, or `"bar"`) and
+    /// `order`; the renderer, not Core, decides what to do with an unknown key.
+    ///
+    /// Renderers MUST ignore an entry whose `type` they do not know (the desktop
+    /// filters by `type`), so shipping a new control type degrades to "not shown on
+    /// older shells" instead of breaking the composer.
     #[serde(default)]
     pub composer_controls: Vec<serde_json::Value>,
 
     /// Declarative settings tabs the plugin contributes (model pickers, text
     /// fields bound to preference keys). Served + rendered the same way.
+    ///
+    /// The **contract** for each entry is [`SettingsTabContribution`] — that is what
+    /// the published JSON Schema advertises (`schemars(with = …)`) and what the
+    /// loader holds every manifest to at import (see `validate_settings_tab`), so a
+    /// malformed tab is rejected with a diagnostic instead of reaching the desktop
+    /// and being silently dropped by the renderer's defensive parser.
+    ///
+    /// The *stored* type stays `serde_json::Value` on purpose. `GET
+    /// /api/plugins/contributions` tags each entry in place with its owning `plugin`
+    /// id and forwards it verbatim; deserializing into the struct here would silently
+    /// DROP any key this Core build does not know about, so a desktop newer than the
+    /// node it talks to would lose exactly the fields it was shipped to render. Parse
+    /// once at the validation chokepoint, forward the original bytes.
     #[serde(default)]
+    #[schemars(with = "Vec<SettingsTabContribution>")]
     pub settings_tabs: Vec<serde_json::Value>,
+
+    /// Tools this plugin wants **hidden** from the model's offered tool list —
+    /// the declarative half of a tool firewall (see [`ToolFilterContribution`]).
+    ///
+    /// Purely declarative here: this contract defines and validates the shape, and
+    /// the filter is applied where tools are offered to the model. Like
+    /// [`Contributes::turn_hooks`] this is self-contained (the ids name tools from
+    /// *other* plugins/servers by design — hiding your own tool is just not
+    /// declaring it), so it is NOT cross-validated against `runnables`.
+    #[serde(default)]
+    pub tool_filters: Vec<ToolFilterContribution>,
 
     /// Slash commands the plugin contributes (e.g. `/goal`). The desktop maps the
     /// command to a `plugin_flags`/message action; the plugin's turn hook reads
@@ -794,6 +862,17 @@ pub struct Contributes {
     /// (no live list, just a label/icon + a client route). See [`SidebarButtonContribution`].
     #[serde(default)]
     pub sidebar_buttons: Vec<SidebarButtonContribution>,
+
+    /// App-registered **workspace dock panels** — a tab in the desktop's bottom or
+    /// right dock (Terminal / Code Review / Browser / Simulator live there today).
+    /// This is the seam that lets an app OWN its dock tab instead of the shell
+    /// welding the app into a closed `TabKind` union: `com.ryu.browser` and
+    /// `com.ryu.simulator` are apps, and their tabs are contributions, not enum
+    /// variants. Self-contained + opaque `spec` (see [`DockPanelContribution`]), so a
+    /// new panel capability needs no Core change; served + tagged with the owning
+    /// `plugin` id at `GET /api/plugins/contributions`.
+    #[serde(default)]
+    pub dock_panels: Vec<DockPanelContribution>,
 }
 
 /// One **declarative view** contribution (the Raycast tier — see [`Contributes::views`]).
@@ -821,6 +900,142 @@ pub struct ViewContribution {
 
     /// The DATA payload for the view (items/columns/actions/fields/…). Opaque to Core
     /// — the shared renderer interprets it per the `view` kind. Absent = an empty view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<serde_json::Value>,
+}
+
+/// Which of the desktop shell's workspace docks a [`DockPanelContribution`] opens in.
+///
+/// Unlike the `panel` discriminant this is a CLOSED enum on purpose: the docks are
+/// shell geometry, not app vocabulary — there are exactly two of them (the bottom
+/// drawer and the right rail), and an app cannot conjure a third. Adding a dock is a
+/// shell change, so it is correct for it to also be a contract change here.
+///
+/// Closed does NOT mean "fails the load", though: see
+/// [`deserialize_dock_panel_placement`]. The set of valid values being fixed and the
+/// blast radius of an unrecognised one are separate decisions, and the second answer
+/// has to match every sibling vocabulary field in this file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DockPanelPlacement {
+    /// The bottom drawer (Terminal / Code Review sit here).
+    #[default]
+    Bottom,
+    /// The right rail (Files / Changes sit here).
+    Right,
+    /// Offered in BOTH docks — the user picks where to open it. This is what the
+    /// Browser and Simulator tabs do today.
+    Both,
+}
+
+impl DockPanelPlacement {
+    /// The concrete docks this placement offers the panel in. `Both` fans out to the
+    /// two real docks so a renderer never has to special-case the fan-out itself.
+    pub fn docks(self) -> &'static [DockPanelPlacement] {
+        match self {
+            Self::Bottom => &[Self::Bottom],
+            Self::Right => &[Self::Right],
+            Self::Both => &[Self::Bottom, Self::Right],
+        }
+    }
+}
+
+/// Coerce a raw `placement` value to a known [`DockPanelPlacement`]: anything that is
+/// not `"right"` or `"both"` — including a null, a number, or a dock name from a
+/// future shell — resolves to [`DockPanelPlacement::Bottom`], the same value a missing
+/// key gets.
+///
+/// Same reasoning as [`deserialize_settings_scope`], and it is what keeps the closed
+/// enum honest. `placement` is closed because the docks are shell geometry, but that
+/// only fixes the *set of valid values* — it says nothing about what an unrecognised
+/// one should COST. Serde's derived enum deserializer makes it a hard parse error,
+/// which takes the entire manifest down (every runnable, sidecar and tool the plugin
+/// ships) over one cosmetic geometry hint. And the hazard is live by the enum's own
+/// admission that "adding a dock is a shell change": the moment a newer shell grows a
+/// third dock, every older Core would refuse to load an app that opts into it, rather
+/// than merely opening its panel in the drawer. That would also contradict the sibling
+/// `panel` field two lines away, whose whole point is that an unknown member must
+/// reach a newer shell intact instead of being rejected at load by an older Core.
+///
+/// The verbatim string survives on the wire regardless — `GET
+/// /api/plugins/contributions` re-serializes this struct, so a shell that understands
+/// the newer dock reads it from a manifest its own Core parsed leniently.
+fn deserialize_dock_panel_placement<'de, D>(deserializer: D) -> Result<DockPanelPlacement, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(match raw.as_str() {
+        Some("right") => DockPanelPlacement::Right,
+        Some("both") => DockPanelPlacement::Both,
+        _ => DockPanelPlacement::Bottom,
+    })
+}
+
+/// One app-registered **workspace dock panel** — a tab in the desktop's bottom or
+/// right dock (see [`Contributes::dock_panels`]).
+///
+/// The dock sibling of [`ViewContribution`] / [`SidebarSectionContribution`]: a typed
+/// envelope (`id` / `title` / `icon` / `placement`) around an OPAQUE description of
+/// what the tab renders. Core stores it verbatim, tags it with the owning `plugin` id
+/// at `GET /api/plugins/contributions`, and never interprets `panel` or `spec` — so a
+/// new panel capability is a renderer change, never a Core change.
+///
+/// # The `panel` vocabulary
+///
+/// `panel` is the render-mode discriminant the desktop's dock renderer switches on.
+/// It is a plain `String` (not an enum) for the same reason [`ViewContribution::view`]
+/// is: an unknown member must reach a newer shell intact rather than being rejected at
+/// load by an older Core. The vocabulary the desktop understands today:
+///
+/// - `"companion"` — mount the app's sandboxed companion surface in the dock. The
+///   `spec` names it: `{ "companion": "<runnable id>" }`. This is the third-party
+///   path: an app ships one companion UI and can surface it in the dock, the sidebar,
+///   or a full tab without any host code.
+/// - `"view"` — render one of the plugin's own [`Contributes::views`] entries inside
+///   the dock chrome: `{ "view": "<view id>" }`. Data-only, drawn with the host's own
+///   `@ryu/ui` components, so a dock panel gets the Raycast tier for free.
+/// - `"native"` — the shell's OWN component, registered under `<plugin>/<id>`. This is
+///   the migration seam for first-party apps whose panel is hand-written React driving
+///   their sidecar through the ext-proxy (`com.ryu.browser`, `com.ryu.simulator`): the
+///   *component* stays in the shell, but its existence, label, icon and placement stop
+///   being a hardcoded `TabKind` variant and become the app's own declaration, so
+///   disabling the app removes the tab. An unknown `<plugin>/<id>` simply renders
+///   nothing — a native panel is never a code channel.
+///
+/// The full `spec` shape is owned by the shared TS vocabulary (`@ryu/app-host/views`
+/// `DockPanelSpec`), NOT by this contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DockPanelContribution {
+    /// Stable id for this panel within the plugin (the dock's tab key, namespaced by
+    /// the shell as `plugin:<pluginId>:<id>` so two apps can reuse an id).
+    pub id: String,
+
+    /// Tab label shown on the dock tab strip and in the "new tab" menu.
+    pub title: String,
+
+    /// Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// Which dock the panel opens in. Defaults to [`DockPanelPlacement::Bottom`], the
+    /// drawer a terminal-shaped panel belongs in — and falls back to it for an
+    /// unrecognised dock too, rather than failing the whole manifest
+    /// (see [`deserialize_dock_panel_placement`]).
+    #[serde(default, deserialize_with = "deserialize_dock_panel_placement")]
+    pub placement: DockPanelPlacement,
+
+    /// Optional ordering hint within the dock's tab-type menu (lower = earlier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i64>,
+
+    /// The render-mode discriminant (`"companion"`, `"view"`, `"native"`, …). Opaque
+    /// to Core; an unknown member is passed through so a newer shell can render it.
+    pub panel: String,
+
+    /// The payload for the render mode (`{ "companion": … }` / `{ "view": … }` / any
+    /// future panel capability). Opaque to Core — the desktop dock renderer interprets
+    /// it per `panel`. Absent = the mode needs no payload (the `"native"` case).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<serde_json::Value>,
 }
@@ -960,6 +1175,546 @@ pub struct HookMatch {
     pub tools: Vec<String>,
 }
 
+/// Which settings dialog a [`SettingsTabContribution`] belongs in.
+///
+/// The two dialogs are not cosmetic: a `node` preference is stored on the node and
+/// is therefore shared by **every** user of that node, while a `user` preference is
+/// client-local. Defaulting to `node` preserves the historical behaviour (tabs
+/// always wrote node-scoped preferences through the active node); a plugin that
+/// wants a per-user knob has to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsScope {
+    /// Affects the whole node/gateway — shared by every user on it. The default.
+    #[default]
+    Node,
+    /// Per-user / client-local, like appearance. Rendered in App Settings.
+    User,
+}
+
+/// Coerce a raw `scope` value to a known [`SettingsScope`]: anything that is not
+/// the literal string `"user"` — including a null, a number, or a scope name from a
+/// future Core — resolves to [`SettingsScope::Node`].
+///
+/// This mirrors the desktop's `parseScope` byte for byte, and deliberately does NOT
+/// use serde's derived enum deserializer: that would make an unrecognised scope a
+/// hard parse error and take the *entire manifest* down (every runnable, sidecar and
+/// tool the plugin ships) over one cosmetic routing hint. Falling back to the
+/// safer-to-render dialog keeps the plugin working.
+fn deserialize_settings_scope<'de, D>(deserializer: D) -> Result<SettingsScope, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(if raw.as_str() == Some("user") {
+        SettingsScope::User
+    } else {
+        SettingsScope::Node
+    })
+}
+
+/// The control one [`SettingsFieldContribution`] renders as.
+///
+/// This list is the desktop renderer's `FieldControl` switch, transcribed: every
+/// variant here has a real control behind it, and there is nothing the renderer
+/// handles that is missing. Adding a variant means teaching the renderer first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsFieldType {
+    /// Single-line text input. The default for a field that omits `type`.
+    #[default]
+    Text,
+    /// Multi-line text input.
+    Textarea,
+    /// Numeric input (still persisted as a bare string, like every preference).
+    Number,
+    /// On/off switch, persisted as `"true"`/`"false"`.
+    Toggle,
+    /// Dropdown over the field's declared `options` (which are then REQUIRED).
+    Select,
+    /// The composer's provider/model picker, so "which model runs this" is a
+    /// catalog pick rather than a typo-prone free-text string. Persists a bare
+    /// model id.
+    ModelPicker,
+    /// The composer's FULL target picker — agent, provider, model, thinking
+    /// level, reasoning effort, and ACP access mode — persisted as one
+    /// `AgentSelection` JSON object.
+    ///
+    /// Prefer this over [`ModelPicker`](Self::ModelPicker) when the plugin can
+    /// be served by an *agent* and not only a raw model call; a field left
+    /// unset inherits the node-wide default selection either way, since the
+    /// resolver reads both forms from the same key.
+    AgentPicker,
+}
+
+/// Coerce a raw field `type` to a known [`SettingsFieldType`], falling back to
+/// [`SettingsFieldType::Text`] for anything unrecognised.
+///
+/// Same reasoning as [`deserialize_settings_scope`], plus one more: the renderer's
+/// `default:` branch *already* draws an unknown type as a text input, so a plugin
+/// that declares a control a newer desktop understands still renders usefully on an
+/// older one. Rejecting the manifest instead would make the plugin unusable rather
+/// than merely plain-looking. The verbatim string survives on the wire regardless —
+/// [`Contributes::settings_tabs`] forwards the original JSON, not this struct.
+fn deserialize_settings_field_type<'de, D>(deserializer: D) -> Result<SettingsFieldType, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(match raw.as_str() {
+        Some("textarea") => SettingsFieldType::Textarea,
+        Some("number") => SettingsFieldType::Number,
+        Some("toggle") => SettingsFieldType::Toggle,
+        Some("select") => SettingsFieldType::Select,
+        Some("model_picker") => SettingsFieldType::ModelPicker,
+        Some("agent_picker") => SettingsFieldType::AgentPicker,
+        _ => SettingsFieldType::Text,
+    })
+}
+
+/// One selectable option for a [`SettingsFieldType::Select`] field.
+///
+/// Accepts both spellings the desktop's `parseOptions` accepts: a bare string
+/// (value and label are the same) or an object with an explicit `label`. Keeping
+/// both is not indulgence — the bare-string form is what every hand-written
+/// manifest reaches for, and rejecting it would push authors into boilerplate for
+/// the common case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum SettingsFieldOption {
+    /// `"fast"` — the stored value doubles as the label.
+    Value(String),
+    /// `{ "value": "fast", "label": "Fast" }`.
+    Labeled {
+        /// The value persisted to the preference key.
+        value: String,
+        /// Display label. Absent = show the raw `value`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+}
+
+impl SettingsFieldOption {
+    /// The value this option persists.
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Value(value) | Self::Labeled { value, .. } => value,
+        }
+    }
+
+    /// The label this option displays (the value itself when none was given).
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Value(value) => value,
+            Self::Labeled { value, label } => label.as_deref().unwrap_or(value),
+        }
+    }
+}
+
+/// One configurable field inside a [`SettingsTabContribution`], bound to exactly
+/// one preference key.
+///
+/// `pref_key` is both the storage binding (`GET/PUT /api/preferences/:key`) **and**
+/// the field's identity — the renderer keys its React elements by it — so two
+/// fields sharing one `pref_key` inside a tab is a bug, not a shorthand, and the
+/// loader rejects it.
+///
+/// The `default`/`required`/`min`/`max`/`min_length`/`max_length` block is
+/// validation metadata: declaring it is how a plugin gets its settings checked at
+/// *import* instead of discovering at runtime that a user typed `"maybe"` into what
+/// the hook reads as a number. It is cross-checked against `type` at load, because
+/// validation metadata that is silently ignored (a `min` on a toggle) is worse than
+/// none — it reads as a guarantee that was never enforced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SettingsFieldContribution {
+    /// The control to render. Absent or unrecognised = a plain text input.
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_settings_field_type"
+    )]
+    pub field_type: SettingsFieldType,
+
+    /// The preference key this field reads/writes. Required, non-empty, and
+    /// restricted to a path-safe alphabet (it becomes a URL path segment).
+    #[serde(alias = "prefKey")]
+    pub pref_key: String,
+
+    /// Display label. Absent = the renderer shows the `pref_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Helper caption shown under the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Placeholder for text / model-picker inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+
+    /// Choices for a [`SettingsFieldType::Select`]; required for that type and
+    /// inert for every other one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<SettingsFieldOption>,
+
+    /// Default value, in the field's own JSON type (bool for a toggle, number for
+    /// a number, string elsewhere) — NOT the stringified form preferences are
+    /// stored in, so a manifest stays readable and the type is checkable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+
+    /// Whether the user must supply a value (advisory: enforced by the renderer,
+    /// declared here so the contract is one place).
+    #[serde(default)]
+    pub required: bool,
+
+    /// Inclusive lower bound for a [`SettingsFieldType::Number`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+
+    /// Inclusive upper bound for a [`SettingsFieldType::Number`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+
+    /// Minimum length for a text/textarea value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u64>,
+
+    /// Maximum length for a text/textarea value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u64>,
+}
+
+/// One **settings tab** a plugin contributes (see [`Contributes::settings_tabs`]).
+///
+/// A tab is EITHER declarative (`fields`, rendered by the shared plugin-settings
+/// renderer against Core's preference store) OR a named `view` the shell resolves to
+/// a bespoke component — for an app whose settings genuinely cannot be expressed as
+/// a list of fields. A tab with neither renders as an empty section, which the
+/// desktop's defensive parser drops on the floor; the loader rejects it instead so
+/// the author gets told.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SettingsTabContribution {
+    /// Stable id for this tab within the plugin — the settings nav routes to it and
+    /// the renderer keys by it. Required: the desktop's fallback (`<plugin>.settings`)
+    /// collides the moment a plugin declares a second tab.
+    pub id: String,
+
+    /// Header label for the section. Absent = `"Settings"`, matching the renderer.
+    #[serde(default = "default_settings_tab_title")]
+    pub title: String,
+
+    /// Which settings dialog this tab lands in. Absent/unrecognised = `node`.
+    #[serde(default, deserialize_with = "deserialize_settings_scope")]
+    pub scope: SettingsScope,
+
+    /// A rich settings view this app ships instead of declarative `fields`. Opaque
+    /// here — the settings renderer owns the vocabulary and resolves the name to a
+    /// component (first-party) or a sandboxed UI (third-party).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+
+    /// The declarative fields this tab renders. Empty is only legal alongside a
+    /// `view`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<SettingsFieldContribution>,
+}
+
+fn default_settings_tab_title() -> String {
+    "Settings".to_owned()
+}
+
+/// One **tool filter**: a fully-qualified tool id a plugin wants withheld from the
+/// model's offered tool list.
+///
+/// Tools are namespaced `<server>__<tool>` (e.g. `browser__navigate`), so `tool`
+/// must carry the namespace — a bare `navigate` would be ambiguous across servers
+/// and is rejected at load. A **trailing** `*` is a prefix wildcard, which is how a
+/// plugin withholds a whole server (`shadow__*`); it is the only wildcard position
+/// allowed, because an interior or leading `*` invites a pattern that silently
+/// matches far more than the author pictured.
+///
+/// This type is declaration + validation only. The filter is **applied** where the
+/// tool list is assembled for the model (the MCP offer site in
+/// `apps/core/src/sidecar/mcp`), which calls [`ToolFilterContribution::matches`] so
+/// the wildcard rule has exactly one implementation. Hiding a tool from the model
+/// is not a security boundary — it does not revoke the capability, it only stops the
+/// tool being advertised; enforcement stays with permissions and grants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolFilterContribution {
+    /// Fully-qualified tool id (`<server>__<tool>`), optionally ending in `*` to
+    /// hide every tool whose id starts with the preceding prefix.
+    pub tool: String,
+
+    /// Why the plugin hides it — surfaced in the plugin's listing so a user can see
+    /// what a plugin is removing from the model's view before installing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl ToolFilterContribution {
+    /// Does this filter hide `tool_id`? Exact match, or prefix match when the
+    /// pattern ends in `*`. The single implementation of the wildcard rule — the
+    /// offer site calls this rather than re-deriving it.
+    pub fn matches(&self, tool_id: &str) -> bool {
+        self.tool.strip_suffix('*').map_or_else(
+            || self.tool == tool_id,
+            |prefix| tool_id.starts_with(prefix),
+        )
+    }
+}
+
+/// Validate one [`ToolFilterContribution`] pattern.
+///
+/// Returns `Ok(())` when the pattern is well-formed, else a descriptive `Err`.
+pub fn validate_tool_filter(filter: &ToolFilterContribution) -> Result<(), String> {
+    let tool = filter.tool.trim();
+    if tool.is_empty() {
+        return Err("tool_filters entry has an empty 'tool' pattern".to_string());
+    }
+    if tool != filter.tool {
+        return Err(format!(
+            "tool_filters pattern '{}' has leading/trailing whitespace",
+            filter.tool
+        ));
+    }
+    if tool.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "tool_filters pattern '{tool}' must not contain whitespace"
+        ));
+    }
+    // Only a TRAILING `*` is a wildcard. An interior one (`br*ser__nav`) would look
+    // like a glob and behave like a literal, which is the worst of both.
+    let body = tool.strip_suffix('*').unwrap_or(tool);
+    if body.contains('*') {
+        return Err(format!(
+            "tool_filters pattern '{tool}' may only use '*' as its final character"
+        ));
+    }
+    // `*` alone (or any pattern that does not name a server) would hide every tool
+    // on the node from the model — a plugin that wants that is almost certainly a
+    // mistake or hostile, and either way the user should not learn about it by
+    // watching the agent lose its hands.
+    if !body.contains("__") {
+        return Err(format!(
+            "tool_filters pattern '{tool}' must be a fully-qualified '<server>__<tool>' id (a bare name or '*' would match across every server)"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate one [`SettingsTabContribution`] and every field it declares.
+///
+/// This is the Rust twin of the schema an SDK author gets from `manifest.ts`: the
+/// same rules, enforced on the Core side so a hand-written manifest (or one from a
+/// language with no SDK) cannot skip them. Returns `Ok(())` when the tab is
+/// well-formed, else a descriptive `Err` naming the tab and field at fault.
+pub fn validate_settings_tab(tab: &SettingsTabContribution) -> Result<(), String> {
+    if tab.id.trim().is_empty() {
+        return Err("settings tab has an empty 'id'".to_string());
+    }
+    if tab.title.trim().is_empty() {
+        return Err(format!("settings tab '{}' has an empty 'title'", tab.id));
+    }
+
+    let has_view = tab.view.as_ref().is_some_and(|v| !v.trim().is_empty());
+    if tab.fields.is_empty() && !has_view {
+        return Err(format!(
+            "settings tab '{}' declares neither 'fields' nor a 'view' and would render as an empty section",
+            tab.id
+        ));
+    }
+
+    let mut seen_keys: BTreeSet<&str> = BTreeSet::new();
+    for field in &tab.fields {
+        validate_settings_field(&tab.id, field)?;
+        if !seen_keys.insert(field.pref_key.as_str()) {
+            return Err(format!(
+                "settings tab '{}' declares two fields bound to '{}'; a preference key is a field's identity, so the second would overwrite the first",
+                tab.id, field.pref_key
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Characters a `pref_key` may contain. It is interpolated into the preference
+/// route (`/api/preferences/<key>`), so a `/`, a backslash or a `..` segment would
+/// escape the key space and address an unrelated route; a strict allowlist (not a
+/// blocklist) is the only form of this check that stays correct as the route table
+/// grows.
+fn pref_key_char_is_legal(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':')
+}
+
+fn validate_settings_field(tab_id: &str, field: &SettingsFieldContribution) -> Result<(), String> {
+    let key = field.pref_key.trim();
+    if key.is_empty() {
+        return Err(format!(
+            "settings tab '{tab_id}' has a field with an empty 'pref_key'; a field with nothing to persist is an inert control"
+        ));
+    }
+    if key != field.pref_key {
+        return Err(format!(
+            "settings tab '{tab_id}' field pref_key '{}' has leading/trailing whitespace",
+            field.pref_key
+        ));
+    }
+    if !key.chars().all(pref_key_char_is_legal) {
+        return Err(format!(
+            "settings tab '{tab_id}' field pref_key '{key}' contains illegal characters (allowed: a-z A-Z 0-9 . - _ :)"
+        ));
+    }
+    if key.contains("..") {
+        return Err(format!(
+            "settings tab '{tab_id}' field pref_key '{key}' must not contain '..'"
+        ));
+    }
+
+    let is_select = field.field_type == SettingsFieldType::Select;
+    if is_select {
+        // The renderer silently degrades an optionless select to a free-text box, so
+        // the user gets a control that looks nothing like what the author declared.
+        if field.options.is_empty() {
+            return Err(format!(
+                "settings tab '{tab_id}' field '{key}' is type 'select' but declares no options"
+            ));
+        }
+        let mut seen_values: BTreeSet<&str> = BTreeSet::new();
+        for option in &field.options {
+            if option.value().trim().is_empty() {
+                return Err(format!(
+                    "settings tab '{tab_id}' field '{key}' has a select option with an empty value"
+                ));
+            }
+            if !seen_values.insert(option.value()) {
+                return Err(format!(
+                    "settings tab '{tab_id}' field '{key}' declares duplicate select option '{}'",
+                    option.value()
+                ));
+            }
+        }
+    }
+
+    validate_settings_field_bounds(tab_id, key, field)?;
+    validate_settings_field_default(tab_id, key, field)
+}
+
+/// Cross-check the numeric / length bounds against the field's declared `type`.
+/// Bounds attached to a type that cannot use them are rejected rather than ignored:
+/// an author who writes `min` on a toggle believes something is being enforced.
+fn validate_settings_field_bounds(
+    tab_id: &str,
+    key: &str,
+    field: &SettingsFieldContribution,
+) -> Result<(), String> {
+    let is_number = field.field_type == SettingsFieldType::Number;
+    if (field.min.is_some() || field.max.is_some()) && !is_number {
+        return Err(format!(
+            "settings tab '{tab_id}' field '{key}' declares min/max but is not type 'number'"
+        ));
+    }
+    if let (Some(min), Some(max)) = (field.min, field.max) {
+        if min > max {
+            return Err(format!(
+                "settings tab '{tab_id}' field '{key}' has min {min} greater than max {max}"
+            ));
+        }
+    }
+
+    let is_textual = matches!(
+        field.field_type,
+        SettingsFieldType::Text | SettingsFieldType::Textarea
+    );
+    if (field.min_length.is_some() || field.max_length.is_some()) && !is_textual {
+        return Err(format!(
+            "settings tab '{tab_id}' field '{key}' declares min_length/max_length but is not type 'text' or 'textarea'"
+        ));
+    }
+    if let (Some(min), Some(max)) = (field.min_length, field.max_length) {
+        if min > max {
+            return Err(format!(
+                "settings tab '{tab_id}' field '{key}' has min_length {min} greater than max_length {max}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check that a declared `default` is of the field's own type and inside its own
+/// bounds. A default that violates either would be written straight into the
+/// preference store the first time the tab renders, so catching it at import is the
+/// difference between a load-time warning and a runtime value nothing can parse.
+fn validate_settings_field_default(
+    tab_id: &str,
+    key: &str,
+    field: &SettingsFieldContribution,
+) -> Result<(), String> {
+    let Some(default) = &field.default else {
+        return Ok(());
+    };
+    let mismatch = |expected: &str| {
+        format!("settings tab '{tab_id}' field '{key}' is type '{expected}' but its default is {default}")
+    };
+
+    match field.field_type {
+        SettingsFieldType::Toggle => {
+            if !default.is_boolean() {
+                return Err(mismatch("toggle"));
+            }
+        }
+        SettingsFieldType::Number => {
+            let Some(value) = default.as_f64() else {
+                return Err(mismatch("number"));
+            };
+            let below_min = field.min.is_some_and(|min| value < min);
+            let above_max = field.max.is_some_and(|max| value > max);
+            if below_min || above_max {
+                return Err(format!(
+                    "settings tab '{tab_id}' field '{key}' default {value} is outside its declared min/max"
+                ));
+            }
+        }
+        SettingsFieldType::Select => {
+            let Some(value) = default.as_str() else {
+                return Err(mismatch("select"));
+            };
+            if !field.options.iter().any(|o| o.value() == value) {
+                return Err(format!(
+                    "settings tab '{tab_id}' field '{key}' default '{value}' is not one of its declared options"
+                ));
+            }
+        }
+        SettingsFieldType::Text | SettingsFieldType::Textarea => {
+            let Some(value) = default.as_str() else {
+                return Err(mismatch("text"));
+            };
+            let len = value.chars().count() as u64;
+            let too_short = field.min_length.is_some_and(|min| len < min);
+            let too_long = field.max_length.is_some_and(|max| len > max);
+            if too_short || too_long {
+                return Err(format!(
+                    "settings tab '{tab_id}' field '{key}' default is outside its declared min_length/max_length"
+                ));
+            }
+        }
+        SettingsFieldType::ModelPicker => {
+            if !default.is_string() {
+                return Err(mismatch("model_picker"));
+            }
+        }
+        // A selection is stored as JSON, but a manifest may equally declare its
+        // default as a bare model id (the legacy form the resolver still reads),
+        // so both spellings are valid here.
+        SettingsFieldType::AgentPicker => {
+            if !(default.is_string() || default.is_object()) {
+                return Err(mismatch("agent_picker"));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Contributes {
     /// Every runnable id referenced across all contribution surfaces. Used by the
     /// loader to verify each one resolves to a `runnables` entry.
@@ -972,6 +1727,38 @@ impl Contributes {
             .chain(self.policies.iter())
             .map(|c| c.id.as_str())
             .collect()
+    }
+
+    /// Hold `settings_tabs` and `tool_filters` to their typed contracts.
+    ///
+    /// `settings_tabs` is stored as raw JSON (see [`Contributes::settings_tabs`]),
+    /// so this is where it is actually parsed as [`SettingsTabContribution`] — the
+    /// ONE implementation, called from both [`PluginManifest::validate`] (the SDK /
+    /// FFI path) and Core's manifest loader, so an author cannot get a different
+    /// answer depending on which door they came through.
+    ///
+    /// Errors are unprefixed; each caller wraps them in its own house style.
+    pub fn validate_settings_contributions(&self) -> Result<(), String> {
+        let mut seen_tab_ids: BTreeSet<&str> = BTreeSet::new();
+        let mut tabs: Vec<SettingsTabContribution> = Vec::with_capacity(self.settings_tabs.len());
+        for (index, raw) in self.settings_tabs.iter().enumerate() {
+            let tab: SettingsTabContribution = serde_json::from_value(raw.clone())
+                .map_err(|e| format!("settings tab #{index} is not a valid settings tab: {e}"))?;
+            validate_settings_tab(&tab)?;
+            tabs.push(tab);
+        }
+        // Two tabs sharing an id collide in the settings nav (which routes by id) and
+        // in the renderer's element keys, so the second silently shadows the first.
+        for tab in &tabs {
+            if !seen_tab_ids.insert(tab.id.as_str()) {
+                return Err(format!("duplicate settings tab id '{}'", tab.id));
+            }
+        }
+
+        for filter in &self.tool_filters {
+            validate_tool_filter(filter)?;
+        }
+        Ok(())
     }
 }
 
@@ -1845,6 +2632,101 @@ mod tests {
         assert_eq!(value["view"], serde_json::json!("empty-state"));
     }
 
+    #[test]
+    fn dock_panel_contribution_round_trips_and_is_self_contained() {
+        // The dock sibling of `views_contribution_round_trips_and_is_self_contained`:
+        // a `dock_panels` entry is opaque + self-contained, so a manifest that declares
+        // only a panel (no runnables) still validates and round-trips, and its `panel`
+        // discriminant / `spec` are NOT cross-validated against `runnables`.
+        let raw = r#"{
+            "id": "com.example.dock",
+            "name": "Dock",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "dock_panels": [
+                    {
+                        "id": "preview",
+                        "title": "Preview",
+                        "icon": "hugeicons:globe-02",
+                        "placement": "both",
+                        "order": 10,
+                        "panel": "companion",
+                        "spec": { "companion": "preview-ui" }
+                    }
+                ]
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw).expect("dock panel manifest validates");
+        let panels = &m.contributes.as_ref().unwrap().dock_panels;
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].id, "preview");
+        assert_eq!(panels[0].panel, "companion");
+        assert_eq!(panels[0].placement, DockPanelPlacement::Both);
+        assert_eq!(panels[0].order, Some(10));
+        assert!(panels[0].spec.is_some(), "opaque spec is carried through");
+        // `spec.companion` names a runnable, but the panel is still not a runnable
+        // REFERENCE for cross-validation purposes — same contract as `views`.
+        assert!(
+            m.contributes.as_ref().unwrap().referenced_ids().is_empty(),
+            "dock panels must not be cross-validated as runnable references"
+        );
+        let round =
+            PluginManifest::parse_and_validate(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(m, round);
+    }
+
+    #[test]
+    fn dock_panel_omits_optional_fields_and_fans_out_both() {
+        // A minimal panel drops icon/order/spec via skip_serializing_if, but `placement`
+        // has no skip: it always ships so a renderer never has to know the default.
+        let dp = DockPanelContribution {
+            id: "bare".to_string(),
+            title: "Bare".to_string(),
+            icon: None,
+            placement: DockPanelPlacement::default(),
+            order: None,
+            panel: "native".to_string(),
+            spec: None,
+        };
+        let value = serde_json::to_value(&dp).unwrap();
+        assert!(value.get("icon").is_none(), "absent icon omitted");
+        assert!(value.get("order").is_none(), "absent order omitted");
+        assert!(value.get("spec").is_none(), "absent spec omitted");
+        assert_eq!(value["placement"], serde_json::json!("bottom"));
+        // `Both` fans out to the two REAL docks, never to itself.
+        assert_eq!(
+            DockPanelPlacement::Both.docks(),
+            &[DockPanelPlacement::Bottom, DockPanelPlacement::Right]
+        );
+        assert_eq!(
+            DockPanelPlacement::Right.docks(),
+            &[DockPanelPlacement::Right]
+        );
+    }
+
+    #[test]
+    fn unknown_dock_placement_falls_back_instead_of_failing() {
+        // A dock name from a newer shell must cost the plugin its PLACEMENT, not its
+        // whole manifest: the sidecar/tool/runnable it ships keep loading and the panel
+        // simply opens in the drawer. Same contract as an unknown settings field type.
+        let raw = r#"{
+            "id": "com.example.dock",
+            "name": "Dock",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "dock_panels": [
+                    { "id": "p", "title": "P", "placement": "left", "panel": "native" }
+                ]
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw)
+            .expect("an unrecognised dock must not fail the manifest");
+        let panels = &m.contributes.as_ref().unwrap().dock_panels;
+        assert_eq!(panels[0].placement, DockPanelPlacement::Bottom);
+    }
+
     // ── unified permission grammar ───────────────────────────────────────────────
 
     #[test]
@@ -1962,5 +2844,123 @@ mod tests {
         }"#;
         let err = PluginManifest::parse_and_validate(raw).unwrap_err();
         assert!(err.contains("invalid version"), "got: {err}");
+    }
+
+    /// The two tab shapes every shipped built-in uses — a `model_picker` field tab
+    /// (advisor/double-check/goal/proof/…) and a `view`-only tab (meetings/memory/
+    /// quests/predict) — must keep validating, and must survive as raw JSON.
+    #[test]
+    fn builtin_settings_tab_shapes_still_validate_and_round_trip_verbatim() {
+        let raw = r#"{
+            "id": "com.example.settings",
+            "name": "Settings",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": { "settings_tabs": [
+                {
+                    "id": "advisor.settings",
+                    "title": "Advisor",
+                    "fields": [
+                        { "type": "model_picker", "pref_key": "advisor-model", "label": "Advisor model" }
+                    ]
+                },
+                { "id": "meetings.settings", "title": "Meetings", "scope": "node", "view": "meetings" }
+            ] }
+        }"#;
+        let manifest = PluginManifest::parse_and_validate(raw).expect("built-in shapes validate");
+        let tabs = manifest.contributes.expect("contributes").settings_tabs;
+        assert_eq!(tabs.len(), 2);
+        // Stored verbatim (not re-serialized from the struct), so a desktop newer
+        // than this Core still receives every key it was shipped to render.
+        assert_eq!(tabs[0]["fields"][0]["type"], "model_picker");
+        assert_eq!(tabs[1]["view"], "meetings");
+    }
+
+    /// Each of these used to reach the desktop and be dropped by the renderer's
+    /// defensive parser, leaving the author with a missing row and no diagnostic.
+    #[test]
+    fn settings_tab_rules_reject_the_silently_broken_shapes() {
+        let with_fields = |fields: &str| {
+            format!(
+                r#"{{
+                    "id": "com.example.bad-settings",
+                    "name": "Bad",
+                    "version": "1.0.0",
+                    "runnables": [],
+                    "contributes": {{ "settings_tabs": [
+                        {{ "id": "t", "title": "T", "fields": {fields} }}
+                    ] }}
+                }}"#
+            )
+        };
+        let reject = |fields: &str, needle: &str| {
+            let err = PluginManifest::parse_and_validate(&with_fields(fields))
+                .expect_err("must be rejected");
+            assert!(err.contains(needle), "expected '{needle}', got: {err}");
+        };
+
+        // Two fields on one preference key: the second silently overwrites the first.
+        reject(r#"[{"pref_key":"k"},{"pref_key":"k"}]"#, "identity");
+        // A select with no options degrades into a free-text box.
+        reject(r#"[{"type":"select","pref_key":"k"}]"#, "no options");
+        // A default of the wrong type is written straight into the preference store.
+        reject(r#"[{"type":"toggle","pref_key":"k","default":"yes"}]"#, "toggle");
+        // Bounds on a type that cannot enforce them read as a guarantee and are not one.
+        reject(r#"[{"type":"toggle","pref_key":"k","min":1}]"#, "min/max");
+        // A pref_key that would escape the `/api/preferences/<key>` route.
+        reject(r#"[{"pref_key":"../secrets"}]"#, "illegal characters");
+        // Neither fields nor a view = an empty section.
+        reject("[]", "empty section");
+    }
+
+    /// A control a NEWER desktop understands must not sink the whole manifest — the
+    /// renderer already draws an unknown type as a text input.
+    #[test]
+    fn unknown_settings_field_type_falls_back_instead_of_failing() {
+        let raw = r#"{
+            "id": "com.example.future",
+            "name": "Future",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": { "settings_tabs": [
+                { "id": "t", "title": "T", "fields": [ { "type": "color_picker", "pref_key": "k" } ] }
+            ] }
+        }"#;
+        let manifest =
+            PluginManifest::parse_and_validate(raw).expect("a future control must still load");
+        let tabs = manifest.contributes.expect("contributes").settings_tabs;
+        assert_eq!(tabs[0]["fields"][0]["type"], "color_picker");
+    }
+
+    #[test]
+    fn tool_filter_matches_exactly_or_by_trailing_wildcard() {
+        let exact = ToolFilterContribution {
+            tool: "browser__navigate".to_owned(),
+            reason: None,
+        };
+        assert!(exact.matches("browser__navigate"));
+        assert!(!exact.matches("browser__navigate_back"));
+        assert!(validate_tool_filter(&exact).is_ok());
+
+        let wildcard = ToolFilterContribution {
+            tool: "shadow__*".to_owned(),
+            reason: Some("replaced by this plugin's own search".to_owned()),
+        };
+        assert!(wildcard.matches("shadow__search"));
+        assert!(!wildcard.matches("browser__search"));
+        assert!(validate_tool_filter(&wildcard).is_ok());
+
+        // `*` alone or an unqualified name would strip tools across every server;
+        // an interior `*` looks like a glob and behaves like a literal.
+        for bad in ["", "*", "navigate", "br*ser__nav", "browser__nav "] {
+            let filter = ToolFilterContribution {
+                tool: bad.to_owned(),
+                reason: None,
+            };
+            assert!(
+                validate_tool_filter(&filter).is_err(),
+                "must reject pattern '{bad}'"
+            );
+        }
     }
 }

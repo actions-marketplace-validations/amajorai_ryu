@@ -8,7 +8,7 @@
 
 import type { ApiTarget } from "@ryuhq/core-client/client";
 import { buildTarget } from "../core/target.ts";
-import { realCoreApi } from "./api.ts";
+import { realCoreApi, realScaffold } from "./api.ts";
 import { findCommand, renderHelp } from "./commands.ts";
 import { errorToJson, formatError, formatTable } from "./output.ts";
 import {
@@ -17,6 +17,7 @@ import {
 	type CoreApi,
 	type GlobalFlags,
 	type ParsedArgs,
+	type ScaffoldRunner,
 	UsageError,
 } from "./types.ts";
 import { VERSION } from "./version.ts";
@@ -25,14 +26,29 @@ const EXIT_OK = 0;
 const EXIT_ERROR = 1;
 const EXIT_USAGE = 2;
 
+/** The flags that consume a VALUE (`--flag v` or `--flag=v`), mapped to the field
+ *  they set. A table keeps the parse loop flat: each new value-flag is one entry
+ *  here instead of two more branches in an ever-growing else-if chain. */
+const VALUE_FLAGS = {
+	"--kind": "kind",
+	"--node": "node",
+	"--template": "template",
+} as const satisfies Record<string, "kind" | "node" | "template">;
+
 /** Parse `process.argv.slice(2)` into a command, its positional args, and flags.
- *  Flags may appear anywhere; `--node <url>` (or `--node=<url>`) consumes a value.
- *  The first non-flag token is the command; the rest are its positional args.
- *  Unknown `--flags` are ignored so they never masquerade as positional args. */
+ *  Flags may appear anywhere; the value flags in {@link VALUE_FLAGS} (`--node`,
+ *  `--kind`, `--template`) each consume the following token, or take it inline
+ *  after an `=`. The first non-flag token is the command; the rest are its
+ *  positional args. Unknown `--flags` are ignored so they never masquerade as
+ *  positional args. A value flag given with no value stays null — its owner then
+ *  applies its own default (or reports a usage error), so a truncated argv can
+ *  never silently pick up the NEXT token as its value. */
 export function parseArgs(argv: string[]): ParsedArgs {
 	const flags: GlobalFlags = {
 		json: false,
+		kind: null,
 		node: null,
+		template: null,
 		force: false,
 		cascade: false,
 		help: false,
@@ -51,13 +67,22 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			flags.help = true;
 		} else if (tok === "--version") {
 			flags.version = true;
-		} else if (tok === "--node") {
-			flags.node = argv[i + 1] ?? null;
-			i++;
-		} else if (tok.startsWith("--node=")) {
-			flags.node = tok.slice("--node=".length);
+		} else if (tok.startsWith("--")) {
+			const eq = tok.indexOf("=");
+			const name = eq === -1 ? tok : tok.slice(0, eq);
+			const key = Object.hasOwn(VALUE_FLAGS, name)
+				? VALUE_FLAGS[name as keyof typeof VALUE_FLAGS]
+				: null;
+			if (!key) {
+				// Unknown long flag — ignore (do not treat as a positional/command).
+			} else if (eq === -1) {
+				flags[key] = argv[i + 1] ?? null;
+				i++;
+			} else {
+				flags[key] = tok.slice(eq + 1);
+			}
 		} else if (tok.startsWith("-")) {
-			// Unknown flag — ignore (do not treat as a positional/command).
+			// Unknown short flag — ignore (do not treat as a positional/command).
 		} else {
 			positional.push(tok);
 		}
@@ -92,6 +117,8 @@ const defaultIo: CliIO = {
 interface RunOverrides {
 	api?: CoreApi;
 	io?: CliIO;
+	/** Fake scaffolder for `ryu init` — see {@link ScaffoldRunner}. */
+	scaffold?: ScaffoldRunner;
 	target?: ApiTarget;
 }
 
@@ -112,7 +139,11 @@ export async function runCli(
 		return EXIT_OK;
 	}
 	if (flags.version) {
-		io.out(flags.json ? `${JSON.stringify({ version: VERSION })}\n` : `ryu ${VERSION}\n`);
+		io.out(
+			flags.json
+				? `${JSON.stringify({ version: VERSION })}\n`
+				: `ryu ${VERSION}\n`
+		);
 		return EXIT_OK;
 	}
 
@@ -127,6 +158,7 @@ export async function runCli(
 		args: parsed.args,
 		flags,
 		io,
+		scaffold: overrides.scaffold ?? realScaffold,
 		target: overrides.target ?? resolveTarget(flags),
 	};
 

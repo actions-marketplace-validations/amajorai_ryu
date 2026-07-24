@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "A CSM agent, your way",
-      "description": "Agents are swappable cards: set the model, your playbook, memory, and the tools each one can touch."
+      "description": "Agents are swappable cards: set the model, your playbook, memory, and the tools each one can touch.",
+      "icon": "Plug"
     },
     {
       "title": "Health from real signals",
-      "description": "Agents connect to your CRM, product data, and support tool to read usage, tickets, and sentiment together."
+      "description": "Agents connect to your CRM, product data, and support tool to read usage, tickets, and sentiment together.",
+      "icon": "Plug"
     },
     {
       "title": "Grounded in your playbook",
-      "description": "Spaces and RAG keep the agent on your success motions and messaging, with answers tied to the source."
+      "description": "Spaces and RAG keep the agent on your success motions and messaging, with answers tied to the source.",
+      "icon": "Bot"
     },
     {
       "title": "Governed and private",
-      "description": "The Gateway logs every call and redacts customer data, so account intelligence never leaks."
+      "description": "The Gateway logs every call and redacts customer data, so account intelligence never leaks.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

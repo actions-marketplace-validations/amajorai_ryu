@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Neural and keyword web search via the Exa API (https://exa.ai), exposed as two declarative HTTP tools: search and find-similar. Requires a BYOK Exa API key.",
   "tagline": "Neural web search for agents",
+  "keywords": ["search", "web"],
   "category": "Search",
   "engines": {
     "ryu": ">=0.0.1"

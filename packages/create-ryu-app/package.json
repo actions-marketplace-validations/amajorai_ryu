@@ -1,6 +1,6 @@
 {
   "name": "create-ryu-app",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "type": "module",
   "description": "Scaffold a starter Ryu SDK project with a Runnable, gateway-pointed model config, and manifest.json manifest",
   "bin": {
@@ -20,7 +20,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@ryuhq/sdk": "^0.0.9"
+    "@ryuhq/sdk": "^0.0.10"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

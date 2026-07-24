@@ -34,6 +34,7 @@ import { inboxSurface } from "../surfaces/inbox/index.tsx";
 import { librarySurface } from "../surfaces/library/index.tsx";
 import { meetingsSurface } from "../surfaces/meetings/index.tsx";
 import { monitorsSurface } from "../surfaces/monitors/index.tsx";
+import { pluginViewSurface } from "../surfaces/plugin-view/index.tsx";
 import { setupSurface } from "../surfaces/setup/index.tsx";
 import { spacesSurface } from "../surfaces/spaces/index.tsx";
 import {
@@ -118,3 +119,8 @@ registerSurface(meetingsSurface);
 registerSurface(inboxSurface);
 registerSurface(downloadsSurface);
 registerSurface(setupSurface);
+// The generic surface for a plugin-contributed declarative view. It owns no
+// built-in path: `/plugin-view/<plugin>/<viewId>` routes are minted from the
+// contributions feed, so an enabled app's views are reachable without the shell
+// naming the app (see src/core/contributions.ts).
+registerSurface(pluginViewSurface);

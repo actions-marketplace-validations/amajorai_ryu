@@ -1,3 +1,4 @@
+import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
 import { useEffect, useState } from "react";
 
 /** Tab layout preference: the horizontal title-bar strip (default) or a vertical
@@ -14,6 +15,10 @@ function read(): TabLayout {
 
 export function useTabLayout(): TabLayout {
 	const [layout, setLayout] = useState<TabLayout>(read);
+	// At phone widths the sidebar is a Sheet, so a vertical strip living inside
+	// it would put the open tabs behind an overlay. Force horizontal there — the
+	// stored preference is untouched and comes back on a wide viewport.
+	const isMobile = useIsMobile();
 
 	useEffect(() => {
 		const handler = () => setLayout(read());
@@ -21,7 +26,7 @@ export function useTabLayout(): TabLayout {
 		return () => window.removeEventListener("storage", handler);
 	}, []);
 
-	return layout;
+	return isMobile ? "horizontal" : layout;
 }
 
 export function setTabLayout(layout: TabLayout) {

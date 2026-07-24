@@ -5,13 +5,41 @@
 //! the two governance primitives it needs live here, reached over HTTP by the
 //! control-plane server (publish) and by Core (verify-on-install):
 //!
-//!   - **Grant validation** (`validate_grants`): the manifest declares the
+//!   - **Grant validation** (`validate_grants_for`): the manifest declares the
 //!     permission grants it wants (tool/capability scopes). The Gateway checks
 //!     them against its grant policy and returns `{ approved, denied }`. A
 //!     non-empty `denied` blocks publish. This fills the seam Core's plugin
 //!     lifecycle already calls (`POST /v1/grants/validate`,
 //!     `apps/core/src/plugins/lifecycle.rs`), which until now only had a
 //!     `RYU_STUB_GRANT_VALIDATION` allow-all stub on the Core side.
+//!
+//! **The capability grammar (replaces the per-app allowlist).** Grant policy
+//! used to be a single hand-maintained list of every capability string any
+//! first-party app declared — `monitors:crud`, `workflows:crud`,
+//! `simulator:control`, … — matched by exact string. That list grew by one entry
+//! per shipped app, and a **third-party** app declaring its own capability could
+//! be installed but never enabled (Core aborts enable with `GrantsDenied`)
+//! without an operator setting `RYU_MARKETPLACE_GRANT_ALLOWLIST`. Every new app
+//! meant a Gateway Rust edit, which is exactly what `AGENTS.md` forbids.
+//!
+//! The policy is now two rules, evaluated per scope (see
+//! [`ryu_gw_governance::validate_grants_for`]):
+//!
+//!   1. **Reviewed allowlist** — [`default_grant_allowlist`], or the
+//!      `RYU_MARKETPLACE_GRANT_ALLOWLIST` operator override. This is now
+//!      *host-primitive vocabulary* (`model.*`, `memory.*`, `mcp:*`,
+//!      `tool:command:*`, `hook:*`, `widget:render`, …), not per-app strings, so
+//!      it does not grow when an app ships.
+//!   2. **Owner-scoped self-grant** — a plugin declaring a capability in its own
+//!      namespace (the last dot-segment of its manifest id: `com.ryu.monitors` ⇒
+//!      `monitors:*`) is approved with no policy entry at all. This is what
+//!      unblocks a third-party marketplace.
+//!
+//! [`reserved_namespaces`] is the fence between them: a namespace naming a host
+//! primitive can never be claimed by rule 2, so `com.evil.memory` cannot
+//! self-approve `memory.read` and `sidecar:process` (arbitrary code execution)
+//! stays unapprovable by any rule. Nothing in the privileged set got more
+//! permissive; only app-owned namespaces did.
 //!
 //!   - **Manifest signing** (`sign_manifest` / `verify_manifest`): the Gateway
 //!     owns the signing key (ed25519). On publish it signs the manifest; on
@@ -43,7 +71,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::SigningKey;
 use serde_json::Value;
 
-use ryu_gw_governance::{signing_key_from_seed, verifying_key_from_b64};
+use ryu_gw_governance::{signing_key_from_seed, verifying_key_from_b64, GrantPolicy};
 pub use ryu_gw_governance::{GrantDecision, SIGNING_ALGORITHM};
 
 /// Env var holding the ed25519 signing seed (32-byte secret), base64-encoded.
@@ -62,13 +90,122 @@ const ENV_SIGNING_KEY_PATH: &str = "RYU_MARKETPLACE_SIGNING_KEY_PATH";
 
 /// Env var holding a comma/whitespace-separated allowlist of permission grants
 /// the marketplace will approve. When unset a sensible built-in default
-/// allowlist is used (see [`default_grant_allowlist`]). A grant not on the
-/// allowlist is denied, which blocks publish.
+/// allowlist is used (see [`default_grant_allowlist`]). A grant that is neither
+/// on the allowlist nor an owner-scoped self-grant is denied, which blocks
+/// publish (and, on Core's side, enable).
 const ENV_GRANT_ALLOWLIST: &str = "RYU_MARKETPLACE_GRANT_ALLOWLIST";
 
-/// Built-in default grant allowlist. These mirror the capability scopes a
-/// first-party App declares in its `ryu.json` `permission_grants`. Anything
-/// outside this set is denied so an over-privileged manifest cannot publish.
+/// Escape hatch back to the pre-grammar posture: set to `0`/`false`/`no` and the
+/// owner-scoped self-grant rule is switched off entirely, so ONLY the allowlist
+/// (built-in or `RYU_MARKETPLACE_GRANT_ALLOWLIST`) approves anything. For an
+/// operator who wants a hand-curated, closed capability set on a locked-down
+/// deployment. Default on.
+const ENV_OWNER_SCOPED_GRANTS: &str = "RYU_MARKETPLACE_OWNER_SCOPED_GRANTS";
+
+/// Namespaces that name a **host primitive** — something Core or the Gateway
+/// itself implements — rather than an app's own surface. A reserved namespace is
+/// never claimable by the owner-scoped self-grant rule, whatever a manifest
+/// calls itself: `com.evil.memory` cannot self-approve `memory.read`, and
+/// `com.evil.sidecar` cannot self-approve `sidecar:process`. Scopes in these
+/// namespaces are approvable **only** through [`default_grant_allowlist`] or the
+/// `RYU_MARKETPLACE_GRANT_ALLOWLIST` override — exactly as gated as before the
+/// grammar existed.
+///
+/// This is *vocabulary*, not a per-app registry: it enumerates the host's own
+/// capability families, so it does not grow when an app ships. Adding an app
+/// never touches this list; adding a new **host primitive family** does.
+///
+/// Matching is on the namespace token only (the part before the first `:` or
+/// `.`) and is separator-agnostic on purpose: `browser.connect` (identity-vault
+/// primitive) and `browser:control` (the Browser app's sidecar capability) share
+/// the `browser` token, and reserving the token gates both rather than letting a
+/// squatter pick the sigil that happens to be unreserved.
+fn reserved_namespaces() -> Vec<String> {
+    [
+        // Arbitrary code execution: an unsandboxed managed process from a
+        // manifest. Deliberately on NO default allowlist — reserved here so the
+        // grammar cannot ever make it self-approvable.
+        "sidecar",
+        // `sidecar`'s code-execution sibling: `runtime:external` is what Core's
+        // `sidecar/external_runtime.rs::may_provision` checks before a
+        // Community-tier plugin may create a venv, `pip install` from its
+        // manifest, and fetch declared assets. Same arbitrary-code-execution
+        // class as `sidecar:process` and, like it, on NO default allowlist — so
+        // reserving the namespace is what keeps `com.evil.runtime` from naming
+        // its way into it.
+        "runtime",
+        // Agent-scaffolding write scope (`self_build:write`, checked by Core's
+        // `runnable/self_build.rs`). Privileged, on no default allowlist.
+        "self_build",
+        // Model / data / egress primitives the Gateway governs.
+        "model",
+        "memory",
+        "spaces",
+        "files",
+        "identity",
+        "network",
+        // Tool-plane primitives: `tool:command:<bin>` is local process exec and
+        // `tool:http-egress:<host>` is network egress, so neither may ever be
+        // owner-scoped; `tools.*` / `mcp:*` / `mcp.*` are the MCP tool plane.
+        "tool",
+        "tools",
+        "mcp",
+        // Turn-hook phases, host-shell integration, the app KV store, the
+        // follow-up-message verb, sandboxed widget promotion, media engines,
+        // native-desktop capture/replay, and Core's own listing verbs.
+        "hook",
+        "shell",
+        "storage",
+        "chat",
+        "widget",
+        "media",
+        "ghost",
+        "core",
+        // The host UI/shell plane a sandboxed frame reaches through
+        // `/api/plugins/:id/host`: `ui:render` (promote a frame), `ui:send_message`
+        // (post a chat turn on the user's behalf — the same power the reserved
+        // `chat.sendFollowUp` gates, so the two sigils must be fenced alike) and
+        // `views:actions` (relay a declarative-view intent to the owning app).
+        // All three are host verbs in `ryu-kernel-contracts::host_api`, none is on
+        // a default allowlist, and no manifest declares them — they are injected
+        // for MCP widget bridges. Reserved so a manifest cannot declare its way in.
+        "ui",
+        "views",
+        // The browser namespace covers the identity-vault connect flow
+        // (`browser.connect`) as well as the Browser app's sidecar control.
+        "browser",
+        // Core-owned data domains that a NON-owner app legitimately reads or
+        // drives (`com.ryu.skill-editor` holds `skills:crud`, `com.ryu.approvals`
+        // holds `quests:crud`), so they are host vocabulary rather than an app's
+        // own namespace.
+        "skills",
+        "quests",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
+/// Built-in default grant allowlist: the **host-primitive vocabulary** a plugin
+/// may hold. Every scope here is either in a [`reserved_namespaces`] family (so
+/// the grammar refuses to self-approve it) or a cross-app capability a
+/// first-party app legitimately holds. Anything outside this set is denied
+/// unless it is an owner-scoped self-grant, so an over-privileged manifest
+/// cannot publish.
+///
+/// **What is deliberately NOT here.** The per-app companion capabilities
+/// (`monitors:crud`, `workflows:*`, `simulator:control`, `webhooks:crud`,
+/// `activity:read`, `timeline:read`, `calendar:crud`, `learning:crud`,
+/// `approvals:crud`, `meetings:crud`, `mail:crud`, `finetune:runs`) used to be
+/// listed one-by-one, which meant every new App — including a third-party one —
+/// needed a Gateway Rust edit before it could ever be enabled. They are now
+/// approved by the owner-scoped rule in
+/// [`ryu_gw_governance::validate_grants_for`] because each is declared by the
+/// app whose id ends in the same namespace segment (`com.ryu.monitors` ⇒
+/// `monitors:*`). Do not re-add per-app strings here: if a first-party app's
+/// capability is denied, either its namespace does not match its id (rename one
+/// of them) or the capability is genuinely a host primitive and belongs in
+/// [`reserved_namespaces`] plus this list.
 fn default_grant_allowlist() -> Vec<String> {
     [
         // tool / MCP capability scopes
@@ -77,9 +214,11 @@ fn default_grant_allowlist() -> Vec<String> {
         "tools.invoke",
         // Per-server MCP tool grants that the seeded system MCP-tool plugins
         // declare in their `permission_grants` (`spider`, `agentbrowser`,
-        // `ghost`, `shadow`). `validate_grants` matches exact scope strings, so
-        // each built-in MCP tool needs its own `mcp:<name>` on the allowlist:
-        // without them a runtime disable→re-enable (which re-runs
+        // `ghost`, `shadow`). `mcp` is a RESERVED namespace (the MCP tool plane
+        // is a host primitive, and `mcp:<name>` names someone else's server), so
+        // the owner-scoped rule never covers these even for a plugin whose id IS
+        // the server name — each needs its own exact entry here. Without them a
+        // runtime disable→re-enable (which re-runs
         // `/v1/grants/validate` with the app's full declared grant set) is denied
         // with GrantsDenied. Swappable via the `RYU_MARKETPLACE_GRANT_ALLOWLIST`
         // env override. (Test-only `sample.manifest.json` is not seeded, so its
@@ -107,21 +246,11 @@ fn default_grant_allowlist() -> Vec<String> {
         "spaces.read",
         "spaces.write",
         "files.read",
-        // The Monitors app (`com.ryu.monitors`) drives Core's `/api/monitors/*`
-        // orchestration from its sandboxed companion frame via one bridge
-        // capability. On the allowlist so the lifecycle enable path
-        // (`/v1/grants/validate`) approves a runtime disable→re-enable instead of
-        // denying it with GrantsDenied (fresh install seeds the grant directly, so
-        // this only bites on the re-enable path). Swappable via the env override.
-        "monitors:crud",
-        // The Mail companion (`com.ryu.mail`) drives Core's `/api/mail/*` (inboxes/
-        // messages/send, proxied to the ryu-mail sidecar) from its sandboxed frame
-        // via the `mail.crud` bridge family. Same re-enable rationale as
-        // `monitors:crud` above.
-        "mail:crud",
-        // The Skill-editor companion (`com.ryu.skill-editor`) drives Core's
-        // `/api/skills` CRUD from its sandboxed frame via the `skills.crud` bridge
-        // family. Same re-enable rationale as `monitors:crud`/`mail:crud` above.
+        // Core's `/api/skills` CRUD, driven from a sandboxed companion frame via
+        // the `skills.crud` bridge family. A **cross-app** hold: the declaring
+        // app is `com.ryu.skill-editor`, whose namespace is `skill-editor`, not
+        // `skills` — so the owner-scoped rule does not cover it and the reviewed
+        // entry stays. Skills are a Core-owned domain, not this app's surface.
         "skills:crud",
         // model / network scopes
         "model.chat",
@@ -139,108 +268,38 @@ fn default_grant_allowlist() -> Vec<String> {
         // the lifecycle enable path (`/v1/grants/validate`) approves it instead of
         // denying a widget-bearing plugin at enable.
         "widget:render",
-        // Companion-app capability scopes that first-party built-ins declare in their
-        // `permission_grants` (whiteboard/canvas/meetings own Space documents; canvas
-        // also bridges to media + agent-listing + side-model hooks; fine-tuning drives
-        // Core's run orchestration). Like `monitors:crud`/`widget:render` above, a fresh
-        // install seeds these directly, but the runtime disable→re-enable path re-runs
-        // `/v1/grants/validate`; without them a re-enable of whiteboard/canvas/finetune
-        // would be denied with GrantsDenied. Swappable via the env override.
+        // Host primitives a companion app reaches ACROSS its own namespace:
+        // Space documents (whiteboard / canvas / meetings all author them), Core's
+        // agent listing, the media engines, and the two turn-hook phases. Every one
+        // of these is in a `reserved_namespaces()` family, so the owner-scoped rule
+        // never approves them — this reviewed list is the only way to hold them.
+        // A fresh install seeds the grant directly, but the runtime
+        // disable→re-enable path re-runs `/v1/grants/validate`, so a missing entry
+        // shows up as GrantsDenied on re-enable. Swappable via the env override.
         "spaces:docs",
         "core:list_agents",
         "media:generate",
         "media:transcribe",
         "hook:run-agent",
         "hook:side-model",
-        "finetune:runs",
-        // The Workflows app (`com.ryu.workflows`) drives Core's DAG workflow engine
-        // (CRUD + versions + run/run-state/resume), the workflow-template catalog,
-        // node-config catalog reads, and ghost record→replay from its sandboxed
-        // companion frame via these four bridge capabilities. Same rationale as
-        // `monitors:crud` above: a fresh install seeds them directly, but a runtime
-        // disable→re-enable re-runs `/v1/grants/validate`; without them the re-enable
-        // would be denied with GrantsDenied. Swappable via the env override.
-        "workflows:crud",
-        "workflows:runstate",
-        "workflows:catalogs",
+        // Ghost record→replay: the `com.ryu.workflows` RecordToWorkflow flow captures
+        // a native-desktop action sequence into a recipe. Cross-namespace (the
+        // `ghost` capture plane is a host primitive, not the Workflows app's own
+        // surface), and split from `workflows:*` so a workflow app that does not use
+        // ghost capture need not hold it.
         "ghost:record",
-        // The Simulator app (`com.ryu.simulator`) drives the local `simctl`/`adb`
-        // device-control sidecar via one grant-gated capability. Same rationale as
-        // `monitors:crud` above: a fresh install seeds the grant directly, but a
-        // runtime disable→re-enable re-runs `/v1/grants/validate`; without it the
-        // re-enable would be denied with GrantsDenied. Swappable via the
-        // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
-        "simulator:control",
-        // The Webhooks app (`com.ryu.webhooks`) renders Core's read-only webhook
-        // endpoint registry from its sandboxed companion frame via one bridge
-        // capability. Same rationale as `monitors:crud` above: a fresh install seeds the
-        // grant directly, but a runtime disable→re-enable re-runs `/v1/grants/validate`;
-        // without it the re-enable would be denied with GrantsDenied. Swappable via the
-        // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
-        "webhooks:crud",
-        // The Quests app (`com.ryu.quests`) drives Core's `/api/quests/*` auto-detecting-
-        // todo orchestration from its sandboxed companion frame via one bridge capability.
-        // Same rationale as `monitors:crud`/`webhooks:crud` above: a fresh install seeds the
-        // grant directly, but a runtime disable→re-enable re-runs `/v1/grants/validate`;
-        // without it the re-enable would be denied with GrantsDenied. Swappable via the
-        // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
+        // Core's `/api/quests/*` auto-detecting-todo orchestration. On the list
+        // because `com.ryu.approvals` holds it **cross-app** for the quest-task
+        // section of the unified inbox — quests are a Core-owned domain, so the
+        // reserved-namespace rule sends every holder (including `com.ryu.quests`)
+        // through this reviewed entry rather than the owner-scoped rule.
         "quests:crud",
-        // The Activity app (`com.ryu.activity`) renders Core's read-only unified activity
-        // feed from its sandboxed companion frame via one bridge capability. Same
-        // rationale as `monitors:crud`/`webhooks:crud`/`quests:crud` above: a fresh install
-        // seeds the grant directly, but a runtime disable→re-enable re-runs
-        // `/v1/grants/validate`; without it the re-enable would be denied with GrantsDenied.
-        // Swappable via the `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
-        "activity:read",
-        // The Timeline app (`com.ryu.timeline`) renders the activity replay scrubber
-        // (Shadow's captured lanes + keyframe preview + Dayflow work journal) from its
-        // sandboxed companion frame via one bridge capability. Same rationale as
-        // `monitors:crud`/`activity:read` above: a fresh install seeds the grant directly,
-        // but a runtime disable→re-enable re-runs `/v1/grants/validate`; without it the
-        // re-enable would be denied with GrantsDenied. Swappable via the
-        // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
-        "timeline:read",
-        // The Calendar app (`com.ryu.calendar`) renders the scheduled-runs calendar and
-        // schedules an agent from its sandboxed companion frame via one bridge capability.
-        // Same rationale as `monitors:crud`/`webhooks:crud`/`quests:crud`/`activity:read`
-        // above: a fresh install seeds the grant directly, but a runtime disable→re-enable
-        // re-runs `/v1/grants/validate`; without it the re-enable would be denied with
-        // GrantsDenied. Swappable via the `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
-        "calendar:crud",
-        // The Learning app (`com.ryu.learning`) renders the read-only continual-learning
-        // surface (opt-in levels + models, the experience buffer, the self-healing attempt
-        // history) from its sandboxed companion frame via one bridge capability. Same
-        // rationale as `monitors:crud`/`webhooks:crud`/`quests:crud`/`activity:read`/
-        // `calendar:crud` above: a fresh install seeds the grant directly, but a runtime
-        // disable→re-enable re-runs `/v1/grants/validate`; without it the re-enable would
-        // be denied with GrantsDenied. Swappable via the `RYU_MARKETPLACE_GRANT_ALLOWLIST`
-        // env override.
-        "learning:crud",
-        // The Inbox / Approvals app (`com.ryu.approvals`) renders the unified inbox
-        // (pending HITL approvals + the per-user notification feed + quest task
-        // check-offs + Shadow's proactive suggestions) from its sandboxed companion
-        // frame via one bridge capability (its quest section reuses `quests:crud`, seeded
-        // separately above). Same rationale as `monitors:crud`/`quests:crud`/`learning:crud`
-        // above: a fresh install seeds the grant directly, but a runtime disable→re-enable
-        // re-runs `/v1/grants/validate`; without it the re-enable would be denied with
-        // GrantsDenied. Swappable via the `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
-        "approvals:crud",
-        // The Meetings app (`com.ryu.meetings`) drives Core's `/api/meetings/*`
-        // orchestration (record → live transcript → AI notes + audio import) from its
-        // sandboxed companion frame via one bridge capability. Same rationale as
-        // `monitors:crud`/`learning:crud` above: a fresh install seeds the grant directly,
-        // but a runtime disable→re-enable re-runs `/v1/grants/validate`; without it the
-        // re-enable would be denied with GrantsDenied. Swappable via the
-        // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
-        "meetings:crud",
         // Shell integration: a companion app that contributes a sidebar section /
-        // navigation entry to the host shell declares this. Seeded by four built-in
-        // fixtures (`activity`, `approvals`, `skill-editor`, `timeline`). Same
-        // rationale as `monitors:crud` above — a fresh install seeds the grant
-        // directly, but a runtime disable→re-enable re-runs `/v1/grants/validate`
-        // and would be denied with GrantsDenied without it. This is what
-        // `every_builtin_fixture_grant_is_allowlisted` caught. Swappable via the
-        // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
+        // navigation entry to the host shell declares this. Reaching into the host
+        // shell is by definition outside the app's own namespace, so it stays a
+        // reviewed host primitive. Seeded by four built-in fixtures (`activity`,
+        // `approvals`, `skill-editor`, `timeline`). This is what
+        // `every_builtin_fixture_grant_is_allowlisted` caught.
         "shell:integrate",
         // A durable key/value store scope declared by the seeded chat-hook
         // plugins (`goal`, `proof`) so they can persist run state. Same re-enable
@@ -256,11 +315,11 @@ fn default_grant_allowlist() -> Vec<String> {
         // The Browser app (`com.ryu.browser`) exposes a real-Chromium Electron
         // sidecar as the grant-gated `browser.control` capability (list/open/
         // navigate tabs, screenshot, read titles, evaluate JS), which the desktop
-        // Browser panel drives through the ext-proxy. Same rationale as
-        // `monitors:crud`/`meetings:crud` above: a fresh install seeds the grant
-        // directly, but a runtime disable→re-enable re-runs `/v1/grants/validate`;
-        // without it the re-enable would be denied with GrantsDenied. Swappable via
-        // the `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
+        // Browser panel drives through the ext-proxy. The `browser` namespace is
+        // RESERVED (it also carries the identity-vault `browser.connect` flow above),
+        // so this one is not owner-scoped even though the declaring app is
+        // `com.ryu.browser` — driving a real browser is too close to the credential
+        // plane to hand out on a name match. Swappable via the env override.
         "browser:control",
     ]
     .iter()
@@ -268,26 +327,88 @@ fn default_grant_allowlist() -> Vec<String> {
     .collect()
 }
 
-/// Resolve the active grant allowlist from env, falling back to the built-in
-/// default. Cached for the process lifetime.
-fn grant_allowlist() -> &'static Vec<String> {
-    static ALLOWLIST: OnceLock<Vec<String>> = OnceLock::new();
-    ALLOWLIST.get_or_init(|| match std::env::var(ENV_GRANT_ALLOWLIST) {
-        Ok(raw) if !raw.trim().is_empty() => raw
-            .split([',', ' ', '\n', '\t'])
+/// Parse the `RYU_MARKETPLACE_GRANT_ALLOWLIST` value into an allowlist.
+/// `None` for an unset/blank value (the caller then uses the built-in default).
+/// Split out of [`grant_allowlist`] so the override semantics are testable
+/// without going through the process-wide `OnceLock`.
+fn parse_grant_allowlist_env(raw: &str) -> Option<Vec<String>> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(
+        raw.split([',', ' ', '\n', '\t'])
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect(),
-        _ => default_grant_allowlist(),
+    )
+}
+
+/// Resolve the active grant allowlist from env, falling back to the built-in
+/// default. Cached for the process lifetime.
+fn grant_allowlist() -> &'static Vec<String> {
+    static ALLOWLIST: OnceLock<Vec<String>> = OnceLock::new();
+    ALLOWLIST.get_or_init(|| {
+        std::env::var(ENV_GRANT_ALLOWLIST)
+            .ok()
+            .and_then(|raw| parse_grant_allowlist_env(&raw))
+            .unwrap_or_else(default_grant_allowlist)
     })
 }
 
-/// Validate the requested grants against the gateway's active allowlist (env
-/// override or built-in default). Delegates the matching to
-/// [`ryu_gw_governance::validate_grants`].
-pub fn validate_grants(grants: &[String]) -> GrantDecision {
-    ryu_gw_governance::validate_grants(grants, grant_allowlist())
+/// The reserved host-primitive namespace vocabulary, cached for the process
+/// lifetime. Not env-configurable: loosening it is a code review, not an
+/// operator toggle — an operator who needs a reserved scope approved adds the
+/// exact scope to `RYU_MARKETPLACE_GRANT_ALLOWLIST`, which is explicit and
+/// auditable, rather than un-reserving a whole family.
+fn reserved_namespace_list() -> &'static Vec<String> {
+    static RESERVED: OnceLock<Vec<String>> = OnceLock::new();
+    RESERVED.get_or_init(reserved_namespaces)
+}
+
+/// Whether the owner-scoped self-grant rule is active (default `true`; see
+/// [`ENV_OWNER_SCOPED_GRANTS`]). Cached for the process lifetime.
+fn owner_scoped_grants_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(ENV_OWNER_SCOPED_GRANTS)
+            .map(|raw| parse_owner_scoped_env(&raw))
+            .unwrap_or(true)
+    })
+}
+
+/// Parse the `RYU_MARKETPLACE_OWNER_SCOPED_GRANTS` value. Anything that is not
+/// an explicit off-word leaves owner-scoping on, so a typo cannot silently
+/// disable app enablement across the fleet. Split out for the same
+/// `OnceLock`-free testability reason as [`parse_grant_allowlist_env`].
+fn parse_owner_scoped_env(raw: &str) -> bool {
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+/// Resolve the gateway's active grant policy: the allowlist (env override or
+/// built-in default), the reserved host-primitive vocabulary, and whether
+/// owner-scoping is on.
+fn grant_policy() -> GrantPolicy<'static> {
+    GrantPolicy {
+        allowlist: grant_allowlist(),
+        reserved_namespaces: reserved_namespace_list(),
+        owner_scoped: owner_scoped_grants_enabled(),
+    }
+}
+
+/// Validate the grants `app_id` requests, under the gateway's active policy.
+/// Delegates the grammar to [`ryu_gw_governance::validate_grants_for`]: a scope
+/// is approved when it is on the reviewed allowlist **or** it is an owner-scoped
+/// self-grant (its namespace equals the last segment of the requesting app's id
+/// and that namespace is not a reserved host primitive).
+///
+/// `app_id` is `None` when the caller did not identify itself, which disables
+/// owner-scoping for the request — fail-closed to the pre-grammar behavior.
+pub fn validate_grants_for(app_id: Option<&str>, grants: &[String]) -> GrantDecision {
+    ryu_gw_governance::validate_grants_for(app_id, grants, &grant_policy())
 }
 
 // ── Signing ─────────────────────────────────────────────────────────────────
@@ -462,9 +583,14 @@ mod tests {
     use ed25519_dalek::Signer;
     use serde_json::json;
 
+    /// Shorthand for the common `&[&str] -> Vec<String>` in these tests.
+    fn scopes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
     #[test]
     fn default_allowlist_approves_known_grant() {
-        let d = validate_grants(&["mcp.tools".to_string(), "memory.read".to_string()]);
+        let d = validate_grants_for(None, &scopes(&["mcp.tools", "memory.read"]));
         assert!(d.all_approved());
         assert_eq!(d.approved.len(), 2);
         assert!(d.denied.is_empty());
@@ -472,7 +598,11 @@ mod tests {
 
     #[test]
     fn unknown_grant_is_denied_and_blocks() {
-        let d = validate_grants(&["mcp.tools".to_string(), "filesystem.write_all".to_string()]);
+        // Neither allowlisted nor owner-scoped (`filesystem` ≠ `canvas`).
+        let d = validate_grants_for(
+            Some("com.ryu.canvas"),
+            &scopes(&["mcp.tools", "filesystem.write_all"]),
+        );
         assert!(!d.all_approved());
         assert_eq!(d.denied, vec!["filesystem.write_all".to_string()]);
         assert_eq!(d.approved, vec!["mcp.tools".to_string()]);
@@ -480,15 +610,20 @@ mod tests {
 
     #[test]
     fn empty_grants_approve() {
-        let d = validate_grants(&[]);
+        let d = validate_grants_for(Some("com.ryu.monitors"), &[]);
         assert!(d.all_approved());
     }
 
     #[test]
     fn identity_vault_scopes_are_approved() {
         // #523: the identity-vault grant scopes must be on the built-in allowlist
-        // so a credential-read/connect flow is governed, not denied.
-        let d = validate_grants(&["browser.connect".to_string(), "identity.read".to_string()]);
+        // so a credential-read/connect flow is governed, not denied. Both are in
+        // RESERVED namespaces (`browser`, `identity`), so the reviewed entry is
+        // the only thing approving them — no app can name its way into them.
+        let d = validate_grants_for(
+            Some("com.ryu.browser"),
+            &scopes(&["browser.connect", "identity.read"]),
+        );
         assert!(d.all_approved());
         assert_eq!(d.approved.len(), 2);
         assert!(d.denied.is_empty());
@@ -496,26 +631,345 @@ mod tests {
 
     #[test]
     fn workflows_companion_grants_are_approved() {
-        // Crux #2: the Workflows companion's four bridge grants must be on the
-        // built-in allowlist so a runtime disable→re-enable (which re-runs
-        // `/v1/grants/validate`) approves them instead of dropping them with
-        // GrantsDenied — which would leave the canvas unable to call anything.
-        let d = validate_grants(&[
-            "workflows:crud".to_string(),
-            "workflows:runstate".to_string(),
-            "workflows:catalogs".to_string(),
-            "ghost:record".to_string(),
-        ]);
-        assert!(d.all_approved());
+        // Crux #2: the Workflows companion's four bridge grants must all survive a
+        // runtime disable→re-enable (which re-runs `/v1/grants/validate`) instead
+        // of being dropped with GrantsDenied — which would leave the canvas unable
+        // to call anything. Post-grammar the three `workflows:*` scopes are
+        // owner-scoped (`com.ryu.workflows` ⇒ namespace `workflows`) and
+        // `ghost:record` is a reviewed host primitive; the app must not notice.
+        let d = validate_grants_for(
+            Some("com.ryu.workflows"),
+            &scopes(&[
+                "workflows:crud",
+                "workflows:runstate",
+                "workflows:catalogs",
+                "ghost:record",
+            ]),
+        );
+        assert!(d.all_approved(), "denied: {:?}", d.denied);
         assert_eq!(d.approved.len(), 4);
-        assert!(d.denied.is_empty());
     }
 
-    /// Drift tripwire: every grant a **seeded built-in** fixture declares must be
-    /// on the allowlist. Core's enable path (`plugins/lifecycle.rs`) sends an
-    /// app's full `permission_grants` set through `/v1/grants/validate` on every
-    /// enable — including a runtime disable→re-enable — so a declared grant that
-    /// is not allowlisted is denied with GrantsDenied and the app cannot re-enable.
+    // ── capability grammar, against the REAL gateway policy ──────────────────
+
+    /// **Requirement-5 regression proof.** Every capability string that used to
+    /// be hand-listed in `default_grant_allowlist()` — including the 14 per-app
+    /// companion scopes the grammar retired — paired with the manifest id that
+    /// actually declares it. Each must still validate, whether it now passes via
+    /// the owner-scoped rule or the retained host-primitive vocabulary.
+    ///
+    /// This is a **frozen historical table**, deliberately restated rather than
+    /// derived: removing entries from the built-in list is the goal, and a
+    /// derived table would shrink alongside it and stop proving anything. The
+    /// fixture-driven `every_builtin_fixture_grant_is_allowlisted` below is the
+    /// forward-looking half (it catches a NEW fixture with an ungranted scope);
+    /// this one is the backward-looking half.
+    #[test]
+    fn every_pre_grammar_allowlist_entry_still_validates() {
+        // (owning manifest id, capability scope) — the id is the one that really
+        // declares the scope in `apps/core/src/plugin_manifest/fixtures/`, or a
+        // representative holder for the scopes no fixture declares.
+        let table: &[(&str, &str)] = &[
+            // tool / MCP capability scopes (host vocabulary, no declarer)
+            ("com.ryu.canvas", "mcp.tools"),
+            ("com.ryu.canvas", "tools.read"),
+            ("com.ryu.canvas", "tools.invoke"),
+            // per-server MCP tool grants from the seeded system MCP-tool plugins
+            ("spider", "mcp:spider"),
+            ("agentbrowser", "mcp:agentbrowser"),
+            ("ghost", "mcp:ghost"),
+            ("shadow", "mcp:shadow"),
+            // declarative `http` / `command` tool plugins
+            ("exa", "tool:http-egress:api.exa.ai"),
+            ("com.ryuhq.advisor", "tool:http-egress:127.0.0.1"),
+            ("spider", "tool:command:spider"),
+            ("rtk", "tool:command:rtk"),
+            // data scopes
+            ("com.ryu.canvas", "memory.read"),
+            ("com.ryu.canvas", "memory.write"),
+            ("com.ryu.canvas", "spaces.read"),
+            ("com.ryu.canvas", "spaces.write"),
+            ("com.ryu.canvas", "files.read"),
+            // companion bridge capabilities (the 14 the grammar retired)
+            ("com.ryu.monitors", "monitors:crud"),
+            ("com.ryu.mail", "mail:crud"),
+            ("com.ryu.finetune", "finetune:runs"),
+            ("com.ryu.workflows", "workflows:crud"),
+            ("com.ryu.workflows", "workflows:runstate"),
+            ("com.ryu.workflows", "workflows:catalogs"),
+            ("com.ryu.simulator", "simulator:control"),
+            ("com.ryu.webhooks", "webhooks:crud"),
+            ("com.ryu.activity", "activity:read"),
+            ("com.ryu.timeline", "timeline:read"),
+            ("com.ryu.calendar", "calendar:crud"),
+            ("com.ryu.learning", "learning:crud"),
+            ("com.ryu.approvals", "approvals:crud"),
+            ("com.ryu.meetings", "meetings:crud"),
+            // cross-app / reserved-namespace holds that stay on the list
+            ("com.ryu.skill-editor", "skills:crud"),
+            ("com.ryu.quests", "quests:crud"),
+            ("com.ryu.approvals", "quests:crud"),
+            ("com.ryu.browser", "browser:control"),
+            // model / network scopes
+            ("com.ryu.canvas", "model.chat"),
+            ("com.ryu.canvas", "model.embed"),
+            ("com.ryu.canvas", "network.fetch"),
+            // identity-vault scopes (#523)
+            ("com.ryu.browser", "browser.connect"),
+            ("com.ryu.browser", "identity.read"),
+            // widget consent + companion host primitives
+            ("sample-widget", "widget:render"),
+            ("com.ryu.canvas", "spaces:docs"),
+            ("com.ryu.canvas", "core:list_agents"),
+            ("com.ryu.canvas", "media:generate"),
+            ("com.ryu.canvas", "media:transcribe"),
+            ("proof", "hook:run-agent"),
+            ("double-check", "hook:side-model"),
+            ("com.ryu.workflows", "ghost:record"),
+            ("com.ryu.activity", "shell:integrate"),
+            ("goal", "storage:kv"),
+            ("checklist", "chat.sendFollowUp"),
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
+        for (app_id, scope) in table {
+            let d = validate_grants_for(Some(app_id), &scopes(&[scope]));
+            if !d.all_approved() {
+                failures.push(format!("{app_id} → '{scope}'"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "first-party capability regression: these validated before the capability \
+             grammar and must still validate (add the scope to default_grant_allowlist() \
+             if it is a host primitive, or check that the app id's last segment matches \
+             the capability namespace): {}",
+            failures.join(", ")
+        );
+    }
+
+    #[test]
+    fn third_party_app_self_grants_its_own_namespace() {
+        // The whole point: an app nobody hardcoded, declaring capabilities in its
+        // own namespace, validates — so it can actually be ENABLED (Core aborts
+        // enable with GrantsDenied on any denial) with no Gateway edit.
+        let d = validate_grants_for(
+            Some("com.acme.invoices"),
+            &scopes(&["invoices:crud", "invoices:export", "invoices.read"]),
+        );
+        assert!(d.all_approved(), "denied: {:?}", d.denied);
+        assert_eq!(d.approved.len(), 3);
+    }
+
+    #[test]
+    fn spoofed_app_id_cannot_claim_another_apps_namespace() {
+        // The named spoofing case: `com.ryu.evil` must not self-approve the
+        // Monitors app's capability. Its owner namespace is `evil`, `monitors` is
+        // not on the reviewed list any more, so it is denied outright.
+        let d = validate_grants_for(Some("com.ryu.evil"), &scopes(&["monitors:crud"]));
+        assert_eq!(d.denied, vec!["monitors:crud".to_string()]);
+        assert!(d.approved.is_empty());
+
+        // Nor by dressing the id up as a prefix/suffix of the real owner.
+        for id in [
+            "monitors.evil",
+            "com.ryu.monitors.evil",
+            "com.ryu.evil-monitors",
+            "com.ryu.monitorz",
+        ] {
+            let d = validate_grants_for(Some(id), &scopes(&["monitors:crud"]));
+            assert_eq!(
+                d.denied,
+                vec!["monitors:crud".to_string()],
+                "'{id}' must not reach the monitors namespace"
+            );
+        }
+    }
+
+    #[test]
+    fn sidecar_process_is_never_approved_by_any_caller() {
+        // Handoff §8 + requirement 3: running an unsandboxed managed process from
+        // a manifest is arbitrary code execution. It is on no default allowlist,
+        // and `sidecar` is reserved so no manifest id can name its way into it.
+        for id in [
+            "com.ryu.monitors",
+            "com.evil.sidecar",
+            "sidecar",
+            "com.ryu.sidecar",
+        ] {
+            let d = validate_grants_for(Some(id), &scopes(&["sidecar:process"]));
+            assert_eq!(
+                d.denied,
+                vec!["sidecar:process".to_string()],
+                "'{id}' must not self-approve sidecar:process"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_host_namespaces_are_not_self_grantable() {
+        // A privileged scope that is NOT on the reviewed list stays denied even
+        // for an app that named itself after the namespace — the fence that keeps
+        // the grammar from loosening the host-primitive set.
+        let cases: &[(&str, &str)] = &[
+            ("com.evil.memory", "memory.purge"),
+            ("com.evil.model", "model.finetune"),
+            ("com.evil.files", "files.write"),
+            ("com.evil.network", "network.listen"),
+            ("com.evil.tool", "tool:command:rm"),
+            ("com.evil.tool", "tool:http-egress:evil.example"),
+            ("com.evil.mcp", "mcp:evil"),
+            ("com.evil.identity", "identity.write"),
+            ("com.evil.core", "core:shutdown"),
+            ("com.evil.hook", "hook:pre-turn"),
+            ("com.evil.widget", "widget:inject"),
+            ("com.evil.shell", "shell:exec"),
+            ("com.evil.storage", "storage:global"),
+            ("com.evil.chat", "chat.readAll"),
+            ("com.evil.media", "media:record"),
+            ("com.evil.ghost", "ghost:replay"),
+            ("com.evil.browser", "browser:hijack"),
+            ("com.evil.spaces", "spaces:purge"),
+            ("com.evil.skills", "skills:write"),
+            ("com.evil.quests", "quests:purge"),
+            ("com.evil.self_build", "self_build:write"),
+            // The three namespaces an adversarial pass caught missing: each names
+            // a host verb that Core gates on `approved_grants`, so a miss here is
+            // not cosmetic — it is a capability the grammar hands out that the
+            // pre-grammar allowlist denied to everyone.
+            //
+            // `runtime:external` is the sharp one: it is what
+            // `external_runtime::may_provision` checks before a Community-tier
+            // plugin runs `pip install` from its own manifest.
+            ("com.evil.runtime", "runtime:external"),
+            ("runtime", "runtime:external"),
+            // `ui:send_message` posts a chat turn as the user; `ui:render`
+            // promotes a frame; `views:actions` relays a shell view intent.
+            ("com.evil.ui", "ui:send_message"),
+            ("com.evil.ui", "ui:render"),
+            ("com.evil.views", "views:actions"),
+        ];
+        let mut approved: Vec<String> = Vec::new();
+        for (app_id, scope) in cases {
+            if validate_grants_for(Some(app_id), &scopes(&[scope])).all_approved() {
+                approved.push(format!("{app_id} → '{scope}'"));
+            }
+        }
+        assert!(
+            approved.is_empty(),
+            "reserved host-primitive namespaces must never be owner-scoped: {}",
+            approved.join(", ")
+        );
+    }
+
+    #[test]
+    fn env_override_parses_and_replaces_the_default_list() {
+        // The operator override keeps working as an override/extension. Parsed
+        // through the same helper the process cache uses; the cache itself is a
+        // `OnceLock`, so we exercise the policy with the parsed value directly
+        // rather than mutating process env from a parallel test.
+        assert_eq!(parse_grant_allowlist_env(""), None, "blank ⇒ built-in default");
+        assert_eq!(parse_grant_allowlist_env("   \n"), None);
+        let parsed = parse_grant_allowlist_env("sidecar:process, mcp.tools\nmemory.read")
+            .expect("non-blank value parses");
+        assert_eq!(parsed, scopes(&["sidecar:process", "mcp.tools", "memory.read"]));
+
+        // An override CAN approve a reserved scope the built-in default refuses —
+        // that is the point of an operator escape hatch, and it stays explicit
+        // (an exact scope, not an un-reserved family).
+        let reserved = reserved_namespaces();
+        let policy = GrantPolicy {
+            allowlist: &parsed,
+            reserved_namespaces: &reserved,
+            owner_scoped: true,
+        };
+        let d = ryu_gw_governance::validate_grants_for(
+            Some("com.ryu.browser"),
+            &scopes(&["sidecar:process"]),
+            &policy,
+        );
+        assert!(d.all_approved(), "an explicit override entry approves");
+
+        // …and a narrowed override still denies what it left out.
+        let d = ryu_gw_governance::validate_grants_for(
+            Some("com.ryu.browser"),
+            &scopes(&["browser:control"]),
+            &policy,
+        );
+        assert_eq!(d.denied, vec!["browser:control".to_string()]);
+    }
+
+    #[test]
+    fn owner_scoped_env_toggle_parses_off_words_only() {
+        for off in ["0", "false", "no", "off", " OFF ", "False"] {
+            assert!(!parse_owner_scoped_env(off), "'{off}' must disable");
+        }
+        for on in ["1", "true", "yes", "", "banana"] {
+            assert!(parse_owner_scoped_env(on), "'{on}' must leave it on");
+        }
+
+        // With the rule off, the gateway is back to a pure allowlist: an app's
+        // own namespace is no longer enough.
+        let allow = default_grant_allowlist();
+        let reserved = reserved_namespaces();
+        let strict = GrantPolicy {
+            allowlist: &allow,
+            reserved_namespaces: &reserved,
+            owner_scoped: false,
+        };
+        let d = ryu_gw_governance::validate_grants_for(
+            Some("com.ryu.monitors"),
+            &scopes(&["monitors:crud"]),
+            &strict,
+        );
+        assert_eq!(d.denied, vec!["monitors:crud".to_string()]);
+    }
+
+    #[test]
+    fn default_allowlist_holds_no_retired_per_app_scope() {
+        // Tripwire against re-growing the list one app at a time. If a first-party
+        // capability is denied, fix the id/namespace match or classify it as a host
+        // primitive — do not paste the string back in.
+        let allow = default_grant_allowlist();
+        let retired = [
+            "monitors:crud",
+            "mail:crud",
+            "finetune:runs",
+            "workflows:crud",
+            "workflows:runstate",
+            "workflows:catalogs",
+            "simulator:control",
+            "webhooks:crud",
+            "activity:read",
+            "timeline:read",
+            "calendar:crud",
+            "learning:crud",
+            "approvals:crud",
+            "meetings:crud",
+        ];
+        let regrown: Vec<&str> = retired
+            .iter()
+            .copied()
+            .filter(|scope| allow.iter().any(|a| a.eq_ignore_ascii_case(scope)))
+            .collect();
+        assert!(
+            regrown.is_empty(),
+            "these are owner-scoped and must NOT be hardcoded again: {regrown:?}"
+        );
+    }
+
+    /// Drift tripwire: every grant a **seeded built-in** fixture declares must
+    /// validate *for that fixture's own id*. Core's enable path
+    /// (`plugins/lifecycle.rs`) sends an app's full `permission_grants` set —
+    /// with its manifest id as `app_id` — through `/v1/grants/validate` on every
+    /// enable, including a runtime disable→re-enable, so a declared grant that
+    /// neither the allowlist nor the owner-scoped rule approves is denied with
+    /// GrantsDenied and the app cannot re-enable.
+    ///
+    /// Feeding the fixture's real `id` (not `None`) is what makes this the
+    /// forward-looking half of the requirement-5 proof: a new app whose
+    /// capability namespace does not match its id fails HERE, at the same place
+    /// an unlisted host primitive does.
     ///
     /// Rather than restate the grant set (which would silently pass when a NEW
     /// fixture adds an unlisted grant — the exact drift this guards), the test
@@ -565,23 +1019,31 @@ mod tests {
             let Some(grants) = manifest.get("permission_grants").and_then(Value::as_array) else {
                 continue; // no declared grants
             };
+            // The id is load-bearing here: it is the subject of the owner-scoped
+            // rule. A fixture without one cannot owner-scope anything.
+            let app_id = manifest
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("fixture {name} declares grants but has no `id`"));
             checked_files += 1;
             let declared: Vec<String> = grants
                 .iter()
                 .filter_map(|g| g.as_str().map(str::to_string))
                 .collect();
-            let decision = validate_grants(&declared);
+            let decision = validate_grants_for(Some(app_id), &declared);
             for denied in decision.denied {
-                failures.push(format!("{name}: '{denied}'"));
+                failures.push(format!("{name} ({app_id}): '{denied}'"));
             }
             checked_grants += declared.len();
         }
 
         assert!(
             failures.is_empty(),
-            "seeded built-in fixtures declare grants missing from default_grant_allowlist() \
-             (a runtime disable→re-enable would fail with GrantsDenied). Add each to the \
-             allowlist (or, for `sidecar:process`, remove it from the fixture per handoff §8): {}",
+            "seeded built-in fixtures declare grants that neither default_grant_allowlist() nor \
+             the owner-scoped rule approves (a runtime disable→re-enable would fail with \
+             GrantsDenied). Either the capability namespace does not match the last segment of \
+             the app's id, or the scope is a host primitive that must be added to the allowlist \
+             (and, for `sidecar:process`, removed from the fixture per handoff §8): {}",
             failures.join(", ")
         );
         // Guard against a vacuous pass: the dir existed, so we must have parsed at

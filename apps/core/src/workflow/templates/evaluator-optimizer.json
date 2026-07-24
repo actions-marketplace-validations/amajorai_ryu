@@ -1,0 +1,94 @@
+{
+  "meta": {
+    "id": "evaluator-optimizer",
+    "name": "Evaluator–Optimizer",
+    "description": "Generate a draft, then iteratively critique and rewrite it over several bounded passes.",
+    "category": "quality",
+    "pattern": "evaluator-optimizer",
+    "icon": "Gauge",
+    "node_count": 4,
+    "tags": ["eval", "refine", "loop", "quality"]
+  },
+  "primary": {
+    "id": "evaluator-optimizer",
+    "name": "Evaluator–Optimizer",
+    "description": "Generate → (evaluate + optimize) × N → refined draft.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "generate",
+        "type": "prompt",
+        "prompt": "Produce a first draft answer to:\n\n{{input}}",
+        "agent_id": null
+      },
+      {
+        "id": "loop",
+        "type": "while",
+        "expr": "input nonempty",
+        "body_workflow_id": "eo_refine_body",
+        "max_iterations": 3
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "generate"
+      },
+      {
+        "from": "generate",
+        "to": "loop"
+      },
+      {
+        "from": "loop",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": [
+    [
+      "eo_refine_body",
+      {
+        "id": "eo_refine_body",
+        "name": "Evaluate + optimize",
+        "description": "Critique the current draft, then rewrite it addressing every issue; return only the improved draft.",
+        "nodes": [
+          {
+            "id": "rin",
+            "type": "input",
+            "key": "input"
+          },
+          {
+            "id": "refine",
+            "type": "prompt",
+            "prompt": "You are optimizing a draft. First, silently critique it against the goal on accuracy, completeness, and clarity. Then rewrite it so it fixes every weakness you found. Return ONLY the improved draft — no commentary, no score.\n\nDraft:\n{{input}}",
+            "agent_id": null
+          },
+          {
+            "id": "rout",
+            "type": "output",
+            "key": "result"
+          }
+        ],
+        "edges": [
+          {
+            "from": "rin",
+            "to": "refine"
+          },
+          {
+            "from": "refine",
+            "to": "rout"
+          }
+        ]
+      }
+    ]
+  ]
+}

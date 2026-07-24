@@ -20,6 +20,7 @@
 /** The control a plugin settings field renders as. Unknown types render as text. */
 export type PluginFieldType =
 	| "model_picker"
+	| "agent_picker"
 	| "text"
 	| "textarea"
 	| "toggle"

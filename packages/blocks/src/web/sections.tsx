@@ -126,17 +126,24 @@ export function SectionHeading({
 
 export interface Highlight {
 	description: string;
+	icon?: LucideIcon;
 	title: string;
 }
 
 export function Highlights({ items }: { items: Highlight[] }) {
 	return (
 		<section className="container mx-auto px-4">
-			<div className="mx-auto max-w-6xl border-border border-t pt-10">
+			<div className="mx-auto max-w-6xl pt-10">
 				<div className="grid grid-cols-1 gap-x-8 gap-y-8 sm:grid-cols-2 lg:grid-cols-4">
 					{items.map((item, i) => (
 						<Reveal delay={(i % 4) * 0.06} key={item.title}>
 							<div>
+								{item.icon ? (
+									<item.icon
+										className="mb-3 size-5 text-foreground"
+										strokeWidth={1.75}
+									/>
+								) : null}
 								<h3 className="font-medium text-foreground">{item.title}</h3>
 								<p className="mt-1.5 text-muted-foreground text-sm leading-relaxed">
 									{item.description}

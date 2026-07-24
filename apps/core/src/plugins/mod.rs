@@ -144,6 +144,61 @@ impl PluginStore {
         Ok(())
     }
 
+    /// The store's one-time-migration counter (SQLite's own `PRAGMA user_version`,
+    /// which lives in the db header and defaults to 0 on every pre-existing file).
+    ///
+    /// Distinct from [`Self::migrate`]: that runs `CREATE TABLE IF NOT EXISTS` /
+    /// tolerated `ALTER TABLE` on EVERY open because those are idempotent. A DATA
+    /// backfill is not idempotent in the same sense — re-running it would keep
+    /// re-asserting a value the user is entitled to change afterwards — so it must
+    /// run exactly once per install. See [`Self::run_one_time_migrations`].
+    pub async fn schema_version(&self) -> Result<i64> {
+        let conn = self.conn.lock().await;
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        Ok(v)
+    }
+
+    async fn set_schema_version(&self, version: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        // PRAGMA does not accept a bound parameter, hence the format!. `version` is
+        // an i64 the caller supplies from a const below, never user input.
+        conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
+        Ok(())
+    }
+
+    /// Union `grants` into an app's approved set WITHOUT touching `enabled`.
+    ///
+    /// Additive only — it can never revoke. Used by the one-time backfill, which must
+    /// not disturb grants the user has already curated.
+    pub async fn add_approved_grants(
+        &self,
+        id: &str,
+        grants: &[String],
+    ) -> Result<Option<PluginRecord>> {
+        let Some(record) = self.get(id).await? else {
+            return Ok(None);
+        };
+        let mut merged = record.approved_grants.clone();
+        for grant in grants {
+            if !merged.iter().any(|g| g == grant) {
+                merged.push(grant.clone());
+            }
+        }
+        if merged.len() == record.approved_grants.len() {
+            return Ok(Some(record));
+        }
+        let grants_json = serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_owned());
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = self.conn.lock().await;
+            conn.execute(
+                "UPDATE apps SET approved_grants = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, grants_json, now],
+            )?;
+        }
+        self.get(id).await
+    }
+
     /// Insert a new app record (install). Fails if an app with the same id is
     /// already present (use `update_version` for upgrades).
     pub async fn insert(&self, id: &str, version: &str) -> Result<PluginRecord> {

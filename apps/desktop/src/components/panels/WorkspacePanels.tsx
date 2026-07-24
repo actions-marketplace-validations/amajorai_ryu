@@ -10,6 +10,7 @@ import {
 	FolderOpenIcon,
 	Globe02Icon,
 	PlusSignIcon,
+	PuzzleIcon,
 	RefreshIcon,
 	Robot01Icon,
 	Search01Icon,
@@ -35,11 +36,13 @@ import {
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
+import { Icon } from "@ryu/ui/components/icon";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
+import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "next-themes";
@@ -61,6 +64,15 @@ import {
 	CoworkContextPanel,
 	extractSubagents,
 } from "@/src/components/panels/CoworkContextPanel.tsx";
+import {
+	type BuiltinTabKind,
+	type DockTabKind,
+	dockPanelsFor,
+	dockTabKind,
+	findDockPanel,
+	isPluginTabKind,
+	nativeDockPanelKey,
+} from "@/src/components/panels/dock-panels.ts";
 import { SubagentAvatar } from "@/src/components/panels/subagent-identity.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
@@ -74,8 +86,12 @@ import {
 	setFileTreePrefs,
 	useFileTreePrefs,
 } from "@/src/hooks/useFileTreePrefs.ts";
+import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { apiUrl, makeHeaders } from "@/src/lib/api/client.ts";
+import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
+import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
+import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 // ── Panel layout icons — same visual language as SidebarToggleIcon ────────────
@@ -476,16 +492,13 @@ function EditorButtonGroup({ folder }: { folder?: string | null }) {
 
 // ── Multi-instance tab system ─────────────────────────────────────────────────
 
-type TabKind =
-	| "terminal"
-	| "codereview"
-	| "browser"
-	| "simulator"
-	| "files"
-	| "cowork"
-	| "subagent"
-	| "artifact"
-	| "inspector";
+// A dock tab is either a SHELL-owned panel (terminal, code review, files, the
+// cowork/subagent/artifact/inspector views of the current run — infrastructure,
+// not apps) or an APP-CONTRIBUTED one, keyed `plugin:<pluginId>:<panelId>`. The
+// union used to be closed, which meant shipping an app (Browser, Simulator)
+// required editing this file; `contributes.dock_panels` inverts that — see
+// `./dock-panels.ts` for the placement/order/resolution rules.
+type TabKind = DockTabKind;
 
 interface PanelTab {
 	kind: TabKind;
@@ -494,24 +507,58 @@ interface PanelTab {
 }
 
 interface TabTypeDef {
-	icon: typeof ComputerTerminal01Icon;
+	/** Bundled glyph — every shell-owned type (built-in or `native`) has one, so
+	 *  it renders offline and identically to before. */
+	icon?: typeof ComputerTerminal01Icon;
+	/** Contributed icon id (`hugeicons:globe-02`, `lucide:heart`, a URL) — the
+	 *  fallback for a third-party panel with no registered shell component. */
+	iconId?: string;
 	kind: TabKind;
 	label: string;
 }
 
+// The shell's own openable panels. Each dock's contributed panels are appended
+// at render time (`bottomTabTypes` / `rightTabTypes` below), so these lists only
+// ever grow with panels the SHELL itself implements.
 const BOTTOM_TAB_TYPES: TabTypeDef[] = [
 	{ kind: "terminal", label: "Terminal", icon: ComputerTerminal01Icon },
 	{ kind: "codereview", label: "Code Review", icon: FileCodeIcon },
-	{ kind: "browser", label: "Browser", icon: Globe02Icon },
-	{ kind: "simulator", label: "Simulator", icon: SmartPhone01Icon },
 ];
 
 const RIGHT_TAB_TYPES: TabTypeDef[] = [
 	{ kind: "files", label: "Files", icon: FolderOpenIcon },
 	{ kind: "codereview", label: "Changes", icon: FileCodeIcon },
-	{ kind: "browser", label: "Browser", icon: Globe02Icon },
-	{ kind: "simulator", label: "Simulator", icon: SmartPhone01Icon },
 ];
+
+/** The glyph of each shell-owned tab kind. The programmatic panels
+ *  (cowork/subagent/artifact/inspector) are opened by the chat rather than the
+ *  "+" menu, so they live here and not in the arrays above. */
+const BUILTIN_TAB_ICONS: Record<BuiltinTabKind, typeof ComputerTerminal01Icon> =
+	{
+		terminal: ComputerTerminal01Icon,
+		codereview: FileCodeIcon,
+		files: FolderOpenIcon,
+		cowork: DashboardSquare01Icon,
+		subagent: Robot01Icon,
+		artifact: BrowserIcon,
+		inspector: SourceCodeIcon,
+	};
+
+/** A contributed panel as a dock tab type. A `native` panel takes the glyph of
+ *  its registered shell component (bundled, offline-safe); anything else falls
+ *  back to the manifest's declared icon id. */
+function contributedTabType(panel: PluginDockPanel): TabTypeDef {
+	const native =
+		panel.panel === "native"
+			? NATIVE_DOCK_PANELS[nativeDockPanelKey(panel)]
+			: undefined;
+	return {
+		kind: dockTabKind(panel),
+		label: panel.title,
+		icon: native?.icon,
+		iconId: native ? undefined : panel.icon,
+	};
+}
 
 let tabCounter = 0;
 function makeTab(kind: TabKind, label: string, n?: number): PanelTab {
@@ -595,9 +642,49 @@ function usePanelTabs(initial: PanelTab[]) {
 	};
 }
 
+/** How a tab's glyph is drawn: a bundled Hugeicons element (built-in + `native`
+ *  panels — no network, identical to before) or a contributed icon id resolved
+ *  through the shared `Icon` (third-party panels). */
+interface TabIconSpec {
+	glyph?: typeof ComputerTerminal01Icon;
+	iconId?: string;
+}
+
+function TabIcon({
+	className,
+	size = 12,
+	spec,
+}: {
+	className?: string;
+	/** Edge length in px for a contributed (masked SVG) icon — it needs an
+	 *  explicit box, unlike a Hugeicons element sized by `className`. */
+	size?: number;
+	spec: TabIconSpec;
+}) {
+	if (spec.glyph) {
+		return <HugeiconsIcon className={className} icon={spec.glyph} />;
+	}
+	if (spec.iconId) {
+		return <Icon className={className} icon={spec.iconId} size={size} />;
+	}
+	// A contributed panel that declared no icon: the generic plugin glyph, so the
+	// tab still reads as "an app's panel" rather than as a built-in.
+	return <HugeiconsIcon className={className} icon={PuzzleIcon} />;
+}
+
+/** The icon of a tab TYPE (the "+" menu / launchpad cards). */
+function tabTypeIcon(def: TabTypeDef): TabIconSpec {
+	return { glyph: def.icon, iconId: def.iconId };
+}
+
 interface PanelTabBarProps {
 	activeUid: string;
 	addTypes: TabTypeDef[];
+	/** Resolve an OPEN tab's icon. Open tabs include kinds absent from `addTypes`
+	 *  (cowork/subagent/artifact/inspector are opened programmatically, and a
+	 *  contributed tab outlives a brief contributions outage), so the strip cannot
+	 *  derive the glyph from the add-menu alone. */
+	iconForKind: (kind: TabKind) => TabIconSpec;
 	onActivate: (uid: string) => void;
 	onAdd: (kind: TabKind) => void;
 	onCloseAll: () => void;
@@ -624,36 +711,9 @@ function PanelTabBar({
 	otherPanelLabel,
 	onAdd,
 	addTypes,
+	iconForKind,
 	onClosePanel,
 }: PanelTabBarProps) {
-	const iconFor = (kind: TabKind) => {
-		if (kind === "terminal") {
-			return ComputerTerminal01Icon;
-		}
-		if (kind === "codereview") {
-			return FileCodeIcon;
-		}
-		if (kind === "files") {
-			return FolderOpenIcon;
-		}
-		if (kind === "cowork") {
-			return DashboardSquare01Icon;
-		}
-		if (kind === "subagent") {
-			return Robot01Icon;
-		}
-		if (kind === "artifact") {
-			return BrowserIcon;
-		}
-		if (kind === "inspector") {
-			return SourceCodeIcon;
-		}
-		if (kind === "simulator") {
-			return SmartPhone01Icon;
-		}
-		return Globe02Icon;
-	};
-
 	return (
 		// Floating rounded-pill strip, matching the main window tab bar (gap between
 		// pills, no attached underline). The dock card already provides the floating
@@ -689,9 +749,9 @@ function PanelTabBar({
 								onClick={() => onCloseTab(tab.uid)}
 								type="button"
 							>
-								<HugeiconsIcon
+								<TabIcon
 									className="absolute size-3 transition-all duration-150 group-hover/tab:scale-50 group-hover/tab:opacity-0"
-									icon={iconFor(tab.kind)}
+									spec={iconForKind(tab.kind)}
 								/>
 								<HugeiconsIcon
 									className="absolute size-3 scale-50 opacity-0 transition-all duration-150 group-hover/tab:scale-100 group-hover/tab:opacity-100"
@@ -757,7 +817,11 @@ function PanelTabBar({
 							key={t.kind}
 							onClick={() => onAdd(t.kind)}
 						>
-							<HugeiconsIcon className="size-3.5 shrink-0" icon={t.icon} />
+							<TabIcon
+								className="size-3.5 shrink-0"
+								size={14}
+								spec={tabTypeIcon(t)}
+							/>
 							{t.label}
 						</DropdownMenuItem>
 					))}
@@ -814,9 +878,10 @@ function PanelEmptyState({
 							onClick={() => onAdd(t.kind)}
 							type="button"
 						>
-							<HugeiconsIcon
+							<TabIcon
 								className="size-5 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
-								icon={t.icon}
+								size={20}
+								spec={tabTypeIcon(t)}
 							/>
 							<span className="truncate font-medium text-foreground text-sm">
 								{t.label}
@@ -2216,21 +2281,130 @@ function SubagentTranscriptPanel({
 	);
 }
 
+// ── App-contributed dock panels ───────────────────────────────────────────────
+
+/** A shell component registered for a `panel: "native"` contribution — the
+ *  migration seam for a first-party app whose panel is hand-written React
+ *  driving its sidecar over the ext-proxy. The COMPONENT stays here (it is shell
+ *  code, not plugin code), while the tab's existence, title, icon and placement
+ *  become the app's declaration: disabling the app removes the tab, with nothing
+ *  hardcoded on this side beyond the registry key. */
+interface NativeDockPanelDef {
+	/** Bundled glyph, so a first-party panel's tab icon never depends on the
+	 *  network (a contributed `icon` id is the fallback for panels not listed here). */
+	icon: typeof ComputerTerminal01Icon;
+	render: (ctx: { label: string }) => ReactNode;
+}
+
+/** Keyed `<plugin>/<id>` (see `nativeDockPanelKey`). These two entries are the
+ *  Browser and Simulator tabs that used to be members of the shell's closed
+ *  `TabKind` union; their components below are unchanged, so an enabled app
+ *  renders exactly what it did before. */
+const NATIVE_DOCK_PANELS: Record<string, NativeDockPanelDef> = {
+	"com.ryu.browser/browser": {
+		icon: Globe02Icon,
+		render: ({ label }) => <BrowserTabPanel title={label} />,
+	},
+	"com.ryu.simulator/simulator": {
+		icon: SmartPhone01Icon,
+		render: () => <SimulatorTabPanel />,
+	},
+};
+
+function DockPanelPlaceholder({ text }: { text: string }) {
+	return (
+		<div className="flex h-full items-center justify-center p-4 text-center text-muted-foreground text-xs">
+			{text}
+		</div>
+	);
+}
+
+/**
+ * Render one app-contributed dock panel. Every failure mode degrades to a
+ * placeholder rather than throwing: the owning app was disabled (its
+ * contributions leave the feed), the manifest names a `native` component this
+ * build does not register, or the `panel` discriminant is newer than this shell.
+ * That is the whole point of keeping `panel` an open string on the wire.
+ */
+function PluginDockTabContent({
+	dockPanels,
+	label,
+	tabKind,
+}: {
+	dockPanels: PluginDockPanel[];
+	label: string;
+	tabKind: TabKind;
+}) {
+	const panel = findDockPanel(dockPanels, tabKind);
+	if (!panel) {
+		return (
+			<DockPanelPlaceholder text="This panel's app is no longer enabled." />
+		);
+	}
+	const emptyText = panel.spec?.emptyText;
+	if (panel.panel === "native") {
+		const def = NATIVE_DOCK_PANELS[nativeDockPanelKey(panel)];
+		if (!def) {
+			return (
+				<DockPanelPlaceholder
+					text={emptyText ?? "This panel isn't available in this version."}
+				/>
+			);
+		}
+		return def.render({ label });
+	}
+	if (panel.panel === "companion" && panel.spec?.companion) {
+		// The app's own sandboxed surface, mounted through the same gated page the
+		// companion route uses (no plugin code runs unless the runtime flag is on).
+		return (
+			<div className="h-full overflow-auto">
+				<PluginCompanionPage companionId={panel.spec.companion} />
+			</div>
+		);
+	}
+	if (panel.panel === "view" && panel.spec?.view) {
+		// One of the plugin's own declarative views, rendered with the host's
+		// components by the same page the view route uses — the app returned DATA.
+		return (
+			<div className="h-full overflow-auto">
+				<PluginViewPage pluginId={panel.plugin} viewId={panel.spec.view} />
+			</div>
+		);
+	}
+	return (
+		<DockPanelPlaceholder
+			text={emptyText ?? "This panel isn't supported by this version of Ryu."}
+		/>
+	);
+}
+
 function TabContent({
 	tab,
 	folder,
 	cowork,
+	dockPanels,
 	subagentView,
 	artifactView,
 	inspectorView,
 }: {
 	artifactView?: Artifact | null;
 	cowork?: CoworkData;
+	/** The enabled apps' contributed panels, for resolving a `plugin:` tab. */
+	dockPanels: PluginDockPanel[];
 	folder?: string | null;
 	inspectorView?: InspectedPart | null;
 	subagentView?: SubagentView | null;
 	tab: PanelTab;
 }) {
+	if (isPluginTabKind(tab.kind)) {
+		return (
+			<PluginDockTabContent
+				dockPanels={dockPanels}
+				label={tab.label}
+				tabKind={tab.kind}
+			/>
+		);
+	}
 	if (tab.kind === "terminal") {
 		return <SimpleTerminal cwd={folder} />;
 	}
@@ -2276,10 +2450,9 @@ function TabContent({
 		}
 		return <CoworkContextPanel {...cowork} />;
 	}
-	if (tab.kind === "simulator") {
-		return <SimulatorTabPanel />;
-	}
-	return <BrowserTabPanel title={tab.label} />;
+	// Every built-in kind is handled above; a tab that reaches here carries a kind
+	// this build no longer knows (a shell panel retired between sessions).
+	return <DockPanelPlaceholder text="This panel is no longer available." />;
 }
 
 // ── Drag resize hook ──────────────────────────────────────────────────────────
@@ -2500,6 +2673,41 @@ export function WorkspacePanels({
 	// user didn't ask for. Tabs are added on demand and closable back down to zero.
 	const bottom = usePanelTabs([]);
 	const right = usePanelTabs([]);
+
+	// The enabled apps' contributed dock panels. Core only serves ENABLED plugins'
+	// contributions, so this feed IS the set of app tabs that should be offered:
+	// disabling an app removes its tab from both the "+" menu and the launchpad
+	// with no shell change. An already-open tab is deliberately left alone (it
+	// renders an "app no longer enabled" placeholder instead) — the contributions
+	// read is best-effort, so a momentarily unreachable node must not destroy the
+	// user's open tabs.
+	const { dock_panels: dockPanels } = usePluginContributions();
+	const bottomTabTypes = useMemo(
+		() => [
+			...BOTTOM_TAB_TYPES,
+			...dockPanelsFor(dockPanels, "bottom").map(contributedTabType),
+		],
+		[dockPanels]
+	);
+	const rightTabTypes = useMemo(
+		() => [
+			...RIGHT_TAB_TYPES,
+			...dockPanelsFor(dockPanels, "right").map(contributedTabType),
+		],
+		[dockPanels]
+	);
+	// Icon for an OPEN tab (the strip), which may be a kind absent from either
+	// add-menu — a programmatic panel, or a contributed one whose app just left.
+	const iconForKind = useCallback(
+		(kind: TabKind): TabIconSpec => {
+			if (isPluginTabKind(kind)) {
+				const panel = findDockPanel(dockPanels, kind);
+				return panel ? tabTypeIcon(contributedTabType(panel)) : {};
+			}
+			return { glyph: BUILTIN_TAB_ICONS[kind] };
+		},
+		[dockPanels]
+	);
 	// The subagent currently pinned to the right panel's subagent tab (if any).
 	const [subagentView, setSubagentView] = useState<SubagentView | null>(null);
 	// The artifact currently pinned to the right panel's artifact tab (if any).
@@ -2592,12 +2800,12 @@ export function WorkspacePanels({
 	const addBottomTab = (kind: TabKind) =>
 		bottom.addTab(
 			kind,
-			BOTTOM_TAB_TYPES.find((t) => t.kind === kind)?.label ?? kind
+			bottomTabTypes.find((t) => t.kind === kind)?.label ?? kind
 		);
 	const addRightTab = (kind: TabKind) =>
 		right.addTab(
 			kind,
-			RIGHT_TAB_TYPES.find((t) => t.kind === kind)?.label ?? kind
+			rightTabTypes.find((t) => t.kind === kind)?.label ?? kind
 		);
 
 	// Move a tab between the two docks, preserving its identity, and reveal the
@@ -2629,7 +2837,8 @@ export function WorkspacePanels({
 		<div className="mx-2 mb-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-sidebar shadow-2xl ring-1 ring-border/40">
 			<PanelTabBar
 				activeUid={bottom.activeUid}
-				addTypes={BOTTOM_TAB_TYPES}
+				addTypes={bottomTabTypes}
+				iconForKind={iconForKind}
 				onActivate={bottom.setActiveUid}
 				onAdd={addBottomTab}
 				onCloseAll={bottom.closeAll}
@@ -2643,9 +2852,13 @@ export function WorkspacePanels({
 			/>
 			<div className="min-h-0 flex-1 overflow-hidden">
 				{activeBottomTab ? (
-					<TabContent folder={folder} tab={activeBottomTab} />
+					<TabContent
+						dockPanels={dockPanels}
+						folder={folder}
+						tab={activeBottomTab}
+					/>
 				) : (
-					<PanelEmptyState addTypes={BOTTOM_TAB_TYPES} onAdd={addBottomTab} />
+					<PanelEmptyState addTypes={bottomTabTypes} onAdd={addBottomTab} />
 				)}
 			</div>
 		</div>
@@ -2655,7 +2868,8 @@ export function WorkspacePanels({
 		<div className="my-2 mr-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-sidebar shadow-2xl ring-1 ring-border/40">
 			<PanelTabBar
 				activeUid={right.activeUid}
-				addTypes={RIGHT_TAB_TYPES}
+				addTypes={rightTabTypes}
+				iconForKind={iconForKind}
 				onActivate={right.setActiveUid}
 				onAdd={addRightTab}
 				onCloseAll={right.closeAll}
@@ -2672,13 +2886,14 @@ export function WorkspacePanels({
 					<TabContent
 						artifactView={artifactView}
 						cowork={cowork}
+						dockPanels={dockPanels}
 						folder={folder}
 						inspectorView={inspectorView}
 						subagentView={subagentView}
 						tab={activeRightTab}
 					/>
 				) : (
-					<PanelEmptyState addTypes={RIGHT_TAB_TYPES} onAdd={addRightTab} />
+					<PanelEmptyState addTypes={rightTabTypes} onAdd={addRightTab} />
 				)}
 			</div>
 		</div>
@@ -2720,23 +2935,42 @@ export function WorkspacePanels({
 	// the would-be-docked width, not the current mode, so it can't oscillate.
 	const containerRef = useRef<HTMLDivElement>(null);
 	const [containerWidth, setContainerWidth] = useState(0);
+	const [containerHeight, setContainerHeight] = useState(0);
 	useEffect(() => {
 		const el = containerRef.current;
 		if (!el) {
 			return;
 		}
 		const observer = new ResizeObserver((entries) => {
-			const width = entries[0]?.contentRect.width;
-			if (width != null) {
-				setContainerWidth(width);
+			const rect = entries[0]?.contentRect;
+			if (rect) {
+				setContainerWidth(rect.width);
+				setContainerHeight(rect.height);
 			}
 		});
 		observer.observe(el);
 		return () => observer.disconnect();
 	}, []);
 
+	// Phone widths have no room for a docked side column: the right panel stops
+	// pushing the chat and becomes a full-width overlay instead, and the
+	// pointer-only hover-peek and drag-to-resize handles stand down. The stored
+	// `rightWidth` is left alone so a wide viewport restores the docked rail.
+	const isMobile = useIsMobile();
+	const rightOverlay = isMobile && rightOpen;
+	const rightPanelWidth = isMobile ? containerWidth : rightWidth + PANEL_GUTTER;
+	// Never let the bottom dock swallow the chat: cap it so at least 120px of
+	// message column survives. Load-bearing on short viewports, where the 260px
+	// default is most of the screen.
+	const maxBottomHeight =
+		containerHeight > 0 ? Math.max(120, containerHeight - 120) : bottomHeight;
+	const effectiveBottomHeight = Math.min(bottomHeight, maxBottomHeight);
+
 	const pinnedRequested = Boolean(renderPinnedSummary);
-	const rightDockWidth = rightOpen ? rightWidth + PANEL_GUTTER : 0;
+	// An overlaid right panel doesn't reserve width, so it must not shift the
+	// pinned column's offset or feed the demotion measurement either.
+	const rightDockWidth =
+		rightOpen && !rightOverlay ? rightWidth + PANEL_GUTTER : 0;
 	const pinnedColumnWidth = PINNED_PANEL_WIDTH + PANEL_GUTTER;
 	const pinnedFloating =
 		pinnedRequested &&
@@ -2763,7 +2997,7 @@ export function WorkspacePanels({
 				<div
 					className="shrink-0"
 					style={{
-						height: bottomOpen ? bottomHeight + 12 : 0,
+						height: bottomOpen ? effectiveBottomHeight + 12 : 0,
 						transition: bottomResizing ? "none" : `height 300ms ${DOCK_EASE}`,
 					}}
 				/>
@@ -2777,7 +3011,7 @@ export function WorkspacePanels({
 				<div
 					className="absolute inset-x-0 bottom-0 z-20 flex flex-col"
 					style={{
-						height: bottomHeight + 12,
+						height: effectiveBottomHeight + 12,
 						display: bottomOpen ? "flex" : "none",
 					}}
 				>
@@ -2796,11 +3030,13 @@ export function WorkspacePanels({
 				}}
 			/>
 
-			{/* In-flow spacer: animates the chat's width when the right panel docks */}
+			{/* In-flow spacer: animates the chat's width when the right panel docks.
+			    Stays at zero while the panel is an overlay (mobile) — there is
+			    nothing to push the chat out of the way of. */}
 			<div
 				className="shrink-0"
 				style={{
-					width: rightOpen ? rightWidth + 12 : 0,
+					width: rightDockWidth,
 					transition: rightResizing ? "none" : `width 300ms ${DOCK_EASE}`,
 				}}
 			/>
@@ -2845,23 +3081,24 @@ export function WorkspacePanels({
 			    can no longer reach the button that hides it. */}
 			<div
 				className="absolute top-12 right-0 bottom-0 z-20 flex flex-row"
-				onMouseEnter={rightOpen ? undefined : showRightPeek}
-				onMouseLeave={rightOpen ? undefined : hideRightPeek}
+				onMouseEnter={rightOpen || isMobile ? undefined : showRightPeek}
+				onMouseLeave={rightOpen || isMobile ? undefined : hideRightPeek}
 				style={{
-					width: rightWidth + 12,
+					width: rightPanelWidth,
 					transform: rightVisible ? "translateX(0)" : "translateX(100%)",
 					pointerEvents: rightVisible ? "auto" : "none",
 					transition: rightResizing ? "none" : `transform 300ms ${DOCK_EASE}`,
 				}}
 			>
-				{rightResizeHandle}
+				{!isMobile && rightResizeHandle}
 				{rightCard(closeRight)}
 			</div>
 
 			{/* Right edge hover-zone: reveals the peek while the panel is closed.
 			    Starts below the titlebar so its z-30 strip never sits over the bar's
-			    right-side action buttons. */}
-			{!rightOpen && (
+			    right-side action buttons. Pointer-only, so it is absent on mobile —
+			    where it would also swallow the edge-swipe back gesture. */}
+			{!(rightOpen || isMobile) && (
 				<div
 					className="absolute top-12 right-0 bottom-0 z-30 w-2"
 					onMouseEnter={showRightPeek}

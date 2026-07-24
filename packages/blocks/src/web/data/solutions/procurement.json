@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Apples-to-apples comparison",
-      "description": "Agents normalize quotes with different units, terms, and bundles into one table you can actually compare."
+      "description": "Agents normalize quotes with different units, terms, and bundles into one table you can actually compare.",
+      "icon": "Plug"
     },
     {
       "title": "Connected to your systems",
-      "description": "Reach your sourcing, ERP, and finance tools to pull spend, supplier records, and POs directly."
+      "description": "Reach your sourcing, ERP, and finance tools to pull spend, supplier records, and POs directly.",
+      "icon": "Eye"
     },
     {
       "title": "Terms checked to your standard",
-      "description": "Ground agents on your contract playbook with Spaces to flag clauses that deviate, with the language quoted."
+      "description": "Ground agents on your contract playbook with Spaces to flag clauses that deviate, with the language quoted.",
+      "icon": "Bot"
     },
     {
       "title": "Governed and on the record",
-      "description": "The Gateway logs every call and protects pricing and supplier data, so sourcing decisions stay defensible."
+      "description": "The Gateway logs every call and protects pricing and supplier data, so sourcing decisions stay defensible.",
+      "icon": "Eye"
     }
   ],
   "useCases": [

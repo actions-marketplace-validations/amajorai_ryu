@@ -50,6 +50,12 @@ import {
 	SlashCommandAutocomplete,
 } from "@/src/components/chat/SlashCommandAutocomplete.tsx";
 import { WorkspaceBar } from "@/src/components/chat/WorkspaceBar.tsx";
+import { PluginComposerBarControls } from "@/src/components/composer/PluginComposerBarControls.tsx";
+import {
+	composerSelectOptions,
+	composerSelectValue,
+	partitionComposerControls,
+} from "@/src/components/composer/plugin-composer-controls.ts";
 import type { SubagentSummary } from "@/src/components/panels/CoworkContextPanel.tsx";
 import { PinnedSummaryPanel } from "@/src/components/panels/PinnedSummaryPanel.tsx";
 import {
@@ -356,10 +362,17 @@ function resolveFirstTeamMention(text: string, teams: Team[]): string | null {
 // ---------------------------------------------------------------------------
 /**
  * Build the per-request `plugin_flags` map from the plugin composer toggles that
- * are currently ON. Every composer control (including the built-in double-check
- * toggle, which is now a plugin contribution like any other) flows through this
- * one generic map keyed by each control's `flag`. Returns `undefined` when
- * nothing is on so Core applies its defaults.
+ * are currently ON (plus any one-shot `action` flag fired for this turn). Every
+ * composer control (including the built-in double-check toggle, which is now a
+ * plugin contribution like any other) flows through this one generic map keyed by
+ * each control's `flag`. Returns `undefined` when nothing is on so Core applies
+ * its defaults.
+ *
+ * The map is BOOL-ONLY on purpose: Core's `ChatRequest::plugin_flags` is a
+ * `HashMap<String, bool>`, so a string value would fail to deserialize and take
+ * the whole turn down with it. A `select`/`chip` value therefore lives in the
+ * composer's own `pluginControlValues` state and does NOT reach the turn until
+ * Core widens that field to a JSON value.
  */
 export function buildPluginFlags(
 	pluginFlags: Record<string, boolean>
@@ -1065,6 +1078,18 @@ export default function ChatPage({
 	const pluginFlagsRef = useRef<Record<string, boolean>>({});
 	pluginFlagsRef.current = pluginFlags;
 
+	// One-shot flags marked by an `action` composer control when it fires. Kept in
+	// a ref rather than state (the button holds no visual state) and CONSUMED by
+	// the next request's body, exactly like `skipNextUserAppendRef`: a button press
+	// belongs to the turn it precedes, not to every turn after it.
+	const pendingActionFlagsRef = useRef<Record<string, boolean>>({});
+	const firePluginActionFlag = useCallback((flag: string) => {
+		pendingActionFlagsRef.current = {
+			...pendingActionFlagsRef.current,
+			[flag]: true,
+		};
+	}, []);
+
 	// Ghost (temporary) chat: when on, every turn is sent with `persist: false` so
 	// Core writes nothing to the conversation store, and a new ghost chat is never
 	// registered in the sidebar history — it lives only in this tab's memory and is
@@ -1111,6 +1136,11 @@ export default function ChatPage({
 				// subsequent normal send.
 				const skipUserAppend = skipNextUserAppendRef.current;
 				skipNextUserAppendRef.current = false;
+				// Same consume-once treatment for the flags an `action` composer
+				// control marked when it fired: they belong to this turn, and leaving
+				// them set would make the owning plugin's hook act on every later one.
+				const firedActionFlags = pendingActionFlagsRef.current;
+				pendingActionFlagsRef.current = {};
 				// Persistent-session worktree: opt-in via the workspace bar's run
 				// mode (not auto-on per folder). When enabled, Core creates an
 				// isolated worktree on the first message and reuses it across turns,
@@ -1152,7 +1182,10 @@ export default function ChatPage({
 					// Per-request plugin flags (every plugin-contributed composer toggle,
 					// double-check included). The plugin turn-hook runtime passes these to
 					// each hook; a plugin acts only when its flag is set.
-					plugin_flags: buildPluginFlags(pluginFlagsRef.current),
+					plugin_flags: buildPluginFlags({
+						...pluginFlagsRef.current,
+						...firedActionFlags,
+					}),
 					// Ghost (temporary) chat: never write this turn to the conversation
 					// store. Omitted otherwise so Core applies its default (persist=true).
 					persist: ghostModeRef.current ? false : undefined,
@@ -3083,6 +3116,79 @@ export default function ChatPage({
 	const composerCompactRef = useRef(composerCompact);
 	composerCompactRef.current = composerCompact;
 
+	// ── App-contributed composer controls (`contributes.composer_controls`) ─────
+	//
+	// The manifest vocabulary is `toggle` | `select` | `chip` | `action`, and each
+	// reaches the composer through one of its EXISTING seams (see
+	// `plugin-composer-controls.ts`): toggles are "+" menu rows, menu-placed
+	// selects are settings-menu sections (fed to the shared factory as
+	// `extraSections`, the same seam the ACP approval/config pickers use), and
+	// chips/actions/bar-placed selects render in the composer toolbar. Nothing here
+	// is per-app: an entry whose `type` this build doesn't know is dropped by the
+	// partition, so a newer control degrades to "not shown" instead of breaking the
+	// composer.
+	const partitionedComposerControls = useMemo(
+		() => partitionComposerControls(pluginContributions.composer_controls),
+		[pluginContributions.composer_controls]
+	);
+
+	// The string-valued controls (a `select`'s chosen option, a `chip`'s live id),
+	// keyed by each control's `flag`. Separate from `pluginFlags` because the wire
+	// `plugin_flags` map is bool-only (Core's `ChatRequest`), so these values stay
+	// desktop-side for now — see the note on `buildPluginFlags`.
+	const [pluginControlValues, setPluginControlValues] = useState<
+		Record<string, string>
+	>({});
+	// Stable + idempotent: re-setting the same value returns the SAME object, so a
+	// chip mirroring its polled value into state can't drive a render loop.
+	const setPluginControlValue = useCallback(
+		(flag: string, value: string | null) => {
+			setPluginControlValues((prev) => {
+				if (value === null) {
+					if (!(flag in prev)) {
+						return prev;
+					}
+					const next = { ...prev };
+					delete next[flag];
+					return next;
+				}
+				return prev[flag] === value ? prev : { ...prev, [flag]: value };
+			});
+		},
+		[]
+	);
+
+	// Menu-placed `select` controls, as settings-menu sections. The section's items
+	// ARE the control's options, so the shell renders a mode picker it knows
+	// nothing about. An options-less one is auto-hidden by the menu.
+	const pluginComposerSelectSections = useMemo<ComposerSettingsSection[]>(
+		() =>
+			partitionedComposerControls.selects.map((control) => ({
+				key: `plugin:${control.plugin}:${control.id}`,
+				ariaLabel: control.label,
+				label: control.label,
+				items: composerSelectOptions(control).map((option) => ({
+					id: option.value,
+					name: option.label,
+					description: option.description ?? null,
+				})),
+				value: composerSelectValue(control, pluginControlValues),
+				onChange: (id: string) => setPluginControlValue(control.flag, id),
+			})),
+		[
+			partitionedComposerControls.selects,
+			pluginControlValues,
+			setPluginControlValue,
+		]
+	);
+
+	// The factory's extra sections: ChatPage's own ACP approval/config pickers plus
+	// whatever the enabled apps contributed.
+	const composerExtraSections = useMemo(
+		() => [...acp.extraSections, ...pluginComposerSelectSections],
+		[acp.extraSections, pluginComposerSelectSections]
+	);
+
 	const {
 		leftActions: composerLeft,
 		rightActions: composerRight,
@@ -3106,14 +3212,42 @@ export default function ChatPage({
 		model: effectiveModel,
 		onModelChange: handleModelChange,
 		modelSection: acp.modelSection,
-		extraSections: acp.extraSections,
+		extraSections: composerExtraSections,
 	});
+
+	// Bar-placed controls (chips, actions, inline selects), rendered into the
+	// composer toolbar's right slot below.
+	const pluginComposerBar =
+		partitionedComposerControls.bar.length > 0 ? (
+			<PluginComposerBarControls
+				controls={partitionedComposerControls.bar}
+				onActionFired={firePluginActionFlag}
+				onValueChange={setPluginControlValue}
+				values={pluginControlValues}
+			/>
+		) : null;
 
 	const composerControlsRef = useRef<{
 		left: ReactNode;
 		right: ReactNode;
 	}>({ left: null, right: null });
-	composerControlsRef.current = { left: composerLeft, right: composerRight };
+	composerControlsRef.current = {
+		left: composerLeft,
+		// Contributed bar controls sit after the shell's own right-hand controls,
+		// in the one slot the memoized InputBar reads from this ref.
+		right: pluginComposerBar ? (
+			<>
+				{composerRight}
+				{pluginComposerBar}
+			</>
+		) : (
+			composerRight
+		),
+	};
+	// `composerSections` already carries the plugin-contributed select sections:
+	// they are fed to the factory as `extraSections` above, so they render inside
+	// the composer's own settings dropdown (and its universal-picker body) exactly
+	// like the ACP approval/config sections do.
 	const composerSectionsRef =
 		useRef<ComposerSettingsSection[]>(composerSections);
 	composerSectionsRef.current = composerSections;
@@ -3167,18 +3301,16 @@ export default function ChatPage({
 	// InputBar slot) so a toggle re-renders the composer without rebuilding the slot.
 	const pluginComposerControls = useMemo<PluginComposerControlRow[]>(
 		() =>
-			pluginContributions.composer_controls
-				.filter((c) => c.type === "toggle")
-				.map((c) => ({
-					id: c.id,
-					flag: c.flag,
-					label: c.label,
-					description: c.description,
-					enabled: Boolean(pluginFlags[c.flag]),
-					onToggle: (flag: string, next: boolean) =>
-						setPluginFlags((m) => ({ ...m, [flag]: next })),
-				})),
-		[pluginContributions.composer_controls, pluginFlags]
+			partitionedComposerControls.toggles.map((c) => ({
+				id: c.id,
+				flag: c.flag,
+				label: c.label,
+				description: c.description,
+				enabled: Boolean(pluginFlags[c.flag]),
+				onToggle: (flag: string, next: boolean) =>
+					setPluginFlags((m) => ({ ...m, [flag]: next })),
+			})),
+		[partitionedComposerControls.toggles, pluginFlags]
 	);
 	const pluginComposerControlsRef = useRef<PluginComposerControlRow[]>([]);
 	pluginComposerControlsRef.current = pluginComposerControls;

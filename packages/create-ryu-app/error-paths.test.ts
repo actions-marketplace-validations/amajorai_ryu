@@ -73,6 +73,9 @@ describe("scaffold rejects bad input", () => {
 		);
 		expect(stderr).toContain("unknown template 'no-such-template'");
 		expect(stderr).toContain("agent");
+		// The app template must be offered too — it is the only one that scaffolds a
+		// satellite, and a list that omits it hides the whole shape.
+		expect(stderr).toContain("app");
 	});
 
 	it("an existing target directory → exits without overwriting", () => {

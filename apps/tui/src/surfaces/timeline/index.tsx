@@ -1,7 +1,15 @@
 /* @jsxImportSource @opentui/react */
 // Timeline surface (path /timeline) - mirrors the desktop TimelinePage, which
-// scrubs the Shadow capture lanes. Shadow is a device-local sidecar (frame/keyframe
-// data served off its own port, not Core's HTTP API), and the terminal has no
+// scrubs the Shadow capture lanes.
+//
+// The screen PREFERS the timeline app's own declarative view: an enabled plugin
+// contributing a `views` entry with id "surface:timeline" claims this surface, and
+// the shell renders that spec (src/ui/ContributedView.tsx) instead of the
+// recorder-status card below. That is the only way this screen ever shows real
+// capture data in a terminal, and until such a contribution exists the card stays.
+//
+// Shadow is a device-local sidecar (frame/keyframe data served off its own port, not
+// Core's HTTP API), and the terminal has no
 // pixel canvas to scrub, so this surface stays a clean status-aware empty-state: it
 // probes the merged system status (GET /api/system/status) to report whether the
 // Shadow sidecar is recording, mirroring the desktop's "Shadow is not running"
@@ -12,7 +20,9 @@ import { fetchSystemStatus } from "@ryuhq/core-client/system";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card.tsx";
 import { useTheme } from "@/components/ui/theme-provider.tsx";
+import { useSurfaceView } from "../../core/ContributionsContext.tsx";
 import { useCore } from "../../core/CoreContext.tsx";
+import { ContributedViewPanel } from "../../ui/ContributedView.tsx";
 import type { SurfaceModule, SurfaceProps } from "../../workspace/router.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 
@@ -20,11 +30,17 @@ type ShadowState = "unknown" | "recording" | "stopped" | "unreachable";
 
 const SHADOW_KEYS = ["shadow", "ghost"];
 
+// The surface id — and therefore the `views` id an app declares to claim this
+// screen, as the reserved `surface:<id>` token (see viewClaimingSurface in
+// src/core/contributions.ts).
+const SURFACE_ID = "timeline";
+
 function TimelineSurface({ active, paneId }: SurfaceProps) {
 	const { target, url, token } = useCore();
 	const theme = useTheme();
 	const { focusedPaneId } = useWorkspace();
 	const focused = active && focusedPaneId === paneId;
+	const contributed = useSurfaceView(SURFACE_ID);
 
 	const [shadow, setShadow] = useState<ShadowState>("unknown");
 
@@ -49,15 +65,17 @@ function TimelineSurface({ active, paneId }: SurfaceProps) {
 			});
 	}, [target]);
 
-	// Lazy load on activation, and reload on node switch (url/token).
+	// Lazy load on activation, and reload on node switch (url/token). Skipped while
+	// a contributed view owns the screen — the recorder probe is only there to feed
+	// the built-in status card.
 	useEffect(() => {
-		if (active) {
+		if (active && !contributed) {
 			runLoad();
 		}
-	}, [active, runLoad]);
+	}, [active, contributed, runLoad]);
 
 	useKeyboard((key) => {
-		if (!focused) {
+		if (!focused || contributed) {
 			return;
 		}
 		if (key.name === "r") {
@@ -72,10 +90,14 @@ function TimelineSurface({ active, paneId }: SurfaceProps) {
 					<b>Timeline</b>
 				</text>
 				<text fg={theme.colors.mutedForeground}>
-					activity history · r refresh
+					{contributed ? "" : "activity history · r refresh"}
 				</text>
 			</box>
-			<TimelineBody shadow={shadow} />
+			{contributed ? (
+				<ContributedViewPanel focused={focused} view={contributed} />
+			) : (
+				<TimelineBody shadow={shadow} />
+			)}
 		</box>
 	);
 }
@@ -128,7 +150,7 @@ function TimelineBody({ shadow }: { shadow: ShadowState }) {
 
 /** The Timeline surface module (path /timeline). Registered by the Integrate step. */
 export const timelineSurface: SurfaceModule = {
-	id: "timeline",
+	id: SURFACE_ID,
 	title: "Timeline",
 	match: (path) => path === "/timeline" || path.startsWith("/timeline/"),
 	Component: TimelineSurface,

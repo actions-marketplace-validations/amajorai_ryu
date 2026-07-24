@@ -787,6 +787,26 @@ impl PluginManifestLoader {
             }
         }
 
+        // Settings + tool-filter schema gate — the manifest equivalent of parsing a
+        // config through a schema at import instead of trusting it at use.
+        //
+        // `settings_tabs` is stored as raw JSON so the contributions endpoint can tag
+        // and forward each entry verbatim (see `Contributes::settings_tabs`), so it is
+        // only ever held to `SettingsTabContribution` at a validation chokepoint —
+        // and this is Core's, covering compiled-in built-ins and disk-loaded
+        // third-party manifests alike because every manifest reaches Core through
+        // this function. Without it a malformed tab travels all the way to the
+        // desktop and is dropped by the renderer's defensive parser: the author sees
+        // a settings screen with a missing row and no diagnostic anywhere. The rules
+        // themselves live in the contract crate so the SDK/FFI path
+        // (`PluginManifest::validate`) enforces exactly the same ones. A failure here
+        // is a skipped manifest with a warn, same as every other gate above.
+        if let Some(contributes) = &manifest.contributes {
+            contributes
+                .validate_settings_contributions()
+                .map_err(|e| format!("app '{}': {e} (source: {source})", manifest.id))?;
+        }
+
         Ok(manifest)
     }
 }

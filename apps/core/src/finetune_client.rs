@@ -24,29 +24,27 @@ use axum::{
 };
 use serde_json::{json, Value};
 
+use crate::plugin_manifest::FINETUNE_PLUGIN_ID;
 use crate::sidecar::ext_proxy::{ext_token, node_token};
 
-/// The built-in Fine-tuning app id (matches the `finetune.manifest.json` fixture id
-/// and `plugins::builtins`).
-const FINETUNE_PLUGIN_ID: &str = "com.ryu.finetune";
-/// Fallback loopback port if the manifest is somehow absent — matches the
-/// `finetune.manifest.json` fixture `port` (7990; distinct from clips 7992, quests
-/// 7991, browser 7993, teams 7994, research 7995, mail 7996, dashboards 7997, and
-/// the Python unsloth worker 8086). Core injects this as `RYU_FINETUNE_PORT` at spawn.
-const FINETUNE_FALLBACK_PORT: u16 = 7990;
+/// The `ryu-finetune` sidecar's name inside the Fine-tuning manifest — the other half
+/// of the `(plugin id, sidecar name)` key the port resolves through. Note the manifest
+/// ALSO declares the Python `unsloth` worker; keying on the name is what keeps this
+/// pointed at the Rust sidecar rather than the worker.
+const FINETUNE_SIDECAR: &str = "ryu-finetune";
 
 /// Resolve the `ryu-finetune` sidecar's loopback port from the loaded manifests,
 /// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]),
-/// so dev/custom profiles hit the same shifted port the sidecar was told to bind.
-/// Falls back to the fixture default when the manifest is missing.
+/// so dev/custom profiles hit the same shifted port the sidecar was told to bind. The
+/// port comes from the manifest and ONLY the manifest — see
+/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
+/// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    let raw = manifests
-        .iter()
-        .find(|m| m.id == FINETUNE_PLUGIN_ID)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == "ryu-finetune"))
-        .map(|s| s.port)
-        .unwrap_or(FINETUNE_FALLBACK_PORT);
-    crate::profile::port(raw)
+    crate::sidecar::ext_proxy::sidecar_port(manifests, FINETUNE_PLUGIN_ID, FINETUNE_SIDECAR)
+        .expect(
+            "built-in finetune.manifest.json must declare the ryu-finetune sidecar (see \
+             plugin_manifest::BUILTIN_MANIFESTS)",
+        )
 }
 
 /// Typed loopback client for the `ryu-finetune` sidecar. Cheap to clone (holds only

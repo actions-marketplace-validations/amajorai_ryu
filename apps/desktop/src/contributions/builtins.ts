@@ -27,13 +27,25 @@
 //     W7 frontend extraction landed the SKILL.md editor as the com.ryu.skill-editor
 //     companion; both previously resolved to blank.)
 //
+// No COMPANION ID is named here. This file used to carry twelve hardcoded aliases of the
+// shape `createElement(PluginCompanionPage, { companionId: "app__<x>-companion" })`
+// (activity, approvals/inbox, calendar, learning, mail, meetings, monitors, quests,
+// skill-editor, timeline, webhooks, workflows). They duplicated the
+// `usePluginContributionRoutes` seam AND kept resolving after their app was disabled
+// — a companion id baked into shell code cannot know the app is gone. They are
+// replaced by `CompanionAliasRoute` below: one generic catch-all that looks the
+// companion up in the LIVE contributions feed, so an app that is not enabled
+// contributes no companion, matches nothing, and its short path renders blank
+// exactly as the seam intends. See `resolveCompanionAlias` for the lookup order.
+//
 // NOTE (PR-1 wiring): `seedBuiltinRoutes()` is called once at `Layout.tsx` module
 // load (before first render) so the registry is populated before `RouteOutlet`
 // resolves. Kept as JSX-free `createElement` calls so the file is `.ts` (no
 // `.tsx`) and carries no JSX-runtime assumptions.
 
-import { createElement } from "react";
+import { createElement, useMemo } from "react";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
+import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { WHITEBOARD_PLUGIN_ID } from "@/src/lib/whiteboard/app.ts";
 import AgentEditPage from "@/src/pages/AgentEditPage.tsx";
 import ChatPage from "@/src/pages/ChatPage.tsx";
@@ -41,7 +53,9 @@ import DownloadsPage from "@/src/pages/DownloadsPage.tsx";
 import FileEditorPage from "@/src/pages/FileEditorPage.tsx";
 import HomePage from "@/src/pages/HomePage.tsx";
 import LibraryPage from "@/src/pages/LibraryPage.tsx";
-import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
+import PluginCompanionPage, {
+	CompanionUnavailable,
+} from "@/src/pages/PluginCompanionPage.tsx";
 import ReviewPage from "@/src/pages/ReviewPage.tsx";
 import SettingsPage from "@/src/pages/SettingsPage.tsx";
 import SpaceAppDocPage from "@/src/pages/SpaceAppDocPage.tsx";
@@ -51,6 +65,7 @@ import SpaceDocEditorPage from "@/src/pages/SpaceDocEditorPage.tsx";
 import SpacesPage from "@/src/pages/SpacesPage.tsx";
 import StorePage from "@/src/pages/StorePage.tsx";
 import WorkflowsPage from "@/src/pages/WorkflowsPage.tsx";
+import { resolveCompanionAlias, topLevelAlias } from "./companion-alias.ts";
 import { contributionRegistry, type RouteTab } from "./registry.ts";
 
 // A Notion-style markdown page inside a Space: /spaces/:spaceId/doc/:docId
@@ -92,6 +107,69 @@ const AGENT_EDIT = /^\/agents\/.+\/edit$/;
 // `/skills` store exact, so no collision. The skill id is baked into the sandboxed
 // com.ryu.skill-editor companion as `window.ryu.context.skillId`.
 const SKILL_EDIT = /^\/skills\/[^/]+\/edit$/;
+// The legacy short-path catch-all: ANY single top-level segment the exact map and
+// every pattern above declined (`/calendar`, `/timeline`, `/inbox`, …). Registered
+// LAST so it can only ever see paths that used to fall through to `null`; it hands
+// them to `CompanionAliasRoute`, which either finds a live companion in the
+// contributions feed or renders blank — the same blank the fallthrough produced.
+// Every pattern above needs at least two segments, so the two never compete.
+const COMPANION_ALIAS = /^\/[^/]+$/;
+
+/**
+ * Mount whatever enabled app answers to `alias`, or nothing.
+ *
+ * The generic replacement for a hardcoded `companionId`. `mountContext` is forwarded
+ * untouched so the context-carrying deep links (`/timeline/:ts` → `focusTs`,
+ * `/meetings/:id` → `meetingId`, `/workflows/:id` → `workflowId`,
+ * `/skills/:id/edit` → `skillId`) keep baking their parameter into the sandboxed
+ * frame as `window.ryu.context.*` — losing that would be a silent regression, since
+ * the sandbox cannot receive the window events the old desktop pages used.
+ */
+function CompanionAliasRoute({
+	alias,
+	mountContext,
+}: {
+	alias: string;
+	mountContext?: unknown;
+}) {
+	const contributions = usePluginContributions();
+	const { companions, sidebar_buttons: buttons } = contributions;
+	const companionId = useMemo(
+		() =>
+			resolveCompanionAlias({ companions, sidebar_buttons: buttons }, alias),
+		[companions, buttons, alias]
+	);
+	if (!companionId) {
+		// NOT `null`. A blank tab is the one outcome worse than a hardcoded route:
+		// most apps ship default-OFF, so on a fresh install the palette's "Inbox"
+		// row, an OS notification click, the Timeline hotkey and the tray's
+		// "Open Timeline" all reach this branch, and blank gives the user nothing to
+		// read and nothing to do. Shares one definition with the by-id mount below so
+		// the two cannot drift.
+		return createElement(CompanionUnavailable);
+	}
+	return createElement(PluginCompanionPage, { companionId, mountContext });
+}
+
+/** Element factory for a route that mounts an app by short path rather than by id. */
+const companionAlias = (alias: string, mountContext?: unknown) =>
+	createElement(CompanionAliasRoute, { alias, mountContext });
+
+// The two legacy paths no app can derive from its own id, so the shell has to spell
+// them out. Both name a PATH, never a companion id, so they still go through
+// `resolveCompanionAlias` and still blank out when their app is disabled — and both
+// disappear the moment the owning manifest claims the path itself (a
+// `sidebar_buttons[].target`-style route claim; see the manifest follow-up).
+//
+/** The short path the SKILL.md editor app answers to (its companion id slug).
+ *  `/skills/new` and `/skills/:id/edit` are shell VERB routes — "author a skill",
+ *  not "open an app" — and `/skills` belongs to the skills store, so neither can be
+ *  derived from its own path. */
+const SKILL_EDITOR_ALIAS = "/skill-editor";
+/** The short path the approvals app answers to. `/inbox` is the historic name of the
+ *  same surface (pending HITL approvals + notifications + quest check-offs + Shadow's
+ *  suggestions) and is still linked from the sidebar, the palette and InboxCenter. */
+const APPROVALS_ALIAS = "/approvals";
 
 let seeded = false;
 
@@ -152,17 +230,10 @@ export function seedBuiltinRoutes(): void {
 		createElement(StorePage, { initialSection: "skills" })
 	);
 	// The SKILL.md authoring editor (fresh draft). Both `/skills/new` and the
-	// `/skills/:id/edit` pattern route below mount the sandboxed com.ryu.skill-editor
-	// companion (ui_format:"html"); new-draft mode carries no mount context (the
-	// companion detects the absent `window.ryu.context.skillId`). These two routes
-	// previously resolved to blank (the SkillEditorPage was never wired into the tab
-	// router); the W7 frontend extraction lands the editor as a companion. The runnable
-	// id `skill-editor-companion` is exposed by Core as `app__skill-editor-companion`.
-	exact("/skills/new", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__skill-editor-companion",
-		})
-	);
+	// `/skills/:id/edit` pattern route below mount whichever app answers to
+	// SKILL_EDITOR_ALIAS; new-draft mode carries no mount context (the companion
+	// detects the absent `window.ryu.context.skillId`).
+	exact("/skills/new", () => companionAlias(SKILL_EDITOR_ALIAS));
 	exact("/spaces", () =>
 		createElement(LibraryPage, { initialSection: "space" })
 	);
@@ -170,119 +241,20 @@ export function seedBuiltinRoutes(): void {
 	exact("/workflows", () =>
 		createElement(LibraryPage, { initialSection: "workflow" })
 	);
-	// Calendar is a sandboxed companion app (com.ryu.calendar, ui_format:"html").
-	// The legacy /calendar route (kept so ryu://calendar + the palette + the sidebar
-	// still resolve) mounts the companion via PluginCompanionPage. The runnable id
-	// `calendar-companion` is exposed by Core as `app__calendar-companion`.
-	exact("/calendar", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__calendar-companion",
-		})
-	);
-	// Timeline is a sandboxed companion app (com.ryu.timeline, ui_format:"html").
-	// The legacy /timeline route (kept so ryu://timeline + the palette + the sidebar
-	// + the hotkey still resolve) mounts the companion via PluginCompanionPage. The
-	// runnable id `timeline-companion` is exposed by Core as `app__timeline-companion`.
-	// The deep-linked focus timestamp (jump-to-moment) rides the /timeline/:ts pattern
-	// route below.
-	exact("/timeline", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__timeline-companion",
-		})
-	);
 	exact("/review", () => createElement(ReviewPage));
-	// Activity is a sandboxed companion app (com.ryu.activity, ui_format:"html").
-	// The legacy /activity route (kept so ryu://activity + the palette + the sidebar
-	// still resolve) mounts the companion via PluginCompanionPage. The runnable id
-	// `activity-companion` is exposed by Core as `app__activity-companion`.
-	exact("/activity", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__activity-companion",
-		})
-	);
 	// Marketplace folded into the store: the legacy route opens the store.
 	exact("/marketplace", () => createElement(StorePage));
-	// Monitors is a sandboxed companion app (com.ryu.monitors, ui_format:"html").
-	// The legacy /monitors route (kept so ryu://monitors + the palette still
-	// resolve) mounts the companion via PluginCompanionPage. The runnable id
-	// `monitors-companion` is exposed by Core as `app__monitors-companion`.
-	exact("/monitors", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__monitors-companion",
-		})
-	);
 	// The NL workflow builder (fresh draft). The visual canvas is the
 	// com.ryu.workflows companion (see the /workflows/:id pattern route below); the
 	// builder is architecturally shell-only, so it keeps its own shell page.
 	exact("/workflows/build", () =>
 		createElement(WorkflowsPage, { initialWorkflowId: null })
 	);
-	// Webhooks is a sandboxed companion app (com.ryu.webhooks, ui_format:"html").
-	// The legacy /webhooks route (kept so ryu://webhooks + the palette still resolve)
-	// mounts the companion via PluginCompanionPage. The runnable id `webhooks-companion`
-	// is exposed by Core as `app__webhooks-companion`.
-	exact("/webhooks", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__webhooks-companion",
-		})
-	);
-	// Quests is a sandboxed companion app (com.ryu.quests, ui_format:"html").
-	// The legacy /quests route (kept so ryu://quests + the palette still resolve)
-	// mounts the companion via PluginCompanionPage. The runnable id `quests-companion`
-	// is exposed by Core as `app__quests-companion`.
-	exact("/quests", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__quests-companion",
-		})
-	);
-	// The Inbox (Approvals) is a sandboxed companion app (com.ryu.approvals,
-	// ui_format:"html"). The unified inbox — pending HITL approvals + the per-user
-	// notification feed + quest task check-offs + Shadow's proactive suggestions —
-	// mounts the companion via PluginCompanionPage. The runnable id `approvals-companion`
-	// is exposed by Core as `app__approvals-companion`.
-	exact("/inbox", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__approvals-companion",
-		})
-	);
-	// Agent Inboxes is a sandboxed companion app (com.ryu.mail, ui_format:"html").
-	// The legacy /mail route (kept so ryu://mail + the palette still resolve) mounts
-	// the companion via PluginCompanionPage. The runnable id `mail-companion` is
-	// exposed by Core as `app__mail-companion`. Distinct from the HITL approvals inbox.
-	exact("/mail", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__mail-companion",
-		})
-	);
+	// `/approvals` itself needs no entry — the catch-all derives it from the app's
+	// companion id — but `/inbox` is the historic alias of the same surface, and no
+	// convention can get there from "approvals".
+	exact("/inbox", () => companionAlias(APPROVALS_ALIAS));
 	exact("/downloads", () => createElement(DownloadsPage));
-	// The approvals deep link (ryu://approvals) lands on the same sandboxed Inbox
-	// companion as /inbox (com.ryu.approvals; runnable `app__approvals-companion`).
-	exact("/approvals", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__approvals-companion",
-		})
-	);
-	// Learning is a sandboxed companion app (com.ryu.learning, ui_format:"html").
-	// The legacy /learning route (kept so ryu://learning + the palette + the
-	// "Make a skill from this chat" affordance still resolve) mounts the companion via
-	// PluginCompanionPage. The runnable id `learning-companion` is exposed by Core as
-	// `app__learning-companion`.
-	exact("/learning", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__learning-companion",
-		})
-	);
-	// Meetings is a sandboxed companion app (com.ryu.meetings, ui_format:"html").
-	// The `/meetings` route (record-start empty state; the meeting list lives in the
-	// sidebar MeetingsSection) mounts the companion via PluginCompanionPage. The
-	// runnable id `meetings-companion` is exposed by Core as `app__meetings-companion`.
-	// A specific meeting's detail rides the /meetings/:id pattern route below, with the
-	// id baked into the frame as `window.ryu.context.meetingId`.
-	exact("/meetings", () =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__meetings-companion",
-		})
-	);
 	exact("/settings", () => createElement(SettingsPage));
 	// Apps + Extensions + Fleet all merged into the store's Installed section.
 	exact("/extensions", () =>
@@ -389,48 +361,45 @@ export function seedBuiltinRoutes(): void {
 	pattern(WORKFLOW_BUILD, (tab) =>
 		createElement(WorkflowsPage, { initialWorkflowId: tab.path.split("/")[3] })
 	);
-	// /workflows/:id ("new" => blank canvas) — the visual canvas is the sandboxed
-	// com.ryu.workflows companion (runnable `workflows-companion` → exposed as
-	// `app__workflows-companion`). The deep-linked workflow id is baked into the
-	// frame as `window.ryu.context.workflowId` via the mount context.
+	// /workflows/:id ("new" => blank canvas) — the visual canvas belongs to whichever
+	// app answers to `/workflows` (its own exact route above is the Library list, so
+	// the alias is only ever used as a lookup key here). The deep-linked workflow id
+	// is baked into the frame as `window.ryu.context.workflowId`.
 	pattern(WORKFLOW_DETAIL, (tab) => {
 		const workflowId = tab.path.split("/")[2];
-		return createElement(PluginCompanionPage, {
-			companionId: "app__workflows-companion",
-			mountContext: workflowId === "new" ? undefined : { workflowId },
-		});
+		return companionAlias(
+			topLevelAlias(tab.path),
+			workflowId === "new" ? undefined : { workflowId }
+		);
 	});
-	// /timeline/:ts — "open captured moment": mount the sandboxed com.ryu.timeline
-	// companion with the target timestamp (Unix µs) baked into the frame as
+	// /timeline/:ts — "open captured moment": mount the app that answers to `/timeline`
+	// with the target timestamp (Unix µs) baked into the frame as
 	// `window.ryu.context.focusTs`, so it scrubs straight to that moment (the desktop
 	// page received this via the `ryu:timeline-focus` window event, which cannot cross
 	// the sandbox). A non-numeric segment yields no focus context (harmless).
 	pattern(TIMELINE_FOCUS, (tab) => {
 		const focusTs = Number(tab.path.split("/")[2]);
-		return createElement(PluginCompanionPage, {
-			companionId: "app__timeline-companion",
-			mountContext: Number.isFinite(focusTs) ? { focusTs } : undefined,
-		});
+		return companionAlias(
+			topLevelAlias(tab.path),
+			Number.isFinite(focusTs) ? { focusTs } : undefined
+		);
 	});
-	// /meetings/:id — a specific meeting's detail (transcript + notes): mount the
-	// sandboxed com.ryu.meetings companion with the meeting id baked into the frame as
+	// /meetings/:id — a specific meeting's detail (transcript + notes): mount the app
+	// that answers to `/meetings` with the meeting id baked into the frame as
 	// `window.ryu.context.meetingId` via the mount context (the desktop page received
 	// it as a route prop, which cannot cross the sandbox).
 	pattern(MEETING_DETAIL, (tab) =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__meetings-companion",
-			mountContext: { meetingId: tab.path.split("/")[2] },
+		companionAlias(topLevelAlias(tab.path), {
+			meetingId: tab.path.split("/")[2],
 		})
 	);
-	// /skills/:id/edit — the SKILL.md editor for an existing skill: mount the sandboxed
-	// com.ryu.skill-editor companion with the skill id baked into the frame as
-	// `window.ryu.context.skillId` via the mount context (the desktop page received it as
-	// a route prop, which cannot cross the sandbox).
+	// /skills/:id/edit — the SKILL.md editor for an existing skill, with the skill id
+	// baked into the frame as `window.ryu.context.skillId` (the desktop page received
+	// it as a route prop, which cannot cross the sandbox). `/skills` belongs to the
+	// skills store, not the editor, so this verb route names SKILL_EDITOR_ALIAS rather
+	// than deriving the app from its own path — see that constant.
 	pattern(SKILL_EDIT, (tab) =>
-		createElement(PluginCompanionPage, {
-			companionId: "app__skill-editor-companion",
-			mountContext: { skillId: tab.path.split("/")[2] },
-		})
+		companionAlias(SKILL_EDITOR_ALIAS, { skillId: tab.path.split("/")[2] })
 	);
 	// /agents/:id/edit (carries onClose from the render context)
 	pattern(AGENT_EDIT, (tab, ctx) =>
@@ -439,4 +408,10 @@ export function seedBuiltinRoutes(): void {
 			onClose: ctx.onClose,
 		})
 	);
+	// The legacy short paths (`/calendar`, `/timeline`, `/inbox`, `/mail`, …), minted
+	// from the contributions feed instead of a hardcoded table — registered LAST so
+	// every shell route above still wins, and so this only ever sees paths that used
+	// to fall through to blank. An app that is disabled contributes no companion, so
+	// its short path resolves to nothing exactly as the `/plugin/<id>` seam intends.
+	pattern(COMPANION_ALIAS, (tab) => companionAlias(tab.path));
 }

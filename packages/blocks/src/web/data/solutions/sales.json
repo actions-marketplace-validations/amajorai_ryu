@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Acts in your stack",
-      "description": "Connect Gmail, Outlook, Salesforce, HubSpot, and Slack so agents can read, draft, and update where you already work."
+      "description": "Connect Gmail, Outlook, Salesforce, HubSpot, and Slack so agents can read, draft, and update where you already work.",
+      "icon": "Plug"
     },
     {
       "title": "Personalized at scale",
-      "description": "Research each account and write outreach that sounds like you, grounded in real signals, not generic templates."
+      "description": "Research each account and write outreach that sounds like you, grounded in real signals, not generic templates.",
+      "icon": "Sparkles"
     },
     {
       "title": "CRM stays current",
-      "description": "Agents log calls, update stages, and fill fields after every interaction, so the pipeline reflects reality."
+      "description": "Agents log calls, update stages, and fill fields after every interaction, so the pipeline reflects reality.",
+      "icon": "Bot"
     },
     {
       "title": "Your data, governed",
-      "description": "Every call passes the Gateway: budgets keep cost predictable and the audit trail shows what was sent."
+      "description": "Every call passes the Gateway: budgets keep cost predictable and the audit trail shows what was sent.",
+      "icon": "Eye"
     }
   ],
   "useCases": [

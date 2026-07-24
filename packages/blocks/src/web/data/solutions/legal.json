@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Privilege stays private",
-      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request."
+      "description": "Run a local Gemma 4 on install, or route to a cloud model with PII and DLP redaction on every request.",
+      "icon": "Shield"
     },
     {
       "title": "Auditable by default",
-      "description": "Every model and tool call is logged in the Gateway audit trail, so you can show exactly what an agent saw and did."
+      "description": "Every model and tool call is logged in the Gateway audit trail, so you can show exactly what an agent saw and did.",
+      "icon": "Eye"
     },
     {
       "title": "Cites its sources",
-      "description": "Ground agents on your own clause library and matter files with Spaces and RAG, so answers point back to the document."
+      "description": "Ground agents on your own clause library and matter files with Spaces and RAG, so answers point back to the document.",
+      "icon": "Bot"
     },
     {
       "title": "No lock-in",
-      "description": "Bring your own model and key. Swap Claude, GPT, or a local model per task without rewriting a thing."
+      "description": "Bring your own model and key. Swap Claude, GPT, or a local model per task without rewriting a thing.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

@@ -126,15 +126,17 @@ fn build_transcript(messages: &[super::conversations::StoredMessage]) -> String 
     out
 }
 
-/// Produce a raw suggestions string. Default: the resident local engine, called
-/// directly. Override (pref `chat-suggestions-model`): the Gateway with that
-/// model id, tagged background. `None` when neither is available.
+/// Produce a raw suggestions string. Resolution: pref `chat-suggestions-model`
+/// → the node-wide default selection → the resident local engine called
+/// directly. The first two route through the Gateway (tagged background); the
+/// local path keeps the transcript on the machine and is what an unconfigured
+/// node still uses. `None` when none of the three is available.
 async fn generate(state: &ServerState, transcript: &str) -> Option<String> {
-    if let Ok(Some(pref)) = state.preferences.get(SUGGESTIONS_MODEL_PREF).await {
-        let model = pref.trim().to_string();
-        if !model.is_empty() {
-            return gateway_generate(state, &model, transcript).await;
-        }
+    if let Some(resolved) =
+        crate::agent_selection::resolve_side_model(&state.preferences, SUGGESTIONS_MODEL_PREF, None)
+            .await
+    {
+        return gateway_generate(state, &resolved.model, transcript).await;
     }
     local_generate(state, transcript).await
 }

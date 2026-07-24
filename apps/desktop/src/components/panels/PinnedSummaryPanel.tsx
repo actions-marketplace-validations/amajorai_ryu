@@ -8,8 +8,11 @@
 // Changes / Sources / Side chats) come from the shared CoworkContextPanel and
 // only appear when they have something to show.
 //
-// The Environment row is shown (and default-open) only while a project folder is
-// open; with no folder there is nothing to configure, so it is omitted too.
+// The Environment row is ALWAYS present — including with no project folder open,
+// where it collapses to the project picker plus a one-line hint. It used to be
+// gated on `folder`, which left a folderless chat with zero accordion items: the
+// panel then rendered nothing while its docked column still reserved its width,
+// so the sidebar read as a blank strip.
 // Placement is owned by WorkspacePanels: normally a docked column stacked with
 // the right panel (both push the chat narrower, both can be open at once); when
 // the chat would get too narrow it auto-demotes to a floating overlay. Only the
@@ -91,6 +94,7 @@ function DiffStat({
 function EnvironmentDescription({
 	conversationId,
 	target,
+	folder,
 	git,
 	commit,
 	hasWork,
@@ -98,6 +102,7 @@ function EnvironmentDescription({
 }: {
 	commit: CommitState;
 	conversationId?: string | null;
+	folder: string | null;
 	git: GitStatus | null;
 	hasWork: boolean;
 	onCommitPush: () => void;
@@ -107,6 +112,21 @@ function EnvironmentDescription({
 	const deletions = git?.deletions ?? 0;
 	const ahead = git?.ahead ?? 0;
 	const clean = insertions === 0 && deletions === 0;
+
+	// No folder: the branch/worktree pickers and every git affordance render
+	// nothing, so the row shows just the project picker and says why it is bare.
+	if (!folder) {
+		return (
+			<div className="flex flex-col gap-2">
+				<div className="flex flex-col items-stretch [&_button]:w-full [&_button]:justify-start">
+					<ProjectPicker />
+				</div>
+				<p className="text-muted-foreground text-xs">
+					No project folder. Pick one to see branch, changes and commit.
+				</p>
+			</div>
+		);
+	}
 
 	return (
 		<div className="flex flex-col gap-2">
@@ -289,9 +309,9 @@ export function PinnedSummaryPanel({
 	// A push is worth doing when there are local changes or unpushed commits.
 	const hasWork = changedCount > 0 || ahead > 0;
 
-	// The Environment row: pickers + git line-stats + commit & push. Only present
-	// while a folder is open — with no folder there is nothing to configure, so
-	// the row (and its default-open state) is dropped entirely.
+	// The Environment row: pickers + git line-stats + commit & push. Always
+	// present — with no folder it degrades to the project picker + a hint, which
+	// keeps the panel from collapsing to nothing (see the file header).
 	const environmentItem: BouncyAccordionItem = {
 		id: "environment",
 		icon: (
@@ -311,6 +331,7 @@ export function PinnedSummaryPanel({
 			<EnvironmentDescription
 				commit={commit}
 				conversationId={conversationId}
+				folder={folder}
 				git={git}
 				hasWork={hasWork}
 				onCommitPush={handleCommitPush}
@@ -329,10 +350,7 @@ export function PinnedSummaryPanel({
 			)}
 			ref={panelRef}
 		>
-			<CoworkContextPanel
-				{...cowork}
-				leadingItems={folder ? [environmentItem] : []}
-			/>
+			<CoworkContextPanel {...cowork} leadingItems={[environmentItem]} />
 		</div>
 	);
 }

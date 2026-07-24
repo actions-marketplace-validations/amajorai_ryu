@@ -1,25 +1,31 @@
 // apps/desktop/src/components/downloads/DownloadRow.tsx
 //
-// One download row — progress bar, size/speed/ETA, and pause/resume/cancel/retry
-// controls — shared by the compact download popup (DownloadCenter) and the full
-// DownloadsPage so both render an identical row.
+// One download row — kind glyph, progress, size/speed/ETA, and
+// pause/resume/cancel/retry controls — shared by the compact download tray
+// (DownloadCenter) and the full DownloadsPage so both render an identical row.
+//
+// Built on the shared TrayRow grid, so a download sits in the same rhythm as an
+// approval or an available update: one title line, one thin progress bar, one
+// dot-separated meta line. Everything a download used to stack (size line +
+// state line + bar) now fits that shape.
+//
+// Controls live in a fixed-width slot and stay visible at 70% rather than being
+// revealed on hover: hover-only controls left every row looking empty on the
+// right, and made the row reflow the moment the pointer touched it.
 
 import {
-	Alert01Icon,
 	Cancel01Icon,
 	CheckmarkCircle02Icon,
+	Delete02Icon,
 	PauseIcon,
 	PlayIcon,
-	Refresh01Icon,
 } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { Button } from "@ryu/ui/components/button";
-import { Progress } from "@ryu/ui/components/progress";
 import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
+	TrayAction,
+	TrayIconAction,
+	TrayRow,
+	trayMeta,
+} from "@/src/components/shell/TrayPopover.tsx";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	cancelDownload,
@@ -32,6 +38,7 @@ import {
 } from "@/src/lib/api/downloads.ts";
 import { friendlyDownloadLabel } from "@/src/lib/catalog/friendly.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
+import { kindIcon } from "./kindIcons.ts";
 
 export function formatBytes(n: number): string {
 	if (n < 1024) {
@@ -105,121 +112,91 @@ export function DownloadRow({
 		: task.label;
 
 	const sizeText = task.total_bytes
-		? `${formatBytes(task.received_bytes)} / ${formatBytes(task.total_bytes)}`
+		? `${formatBytes(task.received_bytes)} of ${formatBytes(task.total_bytes)}`
 		: formatBytes(task.received_bytes);
 	const percent =
 		task.total_bytes && task.total_bytes > 0
 			? Math.min(100, (task.received_bytes / task.total_bytes) * 100)
 			: null;
-	const indeterminate = task.state === "active" && percent === null;
+	const done = task.state === "completed";
+	const failed = task.state === "failed";
+	const terminal = done || failed || task.state === "cancelled";
+
+	let tone: "default" | "danger" | "success" = "default";
+	if (failed) {
+		tone = "danger";
+	} else if (done) {
+		tone = "success";
+	}
+
+	let meta: string;
+	if (failed) {
+		meta = stateLabel(task);
+	} else if (terminal) {
+		meta = trayMeta(done ? "Installed" : "Cancelled", sizeText);
+	} else {
+		meta = trayMeta(sizeText, stateLabel(task));
+	}
 
 	return (
-		<div className="flex flex-col gap-1.5 px-3 py-2.5">
-			<div className="flex items-center justify-between gap-2">
-				<Tooltip>
-					<TooltipTrigger
-						render={
-							<span className="truncate font-medium text-sm">
-								{displayLabel}
-							</span>
-						}
-					/>
-					<TooltipContent>{task.label}</TooltipContent>
-				</Tooltip>
-				<div className="flex shrink-0 items-center gap-1">
+		<TrayRow
+			actions={
+				<span className="flex items-center gap-1">
 					{task.state === "active" && (
-						<Button
-							aria-label="Pause"
+						<TrayIconAction
+							icon={PauseIcon}
+							label="Pause"
 							onClick={() =>
 								pauseDownload(target, task.id).catch(() => undefined)
 							}
-							size="icon"
-							variant="ghost"
-						>
-							<HugeiconsIcon className="size-4" icon={PauseIcon} />
-						</Button>
+						/>
 					)}
 					{(task.state === "paused" || task.state === "queued") && (
-						<Button
-							aria-label="Resume"
+						<TrayIconAction
+							icon={PlayIcon}
+							label="Resume"
 							onClick={() =>
 								resumeDownload(target, task.id).catch(() => undefined)
 							}
-							size="icon"
-							variant="ghost"
-						>
-							<HugeiconsIcon className="size-4" icon={PlayIcon} />
-						</Button>
-					)}
-					{task.state === "failed" && task.retryable && (
-						<Button
-							aria-label="Retry"
-							onClick={() =>
-								retryDownload(target, task.id).catch(() => undefined)
-							}
-							size="icon"
-							variant="ghost"
-						>
-							<HugeiconsIcon className="size-4" icon={Refresh01Icon} />
-						</Button>
+						/>
 					)}
 					{isInFlight(task.state) || task.state === "paused" ? (
-						<Button
-							aria-label="Cancel"
+						<TrayIconAction
+							icon={Cancel01Icon}
+							label="Cancel"
 							onClick={() =>
 								cancelDownload(target, task.id).catch(() => undefined)
 							}
-							size="icon"
-							variant="ghost"
-						>
-							<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
-						</Button>
+							tone="danger"
+						/>
 					) : (
-						<Button
-							aria-label="Dismiss"
+						<TrayIconAction
+							icon={Delete02Icon}
+							label="Dismiss"
 							onClick={() =>
 								clearDownload(target, task.id).catch(() => undefined)
 							}
-							size="icon"
-							variant="ghost"
-						>
-							<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
-						</Button>
+						/>
 					)}
-				</div>
-			</div>
-
-			{task.state === "completed" ? (
-				<div className="flex items-center gap-1.5 text-muted-foreground text-xs">
-					<HugeiconsIcon
-						className="size-3.5 text-success"
-						icon={CheckmarkCircle02Icon}
-					/>
-					<span>Installed · {sizeText}</span>
-				</div>
-			) : task.state === "failed" ? (
-				<div className="flex items-center gap-1.5 text-destructive text-xs">
-					<HugeiconsIcon className="size-3.5" icon={Alert01Icon} />
-					{task.error ? (
-						<Tooltip>
-							<TooltipTrigger
-								render={<span className="truncate">{stateLabel(task)}</span>}
-							/>
-							<TooltipContent>{task.error}</TooltipContent>
-						</Tooltip>
-					) : (
-						<span className="truncate">{stateLabel(task)}</span>
+					{failed && task.retryable && (
+						<TrayAction
+							label="Retry"
+							onClick={() =>
+								retryDownload(target, task.id).catch(() => undefined)
+							}
+						/>
 					)}
-				</div>
-			) : (
-				<>
-					<Progress value={indeterminate ? null : (percent ?? 0)} />
-					<div className="flex items-center justify-between text-muted-foreground text-xs tabular-nums">
-						<span>{sizeText}</span>
-						<span>{stateLabel(task)}</span>
-					</div>
-				</>
-			)}
-		</div>
+				</span>
+			}
+			icon={done ? CheckmarkCircle02Icon : kindIcon(task.kind)}
+			meta={meta}
+			metaTone={failed ? "danger" : "default"}
+			progress={terminal ? undefined : percent}
+			// Native title attribute rather than a Tooltip: the row already carries
+			// tooltipped controls, and nesting another trigger around the truncated
+			// label made the whole row a tooltip target.
+			title={<span title={task.label}>{displayLabel}</span>}
+			tone={tone}
+		/>
 	);
 }

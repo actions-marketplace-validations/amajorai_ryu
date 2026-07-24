@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Connected to your stack",
-      "description": "Agents authenticate into Slack, Notion, HubSpot, and your social tools to draft, post, and update, not just suggest."
+      "description": "Agents authenticate into Slack, Notion, HubSpot, and your social tools to draft, post, and update, not just suggest.",
+      "icon": "Plug"
     },
     {
       "title": "On-brand by grounding",
-      "description": "Point agents at your brand guidelines and past campaigns with Spaces so copy sounds like you, with citations."
+      "description": "Point agents at your brand guidelines and past campaigns with Spaces so copy sounds like you, with citations.",
+      "icon": "Bot"
     },
     {
       "title": "Cost stays in budget",
-      "description": "The Gateway caps spend per agent and routes cheap drafts to a local model, premium work to a frontier one."
+      "description": "The Gateway caps spend per agent and routes cheap drafts to a local model, premium work to a frontier one.",
+      "icon": "Shield"
     },
     {
       "title": "Repeatable as workflows",
-      "description": "Turn a launch into a workflow that runs the same steps every time, on a schedule or a trigger."
+      "description": "Turn a launch into a workflow that runs the same steps every time, on a schedule or a trigger.",
+      "icon": "RefreshCw"
     }
   ],
   "useCases": [

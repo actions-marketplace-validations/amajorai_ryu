@@ -18,28 +18,24 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use ryu_teams::{CreateTeam, TeamRecord};
 
+use crate::plugins::builtins::TEAMS_PLUGIN_ID;
 use crate::sidecar::ext_proxy::{ext_token, node_token};
 
-/// The built-in Teams app id (matches `plugins::builtins::TEAMS_PLUGIN_ID` and the
-/// `teams.manifest.json` fixture).
-const TEAMS_PLUGIN_ID: &str = "com.ryu.teams";
-/// Fallback loopback port if the manifest is somehow absent — matches the
-/// `teams.manifest.json` fixture `port` (7994; distinct from research's 7995 so the two
-/// sidecars never contend for a port). Core injects this as `RYU_TEAMS_PORT` at spawn.
-const TEAMS_FALLBACK_PORT: u16 = 7994;
+/// The `ryu-teams` sidecar's name inside the Teams manifest — the other half of the
+/// `(plugin id, sidecar name)` key the port resolves through.
+const TEAMS_SIDECAR: &str = "ryu-teams";
 
 /// Resolve the `ryu-teams` sidecar's loopback port from the loaded manifests,
 /// profile-shifted the same way the ext-proxy forwards (`crate::profile::port`), so
-/// dev/custom profiles hit the same shifted port the sidecar was told to bind. Falls
-/// back to the fixture default when the manifest is missing.
+/// dev/custom profiles hit the same shifted port the sidecar was told to bind. The
+/// port comes from the manifest and ONLY the manifest — see
+/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
+/// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    let raw = manifests
-        .iter()
-        .find(|m| m.id == TEAMS_PLUGIN_ID)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == "ryu-teams"))
-        .map(|s| s.port)
-        .unwrap_or(TEAMS_FALLBACK_PORT);
-    crate::profile::port(raw)
+    crate::sidecar::ext_proxy::sidecar_port(manifests, TEAMS_PLUGIN_ID, TEAMS_SIDECAR).expect(
+        "built-in teams.manifest.json must declare the ryu-teams sidecar (see \
+         plugin_manifest::BUILTIN_MANIFESTS)",
+    )
 }
 
 /// Typed loopback client for the `ryu-teams` sidecar. Cheap to clone (holds only the

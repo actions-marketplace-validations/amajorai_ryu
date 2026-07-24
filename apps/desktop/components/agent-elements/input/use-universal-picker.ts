@@ -1,9 +1,9 @@
 "use client";
 
-// Builds the universal picker's grouped body (Ryu Portal · Providers · External
-// Agents) and hands `useComposerAgentControls` a `renderBody` it can pass to
-// `ComposerSettingsMenu`. This hook owns the extra data the legacy sibling-section
-// picker never needed:
+// Builds the universal picker's body data (Ryu — with its providers nested
+// under it — plus external agents) and hands `useComposerAgentControls` a
+// `renderBody` it can pass to `ComposerSettingsMenu`. This hook owns the extra
+// data the legacy sibling-section picker never needed:
 //   - Pi provider catalog + active config (`usePiConfig`) → the Providers section,
 //     with per-provider `configured` gating and the active route highlighted.
 //   - The installable agents catalog (`useAgentsCatalog`) → the not-installed
@@ -103,7 +103,7 @@ export function useUniversalPicker(
 	);
 
 	// The provider rows shown in the picker: every Pi provider except the bare
-	// `gateway` pseudo-provider (that IS the Ryu Portal local/gateway route). The
+	// `gateway` pseudo-provider (that IS the Ryu portal local/gateway route). The
 	// managed `managed-openrouter` provider IS shown here — as the subscription upsell
 	// row when unsubscribed, or the full OpenRouter model list when subscribed.
 	const shownProviders = useMemo(
@@ -113,7 +113,7 @@ export function useUniversalPicker(
 
 	const isRyuActive = agentId === RYU_AGENT_ID;
 	// A provider row is the active target when the Ryu agent's Pi config routes to a
-	// provider we show; otherwise (gateway / local) Ryu Portal is the active target.
+	// provider we show; otherwise (gateway / local) the Ryu portal route is active.
 	const activeProviderId =
 		isRyuActive &&
 		config &&

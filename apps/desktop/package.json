@@ -1,7 +1,7 @@
 {
   "name": "desktop",
   "private": true,
-  "version": "0.0.9",
+  "version": "0.0.10",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -34,8 +34,8 @@
     "@ryu/auth": "workspace:*",
     "@ryu/blocks": "workspace:*",
     "@ryu/command": "workspace:*",
-    "@ryu/marketplace": "workspace:*",
     "@ryu/hotkeys": "workspace:*",
+    "@ryu/marketplace": "workspace:*",
     "@ryu/settings": "workspace:*",
     "@ryu/ui": "workspace:*",
     "@ryuhq/core-client": "workspace:*",
@@ -47,6 +47,7 @@
     "@tanstack/react-query": "^5.62.0",
     "@tanstack/react-table": "^8.21.3",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-deep-link": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-fs": "^2.5.0",

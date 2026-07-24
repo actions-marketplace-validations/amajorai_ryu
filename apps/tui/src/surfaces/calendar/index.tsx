@@ -1,6 +1,11 @@
 /* @jsxImportSource @opentui/react */
 // Calendar surface (path /calendar) - mirrors the desktop CalendarPage, which
-// renders the scheduled jobs as a calendar/agenda. The terminal keeps it light: the
+// renders the scheduled jobs as a calendar/agenda.
+//
+// The screen PREFERS the calendar app's own declarative view: an enabled plugin
+// contributing a `views` entry with id "surface:calendar" claims this surface, and
+// the shell renders that spec (src/ui/ContributedView.tsx) instead of the agenda
+// below. Until then the hand-written agenda stays. The terminal keeps it light: the
 // same scheduled jobs (GET /heartbeat/jobs) presented as an agenda sorted by name,
 // with the cadence (cron expr or "every <interval>") as the leading column and the
 // job's run target (workflow or agent) as the subtitle. Where Tasks emphasises the
@@ -13,13 +18,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Card } from "@/components/ui/card.tsx";
 import { useTheme } from "@/components/ui/theme-provider.tsx";
+import { useSurfaceView } from "../../core/ContributionsContext.tsx";
 import { useCore } from "../../core/CoreContext.tsx";
+import { ContributedViewPanel } from "../../ui/ContributedView.tsx";
 import { ErrorView } from "../../ui/ErrorView.tsx";
 import { Loading } from "../../ui/Loading.tsx";
 import type { SurfaceModule, SurfaceProps } from "../../workspace/router.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 
 const VISIBLE_ROWS = 14;
+
+// The surface id — and therefore the `views` id an app declares to claim this
+// screen, as the reserved `surface:<id>` token (see viewClaimingSurface in
+// src/core/contributions.ts).
+const SURFACE_ID = "calendar";
 
 function cadenceLabel(job: ScheduledJob): string {
 	const { schedule } = job;
@@ -48,6 +60,7 @@ function CalendarSurface({ active, paneId }: SurfaceProps) {
 	const theme = useTheme();
 	const { focusedPaneId, openTab } = useWorkspace();
 	const focused = active && focusedPaneId === paneId;
+	const contributed = useSurfaceView(SURFACE_ID);
 
 	const [jobs, setJobs] = useState<ScheduledJob[]>([]);
 	const [index, setIndex] = useState(0);
@@ -88,15 +101,17 @@ function CalendarSurface({ active, paneId }: SurfaceProps) {
 			});
 	}, [target]);
 
-	// Lazy load on activation, and reload on node switch (url/token).
+	// Lazy load on activation, and reload on node switch (url/token). Skipped while
+	// a contributed view owns the screen — the built-in agenda is not rendered then,
+	// so fetching its data would be pure waste.
 	useEffect(() => {
-		if (active) {
+		if (active && !contributed) {
 			runLoad();
 		}
-	}, [active, runLoad]);
+	}, [active, contributed, runLoad]);
 
 	useKeyboard((key) => {
-		if (!focused) {
+		if (!focused || contributed) {
 			return;
 		}
 		if (key.name === "up" || key.name === "k") {
@@ -116,10 +131,23 @@ function CalendarSurface({ active, paneId }: SurfaceProps) {
 				<b>Calendar</b>
 			</text>
 			<text fg={theme.colors.mutedForeground}>
-				agenda · ↑↓ nav · Enter open Tasks · r refresh
+				{contributed ? "" : "agenda · ↑↓ nav · Enter open Tasks · r refresh"}
 			</text>
 		</box>
 	);
+
+	// An app claimed this surface: render its declarative view in place of the
+	// built-in agenda, keeping the page frame so the shell still looks like itself.
+	if (contributed) {
+		return (
+			<box flexDirection="column" flexGrow={1} paddingTop={1}>
+				{header}
+				<box flexDirection="column" paddingLeft={1}>
+					<ContributedViewPanel focused={focused} view={contributed} />
+				</box>
+			</box>
+		);
+	}
 
 	if (loading && !loaded) {
 		return (
@@ -225,7 +253,7 @@ function AgendaRow({
 
 /** The Calendar surface module (path /calendar). Registered by the Integrate step. */
 export const calendarSurface: SurfaceModule = {
-	id: "calendar",
+	id: SURFACE_ID,
 	title: "Calendar",
 	match: (path) => path === "/calendar" || path.startsWith("/calendar/"),
 	Component: CalendarSurface,

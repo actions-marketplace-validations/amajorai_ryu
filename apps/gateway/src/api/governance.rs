@@ -31,7 +31,10 @@ use crate::{error::GatewayError, governance, state::SharedState};
 
 #[derive(Debug, Deserialize)]
 pub struct ValidateGrantsRequest {
-    /// App id requesting the grants (for logging/audit context only).
+    /// Manifest id of the app requesting the grants. **Load-bearing**, not just
+    /// log context: it is the subject of the capability grammar's owner-scoped
+    /// rule (`com.ryu.monitors` may self-grant `monitors:*`). Absent ⇒ the
+    /// grammar falls back to allowlist-only, which is the fail-closed direction.
     #[serde(default)]
     pub app_id: Option<String>,
     /// The permission grant scopes the manifest declares.
@@ -47,11 +50,16 @@ pub struct ValidateGrantsResponse {
 }
 
 /// POST /v1/grants/validate — validate requested grants against gateway policy.
+///
+/// `app_id` is forwarded into the decision (not merely logged): the capability
+/// grammar approves a scope in the requesting app's *own* namespace without an
+/// allowlist entry, which is what lets a third-party app enable at all. Host
+/// primitives stay gated on the reviewed allowlist regardless of who asks.
 pub async fn validate_grants(
     State(_state): State<SharedState>,
     Json(req): Json<ValidateGrantsRequest>,
 ) -> Result<Json<ValidateGrantsResponse>, GatewayError> {
-    let decision = governance::validate_grants(&req.grants);
+    let decision = governance::validate_grants_for(req.app_id.as_deref(), &req.grants);
     if !decision.all_approved() {
         tracing::info!(
             app_id = req.app_id.as_deref().unwrap_or("?"),

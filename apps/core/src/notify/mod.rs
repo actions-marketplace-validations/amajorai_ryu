@@ -15,7 +15,7 @@
 //! Core touches it.
 //!
 //! The out-of-process monitor engine delivers its alerts back here by POSTing them
-//! to Core's `POST /api/host/monitors/alert` callback, handled in
+//! to Core's `POST /api/host/capability/notify.fanout` kernel capability, handled in
 //! [`crate::monitors_client`], which calls [`notify_all`] (and records the activity
 //! item).
 

@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "A keystroke away",
-      "description": "Summon the command bar from any app to ask, draft, or act, then dismiss it and keep moving."
+      "description": "Summon the command bar from any app to ask, draft, or act, then dismiss it and keep moving.",
+      "icon": "Plug"
     },
     {
       "title": "Inbox and calendar connected",
-      "description": "Agents reach the email and calendar to triage, reply, and book, not just suggest what to do."
+      "description": "Agents reach the email and calendar to triage, reply, and book, not just suggest what to do.",
+      "icon": "Plug"
     },
     {
       "title": "Private details protected",
-      "description": "The Gateway redacts personal and confidential data on egress, and can run local for the most sensitive asks."
+      "description": "The Gateway redacts personal and confidential data on egress, and can run local for the most sensitive asks.",
+      "icon": "Shield"
     },
     {
       "title": "Runs everywhere",
-      "description": "Use it from the desktop, the command bar, the browser extension, or your phone, with the same agents."
+      "description": "Use it from the desktop, the command bar, the browser extension, or your phone, with the same agents.",
+      "icon": "Bot"
     }
   ],
   "useCases": [

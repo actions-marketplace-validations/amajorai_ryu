@@ -13,7 +13,7 @@ import {
 	CardTitle,
 } from "@ryu/ui/components/card";
 import { cn } from "@ryu/ui/lib/utils";
-import { Download } from "lucide-react";
+import { Download, Globe, RefreshCw, Sparkles, WifiOff } from "lucide-react";
 import type { SVGProps } from "react";
 import { Reveal } from "./reveal.tsx";
 import { Highlights } from "./sections.tsx";
@@ -173,21 +173,25 @@ const DOWNLOAD_HIGHLIGHTS = [
 		title: "Runs offline",
 		description:
 			"Local models run entirely on your machine. The internet is optional, only needed for cloud models or sync.",
+		icon: WifiOff,
 	},
 	{
 		title: "Free during beta",
 		description:
 			"The full desktop app is free while in beta. Bring your own keys, no markup, keep everything you build.",
+		icon: Sparkles,
 	},
 	{
 		title: "Every platform",
 		description:
 			"Native builds for macOS (Apple Silicon & Intel), Windows, and Linux, as easy as installing an app.",
+		icon: Globe,
 	},
 	{
 		title: "Auto-updates",
 		description:
 			"Ship installs once, then quietly keeps itself current so you're always on the latest release.",
+		icon: RefreshCw,
 	},
 ];
 

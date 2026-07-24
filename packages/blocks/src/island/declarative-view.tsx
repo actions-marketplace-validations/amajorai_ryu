@@ -29,6 +29,7 @@ import type {
 	ViewSpec,
 	ViewTone,
 } from "@ryu/app-host/views";
+import { validateView } from "@ryu/app-host/views";
 import { useState } from "react";
 
 /** Fires when a user activates an action row. The renderer supplies the ctx
@@ -373,10 +374,25 @@ function CompactForm({
 }
 
 /**
- * Render a {@link ViewSpec} in the island's compact idiom. Unknown kinds degrade to a
- * quiet empty row rather than crashing the overlay. `sourceItems` carries the
- * shell-fetched rows of a `source`-declaring `list-detail` spec (this renderer is
- * import-type-only on `@ryu/app-host`, so it never fetches itself).
+ * Render a {@link ViewSpec} in the island's compact idiom. `sourceItems` carries the
+ * shell-fetched rows of a `source`-declaring `list-detail` spec (the island shell owns
+ * fetching, so this renderer never fetches itself).
+ *
+ * # Why the validate gate is here and not upstream
+ *
+ * `spec` is **opaque to Core** — the whole point of the views seam is that a new view
+ * kind needs no Core change, so Core stores and serves whatever the manifest declared
+ * without inspecting it. That means an unvalidated spec reaches this function verbatim,
+ * and the `view` discriminant alone is not enough: a manifest declaring
+ * `{"view": "list-detail"}` with no `items` has a KNOWN kind and would otherwise fall
+ * straight through to `spec.items.map(...)` and throw. In the island that surfaces as a
+ * crash of the whole overlay, not one dead pane.
+ *
+ * So dispatch is gated on the shared [`validateView`] — the same gate the desktop
+ * renderer runs (`apps/desktop/src/components/views/DeclarativeView.tsx`) — which checks
+ * the discriminant AND that the payload carries the collection its kind requires. It is
+ * deliberately shallow, so a newer app targeting an older shell degrades to a readable
+ * row instead of crashing.
  */
 export function IslandDeclarativeView({
 	spec,
@@ -387,6 +403,11 @@ export function IslandDeclarativeView({
 	onAction?: IslandViewActionHandler;
 	sourceItems?: SourceItem[] | null;
 }) {
+	const check = validateView(spec);
+	if (!check.ok) {
+		return <EmptyRow text={check.errors.join("; ")} />;
+	}
+
 	switch (spec.view) {
 		case "list-detail":
 			return (

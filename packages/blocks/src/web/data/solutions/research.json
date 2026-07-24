@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Cites every source",
-      "description": "Spaces and RAG ground answers in your own paper corpus and datasets, pointing back to the exact passage."
+      "description": "Spaces and RAG ground answers in your own paper corpus and datasets, pointing back to the exact passage.",
+      "icon": "Sparkles"
     },
     {
       "title": "Reproducible workflows",
-      "description": "Chain extraction, analysis, and summary into a Workflow you can rerun on new inputs and schedule."
+      "description": "Chain extraction, analysis, and summary into a Workflow you can rerun on new inputs and schedule.",
+      "icon": "RefreshCw"
     },
     {
       "title": "Sensitive data on-device",
-      "description": "Run a local model with no telemetry, so unpublished results and confidential datasets stay on your machine."
+      "description": "Run a local model with no telemetry, so unpublished results and confidential datasets stay on your machine.",
+      "icon": "Shield"
     },
     {
       "title": "Right model per step",
-      "description": "Route a cheap local model for bulk screening and a frontier model for careful synthesis, no lock-in."
+      "description": "Route a cheap local model for bulk screening and a frontier model for careful synthesis, no lock-in.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

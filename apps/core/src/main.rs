@@ -1,5 +1,6 @@
 mod activity;
 mod agent_routing;
+mod agent_selection;
 mod agents;
 mod approvals;
 mod auth;
@@ -862,6 +863,15 @@ async fn main() {
     {
         agent_routing::set_auto_config_from_json(&value);
     }
+    // The node-wide default selection every unset agent/model setting falls back
+    // to. Seeded into an in-process snapshot for the same reason as agent-auto:
+    // the sync routing path has no preference-store handle.
+    if let Ok(Some(value)) = preferences
+        .get(agent_selection::GLOBAL_SELECTION_PREF)
+        .await
+    {
+        agent_selection::set_default_selection_from_json(&value);
+    }
     // Apply the user's saved default embedding model (if any) to the Spaces store,
     // re-indexing in the background when it differs from what the store opened with.
     server::spaces::apply_saved_embedding_pref(&spaces, &preferences).await;
@@ -1013,6 +1023,10 @@ async fn main() {
     {
         let manifests = app_manifests.read().await.clone();
         crate::plugins::seed::seed_default_on(&app_store, &manifests).await;
+        // Repairs ALREADY-INSTALLED stores that the seed loop deliberately skips
+        // (it leaves any existing record alone so the user's choice wins). Runs at
+        // most once per install, gated on the store's schema version.
+        crate::plugins::seed::run_one_time_migrations(&app_store, &manifests).await;
     }
     // Agent Skill registry (M3 / issue #145). Loads from the universal Agent
     // Skills directory `~/.claude/skills/<id>/SKILL.md` (overridable via

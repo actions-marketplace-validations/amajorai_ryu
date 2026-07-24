@@ -241,6 +241,18 @@ export function useAppsCatalog(
 		origin === "community" ||
 		(activeSource !== "" && activeSource !== PLUGIN_MARKETPLACE_SOURCE_ID);
 
+	// A built-in or installed plugin is answered by Core from its OWN loaded
+	// manifest (`local_plugin_detail`) — no catalog round-trip and no dependence
+	// on whether the active source carries it. That detail is what the README /
+	// API-reference / dependency / health tabs read, so fetch it for those too,
+	// not only for descriptor sources. Deliberately NOT broadened further: for a
+	// not-yet-installed item on the default marketplace source there is nothing to
+	// resolve locally, and asking the source would surface an error where the
+	// panel previously showed none.
+	const resolvesFromLocalManifest = Boolean(
+		selectedItem?.installed || selectedItem?.entry.built_in
+	);
+
 	const detailQuery = useQuery({
 		queryKey: [
 			"plugins",
@@ -252,7 +264,8 @@ export function useAppsCatalog(
 		],
 		queryFn: () =>
 			fetchPluginCatalogDetail({ url, token }, selectedId as string, origin),
-		enabled: selectedId !== null && isDescriptorSource,
+		enabled:
+			selectedId !== null && (isDescriptorSource || resolvesFromLocalManifest),
 	});
 
 	const revalidate = useCallback(

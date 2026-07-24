@@ -12,7 +12,7 @@ const TRAY_ID: &str = "main";
 /// Local desktop-process settings file (tauri-plugin-store). Read synchronously
 /// at startup before Core is guaranteed to be up, so the tray pref lives here
 /// rather than in Core's `/api/preferences` KV.
-const SETTINGS_FILE: &str = "settings.json";
+pub(crate) const SETTINGS_FILE: &str = "settings.json";
 /// When `true`, the tray / menu bar icon is hidden. Absent/false = shown.
 const HIDE_TRAY_KEY: &str = "hide-tray-icon";
 

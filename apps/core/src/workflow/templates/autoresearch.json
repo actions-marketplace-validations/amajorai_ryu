@@ -1,0 +1,84 @@
+{
+  "meta": {
+    "id": "autoresearch",
+    "name": "Autoresearch",
+    "description": "A researcher agent iterates on an experiment via the research tools, keeping only improvements — a git-versioned autoresearch loop.",
+    "category": "research",
+    "pattern": "git-ledger-loop",
+    "icon": "FlaskConical",
+    "node_count": 3,
+    "tags": ["research", "loop", "agent", "durable"]
+  },
+  "primary": {
+    "id": "autoresearch",
+    "name": "Autoresearch (git-ledger loop)",
+    "description": "A researcher agent loops over the research sidecar — propose an edit, run, keep-if-improved-else-reset, append the ledger — inside a durable budget loop.",
+    "nodes": [
+      {
+        "id": "goal",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "loop",
+        "type": "while",
+        "expr": "input nonempty",
+        "body_workflow_id": "autoresearch_body",
+        "max_iterations": 10
+      },
+      {
+        "id": "result",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "goal",
+        "to": "loop"
+      },
+      {
+        "from": "loop",
+        "to": "result"
+      }
+    ]
+  },
+  "bodies": [
+    [
+      "autoresearch_body",
+      {
+        "id": "autoresearch_body",
+        "name": "Autoresearch iteration",
+        "description": "One researcher iteration: read → edit → run → keep/reset → ledger.",
+        "nodes": [
+          {
+            "id": "task_in",
+            "type": "input",
+            "key": "input"
+          },
+          {
+            "id": "researcher",
+            "type": "agent",
+            "agent_id": "ryu",
+            "task": "You are an autonomous ML researcher. Minimize the experiment's `val_bpb` (lower is better) by looping with the research__* tools:\n1. research__init_workspace {\"experiment\":\"toy\"} to get a workspace_id, the mutable_files, and program_md (follow it).\n2. research__read_file the mutable train.py and study its hyperparameters.\n3. Form ONE small hypothesis, then research__write_file the edited train.py.\n4. research__run {workspace_id} — read back score, status, memory_gb.\n5. If status==ok AND score improved on the best so far: research__keep; else research__reset.\n6. research__ledger {workspace_id, commit, score, memory_gb, status, description} to log the attempt.\n7. Repeat with a new hypothesis. Change one thing at a time; never stop until told.\nIncoming goal: {{input}}"
+          },
+          {
+            "id": "body_out",
+            "type": "output",
+            "key": "result"
+          }
+        ],
+        "edges": [
+          {
+            "from": "task_in",
+            "to": "researcher"
+          },
+          {
+            "from": "researcher",
+            "to": "body_out"
+          }
+        ]
+      }
+    ]
+  ]
+}

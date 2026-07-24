@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "id": "fan-out-synthesize",
+    "name": "Fan-out / Synthesize",
+    "description": "Fan work out over items to independent sub-agents, then merge their outputs into one result.",
+    "category": "quality",
+    "pattern": "fan-out-synthesize",
+    "icon": "GitFork",
+    "node_count": 4,
+    "tags": ["fan-out", "merge", "sub-agents"]
+  },
+  "primary": {
+    "id": "fan-out-synthesize",
+    "name": "Fan-out / Synthesize",
+    "description": "Fan out over items, then merge.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "fanout",
+        "type": "agent_delegate",
+        "delegates": [
+          {
+            "id": "item-1",
+            "task": "Process this item independently and return your result:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "item-2",
+            "task": "Process this item independently, cross-checking a different aspect:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          },
+          {
+            "id": "item-3",
+            "task": "Process this item independently, focusing on completeness:\n\n{{input}}",
+            "agent_id": "ryu",
+            "preset": "code_read"
+          }
+        ],
+        "caps": null
+      },
+      {
+        "id": "merge",
+        "type": "prompt",
+        "prompt": "Merge these independent results into one deduplicated, complete answer:\n\n{{nodes.fanout}}",
+        "agent_id": null
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "fanout"
+      },
+      {
+        "from": "fanout",
+        "to": "merge"
+      },
+      {
+        "from": "merge",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

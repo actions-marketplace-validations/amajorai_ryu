@@ -198,7 +198,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	leftActions: ReactNode;
 	rightActions: ReactNode;
 	/**
-	 * The universal picker body (Ryu Portal · Providers · External Agents),
+	 * The universal picker body (Ryu (providers nested) · External Agents),
 	 * exposed alongside `sections` so a surface with its own trigger (the
 	 * empty-state agent logo) opens the IDENTICAL dropdown via
 	 * `ComposerSettingsMenu`'s `trigger` + `renderBody` props.
@@ -327,7 +327,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 
 	const sections = [agentSection, modelSectionResolved, ...extraSections];
 
-	// The universal picker body (Ryu Portal · Providers · External Agents) that
+	// The universal picker body (Ryu (providers nested) · External Agents) that
 	// replaces the sibling-submenu list. The trigger summary still derives from
 	// `sections`, so `Ryu · Sonnet · Plan` is unchanged; only the popover changes.
 	// The active agent's live model/approval/thinking sections are threaded in so

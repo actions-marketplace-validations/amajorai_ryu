@@ -23,9 +23,9 @@ import type { ApiTarget } from "@ryuhq/core-client/client";
 import { useEffect, useState } from "react";
 import { ThemeProvider } from "@/components/ui/theme-provider.tsx";
 import { ChatIntentProvider } from "./core/ChatIntentContext.tsx";
+import { ContributionsProvider } from "./core/ContributionsContext.tsx";
 import { CoreProvider, useCore } from "./core/CoreContext.tsx";
 import { InputFocusProvider } from "./core/InputFocusContext.tsx";
-import { fetchUpdateCheck } from "./core/update.ts";
 import {
 	healthCheck,
 	loadNodes,
@@ -34,6 +34,7 @@ import {
 	resolveActive,
 	setActive,
 } from "./core/nodes.ts";
+import { fetchUpdateCheck } from "./core/update.ts";
 import {
 	OverlayHost,
 	OverlayProvider,
@@ -294,17 +295,19 @@ export function App({ target }: { target?: ApiTarget }) {
 	return (
 		<ThemeProvider theme={ryuTheme}>
 			<CoreProvider initial={target}>
-				<InputFocusProvider>
-					<ToastProvider>
-						<ChatIntentProvider>
-							<WorkspaceProvider>
-								<OverlayProvider>
-									<WorkspaceShell />
-								</OverlayProvider>
-							</WorkspaceProvider>
-						</ChatIntentProvider>
-					</ToastProvider>
-				</InputFocusProvider>
+				<ContributionsProvider>
+					<InputFocusProvider>
+						<ToastProvider>
+							<ChatIntentProvider>
+								<WorkspaceProvider>
+									<OverlayProvider>
+										<WorkspaceShell />
+									</OverlayProvider>
+								</WorkspaceProvider>
+							</ChatIntentProvider>
+						</ToastProvider>
+					</InputFocusProvider>
+				</ContributionsProvider>
 			</CoreProvider>
 		</ThemeProvider>
 	);

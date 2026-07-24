@@ -1,7 +1,6 @@
 import {
 	Add01Icon,
 	ArrowUpRight01Icon,
-	InboxIcon,
 	Logout01Icon,
 	PieChartIcon,
 	Settings01Icon,
@@ -32,11 +31,6 @@ import {
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
 import { PlanBadge, type PlanTier } from "@ryu/ui/components/plan-badge";
-import {
-	Popover,
-	PopoverContent,
-	PopoverTrigger,
-} from "@ryu/ui/components/popover";
 import { SidebarMenu, SidebarMenuItem } from "@ryu/ui/components/sidebar";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
@@ -66,14 +60,13 @@ const TRAILING_SLASH_RE = /\/$/;
 
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
-import { useApprovals } from "@/src/hooks/useApprovals.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
-import { useQuests } from "@/src/hooks/useQuests.ts";
 import { fetchEntitlementStatus } from "@/src/lib/api/billing.ts";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { useAppStore } from "../../store/useAppStore.ts";
 import { DownloadCenter } from "../downloads/DownloadCenter.tsx";
+import { InboxCenter } from "../inbox/InboxCenter.tsx";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 import { UpdatesSubmenu } from "./UpdatesSubmenu.tsx";
 
@@ -151,124 +144,6 @@ function formatDate(value: string | null | undefined): string {
 		month: "short",
 		day: "numeric",
 	});
-}
-
-function InboxBadge({ count }: { count: number }) {
-	const open = count > 0;
-	return (
-		<span
-			aria-hidden={!open}
-			className="t-badge -top-0.5 -right-0.5"
-			data-open={open}
-		>
-			<span className="t-badge-dot flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 font-medium text-[10px] text-primary-foreground tabular-nums">
-				{count > 9 ? "9+" : count}
-			</span>
-		</span>
-	);
-}
-
-// Quick-list inbox: a popover preview of everything awaiting a decision —
-// pending approvals plus task completions the quest engine flagged — with an
-// "Open inbox" action that jumps to the full tab. Clicking any row also opens
-// the full inbox; the popover is controlled so those clicks dismiss it.
-function InboxCenter() {
-	const { openTab } = useTabsContext();
-	const approvals = useApprovals();
-	const quests = useQuests();
-	const [open, setOpen] = useState(false);
-	const pending = approvals.approvals.filter((a) => a.status === "pending");
-	// Open quests carrying a pending check-off suggestion (mirrors InboxPage).
-	const taskSuggestions = quests.quests.filter(
-		(q) => q.status === "open" && q.suggestion
-	);
-	const pendingCount = pending.length + taskSuggestions.length;
-
-	const openInbox = () => {
-		setOpen(false);
-		openTab("/inbox");
-	};
-
-	return (
-		<Popover onOpenChange={setOpen} open={open}>
-			<Tooltip>
-				<TooltipTrigger
-					render={
-						<PopoverTrigger
-							aria-label="Inbox"
-							className="gooey-tap relative flex h-7 w-7 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-						>
-							<HugeiconsIcon icon={InboxIcon} size={15} />
-							<InboxBadge count={pendingCount} />
-						</PopoverTrigger>
-					}
-				/>
-				<TooltipContent>Inbox</TooltipContent>
-			</Tooltip>
-			<PopoverContent align="end" className="w-80 gap-0 p-0" side="top">
-				<div className="flex items-center justify-between border-b px-3 py-2">
-					<span className="font-semibold text-sm">Inbox</span>
-					{pendingCount > 0 && (
-						<span className="text-muted-foreground text-xs">
-							{pendingCount} pending
-						</span>
-					)}
-				</div>
-				{pendingCount > 0 ? (
-					<div className="max-h-80 divide-y overflow-y-auto">
-						{pending.slice(0, 8).map((approval) => (
-							<button
-								className="flex w-full flex-col gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-muted"
-								key={approval.id}
-								onClick={openInbox}
-								type="button"
-							>
-								<span className="truncate font-medium text-sm">
-									{approval.title}
-								</span>
-								{approval.summary && (
-									<span className="truncate text-muted-foreground text-xs">
-										{approval.summary}
-									</span>
-								)}
-							</button>
-						))}
-						{taskSuggestions.slice(0, 8).map((quest) => (
-							<button
-								className="flex w-full flex-col gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-muted"
-								key={quest.id}
-								onClick={openInbox}
-								type="button"
-							>
-								<span className="truncate font-medium text-sm">
-									Finished “{quest.title}”?
-								</span>
-								{quest.suggestion?.reason && (
-									<span className="truncate text-muted-foreground text-xs">
-										{quest.suggestion.reason}
-									</span>
-								)}
-							</button>
-						))}
-					</div>
-				) : (
-					<div className="px-3 py-6 text-center text-muted-foreground text-xs">
-						Nothing needs your attention
-					</div>
-				)}
-				<div className="border-t p-1">
-					<button
-						className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-muted"
-						onClick={openInbox}
-						type="button"
-					>
-						Open inbox
-						<HugeiconsIcon icon={ArrowUpRight01Icon} size={14} />
-					</button>
-				</div>
-			</PopoverContent>
-		</Popover>
-	);
 }
 
 // Notion-style account switcher: lists every signed-in account (avatar +
@@ -548,11 +423,6 @@ export function NavUser({
 											render={
 												<button
 													className="flex w-full items-center gap-2 rounded-xl py-1.5 pr-2 pl-1 text-left text-sm transition-colors hover:bg-muted"
-													title={
-														trialCountdown
-															? `${trialCountdown} in trial`
-															: undefined
-													}
 													type="button"
 												/>
 											}
@@ -576,11 +446,6 @@ export function NavUser({
 													</span>
 													<PlanBadge plan={badgePlan} />
 												</span>
-												{trialCountdown ? (
-													<span className="block truncate text-[10px] text-muted-foreground tabular-nums">
-														{trialCountdown} in trial
-													</span>
-												) : null}
 											</span>
 										</DropdownMenuTrigger>
 										<DropdownMenuContent

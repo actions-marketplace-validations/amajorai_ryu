@@ -77,6 +77,21 @@ type SettingsSection =
 	| "hardware"
 	| "memory";
 
+/**
+ * The SHELL's own pages — the ones this desktop client compiles in and owns. A
+ * Ryu App is deliberately NOT in this list: an app reaches the palette through
+ * the contributions feed instead (its `companion` surface, its `sidebar_buttons`,
+ * or its `sidebar_sections`' live items), exactly like it reaches the sidebar.
+ *
+ * Calendar / Timeline / Monitors / Tasks / Meetings / Learning used to sit here.
+ * Each is an apps-store app (`com.ryu.{calendar,timeline,monitors,quests,
+ * meetings,learning}`) that declares a `companion`, so it was already being
+ * listed by the companion loop below — the hardcoded row was a second, dumber
+ * copy that rendered whether or not the app was installed (all six are
+ * default-OFF) and pointed at a shell alias route rather than the seam route the
+ * companion mints. Same reasoning, and the same fix, as the sidebar's
+ * `CHROME_ORDER`: the App declares itself; the shell does not enumerate Apps.
+ */
 const NAV_ITEMS = [
 	{ to: "/chat", label: "Chat", icon: Add01Icon },
 	{ to: "/library/agent", label: "Agents", icon: BotIcon },
@@ -87,14 +102,8 @@ const NAV_ITEMS = [
 	{ to: "/library/memory", label: "Memory", icon: AiBrain01Icon },
 	{ to: "/tools", label: "Tools", icon: ArrowRight01Icon },
 	{ to: "/library/workflow", label: "Workflows", icon: ArrowRight01Icon },
-	{ to: "/calendar", label: "Calendar", icon: ArrowRight01Icon },
-	{ to: "/timeline", label: "Timeline", icon: ArrowRight01Icon },
 	{ to: "/review", label: "Weekly review", icon: ArrowRight01Icon },
-	{ to: "/monitors", label: "Monitors", icon: ArrowRight01Icon },
-	{ to: "/quests", label: "Tasks", icon: ArrowRight01Icon },
 	{ to: "/inbox", label: "Inbox", icon: ArrowRight01Icon },
-	{ to: "/meetings", label: "Meetings", icon: ArrowRight01Icon },
-	{ to: "/learning", label: "Learning", icon: ArrowRight01Icon },
 ] as const;
 
 const MAX_CHAT_RESULTS = 30;

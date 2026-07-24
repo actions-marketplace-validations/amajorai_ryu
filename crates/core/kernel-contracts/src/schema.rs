@@ -407,6 +407,24 @@ pub fn extract_arg_bounds(
 /// an absent/null arg, and clamp a present numeric arg into `[minimum, maximum]`.
 /// A clamped integral arg stays an integer so it renders without a `.0`. Pure and
 /// network-free (unit-testable). Non-object args are left unchanged.
+///
+/// # Why string-typed numbers are coerced
+///
+/// This clamp is the ONLY thing that enforces a declared `minimum`/`maximum` on a
+/// tool call: nothing else validates args against `input_schema`, and a caller that
+/// builds the JSON directly (rather than going through an MCP client that honours
+/// the schema) can put anything in the map. Reading the value with `as_f64` alone
+/// meant `{"depth": "10000"}` fell straight through — the string reached the argv
+/// lowering, which stringifies it back to `10000`, and the declared ceiling bought
+/// nothing. So a *bounded* field's value is coerced from its numeric-string form
+/// before clamping, and rewritten as a real JSON number; a bounded field whose value
+/// is neither a number nor a numeric string is dropped to its `default` (or removed
+/// outright when it declares none) rather than passed through unchecked.
+///
+/// Coercion is scoped to fields that actually declare a `minimum` or `maximum`. A
+/// field that only carries a `default` is left completely alone — it may well be a
+/// string enum whose legal value happens to look like a number, and silently turning
+/// `"123"` into `123` there would corrupt a correct call to enforce nothing.
 pub fn clamp_and_default_args(
     args: &mut serde_json::Value,
     bounds: &std::collections::BTreeMap<String, ArgBounds>,
@@ -422,7 +440,24 @@ pub fn clamp_and_default_args(
                 }
             }
             Some(v) => {
-                let Some(n) = v.as_f64() else { continue };
+                let bounded = b.minimum.is_some() || b.maximum.is_some();
+                let n = match v.as_f64() {
+                    Some(n) => n,
+                    // Not a JSON number. Unbounded → nothing to enforce, leave it.
+                    None if !bounded => continue,
+                    // Bounded: accept a numeric STRING (and normalize it), else the
+                    // value cannot be bounds-checked at all, so it must not survive.
+                    None => match v.as_str().and_then(|s| s.trim().parse::<f64>().ok()) {
+                        Some(parsed) if parsed.is_finite() => parsed,
+                        _ => {
+                            match &b.default {
+                                Some(def) => obj.insert(name.clone(), def.clone()),
+                                None => obj.remove(name),
+                            };
+                            continue;
+                        }
+                    },
+                };
                 let mut c = n;
                 if let Some(min) = b.minimum {
                     if c < min {
@@ -434,7 +469,10 @@ pub fn clamp_and_default_args(
                         c = max;
                     }
                 }
-                if c != n {
+                // Rewrite when the value MOVED (a clamp) or when it arrived in a
+                // non-number form (a coercion) — both must leave a real JSON number
+                // behind so downstream lowering sees the bounded value.
+                if c != n || !v.is_number() {
                     obj.insert(name.clone(), number_from(c, b.integer));
                 }
             }
@@ -2090,6 +2128,75 @@ mod tests {
         clamp_and_default_args(&mut b, &bounds);
         assert_eq!(b["depth"], json!(1));
         assert_eq!(b["limit"], json!(5)); // in-range unchanged
+    }
+
+    /// A raw-JSON caller that skips the MCP client can put ANY value in the args
+    /// map, and this clamp is the only thing enforcing the declared bounds. Reading
+    /// the value with `as_f64` alone let a string-typed number walk straight past
+    /// it — `{"depth":"10000"}` lowered to argv as `--depth 10000`, bounded by
+    /// nothing but the 120s exec timeout.
+    #[test]
+    fn clamp_coerces_string_typed_numbers_before_bounding() {
+        let bounds = extract_arg_bounds(Some(&json!({
+            "properties": {
+                "depth": { "type": "integer", "default": 1, "maximum": 10 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+            }
+        })));
+        let mut a = json!({ "depth": "10000", "limit": "0" });
+        clamp_and_default_args(&mut a, &bounds);
+        assert_eq!(a["depth"], json!(10), "string-typed over-max must clamp");
+        assert_eq!(a["limit"], json!(1), "string-typed under-min must clamp");
+        // …and be rewritten as a real JSON number, so the argv lowering can never
+        // stringify the original out-of-range text back out.
+        assert!(a["depth"].is_number());
+        assert_eq!(a["depth"].to_string(), "10");
+
+        // An in-range numeric string is normalized too (same reason).
+        let mut b = json!({ "depth": "5", "limit": " 42 " });
+        clamp_and_default_args(&mut b, &bounds);
+        assert_eq!(b["depth"], json!(5));
+        assert_eq!(b["limit"], json!(42));
+    }
+
+    /// A bounded arg that is neither a number nor a numeric string cannot be
+    /// bounds-checked at all, so it must not survive: it falls back to the declared
+    /// default, or is removed outright when the schema declares none.
+    #[test]
+    fn clamp_drops_unbounded_garbage_on_a_bounded_arg() {
+        let bounds = extract_arg_bounds(Some(&json!({
+            "properties": {
+                "depth": { "type": "integer", "default": 1, "maximum": 10 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+            }
+        })));
+        let mut a = json!({ "depth": "deep", "limit": ["nope"] });
+        clamp_and_default_args(&mut a, &bounds);
+        assert_eq!(a["depth"], json!(1), "falls back to the declared default");
+        assert!(
+            a.get("limit").is_none(),
+            "a bounded arg with no default is removed, not passed through"
+        );
+    }
+
+    /// Coercion is scoped to fields that declare a `minimum`/`maximum`. A field
+    /// carrying only a `default` may be a string enum whose legal value looks like a
+    /// number — silently turning `"123"` into `123` there would corrupt a correct
+    /// call to enforce nothing.
+    #[test]
+    fn clamp_leaves_default_only_string_fields_alone() {
+        let bounds = extract_arg_bounds(Some(&json!({
+            "properties": {
+                "mode": { "type": "string", "default": "fast" }
+            }
+        })));
+        let mut a = json!({ "mode": "123" });
+        clamp_and_default_args(&mut a, &bounds);
+        assert_eq!(
+            a["mode"],
+            json!("123"),
+            "a default-only field must not be coerced to a number"
+        );
     }
 
     #[test]

@@ -2425,10 +2425,83 @@ impl ConversationStore {
         Ok(path)
     }
 
+    /// How many versions share `parent` in `conversation_id` — the fan-out at a
+    /// branch point, read for the `session_tree` hook payload.
+    ///
+    /// `IS` rather than `=`: the branch point of the very first user turn is the
+    /// root bucket, where `parent_message_id` is NULL, and SQL `=` never matches
+    /// NULL — a naive `=` would report a first-turn edit as having no siblings at
+    /// all, which is exactly the case a version pager cares about.
+    ///
+    /// Fails open to `1` (a lone version): this count only decorates an
+    /// observation hook, so a read error here must never turn an edit into a 500.
+    fn sibling_count_locked(conn: &Connection, conversation_id: &str, parent: Option<&str>) -> i64 {
+        match conn.query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE conversation_id = ?1 AND parent_message_id IS ?2",
+            params![conversation_id, parent],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!(
+                    "session_tree: sibling count failed for '{conversation_id}': {e}; reporting 1"
+                );
+                1
+            }
+        }
+    }
+
+    /// Fire `session_tree` plugin hooks DETACHED after the message tree branched.
+    ///
+    /// Observation-only, in both directions: no directive can move a leaf, so the
+    /// branch is already committed before the sandbox is even spawned, and every
+    /// returned directive is dropped. Detached rather than awaited because an
+    /// edit/regenerate is a user-facing click on the UI's critical path — waiting
+    /// on a Deno spawn there would cost latency for a signal nobody can act on in
+    /// time. The global dispatcher's own DB-free `any_manifest_declares` gate makes
+    /// the no-plugin case free, so a node without a `session_tree` plugin pays only
+    /// this spawn.
+    ///
+    /// Takes owned scalars — never `&self` and never the connection — because the
+    /// caller MUST have dropped the store mutex first. A hook is free to reach back
+    /// into Core over HTTP; if the spawn happened under the lock, that call would
+    /// block on a mutex the still-running caller holds.
+    fn fire_session_tree_hooks(
+        conversation_id: String,
+        source_message_id: String,
+        parent_message_id: Option<String>,
+        new_message_id: Option<String>,
+        active_leaf_message_id: String,
+        sibling_count: i64,
+        reason: &'static str,
+    ) {
+        tokio::spawn(async move {
+            let ctx = crate::plugin_host::HookContext {
+                conversation_id: Some(conversation_id.clone()),
+                event: Some(serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "source_message_id": source_message_id,
+                    "parent_message_id": parent_message_id,
+                    "new_message_id": new_message_id,
+                    "active_leaf_message_id": active_leaf_message_id,
+                    "sibling_count": sibling_count,
+                    "reason": reason,
+                })),
+                ..Default::default()
+            };
+            let _ =
+                crate::plugin_host::dispatch_global(crate::plugin_host::ON_SESSION_TREE, ctx).await;
+        });
+    }
+
     /// Edit a user message: create a new sibling version carrying `new_content`
     /// (same parent as the edited message) and point the active leaf at it, so a
     /// subsequent generation turn attaches its reply beneath the edit. Returns the
     /// new sibling's id, or `None` if the message is absent / not a user turn.
+    ///
+    /// Fires `session_tree` hooks (detached) once the branch is committed — this is
+    /// the primary site where the tree actually gains a fork.
     pub async fn edit_user_message(
         &self,
         conversation_id: &str,
@@ -2467,6 +2540,20 @@ impl ConversationStore {
             params![new_id, now, conversation_id],
         )
         .context("pointing leaf at edit")?;
+        // Read the fan-out under the SAME lock that just inserted the sibling
+        // (cheap, indexed, no decryption), so the hook payload can never disagree
+        // with the branch it is reporting. Then release the lock BEFORE spawning.
+        let sibling_count = Self::sibling_count_locked(&conn, conversation_id, parent.as_deref());
+        drop(conn);
+        Self::fire_session_tree_hooks(
+            conversation_id.to_owned(),
+            message_id.to_owned(),
+            parent,
+            Some(new_id.clone()),
+            new_id.clone(),
+            sibling_count,
+            "edit",
+        );
         Ok(Some(new_id))
     }
 
@@ -2474,6 +2561,10 @@ impl ConversationStore {
     /// user turn *above* it (its parent) so the next generation appends a fresh
     /// assistant sibling. Returns the parent id, or `None` if the message is
     /// absent or has no parent (a regenerate needs a preceding user turn).
+    ///
+    /// Fires `session_tree` hooks (detached) alongside `edit_user_message`: the
+    /// phase means "the tree changed", not "the edit button was pressed", and a
+    /// regenerate moves the active leaf to a fork point just as an edit does.
     pub async fn prepare_regenerate(
         &self,
         conversation_id: &str,
@@ -2499,6 +2590,23 @@ impl ConversationStore {
             params![parent_id, now, conversation_id],
         )
         .context("pointing leaf at regenerate parent")?;
+        let sibling_count = Self::sibling_count_locked(&conn, conversation_id, Some(&parent_id));
+        drop(conn);
+        // `new_message_id` is null on purpose. A regenerate only repoints the leaf;
+        // the fresh assistant sibling is born later, when the streamed turn reaches
+        // `append_message` and chains beneath this parent. Reporting an id here
+        // would mean inventing one. For the same reason `sibling_count` is the
+        // count BEFORE the regeneration lands, i.e. how many versions the user is
+        // branching away from.
+        Self::fire_session_tree_hooks(
+            conversation_id.to_owned(),
+            message_id.to_owned(),
+            Some(parent_id.clone()),
+            None,
+            parent_id.clone(),
+            sibling_count,
+            "regenerate",
+        );
         Ok(Some(parent_id))
     }
 
@@ -2507,6 +2615,12 @@ impl ConversationStore {
     /// and set that as the conversation's active leaf. Returns the resolved leaf
     /// id, or `None` if `version_id` is absent. The client then re-reads the
     /// active path to re-render the thread along the newly-selected branch.
+    ///
+    /// Deliberately does NOT fire `session_tree`, unlike `edit_user_message` and
+    /// `prepare_regenerate`: paging between versions inserts no message and rewires
+    /// no parent edge, it only moves the cursor over a tree that already exists.
+    /// Firing here would turn a branch signal into a navigation feed, so a plugin
+    /// counting forks would over-count every time the user clicked "<".
     pub async fn select_version(
         &self,
         conversation_id: &str,

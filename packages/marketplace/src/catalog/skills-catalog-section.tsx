@@ -6,7 +6,6 @@ import {
 	SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { REALM_ICONS } from "./realm-icons.ts";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
@@ -70,6 +69,7 @@ import {
 	type CatalogMarkdownProps,
 	useCatalogHost,
 } from "./host.tsx";
+import { REALM_ICONS } from "./realm-icons.ts";
 import type {
 	AddMarketplaceParams,
 	SkillCard,
@@ -649,11 +649,13 @@ function SkillList({
 								? `${s.source} · ${formatCount(s.installs)} installs`
 								: s.source
 						}
-						icon={<HugeiconsIcon className="size-5" icon={REALM_ICONS.skills} />}
+						icon={
+							<HugeiconsIcon className="size-5" icon={REALM_ICONS.skills} />
+						}
 						key={s.id}
 						name={s.name}
-						seedId={s.id}
 						onClick={() => onSelect(s.id)}
+						seedId={s.id}
 						selected={s.id === selectedId}
 					/>
 				))}

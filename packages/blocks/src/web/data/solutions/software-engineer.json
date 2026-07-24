@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Git-native by design",
-      "description": "Every run gets its own branch and worktree, so you review a clean diff and apply it or open a PR instead of trusting blind edits."
+      "description": "Every run gets its own branch and worktree, so you review a clean diff and apply it or open a PR instead of trusting blind edits.",
+      "icon": "Plug"
     },
     {
       "title": "Any engine, per task",
-      "description": "Wrap Claude Code, Codex, Gemini CLI, or Pi, and switch the model behind an agent without rewiring your setup."
+      "description": "Wrap Claude Code, Codex, Gemini CLI, or Pi, and switch the model behind an agent without rewiring your setup.",
+      "icon": "Cpu"
     },
     {
       "title": "Local and private",
-      "description": "Run a local model on install with no telemetry, so proprietary source never leaves your machine unless you choose to route out."
+      "description": "Run a local model on install with no telemetry, so proprietary source never leaves your machine unless you choose to route out.",
+      "icon": "Shield"
     },
     {
       "title": "Grounded in your repo",
-      "description": "Spaces and RAG index your codebase and docs, so agents answer with the patterns and conventions you actually use."
+      "description": "Spaces and RAG index your codebase and docs, so agents answer with the patterns and conventions you actually use.",
+      "icon": "Bot"
     }
   ],
   "useCases": [

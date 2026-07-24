@@ -3820,9 +3820,14 @@ mod tests {
     async fn pi_widget_synthesis_builds_tool_widget_event() {
         // End-to-end (minus the live Pi subprocess): the exact two-step the ACP
         // `ToolCallUpdate` handler runs — extract the binding, then feed it to the
-        // SHARED `build_widget_event`. `checklist__render` is an in-process app, so
-        // its widget binding + HTML resolve without any live MCP server.
+        // SHARED `build_widget_event`. `checklist__render` used to be an in-process
+        // app whose binding + HTML resolved without a live MCP server; the eight
+        // inline-chat widget-apps were retired in 1af518d8, so the fixture is now
+        // seeded directly. It stands in for the producer that IS still live — an
+        // external MCP server declaring `ryu/outputTemplate` in its tool `_meta` —
+        // which is what this synthesis path serves in production.
         let mcp = McpRegistry::empty();
+        mcp.seed_widget_tool_for_test("checklist", "render", "ui://widget/checklist.html");
         let raw = ryu_widget_raw_output(
             "checklist__render",
             serde_json::json!({ "title": "Groceries", "items": [{ "text": "milk" }] }),
@@ -3854,8 +3859,11 @@ mod tests {
     #[tokio::test]
     async fn pi_widget_synthesis_skips_error_results() {
         // An `isError` MCP result NEVER emits a widget (spec §1.1) — even when the
-        // Pi extension stamped the marker.
+        // Pi extension stamped the marker. Seed the binding: without it
+        // `build_widget_event` would bail one step EARLIER (no widget at all) and
+        // the assertion would pass without ever reaching the `isError` guard.
         let mcp = McpRegistry::empty();
+        mcp.seed_widget_tool_for_test("checklist", "render", "ui://widget/checklist.html");
         let raw = serde_json::json!({
             "details": { "ryuWidget": {
                 "tool": "checklist__render",

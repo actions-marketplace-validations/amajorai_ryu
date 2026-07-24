@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Plain language to SQL",
-      "description": "Ask a question and get a query you can read and run, so you keep the rigor while skipping the boilerplate."
+      "description": "Ask a question and get a query you can read and run, so you keep the rigor while skipping the boilerplate.",
+      "icon": "Sparkles"
     },
     {
       "title": "Connected to your stack",
-      "description": "Wire Postgres, your warehouse, and Slack through MCP and Connections, so an agent pulls live numbers instead of guessing."
+      "description": "Wire Postgres, your warehouse, and Slack through MCP and Connections, so an agent pulls live numbers instead of guessing.",
+      "icon": "Plug"
     },
     {
       "title": "Governed access",
-      "description": "The Gateway logs every query and tool call and can redact sensitive fields, so analytics on customer data stays auditable."
+      "description": "The Gateway logs every query and tool call and can redact sensitive fields, so analytics on customer data stays auditable.",
+      "icon": "Eye"
     },
     {
       "title": "Knows your schema",
-      "description": "Ground agents on your data dictionary and past queries with Spaces, so results use the right tables and definitions."
+      "description": "Ground agents on your data dictionary and past queries with Spaces, so results use the right tables and definitions.",
+      "icon": "Bot"
     }
   ],
   "useCases": [

@@ -222,7 +222,15 @@ impl PluginHookBridge {
         let explicit = args.get("model").and_then(Value::as_str);
         let pref_key = args.get("model_pref_key").and_then(Value::as_str);
         let effort = args.get("effort").and_then(Value::as_str).unwrap_or("");
-        let model = self.resolve_model(pref_key, explicit).await;
+        let (model, selection_effort) = self.resolve_model(pref_key, explicit).await;
+        // The plugin's per-call `effort` is its own considered choice (the
+        // advisor asks for "high", auto-expand for "low"), so it wins; the
+        // configured selection's effort fills in only when the plugin passed none.
+        let effort = if effort.trim().is_empty() {
+            selection_effort.as_str()
+        } else {
+            effort
+        };
         match crate::server::call_side_model(&self.state, &model, effort, system, prompt).await {
             Ok(text) => ok(json!(text)),
             Err(e) => err(e),
@@ -435,30 +443,56 @@ impl PluginHookBridge {
         }
     }
 
-    /// Resolve the side-model id, swappable and never hardcoded to a remote
-    /// provider: explicit `model` → preference `model_pref_key` → env
+    /// Resolve the side-model id **and effort**, swappable and never hardcoded
+    /// to a remote provider: explicit `model` → the plugin's own
+    /// `model_pref_key` → the node-wide default selection → env
     /// `RYU_DEFAULT_LLM_MODEL` → the bundled local default.
-    async fn resolve_model(&self, pref_key: Option<&str>, explicit: Option<&str>) -> String {
+    ///
+    /// This is the single choke point for every plugin that calls
+    /// `host.sideModel` with a `model_pref_key` (advisor, goal, double-check,
+    /// proof, security-guidance, auto-expand, …), which is why the node-wide
+    /// default only has to be threaded here to reach all of them.
+    ///
+    /// The preference may hold a full [`crate::agent_selection::AgentSelection`]
+    /// or a legacy bare model id; both parse. An effort carried by the
+    /// selection is returned alongside and beats the plugin's per-call `effort`
+    /// argument only when the plugin passed none (the caller applies that).
+    async fn resolve_model(
+        &self,
+        pref_key: Option<&str>,
+        explicit: Option<&str>,
+    ) -> (String, String) {
         if let Some(m) = explicit {
             let t = m.trim();
             if !t.is_empty() {
-                return t.to_string();
+                return (t.to_string(), String::new());
             }
         }
         if let Some(key) = pref_key.filter(|k| !k.is_empty()) {
-            if let Ok(Some(pref)) = self.state.preferences.get(key).await {
-                let t = pref.trim();
-                if !t.is_empty() {
-                    return t.to_string();
-                }
+            if let Some(resolved) =
+                crate::agent_selection::resolve_side_model(&self.state.preferences, key, None).await
+            {
+                return (resolved.model, resolved.effort);
             }
+        } else if let Some(resolved) = crate::agent_selection::resolve_side_model(
+            &self.state.preferences,
+            crate::agent_selection::GLOBAL_SELECTION_PREF,
+            None,
+        )
+        .await
+        {
+            // No per-plugin key at all — the node-wide default still applies.
+            return (resolved.model, resolved.effort);
         }
         if let Ok(v) = std::env::var("RYU_DEFAULT_LLM_MODEL") {
             if !v.is_empty() {
-                return v;
+                return (v, String::new());
             }
         }
-        crate::registry::DEFAULT_LOCAL_CHAT_MODEL_ID.to_string()
+        (
+            crate::registry::DEFAULT_LOCAL_CHAT_MODEL_ID.to_string(),
+            String::new(),
+        )
     }
 }
 

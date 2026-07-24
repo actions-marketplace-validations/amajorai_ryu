@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Best model per language pair",
-      "description": "Route Japanese to one model and Spanish to another, picking whichever handles each pair best without changing your workflow."
+      "description": "Route Japanese to one model and Spanish to another, picking whichever handles each pair best without changing your workflow.",
+      "icon": "Cpu"
     },
     {
       "title": "Glossary-grounded output",
-      "description": "Ground translations on your termbase and approved phrasing via Spaces and RAG so client terminology stays consistent across documents."
+      "description": "Ground translations on your termbase and approved phrasing via Spaces and RAG so client terminology stays consistent across documents.",
+      "icon": "Plug"
     },
     {
       "title": "Private by default",
-      "description": "Translate embargoed or NDA-bound source text on a local model so sensitive content never leaves your device."
+      "description": "Translate embargoed or NDA-bound source text on a local model so sensitive content never leaves your device.",
+      "icon": "Shield"
     },
     {
       "title": "Tone and register preserved",
-      "description": "Tell the agent the target register and audience so legal, marketing, and technical texts each read the way they should."
+      "description": "Tell the agent the target register and audience so legal, marketing, and technical texts each read the way they should.",
+      "icon": "Bot"
     }
   ],
   "useCases": [

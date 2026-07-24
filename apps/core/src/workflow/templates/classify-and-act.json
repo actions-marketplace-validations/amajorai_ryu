@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "id": "classify-and-act",
+    "name": "Classify & Act",
+    "description": "Classify the request, then hand it to a specialized agent per class.",
+    "category": "orchestration",
+    "pattern": "classify-and-act",
+    "icon": "ListTree",
+    "node_count": 6,
+    "tags": ["classify", "routing", "agents"]
+  },
+  "primary": {
+    "id": "classify-and-act",
+    "name": "Classify & Act",
+    "description": "Classify then dispatch to a specialized agent.",
+    "nodes": [
+      {
+        "id": "in",
+        "type": "input",
+        "key": "input"
+      },
+      {
+        "id": "classify",
+        "type": "prompt",
+        "prompt": "Classify this into exactly one word — `code` or `research`. Return only that word.\n\n{{input}}",
+        "agent_id": null
+      },
+      {
+        "id": "gate",
+        "type": "condition",
+        "expr": "input == \"code\""
+      },
+      {
+        "id": "coder",
+        "type": "agent",
+        "agent_id": "ryu",
+        "task": "You are a coding specialist. Handle this request end-to-end:\n\n{{nodes.in}}"
+      },
+      {
+        "id": "researcher",
+        "type": "agent",
+        "agent_id": "ryu",
+        "task": "You are a research specialist. Handle this request end-to-end:\n\n{{nodes.in}}"
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "key": "result"
+      }
+    ],
+    "edges": [
+      {
+        "from": "in",
+        "to": "classify"
+      },
+      {
+        "from": "classify",
+        "to": "gate"
+      },
+      {
+        "from": "gate",
+        "to": "coder",
+        "branch": "true"
+      },
+      {
+        "from": "gate",
+        "to": "researcher",
+        "branch": "false"
+      },
+      {
+        "from": "coder",
+        "to": "out"
+      },
+      {
+        "from": "researcher",
+        "to": "out"
+      }
+    ]
+  },
+  "bodies": []
+}

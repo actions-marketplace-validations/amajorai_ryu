@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Student data stays on-device",
-      "description": "Run a local model with no telemetry by default, so student names and work never leave the machine unless you allow it."
+      "description": "Run a local model with no telemetry by default, so student names and work never leave the machine unless you allow it.",
+      "icon": "Shield"
     },
     {
       "title": "Grounded in your curriculum",
-      "description": "Spaces and RAG let agents build from your own standards, textbooks, and rubrics and cite the source."
+      "description": "Spaces and RAG let agents build from your own standards, textbooks, and rubrics and cite the source.",
+      "icon": "Bot"
     },
     {
       "title": "Reusable skills",
-      "description": "Save your best prompts as Skills, like a lesson-plan builder or rubric grader, and reuse them across classes."
+      "description": "Save your best prompts as Skills, like a lesson-plan builder or rubric grader, and reuse them across classes.",
+      "icon": "Sparkles"
     },
     {
       "title": "Governed and logged",
-      "description": "Every model call passes through the Gateway with PII redaction and an audit trail, so use stays accountable."
+      "description": "Every model call passes through the Gateway with PII redaction and an audit trail, so use stays accountable.",
+      "icon": "Eye"
     }
   ],
   "useCases": [

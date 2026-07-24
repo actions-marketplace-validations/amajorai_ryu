@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Wired into your ATS",
-      "description": "Agents connect to your applicant tracking system and calendar to screen, update stages, and book interviews."
+      "description": "Agents connect to your applicant tracking system and calendar to screen, update stages, and book interviews.",
+      "icon": "Plug"
     },
     {
       "title": "Consistent screening",
-      "description": "Ground agents on your scorecard and rubric with Spaces so candidates are evaluated against the same bar."
+      "description": "Ground agents on your scorecard and rubric with Spaces so candidates are evaluated against the same bar.",
+      "icon": "Bot"
     },
     {
       "title": "Candidate data protected",
-      "description": "The Gateway redacts personal data on egress and logs every screening call for a defensible record."
+      "description": "The Gateway redacts personal data on egress and logs every screening call for a defensible record.",
+      "icon": "Eye"
     },
     {
       "title": "Repeatable pipelines",
-      "description": "Turn a hiring process into a workflow so every req runs the same intake, screen, and outreach steps."
+      "description": "Turn a hiring process into a workflow so every req runs the same intake, screen, and outreach steps.",
+      "icon": "Sparkles"
     }
   ],
   "useCases": [

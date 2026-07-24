@@ -36,10 +36,10 @@ export function HeroAvatarSocialProof() {
 				</Avatar>
 			</AvatarGroup>
 
-			<p className="me-1.5 text-muted-foreground text-xs">
+			{/* <p className="me-1.5 text-muted-foreground text-xs">
 				Trusted by <span className="font-semibold text-foreground">1.7k</span>{" "}
 				users.
-			</p>
+			</p> */}
 		</div>
 	);
 }

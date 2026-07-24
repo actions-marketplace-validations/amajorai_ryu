@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "One agent per engagement",
-      "description": "Spin up a tailored agent per client with its own documents, tools, and policy, so engagements never bleed together."
+      "description": "Spin up a tailored agent per client with its own documents, tools, and policy, so engagements never bleed together.",
+      "icon": "Bot"
     },
     {
       "title": "Grounded synthesis",
-      "description": "Spaces and RAG keep agents anchored to the client's documents and your frameworks, citing every source."
+      "description": "Spaces and RAG keep agents anchored to the client's documents and your frameworks, citing every source.",
+      "icon": "Bot"
     },
     {
       "title": "Confidentiality controlled",
-      "description": "Local-first with no telemetry, plus Gateway redaction and budgets, so client material stays governed and costs stay capped."
+      "description": "Local-first with no telemetry, plus Gateway redaction and budgets, so client material stays governed and costs stay capped.",
+      "icon": "Shield"
     },
     {
       "title": "No lock-in",
-      "description": "Bring your own model and key; route a fast local model for drafts and a frontier model for the final synthesis."
+      "description": "Bring your own model and key; route a fast local model for drafts and a frontier model for the final synthesis.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

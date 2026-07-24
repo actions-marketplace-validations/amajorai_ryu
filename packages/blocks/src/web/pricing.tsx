@@ -668,7 +668,7 @@ export function EnterprisePlanCard() {
 							Tailored to your org · annual contract
 						</p>
 					</div>
-					<ul className="flex flex-1 flex-wrap gap-x-8 gap-y-3">
+					<ul className="grid flex-1 grid-cols-2 gap-x-8 gap-y-3">
 						<li className="flex items-center">
 							<ArrowLeft className="mr-2 size-4" />
 							<span>Everything in Teams</span>

@@ -8,6 +8,7 @@ import {
 	SidebarContent,
 	SidebarProvider,
 } from "@ryu/ui/components/sidebar";
+import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
 import { useCallback, useState } from "react";
 
 const SIDEBAR_PANEL_ID = "sidebar";
@@ -69,6 +70,34 @@ export default function ResizableSettingsLayout({
 		},
 		[storageKey]
 	);
+
+	// Two side-by-side columns don't fit a phone: the content pane's 55% minimum
+	// would leave the nav under 170px. Stack instead — nav on top in its own
+	// scroller, content filling the rest — and skip the drag divider, which has
+	// no touch affordance anyway. The persisted horizontal split is untouched.
+	const isMobile = useIsMobile();
+	if (isMobile) {
+		return (
+			<SidebarProvider className="!min-h-0 h-full flex-col overflow-hidden rounded-lg bg-sidebar">
+				<div className="max-h-[38%] min-h-0 shrink-0 overflow-hidden p-2 pb-0">
+					<Sidebar className="h-full w-full rounded-xl" collapsible="none">
+						{/* Stacked, the nav starts at the dialog's top edge — which is
+						    also where the close button sits. Start the list below it. */}
+						<SidebarContent className="scroll-fade-effect-y overflow-x-hidden pt-10 pb-2">
+							{sidebar}
+						</SidebarContent>
+					</Sidebar>
+				</div>
+				<div className="min-h-0 flex-1 overflow-hidden p-2">
+					<div className="relative h-full overflow-hidden rounded-xl bg-background shadow-sm">
+						<div className="scroll-fade-effect-y h-full w-full overflow-y-auto overflow-x-hidden">
+							{content}
+						</div>
+					</div>
+				</div>
+			</SidebarProvider>
+		);
+	}
 
 	return (
 		<SidebarProvider className="!min-h-0 h-full overflow-hidden rounded-lg bg-sidebar">

@@ -18,10 +18,10 @@
 //!   background loop ([`spawn`]): every enabled monitor gets an enabled job (on its own
 //!   per-monitor interval), disabled monitors get theirs disabled, gone monitors get
 //!   theirs removed.
-//! - **Spider fetch** (`POST /api/host/monitors/spider`) — the sidecar's Spider fetch
+//! - **Spider fetch** (the `mcp.callTool` kernel capability) — the sidecar's Spider fetch
 //!   backend needs Core's `McpRegistry`, which it cannot host; [`host_spider_crawl`]
 //!   runs `spider__crawl` (the declarative command plugin) on its behalf.
-//! - **alert fan-out** (`POST /api/host/monitors/alert`) — the sidecar posts each fired
+//! - **alert fan-out** (the `notify.fanout` kernel capability) — the sidecar posts each fired
 //!   alert back; [`host_monitor_alert`] fans it out through the kernel notification
 //!   store AND records it on the unified activity feed (the two independent consumers
 //!   the old in-process design had, collapsed into one behavior-preserving callback).
@@ -49,10 +49,9 @@ use crate::scheduler::store::{self as job_store, JobTarget, Schedule, ScheduledJ
 use crate::server::ServerState;
 use crate::sidecar::ext_proxy::{authenticate_sidecar, ext_token, node_token};
 
-/// Fallback loopback port if the manifest is somehow absent — matches the
-/// `monitors.manifest.json` fixture `port`. Core injects this as `RYU_MONITORS_PORT`
-/// at spawn.
-const MONITORS_FALLBACK_PORT: u16 = 8003;
+/// The `ryu-monitors` sidecar's name inside the Monitors manifest — the other half of
+/// the `(plugin id, sidecar name)` key the port resolves through.
+const MONITORS_SIDECAR: &str = "ryu-monitors";
 
 /// How often Core reconciles `JobTarget::Monitor` jobs from the sidecar's monitor list.
 const RECONCILE_EVERY: Duration = Duration::from_secs(30);
@@ -64,15 +63,16 @@ fn job_id_for(monitor_id: &str) -> String {
 }
 
 /// Resolve the `ryu-monitors` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]).
+/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
+/// port comes from the manifest and ONLY the manifest — see
+/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
+/// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    let raw = manifests
-        .iter()
-        .find(|m| m.id == MONITORS_PLUGIN_ID)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == "ryu-monitors"))
-        .map(|s| s.port)
-        .unwrap_or(MONITORS_FALLBACK_PORT);
-    crate::profile::port(raw)
+    crate::sidecar::ext_proxy::sidecar_port(manifests, MONITORS_PLUGIN_ID, MONITORS_SIDECAR)
+        .expect(
+            "built-in monitors.manifest.json must declare the ryu-monitors sidecar (see \
+             plugin_manifest::BUILTIN_MANIFESTS)",
+        )
 }
 
 /// Process-global monitors client, so the state-free scheduler (`JobTarget::Monitor`)
@@ -294,7 +294,7 @@ pub fn spawn(client: MonitorsClient) {
 
 // ── Host callbacks (sidecar → Core) ───────────────────────────────────────────────
 
-/// `POST /api/host/monitors/spider` — run `spider__crawl` (or any MCP tool the
+/// `POST /api/host/capability/mcp.callTool` — run `spider__crawl` (or any MCP tool the
 /// monitor engine requests) through Core's [`McpRegistry`](crate::sidecar::mcp::McpRegistry) on
 /// the sidecar's behalf. Registered on the PUBLIC router (the sidecar holds only its
 /// minted ext token, not the node bearer); [`authenticate_sidecar`] does the token +
@@ -346,7 +346,7 @@ pub(crate) struct AlertFanoutBody {
     targets: Vec<NotifyTarget>,
 }
 
-/// `POST /api/host/monitors/alert` — receive a fired alert from the sidecar and (1) fan
+/// `POST /api/host/capability/notify.fanout` — receive a fired alert from the sidecar and (1) fan
 /// it out through the kernel notification store (per-monitor channels + global mobile
 /// push + `notification` plugin hooks) and (2) record it on the unified activity feed.
 /// This collapses the two independent consumers the old in-process design had (the

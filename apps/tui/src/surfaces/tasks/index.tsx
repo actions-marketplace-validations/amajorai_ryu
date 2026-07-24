@@ -1,6 +1,13 @@
 /* @jsxImportSource @opentui/react */
 // Tasks surface (path /tasks) - mirrors the desktop Tasks/Quests page as a to-do
-// oriented view of the work Ryu runs on your behalf. The terminal folds the legacy
+// oriented view of the work Ryu runs on your behalf.
+//
+// The screen PREFERS a contributed declarative view: an enabled plugin contributing
+// a `views` entry with id "surface:tasks" claims this surface, and the shell renders
+// that spec (src/ui/ContributedView.tsx) instead of the built-in list below. Until
+// then the hand-written screen stays.
+//
+// The terminal folds the legacy
 // schedules tab (src/tabs/schedules.tsx) in: the scheduled (heartbeat) jobs from
 // GET /heartbeat/jobs, each row showing enabled state, name, cadence, last outcome
 // and last-run date. Read-only (the terminal never mutates jobs here). Keys are
@@ -11,7 +18,9 @@ import { fetchJobs, type ScheduledJob } from "@ryuhq/core-client/schedules";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card.tsx";
 import { useTheme } from "@/components/ui/theme-provider.tsx";
+import { useSurfaceView } from "../../core/ContributionsContext.tsx";
 import { useCore } from "../../core/CoreContext.tsx";
+import { ContributedViewPanel } from "../../ui/ContributedView.tsx";
 import { ErrorView } from "../../ui/ErrorView.tsx";
 import { Loading } from "../../ui/Loading.tsx";
 import type { SurfaceModule, SurfaceProps } from "../../workspace/router.ts";
@@ -20,6 +29,11 @@ import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 const NAME_WIDTH = 20;
 const SCHEDULE_WIDTH = 22;
 const VISIBLE_ROWS = 16;
+
+// The surface id — and therefore the `views` id an app declares to claim this
+// screen, as the reserved `surface:<id>` token (see viewClaimingSurface in
+// src/core/contributions.ts).
+const SURFACE_ID = "tasks";
 
 function scheduleLabel(job: ScheduledJob): string {
 	const { schedule } = job;
@@ -46,6 +60,7 @@ function TasksSurface({ active, paneId }: SurfaceProps) {
 	const theme = useTheme();
 	const { focusedPaneId } = useWorkspace();
 	const focused = active && focusedPaneId === paneId;
+	const contributed = useSurfaceView(SURFACE_ID);
 
 	const [jobs, setJobs] = useState<ScheduledJob[]>([]);
 	const [index, setIndex] = useState(0);
@@ -83,15 +98,17 @@ function TasksSurface({ active, paneId }: SurfaceProps) {
 			});
 	}, [target]);
 
-	// Lazy load on activation, and reload on node switch (url/token).
+	// Lazy load on activation, and reload on node switch (url/token). Skipped while
+	// a contributed view owns the screen — the built-in list is not rendered then,
+	// so fetching its data would be pure waste.
 	useEffect(() => {
-		if (active) {
+		if (active && !contributed) {
 			runLoad();
 		}
-	}, [active, runLoad]);
+	}, [active, contributed, runLoad]);
 
 	useKeyboard((key) => {
-		if (!focused) {
+		if (!focused || contributed) {
 			return;
 		}
 		if (key.name === "up" || key.name === "k") {
@@ -109,10 +126,23 @@ function TasksSurface({ active, paneId }: SurfaceProps) {
 				<b>Tasks</b>
 			</text>
 			<text fg={theme.colors.mutedForeground}>
-				scheduled jobs · ↑↓ nav · r refresh
+				{contributed ? "" : "scheduled jobs · ↑↓ nav · r refresh"}
 			</text>
 		</box>
 	);
+
+	// An app claimed this surface: render its declarative view in place of the
+	// built-in list, keeping the page frame so the shell still looks like itself.
+	if (contributed) {
+		return (
+			<box flexDirection="column" flexGrow={1} paddingTop={1}>
+				{header}
+				<box flexDirection="column" paddingLeft={1}>
+					<ContributedViewPanel focused={focused} view={contributed} />
+				</box>
+			</box>
+		);
+	}
 
 	if (loading && !loaded) {
 		return (
@@ -218,7 +248,7 @@ function JobRow({ job, selected }: { job: ScheduledJob; selected: boolean }) {
 
 /** The Tasks surface module (path /tasks). Registered by the Integrate step. */
 export const tasksSurface: SurfaceModule = {
-	id: "tasks",
+	id: SURFACE_ID,
 	title: "Tasks",
 	match: (path) => path === "/tasks" || path.startsWith("/tasks/"),
 	Component: TasksSurface,

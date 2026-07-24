@@ -3,14 +3,14 @@
 // presentational `UpdatesView` (`@ryu/blocks/desktop/updates`) — the same view
 // the storyboard renders with mock data.
 
-import { UpdatesView } from "@ryu/blocks/desktop/updates";
+import { UpdatesView } from "@ryu/blocks/desktop/updates.tsx";
 import {
 	Select,
 	SelectContent,
 	SelectItem,
 	SelectTrigger,
 	SelectValue,
-} from "@ryu/ui/components/select";
+} from "@ryu/ui/components/select.tsx";
 import { useEffect, useState } from "react";
 import { sileo } from "sileo";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
@@ -23,8 +23,8 @@ import {
 	setAutoUpdateEnabled,
 } from "@/src/lib/api/update.ts";
 import {
-	type ReleaseChannel,
 	RELEASE_CHANNELS,
+	type ReleaseChannel,
 	useReleaseChannel,
 } from "@/src/lib/release-channel.ts";
 import {
@@ -121,7 +121,7 @@ const RELEASE_CHANNEL_ITEMS = RELEASE_CHANNELS.map((option) => ({
 	label: option.label,
 }));
 
-function ReleaseChannelPicker() {
+export function ReleaseChannelPicker() {
 	const [channel, setChannel] = useReleaseChannel();
 
 	return (

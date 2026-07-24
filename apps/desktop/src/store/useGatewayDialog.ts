@@ -14,6 +14,7 @@ import { create } from "zustand";
 export type GatewaySection =
 	| "overview"
 	| "workspace"
+	| "defaults"
 	| "providers"
 	| "routing"
 	| "guardrails"

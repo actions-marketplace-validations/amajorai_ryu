@@ -19,10 +19,14 @@ export interface SurfaceBackground {
 	/** Layer a linear gradient behind the surface. */
 	gradientEnabled: boolean;
 	gradientFrom: string; // hex
+	/** Transparency of the gradient layer (0 = invisible, 100 = fully opaque). */
+	gradientOpacity: number;
 	gradientTo: string; // hex
 	/** Layer a custom image over the gradient/color. */
 	imageEnabled: boolean;
 	imageFit: BackgroundFit;
+	/** Transparency of the image layer (0 = invisible, 100 = fully opaque). */
+	imageOpacity: number;
 	imageScale: number; // percent, only meaningful for center/tile
 	/**
 	 * Runtime object URL for the stored image Blob. NOT persisted — recreated
@@ -39,9 +43,11 @@ export const DEFAULT_SURFACE_BACKGROUND: SurfaceBackground = {
 	gradientFrom: "#0088ff",
 	gradientTo: "#7c3aed",
 	gradientAngle: 135,
+	gradientOpacity: 100,
 	imageEnabled: false,
 	imageSrc: "",
 	imageFit: "cover",
+	imageOpacity: 100,
 	imageScale: 100,
 	overlayColor: "#000000",
 	overlayOpacity: 30,

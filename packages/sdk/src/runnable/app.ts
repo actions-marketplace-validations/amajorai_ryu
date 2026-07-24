@@ -196,6 +196,7 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		slash_commands: [],
 		sidebar_sections: [],
 		sidebar_buttons: [],
+		dock_panels: [],
 		widgets,
 	};
 
@@ -229,7 +230,9 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		const first = result.error.issues[0];
 		const field = first?.path.join(".") ?? "unknown";
 		const message = first?.message ?? "validation failed";
-		throw new Error(`manifest.json validation failed at '${field}': ${message}`);
+		throw new Error(
+			`manifest.json validation failed at '${field}': ${message}`
+		);
 	}
 	return result.data;
 }

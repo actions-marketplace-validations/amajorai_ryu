@@ -563,7 +563,7 @@ function MotionNavigationMenuContent({
 				<motion.div
 					animate="active"
 					className={cn(
-						"absolute top-full left-0 z-50 mt-1.5 rounded-2xl border border-border/60 bg-muted/80 p-2 pr-2.5 text-popover-foreground shadow-lg backdrop-blur-xl",
+						"absolute top-full left-0 z-50 mt-1.5 rounded-2xl border border-border/60 bg-muted/60 p-2 pr-2.5 text-popover-foreground shadow-lg backdrop-blur-xl",
 						className
 					)}
 					custom={context.direction}
@@ -680,7 +680,7 @@ function MotionNavigationMenuViewport({
 					scale: activeContent ? 1 : 0.95,
 				}}
 				className={cn(
-					"relative mt-1.5 overflow-hidden rounded-2xl border border-border/60 bg-muted/80 text-popover-foreground shadow-lg backdrop-blur-xl",
+					"relative mt-1.5 overflow-hidden rounded-2xl border border-border/60 bg-muted/60 text-popover-foreground shadow-lg backdrop-blur-xl",
 					className
 				)}
 				data-slot="navigation-menu-viewport"

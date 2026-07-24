@@ -2,6 +2,8 @@
   "id": "ghost",
   "name": "Ghost",
   "version": "1.0.0",
+  "description": "Desktop automation: 29 screen perception and input control tools. Windows-first.",
+  "keywords": ["automation", "desktop"],
   "runnables": [],
   "permission_grants": ["mcp:ghost"],
   "mcp_servers": {

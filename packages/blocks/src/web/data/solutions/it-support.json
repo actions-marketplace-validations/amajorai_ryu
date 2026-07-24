@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Wired to your systems",
-      "description": "Connect ticketing, identity, and your knowledge base through MCP, so an agent reads the real ticket and acts."
+      "description": "Connect ticketing, identity, and your knowledge base through MCP, so an agent reads the real ticket and acts.",
+      "icon": "Plug"
     },
     {
       "title": "Answers from your docs",
-      "description": "Ground agents on your runbooks and IT wiki in Spaces, so replies follow your procedures and cite the source."
+      "description": "Ground agents on your runbooks and IT wiki in Spaces, so replies follow your procedures and cite the source.",
+      "icon": "Bot"
     },
     {
       "title": "Governed and logged",
-      "description": "The Gateway records every tool call and can redact employee data, so support actions stay auditable and compliant."
+      "description": "The Gateway records every tool call and can redact employee data, so support actions stay auditable and compliant.",
+      "icon": "Eye"
     },
     {
       "title": "Sensitive lookups local",
-      "description": "Run a local model with no telemetry for anything touching employee records, keeping personal data on your machine."
+      "description": "Run a local model with no telemetry for anything touching employee records, keeping personal data on your machine.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

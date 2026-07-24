@@ -7,83 +7,54 @@
       "version": "1.0.0",
       "description": "Desktop automation: 29 screen perception and input control tools. Windows-first.",
       "source": "builtin",
-      "kinds": [
-        "tool"
-      ],
-      "permission_grants": [],
+      "kinds": ["tool"],
+      "permission_grants": ["mcp:ghost"],
       "built_in": true,
-      "tags": [
-        "automation",
-        "desktop"
-      ]
+      "tags": ["automation", "desktop"]
     },
     {
       "id": "shadow",
       "name": "Shadow",
       "version": "1.0.0",
-      "description": "Screen and audio capture, OCR, proactive engine, semantic memory and search.",
+      "description": "Search everything Shadow has captured (screen text, audio transcripts, input) and summarize recent activity. Exposed as declarative HTTP tools that reach the device-local Shadow sidecar through Core's authenticated `/api/shadow/*` proxy (which injects Shadow's bearer token).",
       "source": "builtin",
-      "kinds": [
-        "tool"
-      ],
-      "permission_grants": [],
+      "kinds": ["tool"],
+      "permission_grants": ["tool:http-egress:127.0.0.1"],
       "built_in": true,
-      "tags": [
-        "capture",
-        "memory"
-      ]
+      "tags": ["capture", "memory"]
     },
     {
       "id": "spider",
       "name": "Spider",
       "version": "1.0.0",
-      "description": "High-performance web crawler and scraper.",
+      "description": "High-performance web crawling and content extraction via the Spider CLI (https://spider.cloud), exposed as a declarative `command` tool that shells out to the locally-installed `spider` binary. No API key.",
       "source": "builtin",
-      "kinds": [
-        "tool"
-      ],
-      "permission_grants": [
-        "mcp:web_scrape"
-      ],
+      "kinds": ["tool"],
+      "permission_grants": ["tool:command:spider"],
       "built_in": true,
-      "tags": [
-        "web",
-        "scraping"
-      ]
+      "tags": ["web", "scraping"]
     },
     {
       "id": "exa",
-      "name": "Exa",
+      "name": "Exa Search",
       "version": "1.0.0",
-      "description": "Neural search: find any content on the web. Requires EXA_API_KEY.",
+      "description": "Neural and keyword web search via the Exa API (https://exa.ai), exposed as two declarative HTTP tools: search and find-similar. Requires a BYOK Exa API key.",
       "source": "builtin",
-      "kinds": [
-        "tool"
-      ],
-      "permission_grants": [
-        "mcp:web_search"
-      ],
+      "kinds": ["tool"],
+      "permission_grants": ["tool:http-egress:api.exa.ai"],
       "built_in": true,
-      "tags": [
-        "search",
-        "web"
-      ]
+      "tags": ["search", "web"]
     },
     {
       "id": "headroom",
-      "name": "Headroom",
+      "name": "Headroom Compression",
       "version": "1.0.0",
       "description": "Context compression (chopratejas/headroom): compress tool outputs, logs, files, and RAG chunks. 60-95% fewer tokens, reversible retrieval. Requires headroom-ai[mcp].",
       "source": "builtin",
-      "kinds": [
-        "tool"
-      ],
+      "kinds": ["policy"],
       "permission_grants": [],
       "built_in": true,
-      "tags": [
-        "context",
-        "compression"
-      ]
+      "tags": ["context", "compression"]
     }
   ]
 }

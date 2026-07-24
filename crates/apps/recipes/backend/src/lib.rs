@@ -47,7 +47,7 @@ pub use api::{routes, RecipesCtx};
 /// info payload plus the host-assigned start timestamp for the new session.
 ///
 /// `Serialize`/`Deserialize` so the out-of-process `ryu-recipes` sidecar can carry
-/// it over the `/api/host/recipes/record-start` callback verbatim (the live ghost
+/// it over the `/api/host/capability/ghost.recordStart` callback verbatim (the live ghost
 /// recorder lives in Core; the sidecar only proxies).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecorderStarted {

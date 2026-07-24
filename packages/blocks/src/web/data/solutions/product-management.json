@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Connected to your stack",
-      "description": "Wire Linear, Jira, Slack, and your docs through Connections, so an agent reads real tickets and feedback, not summaries."
+      "description": "Wire Linear, Jira, Slack, and your docs through Connections, so an agent reads real tickets and feedback, not summaries.",
+      "icon": "Plug"
     },
     {
       "title": "Workflows that recur",
-      "description": "Chain steps with schedules and triggers, so the weekly digest or feedback rollup runs itself and lands where the team looks."
+      "description": "Chain steps with schedules and triggers, so the weekly digest or feedback rollup runs itself and lands where the team looks.",
+      "icon": "RefreshCw"
     },
     {
       "title": "A panel on demand",
-      "description": "Council chat lets you mention several agents at once for a fast pro and con on a tradeoff before you commit."
+      "description": "Council chat lets you mention several agents at once for a fast pro and con on a tradeoff before you commit.",
+      "icon": "Bot"
     },
     {
       "title": "Grounded in your product",
-      "description": "Index PRDs, research, and roadmaps in Spaces, so drafts match your context and cite where a claim came from."
+      "description": "Index PRDs, research, and roadmaps in Spaces, so drafts match your context and cite where a claim came from.",
+      "icon": "Sparkles"
     }
   ],
   "useCases": [

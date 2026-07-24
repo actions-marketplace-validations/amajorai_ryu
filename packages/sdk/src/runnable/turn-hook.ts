@@ -154,12 +154,13 @@ export function definePlugin(options: DefinePluginOptions): PluginManifest {
 		composer_controls: options.composerControls ?? [],
 		settings_tabs: options.settingsTabs ?? [],
 		slash_commands: options.slashCommands ?? [],
-		// A turn-hook plugin contributes no app widgets or sidebar entries; the
-		// fields are required on the resolved `Contributes` type (zod defaults
-		// applied), so set them explicitly.
+		// A turn-hook plugin contributes no app widgets, sidebar entries or dock
+		// panels; the fields are required on the resolved `Contributes` type (zod
+		// defaults applied), so set them explicitly.
 		widgets: [],
 		sidebar_sections: [],
 		sidebar_buttons: [],
+		dock_panels: [],
 	};
 	// Ship each inline tool as a `kind:"tool"` runnable (Core's `inline_deno`
 	// backend). Shipping tools requires the `tool:execute` grant; add it once.

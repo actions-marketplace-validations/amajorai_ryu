@@ -112,3 +112,29 @@ pub fn ryu_home_dir() -> PathBuf {
 		.unwrap_or_else(|| PathBuf::from("."))
 		.join(format!(".ryu{}", suffix()))
 }
+
+/// True when `candidate` is `<home>/.ryu<suffix>/bin/<exe>` for a Ryu profile home
+/// that is NOT the active one.
+///
+/// Installers put **both** `~/.ryu/bin` and `~/.ryu-dev/bin` on PATH, so any
+/// `which("ryu-core")`-style lookup from the dev profile happily returns the
+/// RELEASE binary. Every PATH fallback must run its hit through this first, or a
+/// dev profile silently runs a release-build Core against `~/.ryu-dev` — a version
+/// skew that shows up as routes 404-ing for no visible reason.
+///
+/// Both PATH fallbacks (binary resolution *and* the installed-check that decides
+/// whether to download) must agree here: if only the resolver rejected the foreign
+/// hit, the installed-check would still count it as present, skip the download, and
+/// leave the profile with no binary at all.
+pub fn is_foreign_profile_bin(candidate: &std::path::Path) -> bool {
+	// <profile home>/bin/<exe> → the profile home is two levels up.
+	let Some(home) = candidate.parent().and_then(std::path::Path::parent) else {
+		return false;
+	};
+	if home == ryu_home_dir() {
+		return false;
+	}
+	home.file_name()
+		.and_then(|n| n.to_str())
+		.is_some_and(|n| n == ".ryu" || n.starts_with(".ryu-"))
+}

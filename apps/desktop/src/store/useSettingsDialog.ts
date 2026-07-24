@@ -6,14 +6,17 @@ import { create } from "zustand";
 // importing the dialog component (which would pull the whole settings UI into
 // those entry points). Mirrors useGatewayDialog.ts.
 // Desktop-client / user-account sections only. Node-level tabs (meetings, memory,
-// privacy, storage, updates, email-alerts, connections, health, predict, tasks) and
-// the Danger Zone moved to the Gateway dialog (see `GatewaySection`); per-app/plugin
+// privacy, storage, email-alerts, connections, health, predict, tasks) and the
+// Danger Zone moved to the Gateway dialog (see `GatewaySection`); per-app/plugin
 // user-scoped tabs are dynamic and use `app:<id>` / `plugin:<id>` values.
+// `updates` here is the *desktop app's own* updater — the Gateway dialog keeps a
+// separate Updates tab for the node's Core/Gateway binaries.
 export type SettingsSectionValue =
 	| "general"
 	| "account"
 	| "appearance"
 	| "keyboard"
+	| "updates"
 	| "island"
 	| "shadow"
 	| "integrations"

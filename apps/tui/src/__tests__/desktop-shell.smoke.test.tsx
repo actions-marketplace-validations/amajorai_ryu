@@ -55,6 +55,11 @@ const CANONICAL_PATH: Record<string, string> = {
 	inbox: "/inbox",
 	downloads: "/downloads",
 	setup: "/setup",
+	// The generic contributed-view surface owns no built-in path: its routes are
+	// minted per contribution, so the canonical path is a synthetic one. With no
+	// contributions provider in this harness it must still render (the "no enabled
+	// app contributes this view" state) rather than blow up.
+	"plugin-view": "/plugin-view/com.example.app/demo",
 };
 
 let ws: ReturnType<typeof useWorkspace> | null = null;

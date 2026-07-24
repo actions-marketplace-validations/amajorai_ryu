@@ -1,0 +1,408 @@
+// packages/marketplace/src/catalog/detail/detail-panels.tsx
+//
+// The remaining detail tabs — README, Versions, Dependencies — plus the metadata
+// strip that sits under the listing's name.
+//
+// These are deliberately small and data-shaped. Each renders exactly what the
+// catalog reported and says so plainly when a source reported nothing, rather
+// than fabricating a plausible-looking blank ("0 downloads" for a source that
+// does not count downloads is a lie, "not reported" is not).
+
+import {
+	Calendar01Icon,
+	ComputerIcon,
+	Download01Icon,
+	Link01Icon,
+	SquareLock01Icon,
+	Tag01Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Badge } from "@ryu/ui/components/badge.tsx";
+import type { ComponentType } from "react";
+import { grantDescription, grantLabel } from "../grant-labels.ts";
+import { prettyPluginId } from "../plugin-id.ts";
+import { safeHttpUrl } from "../safe-url.ts";
+import type { CatalogEntry, PluginCatalogDetail } from "../types.ts";
+
+/** Render an ISO timestamp as a short absolute date. Absolute rather than
+ *  relative on purpose: "2 years ago" is the health tab's job, a version table
+ *  wants the date it actually shipped. */
+export function formatDate(iso?: string | null): string | null {
+	if (!iso) {
+		return null;
+	}
+	const parsed = new Date(iso);
+	if (Number.isNaN(parsed.getTime())) {
+		return null;
+	}
+	return parsed.toLocaleDateString(undefined, {
+		day: "numeric",
+		month: "short",
+		year: "numeric",
+	});
+}
+
+/** Compact download counts (12400 → "12.4k") — a store column, not an analytics
+ *  readout. */
+export function formatCount(value: number): string {
+	if (value < 1000) {
+		return String(value);
+	}
+	if (value < 1_000_000) {
+		return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0).replace(/\.0$/, "")}k`;
+	}
+	return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+}
+
+/** Human labels for the host surfaces a plugin can declare. Unknown surfaces
+ *  fall back to the raw token rather than being dropped — a new surface should
+ *  show up in the UI the day a manifest declares it, not the day this map is
+ *  updated. */
+const SURFACE_LABELS: Record<string, string> = {
+	browser: "Browser extension",
+	cli: "CLI",
+	desktop: "Desktop",
+	island: "Island",
+	mobile: "Mobile",
+	tui: "Terminal",
+	web: "Web",
+};
+
+function surfaceLabel(surface: string): string {
+	return SURFACE_LABELS[surface] ?? surface;
+}
+
+/** One item in the strip under the listing name. */
+function MetaItem({
+	icon,
+	label,
+	value,
+}: {
+	icon: typeof Tag01Icon;
+	label: string;
+	value: string;
+}) {
+	return (
+		<span
+			className="inline-flex items-center gap-1.5 text-muted-foreground text-xs"
+			title={label}
+		>
+			<HugeiconsIcon className="size-3.5" icon={icon} />
+			{value}
+		</span>
+	);
+}
+
+/**
+ * The metadata strip: current version, when it last changed, how many times it
+ * has been downloaded, and which surfaces it runs on.
+ *
+ * Every item is conditional. A listing that reports none of them renders nothing
+ * at all rather than a row of dashes.
+ */
+export function DetailMetaStrip({
+	detail,
+	entry,
+}: {
+	detail: PluginCatalogDetail | null;
+	entry: CatalogEntry;
+}) {
+	const version = detail?.version ?? entry.version ?? null;
+	const updated = formatDate(detail?.updatedAt);
+	const created = formatDate(detail?.createdAt);
+	const downloads = detail?.downloads ?? null;
+	const surfaces = detail?.surfaces ?? [];
+
+	const items = [
+		version
+			? {
+					icon: Tag01Icon,
+					label: "Current version",
+					value: `v${version.replace(/^v/, "")}`,
+				}
+			: null,
+		updated
+			? {
+					icon: Calendar01Icon,
+					label: "Last updated",
+					value: `Updated ${updated}`,
+				}
+			: null,
+		created
+			? {
+					icon: Calendar01Icon,
+					label: "First published",
+					value: `Created ${created}`,
+				}
+			: null,
+		typeof downloads === "number"
+			? {
+					icon: Download01Icon,
+					label: "Downloads",
+					value: `${formatCount(downloads)} downloads`,
+				}
+			: null,
+	].filter(Boolean) as {
+		icon: typeof Tag01Icon;
+		label: string;
+		value: string;
+	}[];
+
+	if (items.length === 0 && surfaces.length === 0) {
+		return null;
+	}
+
+	return (
+		<div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+			{items.map((item) => (
+				<MetaItem
+					icon={item.icon}
+					key={item.label}
+					label={item.label}
+					value={item.value}
+				/>
+			))}
+			{surfaces.length > 0 ? (
+				<span className="inline-flex items-center gap-1.5">
+					<HugeiconsIcon
+						className="size-3.5 text-muted-foreground"
+						icon={ComputerIcon}
+					/>
+					{surfaces.map((surface) => (
+						<Badge className="text-xs" key={surface} variant="outline">
+							{surfaceLabel(surface)}
+						</Badge>
+					))}
+				</span>
+			) : null}
+		</div>
+	);
+}
+
+/** The README tab. Markdown rendering crosses the host seam (desktop renders
+ *  with Streamdown, web with react-markdown), so the component is passed in. */
+export function ReadmePanel({
+	Markdown,
+	readme,
+	readmeUrl,
+}: {
+	Markdown: ComponentType<{ className?: string; content: string }>;
+	readme: string;
+	readmeUrl?: string | null;
+}) {
+	const href = safeHttpUrl(readmeUrl);
+	return (
+		<div className="flex flex-col gap-3">
+			<Markdown
+				className="prose prose-sm dark:prose-invert max-w-none"
+				content={readme}
+			/>
+			{href ? (
+				<a
+					className="inline-flex items-center gap-1.5 text-muted-foreground text-xs hover:underline"
+					href={href}
+					rel="noopener noreferrer"
+					target="_blank"
+				>
+					<HugeiconsIcon className="size-3.5" icon={Link01Icon} />
+					Read the original
+				</a>
+			) : null}
+		</div>
+	);
+}
+
+/** The Versions tab: published version history, newest first. */
+export function VersionsPanel({
+	versions,
+}: {
+	versions: NonNullable<PluginCatalogDetail["versions"]>;
+}) {
+	return (
+		<ul className="flex flex-col gap-1.5">
+			{versions.map((version, index) => {
+				const href = safeHttpUrl(version.url);
+				const published = formatDate(version.publishedAt);
+				return (
+					<li className="rounded-md border px-3 py-2" key={version.version}>
+						<div className="flex flex-wrap items-baseline gap-2">
+							<span className="font-medium font-mono text-sm">
+								{version.version}
+							</span>
+							{index === 0 ? (
+								<Badge className="text-xs" variant="secondary">
+									Current
+								</Badge>
+							) : null}
+							{version.prerelease ? (
+								<Badge className="text-xs" variant="outline">
+									Pre-release
+								</Badge>
+							) : null}
+							{version.tagOnly ? (
+								<Badge className="text-xs" variant="outline">
+									Tag only
+								</Badge>
+							) : null}
+							<span className="ml-auto flex items-center gap-3 text-muted-foreground text-xs">
+								{typeof version.downloads === "number" &&
+								version.downloads > 0 ? (
+									<span>{formatCount(version.downloads)} downloads</span>
+								) : null}
+								{published ? <span>{published}</span> : null}
+							</span>
+						</div>
+						{version.notes ? (
+							<p className="mt-1 whitespace-pre-wrap text-muted-foreground text-xs leading-relaxed">
+								{version.notes}
+							</p>
+						) : null}
+						{href ? (
+							<a
+								className="mt-1 inline-block text-muted-foreground text-xs hover:underline"
+								href={href}
+								rel="noopener noreferrer"
+								target="_blank"
+							>
+								View release
+							</a>
+						) : null}
+					</li>
+				);
+			})}
+		</ul>
+	);
+}
+
+/** True when there is anything to put on a Dependencies tab. */
+export function hasDependencies(
+	detail: PluginCatalogDetail | null,
+	entry: CatalogEntry
+): boolean {
+	const requires = detail?.requires ?? entry.requires ?? null;
+	return Boolean(
+		requires?.apps?.length ||
+			requires?.grants?.length ||
+			detail?.permissionGrants?.length ||
+			detail?.engines?.ryu ||
+			detail?.apiSurface?.provides?.length
+	);
+}
+
+/**
+ * The Dependencies tab: what must be present for this plugin to work.
+ *
+ * Three different kinds of dependency live here on purpose — other plugins, the
+ * permissions it needs granted, and the Core version it needs — because from the
+ * reader's side they are the same question: what else does installing this drag
+ * in?
+ */
+export function DependenciesPanel({
+	detail,
+	entry,
+}: {
+	detail: PluginCatalogDetail | null;
+	entry: CatalogEntry;
+}) {
+	const requires = detail?.requires ?? entry.requires ?? null;
+	const apps = requires?.apps ?? [];
+	const grants = detail?.permissionGrants?.length
+		? detail.permissionGrants
+		: (requires?.grants ?? []);
+	const engineReq = detail?.engines?.ryu ?? null;
+
+	return (
+		<div className="flex flex-col gap-6">
+			{apps.length > 0 ? (
+				<section className="flex flex-col gap-2">
+					<h3 className="flex items-center gap-1.5 font-medium text-sm">
+						<HugeiconsIcon
+							className="size-4 text-muted-foreground"
+							icon={Link01Icon}
+						/>
+						Requires these plugins
+					</h3>
+					<ul className="flex flex-col gap-1.5">
+						{apps.map((dep) => (
+							<li
+								className="flex items-center gap-2.5 rounded-md border px-3 py-2"
+								key={dep.id}
+							>
+								<span className="min-w-0 flex-1 truncate text-sm">
+									{prettyPluginId(dep.id)}
+								</span>
+								{dep.min_version ? (
+									<span className="shrink-0 text-muted-foreground text-xs">
+										≥ {dep.min_version}
+									</span>
+								) : null}
+								<code className="shrink-0 truncate font-mono text-muted-foreground text-xs">
+									{dep.id}
+								</code>
+							</li>
+						))}
+					</ul>
+					<p className="text-muted-foreground text-xs">
+						Enabling this plugin turns these on automatically.
+					</p>
+				</section>
+			) : null}
+
+			{grants.length > 0 ? (
+				<section className="flex flex-col gap-2">
+					<h3 className="flex items-center gap-1.5 font-medium text-sm">
+						<HugeiconsIcon
+							className="size-4 text-muted-foreground"
+							icon={SquareLock01Icon}
+						/>
+						Requires these permissions
+					</h3>
+					<ul className="flex flex-col gap-1.5">
+						{grants.map((grant) => (
+							<li className="rounded-md border px-3 py-2" key={grant}>
+								<div className="flex items-baseline justify-between gap-3">
+									<span className="min-w-0 truncate text-sm">
+										{grantLabel(grant)}
+									</span>
+									<code className="shrink-0 truncate font-mono text-muted-foreground text-xs">
+										{grant}
+									</code>
+								</div>
+								<p className="mt-0.5 text-muted-foreground text-xs leading-relaxed">
+									{grantDescription(grant)}
+								</p>
+							</li>
+						))}
+					</ul>
+				</section>
+			) : null}
+
+			{engineReq ? (
+				<section className="flex flex-col gap-2">
+					<h3 className="font-medium text-sm">Requires Ryu</h3>
+					<p className="text-muted-foreground text-sm">
+						This plugin declares it needs Ryu{" "}
+						<code className="font-mono">{engineReq}</code>. An incompatible node
+						refuses to load it rather than failing at runtime.
+					</p>
+				</section>
+			) : null}
+
+			{detail?.apiSurface?.provides?.length ? (
+				<section className="flex flex-col gap-2">
+					<h3 className="font-medium text-sm">Provides to other plugins</h3>
+					<ul className="flex flex-col gap-1.5">
+						{detail.apiSurface.provides.map((entryProvides) => (
+							<li
+								className="rounded-md border px-3 py-2 text-sm"
+								key={entryProvides.capability}
+							>
+								<code className="font-mono">{entryProvides.capability}</code>
+							</li>
+						))}
+					</ul>
+				</section>
+			) : null}
+		</div>
+	);
+}

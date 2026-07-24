@@ -10,15 +10,25 @@
 //   enable            POST /api/plugins/:id/enable      (enableApp)
 //   disable           POST /api/plugins/:id/disable     (disableApp)
 //   uninstall/rm      POST /api/plugins/:id/uninstall   (uninstallApp)
+//   init              local  → bunx create-ryu-app      (ctx.scaffold)
 //   chat              POST /api/chat/stream             (streamChat, SSE)
 //   node ls/use       local ~/.ryu/nodes.json store     (loadNodes/setActive)
 //   help / version    local
+//
+// Apps AND plugins: every lifecycle command above takes a plain id and works for
+// both, because Core has ONE lifecycle API — `/api/plugins/:id/*` does not care
+// whether the manifest ships a Companion UI. "app" vs "plugin" is a catalog
+// classification (see kind.ts), so it shows up here only as the `--kind` filter
+// and the KIND column, never as a second install path.
 
+import { loadNodes, resolveActive, setActive } from "../core/nodes.ts";
 import {
-	loadNodes,
-	resolveActive,
-	setActive,
-} from "../core/nodes.ts";
+	catalogEntryKind,
+	installedAppKind,
+	kindFilterPlural,
+	matchesKind,
+	parseKindFilter,
+} from "./kind.ts";
 import { formatTable, truncate } from "./output.ts";
 import { type CliContext, type Command, UsageError } from "./types.ts";
 import { VERSION } from "./version.ts";
@@ -34,75 +44,96 @@ function requireArg(ctx: CliContext, name: string, usage: string): string {
 	return value;
 }
 
-/** `ryu list` / `ryu ls` — installed apps (id, name, enabled). */
+/** `ryu list` / `ryu ls` — installed apps and plugins (id, name, kind, enabled).
+ *  `--kind` narrows to one classification; unset = both, which is the pre-flag
+ *  behavior and so cannot break a script that predates it. `--json` keeps emitting
+ *  the raw AppInfo records (filtered, never reshaped) — a consumer that wants the
+ *  classification derives it from `runnables` exactly as the KIND column does. */
 const listCommand: Command = {
 	name: "list",
 	aliases: ["ls"],
-	summary: "List installed apps",
-	usage: "ryu list [--json]",
+	summary: "List installed apps and plugins",
+	usage: "ryu list [--kind app|plugin|all] [--json]",
 	run: async (ctx) => {
+		const filter = parseKindFilter(ctx.flags.kind);
 		const apps = await ctx.api.fetchApps(ctx.target);
-		const installed = apps.filter((a) => a.installed || a.builtIn);
+		const installed = apps.filter(
+			(a) =>
+				(a.installed || a.builtIn) && matchesKind(filter, installedAppKind(a))
+		);
 		if (ctx.flags.json) {
 			ctx.io.out(`${JSON.stringify(installed, null, 2)}\n`);
 			return 0;
 		}
 		if (installed.length === 0) {
-			ctx.io.out("No apps installed.\n");
+			ctx.io.out(`No ${kindFilterPlural(filter)} installed.\n`);
 			return 0;
 		}
-		const rows = installed.map((a) => [a.id, a.name, a.enabled ? "yes" : "no"]);
-		ctx.io.out(`${formatTable(["ID", "NAME", "ENABLED"], rows)}\n`);
+		const rows = installed.map((a) => [
+			a.id,
+			a.name,
+			installedAppKind(a),
+			a.enabled ? "yes" : "no",
+		]);
+		ctx.io.out(`${formatTable(["ID", "NAME", "KIND", "ENABLED"], rows)}\n`);
 		return 0;
 	},
 };
 
-/** `ryu catalog` / `ryu search [q]` — installable apps from the remote registry. */
+/** `ryu catalog` / `ryu search [q]` — installable apps AND plugins from the remote
+ *  registry. One Core endpoint returns both, so both have always been listed here;
+ *  the KIND column is what finally makes them distinguishable, and `--kind` is the
+ *  narrowing a scripted caller needs. */
 const catalogCommand: Command = {
 	name: "catalog",
 	aliases: ["search"],
-	summary: "Browse/search installable apps",
-	usage: "ryu catalog [query] [--json]",
+	summary: "Browse/search installable apps and plugins",
+	usage: "ryu catalog [query] [--kind app|plugin|all] [--json]",
 	run: async (ctx) => {
+		const filter = parseKindFilter(ctx.flags.kind);
 		const entries = await ctx.api.fetchAppsCatalog(ctx.target);
 		const query = ctx.args[0]?.toLowerCase();
-		const matches = query
-			? entries.filter(
-					(e) =>
-						e.id.toLowerCase().includes(query) ||
-						e.name.toLowerCase().includes(query) ||
-						e.tags.some((t) => t.toLowerCase().includes(query))
-				)
-			: entries;
+		const matches = entries
+			.filter((e) => matchesKind(filter, catalogEntryKind(e)))
+			.filter(
+				(e) =>
+					!query ||
+					e.id.toLowerCase().includes(query) ||
+					e.name.toLowerCase().includes(query) ||
+					e.tags.some((t) => t.toLowerCase().includes(query))
+			);
 		if (ctx.flags.json) {
 			ctx.io.out(`${JSON.stringify(matches, null, 2)}\n`);
 			return 0;
 		}
 		if (matches.length === 0) {
-			ctx.io.out("No matching apps.\n");
+			ctx.io.out(`No matching ${kindFilterPlural(filter)}.\n`);
 			return 0;
 		}
 		const rows = matches.map((e) => [
 			e.id,
 			e.name,
+			catalogEntryKind(e),
 			e.version,
 			truncate(e.description, DESCRIPTION_WIDTH),
 		]);
 		ctx.io.out(
-			`${formatTable(["ID", "NAME", "VERSION", "DESCRIPTION"], rows)}\n`
+			`${formatTable(["ID", "NAME", "KIND", "VERSION", "DESCRIPTION"], rows)}\n`
 		);
 		return 0;
 	},
 };
 
-/** `ryu add <id>` / `ryu install <id>` — the shadcn-style install command. */
+/** `ryu add <id>` / `ryu install <id>` — the shadcn-style install command. Takes
+ *  the id of an app OR a plugin: `POST /api/plugins/:id/install` is the single
+ *  lifecycle route for both, so there is nothing to branch on here. */
 const addCommand: Command = {
 	name: "add",
 	aliases: ["install"],
-	summary: "Install an app from the catalog",
+	summary: "Install an app or plugin from the catalog",
 	usage: "ryu add <id> [--json]",
 	run: async (ctx) => {
-		const id = requireArg(ctx, "app id", "ryu add <id>");
+		const id = requireArg(ctx, "app or plugin id", "ryu add <id>");
 		const record = await ctx.api.installApp(ctx.target, id);
 		if (ctx.flags.json) {
 			ctx.io.out(`${JSON.stringify(record, null, 2)}\n`);
@@ -115,13 +146,13 @@ const addCommand: Command = {
 	},
 };
 
-/** `ryu enable <id>`. */
+/** `ryu enable <id>` — apps and plugins alike (one Core route for both). */
 const enableCommand: Command = {
 	name: "enable",
-	summary: "Enable an installed app",
+	summary: "Enable an installed app or plugin",
 	usage: "ryu enable <id> [--json]",
 	run: async (ctx) => {
-		const id = requireArg(ctx, "app id", "ryu enable <id>");
+		const id = requireArg(ctx, "app or plugin id", "ryu enable <id>");
 		const record = await ctx.api.enableApp(ctx.target, id);
 		if (ctx.flags.json) {
 			ctx.io.out(`${JSON.stringify(record, null, 2)}\n`);
@@ -135,10 +166,10 @@ const enableCommand: Command = {
 /** `ryu disable <id>` (`--cascade` to disable dependents too). */
 const disableCommand: Command = {
 	name: "disable",
-	summary: "Disable an app",
+	summary: "Disable an app or plugin",
 	usage: "ryu disable <id> [--cascade] [--json]",
 	run: async (ctx) => {
-		const id = requireArg(ctx, "app id", "ryu disable <id>");
+		const id = requireArg(ctx, "app or plugin id", "ryu disable <id>");
 		const record = await ctx.api.disableApp(ctx.target, id, {
 			cascade: ctx.flags.cascade,
 		});
@@ -155,10 +186,10 @@ const disableCommand: Command = {
 const uninstallCommand: Command = {
 	name: "uninstall",
 	aliases: ["rm"],
-	summary: "Uninstall an app",
+	summary: "Uninstall an app or plugin",
 	usage: "ryu uninstall <id> [--cascade] [--json]",
 	run: async (ctx) => {
-		const id = requireArg(ctx, "app id", "ryu uninstall <id>");
+		const id = requireArg(ctx, "app or plugin id", "ryu uninstall <id>");
 		const result = await ctx.api.uninstallApp(ctx.target, id, {
 			cascade: ctx.flags.cascade,
 		});
@@ -171,6 +202,52 @@ const uninstallCommand: Command = {
 			ctx.io.out(`${result.notice}\n`);
 		}
 		return 0;
+	},
+};
+
+/** `ryu init <name> [--template <t>]` — scaffold a new app or plugin project.
+ *
+ *  Templates are NOT reimplemented here. `create-ryu-app` is the source of truth
+ *  for what an app/plugin skeleton looks like, and `ctx.scaffold` shells out to it
+ *  exactly as a user would (`bunx create-ryu-app <name> [--template <t>]`). Two
+ *  things that would look tempting are wrong: importing the package would give the
+ *  tui a build-time dependency on a package it does not own AND freeze its template
+ *  list into this binary; and validating `<name>`/`--template` here would duplicate
+ *  the scaffolder's own gates, so a template added upstream would be rejected by a
+ *  stale copy of the list. Both are deliberately left to the child, whose usage
+ *  text is forwarded verbatim on failure. */
+const initCommand: Command = {
+	name: "init",
+	summary: "Scaffold a new app or plugin project",
+	usage: "ryu init <name> [--template <t>]",
+	run: async (ctx) => {
+		const name = requireArg(ctx, "project name", "ryu init <name>");
+		const template = ctx.flags.template;
+		const argv = template ? [name, "--template", template] : [name];
+		const result = await ctx.scaffold(argv);
+		const ok = result.exitCode === 0;
+		if (ctx.flags.json) {
+			ctx.io.out(
+				`${JSON.stringify({
+					name,
+					template: template ?? null,
+					exitCode: result.exitCode,
+					stdout: result.stdout,
+					stderr: result.stderr,
+				})}\n`
+			);
+			return ok ? 0 : 1;
+		}
+		// The scaffolder prints its own "created …/ next steps:" block — forward it
+		// rather than paraphrasing, so `ryu init` and `bunx create-ryu-app` never
+		// tell a user two different things about the project they just made.
+		if (result.stdout) {
+			ctx.io.out(result.stdout);
+		}
+		if (result.stderr) {
+			ctx.io.err(result.stderr);
+		}
+		return ok ? 0 : 1;
 	},
 };
 
@@ -290,6 +367,7 @@ const BASE_COMMANDS: Command[] = [
 	enableCommand,
 	disableCommand,
 	uninstallCommand,
+	initCommand,
 	chatCommand,
 	nodeCommand,
 	versionCommand,
@@ -315,19 +393,25 @@ export function renderHelp(): string {
 	// App-contributed subcommands (surfaces.cli.commands) — resolved at runtime
 	// against the active node; run `ryu <app>` to list what an app contributes.
 	lines.push(
-		`  ${appLine.padEnd(width)}  Run a command an installed app contributes`
+		`  ${appLine.padEnd(width)}  Run a command an installed app/plugin contributes`
 	);
 	lines.push(
 		"",
 		"Global flags:",
 		"  --json          Machine-readable output (for agents/CI)",
 		"  --node <url>    Target a specific Core node for this invocation",
+		"  --kind <k>      Filter list/catalog: app | plugin | all (default: all)",
+		"  --template <t>  Template for 'ryu init' (passed to create-ryu-app)",
 		"  --force         Override a refused operation where supported",
 		"  --cascade       Include dependents on disable/uninstall",
 		"  -h, --help      Show this help",
 		"  --version       Print the version",
 		"",
-		"Node targeting: RYU_CORE_URL / RYU_CORE_TOKEN (env) or --node <url>.",
+		"Apps vs plugins: both install, enable, disable and uninstall by id through the",
+		"same commands — an app is a plugin that also ships a full-page UI. Use --kind",
+		"to browse one at a time.",
+		"",
+		"Node targeting: RYU_CORE_URL / RYU_CORE_TOKEN (env) or --node <url>."
 	);
 	return lines.join("\n");
 }

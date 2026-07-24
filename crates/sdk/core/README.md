@@ -16,7 +16,7 @@ cargo build -p ryu-sdk
 cargo test  -p ryu-sdk
 ```
 
-The optional `codegen` feature regenerates an OpenAPI client from the vendored specs; it is off by default (the hand-written model client is the shipping transport).
+The optional `codegen` feature regenerates an OpenAPI client from the vendored specs; it is off by default (the model client is the shipping transport).
 
 ## What it provides
 

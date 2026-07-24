@@ -235,6 +235,40 @@ export interface SidebarSectionSpec {
 	source?: ViewSource;
 }
 
+/** The render-mode vocabulary of a manifest `dock_panels` contribution — the
+ *  discriminant the desktop dock renderer switches on. Mirrors the vocabulary
+ *  documented on the Rust `DockPanelContribution::panel`, which keeps the field a
+ *  bare string so an unknown member survives an older Core intact. */
+export const DOCK_PANEL_KINDS = ["companion", "view", "native"] as const;
+
+export type DockPanelKind = (typeof DOCK_PANEL_KINDS)[number];
+
+/**
+ * The opaque `spec` of a manifest `dock_panels` contribution (the Rust
+ * `DockPanelContribution`). Which key is read depends on the entry's `panel`
+ * discriminant, so every field is optional:
+ * - `panel: "companion"` reads {@link DockPanelSpec.companion} — the id of the
+ *   companion runnable whose sandboxed surface mounts inside the dock chrome.
+ * - `panel: "view"` reads {@link DockPanelSpec.view} — the id of one of the same
+ *   plugin's `contributes.views` entries, rendered with the host's own components.
+ * - `panel: "native"` reads nothing: the shell resolves its OWN component registered
+ *   under `<plugin>/<id>`. That is the migration seam for first-party apps whose panel
+ *   is hand-written React driving their sidecar through the ext-proxy (Browser,
+ *   Simulator) — the component stays in the shell, but the tab's existence, label and
+ *   placement become the app's declaration, so disabling the app removes the tab.
+ *
+ * `emptyText` is the placeholder a renderer shows before the panel has content (or
+ * when a `native` panel has no registered component), and is read for every mode.
+ */
+export interface DockPanelSpec {
+	/** Companion runnable id mounted by a `panel: "companion"` entry. */
+	companion?: string;
+	/** Placeholder shown while the panel has nothing to draw. */
+	emptyText?: string;
+	/** Id of a sibling `contributes.views` entry, for a `panel: "view"` entry. */
+	view?: string;
+}
+
 // ── The discriminated union on `view` ─────────────────────────────────────────
 
 export interface ListDetailView {

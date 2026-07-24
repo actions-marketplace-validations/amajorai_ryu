@@ -14,6 +14,7 @@ import {
 	Refresh01Icon,
 	Share08Icon,
 	Shield01Icon,
+	SparklesIcon,
 	SquareLock01Icon,
 	UserGroupIcon,
 	ViewOffSlashIcon,
@@ -58,6 +59,8 @@ import {
 	SidebarMenuButton,
 	SidebarMenuItem,
 } from "@ryu/ui/components/sidebar";
+import { toast } from "@ryu/ui/components/sileo";
+import { Skeleton } from "@ryu/ui/components/skeleton";
 import { Slider } from "@ryu/ui/components/slider";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
@@ -70,6 +73,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentModelPickerField } from "@/components/agent-elements/input/agent-model-picker-field.tsx";
+import { AgentSelectionField } from "@/components/agent-elements/input/agent-selection-field.tsx";
 import { WEB_URL } from "@/lib/app-urls.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { toCatalogItem } from "@/src/components/evaluators/catalog-utils.ts";
@@ -90,6 +94,7 @@ import { LlmProvidersSettings } from "@/src/components/settings/LlmProvidersSett
 import { PrivacySettings } from "@/src/components/settings/PrivacySettings.tsx";
 import { StorageSettings } from "@/src/components/settings/StorageSettings.tsx";
 import {
+	SettingsCard,
 	SettingsGroup,
 	SettingsItem,
 	SettingsSection,
@@ -159,10 +164,15 @@ import {
 	hasOrgAuth,
 } from "@/src/lib/api/org.ts";
 import {
+	type AgentSelection,
+	DEFAULT_AGENT_SELECTION_PREF_KEY,
+	EMPTY_AGENT_SELECTION,
+	getAgentSelection,
 	getComposioApiKey,
 	getExecApprovalEnabled,
 	getFalApiKey,
 	getReplicateApiKey,
+	setAgentSelection,
 	setComposioApiKey,
 	setExecApprovalEnabled,
 	setFalApiKey,
@@ -4757,6 +4767,99 @@ function RunEvalsPanel({ target }: { target: ApiTarget }) {
 	);
 }
 
+/**
+ * The node-wide default target: what every agent/model setting on this node
+ * falls back to when it is left unset — plugin settings fields, chat
+ * auto-rename, `/btw`, the advisor, context compaction, chat suggestions, and
+ * the agent-auto no-match fallback.
+ *
+ * Node-scoped rather than per-user because it is inherited by everyone and
+ * everything on the node. It writes the same `AgentSelection` shape a plugin
+ * field writes, so there is one value vocabulary rather than a special case for
+ * "the global one".
+ */
+function DefaultsSection({ target }: { target: ApiTarget }) {
+	const [selection, setSelection] = useState<AgentSelection>(
+		EMPTY_AGENT_SELECTION
+	);
+	const [loaded, setLoaded] = useState(false);
+
+	useEffect(() => {
+		let cancelled = false;
+		getAgentSelection(target, DEFAULT_AGENT_SELECTION_PREF_KEY)
+			.then((stored) => {
+				if (!cancelled) {
+					setSelection(stored);
+					setLoaded(true);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setLoaded(true);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [target]);
+
+	const save = useCallback(
+		async (next: AgentSelection) => {
+			let previous = EMPTY_AGENT_SELECTION;
+			setSelection((prev) => {
+				previous = prev;
+				return next;
+			});
+			const ok = await setAgentSelection(
+				target,
+				DEFAULT_AGENT_SELECTION_PREF_KEY,
+				next
+			);
+			if (!ok) {
+				setSelection(previous);
+				toast.error("Couldn't save the default", {
+					description: "Check your connection and try again.",
+				});
+			}
+		},
+		[target]
+	);
+
+	return (
+		<SettingsSection
+			caption="Anything on this node that needs an agent or a model, but has none configured of its own, uses this: plugin settings left blank, chat auto-rename, side questions, the advisor, context compaction, and follow-up suggestions. A setting that names its own target always wins over this one. Leave it unset to keep each feature's built-in fallback — which for chat titles and suggestions is the on-device local model, so setting a cloud default here does route those through the Gateway."
+			title="Default agent & model"
+		>
+			<SettingsCard className="space-y-4">
+				<div className="flex flex-col gap-1.5">
+					<Label className="text-muted-foreground text-xs">
+						Default target
+					</Label>
+					{loaded ? (
+						<AgentSelectionField
+							ariaLabel="Default agent or model"
+							onChange={(next) => {
+								save(next).catch(() => undefined);
+							}}
+							placeholder="No default — each feature uses its own fallback"
+							target={target}
+							value={selection}
+						/>
+					) : (
+						<Skeleton className="h-8 w-full" />
+					)}
+					<p className="text-muted-foreground text-xs">
+						Pick an agent to run the work, or a provider and model to answer it
+						directly. Features that make a plain model call can't run an agent —
+						if you pick one, they use the model it is configured with, and fall
+						back to their own default when it has none.
+					</p>
+				</div>
+			</SettingsCard>
+		</SettingsSection>
+	);
+}
+
 const GATEWAY_SECTIONS: {
 	value: GatewaySection;
 	label: string;
@@ -4764,6 +4867,7 @@ const GATEWAY_SECTIONS: {
 }[] = [
 	{ value: "overview", label: "Overview", icon: Activity01Icon },
 	{ value: "workspace", label: "Workspace", icon: UserGroupIcon },
+	{ value: "defaults", label: "Defaults", icon: SparklesIcon },
 	{ value: "providers", label: "LLM Providers", icon: CpuIcon },
 	{ value: "routing", label: "Routing", icon: GitBranchIcon },
 	{ value: "guardrails", label: "Guardrails", icon: Shield01Icon },
@@ -4921,7 +5025,7 @@ function OverviewSection({
  * groups the 7 gateway sections.
  */
 const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
-	{ items: ["overview", "workspace"] },
+	{ items: ["overview", "workspace", "defaults"] },
 	{
 		title: "Policy",
 		items: [
@@ -5015,20 +5119,29 @@ export function GatewayDialog({
 
 	// Static gateway nav (labels resolved from GATEWAY_SECTIONS) + the dynamic
 	// Apps/Plugins groups for node-scoped app settings.
-	const navGroups = useMemo(
-		() => [
-			...GATEWAY_NAV_GROUPS.map((group) => ({
-				title: group.title,
-				items: group.items.map((value) => ({
-					value: value as string,
-					label:
-						GATEWAY_SECTIONS.find((s) => s.value === value)?.label ?? value,
-				})),
-			})),
-			...buildEntityNavGroups(appEntities, pluginEntities),
-		],
+	// Apps/Plugins are placed before the Node group for quicker access.
+	const entityGroups = useMemo(
+		() => buildEntityNavGroups(appEntities, pluginEntities),
 		[appEntities, pluginEntities]
 	);
+	const navGroups = useMemo(() => {
+		const nodeIdx = GATEWAY_NAV_GROUPS.findIndex((g) => g.title === "Node");
+		const before = GATEWAY_NAV_GROUPS.slice(0, nodeIdx).map((group) => ({
+			title: group.title,
+			items: group.items.map((value) => ({
+				value: value as string,
+				label: GATEWAY_SECTIONS.find((s) => s.value === value)?.label ?? value,
+			})),
+		}));
+		const nodeAndAfter = GATEWAY_NAV_GROUPS.slice(nodeIdx).map((group) => ({
+			title: group.title,
+			items: group.items.map((value) => ({
+				value: value as string,
+				label: GATEWAY_SECTIONS.find((s) => s.value === value)?.label ?? value,
+			})),
+		}));
+		return [...before, ...entityGroups, ...nodeAndAfter];
+	}, [entityGroups]);
 
 	const node = getActiveNode();
 	const target: ApiTarget = { url: node.url, token: node.token ?? null };
@@ -5091,6 +5204,7 @@ export function GatewayDialog({
 					/>
 				) : null}
 				{section === "workspace" ? <WorkspaceSection /> : null}
+				{section === "defaults" ? <DefaultsSection target={target} /> : null}
 				{/* LLM Providers. Provider *selection* (which model/keys/routing the
 				    local Pi agent uses) is strictly Core — "what runs" — NOT account/org
 				    data, so it lives here on the node/infra Gateway surface, next to
@@ -5206,10 +5320,12 @@ export function GatewayDialog({
 
 	return (
 		<Dialog onOpenChange={onOpenChange} open={open}>
-			<DialogContent className="!w-[85vw] !max-w-7xl [&>[data-slot=dialog-close]]:!top-5 [&>[data-slot=dialog-close]]:!right-5 h-[85vh] gap-0 overflow-hidden p-0">
+			{/* Goes edge-to-edge below `md` (the useIsMobile line), matching the
+			    App Settings dialog. */}
+			<DialogContent className="!w-[85vw] !max-w-7xl max-md:!w-screen max-md:!max-w-none [&>[data-slot=dialog-close]]:!top-5 [&>[data-slot=dialog-close]]:!right-5 h-[85vh] gap-0 overflow-hidden p-0 max-md:h-[100dvh] max-md:rounded-none">
 				<ResizableSettingsLayout
 					content={
-						<div className="px-8 py-6">
+						<div className="px-4 py-4 md:px-8 md:py-6">
 							<div className="mb-6 flex items-center gap-2">
 								<h2 className="font-semibold text-base">{activeLabel}</h2>
 								<Badge variant={reachable ? "default" : "destructive"}>

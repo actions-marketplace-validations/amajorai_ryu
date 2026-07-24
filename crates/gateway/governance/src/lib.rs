@@ -5,11 +5,13 @@
 //! operates over caller-supplied data and *explicit* keys / allowlists, with no
 //! env, disk, or process-global state:
 //!
-//!   - **Grant validation** ([`validate_grants`]): match a manifest's requested
-//!     permission grants against an *explicit* allowlist, returning
-//!     `{ approved, denied }`. The allowlist *policy* (the built-in default and
-//!     the `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override) is resolved by the
-//!     gateway wiring and passed in.
+//!   - **Grant validation** ([`validate_grants_for`]): decide a manifest's
+//!     requested permission grants under the **capability grammar** — an
+//!     owner-scoped self-grant rule plus an *explicit* allowlist — returning
+//!     `{ approved, denied }`. The policy inputs (the built-in default
+//!     allowlist, the `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override, and the
+//!     reserved host-primitive namespace vocabulary) are resolved by the gateway
+//!     wiring and passed in as a [`GrantPolicy`].
 //!
 //!   - **Manifest signing** ([`sign_manifest`] / [`verify_manifest`]): sign and
 //!     verify over a canonicalized (recursively key-sorted) JSON encoding, so a
@@ -47,12 +49,136 @@ impl GrantDecision {
     }
 }
 
-/// Validate the requested grants against an explicit allowlist. A grant not on
-/// the allowlist is denied. Matching is case-insensitive on the trimmed scope
-/// string. An empty request approves trivially. The allowlist *policy* (default
-/// set + env override) is resolved by the gateway and passed in.
+/// The policy inputs the capability grammar decides against. All three are
+/// resolved by the gateway (env override + built-in defaults) and passed in, so
+/// this crate stays a pure function of caller-supplied data.
+pub struct GrantPolicy<'a> {
+    /// Scopes approved unconditionally, whatever the requesting app is: the
+    /// gateway's reviewed policy list (built-in default or the
+    /// `RYU_MARKETPLACE_GRANT_ALLOWLIST` operator override). Matched
+    /// case-insensitively against the whole trimmed scope string.
+    pub allowlist: &'a [String],
+    /// Namespaces that name a **host primitive** rather than an app's own
+    /// surface (`model`, `memory`, `sidecar`, `tool`, `mcp`, …). A reserved
+    /// namespace can never be claimed by the owner-scoped rule below, no matter
+    /// what a manifest calls itself — so `com.evil.memory` cannot self-approve
+    /// `memory.read`. Reserved scopes are approvable only via `allowlist`.
+    pub reserved_namespaces: &'a [String],
+    /// Whether the owner-scoped self-grant rule is active. Operators can turn it
+    /// off for a pure-allowlist (pre-grammar) posture. `false` reduces this to
+    /// exact allowlist membership.
+    pub owner_scoped: bool,
+}
+
+/// The **namespace** of a capability scope: the token before the first `:` or
+/// `.` separator. `"monitors:crud"` → `"monitors"`, `"model.chat"` → `"model"`.
+///
+/// Returns `None` for anything the grammar refuses to reason about structurally
+/// — no separator, an empty namespace or an empty remainder, a namespace with
+/// characters outside `[A-Za-z0-9_-]`, or any embedded whitespace/wildcard. A
+/// `None` here never means "approve": it only means the scope cannot be
+/// *owner-scoped*, so it falls through to explicit allowlist membership.
+pub fn capability_namespace(scope: &str) -> Option<&str> {
+    let scope = scope.trim();
+    if scope.is_empty() || scope.contains('*') || scope.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let sep = scope.find([':', '.'])?;
+    let (namespace, rest) = scope.split_at(sep);
+    // `rest` still carries the separator; a scope like `monitors:` (empty
+    // remainder) is malformed and must not owner-scope.
+    if namespace.is_empty() || rest.len() < 2 {
+        return None;
+    }
+    if !namespace.chars().all(is_ident_char) {
+        return None;
+    }
+    Some(namespace)
+}
+
+/// The namespace a plugin **owns**, derived from its manifest id: the last
+/// dot-separated segment. `"com.ryu.monitors"` → `"monitors"`, `"rtk"` → `"rtk"`.
+///
+/// Returns `None` for a malformed id (empty, trailing dot, whitespace, or a
+/// segment with characters outside `[A-Za-z0-9_-]`), which disables owner-scoped
+/// approval for that caller — fail-closed.
+///
+/// ## Known limitation: same-segment squatting
+///
+/// Capability namespaces are a flat global vocabulary while plugin ids are
+/// hierarchical, so `com.evil.monitors` derives the same owner namespace as
+/// `com.ryu.monitors` and could self-approve `monitors:crud`. Two things bound
+/// that: (a) host primitives live in [`GrantPolicy::reserved_namespaces`] and
+/// are never owner-scopable, so the squat can only reach another *app's*
+/// surface, never Core's; and (b) Core's enforcement points additionally gate on
+/// the owning app being installed and enabled. The real fix is id-namespace
+/// ownership at publish time (a marketplace publisher owning `com.acme.*`),
+/// which is a registry concern, not a grammar one.
+pub fn owner_namespace(app_id: &str) -> Option<&str> {
+    let id = app_id.trim();
+    if id.is_empty() || id.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let segment = match id.rfind('.') {
+        Some(dot) => &id[dot + 1..],
+        None => id,
+    };
+    if segment.is_empty() || !segment.chars().all(is_ident_char) {
+        return None;
+    }
+    Some(segment)
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Validate the requested grants against an explicit allowlist, with no
+/// owner-scoped rule. Equivalent to [`validate_grants_for`] with an unknown
+/// caller; retained as the crate's original entry point.
 pub fn validate_grants(grants: &[String], allowlist: &[String]) -> GrantDecision {
-    let allowed = |g: &str| allowlist.iter().any(|a| a.eq_ignore_ascii_case(g.trim()));
+    validate_grants_for(
+        None,
+        grants,
+        &GrantPolicy {
+            allowlist,
+            reserved_namespaces: &[],
+            owner_scoped: false,
+        },
+    )
+}
+
+/// Decide the requested grants for `app_id` under the capability grammar,
+/// returning `{ approved, denied }`. An empty request approves trivially; empty
+/// / whitespace-only scopes are skipped.
+///
+/// A scope is approved when **either**:
+///
+///   1. it is on the reviewed `allowlist` (exact, case-insensitive match on the
+///      trimmed string) — the host-primitive vocabulary and any operator
+///      override; **or**
+///   2. it is an **owner-scoped self-grant**: its namespace equals the namespace
+///      derived from the caller's own manifest id, and that namespace is not
+///      reserved. `com.ryu.monitors` declaring `monitors:crud` needs no policy
+///      entry — which is what lets a third-party app ship a capability of its
+///      own without a Gateway code change.
+///
+/// Everything else — a namespace belonging to another app, a reserved host
+/// primitive that is not allowlisted, a structurally malformed scope, or any
+/// scope at all when `app_id` is `None` — is denied. Deny-by-default is
+/// unchanged; the grammar only adds rule 2.
+pub fn validate_grants_for(
+    app_id: Option<&str>,
+    grants: &[String],
+    policy: &GrantPolicy<'_>,
+) -> GrantDecision {
+    // Resolved once: the caller's owned namespace, or `None` when the caller is
+    // unknown / its id is malformed (both fail closed to allowlist-only).
+    let owner = if policy.owner_scoped {
+        app_id.and_then(owner_namespace)
+    } else {
+        None
+    };
 
     let mut approved = Vec::new();
     let mut denied = Vec::new();
@@ -61,13 +187,42 @@ pub fn validate_grants(grants: &[String], allowlist: &[String]) -> GrantDecision
         if scope.is_empty() {
             continue;
         }
-        if allowed(scope) {
+        if scope_allowed(scope, owner, policy) {
             approved.push(scope.to_string());
         } else {
             denied.push(scope.to_string());
         }
     }
     GrantDecision { approved, denied }
+}
+
+/// The single-scope decision. Split out so both the allowlist rule and the
+/// owner-scoped rule are readable in isolation and testable through the public
+/// entry point.
+fn scope_allowed(scope: &str, owner: Option<&str>, policy: &GrantPolicy<'_>) -> bool {
+    // Rule 1 — reviewed policy. Checked first so an operator override can
+    // approve a reserved scope the grammar would otherwise refuse.
+    if policy.allowlist.iter().any(|a| a.eq_ignore_ascii_case(scope)) {
+        return true;
+    }
+    // Rule 2 — owner-scoped self-grant.
+    let Some(owner) = owner else {
+        return false;
+    };
+    let Some(namespace) = capability_namespace(scope) else {
+        return false;
+    };
+    if policy
+        .reserved_namespaces
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(namespace))
+    {
+        // A host primitive is never self-granted, even by an app that named
+        // itself after it. This is what keeps `sidecar:process`, `model.*`,
+        // `memory.*` … exactly as gated as they are today.
+        return false;
+    }
+    namespace.eq_ignore_ascii_case(owner)
 }
 
 // ── signing ─────────────────────────────────────────────────────────────────
@@ -188,6 +343,235 @@ mod tests {
     fn validate_grants_skips_empty_scopes() {
         let allow = vec!["mcp.tools".to_string()];
         let d = validate_grants(&["".to_string(), "  ".to_string()], &allow);
+        assert!(d.all_approved());
+        assert!(d.approved.is_empty());
+    }
+
+    // ── capability grammar ───────────────────────────────────────────────────
+
+    fn scopes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// A test policy shaped like the gateway's: a small reviewed allowlist plus
+    /// the reserved host-primitive namespaces, owner-scoping on.
+    fn policy<'a>(allowlist: &'a [String], reserved: &'a [String]) -> GrantPolicy<'a> {
+        GrantPolicy {
+            allowlist,
+            reserved_namespaces: reserved,
+            owner_scoped: true,
+        }
+    }
+
+    #[test]
+    fn capability_namespace_splits_on_either_separator() {
+        assert_eq!(capability_namespace("monitors:crud"), Some("monitors"));
+        assert_eq!(capability_namespace("model.chat"), Some("model"));
+        // The FIRST separator wins, so a multi-part scope keeps its head token.
+        assert_eq!(capability_namespace("tool:command:rtk"), Some("tool"));
+        assert_eq!(capability_namespace("chat.sendFollowUp"), Some("chat"));
+    }
+
+    #[test]
+    fn capability_namespace_rejects_malformed_scopes() {
+        assert_eq!(capability_namespace(""), None);
+        assert_eq!(capability_namespace("   "), None);
+        assert_eq!(capability_namespace("monitors"), None, "no separator");
+        assert_eq!(capability_namespace("monitors:"), None, "empty remainder");
+        assert_eq!(capability_namespace(":crud"), None, "empty namespace");
+        assert_eq!(capability_namespace("moni tors:crud"), None, "whitespace");
+        assert_eq!(capability_namespace("*:crud"), None, "wildcard");
+        assert_eq!(capability_namespace("moni/tors:crud"), None, "bad char");
+    }
+
+    #[test]
+    fn owner_namespace_takes_the_last_id_segment() {
+        assert_eq!(owner_namespace("com.ryu.monitors"), Some("monitors"));
+        assert_eq!(owner_namespace("rtk"), Some("rtk"), "unqualified id");
+        assert_eq!(owner_namespace("  com.ryu.mail  "), Some("mail"), "trimmed");
+        assert_eq!(owner_namespace("com.ryu.skill-editor"), Some("skill-editor"));
+    }
+
+    #[test]
+    fn owner_namespace_rejects_malformed_ids() {
+        assert_eq!(owner_namespace(""), None);
+        assert_eq!(owner_namespace("   "), None);
+        assert_eq!(owner_namespace("com.ryu."), None, "trailing dot");
+        assert_eq!(owner_namespace("com ryu"), None, "whitespace");
+        assert_eq!(owner_namespace("com.ryu.mon/itors"), None, "bad char");
+    }
+
+    #[test]
+    fn owner_scoped_self_grant_is_approved_without_an_allowlist_entry() {
+        // The whole point of the grammar: a third-party app declaring a
+        // capability in its OWN namespace enables with no Gateway edit.
+        let reserved = scopes(&["model", "memory", "sidecar"]);
+        let d = validate_grants_for(
+            Some("com.acme.notes"),
+            &scopes(&["notes:crud", "notes:export"]),
+            &policy(&[], &reserved),
+        );
+        assert!(d.all_approved(), "denied: {:?}", d.denied);
+        assert_eq!(d.approved.len(), 2);
+    }
+
+    #[test]
+    fn cross_app_namespace_is_denied() {
+        let reserved = scopes(&["model"]);
+        let d = validate_grants_for(
+            Some("com.acme.notes"),
+            &scopes(&["notes:crud", "monitors:crud"]),
+            &policy(&[], &reserved),
+        );
+        assert_eq!(d.approved, vec!["notes:crud".to_string()]);
+        assert_eq!(d.denied, vec!["monitors:crud".to_string()]);
+    }
+
+    #[test]
+    fn spoofed_id_cannot_claim_another_apps_namespace() {
+        // The named spoofing case: an app that is not `com.ryu.monitors` must
+        // not self-approve `monitors:crud`, however it dresses up its id.
+        let reserved = scopes(&["model"]);
+        for id in [
+            "com.ryu.evil",
+            "monitors.evil",
+            "com.ryu.monitors.evil",
+            "evil-monitors",
+            "com.ryu.monitorsx",
+        ] {
+            let d = validate_grants_for(Some(id), &scopes(&["monitors:crud"]), &policy(&[], &reserved));
+            assert_eq!(
+                d.denied,
+                vec!["monitors:crud".to_string()],
+                "'{id}' must not self-approve another app's namespace"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_namespace_is_never_owner_scoped() {
+        // An app that names itself after a host primitive still cannot
+        // self-grant it — `sidecar:process` above all (arbitrary code
+        // execution), which is on no default allowlist.
+        let reserved = scopes(&["sidecar", "memory", "model", "tool", "mcp"]);
+        let d = validate_grants_for(
+            Some("com.evil.sidecar"),
+            &scopes(&["sidecar:process"]),
+            &policy(&[], &reserved),
+        );
+        assert_eq!(d.denied, vec!["sidecar:process".to_string()]);
+
+        let d = validate_grants_for(
+            Some("com.evil.memory"),
+            &scopes(&["memory.read"]),
+            &policy(&[], &reserved),
+        );
+        assert_eq!(d.denied, vec!["memory.read".to_string()]);
+
+        let d = validate_grants_for(
+            Some("com.evil.tool"),
+            &scopes(&["tool:command:rm"]),
+            &policy(&[], &reserved),
+        );
+        assert_eq!(d.denied, vec!["tool:command:rm".to_string()]);
+    }
+
+    #[test]
+    fn allowlist_still_approves_reserved_host_primitives() {
+        // Rule 1 is unchanged: a reviewed host-primitive scope is approved for
+        // any caller, which is how first-party apps hold `hook:*`, `mcp:*`, …
+        let reserved = scopes(&["hook", "mcp"]);
+        let allow = scopes(&["hook:side-model", "mcp:ghost"]);
+        let d = validate_grants_for(
+            Some("com.ryuhq.advisor"),
+            &scopes(&["hook:side-model"]),
+            &policy(&allow, &reserved),
+        );
+        assert!(d.all_approved());
+    }
+
+    #[test]
+    fn unknown_caller_falls_back_to_allowlist_only() {
+        // No `app_id` ⇒ no owner namespace ⇒ pre-grammar behavior. Fail-closed.
+        let reserved = scopes(&["model"]);
+        let allow = scopes(&["model.chat"]);
+        let d = validate_grants_for(
+            None,
+            &scopes(&["model.chat", "notes:crud"]),
+            &policy(&allow, &reserved),
+        );
+        assert_eq!(d.approved, vec!["model.chat".to_string()]);
+        assert_eq!(d.denied, vec!["notes:crud".to_string()]);
+    }
+
+    #[test]
+    fn malformed_caller_id_disables_owner_scoping() {
+        let reserved = scopes(&["model"]);
+        for id in ["", "   ", "com.acme.", "com acme"] {
+            let d = validate_grants_for(Some(id), &scopes(&["acme:crud"]), &policy(&[], &reserved));
+            assert_eq!(
+                d.denied,
+                vec!["acme:crud".to_string()],
+                "malformed id '{id}' must not owner-scope"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_scope_is_denied_not_owner_scoped() {
+        let reserved = scopes(&["model"]);
+        // A bare namespace, an empty remainder, and a wildcard are all denied
+        // for an app that owns the namespace — the grammar needs `<ns><sep><rest>`.
+        let d = validate_grants_for(
+            Some("com.acme.notes"),
+            &scopes(&["notes", "notes:", "notes:*", "notes crud"]),
+            &policy(&[], &reserved),
+        );
+        assert!(d.approved.is_empty(), "approved: {:?}", d.approved);
+        assert_eq!(d.denied.len(), 4);
+    }
+
+    #[test]
+    fn grammar_matching_is_case_insensitive_on_both_sides() {
+        let reserved = scopes(&["Model"]);
+        let allow = scopes(&["Model.Chat"]);
+        let d = validate_grants_for(
+            Some("COM.Acme.Notes"),
+            &scopes(&["NOTES:crud", "model.chat"]),
+            &policy(&allow, &reserved),
+        );
+        assert!(d.all_approved(), "denied: {:?}", d.denied);
+        // The response echoes the requested spelling, not a normalized one.
+        assert_eq!(d.approved, vec!["NOTES:crud".to_string(), "model.chat".to_string()]);
+
+        // Case-folding does not open the reserved gate either.
+        let d = validate_grants_for(
+            Some("com.evil.MODEL"),
+            &scopes(&["MODEL.embed"]),
+            &policy(&[], &reserved),
+        );
+        assert_eq!(d.denied, vec!["MODEL.embed".to_string()]);
+    }
+
+    #[test]
+    fn owner_scoping_can_be_turned_off_for_a_pure_allowlist_posture() {
+        let reserved = scopes(&["model"]);
+        let strict = GrantPolicy {
+            allowlist: &[],
+            reserved_namespaces: &reserved,
+            owner_scoped: false,
+        };
+        let d = validate_grants_for(Some("com.acme.notes"), &scopes(&["notes:crud"]), &strict);
+        assert_eq!(d.denied, vec!["notes:crud".to_string()]);
+    }
+
+    #[test]
+    fn empty_and_whitespace_scopes_are_skipped_under_the_grammar() {
+        let d = validate_grants_for(
+            Some("com.acme.notes"),
+            &scopes(&["", "   "]),
+            &policy(&[], &[]),
+        );
         assert!(d.all_approved());
         assert!(d.approved.is_empty());
     }

@@ -2878,7 +2878,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
     // Recipes `/api/recipes/*` is now served OUT-OF-PROCESS by the `ryu-recipes`
     // sidecar via the manifest `public_mount` (generic ext-proxy loader) — no
     // in-process route merge. Its two live-ghost paths (replay + the recording
-    // session) proxy back to Core's `/api/host/recipes/*` (the shared MCP registry +
+    // session) proxy back to Core's `/api/host/capability/ghost.*` (the shared MCP registry +
     // the recorder subprocess are kernel; see `recipes_client` + `recipes_host`).
     // The workflow executor's `Recipe`/`GhostAction` nodes still call
     // `ryu_recipes::run` IN-PROCESS (no HTTP round-trip) against the same host.
@@ -3320,7 +3320,7 @@ fn learning_routes(app_store: &PluginStore) -> Router<ServerState> {
 // stays a NON-optional dependency: the workflow executor's `Recipe`/`GhostAction`
 // nodes call `ryu_recipes::run`/`extract_mcp_json` in every build, and Core installs
 // the live-ghost `RecipesHost` at boot (`recipes_host::CoreRecipesHost`), reached
-// both by that in-process path and by the sidecar via `/api/host/recipes/*`
+// both by that in-process path and by the sidecar via `/api/host/capability/ghost.*`
 // (`recipes_client`).
 
 /// The `/api/predict/*` surface, gated on the **Predict App** being enabled.
@@ -3679,6 +3679,13 @@ async fn set_preference(
             // snapshot in sync so the next "auto" turn resolves with the new rules.
             if key == crate::agent_routing::AGENT_AUTO_ROUTING_PREF_KEY {
                 crate::agent_routing::set_auto_config_from_json(&body.value);
+            }
+            // The node-wide default selection: keep the sync snapshot in step so
+            // agent-consuming paths pick up a new default without a restart.
+            // (Model-consuming paths read the preference directly and need no
+            // snapshot.)
+            if key == crate::agent_selection::GLOBAL_SELECTION_PREF {
+                crate::agent_selection::set_default_selection_from_json(&body.value);
             }
             (StatusCode::OK, Json(json!({ "ok": true, "key": key }))).into_response()
         }
@@ -5169,6 +5176,9 @@ async fn run_chat_with_hooks(
         // any hook error is a no-op and the original prompt is sent. Runs inside
         // the stream so the `sideModel` round-trip streams a note rather than
         // stalling before any bytes reach the client.
+        // Set when a `pre_user_turn` hook returns `Handled` — the turn is answered
+        // without a model call. `None` on every ordinary turn.
+        let mut handled_text: Option<String> = None;
         if has_pre {
             let pre_ctx = build_pre_hook_context(&current, &flags);
             let directives = crate::plugin_host::run_hooks(
@@ -5205,12 +5215,64 @@ async fn run_chat_with_hooks(
                             );
                         }
                     }
+                    crate::plugin_host::HookDirective::Handled { text } => {
+                        let t = text.trim();
+                        if !t.is_empty() {
+                            handled_text = Some(t.to_string());
+                            // First writer wins: once a hook owns this turn, no
+                            // later hook may also claim it or rewrite the prompt
+                            // for a model call that is no longer going to happen.
+                            break;
+                        }
+                    }
                     _ => {}
                 }
             }
         }
 
+        // `Handled`: a hook answered the turn itself, so NO model call is made. The
+        // reply is framed exactly like a streamed one — a client cannot tell the
+        // difference, and must not, or it renders a turn that never opens or never
+        // closes — and is persisted like any assistant message so a reload is
+        // faithful. Fail-open stays intact: a persist error costs the transcript
+        // row, never the response the user is already reading.
+        if let Some(text) = handled_text.as_deref() {
+            for frame in crate::sidecar::adapters::synthetic_assistant_frames(text) {
+                yield Ok::<_, std::convert::Infallible>(frame);
+            }
+            // BOTH rows, via the same helper the off-HTTP transports use. The user
+            // row matters and is easy to miss: `route_chat_stream` is the only
+            // writer of the user message, and a handled turn skips it entirely, so
+            // persisting just the assistant reply would reload the conversation as
+            // an answer to a prompt that is not there. Passing the post-hook text
+            // means a `Replace` that rewrote the prompt is what gets stored — the
+            // transcript shows what actually ran, matching the note the Replace arm
+            // already streams.
+            let user_text = current
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .map(crate::sidecar::adapters::ui_message_text)
+                .unwrap_or_default();
+            crate::sidecar::adapters::persist_handled_turn(
+                &state.conversations,
+                &conversation_id,
+                &user_text,
+                text,
+                agent_id.as_deref(),
+                None,
+            )
+            .await;
+        }
+
         loop {
+            // A handled turn is already complete: skip the model entirely. Guarding
+            // here rather than wrapping the loop keeps the terminal [DONE] below as
+            // the single exit for every path.
+            if handled_text.is_some() {
+                break;
+            }
             // Stream one turn, forwarding every UI part except its terminal [DONE].
             let inner = route_single_turn(&state, current.clone()).await;
             let mut body = inner.into_body().into_data_stream();
@@ -5256,7 +5318,11 @@ async fn run_chat_with_hooks(
                     | crate::plugin_host::HookDirective::Inject { .. }
                     | crate::plugin_host::HookDirective::Deny { .. }
                     | crate::plugin_host::HookDirective::Transform { .. }
-                    | crate::plugin_host::HookDirective::Rewrite { .. } => {}
+                    | crate::plugin_host::HookDirective::Rewrite { .. }
+                    // `Handled` short-circuits a turn BEFORE the model call; by the
+                    // post-turn point the call has already happened, so honouring it
+                    // here would discard a real reply the user already saw stream in.
+                    | crate::plugin_host::HookDirective::Handled { .. } => {}
                     crate::plugin_host::HookDirective::None => {}
                 }
             }
@@ -7216,6 +7282,14 @@ async fn plugin_catalog_detail(
     } else {
         active_plugin_source(&state).await
     };
+    // A locally loaded plugin (built-in or installed) answers from its own
+    // manifest — no source round-trip, and no dependence on whether the active
+    // remote source happens to carry it. This is what gives a first-party app the
+    // same README / API-reference / dependency tabs a community listing gets.
+    if let Some(local) = local_plugin_detail(id) {
+        return (StatusCode::OK, Json(local));
+    }
+
     match selected {
         Some(source) => match source.detail(&state.client, id).await {
             Ok(value) => (StatusCode::OK, Json(value)),
@@ -7229,6 +7303,103 @@ async fn plugin_catalog_detail(
             Json(json!({ "error": "no active plugin catalog source" })),
         ),
     }
+}
+
+/// README file names tried inside an installed plugin's directory, in order.
+const PLUGIN_README_NAMES: [&str; 4] = ["README.md", "readme.md", "README.markdown", "README"];
+
+/// Cap on a README read off disk. Matches the community-listing cap so both paths
+/// hand the renderer the same worst case.
+const MAX_PLUGIN_README_BYTES: usize = 256 * 1024;
+
+/// Read an installed plugin's README from its plugin directory. Built-ins have no
+/// directory, so this is simply absent for them — not an error.
+fn local_plugin_readme(id: &str) -> Option<String> {
+    let dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir().join(id);
+    for name in PLUGIN_README_NAMES {
+        let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+            continue;
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.len() <= MAX_PLUGIN_README_BYTES {
+            return Some(trimmed.to_string());
+        }
+        let mut end = MAX_PLUGIN_README_BYTES;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        return Some(format!("{}\n\n…", &trimmed[..end]));
+    }
+    None
+}
+
+/// Detail payload for a locally loaded plugin, assembled from its manifest alone.
+///
+/// Returns `None` when no loaded manifest claims `id`, so the caller falls through
+/// to the remote catalog source. The payload follows the same camelCase detail
+/// contract remote sources emit (see `PluginCatalogDetail` in `@ryu/marketplace`),
+/// so one renderer serves both.
+/// The `(source, origin, reviewed)` trust signals for a locally loaded manifest,
+/// decided purely by whether its bytes ship inside the binary.
+///
+/// Pure so both branches are unit-testable: exercising the disk branch through
+/// [`local_plugin_detail`] itself would mean pointing the process-global
+/// `RYU_PLUGINS_DIR` at a fixture, which races every other test that loads a
+/// manifest.
+fn local_detail_trust_signals(compiled_in: bool) -> (&'static str, &'static str, bool) {
+    if compiled_in {
+        ("built-in", "first_party", true)
+    } else {
+        ("installed", "community", false)
+    }
+}
+
+fn local_plugin_detail(id: &str) -> Option<serde_json::Value> {
+    let manifests = crate::plugin_manifest::PluginManifestLoader::load();
+    let m = manifests.iter().find(|m| m.id == id)?;
+
+    // `load()` returns compiled-in fixtures AND anything the user dropped into the
+    // writable `~/.ryu/plugins`. Only the former is reviewed-by-construction, and
+    // `origin`/`reviewed` are TRUST SIGNALS the consent surface renders next to the
+    // permission grants — so they must key on manifest provenance, not on the mere
+    // fact that Core managed to parse the file. Marking a disk manifest
+    // `first_party` + `reviewed` would let anything that can write a directory
+    // under `~/.ryu/plugins` dress itself as a vetted first-party app on the very
+    // screen where the user decides whether to approve its grants (and, because
+    // this path answers BEFORE the remote source, shadow a real listing while
+    // doing it).
+    let (source, origin, reviewed) =
+        local_detail_trust_signals(crate::plugins::builtins::is_compiled_in_manifest(&m.id));
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".to_owned(), json!(m.id));
+    obj.insert("name".to_owned(), json!(m.name));
+    obj.insert("version".to_owned(), json!(m.version));
+    obj.insert("description".to_owned(), json!(m.description));
+    obj.insert("source".to_owned(), json!(source));
+    obj.insert("origin".to_owned(), json!(origin));
+    obj.insert("reviewed".to_owned(), json!(reviewed));
+    obj.insert(
+        "builtIn".to_owned(),
+        json!(crate::plugins::builtins::find_system_plugin(&m.id).is_some()),
+    );
+    merge_plugin_contract_fields(&mut obj, m);
+
+    // The API surface is projected from the manifest's own JSON, through the exact
+    // same allowlist a third-party manifest crosses — one projection, one contract,
+    // no first-party-only shape for the renderer to special-case.
+    if let Ok(value) = serde_json::to_value(m) {
+        for (k, v) in crate::catalog_source::manifest_surface::project_manifest(&value) {
+            obj.insert(k, v);
+        }
+    }
+    if let Some(readme) = local_plugin_readme(&m.id) {
+        obj.insert("readme".to_owned(), json!(readme));
+    }
+    Some(serde_json::Value::Object(obj))
 }
 
 /// Map a loaded [`crate::plugin_manifest::PluginManifest`] to a Plugins-catalog
@@ -7395,6 +7566,34 @@ fn merge_plugin_contract_fields(
         })
         .collect();
     obj.insert("runnables".to_owned(), json!(runnables));
+    // `mcp_servers`: the local processes this plugin will SPAWN if enabled, as
+    // `{ name, command, args }`. Emitted only when the manifest declares any.
+    //
+    // Why this is part of the permission contract and not decoration: everything
+    // else a consent surface shows is a grant STRING (`tool:command:spider`), and
+    // grant strings are what the Gateway validates. An `mcp_servers` entry carries
+    // its own verbatim `command` + `args` that Core hands to `Command::new`, so a
+    // consent surface rendering `permission_grants` alone tells the user "this
+    // plugin wants mcp:server" and never shows them WHAT it is about to run. This
+    // serves the missing half. `command_env` is deliberately NOT resolved here:
+    // this is the DECLARATION as authored, not the lowered runtime command (a
+    // resolved absolute path would read as a promise Core has not yet made — the
+    // env lookup happens at registration time in `mcp_server_config_from_decl`).
+    if !m.mcp_servers.is_empty() {
+        let mcp_servers: Vec<serde_json::Value> = m
+            .mcp_servers
+            .iter()
+            .map(|(name, decl)| {
+                json!({
+                    "name": name,
+                    "command": decl.command,
+                    "args": decl.args,
+                    "command_env": decl.command_env,
+                })
+            })
+            .collect();
+        obj.insert("mcp_servers".to_owned(), json!(mcp_servers));
+    }
 }
 
 /// Map one Ryu-marketplace plugin item (`{ id, name, description, version, … }`,
@@ -8665,6 +8864,41 @@ fn app_tool_claim_sets(
     (disabled_claimed, enabled_claimed)
 }
 
+/// Collect the tool-hide patterns declared by **enabled** plugins
+/// (`contributes.tool_filters`).
+///
+/// This is the declarative half of a tool firewall, and it is strictly better than
+/// the `pre_tool_use` + [`HookDirective::Deny`] half for anything a plugin knows
+/// statically: `Deny` fires only once the model has already chosen the tool and
+/// spent a round-trip on it, so the user pays latency and tokens for a call that
+/// was never going to run. Removing the tool from the offered list means the model
+/// never sees it and never tries.
+///
+/// Only enabled plugins contribute. A disabled plugin that kept hiding tools would
+/// be invisible policy — the user disabled it precisely to stop it acting.
+///
+/// Hiding is NOT a security boundary and must not be read as one: it changes what
+/// is advertised, not what is permitted. A tool that is hidden is still callable by
+/// id, and enforcement stays with permissions, grants, and the approval gate.
+///
+/// [`HookDirective::Deny`]: crate::plugin_host::HookDirective::Deny
+fn app_tool_hide_filters(
+    manifests: &[crate::plugin_manifest::PluginManifest],
+    lifecycle: &[crate::plugins::PluginRecord],
+) -> Vec<ryu_kernel_contracts::manifest::ToolFilterContribution> {
+    manifests
+        .iter()
+        .filter(|m| {
+            lifecycle
+                .iter()
+                .find(|r| r.id == m.id)
+                .is_some_and(|r| r.enabled)
+        })
+        .filter_map(|m| m.contributes.as_ref())
+        .flat_map(|c| c.tool_filters.iter().cloned())
+        .collect()
+}
+
 // ── Skill CRUD/version/activate handlers moved to `ryu_skills::api` ───────────
 //
 // The `/api/skills` list + `/api/skills/:id` source/update + version-history +
@@ -9002,7 +9236,19 @@ async fn activate_plugin(
     // Register the plugin's declared `mcp_servers` into the MCP registry (the
     // manifest-owned successor to Core's hardcoded built-in servers). Idempotent +
     // a no-op for every manifest with no `mcp_servers`.
-    let registered = crate::sidecar::mcp::register_manifest_mcp_servers(&state.mcp, manifest);
+    //
+    // Gated on tier + the approved `mcp:server` grant, exactly like the two sibling
+    // process-spawning seams above: an `mcp_servers` entry is a verbatim
+    // command+args the next tool listing hands to `Command::new`, so a manifest
+    // dropped into the user-writable `~/.ryu/plugins` must not be able to run code
+    // just by being enabled. `approved_grants` is read from the RECORD, never the
+    // manifest's unvalidated declarations.
+    let registered = crate::sidecar::mcp::register_manifest_mcp_servers(
+        &state.mcp,
+        manifest,
+        crate::plugins::builtins::tier_for(&manifest.id),
+        &record.approved_grants,
+    );
     if !registered.is_empty() {
         tracing::info!(
             plugin = %manifest.id,
@@ -9360,18 +9606,23 @@ fn build_runnable_registry(state: &ServerState) -> crate::runnable::RunnableRegi
 pub async fn fire_activation_event(state: &ServerState, event: &str) {
     let snapshot = crate::runnable::mark_activation_event_fired(event);
 
-    // The set of installed+enabled plugins; only these may activate.
-    let enabled_ids: std::collections::HashSet<String> = match state.app_store.list().await {
-        Ok(records) => records
-            .into_iter()
-            .filter(|r| r.enabled)
-            .map(|r| r.id)
-            .collect(),
-        Err(e) => {
-            tracing::warn!("fire_activation_event('{event}'): listing plugins failed: {e}");
-            return;
-        }
-    };
+    // The set of installed+enabled plugins; only these may activate. Each entry
+    // carries the record's GATEWAY-APPROVED grants, because the `onStartup`
+    // MCP-server re-register below is gated on them exactly as `activate_plugin`
+    // is — without the record in scope that boot path would be an ungated second
+    // door into the same process-spawning seam.
+    let enabled_ids: std::collections::HashMap<String, Vec<String>> =
+        match state.app_store.list().await {
+            Ok(records) => records
+                .into_iter()
+                .filter(|r| r.enabled)
+                .map(|r| (r.id, r.approved_grants))
+                .collect(),
+            Err(e) => {
+                tracing::warn!("fire_activation_event('{event}'): listing plugins failed: {e}");
+                return;
+            }
+        };
     if enabled_ids.is_empty() {
         return;
     }
@@ -9379,9 +9630,9 @@ pub async fn fire_activation_event(state: &ServerState, event: &str) {
     let registry = build_runnable_registry(state);
     let manifests = state.app_manifests.read().await.clone();
     for manifest in &manifests {
-        if !enabled_ids.contains(&manifest.id) {
+        let Some(approved_grants) = enabled_ids.get(&manifest.id) else {
             continue;
-        }
+        };
         let results = registry.register_active(manifest, &snapshot);
         for (rid, res) in results {
             if let Err(e) = res {
@@ -9400,8 +9651,17 @@ pub async fn fire_activation_event(state: &ServerState, event: &str) {
         // unrelated event firing (`onChat`/`onCommand:*`/`onRoute`/…) would wipe the
         // MCP tool cache and force stdio servers to re-spawn on the next list. The
         // enable-time registration lives in `activate_plugin`, not here.
+        //
+        // Same tier + approved-`mcp:server` gate as the enable path: the boot
+        // re-register spawns exactly the same declared commands, so it must not be
+        // the door that skips the check.
         if event == "onStartup" {
-            crate::sidecar::mcp::register_manifest_mcp_servers(&state.mcp, manifest);
+            crate::sidecar::mcp::register_manifest_mcp_servers(
+                &state.mcp,
+                manifest,
+                crate::plugins::builtins::tier_for(&manifest.id),
+                approved_grants,
+            );
         }
     }
 }
@@ -9484,6 +9744,7 @@ async fn plugin_contributions(
     let mut views = Vec::new();
     let mut sidebar_sections = Vec::new();
     let mut sidebar_buttons = Vec::new();
+    let mut dock_panels = Vec::new();
 
     // Surface filter (`targets`): a plugin that doesn't target the calling host
     // contributes nothing to it. Absent/unknown `x-ryu-surface` = no filter, and
@@ -9534,6 +9795,16 @@ async fn plugin_contributions(
             c.sidebar_buttons
                 .iter()
                 .filter_map(|b| serde_json::to_value(b).ok())
+                .map(tag),
+        );
+        // Workspace dock panels — the app-owned replacement for the desktop's closed
+        // `TabKind` union. Same tag-and-collect shape as the sibling families; the
+        // `panel` discriminant and `spec` stay opaque to Core, so a panel capability
+        // this build has never heard of still reaches a newer shell intact.
+        dock_panels.extend(
+            c.dock_panels
+                .iter()
+                .filter_map(|p| serde_json::to_value(p).ok())
                 .map(tag),
         );
         turn_hooks.extend(
@@ -9609,6 +9880,7 @@ async fn plugin_contributions(
         "views": views,
         "sidebar_sections": sidebar_sections,
         "sidebar_buttons": sidebar_buttons,
+        "dock_panels": dock_panels,
         "channels": channels,
         "companions": companions,
     }))
@@ -13016,13 +13288,24 @@ async fn resolve_context_window(
         Some(ref v) if matches!(v.as_str(), "true" | "1" | "on" | "yes")
     );
 
-    let compact_model = match state.preferences.get(CONTEXT_COMPACT_MODEL_PREF).await {
-        Ok(Some(v)) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => model.unwrap_or_else(|| crate::registry::DEFAULT_LLM_MODEL.to_string()),
-    };
-    let compact_effort = match state.preferences.get(CONTEXT_COMPACT_EFFORT_PREF).await {
-        Ok(Some(v)) => v.trim().to_string(),
-        _ => String::new(),
+    // `context.compact-model` → the node-wide default selection → this turn's own
+    // chat model (the historical fallback, kept so an unconfigured node summarizes
+    // with the same model it is talking to).
+    let compacted = crate::agent_selection::resolve_side_model(
+        &state.preferences,
+        CONTEXT_COMPACT_MODEL_PREF,
+        Some(CONTEXT_COMPACT_EFFORT_PREF),
+    )
+    .await;
+    let (compact_model, compact_effort) = match compacted {
+        Some(resolved) => (resolved.model, resolved.effort),
+        None => (
+            model.unwrap_or_else(|| crate::registry::DEFAULT_LLM_MODEL.to_string()),
+            match state.preferences.get(CONTEXT_COMPACT_EFFORT_PREF).await {
+                Ok(Some(v)) => v.trim().to_string(),
+                _ => String::new(),
+            },
+        ),
     };
 
     Some(
@@ -13221,8 +13504,21 @@ async fn btw_handler(
         },
     };
 
-    let model = resolve_btw_model(&state).await;
-    let effort = resolve_side_effort(&state, BTW_EFFORT_PREF, "RYU_BTW_EFFORT").await;
+    // `btw-model` → the node-wide default selection → the env/registry fallback
+    // `resolve_btw_model` has always applied.
+    let (model, effort) = match crate::agent_selection::resolve_side_model(
+        &state.preferences,
+        BTW_MODEL_PREF,
+        Some(BTW_EFFORT_PREF),
+    )
+    .await
+    {
+        Some(resolved) => (resolved.model, resolved.effort),
+        None => (
+            resolve_btw_model(&state).await,
+            resolve_side_effort(&state, BTW_EFFORT_PREF, "RYU_BTW_EFFORT").await,
+        ),
+    };
 
     let system = "You are answering a quick SIDE QUESTION about an ongoing conversation. \
         Answer ONLY from the conversation context provided — you have no tools and cannot run \
@@ -13271,10 +13567,11 @@ async fn btw_handler(
 const ADVISOR_MODEL_PREF: &str = "advisor-model";
 
 /// Resolve the advisor model, swappable and never hardcoded to a remote provider:
-/// explicit body arg → preference `advisor-model` → env `RYU_ADVISOR_MODEL` /
-/// `RYU_DEFAULT_LLM_MODEL` → the bundled local default. Mirrors the resolution the
-/// deleted `sidecar/mcp/advisor` provider did, so the tool's model selection is
-/// unchanged by the move to a declarative `http` tool.
+/// explicit body arg → preference `advisor-model` → the node-wide default
+/// selection → env `RYU_ADVISOR_MODEL` / `RYU_DEFAULT_LLM_MODEL` → the bundled
+/// local default. Mirrors the resolution the deleted `sidecar/mcp/advisor`
+/// provider did, so the tool's model selection is unchanged by the move to a
+/// declarative `http` tool.
 async fn resolve_advisor_model(state: &ServerState, explicit: Option<&str>) -> String {
     if let Some(m) = explicit {
         let t = m.trim();
@@ -13282,11 +13579,11 @@ async fn resolve_advisor_model(state: &ServerState, explicit: Option<&str>) -> S
             return t.to_string();
         }
     }
-    if let Ok(Some(pref)) = state.preferences.get(ADVISOR_MODEL_PREF).await {
-        let t = pref.trim();
-        if !t.is_empty() {
-            return t.to_string();
-        }
+    if let Some(resolved) =
+        crate::agent_selection::resolve_side_model(&state.preferences, ADVISOR_MODEL_PREF, None)
+            .await
+    {
+        return resolved.model;
     }
     for var in ["RYU_ADVISOR_MODEL", "RYU_DEFAULT_LLM_MODEL"] {
         if let Ok(val) = std::env::var(var) {
@@ -15441,6 +15738,7 @@ async fn list_mcp_tools(
     let lifecycle = state.app_store.list().await.unwrap_or_default();
     let app_manifests_guard = state.app_manifests.read().await;
     let (disabled_claimed, enabled_claimed) = app_tool_claim_sets(&app_manifests_guard, &lifecycle);
+    let hide_filters = app_tool_hide_filters(&app_manifests_guard, &lifecycle);
     drop(app_manifests_guard);
 
     let tools: Vec<_> = raw_tools
@@ -15450,6 +15748,14 @@ async fn list_mcp_tools(
             // If claimed by a disabled app AND NOT by any enabled app → exclude.
             // Standalone (unclaimed) tools are always visible.
             if disabled_claimed.contains(&t.name) && !enabled_claimed.contains(&t.name) {
+                return false;
+            }
+            // Declarative tool-hide (`contributes.tool_filters`): drop anything an
+            // enabled plugin asked to hide, so the model never sees it and cannot
+            // waste a round-trip discovering it is denied. Patterns are matched by
+            // the contract's own `matches` so the trailing-`*` rule has exactly one
+            // implementation.
+            if hide_filters.iter().any(|f| f.matches(&t.name)) {
                 return false;
             }
             true
@@ -24231,12 +24537,55 @@ mod connection_identity_tests {
 #[cfg(test)]
 mod plugin_catalog_tests {
     use super::{
-        manifest_policy_types, merge_plugin_catalog_entries, plugin_manifest_to_entry,
-        plugin_marketplace_item_to_entry, plugin_runtime_dir,
+        local_detail_trust_signals, local_plugin_detail, manifest_policy_types,
+        merge_plugin_catalog_entries, plugin_manifest_to_entry, plugin_marketplace_item_to_entry,
+        plugin_runtime_dir,
     };
     use crate::plugin_manifest::{schema::RunnableEntry, PluginManifest};
     use crate::runnable::RunnableKind;
     use serde_json::json;
+
+    /// `origin` / `reviewed` / `source` are TRUST SIGNALS the consent surface
+    /// renders beside the permission grants (and, since #1, beside the
+    /// `mcp_servers` commands a plugin is about to spawn). `local_plugin_detail`
+    /// answers from `PluginManifestLoader::load()`, which returns the compiled-in
+    /// fixtures AND whatever the user dropped into the writable `~/.ryu/plugins` —
+    /// so the signals must key on PROVENANCE. A disk manifest labelled
+    /// `first_party` + `reviewed` would let anything that can write a directory
+    /// dress itself as a vetted first-party app on the exact screen where the user
+    /// decides whether to approve its grants, and (because this path answers before
+    /// the remote catalog source) shadow the genuine listing while doing it.
+    ///
+    /// Both directions of the decision are pinned without touching the process-global
+    /// `RYU_PLUGINS_DIR` — mutating it here would race every other test that reads a
+    /// manifest. The compiled-in side is asserted end-to-end against the real
+    /// payload; the disk side is asserted on the exact predicate the branch keys on,
+    /// for ids a squatter can actually claim.
+    #[test]
+    fn local_detail_trust_signals_track_manifest_provenance() {
+        let detail = local_plugin_detail("ghost").expect("ghost is a compiled-in fixture");
+        assert_eq!(detail["origin"], json!("first_party"));
+        assert_eq!(detail["reviewed"], json!(true));
+        assert_eq!(detail["source"], json!("built-in"));
+
+        // A disk manifest can claim any id no fixture already holds. Those must NOT
+        // take the reviewed/first-party branch above.
+        for squatter in ["com.evil.plugin", "master", "gateway"] {
+            assert!(
+                !crate::plugins::builtins::is_compiled_in_manifest(squatter),
+                "'{squatter}' must stay claimable by a disk manifest for this to mean anything"
+            );
+        }
+        assert_eq!(
+            local_detail_trust_signals(false),
+            ("installed", "community", false),
+            "a disk manifest must never be labelled reviewed/first-party"
+        );
+        assert_eq!(
+            local_detail_trust_signals(true),
+            ("built-in", "first_party", true)
+        );
+    }
 
     /// #449: the per-plugin external-runtime dir is namespaced under the plugin
     /// id and ends in `runtime`, and the OS-correct venv interpreter derives
@@ -24452,7 +24801,7 @@ mod plugin_catalog_tests {
 
 #[cfg(test)]
 mod app_tool_filter_tests {
-    use super::app_tool_claim_sets;
+    use super::{app_tool_claim_sets, app_tool_hide_filters};
     use crate::plugin_manifest::{schema::RunnableEntry, PluginManifest};
     use crate::plugins::PluginRecord;
     use crate::runnable::RunnableKind;
@@ -24483,6 +24832,80 @@ mod app_tool_filter_tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    // ── Declarative tool-hide (`contributes.tool_filters`) ───────────────────
+
+    fn make_hider(id: &str, patterns: &[&str]) -> PluginManifest {
+        let mut m = make_manifest(id, &[]);
+        m.contributes = Some(ryu_kernel_contracts::manifest::Contributes {
+            tool_filters: patterns
+                .iter()
+                .map(
+                    |p| ryu_kernel_contracts::manifest::ToolFilterContribution {
+                        tool: (*p).to_owned(),
+                        reason: None,
+                    },
+                )
+                .collect(),
+            ..Default::default()
+        });
+        m
+    }
+
+    /// The whole point of the primitive: an enabled plugin's declared pattern
+    /// removes the tool from the list offered to the model, so the model never
+    /// spends a round-trip discovering it is unavailable.
+    #[test]
+    fn enabled_plugin_hide_pattern_matches_exactly() {
+        let manifests = vec![make_hider("com.test.hider", &["shell__exec"])];
+        let lifecycle = vec![make_record("com.test.hider", true)];
+
+        let filters = app_tool_hide_filters(&manifests, &lifecycle);
+        assert_eq!(filters.len(), 1);
+        assert!(filters[0].matches("shell__exec"));
+        assert!(
+            !filters[0].matches("shell__exec_many"),
+            "an exact pattern must not behave like a prefix"
+        );
+    }
+
+    /// A trailing `*` hides a whole server namespace.
+    #[test]
+    fn trailing_wildcard_hides_the_namespace() {
+        let manifests = vec![make_hider("com.test.hider", &["shell__*"])];
+        let lifecycle = vec![make_record("com.test.hider", true)];
+
+        let filters = app_tool_hide_filters(&manifests, &lifecycle);
+        assert!(filters[0].matches("shell__exec"));
+        assert!(filters[0].matches("shell__write"));
+        assert!(
+            !filters[0].matches("browser__navigate"),
+            "the wildcard must stay scoped to its server namespace"
+        );
+    }
+
+    /// A DISABLED plugin must stop hiding. Otherwise disabling a plugin would
+    /// leave its policy silently in force — the user disabled it to stop it acting.
+    #[test]
+    fn disabled_plugin_contributes_no_hide_filters() {
+        let manifests = vec![make_hider("com.test.hider", &["shell__exec"])];
+        let lifecycle = vec![make_record("com.test.hider", false)];
+
+        assert!(
+            app_tool_hide_filters(&manifests, &lifecycle).is_empty(),
+            "a disabled plugin must not keep hiding tools"
+        );
+    }
+
+    /// A plugin with no `contributes` at all (the overwhelmingly common case) must
+    /// not panic or contribute anything.
+    #[test]
+    fn plugin_without_contributes_hides_nothing() {
+        let manifests = vec![make_manifest("com.test.plain", &["mcp:web_search"])];
+        let lifecycle = vec![make_record("com.test.plain", true)];
+
+        assert!(app_tool_hide_filters(&manifests, &lifecycle).is_empty());
     }
 
     /// A tool claimed by a disabled app (not claimed by any enabled app) is

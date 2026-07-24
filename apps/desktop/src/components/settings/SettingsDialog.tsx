@@ -1,13 +1,13 @@
 import { AuthorizedAppsTab, ReferralsTab } from "@ryu/settings";
-import { Dialog, DialogContent } from "@ryu/ui/components/dialog";
+import { Dialog, DialogContent } from "@ryu/ui/components/dialog.tsx";
 import {
 	SidebarGroup,
 	SidebarGroupLabel,
 	SidebarMenu,
 	SidebarMenuButton,
 	SidebarMenuItem,
-} from "@ryu/ui/components/sidebar";
-import { toast } from "@ryu/ui/components/sileo";
+} from "@ryu/ui/components/sidebar.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import { useEffect, useMemo, useState } from "react";
@@ -29,6 +29,7 @@ import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import type { SettingsSectionValue } from "@/src/store/useSettingsDialog.ts";
 import { AccountTab } from "./AccountTab.tsx";
 import { AppearanceTab } from "./AppearanceTab.tsx";
+import { AppUpdatesSettings } from "./AppUpdatesSettings.tsx";
 import { AudioDevicesSettings } from "./AudioDevicesSettings.tsx";
 import { BillingTab } from "./BillingTab.tsx";
 import { EntitySettings } from "./EntitySettings.tsx";
@@ -63,16 +64,34 @@ interface NavGroup {
 }
 
 // Desktop-client + user-account sections only. Everything node/gateway-level
-// (meetings, memory, privacy, storage, updates, email/alerts, connections, health,
+// (meetings, memory, privacy, storage, email/alerts, connections, health,
 // predictive typing, tasks, the Danger Zone, and node-scoped app/plugin settings)
 // now lives in the Gateway dialog — those affect the whole node, not this per-user
 // desktop client, and belong next to the other node settings.
+//
+// Updates is the one tab that exists in both dialogs, and deliberately so: the
+// Gateway one updates the node's Core/Gateway binaries, the one here updates this
+// desktop client. They are separate installs that can sit at different versions.
+//
+// KNOWN HYBRID — `island`, `shadow` and `voice` are the three entries below that
+// are NOT the shell's own settings: each belongs to a sidecar app and should
+// arrive through `contributes.settings_tabs` under the dynamic Apps/Plugins
+// headers (as memory/meetings/quests/predict already do), so the tab appears only
+// while its app is enabled instead of always. The manifest vocabulary can express
+// them — a `{"view": …}` tab covers a rich, non-declarative settings UI — so the
+// gap is not the schema; it is that each needs a binding in `EntitySettings`'
+// `SETTINGS_VIEWS` (and Voice needs a wrapper around its five sub-panels, Island
+// needs a manifest at all, since it is a desktop-owned Electron sidecar with no
+// plugin record). Migrating half of that — declaring the tab without the binding —
+// renders an EMPTY settings tab, which is strictly worse than this switch. Do it
+// as one change or not at all.
 const NAV_GROUPS: NavGroup[] = [
 	{
 		items: [
 			{ value: "general", label: "General" },
 			{ value: "appearance", label: "Appearance" },
 			{ value: "keyboard", label: "Keyboard shortcuts" },
+			{ value: "updates", label: "Updates" },
 			{ value: "island", label: "Island" },
 			{ value: "shadow", label: "Shadow" },
 			{ value: "voice", label: "Voice" },
@@ -112,6 +131,8 @@ function SectionContent({ value }: { value: SectionValue }) {
 			return <AppearanceTab />;
 		case "keyboard":
 			return <KeyboardShortcutsTab />;
+		case "updates":
+			return <AppUpdatesSettings />;
 		case "island":
 			return <IslandSettings />;
 		case "shadow":
@@ -224,10 +245,14 @@ export function SettingsDialog({
 	return (
 		<QueryClientProvider client={queryClient}>
 			<Dialog onOpenChange={onOpenChange} open={open}>
-				<DialogContent className="!w-[85vw] !max-w-7xl [&>[data-slot=dialog-close]]:!top-5 [&>[data-slot=dialog-close]]:!right-5 h-[85vh] gap-0 overflow-hidden p-0">
+				{/* 85% of the viewport reads as a dialog on a desktop and as a cramped
+				    box with no room for both panes on a phone, so below `md` — the same
+				    768px line `useIsMobile` stacks the panes at — it goes
+				    edge-to-edge, full dynamic viewport height. */}
+				<DialogContent className="!w-[85vw] !max-w-7xl max-md:!w-screen max-md:!max-w-none [&>[data-slot=dialog-close]]:!top-5 [&>[data-slot=dialog-close]]:!right-5 h-[85vh] gap-0 overflow-hidden p-0 max-md:h-[100dvh] max-md:rounded-none">
 					<ResizableSettingsLayout
 						content={
-							<div className="px-8 py-6">
+							<div className="px-4 py-4 md:px-8 md:py-6">
 								<h2 className="mb-6 font-semibold text-base">{activeLabel}</h2>
 								{activeEntity ? (
 									<EntitySettings entity={activeEntity} target={target} />

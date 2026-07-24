@@ -38,7 +38,7 @@ export default function LandingTestimonials() {
 					</div>
 
 					<div className="mt-10">
-						<AppleHelloEffect className="h-16 text-foreground" />
+						<AppleHelloEffect className="h-16 text-foreground" text="jiawei" />
 					</div>
 
 					<div className="mt-12 flex items-center gap-4">

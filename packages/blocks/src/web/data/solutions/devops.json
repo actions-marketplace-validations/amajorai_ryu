@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "Terminal-native",
-      "description": "Drive agents from the CLI and a global command bar, so you stay in the shell instead of switching to a chat window."
+      "description": "Drive agents from the CLI and a global command bar, so you stay in the shell instead of switching to a chat window.",
+      "icon": "Bot"
     },
     {
       "title": "Infra changes as diffs",
-      "description": "Edits to Terraform, manifests, and CI config land on a git branch, so you review the plan before anything applies."
+      "description": "Edits to Terraform, manifests, and CI config land on a git branch, so you review the plan before anything applies.",
+      "icon": "Plug"
     },
     {
       "title": "Governed automation",
-      "description": "The Gateway logs every tool call and enforces budgets and policy, so an agent's actions stay bounded and auditable."
+      "description": "The Gateway logs every tool call and enforces budgets and policy, so an agent's actions stay bounded and auditable.",
+      "icon": "Eye"
     },
     {
       "title": "Wired to your tools",
-      "description": "Connect GitHub, your cloud, observability, and chat through MCP, so an agent can read logs and act in one loop."
+      "description": "Connect GitHub, your cloud, observability, and chat through MCP, so an agent can read logs and act in one loop.",
+      "icon": "Plug"
     }
   ],
   "useCases": [

@@ -25,7 +25,10 @@
 //!   dedicated recording subprocess held across start..stop. Those are Core kernel
 //!   machinery, inverted through the [`RecipesHost`] trait. The sidecar owns
 //!   NEITHER, so it installs [`CoreCallback`] — every host method POSTs back to
-//!   Core's `/api/host/recipes/*` endpoints (ext-bearer authed), where the live
+//!   Core's generic capability seam, `POST /api/host/capability/ghost.{replay,
+//!   recordStart,recordStatus,recordStop}` (ext-bearer authed, gated on the
+//!   `ghost:record` grant this manifest declares in `sidecars[].host_api.grants`),
+//!   where the live
 //!   [`ryu_recipes::RecipesHost`] impl runs against the real ghost engine. The
 //!   recording session is held in Core's process-global slot, so start..status..stop
 //!   spanning separate sidecar HTTP calls all reach the SAME session — the whole
@@ -93,7 +96,8 @@ const DEFAULT_CORE_PORT: u16 = 7980;
 /// implementation. Replay (`run`) and the recording session (`record/*`) need the
 /// live ghost engine: the shared MCP registry and a dedicated recording subprocess
 /// held across start..stop. Both are Core kernel machinery the sidecar does not
-/// own, so every method POSTs back to Core's `/api/host/recipes/*` endpoints, where
+/// own, so every method POSTs back to Core's kernel capabilities
+/// (`/api/host/capability/ghost.*`, gated on the declared `ghost:record` grant), where
 /// the real [`RecipesHost`] impl runs against the live engine. The recording
 /// session is held in Core's process-global slot, so start..status..stop across
 /// separate sidecar calls all reach the SAME session. The stateless CRUD surface
@@ -166,7 +170,7 @@ impl RecipesHost for CoreCallback {
         // wrapper unwraps it with `extract_mcp_json` (do NOT unwrap here — that is
         // the crate's job, identical to the in-process path).
         self.post(
-            "/api/host/recipes/run",
+            "/api/host/capability/ghost.replay",
             json!({ "recipe": recipe, "params": params }),
         )
         .await
@@ -174,7 +178,7 @@ impl RecipesHost for CoreCallback {
 
     async fn recorder_start(&self, task: &str) -> Result<RecorderStarted> {
         let raw = self
-            .post("/api/host/recipes/record-start", json!({ "task": task }))
+            .post("/api/host/capability/ghost.recordStart", json!({ "task": task }))
             .await?;
         serde_json::from_value(raw)
             .map_err(|e| anyhow::anyhow!("malformed RecorderStarted from Core: {e}"))
@@ -182,7 +186,7 @@ impl RecipesHost for CoreCallback {
 
     async fn recorder_status(&self) -> Result<Option<RecorderStatus>> {
         let raw = self
-            .post("/api/host/recipes/record-status", json!({}))
+            .post("/api/host/capability/ghost.recordStatus", json!({}))
             .await?;
         serde_json::from_value(raw)
             .map_err(|e| anyhow::anyhow!("malformed RecorderStatus from Core: {e}"))
@@ -190,7 +194,7 @@ impl RecipesHost for CoreCallback {
 
     async fn recorder_stop(&self) -> Result<RecorderStopped> {
         let raw = self
-            .post("/api/host/recipes/record-stop", json!({}))
+            .post("/api/host/capability/ghost.recordStop", json!({}))
             .await?;
         serde_json::from_value(raw)
             .map_err(|e| anyhow::anyhow!("malformed RecorderStopped from Core: {e}"))
@@ -211,7 +215,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(DEFAULT_PORT);
 
     // Install the Core-callback host once at boot so the replay/record routes proxy
-    // back to Core's `/api/host/recipes/*` (where the live ghost engine runs)
+    // back to Core's `/api/host/capability/ghost.*` kernel capabilities (where the
+    // live ghost engine runs)
     // instead of the crate's default "recipes host not initialized". Idempotent.
     set_global_host(Arc::new(CoreCallback::new()));
 
@@ -475,7 +480,7 @@ mod tests {
         // Security: the ext bearer + plugin-id headers are stamped on the hop.
         assert_eq!(c.auth.as_deref(), Some("Bearer testtok"));
         assert_eq!(c.plugin_id.as_deref(), Some(RECIPES_PLUGIN_ID));
-        assert_eq!(c.path, "/api/host/recipes/run");
+        assert_eq!(c.path, "/api/host/capability/ghost.replay");
         assert_eq!(c.body["recipe"], json!("myrecipe"));
         assert_eq!(c.body["params"], json!({ "n": 2 }));
 
@@ -497,7 +502,7 @@ mod tests {
         assert_eq!(started.info, json!({ "pid": 7 }));
 
         let c = captured.lock().unwrap().clone().unwrap();
-        assert_eq!(c.path, "/api/host/recipes/record-start");
+        assert_eq!(c.path, "/api/host/capability/ghost.recordStart");
         assert_eq!(c.body["task"], json!("demo"));
 
         std::env::remove_var("RYU_CORE_PORT");
@@ -575,7 +580,7 @@ mod tests {
         std::env::remove_var("RYU_CORE_PORT");
         let cb = CoreCallback::new();
         // No token configured → the callback refuses to send.
-        let err = cb.post("/api/host/recipes/run", json!({})).await.unwrap_err().to_string();
+        let err = cb.post("/api/host/capability/ghost.replay", json!({})).await.unwrap_err().to_string();
         assert!(err.contains("no RYU_EXT_TOKEN"), "unexpected: {err}");
     }
 

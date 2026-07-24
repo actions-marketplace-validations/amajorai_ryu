@@ -529,7 +529,7 @@ fn truncate_description(value: &str) -> String {
 
 /// http(s)-only allowlist, so a `javascript:` / `data:` homepage from an untrusted
 /// repo can never reach an href. Mirrors `sources::http_url`.
-fn sanitize_url(value: &str) -> Option<String> {
+pub(crate) fn sanitize_url(value: &str) -> Option<String> {
     let trimmed = value.trim();
     let lower = trimmed.to_ascii_lowercase();
     (lower.starts_with("https://") || lower.starts_with("http://")).then(|| trimmed.to_string())
@@ -752,10 +752,33 @@ impl CatalogSource for GithubTopicSource {
             },
         });
 
+        // Repository enrichment (README, releases, timestamps, download counts) —
+        // best-effort and cached, so a rate-limited GitHub costs a few tabs, not
+        // the page. Merged BEFORE the manifest so a manifest-declared value (the
+        // publisher's own claim) still wins where the two overlap.
+        if let Some(obj) = detail.as_object_mut() {
+            let enrichment = super::github_enrich::enrich_repo(
+                &record.id,
+                &self.resolve_api_base(),
+                &self.request_headers(),
+                &record.owner,
+                &record.repo,
+            )
+            .await;
+            if let Some(fields) = enrichment.as_object() {
+                for (k, v) in fields {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
         match self.fetch_repo_manifest(record).await {
             Some((manifest, url)) => {
                 if let Some(obj) = detail.as_object_mut() {
                     for (k, v) in manifest_display_fields(&manifest) {
+                        obj.insert(k, v);
+                    }
+                    for (k, v) in super::manifest_surface::project_manifest(&manifest) {
                         obj.insert(k, v);
                     }
                     obj.insert("manifestUrl".to_string(), Value::String(url));

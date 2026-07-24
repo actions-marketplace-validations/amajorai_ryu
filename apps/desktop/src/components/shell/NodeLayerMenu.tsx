@@ -1,0 +1,465 @@
+// apps/desktop/src/components/shell/NodeLayerMenu.tsx
+//
+// The presentational shell for one swappable "layer" of a node in the node
+// selector dropdown: services (Core / Gateway / Shadow / Island), the resident
+// chat engine, the run-alongside engines (speech / image / embeddings), the
+// text-to-speech and speech-to-text engines, and the sandbox backend.
+//
+// Every layer renders as the same submenu so the dropdown reads as one system:
+//
+//   ┌ trigger ─────────────────────────────┐
+//   │ ● Chat engine        llama.cpp b9670 │──▸ ┌ submenu ──────────────┐
+//   └──────────────────────────────────────┘    │ llama.cpp     b9670   │ header
+//                                               │ Running · 2.1 GB      │
+//                                               ├───────────────────────┤
+//                                               │ ▶ Start / ■ Stop      │ actions
+//                                               │ ⤓ Update              │
+//                                               ├───────────────────────┤
+//                                               │ INSTALLED             │
+//                                               │ ✓ llama.cpp           │ swap
+//                                               │   Ollama              │
+//                                               ├───────────────────────┤
+//                                               │ NOT INSTALLED         │
+//                                               │ ⤓ vLLM                │ install
+//                                               └───────────────────────┘
+//
+// This component is deliberately dumb — it owns layout, pending labels and the
+// "don't close the menu while mutating" behaviour, nothing else. Each call site
+// decides the SEMANTICS of its layer and passes only the slots that apply:
+//
+//   - services      → header + actions (start/stop, and update for Core/Gateway)
+//   - chat engine   → header + installed (swap) + available (install); NO
+//                     start/stop, because the chat slot is swap-managed, not a
+//                     sidecar toggle (see ENGINE_GROUPS in NodeSelector)
+//   - run-alongside → header + actions (start/stop) + uninstall; these engines
+//                     are NOT mutually exclusive, so they get no swap list
+//   - tts/stt       → header + installed (swap) + available (install)
+//   - sandbox       → header + installed (swap); backends are node capabilities,
+//                     not installables
+//
+// No layer fabricates an "Update" it cannot honour: engine downloads are pinned
+// to a compile-time target and move with the app, so only the services pass
+// `onUpdate`.
+
+import {
+	Delete02Icon,
+	Download04Icon,
+	PlayIcon,
+	StopIcon,
+	Tick02Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
+import {
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
+} from "@ryu/ui/components/dropdown-menu";
+import { type ReactNode, useState } from "react";
+import { cn } from "@/lib/utils.ts";
+import { AutoScrollText } from "./AutoScrollText.tsx";
+
+/**
+ * Run state of a layer:
+ *   `true`/`false` — up / down (green / red dot);
+ *   `null`         — probed but unknown, or not relevant yet (neutral dot);
+ *   omitted        — the layer HAS no run state (a pure preference, like the
+ *                    nested voice picker), so no dot is drawn at all. A grey dot
+ *                    on something that cannot run reads as "broken".
+ */
+export type LayerRunState = boolean | null;
+
+/** A top-of-submenu verb: Start / Stop / Update / Restart / Launch. */
+export interface LayerAction {
+	/** Rendered while `run()` is in flight ("Starting…"). Falls back to `label`. */
+	busyLabel?: string;
+	icon?: IconSvgElement;
+	/** Stable key for the pending state — also the React key. */
+	id: string;
+	label: string;
+	run: () => Promise<void> | void;
+	/** Warning tone for Update, destructive for anything that tears state down. */
+	tone?: "default" | "warning" | "destructive";
+}
+
+/** One swappable / installable option inside a layer's submenu. */
+export interface LayerOption {
+	/** Ticked: the current selection in a `swap` layer, running in a `toggle` one. */
+	active?: boolean;
+	/** Shown while `select()` is in flight; defaults to the layer's mode wording. */
+	busyLabel?: string;
+	/** Right-aligned caption — version, "running", a size, whatever fits. */
+	detail?: string | null;
+	disabled?: boolean;
+	/** Why it is disabled (e.g. "not supported on macOS") — shown as the detail. */
+	disabledReason?: string | null;
+	label: string;
+	/** Stable key: the catalog/engine/backend name. */
+	name: string;
+	/** Picking this option (swap to it, or install it when `available`). */
+	select: () => Promise<void> | void;
+	/** Optional uninstall for an installed option; omitted → no uninstall. */
+	uninstall?: () => Promise<void> | void;
+}
+
+/**
+ * How the installed list behaves — this is the ONE place a layer declares its
+ * backend semantics, and it must match Core:
+ *
+ *   `swap`   — mutually exclusive. Exactly one option is active; picking another
+ *              moves the layer onto it (chat engine, sandbox backend, TTS, STT).
+ *   `toggle` — independent. Every option runs (or not) on its own; the tick means
+ *              "running", and picking one starts/stops just that engine. The
+ *              run-alongside engines (speech / image / embeddings) are this — they
+ *              have no "current selection" to swap between.
+ */
+export type LayerSelectionMode = "swap" | "toggle";
+
+export interface NodeLayerMenuProps {
+	actions?: LayerAction[];
+	/** Options the node does NOT have yet — picking one installs it. */
+	available?: LayerOption[];
+	/** Sub-caption under the submenu header: "Running · 2.1 GB", "Stopped". */
+	caption?: string | null;
+	/** Extra rows appended to the submenu (e.g. a nested voice picker). */
+	children?: ReactNode;
+	/** What the trigger row shows on the right: the current selection's name. */
+	currentLabel: string;
+	icon?: IconSvgElement;
+	/** Options already on the node — picking one swaps the layer onto it. */
+	installed?: LayerOption[];
+	/** The layer's name, shown on the trigger row: "Chat engine", "Core". */
+	label: string;
+	running?: LayerRunState;
+	/** Semantics of `installed` — see {@link LayerSelectionMode}. Default `swap`. */
+	selectionMode?: LayerSelectionMode;
+	/** Trigger-row right-hand caption. Defaults to `currentLabel` when it differs
+	 *  from `label` (a singleton layer like "Core" names itself, so it passes a
+	 *  live detail — "2.1 GB · 4%" — instead of repeating its own name). */
+	trailing?: string | null;
+	/** Version of the CURRENT selection, badged on the trigger + header. */
+	version?: string | null;
+}
+
+const DOT_CLASS: Record<"on" | "off" | "unknown", string> = {
+	on: "bg-success",
+	off: "bg-destructive",
+	unknown: "bg-muted-foreground/30",
+};
+
+function dotState(running: LayerRunState): "on" | "off" | "unknown" {
+	if (running === null || running === undefined) {
+		return "unknown";
+	}
+	return running ? "on" : "off";
+}
+
+/** Version badge text. Build stamps that already carry their own letter prefix
+ *  (llama.cpp's `b9670`) must not be re-prefixed into "vb9670" — only a bare
+ *  numeric version gets the `v`. */
+function versionLabel(version: string): string {
+	return /^\d/.test(version) ? `v${version}` : version;
+}
+
+const ACTION_TONE: Record<NonNullable<LayerAction["tone"]>, string> = {
+	default: "text-foreground",
+	warning: "text-warning dark:text-warning",
+	destructive: "text-destructive",
+};
+
+/** Shared "start" / "stop" actions, so every toggleable layer words it the same. */
+export function startStopAction(
+	running: LayerRunState,
+	toggle: (next: boolean) => Promise<void> | void
+): LayerAction {
+	const isRunning = running === true;
+	return {
+		id: isRunning ? "stop" : "start",
+		label: isRunning ? "Stop" : "Start",
+		busyLabel: isRunning ? "Stopping…" : "Starting…",
+		icon: isRunning ? StopIcon : PlayIcon,
+		tone: isRunning ? "destructive" : "default",
+		run: () => toggle(!isRunning),
+	};
+}
+
+/** Default in-flight wording per list, when the option doesn't override it. */
+function busyWording(
+	kind: "installed" | "available",
+	mode: LayerSelectionMode,
+	active: boolean
+): string {
+	if (kind === "available") {
+		return "Installing…";
+	}
+	if (mode === "toggle") {
+		return active ? "Stopping…" : "Starting…";
+	}
+	return "Switching…";
+}
+
+function OptionRow({
+	option,
+	kind,
+	mode,
+	pending,
+	onRun,
+}: {
+	kind: "installed" | "available";
+	mode: LayerSelectionMode;
+	onRun: (key: string, task: () => Promise<void> | void) => void;
+	option: LayerOption;
+	pending: string | null;
+}) {
+	const selectKey = `${kind}:${option.name}`;
+	const uninstallKey = `uninstall:${option.name}`;
+	const busy = pending === selectKey;
+	const uninstalling = pending === uninstallKey;
+	const detail = option.disabled
+		? (option.disabledReason ?? option.detail)
+		: option.detail;
+	const active = option.active ?? false;
+
+	return (
+		<DropdownMenuItem
+			className="gap-2 py-1 text-xs"
+			closeOnClick={false}
+			disabled={option.disabled || pending !== null}
+			onClick={() => onRun(selectKey, option.select)}
+		>
+			{kind === "installed" ? (
+				<span className="flex size-3 shrink-0 items-center justify-center">
+					{active ? (
+						<HugeiconsIcon
+							className="size-3 text-primary"
+							icon={Tick02Icon}
+							strokeWidth={2.5}
+						/>
+					) : (
+						// A toggle layer has no single "current" row, so an idle engine
+						// keeps an explicit off-dot rather than an empty gutter.
+						mode === "toggle" && (
+							<span
+								aria-hidden
+								className="size-1.5 rounded-full bg-muted-foreground/30"
+							/>
+						)
+					)}
+				</span>
+			) : (
+				<HugeiconsIcon
+					className="size-3 shrink-0 text-muted-foreground/60"
+					icon={Download04Icon}
+				/>
+			)}
+			<AutoScrollText
+				className={cn("min-w-0 flex-1", active && "font-medium")}
+				title={option.label}
+			>
+				{option.label}
+			</AutoScrollText>
+			{busy ? (
+				<span className="shrink-0 text-[10px] text-muted-foreground/60">
+					{option.busyLabel ?? busyWording(kind, mode, active)}
+				</span>
+			) : (
+				detail && (
+					<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
+						{detail}
+					</span>
+				)
+			)}
+			{option.uninstall && !option.disabled && (
+				<button
+					aria-label={`Uninstall ${option.label}`}
+					className="shrink-0 rounded-md p-0.5 text-muted-foreground/50 hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+					disabled={pending !== null}
+					onClick={(e) => {
+						// Uninstall is a row-local action: never let it bubble into the
+						// row's own "select this option" handler.
+						e.preventDefault();
+						e.stopPropagation();
+						const task = option.uninstall;
+						if (task) {
+							onRun(uninstallKey, task);
+						}
+					}}
+					title={uninstalling ? "Uninstalling…" : "Uninstall"}
+					type="button"
+				>
+					<HugeiconsIcon className="size-3" icon={Delete02Icon} />
+				</button>
+			)}
+		</DropdownMenuItem>
+	);
+}
+
+function SectionLabel({ children }: { children: ReactNode }) {
+	return (
+		<p className="px-2 pt-1 pb-0.5 font-medium text-[9px] text-muted-foreground/40 uppercase tracking-wider">
+			{children}
+		</p>
+	);
+}
+
+export function NodeLayerMenu({
+	actions = [],
+	available = [],
+	caption,
+	children,
+	currentLabel,
+	icon,
+	installed = [],
+	label,
+	running,
+	selectionMode = "swap",
+	trailing,
+	version,
+}: NodeLayerMenuProps) {
+	// One pending key for the whole submenu: mutations on the same layer are
+	// mutually exclusive (you cannot start an engine while swapping off it), so a
+	// single in-flight slot keeps the menu honest instead of racing itself.
+	const [pending, setPending] = useState<string | null>(null);
+
+	const run = (key: string, task: () => Promise<void> | void) => {
+		if (pending !== null) {
+			return;
+		}
+		setPending(key);
+		Promise.resolve(task())
+			.catch(() => {
+				// Every call site surfaces its own failure (toast / status re-poll);
+				// the menu only owns clearing the spinner.
+			})
+			.finally(() => setPending(null));
+	};
+
+	const hasBody =
+		actions.length > 0 ||
+		installed.length > 0 ||
+		available.length > 0 ||
+		children != null;
+
+	// A singleton layer names itself on both slots ("Core" / "Core"), so it shows
+	// its live detail on the trigger instead of echoing its own label.
+	const triggerRight =
+		trailing ?? (currentLabel === label ? null : currentLabel);
+
+	return (
+		<DropdownMenuSub>
+			<DropdownMenuSubTrigger className="gap-2 py-1 font-normal text-xs">
+				{running !== undefined && (
+					<span
+						aria-hidden
+						className={cn(
+							"size-1.5 shrink-0 rounded-full",
+							DOT_CLASS[dotState(running)]
+						)}
+					/>
+				)}
+				{icon && (
+					<HugeiconsIcon
+						className="size-3 shrink-0 text-muted-foreground/60"
+						icon={icon}
+					/>
+				)}
+				<span className="shrink-0 text-muted-foreground">{label}</span>
+				{triggerRight ? (
+					<AutoScrollText
+						className="min-w-0 flex-1 text-right text-muted-foreground/70"
+						title={triggerRight}
+					>
+						{triggerRight}
+					</AutoScrollText>
+				) : (
+					<span className="flex-1" />
+				)}
+				{version && (
+					<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
+						{versionLabel(version)}
+					</span>
+				)}
+			</DropdownMenuSubTrigger>
+			<DropdownMenuSubContent className="w-64 min-w-64">
+				{/* Header: WHAT is selected right now, and how it is doing. */}
+				<div className="px-2 pt-1.5 pb-1">
+					<div className="flex items-baseline gap-2">
+						<AutoScrollText
+							className="min-w-0 flex-1 font-medium text-xs"
+							title={currentLabel}
+						>
+							{currentLabel}
+						</AutoScrollText>
+						{version && (
+							<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
+								{versionLabel(version)}
+							</span>
+						)}
+					</div>
+					<p className="truncate text-[10px] text-muted-foreground/60">
+						{caption ?? label}
+					</p>
+				</div>
+				{hasBody && <DropdownMenuSeparator />}
+				{actions.map((action) => {
+					const busy = pending === `action:${action.id}`;
+					return (
+						<DropdownMenuItem
+							className={cn(
+								"gap-2 py-1 text-xs",
+								ACTION_TONE[action.tone ?? "default"]
+							)}
+							closeOnClick={false}
+							disabled={pending !== null}
+							key={action.id}
+							onClick={() => run(`action:${action.id}`, action.run)}
+						>
+							{action.icon && (
+								<HugeiconsIcon className="size-3 shrink-0" icon={action.icon} />
+							)}
+							<span className="flex-1">
+								{busy ? (action.busyLabel ?? action.label) : action.label}
+							</span>
+						</DropdownMenuItem>
+					);
+				})}
+				{installed.length > 0 && (
+					<>
+						{actions.length > 0 && <DropdownMenuSeparator />}
+						<SectionLabel>
+							{selectionMode === "toggle" ? "Installed · running" : "Installed"}
+						</SectionLabel>
+						{installed.map((option) => (
+							<OptionRow
+								key={option.name}
+								kind="installed"
+								mode={selectionMode}
+								onRun={run}
+								option={option}
+								pending={pending}
+							/>
+						))}
+					</>
+				)}
+				{available.length > 0 && (
+					<>
+						<DropdownMenuSeparator />
+						<SectionLabel>Not installed</SectionLabel>
+						{available.map((option) => (
+							<OptionRow
+								key={option.name}
+								kind="available"
+								mode={selectionMode}
+								onRun={run}
+								option={option}
+								pending={pending}
+							/>
+						))}
+					</>
+				)}
+				{children}
+			</DropdownMenuSubContent>
+		</DropdownMenuSub>
+	);
+}

@@ -9,6 +9,13 @@
 //!   - TTS: per-sentence synthesis (RyuTTS `/generate`, resident + warm; OuteTTS
 //!     otherwise) streamed back sentence-by-sentence.
 //!
+//! A voice turn is a REAL user turn, so it also runs the plugin turn-boundary
+//! hooks the typed chat path runs: `pre_user_turn` before the model (rewrite,
+//! inject context, or answer the turn outright) and `post_assistant_turn` as a
+//! detached observer once the reply has drained cleanly. See
+//! `sidecar::adapters`'s off-HTTP turn-hook section for why the directives a
+//! realtime spoken surface cannot honour are dropped rather than half-applied.
+//!
 //! ## Loop
 //!
 //! The client streams mic PCM continuously. [`on_audio`] resamples it to 16 kHz,
@@ -32,7 +39,7 @@ use crate::agents::AgentStore;
 use crate::server::conversations::ConversationStore;
 use crate::server::memory::MemoryStore;
 use crate::sidecar::adapters::{
-    stream_text_reply, AcpAgentRegistry, ChatStreamRequest, UiContent, UiMessage,
+    stream_text_reply, AcpAgentRegistry, ChatStreamRequest, PreUserTurn, UiContent, UiMessage,
 };
 use crate::sidecar::mcp::McpRegistry;
 use crate::sidecar::SidecarManager;
@@ -279,25 +286,64 @@ pub async fn run_voice_turn(
         }))
         .await;
 
-    // 2) Kick off the streaming model turn and consume its per-token deltas.
-    let response = crate::sidecar::adapters::route_chat_stream(
-        build_chat_request(&cfg, prompt),
-        Arc::clone(&deps.registry),
-        deps.conversations.clone(),
-        deps.agent_store.clone(),
-        Arc::clone(&deps.manager),
-        deps.memory.clone(),
-        Arc::clone(&deps.worktree_diffs),
-        Arc::clone(&deps.mcp),
-        deps.skills.clone(),
-        deps.traces.clone(),
-        None,
-        None,
+    // 2) Plugin `pre_user_turn` hooks. A voice turn is a real user turn — someone
+    //    spoke a prompt — so it gets the same pre-model treatment the typed chat
+    //    path gets: a plugin may rewrite it, fold context into it, or answer it
+    //    outright. Fired AFTER the transcript echo above on purpose: that echo is a
+    //    caption of what the user actually said, and showing them a plugin's
+    //    rewrite of their own words back as their speech would be a lie.
+    let spoken = prompt.clone();
+    let pre = crate::sidecar::adapters::run_pre_user_turn_hooks(
+        prompt,
+        Some(&cfg.conversation_id),
+        cfg.agent_id.as_deref(),
     )
     .await;
 
+    // 3) Kick off the reply and consume it as per-token deltas. A hook-`Handled`
+    //    turn makes NO model call, and feeds its text through the SAME delta
+    //    channel, so captions, sentence segmentation, TTS and barge-in behave
+    //    identically — a plugin that owns a spoken command is indistinguishable
+    //    from the model answering it. It also persists both rows itself, because
+    //    `route_chat_stream` (the only site that writes the user row) is skipped.
     let (delta_tx, mut delta_rx) = mpsc::channel::<String>(64);
-    let streamer = tokio::spawn(stream_text_reply(response, delta_tx));
+    let streamer = match pre {
+        PreUserTurn::Handled(reply) => {
+            crate::sidecar::adapters::persist_handled_turn(
+                &deps.conversations,
+                &cfg.conversation_id,
+                &spoken,
+                &reply,
+                cfg.agent_id.as_deref(),
+                None,
+            )
+            .await;
+            tokio::spawn(async move {
+                // A closed receiver (client gone) is not an error, exactly as in
+                // `stream_text_reply`.
+                let _ = delta_tx.send(reply).await;
+                Ok::<(), anyhow::Error>(())
+            })
+        }
+        PreUserTurn::Prompt(prompt) => {
+            let response = crate::sidecar::adapters::route_chat_stream(
+                build_chat_request(&cfg, prompt),
+                Arc::clone(&deps.registry),
+                deps.conversations.clone(),
+                deps.agent_store.clone(),
+                Arc::clone(&deps.manager),
+                deps.memory.clone(),
+                Arc::clone(&deps.worktree_diffs),
+                Arc::clone(&deps.mcp),
+                deps.skills.clone(),
+                deps.traces.clone(),
+                None,
+                None,
+            )
+            .await;
+            tokio::spawn(stream_text_reply(response, delta_tx))
+        }
+    };
 
     let mut acc = SentenceAccumulator::new();
     let mut spoke = false;
@@ -340,15 +386,38 @@ pub async fn run_voice_turn(
     }
 
     // Reap the streamer: abort it on barge-in, else surface an error frame.
+    let mut completed = false;
     if aborted {
         streamer.abort();
-    } else if let Ok(Err(e)) = streamer.await {
-        let _ = out_tx
-            .send(VoiceOutput::Control(VoiceServerMsg::Error {
-                code: "turn_failed".to_string(),
-                message: format!("{e:#}"),
-            }))
-            .await;
+    } else {
+        match streamer.await {
+            Ok(Ok(())) => completed = true,
+            Ok(Err(e)) => {
+                let _ = out_tx
+                    .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                        code: "turn_failed".to_string(),
+                        message: format!("{e:#}"),
+                    }))
+                    .await;
+            }
+            // Join error (the task panicked or was cancelled): nothing to report
+            // that the client can act on, and the turn still closes below.
+            Err(_) => {}
+        }
+    }
+
+    // Plugin `post_assistant_turn` hooks, fired ONLY for a turn that drained
+    // cleanly. A barge-in truncates the reply mid-sentence, so firing there would
+    // hand a `stop`-phase observer half an answer as if it were the turn's result —
+    // and would let a hook act on a turn the user deliberately interrupted. By this
+    // point the stream has finished, so the reply is already persisted and the
+    // hook's transcript read sees the turn it is being fired for.
+    if completed && !abort.load(Ordering::SeqCst) {
+        crate::sidecar::adapters::fire_voice_post_turn_hooks(
+            deps.conversations.clone(),
+            cfg.conversation_id.clone(),
+            cfg.agent_id.clone(),
+        );
     }
 
     if spoke {

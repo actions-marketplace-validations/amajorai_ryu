@@ -13,19 +13,23 @@
   "highlights": [
     {
       "title": "The loop as a workflow",
-      "description": "Chain generate, launch, measure, and recap into one pipeline that runs on a schedule or a trigger."
+      "description": "Chain generate, launch, measure, and recap into one pipeline that runs on a schedule or a trigger.",
+      "icon": "RefreshCw"
     },
     {
       "title": "Connected to your funnel",
-      "description": "Agents reach your analytics, ad tools, and email platform to pull metrics and push changes directly."
+      "description": "Agents reach your analytics, ad tools, and email platform to pull metrics and push changes directly.",
+      "icon": "Plug"
     },
     {
       "title": "Variants at volume",
-      "description": "Spin up dozens of copy, subject-line, and creative variations grounded in what's already worked for you."
+      "description": "Spin up dozens of copy, subject-line, and creative variations grounded in what's already worked for you.",
+      "icon": "Sparkles"
     },
     {
       "title": "Cost-aware routing",
-      "description": "The Gateway routes bulk generation to a cheap or local model and sets budgets so testing stays affordable."
+      "description": "The Gateway routes bulk generation to a cheap or local model and sets budgets so testing stays affordable.",
+      "icon": "Shield"
     }
   ],
   "useCases": [

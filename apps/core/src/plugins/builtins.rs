@@ -594,6 +594,36 @@ pub fn is_default_on(manifest_id: &str) -> bool {
     CORE_DEFAULT_ON.contains(&manifest_id)
 }
 
+/// Whether `manifest_id` names a manifest that ships **inside the binary**
+/// (a `plugin_manifest/fixtures/*.manifest.json` registered with `include_str!`),
+/// as opposed to one loaded from the user-writable `~/.ryu/plugins`.
+///
+/// This is a **provenance** question, not a privilege one, and it is deliberately
+/// distinct from [`tier_for`]. Tier answers "how much may this plugin be trusted
+/// with once the Gateway has vetted it" and drives the grant gates. Provenance
+/// answers "did a human writing this repo author the bytes" — which is what matters
+/// wherever a manifest field is consumed with no per-field approval record to check
+/// against (see `tool_exec::may_read_env_secret`: there is no Gateway approval for
+/// "may read env var X", so the only honest discriminator is where the manifest
+/// came from). Several first-party plugins are Community-tier but compiled in
+/// (`exa`, `rtk`, `com.ryuhq.advisor`), so the two predicates genuinely differ.
+///
+/// Safe as an id comparison because the loader parses built-ins FIRST and
+/// duplicate ids are rejected first-occurrence-wins ([`crate::plugin_manifest::PluginManifestLoader::load`]),
+/// so a disk manifest can never take a compiled-in id. Computed once and cached —
+/// the parse walks every embedded fixture.
+pub fn is_compiled_in_manifest(manifest_id: &str) -> bool {
+    static IDS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        crate::plugin_manifest::PluginManifestLoader::load_builtins()
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+    })
+    .contains(manifest_id)
+}
+
 /// Returns `true` if `manifest_id` is one of the built-in system apps.
 pub fn is_builtin(manifest_id: &str) -> bool {
     SYSTEM_PLUGINS.iter().any(|s| s.manifest_id == manifest_id)

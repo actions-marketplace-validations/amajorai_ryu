@@ -9,23 +9,26 @@ import {
 	Cable,
 	Chrome,
 	Cloud,
-	Command,
 	Cpu,
+	Eye,
 	Gem,
 	GitBranch,
 	Globe,
 	HeartHandshake,
+	Key,
 	Layers,
 	Mic,
 	Monitor,
 	Plug,
 	Puzzle,
 	Radio,
+	RefreshCw,
 	Shield,
 	Smartphone,
 	Sparkles,
 	Store,
 	Terminal as TerminalIcon,
+	Users,
 	Zap,
 } from "lucide-react";
 import Link from "next/link";
@@ -43,7 +46,6 @@ import {
 	CliVisual,
 	CloudVisual,
 	CodePaneSplit,
-	CommandBarVisual,
 	ConnectionsVisual,
 	CoreVisual,
 	DesktopVisual,
@@ -161,21 +163,25 @@ export const products: Product[] = [
 				title: "Any engine",
 				description:
 					"Claude Code, Codex, Gemini, Pi, or any OpenAI-compatible runtime, wrapped, never reimplemented.",
+				icon: Cpu,
 			},
 			{
 				title: "Doesn't start from zero",
 				description:
 					"Bring your existing Claude and Codex conversations. Your context comes with you.",
+				icon: RefreshCw,
 			},
 			{
 				title: "Runs everywhere",
 				description:
 					"Any model, any provider, any OS. Local on install with llama.cpp and Gemma 4.",
+				icon: Globe,
 			},
 			{
 				title: "No telemetry",
 				description:
 					"Encrypted by default, no telemetry by default. You own the data and the binary.",
+				icon: Shield,
 			},
 		],
 		bento: {
@@ -282,21 +288,25 @@ export const products: Product[] = [
 				title: "Reliable in production",
 				description:
 					"Fallback, rate-limit, circuit breaking, and caching so agents survive the real world.",
+				icon: RefreshCw,
 			},
 			{
 				title: "Lower AI cost",
 				description:
 					"Per-agent budgets and exact plus semantic caching cut spend on every call.",
+				icon: Zap,
 			},
 			{
 				title: "Per-attribute routing",
 				description:
 					"An agent's chat, voice, and image calls can each go to a different provider.",
+				icon: GitBranch,
 			},
 			{
 				title: "On the path today",
 				description:
 					"Already governs the default chat path in Core. Adopt it without rewiring.",
+				icon: Shield,
 			},
 		],
 		bento: {
@@ -402,21 +412,25 @@ export const products: Product[] = [
 				title: "Agents that don't sleep",
 				description:
 					"24/7 cloud automations keep working even when your devices are off.",
+				icon: Zap,
 			},
 			{
 				title: "Out of the box",
 				description:
 					"Custom-made platform means agents that work for your business on day one.",
+				icon: Sparkles,
 			},
 			{
 				title: "Managed end-to-end",
 				description:
 					"Deployment, scaling, monitoring, retries, and uptime. You write the agent, we run it.",
+				icon: Cloud,
 			},
 			{
 				title: "Cross-device fleet",
 				description:
 					"Run on cloud, a Mac mini, a Pi, or your laptop, with node selection and sync.",
+				icon: Globe,
 			},
 		],
 		bento: {
@@ -522,21 +536,25 @@ export const products: Product[] = [
 				title: "White-glove",
 				description:
 					"We embed with your team, scope the work, and build the agent for you.",
+				icon: HeartHandshake,
 			},
 			{
 				title: "Free to build",
 				description:
 					"No build fee. Forward-deployed help, the Palantir model, without the price tag.",
+				icon: Sparkles,
 			},
 			{
 				title: "Yours to keep",
 				description:
 					"Built on the open Ryu platform, so you own it and can self-host anytime.",
+				icon: Shield,
 			},
 			{
 				title: "Production-ready",
 				description:
 					"Memory, routing, observability, and security built in from day one.",
+				icon: Zap,
 			},
 		],
 		bento: {
@@ -631,21 +649,25 @@ export const products: Product[] = [
 				title: "Build your own",
 				description:
 					"Start from Pi, swap any slot, and ship a card no one else has.",
+				icon: Blocks,
 			},
 			{
 				title: "LLM council",
 				description:
 					"@mention several agents into one chat and let them debate to a better answer.",
+				icon: Users,
 			},
 			{
 				title: "Self-improving",
 				description:
 					"Agents that learn from memory and evals, getting more reliable over time.",
+				icon: Sparkles,
 			},
 			{
 				title: "Zero lock-in",
 				description:
 					"BYOA, BYOK, BYOS. Every attribute is a swappable default.",
+				icon: Shield,
 			},
 		],
 		bento: {
@@ -737,21 +759,25 @@ export const products: Product[] = [
 				title: "Visual canvas",
 				description:
 					"Drag nodes, draw edges, branch on output. The canvas is the orchestration.",
+				icon: GitBranch,
 			},
 			{
 				title: "Durable by design",
 				description:
 					"Restate-backed steps with retries and human-in-the-loop checkpoints.",
+				icon: RefreshCw,
 			},
 			{
 				title: "Runnable steps",
 				description:
 					"Every step is an agent, tool, skill, or another workflow.",
+				icon: Bot,
 			},
 			{
 				title: "Governed throughout",
 				description:
 					"Every model call inside a workflow still routes through the Gateway.",
+				icon: Shield,
 			},
 		],
 		bento: {
@@ -839,21 +865,25 @@ export const products: Product[] = [
 				title: "Open standard",
 				description:
 					"Ryu speaks the Agent Skills standard natively, no proprietary format.",
+				icon: Blocks,
 			},
 			{
 				title: "One-click install",
 				description:
 					"Install writes SKILL.md locally and hot-reloads, no restart.",
+				icon: Sparkles,
 			},
 			{
 				title: "Trigger-aware",
 				description:
 					"Front-matter is parsed so the right skill fires at the right time.",
+				icon: Zap,
 			},
 			{
 				title: "Provenance tracked",
 				description:
 					"See what's installed, where it came from, and update on drift.",
+				icon: GitBranch,
 			},
 		],
 		bento: {
@@ -969,21 +999,25 @@ export const products: Product[] = [
 				title: "250+ tools",
 				description:
 					"A registry of ready tools, available to any agent instantly.",
+				icon: Plug,
 			},
 			{
 				title: "Zero wiring",
 				description:
 					"No SDK, no glue, no manual auth. Turn it on and the agent can use it.",
+				icon: Sparkles,
 			},
 			{
 				title: "Built-in servers",
 				description:
 					"Ghost desktop automation and Shadow capture ship in the registry.",
+				icon: Boxes,
 			},
 			{
 				title: "Governed calls",
 				description:
 					"Every tool call passes the same firewall, budgets, and audit as model calls.",
+				icon: Shield,
 			},
 		],
 		bento: {
@@ -1105,20 +1139,24 @@ export const products: Product[] = [
 				title: "Hundreds of apps",
 				description:
 					"Composio-powered connections to the SaaS your work already lives in.",
+				icon: Plug,
 			},
 			{
 				title: "Managed auth",
 				description:
 					"OAuth handled for you. Tokens stay in the vault, agents never see secrets.",
+				icon: Key,
 			},
 			{
 				title: "Superpowers",
 				description:
 					"Read, write, and act across apps, not just chat about them.",
+				icon: Zap,
 			},
 			{
 				title: "Works everywhere",
 				description: "Any integration, on any agent, governed by the Gateway.",
+				icon: Globe,
 			},
 		],
 		bento: {
@@ -1209,19 +1247,23 @@ export const products: Product[] = [
 				title: "Core-native",
 				description:
 					"Real agent runs through Core: tools, memory, and Gateway routing.",
+				icon: TerminalIcon,
 			},
 			{
 				title: "Headless-first",
 				description: "Script it, pipe it, run it on a server with no UI.",
+				icon: TerminalIcon,
 			},
 			{
 				title: "Node discovery",
 				description:
 					"Finds Ryu nodes on your LAN and lets you pick where compute runs.",
+				icon: Globe,
 			},
 			{
 				title: "Sessions persist",
 				description: "Resume conversations and runs; history lives in Core.",
+				icon: RefreshCw,
 			},
 		],
 		bento: {
@@ -1292,21 +1334,25 @@ export const products: Product[] = [
 				title: "One contract",
 				description:
 					"Agent, workflow, tool, skill, and MCP server, all Runnables.",
+				icon: Blocks,
 			},
 			{
 				title: "Gateway-mandatory",
 				description:
 					"The model client always routes through the Gateway. Governance isn't optional.",
+				icon: Shield,
 			},
 			{
 				title: "Depend on nothing",
 				description:
 					"References Mastra and AI SDK patterns, depends on neither.",
+				icon: Plug,
 			},
 			{
 				title: "Pack & ship",
 				description:
 					"Bundle Runnables into an installable App with one command.",
+				icon: Boxes,
 			},
 		],
 		bento: {
@@ -1391,21 +1437,25 @@ export const products: Product[] = [
 				title: "As easy as an app",
 				description:
 					"Download, pick an agent, go. The hard problem Ryu solves is the UX.",
+				icon: Sparkles,
 			},
 			{
 				title: "Doesn't start from zero",
 				description:
 					"Bring your existing Claude and Codex conversations with you.",
+				icon: RefreshCw,
 			},
 			{
 				title: "Git-native runs",
 				description:
 					"Active folder, branch, per-run worktree, diff, review, and apply.",
+				icon: GitBranch,
 			},
 			{
 				title: "Everywhere you work",
 				description:
 					"Run it on your laptop, Mac mini, or server; agents live where they're needed.",
+				icon: Globe,
 			},
 		],
 		bento: {
@@ -1487,88 +1537,6 @@ export const products: Product[] = [
 	},
 
 	{
-		slug: "command-bar",
-		name: "Command Bar",
-		navLabel: "Command Bar",
-		category: "Surfaces",
-		tagline: "Quick access to your agents from anywhere on your desktop.",
-		Icon: Command,
-		hero: {
-			eyebrow: "Command Bar",
-			title: "Your agent, one shortcut away.",
-			subtitle:
-				"A Raycast-style command bar that calls your agents from anywhere on your desktop. Ask, run, and resume without switching apps, by keyboard or by voice.",
-			primaryCta: DOWNLOAD,
-			secondaryCta: EARLY_ACCESS,
-			visual: <CommandBarVisual />,
-		},
-		highlights: [
-			{
-				title: "From anywhere",
-				description: "A global hotkey opens Ryu over whatever you're doing.",
-			},
-			{
-				title: "Ask or run",
-				description: "Ask a question, launch an agent, or resume a run inline.",
-			},
-			{
-				title: "Voice input",
-				description: "Speak instead of type; speech to text, then an answer.",
-			},
-			{
-				title: "Core-native",
-				description: "Same agents, memory, and tools as the desktop app.",
-			},
-		],
-		bento: {
-			eyebrow: "Quick access",
-			title: "AI at the speed of a keystroke.",
-			subtitle:
-				"The command bar puts your agents one shortcut away, so the fastest path to an answer is never leaving what you're doing.",
-			items: [
-				{
-					title: "Global hotkey",
-					description:
-						"Summon Ryu over any app with a keystroke, ask, and dismiss.",
-					icon: Command,
-				},
-				{
-					title: "Ask, run, resume",
-					description:
-						"Ask a question, kick off an agent, or jump back into a run from one bar.",
-					icon: Zap,
-				},
-				{
-					title: "Voice input",
-					description:
-						"Talk to it: speech to text turns your words into an answer.",
-					icon: Mic,
-				},
-				{
-					title: "Core-native",
-					description:
-						"Routes through Core, so it's the same agents, memory, and tools.",
-					icon: Boxes,
-				},
-			],
-		},
-		faq: [
-			{
-				q: "How is this different from the Island?",
-				a: "The command bar is a you-initiated quick launcher, summoned by hotkey. Island is proactive, it watches context and suggests on its own. They share the same Core agents.",
-			},
-		],
-		cta: {
-			title: "Call your agent from anywhere.",
-			subtitle:
-				"Download Ryu and summon your agents with a keystroke or your voice.",
-			primaryCta: DOWNLOAD,
-			secondaryCta: BOOK_DEMO,
-			note: "Global hotkey · Voice input · Core-native",
-		},
-	},
-
-	{
 		slug: "island",
 		name: "Island",
 		navLabel: "Island",
@@ -1589,20 +1557,24 @@ export const products: Product[] = [
 				title: "Always aware",
 				description:
 					"Reads your screen context locally and notices when you're stuck.",
+				icon: Eye,
 			},
 			{
 				title: "Proactive",
 				description: "Suggests the next step before you think to ask for it.",
+				icon: Sparkles,
 			},
 			{
 				title: "Consent-gated",
 				description:
 					"Every capability is opt-in. Nothing runs without your say-so.",
+				icon: Shield,
 			},
 			{
 				title: "Local-first",
 				description:
 					"Context monitoring and suggestions run on-device through Shadow.",
+				icon: Monitor,
 			},
 		],
 		bento: {
@@ -1696,20 +1668,24 @@ export const products: Product[] = [
 				title: "On-device",
 				description:
 					"Run small models locally with Cactus Compute, private and offline-capable.",
+				icon: Smartphone,
 			},
 			{
 				title: "Node selection",
 				description:
 					"Reach a home or cloud node for heavy runs, else compute locally.",
+				icon: Globe,
 			},
 			{
 				title: "Synced",
 				description: "Conversations and runs sync across devices through Core.",
+				icon: RefreshCw,
 			},
 			{
 				title: "Governed",
 				description:
 					"Cloud calls from mobile still pass the firewall, budgets, and audit.",
+				icon: Shield,
 			},
 		],
 		bento: {
@@ -1781,20 +1757,24 @@ export const products: Product[] = [
 				title: "Page-aware",
 				description:
 					"Summarize, extract, and ask about the tab you're viewing.",
+				icon: Eye,
 			},
 			{
 				title: "Quick actions",
 				description: "One-tap chips for the things you do most.",
+				icon: Zap,
 			},
 			{
 				title: "DLP on egress",
 				description:
 					"The Gateway redacts and blocks sensitive data before anything is sent.",
+				icon: Shield,
 			},
 			{
 				title: "Core-native",
 				description:
 					"Runs route through Core: same agents, memory, and tools as the desktop.",
+				icon: Boxes,
 			},
 		],
 		bento: {
@@ -1865,18 +1845,22 @@ export const products: Product[] = [
 			{
 				title: "On-device AI",
 				description: "Local inference for privacy, no screen required.",
+				icon: Cpu,
 			},
 			{
 				title: "Always aware",
 				description: "Ambient context that understands your moment.",
+				icon: Eye,
 			},
 			{
 				title: "Wearable",
 				description: "Rings and pendants designed to disappear into your day.",
+				icon: Gem,
 			},
 			{
 				title: "Ryu inside",
 				description: "The same agents and memory, now ambient.",
+				icon: Shield,
 			},
 		],
 		bento: {
@@ -1949,21 +1933,25 @@ export const products: Product[] = [
 				title: "Apps, not config",
 				description:
 					"Every listing is a ryu.json App bundling Runnables and a surface.",
+				icon: Store,
 			},
 			{
 				title: "One-click install",
 				description:
 					"Install and enable with clear permission grants. Disable just as fast.",
+				icon: Sparkles,
 			},
 			{
 				title: "Built-in apps",
 				description:
 					"agentbrowser, spider, Ghost, Shadow, and promptfoo ship ready.",
+				icon: Boxes,
 			},
 			{
 				title: "Grants enforced",
 				description:
 					"Each app declares what it can reach; the Gateway enforces it.",
+				icon: Shield,
 			},
 		],
 		bento: {
@@ -2034,20 +2022,24 @@ export const products: Product[] = [
 				title: "Manifest-driven",
 				description:
 					"Declare runnables, permissions, and a Gateway policy in ryu.json.",
+				icon: Puzzle,
 			},
 			{
 				title: "Full lifecycle",
 				description:
 					"Install, enable, disable, and update with grant validation.",
+				icon: GitBranch,
 			},
 			{
 				title: "Open runtime",
 				description:
 					"The plugin runtime is open source, so the closed app stays extensible.",
+				icon: Blocks,
 			},
 			{
 				title: "Third-party",
 				description: "Build and publish plugins via the SDK.",
+				icon: Boxes,
 			},
 		],
 		bento: {
@@ -2119,19 +2111,23 @@ export const products: Product[] = [
 				title: "Adversarial probes",
 				description:
 					"Hundreds of attacks across the OWASP LLM and agentic threat models.",
+				icon: Bug,
 			},
 			{
 				title: "Find holes first",
 				description: "See how your agent fails before an attacker shows you.",
+				icon: Eye,
 			},
 			{
 				title: "Service + product",
 				description: "Run it as a managed engagement or as a self-serve tool.",
+				icon: Sparkles,
 			},
 			{
 				title: "Closes the loop",
 				description:
 					"Findings feed Gateway guardrails for self-improving defense.",
+				icon: Shield,
 			},
 		],
 		bento: {

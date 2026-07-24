@@ -9,7 +9,12 @@
 // the client-side view exposed to React components. The internal symbol names
 // (App*, fetchApps, etc.) are kept stable to limit churn across importers.
 
-import type { SidebarSectionSpec, ViewContribution } from "@ryu/app-host/views";
+import type {
+	DockPanelSpec,
+	SidebarSectionSpec,
+	ViewContribution,
+	ViewSource,
+} from "@ryu/app-host/views";
 import {
 	type ApiTarget,
 	apiUrl,
@@ -399,6 +404,9 @@ export interface PluginContributions {
 	/** Companion surfaces (overlay/sidebar panels) an enabled plugin declares. */
 	companions: PluginCompanion[];
 	composer_controls: PluginComposerControl[];
+	/** App-registered workspace dock panels (bottom/right dock tabs), tagged with
+	 *  `plugin`. The declarative replacement for the shell's closed `TabKind` union. */
+	dock_panels: PluginDockPanel[];
 	settings_tabs: Record<string, unknown>[];
 	/** App-registered sidebar buttons (single nav rows), tagged with `plugin`. */
 	sidebar_buttons: PluginSidebarButton[];
@@ -443,17 +451,85 @@ export interface PluginSidebarButton {
  *  the plugins API. */
 export type PluginView = ViewContribution;
 
-/** A composer "+"-menu control an enabled plugin contributes
- *  (`contributes.composer_controls`, tagged server-side with its owning `plugin`).
- *  Today only `type: "toggle"` is rendered: flipping it sets `flag` in the
- *  per-request `plugin_flags` map the plugin turn-hook runtime reads. */
-export interface PluginComposerControl {
-	description?: string;
-	flag: string;
+/** Which dock a {@link PluginDockPanel} opens in. Mirrors the Rust
+ *  `DockPanelPlacement`; `"both"` offers the panel in each dock's new-tab menu. */
+export type PluginDockPlacement = "bottom" | "right" | "both";
+
+/** An app-registered workspace dock panel as served by Core
+ *  (`contributes.dock_panels[]`), tagged with its owning `plugin`.
+ *
+ *  `panel` is the render-mode discriminant (the `DockPanelKind` vocabulary — `"companion"`,
+ *  `"view"`, `"native"`) and stays a bare string so a member this build predates is
+ *  still delivered; the renderer must ignore what it does not know. `spec` carries the
+ *  mode's payload ({@link DockPanelSpec}). */
+export interface PluginDockPanel {
+	icon?: string;
 	id: string;
-	label: string;
+	order?: number;
+	/** Render mode: `"companion"` | `"view"` | `"native"` | a newer member. */
+	panel: string;
+	placement: PluginDockPlacement;
 	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
 	plugin: string;
+	spec?: DockPanelSpec;
+	title: string;
+}
+
+/** One option of a `select` composer control. */
+export interface PluginComposerControlOption {
+	description?: string;
+	icon?: string;
+	label: string;
+	value: string;
+}
+
+/**
+ * A composer control an enabled plugin contributes (`contributes.composer_controls`,
+ * tagged server-side with its owning `plugin`).
+ *
+ * `type` is the render discriminant and stays a bare string on purpose — Core forwards
+ * every entry verbatim, so a control type newer than this build still arrives and must
+ * simply be skipped rather than break the composer. The vocabulary (kept in lockstep
+ * with the Rust `Contributes::composer_controls` doc comment):
+ *
+ * - `"toggle"` — switch row in the "+" menu. Sets `plugin_flags[flag] = true|false`.
+ * - `"select"` — menu/segmented picker over `options`; the chosen `value` (a string)
+ *   lands in `plugin_flags[flag]`, with `default` used until the user picks.
+ * - `"chip"` — inline pill in the composer bar showing a LIVE value polled from
+ *   `source` (the same {@link ViewSource} a declarative view uses) rather than a menu
+ *   row; `flag` is where it exposes (and clears) that value.
+ * - `"action"` — button that dispatches `capability` (with optional `args`) through the
+ *   owning plugin's granted capability seam instead of storing state.
+ *
+ * Every field beyond `id`/`type`/`label`/`plugin` is therefore optional: which ones are
+ * meaningful depends on `type`, and the renderer narrows before reading them.
+ */
+export interface PluginComposerControl {
+	/** Arguments passed alongside `capability` by an `action` control. */
+	args?: Record<string, unknown>;
+	/** Capability an `action` control dispatches through the owning plugin's granted
+	 *  capability seam. Never inline code, and never a capability it wasn't granted. */
+	capability?: string;
+	/** Initial `select` value, used until the user picks one. */
+	default?: string;
+	description?: string;
+	/** The `plugin_flags` key this control binds to. Required for EVERY type, because
+	 *  `plugin_flags` is the composer's only channel to the turn: a `toggle` writes a
+	 *  bool, a `select` writes the chosen option `value`, a `chip` exposes (and clears)
+	 *  its live value, and an `action` marks its dispatch so the turn hook sees it. */
+	flag: string;
+	icon?: string;
+	id: string;
+	label: string;
+	/** The options a `select` control offers. */
+	options?: PluginComposerControlOption[];
+	order?: number;
+	/** Where the control is drawn: the "+" menu (default) or the composer bar itself. */
+	placement?: "menu" | "bar";
+	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
+	plugin: string;
+	/** Live value source polled by a `chip` control. */
+	source?: ViewSource;
 	type: string;
 }
 
@@ -556,6 +632,7 @@ export async function getPluginContributions(
 		views: json.views ?? [],
 		sidebar_sections: json.sidebar_sections ?? [],
 		sidebar_buttons: json.sidebar_buttons ?? [],
+		dock_panels: json.dock_panels ?? [],
 		channels: json.channels ?? [],
 		companions: (json.companions ?? []).map(toPluginCompanion),
 	};
