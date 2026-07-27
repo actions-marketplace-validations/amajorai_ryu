@@ -1,19 +1,6 @@
-import {
-	Add01Icon,
-	ArrowUpRight01Icon,
-	ComputerIcon,
-	Logout01Icon,
-	Moon01Icon,
-	PieChartIcon,
-	Settings01Icon,
-	Sun01Icon,
-	Tick02Icon,
-	UserGroupIcon,
-	ViewOffSlashIcon,
-	Wallet01Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { settingsApi, useSubscription } from "@ryu/settings";
 import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
+import { NavBeamCta } from "@ryu/ui/components/border-beam";
 import {
 	ContextMenu,
 	ContextMenuContent,
@@ -42,6 +29,21 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
 import { useQuery } from "@tanstack/react-query";
+import {
+	ArrowUp,
+	ArrowUpRight,
+	Check,
+	CreditCard,
+	EyeOff,
+	Laptop,
+	LogOut,
+	Moon,
+	PieChart,
+	Plus,
+	Settings,
+	Sun,
+	User,
+} from "lucide-react";
 import { useTheme } from "next-themes";
 import { useState } from "react";
 import { useAuthContext } from "@/contexts/auth-context.tsx";
@@ -57,10 +59,6 @@ import {
 } from "@/lib/auth-client.ts";
 import { addAccountViaDeviceAuth } from "@/lib/oauth.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
-import { BuildBadge } from "./BuildBadge.tsx";
-
-const TRAILING_SLASH_RE = /\/$/;
-
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
@@ -72,6 +70,8 @@ import { DownloadCenter } from "../downloads/DownloadCenter.tsx";
 import { InboxCenter } from "../inbox/InboxCenter.tsx";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 import { UpdatesSubmenu } from "./UpdatesSubmenu.tsx";
+
+const TRAILING_SLASH_RE = /\/$/;
 
 type FooterChromeKey = "inbox" | "user" | "downloads" | "settings";
 
@@ -255,10 +255,7 @@ function AccountList() {
 						<span className="relative ml-1 flex size-5 shrink-0 items-center justify-center">
 							{isActive ? (
 								<span className="absolute transition-all duration-150 group-hover/item:scale-50 group-hover/item:opacity-0">
-									<HugeiconsIcon
-										className="size-4 text-primary"
-										icon={Tick02Icon}
-									/>
+									<Check className="size-4 text-primary" />
 								</span>
 							) : null}
 							<button
@@ -267,7 +264,7 @@ function AccountList() {
 								onClick={(event) => handleSignOutAccount(event, account)}
 								type="button"
 							>
-								<HugeiconsIcon icon={Logout01Icon} size={14} />
+								<LogOut className="h-3.5 w-3.5" />
 							</button>
 						</span>
 					</DropdownMenuItem>
@@ -282,7 +279,7 @@ function AccountList() {
 				{adding ? (
 					<Spinner className="mr-2 size-4" />
 				) : (
-					<HugeiconsIcon className="mr-2 size-4" icon={Add01Icon} />
+					<Plus className="mr-2 size-4" />
 				)}
 				Add account
 			</DropdownMenuItem>
@@ -298,7 +295,8 @@ export function NavUser({
 	hiddenChrome: Set<string>;
 	onHideChrome: (key: FooterChromeKey) => void;
 }) {
-	const { setTheme } = useTheme();
+	const { setTheme, resolvedTheme } = useTheme();
+	const beamTheme = resolvedTheme === "light" ? "light" : "dark";
 	const settingsOpen = useSettingsDialog((s) => s.open);
 	const settingsSection = useSettingsDialog((s) => s.section);
 	const setSettingsOpen = useSettingsDialog((s) => s.setOpen);
@@ -307,6 +305,7 @@ export function NavUser({
 	const { verdict } = useEntitlementContext();
 	const { openTab } = useTabsContext();
 	const badgePlan = entitlementBadgeTier(verdict);
+	const { isLifetime } = useSubscription();
 	const {
 		wallet,
 		entitlement,
@@ -385,6 +384,28 @@ export function NavUser({
 			`${FRONTEND_URL.replace(TRAILING_SLASH_RE, "")}/pricing`
 		).catch(() => undefined);
 	};
+	const openLifetimeCheckout = async () => {
+		try {
+			const { url } = await settingsApi.billing.createLifetimeCheckout();
+			await openExternal(url);
+		} catch {
+			toast.error({
+				title: "Failed to start checkout",
+				description: "Please try again.",
+			});
+		}
+	};
+
+	const upgradeItem = (
+		<DropdownMenuItem onClick={openPricing}>
+			{upgradeLabel ? (
+				<ArrowUpRight className="mr-2 size-4" />
+			) : (
+				<CreditCard className="mr-2 size-4" />
+			)}
+			{upgradeLabel ?? "See all plans"}
+		</DropdownMenuItem>
+	);
 
 	return (
 		<SidebarMenu>
@@ -434,49 +455,31 @@ export function NavUser({
 											<DropdownMenuSeparator />
 											<DropdownMenuGroup>
 												<DropdownMenuItem onClick={() => openTab("/profile")}>
-													<HugeiconsIcon
-														className="mr-2 size-4"
-														icon={UserGroupIcon}
-													/>
+													<User className="mr-2 size-4" />
 													Profile
 												</DropdownMenuItem>
 												<DropdownMenuItem onClick={() => openSettings()}>
-													<HugeiconsIcon
-														className="mr-2 size-4"
-														icon={Settings01Icon}
-													/>
+													<Settings className="mr-2 size-4" />
 													Settings
 												</DropdownMenuItem>
 												<UpdatesSubmenu />
 											</DropdownMenuGroup>
 											<DropdownMenuSub>
 												<DropdownMenuSubTrigger>
-													<HugeiconsIcon
-														className="mr-2 size-4"
-														icon={Sun01Icon}
-													/>
+													<Sun className="mr-2 size-4" />
 													Theme
 												</DropdownMenuSubTrigger>
 												<DropdownMenuSubContent>
 													<DropdownMenuItem onClick={() => setTheme("light")}>
-														<HugeiconsIcon
-															className="mr-2 size-4"
-															icon={Sun01Icon}
-														/>
+														<Sun className="mr-2 size-4" />
 														Light
 													</DropdownMenuItem>
 													<DropdownMenuItem onClick={() => setTheme("dark")}>
-														<HugeiconsIcon
-															className="mr-2 size-4"
-															icon={Moon01Icon}
-														/>
+														<Moon className="mr-2 size-4" />
 														Dark
 													</DropdownMenuItem>
 													<DropdownMenuItem onClick={() => setTheme("system")}>
-														<HugeiconsIcon
-															className="mr-2 size-4"
-															icon={ComputerIcon}
-														/>
+														<Laptop className="mr-2 size-4" />
 														System
 													</DropdownMenuItem>
 												</DropdownMenuSubContent>
@@ -484,10 +487,7 @@ export function NavUser({
 											<DropdownMenuSeparator />
 											<DropdownMenuGroup>
 												<DropdownMenuItem disabled>
-													<HugeiconsIcon
-														className="mr-2 size-4"
-														icon={Wallet01Icon}
-													/>
+													<CreditCard className="mr-2 size-4" />
 													<span className="flex-1">Plan</span>
 													<span className="text-right text-muted-foreground">
 														{currentPlanLabel}
@@ -501,10 +501,7 @@ export function NavUser({
 												{hasSubscription && (
 													<DropdownMenuSub>
 														<DropdownMenuSubTrigger>
-															<HugeiconsIcon
-																className="mr-2 size-4"
-																icon={PieChartIcon}
-															/>
+															<PieChart className="mr-2 size-4" />
 															Usage remaining
 														</DropdownMenuSubTrigger>
 														<DropdownMenuSubContent className="min-w-64">
@@ -529,15 +526,21 @@ export function NavUser({
 														</DropdownMenuSubContent>
 													</DropdownMenuSub>
 												)}
-												<DropdownMenuItem onClick={openPricing}>
-													<HugeiconsIcon
-														className="mr-2 size-4"
-														icon={
-															upgradeLabel ? ArrowUpRight01Icon : Wallet01Icon
-														}
-													/>
-													{upgradeLabel ?? "See all plans"}
-												</DropdownMenuItem>
+												{upgradeLabel === "Upgrade to Pro" ? (
+													<NavBeamCta theme={beamTheme} variant="pulse">
+														{upgradeItem}
+													</NavBeamCta>
+												) : (
+													upgradeItem
+												)}
+												{!isLifetime && (
+													<NavBeamCta theme={beamTheme} variant="rotate">
+														<DropdownMenuItem onClick={openLifetimeCheckout}>
+															<ArrowUp className="mr-2 size-4" />
+															Get Lifetime Access
+														</DropdownMenuItem>
+													</NavBeamCta>
+												)}
 											</DropdownMenuGroup>
 										</DropdownMenuContent>
 									</DropdownMenu>
@@ -545,18 +548,13 @@ export function NavUser({
 							</ContextMenuTrigger>
 							<ContextMenuContent>
 								<ContextMenuItem onClick={() => onHideChrome("user")}>
-									<HugeiconsIcon
-										className="mr-2 size-4"
-										icon={ViewOffSlashIcon}
-									/>
+									<EyeOff className="mr-2 size-4" />
 									Hide account
 								</ContextMenuItem>
 							</ContextMenuContent>
 						</ContextMenu>
 					)}
-					{/* Build/profile badge ("Dev" / channel) — self-hides on a plain
-					    release build. Sits beside the account button. */}
-					<BuildBadge className="ml-1.5" />
+
 					<div className="ml-auto flex items-center gap-0.5">
 						{/* Create menu ("+") temporarily hidden per request. Restore by
 						    re-adding the CreateMenu import and <CreateMenu /> here. */}
@@ -567,10 +565,7 @@ export function NavUser({
 								</ContextMenuTrigger>
 								<ContextMenuContent>
 									<ContextMenuItem onClick={() => onHideChrome("inbox")}>
-										<HugeiconsIcon
-											className="mr-2 size-4"
-											icon={ViewOffSlashIcon}
-										/>
+										<EyeOff className="mr-2 size-4" />
 										Hide inbox
 									</ContextMenuItem>
 								</ContextMenuContent>
@@ -583,10 +578,7 @@ export function NavUser({
 								</ContextMenuTrigger>
 								<ContextMenuContent>
 									<ContextMenuItem onClick={() => onHideChrome("downloads")}>
-										<HugeiconsIcon
-											className="mr-2 size-4"
-											icon={ViewOffSlashIcon}
-										/>
+										<EyeOff className="mr-2 size-4" />
 										Hide downloads
 									</ContextMenuItem>
 								</ContextMenuContent>
@@ -604,7 +596,7 @@ export function NavUser({
 													onClick={() => openSettings()}
 													type="button"
 												>
-													<HugeiconsIcon icon={Settings01Icon} size={15} />
+													<Settings className="size-4" />
 												</button>
 											}
 										/>
@@ -613,10 +605,7 @@ export function NavUser({
 								</ContextMenuTrigger>
 								<ContextMenuContent>
 									<ContextMenuItem onClick={() => onHideChrome("settings")}>
-										<HugeiconsIcon
-											className="mr-2 size-4"
-											icon={ViewOffSlashIcon}
-										/>
+										<EyeOff className="mr-2 size-4" />
 										Hide settings
 									</ContextMenuItem>
 								</ContextMenuContent>

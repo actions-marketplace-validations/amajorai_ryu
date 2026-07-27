@@ -30,6 +30,10 @@ const GRANT_SPACES: &str = "spaces:docs";
 const GRANT_FINETUNE: &str = "finetune:runs";
 /// Grant required to call `host.navigate` (ask the host shell to navigate/deep-link).
 const GRANT_NAVIGATE: &str = "shell:navigate";
+/// Grant required to call `host.setConversationTitle`.
+const GRANT_SET_TITLE: &str = "conversation:set-title";
+/// Grant required to call `host.getPreference`.
+const GRANT_PREFERENCES_READ: &str = "preferences:read";
 
 /// Map a kernel-contracts host-API method name (dotted, e.g. `"model.complete"`,
 /// `"storage.get"`, `"spaces.createDoc"`) to the closed `host.<...>` path
@@ -62,6 +66,8 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "finetune.cancel" => "host.finetune_cancel",
         "finetune.adapters" => "host.finetune_adapters",
         "finetune.merge" => "host.finetune_merge",
+        "conversation.setTitle" => "host.setConversationTitle",
+        "preferences.get" => "host.getPreference",
         _ => return None,
     })
 }
@@ -100,8 +106,80 @@ impl PluginHookBridge {
             | "finetune_cancel"
             | "finetune_adapters"
             | "finetune_merge" => self.finetune(method, args).await,
+            "setConversationTitle" => self.set_conversation_title(args).await,
+            "getPreference" => self.get_preference(args).await,
             "navigate" => self.navigate(args),
             other => err(format!("unknown host capability '{other}'")),
+        }
+    }
+
+    /// `host.setConversationTitle({ id, title, mode? })` — rename a conversation.
+    /// `mode` defaults to `"auto"` (skips when `title_custom`); `"custom"` locks
+    /// the title like a manual rename. Titles are sanitized with the same rules
+    /// as Core's built-in titler.
+    async fn set_conversation_title(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_SET_TITLE) {
+            return err(format!(
+                "capability '{GRANT_SET_TITLE}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let id = args
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if id.is_empty() {
+            return err("host.setConversationTitle requires a non-empty 'id'".to_string());
+        }
+        let raw = args
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let title = crate::server::auto_title::sanitize_title(raw);
+        if title.is_empty() {
+            return err("host.setConversationTitle requires a usable 'title'".to_string());
+        }
+        let mode = args
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("auto")
+            .trim();
+        match mode {
+            "custom" => match self.state.conversations.set_title(id, &title).await {
+                Ok(()) => ok(json!({ "ok": true, "title": title, "applied": true })),
+                Err(e) => err(e.to_string()),
+            },
+            "auto" => match self.state.conversations.auto_set_title(id, &title).await {
+                Ok(applied) => ok(json!({ "ok": true, "title": title, "applied": applied })),
+                Err(e) => err(e.to_string()),
+            },
+            other => err(format!(
+                "host.setConversationTitle mode must be 'auto' or 'custom', got '{other}'"
+            )),
+        }
+    }
+
+    /// `host.getPreference({ key })` — read one preference as a string (or null).
+    async fn get_preference(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_PREFERENCES_READ) {
+            return err(format!(
+                "capability '{GRANT_PREFERENCES_READ}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let key = args
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if key.is_empty() {
+            return err("host.getPreference requires a non-empty 'key'".to_string());
+        }
+        match self.state.preferences.get(key).await {
+            Ok(Some(v)) => ok(json!(v)),
+            Ok(None) => ok(Value::Null),
+            Err(e) => err(e.to_string()),
         }
     }
 
@@ -564,6 +642,8 @@ mod tests {
         assert_eq!(GRANT_RUN_AGENT, "hook:run-agent");
         assert_eq!(GRANT_SPACES, "spaces:docs");
         assert_eq!(GRANT_FINETUNE, "finetune:runs");
+        assert_eq!(GRANT_SET_TITLE, "conversation:set-title");
+        assert_eq!(GRANT_PREFERENCES_READ, "preferences:read");
     }
 
     /// The bridge's local grant consts MUST equal the single-sourced grant the
@@ -580,6 +660,8 @@ mod tests {
         assert_eq!(grant_for("storage.get"), Some(GRANT_STORAGE));
         assert_eq!(grant_for("spaces.createDoc"), Some(GRANT_SPACES));
         assert_eq!(grant_for("finetune.start"), Some(GRANT_FINETUNE));
+        assert_eq!(grant_for("conversation.setTitle"), Some(GRANT_SET_TITLE));
+        assert_eq!(grant_for("preferences.get"), Some(GRANT_PREFERENCES_READ));
     }
 
     /// Every method `dispatch_path_for` maps MUST (a) carry a grant in the
@@ -623,6 +705,8 @@ mod tests {
             "storage.get",
             "spaces.createDoc",
             "finetune.start",
+            "conversation.setTitle",
+            "preferences.get",
         ] {
             assert!(
                 dispatch_path_for(method).is_some(),
@@ -654,6 +738,8 @@ mod tests {
                 | "finetune_cancel"
                 | "finetune_adapters"
                 | "finetune_merge"
+                | "setConversationTitle"
+                | "getPreference"
                 | "navigate"
         )
     }

@@ -40,6 +40,21 @@ function subscribe(cb: () => void): () => void {
 	};
 }
 
+/** Default ON — only an explicit `"false"` in storage turns friendly names off. */
+export const DEFAULT_FRIENDLY_MODE = true;
+
+/** Write the friendly-names preference and notify every consumer. */
+export function setFriendlyMode(v: boolean): void {
+	try {
+		localStorage.setItem(STORAGE_KEY, v ? "true" : "false");
+	} catch {
+		// Non-fatal: persistence is best-effort.
+	}
+	for (const cb of listeners) {
+		cb();
+	}
+}
+
 /**
  * `[friendly, setFriendly]`. Persisted, default `true`, shared across both
  * catalog tabs within (and across) windows.
@@ -48,14 +63,7 @@ export function useFriendlyMode(): [boolean, (v: boolean) => void] {
 	const friendly = useSyncExternalStore(subscribe, read, () => true);
 
 	const setFriendly = useCallback((v: boolean) => {
-		try {
-			localStorage.setItem(STORAGE_KEY, v ? "true" : "false");
-		} catch {
-			// Non-fatal: persistence is best-effort.
-		}
-		for (const cb of listeners) {
-			cb();
-		}
+		setFriendlyMode(v);
 	}, []);
 
 	return [friendly, setFriendly];

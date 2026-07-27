@@ -9,6 +9,8 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
+import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
 import { Input } from "@ryu/ui/components/input";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
@@ -17,6 +19,7 @@ import {
 	type MarkdownCollab,
 	MarkdownEditor,
 } from "@/src/components/editor/MarkdownEditor.tsx";
+import { EntityIconDialog } from "@/src/components/layout/EntityIconDialog.tsx";
 import { BacklinksPanel } from "@/src/components/spaces/BacklinksPanel.tsx";
 import {
 	VersionHistory,
@@ -89,8 +92,8 @@ export default function SpaceDocEditorPage({
 	spaceId: string;
 	documentId: string;
 }) {
-	const { getDocument, saveDocument } = useSpacesContext();
-	const { updateTabTitle, openTab } = useTabsContext();
+	const { getDocument, saveDocument, setDocumentIcon } = useSpacesContext();
+	const { updateTabTitle, updateTabsIconWhere, openTab } = useTabsContext();
 	const tabId = useCurrentTabId();
 	const node = useActiveNode();
 	const nodeUrl = node.url;
@@ -102,6 +105,7 @@ export default function SpaceDocEditorPage({
 
 	const [doc, setDoc] = useState<SpaceDocumentContent | null>(null);
 	const [loadFailed, setLoadFailed] = useState(false);
+	const [iconDialogOpen, setIconDialogOpen] = useState(false);
 	// Bumped by the Retry button and by a version restore to force the editor to
 	// re-mount with fresh content (Plate deserializes `initialMarkdown` once).
 	const [reloadNonce, setReloadNonce] = useState(0);
@@ -134,6 +138,14 @@ export default function SpaceDocEditorPage({
 				setTitle(d.title);
 				titleRef.current = d.title;
 				markdownRef.current = d.source;
+				if (d.icon !== undefined) {
+					updateTabsIconWhere(
+						(t) =>
+							t.path === `/spaces/${spaceId}/doc/${documentId}` ||
+							t.path === `/spaces/${spaceId}/db/${documentId}`,
+						d.icon ?? null
+					);
+				}
 			})
 			.catch(() => {
 				if (!cancelled) {
@@ -143,7 +155,7 @@ export default function SpaceDocEditorPage({
 		return () => {
 			cancelled = true;
 		};
-	}, [getDocument, spaceId, documentId]);
+	}, [getDocument, spaceId, documentId, updateTabsIconWhere]);
 
 	// Offer this page as context to the global "Ask Ryu" assistant.
 	useAssistantPageContext(
@@ -368,6 +380,19 @@ export default function SpaceDocEditorPage({
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
 			<div className="flex shrink-0 items-center gap-3 border-b px-4 py-2">
+				<button
+					aria-label="Change page icon"
+					className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+					onClick={() => setIconDialogOpen(true)}
+					title="Change icon…"
+					type="button"
+				>
+					<GlyphDisplay
+						fallback={<HugeiconsIcon className="size-4" icon={LibraryIcon} />}
+						size={20}
+						value={doc.icon}
+					/>
+				</button>
 				<Input
 					aria-label="Page title"
 					className="h-8 border-none bg-transparent px-0 font-medium text-base shadow-none focus-visible:ring-0"
@@ -405,6 +430,25 @@ export default function SpaceDocEditorPage({
 				/>
 			</div>
 			<BacklinksPanel documentId={documentId} spaceId={spaceId} />
+			<EntityIconDialog
+				description={title || "Untitled"}
+				onChange={(next: GlyphValue) => {
+					setDoc((prev) => (prev ? { ...prev, icon: next } : prev));
+					updateTabsIconWhere(
+						(t) =>
+							t.path === `/spaces/${spaceId}/doc/${documentId}` ||
+							t.path === `/spaces/${spaceId}/db/${documentId}`,
+						next
+					);
+					void setDocumentIcon(spaceId, documentId, next).catch(() => {
+						toast.error("Couldn't update page icon");
+					});
+				}}
+				onOpenChange={setIconDialogOpen}
+				open={iconDialogOpen}
+				title="Page icon"
+				value={doc.icon}
+			/>
 		</div>
 	);
 }

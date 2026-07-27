@@ -9,6 +9,8 @@ import {
 	FileCodeIcon,
 	FolderOpenIcon,
 	Globe02Icon,
+	PinIcon,
+	PinOffIcon,
 	PlusSignIcon,
 	PuzzleIcon,
 	RefreshIcon,
@@ -66,14 +68,21 @@ import {
 } from "@/src/components/panels/CoworkContextPanel.tsx";
 import {
 	type BuiltinTabKind,
+	type DockSide,
 	type DockTabKind,
 	dockPanelsFor,
 	dockTabKind,
 	findDockPanel,
+	isPinnableDockTabKind,
 	isPluginTabKind,
 	nativeDockPanelKey,
 } from "@/src/components/panels/dock-panels.ts";
+import { useProjectDockSlots } from "@/src/components/panels/project-dock-context.tsx";
 import { SubagentAvatar } from "@/src/components/panels/subagent-identity.tsx";
+import {
+	useCurrentTabId,
+	useIsActiveTab,
+} from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import {
@@ -87,11 +96,20 @@ import {
 	useFileTreePrefs,
 } from "@/src/hooks/useFileTreePrefs.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
+import {
+	sidebarFloatingChrome,
+	useSidebarVariant,
+} from "@/src/hooks/useSidebarVariant.ts";
 import { apiUrl, makeHeaders } from "@/src/lib/api/client.ts";
 import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
 import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
 import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
+import {
+	type ProjectDockTab,
+	useProjectDockStore,
+	visibleProjectDockTabs,
+} from "@/src/store/useProjectDockStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 // ── Panel layout icons — same visual language as SidebarToggleIcon ────────────
@@ -503,6 +521,13 @@ type TabKind = DockTabKind;
 interface PanelTab {
 	kind: TabKind;
 	label: string;
+	/** True when this tab is project-shared (visible in every chat for the folder). */
+	pinned?: boolean;
+	/**
+	 * Content is hosted above ChatPage and portaled into a slot — used for all
+	 * project-store tabs so pinning never remounts the live panel.
+	 */
+	projectHosted?: boolean;
 	uid: string;
 }
 
@@ -638,6 +663,7 @@ function usePanelTabs(initial: PanelTab[]) {
 		closeTab,
 		closeOthers,
 		closeAll,
+		adoptTab,
 		openTab,
 	};
 }
@@ -694,8 +720,12 @@ interface PanelTabBarProps {
 	// Move a tab to the sibling dock (right ⇄ bottom). Omitted if there is no
 	// sibling to move to.
 	onMoveToOtherPanel?: (uid: string) => void;
+	/** Pin/unpin a project-shareable tab. Omitted when the dock has no project folder. */
+	onTogglePin?: (uid: string) => void;
 	otherPanelIcon: typeof Cancel01Icon;
 	otherPanelLabel: string;
+	/** When set, pin is offered but disabled (e.g. no project folder open). */
+	pinDisabledReason?: string;
 	tabs: PanelTab[];
 }
 
@@ -707,6 +737,8 @@ function PanelTabBar({
 	onCloseOthers,
 	onCloseAll,
 	onMoveToOtherPanel,
+	onTogglePin,
+	pinDisabledReason,
 	otherPanelIcon,
 	otherPanelLabel,
 	onAdd,
@@ -719,88 +751,137 @@ function PanelTabBar({
 		// pills, no attached underline). The dock card already provides the floating
 		// surface, so the strip itself is transparent.
 		<div className="flex shrink-0 items-center gap-1 bg-sidebar px-1.5 py-1.5">
-			{tabs.map((tab) => (
-				<ContextMenu key={tab.uid}>
-					<ContextMenuTrigger className="flex h-8 max-w-[180px] shrink-0 items-center">
-						{/* biome-ignore lint/a11y/noStaticElementInteractions: custom tab interaction, mirrors the window tab bar */}
-						<div
-							className={cn(
-								"group/tab relative flex h-8 w-full min-w-0 items-center rounded-full transition-colors",
-								activeUid === tab.uid ? "bg-muted" : "hover:bg-muted/50"
+			{tabs.map((tab) => {
+				const canPin = Boolean(onTogglePin) && isPinnableDockTabKind(tab.kind);
+				const pinBlocked = Boolean(pinDisabledReason);
+				return (
+					<ContextMenu key={tab.uid}>
+						<ContextMenuTrigger className="flex h-8 max-w-[180px] shrink-0 items-center">
+							{/* biome-ignore lint/a11y/noStaticElementInteractions: custom tab interaction, mirrors the window tab bar */}
+							<div
+								className={cn(
+									"group/tab relative flex h-8 w-full min-w-0 items-center rounded-full transition-colors",
+									activeUid === tab.uid ? "bg-muted" : "hover:bg-muted/50"
+								)}
+								data-active={activeUid === tab.uid}
+								// Middle-click closes the tab, exactly like the window tabs.
+								onMouseDown={(e) => {
+									if (e.button === 1) {
+										e.preventDefault();
+										onCloseTab(tab.uid);
+									}
+								}}
+							>
+								{/* Icon zone — the kind icon morphs into a close X on tab hover. */}
+								<button
+									aria-label="Close tab"
+									className={cn(
+										"relative ml-2 flex size-4 shrink-0 items-center justify-center rounded-full",
+										activeUid === tab.uid
+											? "text-foreground/60"
+											: "text-muted-foreground/50"
+									)}
+									onClick={() => onCloseTab(tab.uid)}
+									type="button"
+								>
+									<TabIcon
+										className="absolute size-3 transition-all duration-150 group-hover/tab:scale-50 group-hover/tab:opacity-0"
+										spec={iconForKind(tab.kind)}
+									/>
+									<HugeiconsIcon
+										className="absolute size-3 scale-50 opacity-0 transition-all duration-150 group-hover/tab:scale-100 group-hover/tab:opacity-100"
+										icon={Cancel01Icon}
+									/>
+								</button>
+								{/* Title — activates the tab. */}
+								<button
+									className={cn(
+										"flex h-full min-w-0 flex-1 items-center gap-1 overflow-hidden pr-3 pl-1.5",
+										activeUid === tab.uid
+											? "text-foreground"
+											: "text-muted-foreground"
+									)}
+									onClick={() => onActivate(tab.uid)}
+									type="button"
+								>
+									{tab.pinned ? (
+										<Tooltip>
+											<TooltipTrigger
+												render={
+													<span className="flex shrink-0 items-center">
+														<HugeiconsIcon
+															className="size-2.5 text-muted-foreground"
+															icon={PinIcon}
+														/>
+													</span>
+												}
+											/>
+											<TooltipContent>
+												Shared across chats in this project
+											</TooltipContent>
+										</Tooltip>
+									) : null}
+									<OverflowTooltip
+										className="min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none"
+										fade
+										text={tab.label}
+									/>
+								</button>
+							</div>
+						</ContextMenuTrigger>
+						<ContextMenuContent>
+							{canPin ? (
+								<>
+									<ContextMenuItem
+										disabled={pinBlocked}
+										onClick={() => onTogglePin?.(tab.uid)}
+									>
+										<HugeiconsIcon
+											className="size-4"
+											icon={tab.pinned ? PinOffIcon : PinIcon}
+										/>
+										{tab.pinned ? "Unpin tab" : "Pin tab"}
+									</ContextMenuItem>
+									{tab.pinned ? (
+										<div className="px-2 pb-1.5 text-[11px] text-muted-foreground leading-snug">
+											Shared across chats in this project
+										</div>
+									) : pinDisabledReason ? (
+										<div className="px-2 pb-1.5 text-[11px] text-muted-foreground leading-snug">
+											{pinDisabledReason}
+										</div>
+									) : (
+										<div className="px-2 pb-1.5 text-[11px] text-muted-foreground leading-snug">
+											Share this tab across all chats in the project
+										</div>
+									)}
+									<ContextMenuSeparator />
+								</>
+							) : null}
+							<ContextMenuItem onClick={() => onCloseTab(tab.uid)}>
+								<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
+								Close
+							</ContextMenuItem>
+							<ContextMenuItem
+								disabled={tabs.length <= 1}
+								onClick={() => onCloseOthers(tab.uid)}
+							>
+								Close others
+							</ContextMenuItem>
+							<ContextMenuItem onClick={onCloseAll}>Close all</ContextMenuItem>
+							{onMoveToOtherPanel && (
+								<>
+									<ContextMenuSeparator />
+									<ContextMenuItem onClick={() => onMoveToOtherPanel(tab.uid)}>
+										<HugeiconsIcon className="size-4" icon={otherPanelIcon} />
+										Move to {otherPanelLabel}
+									</ContextMenuItem>
+								</>
 							)}
-							data-active={activeUid === tab.uid}
-							// Middle-click closes the tab, exactly like the window tabs.
-							onMouseDown={(e) => {
-								if (e.button === 1) {
-									e.preventDefault();
-									onCloseTab(tab.uid);
-								}
-							}}
-						>
-							{/* Icon zone — the kind icon morphs into a close X on tab hover. */}
-							<button
-								aria-label="Close tab"
-								className={cn(
-									"relative ml-2 flex size-4 shrink-0 items-center justify-center rounded-full",
-									activeUid === tab.uid
-										? "text-foreground/60"
-										: "text-muted-foreground/50"
-								)}
-								onClick={() => onCloseTab(tab.uid)}
-								type="button"
-							>
-								<TabIcon
-									className="absolute size-3 transition-all duration-150 group-hover/tab:scale-50 group-hover/tab:opacity-0"
-									spec={iconForKind(tab.kind)}
-								/>
-								<HugeiconsIcon
-									className="absolute size-3 scale-50 opacity-0 transition-all duration-150 group-hover/tab:scale-100 group-hover/tab:opacity-100"
-									icon={Cancel01Icon}
-								/>
-							</button>
-							{/* Title — activates the tab. */}
-							<button
-								className={cn(
-									"flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
-									activeUid === tab.uid
-										? "text-foreground"
-										: "text-muted-foreground"
-								)}
-								onClick={() => onActivate(tab.uid)}
-								type="button"
-							>
-								<OverflowTooltip
-									className="min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none"
-									fade
-									text={tab.label}
-								/>
-							</button>
-						</div>
-					</ContextMenuTrigger>
-					<ContextMenuContent>
-						<ContextMenuItem onClick={() => onCloseTab(tab.uid)}>
-							<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
-							Close
-						</ContextMenuItem>
-						<ContextMenuItem
-							disabled={tabs.length <= 1}
-							onClick={() => onCloseOthers(tab.uid)}
-						>
-							Close others
-						</ContextMenuItem>
-						<ContextMenuItem onClick={onCloseAll}>Close all</ContextMenuItem>
-						{onMoveToOtherPanel && (
-							<>
-								<ContextMenuSeparator />
-								<ContextMenuItem onClick={() => onMoveToOtherPanel(tab.uid)}>
-									<HugeiconsIcon className="size-4" icon={otherPanelIcon} />
-									Move to {otherPanelLabel}
-								</ContextMenuItem>
-							</>
-						)}
-					</ContextMenuContent>
-				</ContextMenu>
-			))}
+						</ContextMenuContent>
+					</ContextMenu>
+				);
+			})}
 
 			{/* Add tab button + dropdown */}
 			<DropdownMenu>
@@ -2455,6 +2536,59 @@ function TabContent({
 	return <DockPanelPlaceholder text="This panel is no longer available." />;
 }
 
+/**
+ * Content for a project-store dock tab. Mounted once by {@link ProjectDockHost}
+ * and portaled into the focused chat's dock slot so pin/share never remounts
+ * the live panel (terminal history, browser session, …).
+ */
+export function ProjectDockTabContent({
+	tab,
+	folder,
+	dockPanels,
+}: {
+	dockPanels: PluginDockPanel[];
+	folder?: string | null;
+	tab: Pick<ProjectDockTab, "kind" | "label" | "uid">;
+}) {
+	return (
+		<TabContent
+			dockPanels={dockPanels}
+			folder={folder}
+			tab={{
+				uid: tab.uid,
+				kind: tab.kind,
+				label: tab.label,
+				projectHosted: true,
+			}}
+		/>
+	);
+}
+
+/** Portal target for a project-hosted tab. Only the focused chat pane registers
+ *  so split views don't fight over the single live content tree. */
+function ProjectDockContentSlot({
+	uid,
+	active,
+}: {
+	active: boolean;
+	uid: string;
+}) {
+	const isActiveTab = useIsActiveTab();
+	const { registerSlot, unregisterSlot } = useProjectDockSlots();
+	const ref = useRef<HTMLDivElement | null>(null);
+
+	useEffect(() => {
+		const el = ref.current;
+		if (!(el && active && isActiveTab)) {
+			return;
+		}
+		registerSlot(uid, el);
+		return () => unregisterSlot(uid, el);
+	}, [uid, active, isActiveTab, registerSlot, unregisterSlot]);
+
+	return <div className="h-full min-h-0" ref={ref} />;
+}
+
 // ── Drag resize hook ──────────────────────────────────────────────────────────
 
 function useResizeHandle(
@@ -2668,11 +2802,109 @@ export function WorkspacePanels({
 	inspectorRequest,
 	renderPinnedSummary,
 }: WorkspacePanelsProps) {
-	// Both docks start with no tabs open: a docked panel shows the launchpad empty
-	// state (openable tab types as quick actions) rather than pre-opening tabs the
-	// user didn't ask for. Tabs are added on demand and closable back down to zero.
-	const bottom = usePanelTabs([]);
-	const right = usePanelTabs([]);
+	// Chat-local tabs (cowork / subagent / artifact / inspector, and shareable
+	// kinds when no project folder is open). Project-shareable tabs live in
+	// `useProjectDockStore` so pinning can surface the same live instance in
+	// every chat for the folder.
+	const bottomLocal = usePanelTabs([]);
+	const rightLocal = usePanelTabs([]);
+	const currentTabId = useCurrentTabId();
+	const projectByFolder = useProjectDockStore((s) => s.byFolder);
+	const addProjectTab = useProjectDockStore((s) => s.addTab);
+	const removeProjectTab = useProjectDockStore((s) => s.removeTab);
+	const toggleProjectPin = useProjectDockStore((s) => s.togglePin);
+	const setProjectSide = useProjectDockStore((s) => s.setSide);
+	const clearProjectOwner = useProjectDockStore((s) => s.clearOwner);
+
+	const projectTabs = folder ? (projectByFolder[folder] ?? []) : [];
+
+	// Drop this chat's unpinned project tabs when the window-tab unmounts so a
+	// closed conversation does not leave orphan terminals around.
+	useEffect(() => {
+		if (!(folder && currentTabId)) {
+			return;
+		}
+		return () => {
+			clearProjectOwner(folder, currentTabId);
+		};
+	}, [folder, currentTabId, clearProjectOwner]);
+
+	const visibleBottomProject = useMemo(
+		() => visibleProjectDockTabs(projectTabs, "bottom", currentTabId),
+		[projectTabs, currentTabId]
+	);
+	const visibleRightProject = useMemo(
+		() => visibleProjectDockTabs(projectTabs, "right", currentTabId),
+		[projectTabs, currentTabId]
+	);
+
+	const bottomTabs = useMemo((): PanelTab[] => {
+		const project: PanelTab[] = visibleBottomProject.map((t) => ({
+			uid: t.uid,
+			kind: t.kind,
+			label: t.label,
+			pinned: t.pinned,
+			projectHosted: true,
+		}));
+		const pinned = project.filter((t) => t.pinned);
+		const unpinned = project.filter((t) => !t.pinned);
+		return [...pinned, ...unpinned, ...bottomLocal.tabs];
+	}, [visibleBottomProject, bottomLocal.tabs]);
+
+	const rightTabs = useMemo((): PanelTab[] => {
+		const project: PanelTab[] = visibleRightProject.map((t) => ({
+			uid: t.uid,
+			kind: t.kind,
+			label: t.label,
+			pinned: t.pinned,
+			projectHosted: true,
+		}));
+		const pinned = project.filter((t) => t.pinned);
+		const unpinned = project.filter((t) => !t.pinned);
+		return [...pinned, ...unpinned, ...rightLocal.tabs];
+	}, [visibleRightProject, rightLocal.tabs]);
+
+	const [bottomActiveUid, setBottomActiveUid] = useState("");
+	const [rightActiveUid, setRightActiveUid] = useState("");
+
+	// Keep the strip selection valid as tabs come and go (including pinned tabs
+	// that appear because another chat pinned them).
+	useEffect(() => {
+		if (bottomTabs.length === 0) {
+			if (bottomActiveUid) {
+				setBottomActiveUid("");
+			}
+			return;
+		}
+		if (!bottomTabs.some((t) => t.uid === bottomActiveUid)) {
+			setBottomActiveUid(bottomTabs[0]?.uid ?? "");
+		}
+	}, [bottomTabs, bottomActiveUid]);
+
+	useEffect(() => {
+		if (rightTabs.length === 0) {
+			if (rightActiveUid) {
+				setRightActiveUid("");
+			}
+			return;
+		}
+		if (!rightTabs.some((t) => t.uid === rightActiveUid)) {
+			setRightActiveUid(rightTabs[0]?.uid ?? "");
+		}
+	}, [rightTabs, rightActiveUid]);
+
+	// Mirror local-hook focus into the merged selection (chat-only tabs).
+	useEffect(() => {
+		if (bottomLocal.tabs.some((t) => t.uid === bottomLocal.activeUid)) {
+			setBottomActiveUid(bottomLocal.activeUid);
+		}
+	}, [bottomLocal.activeUid, bottomLocal.tabs]);
+
+	useEffect(() => {
+		if (rightLocal.tabs.some((t) => t.uid === rightLocal.activeUid)) {
+			setRightActiveUid(rightLocal.activeUid);
+		}
+	}, [rightLocal.activeUid, rightLocal.tabs]);
 
 	// The enabled apps' contributed dock panels. Core only serves ENABLED plugins'
 	// contributions, so this feed IS the set of app tabs that should be offered:
@@ -2720,8 +2952,8 @@ export function WorkspacePanels({
 	// Open (or re-focus) the subagent tab when ChatPage requests one. `openTab` is
 	// re-created each render, so hold it in a ref and depend only on the request —
 	// the effect fires once per click (the nonce makes each request distinct).
-	const openRightTabRef = useRef(right.openTab);
-	openRightTabRef.current = right.openTab;
+	const openRightTabRef = useRef(rightLocal.openTab);
+	openRightTabRef.current = rightLocal.openTab;
 	useEffect(() => {
 		if (!subagentRequest) {
 			return;
@@ -2792,66 +3024,216 @@ export function WorkspacePanels({
 		}
 	}, [rightOpen]);
 
-	const activeBottomTab = bottom.tabs.find((t) => t.uid === bottom.activeUid);
-	const activeRightTab = right.tabs.find((t) => t.uid === right.activeUid);
+	const activeBottomTab = bottomTabs.find((t) => t.uid === bottomActiveUid);
+	const activeRightTab = rightTabs.find((t) => t.uid === rightActiveUid);
+
+	const addToProject = (
+		side: DockSide,
+		kind: TabKind,
+		label: string,
+		visible: ProjectDockTab[]
+	) => {
+		if (!(folder && currentTabId)) {
+			return null;
+		}
+		const sameKind = visible.filter((t) => t.kind === kind);
+		return addProjectTab(folder, {
+			kind,
+			label: sameKind.length === 0 ? label : `${label} ${sameKind.length + 1}`,
+			side,
+			pinned: false,
+			ownerTabId: currentTabId,
+		});
+	};
 
 	// ── Reusable panel cards (shared by docked + floating-peek renders) ──────────
 
-	const addBottomTab = (kind: TabKind) =>
-		bottom.addTab(
-			kind,
-			bottomTabTypes.find((t) => t.kind === kind)?.label ?? kind
-		);
-	const addRightTab = (kind: TabKind) =>
-		right.addTab(
-			kind,
-			rightTabTypes.find((t) => t.kind === kind)?.label ?? kind
-		);
+	const addBottomTab = (kind: TabKind) => {
+		const label = bottomTabTypes.find((t) => t.kind === kind)?.label ?? kind;
+		if (folder && isPinnableDockTabKind(kind)) {
+			const entry = addToProject("bottom", kind, label, visibleBottomProject);
+			if (entry) {
+				setBottomActiveUid(entry.uid);
+				return;
+			}
+		}
+		bottomLocal.addTab(kind, label);
+	};
+	const addRightTab = (kind: TabKind) => {
+		const label = rightTabTypes.find((t) => t.kind === kind)?.label ?? kind;
+		if (folder && isPinnableDockTabKind(kind)) {
+			const entry = addToProject("right", kind, label, visibleRightProject);
+			if (entry) {
+				setRightActiveUid(entry.uid);
+				return;
+			}
+		}
+		rightLocal.addTab(kind, label);
+	};
+
+	const closeBottomTab = (uid: string) => {
+		if (folder && projectTabs.some((t) => t.uid === uid)) {
+			removeProjectTab(folder, uid);
+			return;
+		}
+		bottomLocal.closeTab(uid);
+	};
+	const closeRightTab = (uid: string) => {
+		if (folder && projectTabs.some((t) => t.uid === uid)) {
+			removeProjectTab(folder, uid);
+			return;
+		}
+		rightLocal.closeTab(uid);
+	};
+
+	const closeBottomOthers = (uid: string) => {
+		if (folder) {
+			for (const t of visibleBottomProject) {
+				if (t.uid !== uid && !t.pinned) {
+					removeProjectTab(folder, t.uid);
+				}
+			}
+		}
+		if (bottomLocal.tabs.some((t) => t.uid === uid)) {
+			bottomLocal.closeOthers(uid);
+		} else {
+			bottomLocal.closeAll();
+		}
+		setBottomActiveUid(uid);
+	};
+	const closeRightOthers = (uid: string) => {
+		if (folder) {
+			for (const t of visibleRightProject) {
+				if (t.uid !== uid && !t.pinned) {
+					removeProjectTab(folder, t.uid);
+				}
+			}
+		}
+		if (rightLocal.tabs.some((t) => t.uid === uid)) {
+			rightLocal.closeOthers(uid);
+		} else {
+			rightLocal.closeAll();
+		}
+		setRightActiveUid(uid);
+	};
+
+	const closeBottomAll = () => {
+		if (folder) {
+			for (const t of visibleBottomProject) {
+				if (!t.pinned) {
+					removeProjectTab(folder, t.uid);
+				}
+			}
+		}
+		bottomLocal.closeAll();
+		const pinnedLeft = visibleBottomProject.find((t) => t.pinned);
+		setBottomActiveUid(pinnedLeft?.uid ?? "");
+	};
+	const closeRightAll = () => {
+		if (folder) {
+			for (const t of visibleRightProject) {
+				if (!t.pinned) {
+					removeProjectTab(folder, t.uid);
+				}
+			}
+		}
+		rightLocal.closeAll();
+		const pinnedLeft = visibleRightProject.find((t) => t.pinned);
+		setRightActiveUid(pinnedLeft?.uid ?? "");
+	};
+
+	const onTogglePin = (uid: string) => {
+		if (!folder) {
+			return;
+		}
+		toggleProjectPin(folder, uid);
+	};
 
 	// Move a tab between the two docks, preserving its identity, and reveal the
 	// destination dock if it was closed so the moved tab is visible.
 	const moveTabToRight = (uid: string) => {
-		const tab = bottom.tabs.find((t) => t.uid === uid);
+		const projectTab = projectTabs.find((t) => t.uid === uid);
+		if (folder && projectTab) {
+			setProjectSide(folder, uid, "right");
+			setRightActiveUid(uid);
+			if (!rightOpen) {
+				onRightOpenChange(true);
+			}
+			return;
+		}
+		const tab = bottomLocal.tabs.find((t) => t.uid === uid);
 		if (!tab) {
 			return;
 		}
-		bottom.closeTab(uid);
-		right.adoptTab(tab);
+		bottomLocal.closeTab(uid);
+		rightLocal.adoptTab(tab);
 		if (!rightOpen) {
 			onRightOpenChange(true);
 		}
 	};
 	const moveTabToBottom = (uid: string) => {
-		const tab = right.tabs.find((t) => t.uid === uid);
+		const projectTab = projectTabs.find((t) => t.uid === uid);
+		if (folder && projectTab) {
+			setProjectSide(folder, uid, "bottom");
+			setBottomActiveUid(uid);
+			if (!bottomOpen) {
+				onBottomOpenChange(true);
+			}
+			return;
+		}
+		const tab = rightLocal.tabs.find((t) => t.uid === uid);
 		if (!tab) {
 			return;
 		}
-		right.closeTab(uid);
-		bottom.adoptTab(tab);
+		rightLocal.closeTab(uid);
+		bottomLocal.adoptTab(tab);
 		if (!bottomOpen) {
 			onBottomOpenChange(true);
 		}
 	};
 
+	const pinDisabledReason = folder
+		? undefined
+		: "Open a project to pin and share tabs across chats";
+
+	// Floating = rounded card rail (matches left shadcn sidebar-inner). Inset =
+	// flush inside the already-carded SidebarInset canvas — no nested chrome.
+	const [sidebarVariant] = useSidebarVariant();
+	const floatingChrome = sidebarVariant === "floating";
+	const panelChrome = cn(
+		"flex flex-1 flex-col overflow-hidden bg-sidebar",
+		floatingChrome && sidebarFloatingChrome
+	);
+
 	const bottomCard = (onClosePanel: () => void) => (
-		<div className="mx-2 mb-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-sidebar shadow-2xl ring-1 ring-border/40">
+		<div
+			className={cn(
+				panelChrome,
+				"min-h-0",
+				floatingChrome ? "mx-2 mb-2" : null
+			)}
+		>
 			<PanelTabBar
-				activeUid={bottom.activeUid}
+				activeUid={bottomActiveUid}
 				addTypes={bottomTabTypes}
 				iconForKind={iconForKind}
-				onActivate={bottom.setActiveUid}
+				onActivate={setBottomActiveUid}
 				onAdd={addBottomTab}
-				onCloseAll={bottom.closeAll}
-				onCloseOthers={bottom.closeOthers}
+				onCloseAll={closeBottomAll}
+				onCloseOthers={closeBottomOthers}
 				onClosePanel={onClosePanel}
-				onCloseTab={bottom.closeTab}
+				onCloseTab={closeBottomTab}
 				onMoveToOtherPanel={moveTabToRight}
+				onTogglePin={onTogglePin}
 				otherPanelIcon={ArrowRight01Icon}
 				otherPanelLabel="right panel"
-				tabs={bottom.tabs}
+				pinDisabledReason={pinDisabledReason}
+				tabs={bottomTabs}
 			/>
 			<div className="min-h-0 flex-1 overflow-hidden">
-				{activeBottomTab ? (
+				{activeBottomTab?.projectHosted ? (
+					<ProjectDockContentSlot active uid={activeBottomTab.uid} />
+				) : activeBottomTab ? (
 					<TabContent
 						dockPanels={dockPanels}
 						folder={folder}
@@ -2865,24 +3247,34 @@ export function WorkspacePanels({
 	);
 
 	const rightCard = (onClosePanel: () => void) => (
-		<div className="my-2 mr-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-sidebar shadow-2xl ring-1 ring-border/40">
+		<div
+			className={cn(
+				panelChrome,
+				"min-w-0",
+				floatingChrome ? "my-2 mr-2" : null
+			)}
+		>
 			<PanelTabBar
-				activeUid={right.activeUid}
+				activeUid={rightActiveUid}
 				addTypes={rightTabTypes}
 				iconForKind={iconForKind}
-				onActivate={right.setActiveUid}
+				onActivate={setRightActiveUid}
 				onAdd={addRightTab}
-				onCloseAll={right.closeAll}
-				onCloseOthers={right.closeOthers}
+				onCloseAll={closeRightAll}
+				onCloseOthers={closeRightOthers}
 				onClosePanel={onClosePanel}
-				onCloseTab={right.closeTab}
+				onCloseTab={closeRightTab}
 				onMoveToOtherPanel={moveTabToBottom}
+				onTogglePin={onTogglePin}
 				otherPanelIcon={ArrowDown01Icon}
 				otherPanelLabel="bottom panel"
-				tabs={right.tabs}
+				pinDisabledReason={pinDisabledReason}
+				tabs={rightTabs}
 			/>
 			<div className="min-h-0 flex-1 overflow-hidden">
-				{activeRightTab ? (
+				{activeRightTab?.projectHosted ? (
+					<ProjectDockContentSlot active uid={activeRightTab.uid} />
+				) : activeRightTab ? (
 					<TabContent
 						artifactView={artifactView}
 						cowork={cowork}
@@ -3047,7 +3439,10 @@ export function WorkspacePanels({
 			    over it. display:none when hidden, same as the bottom panel, so it
 			    never flashes on first mount. */}
 			<div
-				className="absolute top-[58px] bottom-0 z-10"
+				className={cn(
+					"absolute bottom-0 z-10",
+					floatingChrome ? "top-[58px]" : "top-12"
+				)}
 				style={{
 					right: rightDockWidth,
 					width: pinnedColumnWidth,
@@ -3055,7 +3450,12 @@ export function WorkspacePanels({
 					transition: rightResizing ? "none" : `right 300ms ${DOCK_EASE}`,
 				}}
 			>
-				<div className="h-full overflow-y-auto py-2 pr-2 pl-1">
+				<div
+					className={cn(
+						"h-full overflow-y-auto pl-1",
+						floatingChrome ? "py-2 pr-2" : "pr-0"
+					)}
+				>
 					{pinnedDocked && renderPinnedSummary?.({ floating: false })}
 				</div>
 			</div>
@@ -3075,12 +3475,16 @@ export function WorkspacePanels({
 
 			{/* The one right-panel instance — pinned to the right edge, slides via
 			    transform for both docking and hover-peek. It starts BELOW the frosted
-			    titlebar (top-12 = the bar's h-12) so the full-width bar keeps its
-			    right-side panel-toggle buttons visible and clickable while the panel
-			    is open — otherwise this z-20 layer covers the z-10 titlebar and you
-			    can no longer reach the button that hides it. */}
+			    titlebar so the full-width bar keeps its right-side panel-toggle
+			    buttons visible and clickable while the panel is open — otherwise this
+			    z-20 layer covers the z-10 titlebar and you can no longer reach the
+			    button that hides it. Floating chrome clears the titlebar's top-2
+			    offset (58px); inset chrome sits flush under h-12. */}
 			<div
-				className="absolute top-[58px] right-0 bottom-0 z-20 flex flex-row"
+				className={cn(
+					"absolute right-0 bottom-0 z-20 flex flex-row",
+					floatingChrome ? "top-[58px]" : "top-12"
+				)}
 				onMouseEnter={rightOpen || isMobile ? undefined : showRightPeek}
 				onMouseLeave={rightOpen || isMobile ? undefined : hideRightPeek}
 				style={{
@@ -3100,7 +3504,10 @@ export function WorkspacePanels({
 			    where it would also swallow the edge-swipe back gesture. */}
 			{!(rightOpen || isMobile) && (
 				<div
-					className="absolute top-[58px] right-0 bottom-0 z-30 w-2"
+					className={cn(
+						"absolute right-0 bottom-0 z-30 w-2",
+						floatingChrome ? "top-[58px]" : "top-12"
+					)}
 					onMouseEnter={showRightPeek}
 					onMouseLeave={hideRightPeek}
 				/>

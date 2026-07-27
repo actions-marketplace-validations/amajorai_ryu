@@ -45,7 +45,7 @@ import { NodeFolderBrowser } from "./NodeFolderBrowser.tsx";
 const PATH_SEP = /[\\/]/;
 
 export function ProjectPicker() {
-	const { folder, setFolder } = useWorkspaceStore();
+	const { folder, projectNames, setFolder } = useWorkspaceStore();
 	const [menuOpen, setMenuOpen] = useState(false);
 	// The create-folder and browse dialogs live OUTSIDE the menu so they survive
 	// the menu closing on select (a dialog nested in the menu would unmount with it).
@@ -64,7 +64,9 @@ export function ProjectPicker() {
 		[setFolder]
 	);
 
-	const folderName = folder ? folder.split(PATH_SEP).at(-1) : null;
+	const folderName = folder
+		? projectNames[folder]?.trim() || folder.split(PATH_SEP).at(-1) || null
+		: null;
 
 	return (
 		<>
@@ -137,6 +139,7 @@ export function ProjectPickerContent({
 		folder,
 		recentFolders,
 		projectIcons,
+		projectNames,
 		setFolder,
 		removeProject,
 		clearFolder,
@@ -175,7 +178,15 @@ export function ProjectPickerContent({
 	const hasRecents = recentFolders.length > 0;
 	const rq = recentQuery.trim().toLowerCase();
 	const filteredRecents = rq
-		? recentFolders.filter((p) => p.toLowerCase().includes(rq))
+		? recentFolders.filter((p) => {
+				const leaf = p.split(PATH_SEP).at(-1) ?? p;
+				const label = projectNames[p]?.trim() || leaf;
+				return (
+					p.toLowerCase().includes(rq) ||
+					label.toLowerCase().includes(rq) ||
+					leaf.toLowerCase().includes(rq)
+				);
+			})
 		: recentFolders;
 
 	return (
@@ -204,7 +215,10 @@ export function ProjectPickerContent({
 						</p>
 					) : (
 						filteredRecents.map((path) => {
-							const name = path.split(PATH_SEP).at(-1) ?? path;
+							const name =
+								projectNames[path]?.trim() ||
+								path.split(PATH_SEP).at(-1) ||
+								path;
 							const isActive = path === folder;
 							return (
 								<div
@@ -257,8 +271,6 @@ export function ProjectPickerContent({
 							);
 						})
 					)}
-
-					<div className="mx-2 my-1 border-border border-t" />
 				</>
 			)}
 
@@ -273,7 +285,7 @@ export function ProjectPickerContent({
 						/>
 						<span className="text-foreground/70">New project</span>
 					</DropdownMenuSubTrigger>
-					<DropdownMenuSubContent className="w-64">
+					<DropdownMenuSubContent>
 						{onBrowse && (
 							<DropdownMenuItem onClick={handleBrowse}>
 								<HugeiconsIcon

@@ -22,7 +22,9 @@ companion-spike = []
 dev-variant = []
 
 [dependencies]
-tauri = { version = "2.10.3", features = ["tray-icon", "macos-private-api", "image-png"] }
+# `devtools` keeps Toggle DevTools / Inspect available when Developer Mode is
+# on in packaged builds (debug builds already enable the inspector).
+tauri = { version = "2.10.3", features = ["tray-icon", "macos-private-api", "image-png", "devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-store = "2"

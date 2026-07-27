@@ -73,6 +73,8 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "finetune.cancel" => Some("host.finetune_cancel"),
         "finetune.adapters" => Some("host.finetune_adapters"),
         "finetune.merge" => Some("host.finetune_merge"),
+        "conversation.setTitle" => Some("host.setConversationTitle"),
+        "preferences.get" => Some("host.getPreference"),
         _ => None,
     }
 }
@@ -541,6 +543,14 @@ mod tests {
             bridge_path_for("finetune.merge"),
             Some("host.finetune_merge")
         );
+        assert_eq!(
+            bridge_path_for("conversation.setTitle"),
+            Some("host.setConversationTitle")
+        );
+        assert_eq!(
+            bridge_path_for("preferences.get"),
+            Some("host.getPreference")
+        );
         // `finetune.stream` is a STREAMING method — it has a required grant but no
         // unary bridge path (it's handled by the stream endpoint, not dispatch).
         assert_eq!(bridge_path_for("finetune.stream"), None);
@@ -572,6 +582,14 @@ mod tests {
         );
         assert_eq!(required_grant_for("finetune.start"), Some("finetune:runs"));
         assert_eq!(required_grant_for("finetune.get"), Some("finetune:runs"));
+        assert_eq!(
+            required_grant_for("conversation.setTitle"),
+            Some("conversation:set-title")
+        );
+        assert_eq!(
+            required_grant_for("preferences.get"),
+            Some("preferences:read")
+        );
         // `view.action` is grant-gated but has NO unary bridge path — it is
         // dispatched by its own branch (501 until an app hook runtime consumes it).
         assert_eq!(required_grant_for("view.action"), Some("views:actions"));
@@ -600,6 +618,8 @@ mod tests {
             "finetune.cancel",
             "finetune.adapters",
             "finetune.merge",
+            "conversation.setTitle",
+            "preferences.get",
         ] {
             assert!(bridge_path_for(method).is_some());
             assert!(required_grant_for(method).is_some());

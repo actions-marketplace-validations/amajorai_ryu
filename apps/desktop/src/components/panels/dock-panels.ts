@@ -48,6 +48,21 @@ export function isPluginTabKind(kind: DockTabKind): kind is PluginTabKind {
 }
 
 /**
+ * Kinds that can be pinned and shared across chats in the same project folder.
+ *
+ * Workspace infrastructure (terminal, files, changes, app panels) belongs to the
+ * project, not a single chat — pinning opts them into that shared strip. Chat-run
+ * panels (cowork / subagent / artifact / inspector) stay conversation-local and
+ * are never pinnable.
+ */
+export function isPinnableDockTabKind(kind: DockTabKind): boolean {
+	if (isPluginTabKind(kind)) {
+		return true;
+	}
+	return kind === "terminal" || kind === "files" || kind === "codereview";
+}
+
+/**
  * The tab kind identifying a contributed panel: `plugin:<pluginId>:<panelId>`.
  *
  * This is the same key `pluginDockPanelKey` in `hooks/usePluginContributions.ts`

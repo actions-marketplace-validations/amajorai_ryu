@@ -147,7 +147,7 @@ export function AgentChat({
 			onRemoveImage={attachments?.onRemoveImage}
 			onSend={onSend}
 			onStop={onStop}
-			placeholder={isEmpty ? "Send a message..." : "Ask a follow up"}
+			placeholder={isEmpty ? "Send a message" : "Ask a follow up"}
 			questionBar={
 				pendingQuestion
 					? {

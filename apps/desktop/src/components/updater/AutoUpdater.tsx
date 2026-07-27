@@ -91,6 +91,9 @@ export async function installUpdate(verdict: UpdateCheck) {
 	// command is unavailable (older Core-less shell) or fails, we fall through to
 	// the manual-download fallback rather than trapping the user.
 	const channel = getReleaseChannel();
+	console.info(
+		`[FIX] installUpdate.entry: channel=${channel} current=${verdict.current} latest=${verdict.latest} update_available=${verdict.update_available} hasTauri=${typeof window !== "undefined" && "__TAURI_INTERNALS__" in window}`
+	);
 	if (channel !== "stable") {
 		const progressId = sileo.info({
 			title: `Downloading ${channel} update v${verdict.latest}…`,
@@ -151,6 +154,9 @@ export async function installUpdate(verdict: UpdateCheck) {
 		if (!update) {
 			// Core saw a release but the signed Tauri feed isn't reachable yet
 			// (typical in dev / before the release CI runs). Offer manual install.
+			console.info(
+				"[FIX] installUpdate.branch: took=stable-no-tauri-feed soft-success"
+			);
 			sileo.dismiss(progressId);
 			sileo.info({
 				title: `Update v${verdict.latest} available`,
@@ -166,6 +172,7 @@ export async function installUpdate(verdict: UpdateCheck) {
 			return;
 		}
 
+		console.info("[FIX] installUpdate.branch: took=stable-downloadAndInstall");
 		await update.downloadAndInstall();
 		sileo.dismiss(progressId);
 		sileo.success({
@@ -176,7 +183,11 @@ export async function installUpdate(verdict: UpdateCheck) {
 		setTimeout(() => {
 			relaunch().catch(() => undefined);
 		}, 1500);
+		console.info("[FIX] installUpdate.exit: result=installed-relaunching");
 	} catch (err) {
+		console.info(
+			`[FIX] installUpdate.threw-caught: err=${err instanceof Error ? err.message : String(err)} soft-success-no-rethrow`
+		);
 		sileo.dismiss(progressId);
 		sileo.error({
 			title: "Update failed",

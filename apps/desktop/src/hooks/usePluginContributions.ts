@@ -1,5 +1,5 @@
 // Data-driven bridge between Core's enabled-plugin contributions
-// (`GET /api/plugins/contributions`) and the desktop shell. Two hooks:
+// (`GET /api/plugins/contributions`) and the desktop shell. Three hooks:
 //
 //   - `usePluginContributions()` — the shared, react-query-cached read of every
 //     enabled plugin's declarative contributions (companions, slash commands, …).
@@ -8,13 +8,21 @@
 //     navigable route per contributed **companion** into the singleton
 //     `contributionRegistry` so `RouteOutlet` can render it. Call this ONCE from a
 //     component that is always mounted (LayoutContent), never the palette.
+//   - `usePluginContributionTabIcons()` — seeds the title-bar tab-icon registry
+//     from companion / sidebar_section / sidebar_button `icon` fields so tabs
+//     inherit the same Iconify/Hugeicons glyph the sidebar shows.
 //
-// Nothing is hardcoded per-plugin: routes are minted purely from the API payload.
+// Nothing is hardcoded per-plugin: routes and tab icons are minted purely from
+// the API payload.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createElement, useEffect, useState } from "react";
 import { HelloDeclarativeViewHarness } from "@/src/components/views/DeclarativeView.tsx";
 import { contributionRegistry } from "@/src/contributions/registry.ts";
+import {
+	registerTabIcon,
+	ruleFromItemTarget,
+} from "@/src/contributions/tab-icon-registry.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import {
 	getPluginContributions,
@@ -172,4 +180,67 @@ export function usePluginContributionRoutes(): void {
 			}
 		};
 	}, [companions, views]);
+}
+
+/**
+ * Seed the title-bar tab-icon registry from enabled plugin contributions so
+ * companions / sidebar sections / sidebar buttons paint their declared Iconify
+ * (or Hugeicons) glyph on tabs without each app calling `shell.registerTabIcon`.
+ * Call ONCE from Layout alongside {@link usePluginContributionRoutes}.
+ */
+export function usePluginContributionTabIcons(): void {
+	const { companions, sidebar_sections, sidebar_buttons } =
+		usePluginContributions();
+
+	useEffect(() => {
+		const disposers: (() => void)[] = [];
+
+		for (const companion of companions) {
+			if (!companion.icon) {
+				continue;
+			}
+			disposers.push(
+				registerTabIcon({
+					id: `contrib:companion:${companion.id}`,
+					pathPrefix: pluginCompanionPath(companion.id),
+					icon: companion.icon,
+					priority: 15,
+				})
+			);
+		}
+
+		for (const section of sidebar_sections) {
+			if (!(section.icon && section.spec?.itemTarget)) {
+				continue;
+			}
+			const rule = ruleFromItemTarget(
+				section.spec.itemTarget,
+				section.icon,
+				`contrib:section:${section.plugin}:${section.id}`
+			);
+			if (rule) {
+				disposers.push(registerTabIcon(rule));
+			}
+		}
+
+		for (const button of sidebar_buttons) {
+			if (!(button.icon && button.target?.startsWith("/"))) {
+				continue;
+			}
+			disposers.push(
+				registerTabIcon({
+					id: `contrib:button:${button.plugin}:${button.id}`,
+					pathPrefix: button.target.split("?")[0] ?? button.target,
+					icon: button.icon,
+					priority: 15,
+				})
+			);
+		}
+
+		return () => {
+			for (const dispose of disposers) {
+				dispose();
+			}
+		};
+	}, [companions, sidebar_sections, sidebar_buttons]);
 }

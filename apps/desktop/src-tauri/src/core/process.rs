@@ -152,13 +152,6 @@ impl RyuCoreProcess {
 
 	/// Gracefully stop the process: SIGTERM → 5 s wait → SIGKILL.
 	pub async fn stop(&mut self) -> Result<()> {
-		// If we don't have a child handle, just cleanup the PID file
-		if self.child.is_none() {
-			let _ = tokio::fs::remove_file(&self.pid_path).await;
-			self.state = ProcessState::Stopped;
-			return Ok(());
-		}
-
 		self.state = ProcessState::Stopping;
 
 		// Abort log forwarding tasks first.
@@ -166,31 +159,43 @@ impl RyuCoreProcess {
 			handle.abort();
 		}
 
-		let child = self.child.as_mut().unwrap();
+		if let Some(child) = self.child.as_mut() {
+			// Send graceful termination signal.
+			#[cfg(unix)]
+			if let Some(raw_pid) = child.id() {
+				use nix::sys::signal::{kill, Signal};
+				use nix::unistd::Pid;
+				let _ = kill(Pid::from_raw(raw_pid as i32), Signal::SIGTERM);
+			}
 
-		// Send graceful termination signal.
-		#[cfg(unix)]
-		if let Some(raw_pid) = child.id() {
-			use nix::sys::signal::{kill, Signal};
-			use nix::unistd::Pid;
-			let _ = kill(Pid::from_raw(raw_pid as i32), Signal::SIGTERM);
-		}
+			#[cfg(windows)]
+			if let Some(raw_pid) = child.id() {
+				// `/T` kills the whole tree (gateway + plugin sidecars). Without it
+				// orphaned children keep SQLite handles open and the reset wipe
+				// silently fails on Windows.
+				let _ = std::process::Command::new("taskkill")
+					.args(["/F", "/T", "/PID", &raw_pid.to_string()])
+					.no_window()
+					.output();
+			}
 
-		#[cfg(windows)]
-		{
-			let _ = child.kill().await;
-		}
-
-		// Wait up to 5 s for the process to exit; force-kill on timeout.
-		let child = self.child.as_mut().unwrap();
-		match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-			Ok(_) => {}
-			Err(_) => {
-				tracing::warn!("ryu-core did not exit within 5 s — sending SIGKILL");
-				let _ = child.kill().await;
-				let _ = child.wait().await;
+			// Wait up to 5 s for the process to exit; force-kill on timeout.
+			match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+				Ok(_) => {}
+				Err(_) => {
+					tracing::warn!("ryu-core did not exit within 5 s — sending SIGKILL");
+					let _ = child.kill().await;
+					let _ = child.wait().await;
+				}
 			}
 		}
+
+		// Always sweep orphans: PID file (if we ever wrote one) AND whoever is
+		// still listening on this profile's Core/gateway ports. Turbo-owned Core
+		// in dev never gets a PID file from us, so port kill is what makes
+		// restart/reset actually stop the process that holds the data-dir locks.
+		self.cleanup_orphan().await;
+		kill_profile_listeners().await;
 
 		let _ = tokio::fs::remove_file(&self.pid_path).await;
 		self.state = ProcessState::Stopped;
@@ -218,7 +223,7 @@ impl RyuCoreProcess {
 			#[cfg(windows)]
 			{
 				let _ = std::process::Command::new("taskkill")
-					.args(["/F", "/PID", &child.id().unwrap().to_string()])
+					.args(["/F", "/T", "/PID", &child.id().unwrap().to_string()])
 					.no_window()
 					.output();
 			}
@@ -278,23 +283,103 @@ impl RyuCoreProcess {
 		let Ok(pid) = content.trim().parse::<i32>() else {
 			return;
 		};
+		kill_pid_tree(pid).await;
+	}
+}
 
-		#[cfg(unix)]
-		{
-			use nix::sys::signal::{kill, Signal};
-			use nix::unistd::Pid;
-			let nix_pid = Pid::from_raw(pid);
-			let _ = kill(nix_pid, Signal::SIGTERM);
-			tokio::time::sleep(Duration::from_secs(2)).await;
-			let _ = kill(nix_pid, Signal::SIGKILL);
+/// Force-kill whatever is still bound to this profile's Core + gateway ports.
+///
+/// Needed because in dev turbo owns Core (no desktop PID file), and a node reset
+/// previously only wrote `.reset-pending` then no-op'd the restart — leaving the
+/// old process holding every SQLite lock so the wipe could never delete agents /
+/// plugins / apps DBs.
+async fn kill_profile_listeners() {
+	let core = crate::profile::core_port();
+	// Gateway base is Core+1 (7981 release / 8981 dev) — matches Core's profile.
+	let gateway = core.saturating_add(1);
+	for port in [core, gateway] {
+		for pid in pids_listening_on(port) {
+			tracing::warn!("killing pid {pid} still listening on port {port}");
+			kill_pid_tree(pid).await;
 		}
+	}
+}
 
-		#[cfg(windows)]
-		{
-			let _ = std::process::Command::new("taskkill")
-				.args(["/F", "/PID", &pid.to_string()])
-				.no_window()
-				.output();
+async fn kill_pid_tree(pid: i32) {
+	if pid <= 0 {
+		return;
+	}
+	#[cfg(unix)]
+	{
+		use nix::sys::signal::{kill, Signal};
+		use nix::unistd::Pid;
+		let nix_pid = Pid::from_raw(pid);
+		let _ = kill(nix_pid, Signal::SIGTERM);
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		let _ = kill(nix_pid, Signal::SIGKILL);
+	}
+	#[cfg(windows)]
+	{
+		let _ = std::process::Command::new("taskkill")
+			.args(["/F", "/T", "/PID", &pid.to_string()])
+			.no_window()
+			.output();
+	}
+}
+
+/// PIDs in LISTEN state on `port` (IPv4/IPv6). Best-effort; empty on parse failure.
+fn pids_listening_on(port: u16) -> Vec<i32> {
+	#[cfg(windows)]
+	{
+		let Ok(output) = std::process::Command::new("netstat")
+			.args(["-ano", "-p", "tcp"])
+			.no_window()
+			.output()
+		else {
+			return Vec::new();
+		};
+		let text = String::from_utf8_lossy(&output.stdout);
+		let needle = format!(":{port}");
+		let mut pids = Vec::new();
+		for line in text.lines() {
+			let line = line.trim();
+			// e.g. "TCP    127.0.0.1:8980    0.0.0.0:0    LISTENING    51588"
+			if !(line.contains("LISTENING") && line.contains(&needle)) {
+				continue;
+			}
+			let Some(pid_str) = line.split_whitespace().last() else {
+				continue;
+			};
+			let Ok(pid) = pid_str.parse::<i32>() else {
+				continue;
+			};
+			// Ensure the port token is a local bind (`:8980` as address end), not a
+			// remote ephemeral that happens to contain the digits.
+			let parts: Vec<&str> = line.split_whitespace().collect();
+			if parts.len() < 4 {
+				continue;
+			}
+			let local = parts[1];
+			if !local.ends_with(&needle) {
+				continue;
+			}
+			if !pids.contains(&pid) {
+				pids.push(pid);
+			}
 		}
+		pids
+	}
+	#[cfg(unix)]
+	{
+		let Ok(output) = std::process::Command::new("lsof")
+			.args(["-ti", &format!("TCP:{port}"), "-sTCP:LISTEN"])
+			.output()
+		else {
+			return Vec::new();
+		};
+		String::from_utf8_lossy(&output.stdout)
+			.split_whitespace()
+			.filter_map(|s| s.parse::<i32>().ok())
+			.collect()
 	}
 }

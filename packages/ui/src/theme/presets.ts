@@ -1006,6 +1006,87 @@ export interface CustomTokens {
 	sidebar: string;
 }
 
+const HEX_6_RE = /^#[0-9a-fA-F]{6}$/;
+const HEX_3_RE = /^#[0-9a-fA-F]{3}$/;
+const OKLCH_RE = /oklch\(\s*([\d.]+%?)\s+([\d.]+)\s+([\d.]+)/;
+const RGBA_CHANNEL_RE = /rgba?\((\d+),\s*(\d+),\s*(\d+)/;
+
+function channelToHex(v: number): string {
+	return Math.round(Math.min(1, Math.max(0, v)) * 255)
+		.toString(16)
+		.padStart(2, "0");
+}
+
+function linearToSrgb(x: number): number {
+	return x <= 0.003_130_8 ? 12.92 * x : 1.055 * x ** (1 / 2.4) - 0.055;
+}
+
+/** OKLCH → sRGB hex (Björn Ottosson OKLab matrices). Lightness may be 0–1 or %. */
+function oklchToHex(lRaw: string, cRaw: string, hRaw: string): string {
+	const l = lRaw.endsWith("%") ? Number.parseFloat(lRaw) / 100 : Number(lRaw);
+	const c = Number(cRaw);
+	const h = Number(hRaw);
+	const hRad = (h * Math.PI) / 180;
+	const a = c * Math.cos(hRad);
+	const b = c * Math.sin(hRad);
+
+	const lp = (l + 0.396_337_777_4 * a + 0.215_803_757_3 * b) ** 3;
+	const mp = (l - 0.105_561_345_8 * a - 0.063_854_172_8 * b) ** 3;
+	const sp = (l - 0.089_484_177_5 * a - 1.291_485_548 * b) ** 3;
+
+	const r = 4.076_741_662_1 * lp - 3.307_711_591_3 * mp + 0.230_969_929_2 * sp;
+	const g = -1.268_438_004_6 * lp + 2.609_757_401_1 * mp - 0.341_319_396_5 * sp;
+	const bb = -0.004_196_086_3 * lp - 0.703_418_614_7 * mp + 1.707_614_701 * sp;
+
+	return `#${channelToHex(linearToSrgb(r))}${channelToHex(linearToSrgb(g))}${channelToHex(linearToSrgb(bb))}`;
+}
+
+function colorToHex(color: string): string | null {
+	if (HEX_6_RE.test(color)) {
+		return color;
+	}
+	if (HEX_3_RE.test(color)) {
+		const r = color[1];
+		const g = color[2];
+		const b = color[3];
+		return `#${r}${r}${g}${g}${b}${b}`;
+	}
+	const rgba = color.match(RGBA_CHANNEL_RE);
+	if (rgba) {
+		const toHex = (n: string) => Number(n).toString(16).padStart(2, "0");
+		return `#${toHex(rgba[1])}${toHex(rgba[2])}${toHex(rgba[3])}`;
+	}
+	const oklchMatch = color.match(OKLCH_RE);
+	if (oklchMatch) {
+		return oklchToHex(oklchMatch[1], oklchMatch[2], oklchMatch[3]);
+	}
+	return null;
+}
+
+function relativeLuminance(hex: string): number {
+	const r = Number.parseInt(hex.slice(1, 3), 16) / 255;
+	const g = Number.parseInt(hex.slice(3, 5), 16) / 255;
+	const b = Number.parseInt(hex.slice(5, 7), 16) / 255;
+	return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+/**
+ * Pick black or white ink for text/icons on `color`. Uses relative luminance
+ * of the resolved sRGB hex — not theme mode — so a dark-mode blue primary
+ * still gets light ink (Switch thumbs read `--primary-foreground`).
+ * Falls back to mode when the colour string cannot be parsed.
+ */
+export function contrastForeground(
+	color: string,
+	mode: "light" | "dark"
+): string {
+	const hex = colorToHex(color);
+	if (!hex) {
+		return mode === "light" ? "#ffffff" : "#000000";
+	}
+	return relativeLuminance(hex) > 0.5 ? "#000000" : "#ffffff";
+}
+
 export function customTokensToVariant(
 	id: string,
 	label: string,
@@ -1013,6 +1094,7 @@ export function customTokensToVariant(
 	t: CustomTokens
 ): ThemeVariant {
 	const card = t.sidebar;
+	const primaryFg = contrastForeground(t.primary, mode);
 	return {
 		id,
 		label,
@@ -1031,7 +1113,7 @@ export function customTokensToVariant(
 			"--popover": card,
 			"--popover-foreground": t.foreground,
 			"--primary": t.primary,
-			"--primary-foreground": mode === "light" ? "#ffffff" : "#000000",
+			"--primary-foreground": primaryFg,
 			"--secondary": t.muted,
 			"--secondary-foreground": t.foreground,
 			"--muted": t.muted,
@@ -1045,7 +1127,7 @@ export function customTokensToVariant(
 			"--sidebar": t.sidebar,
 			"--sidebar-foreground": t.foreground,
 			"--sidebar-primary": t.primary,
-			"--sidebar-primary-foreground": mode === "light" ? "#ffffff" : "#000000",
+			"--sidebar-primary-foreground": primaryFg,
 			"--sidebar-accent": t.muted,
 			"--sidebar-accent-foreground": t.foreground,
 			"--sidebar-border": t.border,

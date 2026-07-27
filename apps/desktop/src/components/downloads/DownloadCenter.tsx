@@ -13,8 +13,8 @@
 // stacked above the per-row bars, which made a two-item download look like a
 // loading screen.
 //
-// Chrome comes from TrayPopover, shared with the Inbox tray so the two footer
-// popovers read as the same object.
+// Chrome comes from TrayPopover (plain shadcn Popover + shared row/header
+// primitives), matching the Inbox tray so the two footer popovers read as one.
 
 import { Download01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";

@@ -165,6 +165,16 @@
 	}
 }
 
+/* Sileo toast text color — background uses var(--muted) (set in sileo.tsx
+   `fill`), so text needs var(--foreground) to stay readable in dark mode. */
+[data-sileo-viewport] {
+	--sileo-tone: var(--foreground);
+}
+[data-sileo-title],
+[data-sileo-description] {
+	color: var(--foreground);
+}
+
 /* Color theme variants — applied via data-color-theme attribute on <html> */
 [data-color-theme="zinc"] {
 	--primary: oklch(0.205 0 0);
@@ -541,11 +551,9 @@
 	transition: none;
 }
 
-/* --- Onboarding progress marquee — the phase-derived fill sets the general
-   position, but the numeric percent is hidden and this band sweeps across the
-   whole track (over both the muted rest and the primary fill) so there is always
-   visible motion, even when the fill sits still for minutes on the local
-   install. A low-alpha foreground tint reads against both surfaces. --- */
+/* --- Progress marquee — a low-alpha foreground band that sweeps inside the
+   filled portion (onboarding clips it to the primary fill; indeterminate tray
+   lines mount it on the full track). Keeps long waits from reading as stuck. --- */
 @keyframes t-progress-marquee {
 	from {
 		transform: translateX(-120%);

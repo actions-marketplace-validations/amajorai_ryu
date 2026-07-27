@@ -684,9 +684,15 @@ function AppCardAction({
 }) {
 	if (item.entry.descriptor_only || !canInstall) {
 		return (
-			<Button onClick={onOpen} size="sm" variant="outline">
-				Details
-			</Button>
+			<StoreItemAction
+				affordance={
+					<Button onClick={onOpen} size="sm" variant="outline">
+						Details
+					</Button>
+				}
+				installed={false}
+				reportTarget={reportTargetForApp(item)}
+			/>
 		);
 	}
 	return (
@@ -697,8 +703,28 @@ function AppCardAction({
 			onDisable={onDisable}
 			onEnable={onOpen}
 			onInstall={onInstall}
+			reportTarget={reportTargetForApp(item)}
 		/>
 	);
+}
+
+function reportTargetForApp(item: AppCatalogItem) {
+	const origin = item.entry.origin;
+	const source =
+		origin === "community"
+			? ("github-community" as const)
+			: item.entry.provenance === "github-topic" ||
+					item.entry.source?.includes("github")
+				? ("github-curated" as const)
+				: ("mongo" as const);
+	return {
+		id: item.entry.id,
+		kind: "plugin",
+		itemName: item.entry.name,
+		homepage: item.entry.repo_url ?? null,
+		installSource: item.entry.source ?? item.entry.repo_url ?? null,
+		source,
+	};
 }
 
 /** Import an integrations.sh API entry (REST `openapi` or `graphql`) as

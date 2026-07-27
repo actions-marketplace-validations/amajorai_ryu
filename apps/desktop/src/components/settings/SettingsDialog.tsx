@@ -36,7 +36,8 @@ import { DeveloperTab } from "./DeveloperTab.tsx";
 import { EntitySettings } from "./EntitySettings.tsx";
 import { ExperimentalSettings } from "./ExperimentalSettings.tsx";
 import { GeneralTab } from "./GeneralTab.tsx";
-import { IslandSettings } from "./IslandSettings.tsx";
+// # 0.1.0: Island disabled — uncomment with the Island nav item below
+// import { IslandSettings } from "./IslandSettings.tsx";
 import { KeyboardShortcutsTab } from "./KeyboardShortcutsTab.tsx";
 import { SessionsTab } from "./SessionsTab.tsx";
 import { ShadowSettings } from "./ShadowSettings.tsx";
@@ -93,7 +94,8 @@ const NAV_GROUPS: NavGroup[] = [
 			{ value: "appearance", label: "Appearance" },
 			{ value: "keyboard", label: "Keyboard shortcuts" },
 			{ value: "updates", label: "Updates" },
-			{ value: "island", label: "Island" },
+			// # 0.1.0: Island disabled — uncomment when re-enabling Island settings
+			// { value: "island", label: "Island" },
 			{ value: "shadow", label: "Shadow" },
 			{ value: "voice", label: "Voice" },
 			{ value: "experimental", label: "Experimental" },
@@ -135,8 +137,9 @@ function SectionContent({ value }: { value: SectionValue }) {
 			return <KeyboardShortcutsTab />;
 		case "updates":
 			return <AppUpdatesSettings />;
-		case "island":
-			return <IslandSettings />;
+		// # 0.1.0: Island disabled — uncomment when re-enabling Island settings
+		// case "island":
+		// 	return <IslandSettings />;
 		case "shadow":
 			return <ShadowSettings />;
 		case "billing":

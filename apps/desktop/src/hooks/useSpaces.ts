@@ -1,3 +1,4 @@
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { useCallback, useEffect, useState } from "react";
 import { type ApiTarget, AppDisabledError } from "@/src/lib/api/client.ts";
 import {
@@ -9,6 +10,8 @@ import {
 	deleteSpace as apiDeleteSpace,
 	ingestDocument as apiIngestDocument,
 	searchSpace as apiSearchSpace,
+	setDocumentIcon as apiSetDocumentIcon,
+	setSpaceIcon as apiSetSpaceIcon,
 	updateDocument as apiUpdateDocument,
 	fetchDocument,
 	fetchDocuments,
@@ -65,6 +68,14 @@ export interface UseSpacesResult {
 		source: string
 	) => Promise<void>;
 	search: (spaceId: string, query: string) => Promise<SpaceMatch[]>;
+	/** Set or clear a document glyph without re-embedding. */
+	setDocumentIcon: (
+		spaceId: string,
+		documentId: string,
+		icon: GlyphValue
+	) => Promise<void>;
+	/** Set or clear a Space glyph. */
+	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
 	spaces: Space[];
 }
 
@@ -211,6 +222,21 @@ export function useSpaces(): UseSpacesResult {
 		[url, token, reload]
 	);
 
+	const setSpaceIcon = useCallback(
+		async (id: string, icon: GlyphValue) => {
+			await apiSetSpaceIcon({ url, token }, id, icon);
+			setSpaces((prev) => prev.map((s) => (s.id === id ? { ...s, icon } : s)));
+		},
+		[url, token]
+	);
+
+	const setDocumentIcon = useCallback(
+		async (spaceId: string, documentId: string, icon: GlyphValue) => {
+			await apiSetDocumentIcon({ url, token }, spaceId, documentId, icon);
+		},
+		[url, token]
+	);
+
 	return {
 		appDisabled,
 		spaces,
@@ -228,5 +254,7 @@ export function useSpaces(): UseSpacesResult {
 		getDocument,
 		saveDocument,
 		removeDocument,
+		setSpaceIcon,
+		setDocumentIcon,
 	};
 }

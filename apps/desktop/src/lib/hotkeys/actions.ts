@@ -58,6 +58,22 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 		category: "Tabs",
 		defaultBinding: "Mod+Alt+S",
 	},
+	{
+		id: "tab.next",
+		label: "Next tab",
+		category: "Tabs",
+		defaultBinding: "Mod+Tab",
+		description:
+			"Cycle to the next open tab. Order follows Settings → Tabs → Switch tabs with Ctrl/Cmd+Tab (in sequence or most recently used).",
+	},
+	{
+		id: "tab.prev",
+		label: "Previous tab",
+		category: "Tabs",
+		defaultBinding: "Mod+Shift+Tab",
+		description:
+			"Cycle to the previous open tab. Order follows Settings → Tabs → Switch tabs with Ctrl/Cmd+Tab.",
+	},
 	// --- Navigation ---
 	{
 		id: "nav.back",
@@ -95,6 +111,38 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 		label: "New chat",
 		category: "Chat",
 		defaultBinding: "Mod+N",
+	},
+	// --- Composer (focus-scoped: only fire inside the prompt input) ---
+	{
+		id: "composer.cycle-agent",
+		label: "Cycle agent",
+		category: "Composer",
+		defaultBinding: "Tab",
+		description:
+			"While typing in the composer (desktop or island), cycle the selected agent.",
+	},
+	{
+		id: "composer.cycle-mode",
+		label: "Cycle mode",
+		category: "Composer",
+		defaultBinding: "Shift+Tab",
+		description:
+			"While typing in the composer, cycle approval / permission mode.",
+	},
+	{
+		id: "composer.cycle-model",
+		label: "Cycle model",
+		category: "Composer",
+		defaultBinding: "Shift+M",
+		description: "While typing in the composer, cycle the selected model.",
+	},
+	{
+		id: "composer.cycle-thinking",
+		label: "Cycle thinking effort",
+		category: "Composer",
+		defaultBinding: "Shift+T",
+		description:
+			"While typing in the composer, cycle thinking / reasoning effort.",
 	},
 	// --- Global (OS-level, managed by the island's native layer) ---
 	{

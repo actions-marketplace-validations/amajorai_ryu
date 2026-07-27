@@ -1,36 +1,47 @@
 import { useCallback, useSyncExternalStore } from "react";
 
 /**
- * How the left sidebar sits against the main content.
+ * How sidebars sit against the main content.
  *
- * - "floating": the default — the sidebar is a rounded, bordered card that
- *   floats over the window, and the main content fills the rest flush.
- * - "inset": the sidebar sits flush to the window edge and the main content is
- *   pulled in as its own rounded, shadowed card (an "inset" canvas).
+ * - "floating": the default — sidebars are rounded, bordered cards that float
+ *   over the window, and the main content fills the rest flush.
+ * - "inset": sidebars sit flush (no card chrome) and the main content is pulled
+ *   in as its own rounded, shadowed card (an "inset" canvas).
  *
- * Both map directly onto the shadcn `<Sidebar variant>` prop, so flipping this
- * value is all that's needed — `<SidebarInset>` already carries the matching
- * `peer-data-[variant=inset]` styles.
+ * The left rail maps this onto the shadcn `<Sidebar variant>` prop;
+ * `<SidebarInset>` already carries the matching `peer-data-[variant=inset]`
+ * styles. Workspace right/bottom docks and the docked Ask Ryu panel reuse the
+ * same preference via {@link sidebarFloatingChrome} so they invert in lockstep.
  */
 export type SidebarVariant = "floating" | "inset";
 
-const STORAGE_KEY = "ryu:sidebar-variant";
-const DEFAULT_VARIANT: SidebarVariant = "floating";
+/**
+ * Card chrome matching shadcn's `group-data-[variant=floating]` sidebar-inner
+ * treatment (`rounded-3xl` tracks the Appearance roundness token). Apply only
+ * when the variant is `"floating"`; inset mode is flush.
+ */
+export const sidebarFloatingChrome =
+	"ryu-chrome-shadow inset-shadow-sm rounded-3xl border border-background drop-shadow-2xl";
+
+export const SIDEBAR_VARIANT_KEY = "ryu:sidebar-variant";
+export const DEFAULT_SIDEBAR_VARIANT: SidebarVariant = "floating";
 
 const listeners = new Set<() => void>();
 
 function read(): SidebarVariant {
 	try {
-		return localStorage.getItem(STORAGE_KEY) === "inset" ? "inset" : "floating";
+		return localStorage.getItem(SIDEBAR_VARIANT_KEY) === "inset"
+			? "inset"
+			: "floating";
 	} catch {
-		return DEFAULT_VARIANT;
+		return DEFAULT_SIDEBAR_VARIANT;
 	}
 }
 
 function subscribe(cb: () => void): () => void {
 	listeners.add(cb);
 	const onStorage = (e: StorageEvent) => {
-		if (e.key === STORAGE_KEY) {
+		if (e.key === SIDEBAR_VARIANT_KEY) {
 			cb();
 		}
 	};
@@ -39,6 +50,18 @@ function subscribe(cb: () => void): () => void {
 		listeners.delete(cb);
 		window.removeEventListener("storage", onStorage);
 	};
+}
+
+/** Write the sidebar variant and notify every consumer. */
+export function setSidebarVariant(next: SidebarVariant): void {
+	try {
+		localStorage.setItem(SIDEBAR_VARIANT_KEY, next);
+	} catch {
+		// best-effort
+	}
+	for (const cb of listeners) {
+		cb();
+	}
 }
 
 /**
@@ -50,17 +73,14 @@ export function useSidebarVariant(): [
 	SidebarVariant,
 	(variant: SidebarVariant) => void,
 ] {
-	const variant = useSyncExternalStore(subscribe, read, () => DEFAULT_VARIANT);
+	const variant = useSyncExternalStore(
+		subscribe,
+		read,
+		() => DEFAULT_SIDEBAR_VARIANT
+	);
 
 	const setVariant = useCallback((next: SidebarVariant) => {
-		try {
-			localStorage.setItem(STORAGE_KEY, next);
-		} catch {
-			// best-effort
-		}
-		for (const cb of listeners) {
-			cb();
-		}
+		setSidebarVariant(next);
 	}, []);
 
 	return [variant, setVariant];

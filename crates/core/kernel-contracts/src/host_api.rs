@@ -161,6 +161,26 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // Conversation title write for turn-hook plugins (chat-title auto-rename).
+    // `mode: "auto"` respects `title_custom`; `mode: "custom"` locks the title.
+    // Rust-bridge-only (`ts_host = false`): Deno turn hooks reach it via
+    // `PluginHookBridge`; it is not a TS app-host RPC.
+    m(
+        "conversation.setTitle",
+        "conversation.title",
+        Some("conversation:set-title"),
+        false,
+        false,
+    ),
+    // Read a node preference by key (plugin settings fields → `/api/preferences/:key`).
+    // Rust-bridge-only — same rationale as `conversation.setTitle`.
+    m(
+        "preferences.get",
+        "preferences.read",
+        Some("preferences:read"),
+        false,
+        false,
+    ),
     m(
         "agent.run.stream",
         "agent.run",
@@ -950,7 +970,7 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     // event stream. One capability (`shell.integrate`) gates the whole family; the
     // three subscribe/register verbs are STREAMING (host→frame push over the existing
     // chunk path), `openTab` is unary. Host-direct: the desktop host owns the tabs /
-    // theme / palette / event-stream seams, so there is no Core bridge fetch (the
+    // theme / palette / tab-icon / event-stream seams, so there is no Core bridge fetch (the
     // shell verbs are `ts_host = true` but have no `plugin_bridge_api.rs` branch — like
     // the existing `activity.openSession`/`meetings.open` nav verbs they resolve
     // entirely in the trusted webview). See `docs/renderer-host-slice-1.md`.
@@ -970,6 +990,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m(
         "shell.registerCommand",
+        "shell.integrate",
+        Some("shell:integrate"),
+        true,
+        true,
+    ),
+    m(
+        "shell.registerTabIcon",
         "shell.integrate",
         Some("shell:integrate"),
         true,

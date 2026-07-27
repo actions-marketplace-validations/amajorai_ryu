@@ -23,30 +23,29 @@ import {
 	SettingsGroup,
 	SettingsItem,
 	SettingsSection,
-} from "@ryu/blocks/desktop/settings-items";
-import { Button } from "@ryu/ui/components/button";
+} from "@ryu/blocks/desktop/settings-items.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Dialog,
 	DialogContent,
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
-} from "@ryu/ui/components/dialog";
+} from "@ryu/ui/components/dialog.tsx";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
-	DropdownMenuSeparator,
 	DropdownMenuTrigger,
-} from "@ryu/ui/components/dropdown-menu";
-import { Input } from "@ryu/ui/components/input";
-import { Progress } from "@ryu/ui/components/progress";
-import { Switch } from "@ryu/ui/components/switch";
+} from "@ryu/ui/components/dropdown-menu.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Progress } from "@ryu/ui/components/progress.tsx";
+import { Switch } from "@ryu/ui/components/switch.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
+} from "@ryu/ui/components/tooltip.tsx";
 import { buildRyuDeepLink } from "@ryuhq/protocol/deep-link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
@@ -71,7 +70,8 @@ import {
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
 import { fetchActiveEngine, setActiveEngine } from "@/src/lib/api/engines.ts";
 import { fetchGatewayStatus } from "@/src/lib/api/gateway.ts";
-import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
+// # 0.1.0: Island disabled — uncomment with the Island ServiceRow below
+// import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
 import type {
 	MeshPeerEntry,
 	MeshPeersResult,
@@ -1599,39 +1599,36 @@ function SandboxesSection({
 	};
 
 	return (
-		<>
-			<DropdownMenuSeparator />
-			<div className="px-1 py-0.5">
-				<div className="flex items-center justify-between px-2 pt-0.5 pb-1">
-					<p className="font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
-						Running Sandboxes · {sandboxes.length}
-					</p>
-					<button
-						className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-						disabled={creating}
-						onClick={handleCreate}
-						type="button"
-					>
-						<HugeiconsIcon className="size-3" icon={Add01Icon} />
-						{creating ? "Creating…" : "New sandbox"}
-					</button>
-				</div>
-				{sandboxes.length === 0 ? (
-					<p className="px-2 pb-0.5 text-[10px] text-muted-foreground/50">
-						No sandboxes running
-					</p>
-				) : (
-					sandboxes.map((run) => (
-						<SandboxRow
-							key={run.runId}
-							onDestroyed={invalidate}
-							run={run}
-							target={target}
-						/>
-					))
-				)}
+		<div className="px-1 py-0.5">
+			<div className="flex items-center justify-between px-2 pt-0.5 pb-1">
+				<p className="font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
+					Running Sandboxes · {sandboxes.length}
+				</p>
+				<button
+					className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+					disabled={creating}
+					onClick={handleCreate}
+					type="button"
+				>
+					<HugeiconsIcon className="size-3" icon={Add01Icon} />
+					{creating ? "Creating…" : "New sandbox"}
+				</button>
 			</div>
-		</>
+			{sandboxes.length === 0 ? (
+				<p className="px-2 pb-0.5 text-[10px] text-muted-foreground/50">
+					No sandboxes running
+				</p>
+			) : (
+				sandboxes.map((run) => (
+					<SandboxRow
+						key={run.runId}
+						onDestroyed={invalidate}
+						run={run}
+						target={target}
+					/>
+				))
+			)}
+		</div>
 	);
 }
 
@@ -1826,131 +1823,120 @@ function VoiceAndSandboxSection({
 	}
 
 	return (
-		<>
-			<DropdownMenuSeparator />
-			<div className="px-1 py-0.5">
-				<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
-					Voice &amp; Sandbox
-				</p>
-				{ttsEngines.length > 0 && (
-					<NodeLayerMenu
-						// The extra (non-built-in) voices only exist once the `ryutts`
-						// sidecar is installed and up, so surface that bring-up here rather
-						// than sending the user to the Voice settings tab for it.
-						actions={ttsReadyAction ? [ttsReadyAction] : []}
-						caption={
-							selectedTts
-								? `Speaks as ${activeVoice || "default voice"}`
-								: "Engine not available on this node"
-						}
-						currentLabel={selectedTts?.display_name ?? ttsPrefs.engine}
-						icon={VolumeHighIcon}
-						installed={ttsEngines.map(
-							(engine): LayerOption => ({
-								name: engine.id,
-								label: engine.display_name,
-								active: engine.id === ttsPrefs.engine,
-								detail: engine.installed
-									? `${engine.voices.length} voices`
-									: "not installed",
-								select: () => pickTtsEngine(engine),
-							})
-						)}
-						label="Text-to-speech"
-						running={selectedTts?.loaded ?? null}
-						trailing={selectedTts?.display_name ?? ttsPrefs.engine}
-					>
-						{/* The voice is a second dimension of the SAME layer, so it nests
-						    inside the engine's submenu instead of claiming a sibling row. */}
-						{selectedTts && selectedTts.voices.length > 0 && (
-							<>
-								<DropdownMenuSeparator />
-								<NodeLayerMenu
-									currentLabel={activeVoice || "Default"}
-									installed={selectedTts.voices.map(
-										(voice): LayerOption => ({
-											name: voice,
-											label: voice,
-											active: voice === activeVoice,
-											select: () =>
-												setDesktopTtsPref(DESKTOP_TTS_VOICE_KEY, voice),
-										})
-									)}
-									label="Voice"
-								/>
-							</>
-						)}
-					</NodeLayerMenu>
-				)}
+		<div className="px-1 py-0.5">
+			<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
+				Voice &amp; Sandbox
+			</p>
+			{ttsEngines.length > 0 && (
 				<NodeLayerMenu
-					actions={sttActions}
+					// The extra (non-built-in) voices only exist once the `ryutts`
+					// sidecar is installed and up, so surface that bring-up here rather
+					// than sending the user to the Voice settings tab for it.
+					actions={ttsReadyAction ? [ttsReadyAction] : []}
 					caption={
-						sttInstalled
-							? `Transcribes with ${sttPrefs.model}`
-							: "Engine not installed on this node"
+						selectedTts
+							? `Speaks as ${activeVoice || "default voice"}`
+							: "Engine not available on this node"
 					}
-					currentLabel={selectedStt.label}
-					icon={Mic01Icon}
-					installed={VOICE_ENGINES.map((entry): LayerOption => {
-						const item = catalogItem(entry.sidecar);
-						let detail = entry.model;
-						if (details[entry.sidecar]?.running) {
-							detail = "running";
-						} else if (item && item.installState !== "installed") {
-							detail = "not installed";
-						}
-						return {
-							name: entry.engine,
-							label: entry.label,
-							active: entry.engine === sttPrefs.engine,
-							detail,
-							select: () => pickStt(entry),
-							// Only the engine that is NOT selected is removable — dropping
-							// the one transcription is bound to would break voice input.
-							uninstall:
-								entry.engine === sttPrefs.engine || !item
-									? undefined
-									: async () => {
-											await uninstallSidecar(
-												target.url,
-												target.token,
-												item.name
-											);
-											await refresh();
-										},
-						};
-					})}
-					label="Speech-to-text"
-					running={sttRunning}
+					currentLabel={selectedTts?.display_name ?? ttsPrefs.engine}
+					icon={VolumeHighIcon}
+					installed={ttsEngines.map(
+						(engine): LayerOption => ({
+							name: engine.id,
+							label: engine.display_name,
+							active: engine.id === ttsPrefs.engine,
+							detail: engine.installed
+								? `${engine.voices.length} voices`
+								: "not installed",
+							select: () => pickTtsEngine(engine),
+						})
+					)}
+					label="Text-to-speech"
+					running={selectedTts?.loaded ?? null}
+					trailing={selectedTts?.display_name ?? ttsPrefs.engine}
+				>
+					{/* The voice is a second dimension of the SAME layer, so it nests
+						    inside the engine's submenu instead of claiming a sibling row. */}
+					{selectedTts && selectedTts.voices.length > 0 && (
+						<NodeLayerMenu
+							currentLabel={activeVoice || "Default"}
+							installed={selectedTts.voices.map(
+								(voice): LayerOption => ({
+									name: voice,
+									label: voice,
+									active: voice === activeVoice,
+									select: () => setDesktopTtsPref(DESKTOP_TTS_VOICE_KEY, voice),
+								})
+							)}
+							label="Voice"
+						/>
+					)}
+				</NodeLayerMenu>
+			)}
+			<NodeLayerMenu
+				actions={sttActions}
+				caption={
+					sttInstalled
+						? `Transcribes with ${sttPrefs.model}`
+						: "Engine not installed on this node"
+				}
+				currentLabel={selectedStt.label}
+				icon={Mic01Icon}
+				installed={VOICE_ENGINES.map((entry): LayerOption => {
+					const item = catalogItem(entry.sidecar);
+					let detail = entry.model;
+					if (details[entry.sidecar]?.running) {
+						detail = "running";
+					} else if (item && item.installState !== "installed") {
+						detail = "not installed";
+					}
+					return {
+						name: entry.engine,
+						label: entry.label,
+						active: entry.engine === sttPrefs.engine,
+						detail,
+						select: () => pickStt(entry),
+						// Only the engine that is NOT selected is removable — dropping
+						// the one transcription is bound to would break voice input.
+						uninstall:
+							entry.engine === sttPrefs.engine || !item
+								? undefined
+								: async () => {
+										await uninstallSidecar(target.url, target.token, item.name);
+										await refresh();
+									},
+					};
+				})}
+				label="Speech-to-text"
+				running={sttRunning}
+			/>
+			{sandboxBackends && (
+				// Which isolated runtime `sandbox_exec` uses by default. wasmtime is
+				// the built-in; a per-call `backend` argument still overrides this.
+				<NodeLayerMenu
+					caption={
+						activeBackend?.detected
+							? "Default runtime for sandboxed execution"
+							: "Runtime not detected on this node"
+					}
+					currentLabel={activeBackend?.displayName ?? "None"}
+					icon={PackageIcon}
+					installed={sandboxBackends.available.map(
+						(backend): LayerOption => ({
+							name: backend.name,
+							label: backend.displayName,
+							active: backend.name === sandboxBackends.active,
+							detail: backend.detected ? "ready" : "not detected",
+							disabled: !backend.supported,
+							disabledReason: "unsupported here",
+							select: () => pickBackend(backend.name, backend.displayName),
+						})
+					)}
+					label="Sandbox"
+					running={activeBackend?.detected ?? null}
 				/>
-				{sandboxBackends && (
-					// Which isolated runtime `sandbox_exec` uses by default. wasmtime is
-					// the built-in; a per-call `backend` argument still overrides this.
-					<NodeLayerMenu
-						caption={
-							activeBackend?.detected
-								? "Default runtime for sandboxed execution"
-								: "Runtime not detected on this node"
-						}
-						currentLabel={activeBackend?.displayName ?? "None"}
-						icon={PackageIcon}
-						installed={sandboxBackends.available.map(
-							(backend): LayerOption => ({
-								name: backend.name,
-								label: backend.displayName,
-								active: backend.name === sandboxBackends.active,
-								detail: backend.detected ? "ready" : "not detected",
-								disabled: !backend.supported,
-								disabledReason: "unsupported here",
-								select: () => pickBackend(backend.name, backend.displayName),
-							})
-						)}
-						label="Sandbox"
-						running={activeBackend?.detected ?? null}
-					/>
-				)}
-			</div>
-		</>
+			)}
+		</div>
 	);
 }
 
@@ -2053,50 +2039,47 @@ function MeshSection({
 		peerList.length > 0 &&
 		peers.bearerSource === BEARER_SOURCE_NONE;
 	return (
-		<>
-			<DropdownMenuSeparator />
-			<div className="px-1 py-0.5">
-				<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
-					Mesh
-				</p>
-				<div className="flex items-center gap-2 px-2 py-1 text-xs">
-					<span
-						aria-hidden
-						className={cn("size-1.5 shrink-0 rounded-full", dotColor)}
-					/>
-					<span className="flex-1 truncate text-muted-foreground">
-						{status.magicDnsName ?? (reachable ? "Connected" : "Connecting…")}
+		<div className="px-1 py-0.5">
+			<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
+				Mesh
+			</p>
+			<div className="flex items-center gap-2 px-2 py-1 text-xs">
+				<span
+					aria-hidden
+					className={cn("size-1.5 shrink-0 rounded-full", dotColor)}
+				/>
+				<span className="flex-1 truncate text-muted-foreground">
+					{status.magicDnsName ?? (reachable ? "Connected" : "Connecting…")}
+				</span>
+				{status.backend && (
+					<span className="shrink-0 text-[10px] text-muted-foreground/60">
+						{status.backend}
 					</span>
-					{status.backend && (
-						<span className="shrink-0 text-[10px] text-muted-foreground/60">
-							{status.backend}
-						</span>
-					)}
-				</div>
-				{ingress?.up && ingress.kind && (
-					<p className="px-2 pb-0.5 text-[10px] text-muted-foreground/60">
-						Ingress: {ingress.kind}
-					</p>
-				)}
-				{peerList.length > 0 && (
-					<div className="space-y-0.5 pt-0.5">
-						{peerList.map((peer) => (
-							<MeshPeerRow
-								key={peer.name || peer.hostOrDns}
-								onAddPeer={onAddPeer}
-								peer={peer}
-							/>
-						))}
-					</div>
-				)}
-				{noBearer && (
-					<p className="px-2 pt-0.5 pb-0.5 text-[10px] text-muted-foreground/60">
-						{peers?.note ??
-							"Peer needs an enrollment token — provision the same RYU_TOKEN on both nodes, or add the peer's own token by hand."}
-					</p>
 				)}
 			</div>
-		</>
+			{ingress?.up && ingress.kind && (
+				<p className="px-2 pb-0.5 text-[10px] text-muted-foreground/60">
+					Ingress: {ingress.kind}
+				</p>
+			)}
+			{peerList.length > 0 && (
+				<div className="space-y-0.5 pt-0.5">
+					{peerList.map((peer) => (
+						<MeshPeerRow
+							key={peer.name || peer.hostOrDns}
+							onAddPeer={onAddPeer}
+							peer={peer}
+						/>
+					))}
+				</div>
+			)}
+			{noBearer && (
+				<p className="px-2 pt-0.5 pb-0.5 text-[10px] text-muted-foreground/60">
+					{peers?.note ??
+						"Peer needs an enrollment token — provision the same RYU_TOKEN on both nodes, or add the peer's own token by hand."}
+				</p>
+			)}
+		</div>
 	);
 }
 
@@ -2136,45 +2119,42 @@ function ConnectedSection({
 		return null;
 	}
 	return (
-		<>
-			<DropdownMenuSeparator />
-			<div className="px-1 py-0.5">
-				<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
-					Connected · {clients.length}
-				</p>
-				{clients.map((c) => {
-					const device = c.clientLabel ?? c.surface;
-					return (
-						<div
-							className="flex items-center gap-2 px-2 py-1 text-xs"
-							key={c.clientId}
+		<div className="px-1 py-0.5">
+			<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
+				Connected · {clients.length}
+			</p>
+			{clients.map((c) => {
+				const device = c.clientLabel ?? c.surface;
+				return (
+					<div
+						className="flex items-center gap-2 px-2 py-1 text-xs"
+						key={c.clientId}
+					>
+						<span
+							aria-hidden
+							className="size-1.5 shrink-0 rounded-full bg-success"
+						/>
+						<AutoScrollText
+							className="flex-1 text-muted-foreground"
+							title={`${clientDisplayName(c)}${c.clientId === selfClientId ? " (you)" : ""}`}
 						>
-							<span
-								aria-hidden
-								className="size-1.5 shrink-0 rounded-full bg-success"
-							/>
-							<AutoScrollText
-								className="flex-1 text-muted-foreground"
-								title={`${clientDisplayName(c)}${c.clientId === selfClientId ? " (you)" : ""}`}
-							>
-								{clientDisplayName(c)}
-								{c.clientId === selfClientId && (
-									<span className="text-muted-foreground/50"> (you)</span>
-								)}
-							</AutoScrollText>
-							{device && (
-								<span className="shrink-0 text-[10px] text-muted-foreground/60">
-									{device}
-								</span>
+							{clientDisplayName(c)}
+							{c.clientId === selfClientId && (
+								<span className="text-muted-foreground/50"> (you)</span>
 							)}
-							<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
-								{relativeAge(c.lastSeen)}
+						</AutoScrollText>
+						{device && (
+							<span className="shrink-0 text-[10px] text-muted-foreground/60">
+								{device}
 							</span>
-						</div>
-					);
-				})}
-			</div>
-		</>
+						)}
+						<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
+							{relativeAge(c.lastSeen)}
+						</span>
+					</div>
+				);
+			})}
+		</div>
 	);
 }
 
@@ -2390,7 +2370,8 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 		coreReachable,
 		gatewayReachable,
 		shadowReachable,
-		islandReachable,
+		// # 0.1.0: Island disabled — restore with the Island ServiceRow below
+		// islandReachable,
 		meshReachable,
 		meshStatus,
 		loading,
@@ -2409,12 +2390,13 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 		token: activeNode?.token ?? null,
 	};
 
+	// # 0.1.0: Island disabled — uncomment when re-enabling the Island ServiceRow
 	// Island is a device-local Electron companion the shell installs + launches
 	// (Core can't — it's not a Core sidecar). The Island row surfaces this only when
 	// the local island isn't reachable; the status dot goes green on the next probe.
-	const handleIslandLaunch = async () => {
-		await installAndLaunchIsland();
-	};
+	// const handleIslandLaunch = async () => {
+	// 	await installAndLaunchIsland();
+	// };
 
 	// Live specs for the active node, surfaced in the compact dropdown header.
 	const { data: activeInfo } = useNodeSystemInfo(
@@ -2645,7 +2627,6 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 					<CloudSuggestions compact />
 					{/* Prefer whichever node is actually reachable (opt-in, OFF by default). */}
 					<AutoSelectRow compact />
-					<DropdownMenuSeparator />
 					<div className="px-1 py-0.5">
 						<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
 							Services
@@ -2681,10 +2662,11 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							sidecarKey="shadow"
 							target={target}
 						/>
-						{/* Island is a device-local Electron companion (loopback :7989), not
+						{/* # 0.1.0: Island disabled — uncomment when re-enabling Island
+						    Island is a device-local Electron companion (loopback :7989), not
 						    a Core sidecar — Core can't start/stop it, so the row is
 						    read-only status only. Hidden on remote nodes (islandReachable
-						    is null = not relevant for another machine). */}
+						    is null = not relevant for another machine).
 						{islandReachable !== null && (
 							<ServiceRow
 								label="Island"
@@ -2696,6 +2678,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 								target={target}
 							/>
 						)}
+						*/}
 					</div>
 					<EnginesSection target={target} />
 					<VoiceAndSandboxSection
@@ -2714,7 +2697,6 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 						clients={connections?.clients ?? []}
 						selfClientId={currentClientId()}
 					/>
-					<DropdownMenuSeparator />
 					<DropdownMenuItem onClick={() => setAddOpen(true)}>
 						<HugeiconsIcon icon={Add01Icon} size={12} />
 						<span className="flex-1">Add node</span>

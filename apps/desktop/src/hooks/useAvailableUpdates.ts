@@ -294,56 +294,121 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 	const applyMutation = useMutation({
 		mutationKey: ["available-updates", "apply", url],
 		mutationFn: async (update: AvailableUpdate): Promise<void> => {
-			switch (update.kind) {
-				case "app": {
-					if (update.appVerdict) {
+			const corr = `upd-${Date.now().toString(36)}`;
+			// [FIX] entry — discriminate soft-success vs throw vs silent no-op
+			console.info(
+				`[FIX] ${performance.now().toFixed(1)} apply.entry: corr=${corr} key=${update.key} kind=${update.kind} id=${update.id} current=${update.currentVersion} latest=${update.latestVersion} hasAppVerdict=${Boolean(update.appVerdict)} hasModel=${Boolean(update.model)}`
+			);
+			try {
+				switch (update.kind) {
+					case "app": {
+						if (!update.appVerdict) {
+							console.info(
+								`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=app-missing-verdict`
+							);
+							return;
+						}
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=app-installUpdate update_available=${update.appVerdict.update_available}`
+						);
 						await installUpdate(update.appVerdict);
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=app-resolved-no-throw`
+						);
+						return;
 					}
-					return;
-				}
-				case "agent": {
-					await runAgentUpdate(target, update.id);
-					return;
-				}
-				case "plugin": {
-					await updateInstalledPlugin(target, update.id);
-					return;
-				}
-				// engine/tool/voice/media all reinstall via the sidecar setup path,
-				// which re-downloads the latest through the download center.
-				case "engine":
-				case "tool":
-				case "voice":
-				case "media": {
-					await installSidecar(url, token, update.id);
-					return;
-				}
-				case "model": {
-					if (update.model) {
-						// Re-download the newer file through the verified downloader.
+					case "agent": {
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=agent-runAgentUpdate`
+						);
+						const res = await runAgentUpdate(target, update.id);
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=agent updated=${res.updated} installed=${res.installedVersion ?? "none"} error=${res.error ?? "none"}`
+						);
+						return;
+					}
+					case "plugin": {
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=plugin-updateInstalledPlugin`
+						);
+						const res = await updateInstalledPlugin(target, update.id);
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=plugin id=${res.id} installedVersion=${res.installedVersion ?? "none"}`
+						);
+						return;
+					}
+					// engine/tool/voice/media all reinstall via the sidecar setup path,
+					// which re-downloads the latest through the download center.
+					case "engine":
+					case "tool":
+					case "voice":
+					case "media": {
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=sidecar-installSidecar kind=${update.kind}`
+						);
+						await installSidecar(url, token, update.id);
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=sidecar-resolved`
+						);
+						return;
+					}
+					case "model": {
+						if (!update.model) {
+							console.info(
+								`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=model-missing-payload`
+							);
+							return;
+						}
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=model-installModelFile`
+						);
 						await installModelFile(
 							target,
 							update.model.repoId,
 							update.model.file
 						);
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=model-resolved`
+						);
+						return;
 					}
-					return;
+					case "skill": {
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=skill-installSkill`
+						);
+						await installSkill(target, update.id);
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=skill-resolved`
+						);
+						return;
+					}
+					case "mcp": {
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=mcp-installMcpServer`
+						);
+						await installMcpServer(target, update.id, true);
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=mcp-resolved`
+						);
+						return;
+					}
+					default:
+						console.info(
+							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=unsupported`
+						);
+						throw new Error(`Updating ${update.kind} is not supported yet`);
 				}
-				case "skill": {
-					// Re-install the package; overwrites the local SKILL.md.
-					await installSkill(target, update.id);
-					return;
-				}
-				case "mcp": {
-					// Force-reinstall (overwrite) at the newer catalog version.
-					await installMcpServer(target, update.id, true);
-					return;
-				}
-				default:
-					throw new Error(`Updating ${update.kind} is not supported yet`);
+			} catch (err) {
+				console.info(
+					`[FIX] ${performance.now().toFixed(1)} apply.threw: corr=${corr} err=${err instanceof Error ? err.message : String(err)}`
+				);
+				throw err;
 			}
 		},
-		onSettled: (_data, _err, update) => {
+		onSettled: (_data, err, update) => {
+			console.info(
+				`[FIX] ${performance.now().toFixed(1)} apply.onSettled: key=${update.key} kind=${update.kind} hadError=${Boolean(err)} err=${err instanceof Error ? err.message : err ? String(err) : "none"}`
+			);
 			// Revalidate the source that owned this update so the row clears once
 			// the new version is installed.
 			const invalidate = (key: readonly unknown[]) =>

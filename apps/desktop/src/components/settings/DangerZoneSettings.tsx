@@ -34,6 +34,8 @@ import {
 	fetchDataCounts,
 	resetNode,
 } from "@/src/lib/api/data-admin.ts";
+import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
+import { isLocalNode } from "@/src/store/useNodeStore.ts";
 
 interface CategoryDef {
 	/** The exact word the user must type to arm this delete (e.g. "Meetings"). */
@@ -62,7 +64,7 @@ const CATEGORIES: CategoryDef[] = [
 		noun: "spaces",
 		confirmWord: "Spaces",
 		detail:
-			"Every Space, including all of its documents and their search data, will be permanently deleted. The hidden Meetings space is left untouched.",
+			"Every Space, including all of its documents and their search data, will be permanently deleted. System spaces (Artifacts, Uploads, Meetings, …) are left untouched.",
 	},
 	{
 		key: "memory",
@@ -88,6 +90,29 @@ const CATEGORIES: CategoryDef[] = [
 			"Every meeting record and its transcript will be permanently deleted.",
 	},
 ];
+
+/** Desktop-only flags that survive a Core data wipe and would skip onboarding. */
+const CLIENT_RESET_KEYS = [
+	"ryu_onboarding_complete",
+	"ryu_setup_seen",
+	"ryu_default_agent",
+	STORAGE_KEYS.lightPreset,
+	STORAGE_KEYS.darkPreset,
+	STORAGE_KEYS.uiFont,
+	STORAGE_KEYS.headingFont,
+	STORAGE_KEYS.codeFont,
+	STORAGE_KEYS.contrast,
+	STORAGE_KEYS.radius,
+	STORAGE_KEYS.spacing,
+	STORAGE_KEYS.cardSpacing,
+	STORAGE_KEYS.chatWidth,
+] as const;
+
+function clearClientStateForFreshNode(): void {
+	for (const key of CLIENT_RESET_KEYS) {
+		localStorage.removeItem(key);
+	}
+}
 
 /**
  * Turn a failed `POST /api/node/reset` into copy that names the actual cause.
@@ -134,10 +159,11 @@ export function DangerZoneSettings() {
 	const runReset = async () => {
 		setResetBusy(true);
 		try {
-			const { restartRequired } = await resetNode(
-				toTarget(getNode()),
-				nodeName
-			);
+			const node = getNode();
+			const { restartRequired } = await resetNode(toTarget(node), nodeName);
+			// Core wipe does not touch the desktop's localStorage — clear the
+			// onboarding/setup flags here so the reload lands on /onboarding.
+			clearClientStateForFreshNode();
 			sileo.success({
 				title: "Node reset",
 				description: restartRequired
@@ -145,12 +171,14 @@ export function DangerZoneSettings() {
 					: "This node has been reset.",
 			});
 			setResetOpen(false);
-			// The wipe runs at the next boot (Core can't delete open DB files live),
-			// so restart Core now to trigger it. Best-effort: if the restart call
-			// fails the marker is still armed and the next manual start will wipe.
-			if (restartRequired) {
+			// Core exits itself after arming the wipe marker. For the local node,
+			// wait for that exit and start a fresh Core so `apply_pending_reset`
+			// runs; remote nodes are restarted by their own host. Always reload
+			// so MemoryRouter re-reads the cleared onboarding flag.
+			if (restartRequired && isLocalNode(node)) {
 				await restartRyuCore().catch(() => undefined);
 			}
+			window.location.reload();
 		} catch (e) {
 			console.error("Failed to reset node", e);
 			sileo.error({

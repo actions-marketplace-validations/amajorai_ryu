@@ -1,9 +1,9 @@
 // Unified Library page — the single browsing surface for everything the app
-// holds (agents, workflows, chats, spaces, teams, meetings), modelled on the
-// Store shell (`StorePage`). One section-nav of pill tabs switches collections
-// in-place; every tab shares the SAME toolbar + card/row (from
-// `@ryu/blocks/desktop/library`) so the views are standardised rather than each
-// collection having its own bespoke page.
+// holds (agents, workflows, chats, spaces, teams, meetings, channels,
+// identities), modelled on the Store shell (`StorePage`). One section-nav of
+// pill tabs switches collections in-place; every tab shares the SAME toolbar +
+// card/row (from `@ryu/blocks/desktop/library`) so the views are standardised
+// rather than each collection having its own bespoke page.
 //
 // Two synthetic tabs sit in front: Recents (recently-opened, across all types,
 // from the `library` store's stamp-on-open recents) and Favorites (items the
@@ -15,8 +15,10 @@ import {
 	Add01Icon,
 	AudioWave01Icon,
 	BookOpen01Icon,
+	BubbleChatIcon,
 	Clock01Icon,
 	DeliverySecure01Icon,
+	Key01Icon,
 	LibraryIcon,
 	StarIcon,
 	Target01Icon,
@@ -55,9 +57,12 @@ import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
+import { useChannels } from "@/src/hooks/useChannels.ts";
+import { useIdentities } from "@/src/hooks/useIdentities.ts";
 import { useMeetings } from "@/src/hooks/useMeetings.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
+import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
 import {
 	type LibraryItemType,
 	normalizeTimestamp,
@@ -68,7 +73,7 @@ import {
 } from "@/src/lib/library.ts";
 import { WorkflowFlowStrip } from "@/src/lib/workflow-triggers.tsx";
 
-type LibrarySection = "recents" | "favorites" | LibraryItemType; // agent | workflow | chat | space | team | meeting
+type LibrarySection = "recents" | "favorites" | LibraryItemType; // agent | workflow | chat | space | team | meeting | channel | identity
 
 const SECTIONS: {
 	value: LibrarySection;
@@ -83,11 +88,14 @@ const SECTIONS: {
 	{ value: "space", label: "Spaces", icon: DeliverySecure01Icon },
 	{ value: "team", label: "Teams", icon: UserGroupIcon },
 	{ value: "meeting", label: "Meetings", icon: AudioWave01Icon },
+	{ value: "channel", label: "Channels", icon: BubbleChatIcon },
+	{ value: "identity", label: "Identities", icon: Key01Icon },
 ];
 
 /** The app that owns each collection. A tab shows only when its owning app is
  *  enabled — so an uninstalled Workflows/Teams/Meetings app leaves no empty tab.
- *  Sections absent here (recents/favorites/chat) are host surfaces, always shown. */
+ *  Sections absent here (recents/favorites/chat/channel/identity) are host
+ *  surfaces, always shown. */
 const SECTION_PLUGIN: Partial<Record<LibrarySection, string>> = {
 	agent: "com.ryu.agents",
 	workflow: "com.ryu.workflows",
@@ -107,6 +115,8 @@ const TYPE_META: Record<
 	space: { label: "Space", icon: DeliverySecure01Icon },
 	team: { label: "Team", icon: UserGroupIcon },
 	meeting: { label: "Meeting", icon: AudioWave01Icon },
+	channel: { label: "Channel", icon: BubbleChatIcon },
+	identity: { label: "Identity", icon: Key01Icon },
 };
 
 const SORT_OPTIONS: LibrarySortOption[] = [
@@ -208,10 +218,12 @@ function LibraryCollections({
 		create: createSpace,
 	} = useSpacesContext();
 	const { conversations } = useChatHistoryContext();
+	const { channels, loading: channelsLoading } = useChannels();
+	const { profiles, loading: identitiesLoading } = useIdentities();
 
 	// Only show a collection tab when its owning app is enabled — an uninstalled
 	// Workflows/Teams/Meetings app should leave no empty tab. Host surfaces
-	// (recents/favorites/chat) have no owner and always show.
+	// (recents/favorites/chat/channel/identity) have no owner and always show.
 	const { apps, loading: appsLoading } = useApps();
 	const enabledPlugins = useMemo(
 		() => new Set(apps.filter((a) => a.enabled).map((a) => a.id)),
@@ -379,6 +391,51 @@ function LibraryCollections({
 		[meetings, openTab]
 	);
 
+	const channelItems = useMemo<LibraryItem[]>(
+		() =>
+			channels.map((c) => ({
+				type: "channel",
+				id: c.id,
+				name: c.name,
+				subtitle: CHANNEL_LABELS[c.channelType],
+				badge: c.enabled ? null : "Disabled",
+				icon: BubbleChatIcon,
+				updatedAt: normalizeTimestamp(c.updatedAt ?? c.createdAt),
+				open: () => openTab(`/channels/${c.id}`, { title: c.name }),
+			})),
+		[channels, openTab]
+	);
+
+	const identityItems = useMemo<LibraryItem[]>(
+		() =>
+			profiles.map((p) => {
+				const count = p.connections.length;
+				const authenticated = p.connections.filter(
+					(c) => c.status === "AUTHENTICATED"
+				).length;
+				const latest = p.connections.reduce(
+					(max, c) => Math.max(max, c.updated_at ?? c.created_at ?? 0),
+					0
+				);
+				return {
+					type: "identity" as const,
+					id: p.profile_id,
+					name: p.profile_id,
+					subtitle: `${count} ${count === 1 ? "connection" : "connections"}`,
+					badge: count > 0 ? `${authenticated}/${count} signed in` : null,
+					icon: Key01Icon,
+					updatedAt: normalizeTimestamp(latest),
+					open: () => {
+						stampRecent("identity", p.profile_id);
+						openTab(`/identities/profile/${encodeURIComponent(p.profile_id)}`, {
+							title: p.profile_id,
+						});
+					},
+				};
+			}),
+		[profiles, openTab]
+	);
+
 	const itemsByType = useMemo<Record<LibraryItemType, LibraryItem[]>>(
 		() => ({
 			agent: agentItems,
@@ -387,8 +444,19 @@ function LibraryCollections({
 			space: spaceItems,
 			team: teamItems,
 			meeting: meetingItems,
+			channel: channelItems,
+			identity: identityItems,
 		}),
-		[agentItems, workflowItems, chatItems, spaceItems, teamItems, meetingItems]
+		[
+			agentItems,
+			workflowItems,
+			chatItems,
+			spaceItems,
+			teamItems,
+			meetingItems,
+			channelItems,
+			identityItems,
+		]
 	);
 
 	// Flat lookup for resolving recents/favorites refs.
@@ -426,6 +494,8 @@ function LibraryCollections({
 		space: spacesLoading,
 		team: false,
 		meeting: meetingsLoading,
+		channel: channelsLoading,
+		identity: identitiesLoading,
 	};
 
 	// --- Build the visible list for the active tab --------------------------
@@ -445,7 +515,12 @@ function LibraryCollections({
 	// still loading and nothing has resolved yet — otherwise they'd flash the
 	// "nothing here" empty state before the data arrives.
 	const anySourceLoading =
-		agentsLoading || workflowsLoading || spacesLoading || meetingsLoading;
+		agentsLoading ||
+		workflowsLoading ||
+		spacesLoading ||
+		meetingsLoading ||
+		channelsLoading ||
+		identitiesLoading;
 	const loading = isMixed
 		? anySourceLoading && baseItems.length === 0
 		: loadingByType[section];
@@ -519,6 +594,16 @@ function LibraryCollections({
 					label: "Record a meeting",
 					onCta: () => openTab("/meetings", { title: "Meetings" }),
 				};
+			case "channel":
+				return {
+					label: "New channel",
+					onCta: () => openTab("/channels/new", { title: "New channel" }),
+				};
+			case "identity":
+				return {
+					label: "New identity",
+					onCta: () => openTab("/identities/new", { title: "New identity" }),
+				};
 			default:
 				// Favorites has no create affordance — you favorite existing items.
 				return null;
@@ -571,6 +656,8 @@ function LibraryCollections({
 		space: "Create a space to give your agents a knowledge base.",
 		team: "Group several agents into a team.",
 		meeting: "Record a meeting to get AI-written notes.",
+		channel: "Connect a Telegram, Slack, WhatsApp, or Discord bot.",
+		identity: "Save a login profile agents can reuse on the web.",
 	};
 
 	const editingTeam = teams.find((t) => t.id === editingTeamId) ?? null;

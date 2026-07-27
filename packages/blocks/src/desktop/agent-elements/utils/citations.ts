@@ -8,6 +8,11 @@ interface ToolPartLike {
 	type?: string;
 }
 
+const CODE_FENCE_SPLIT_RE = /(```[\s\S]*?```)/g;
+const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g;
+/** Bare `[n]` that is not already a markdown link `[n](...)` or definition `[n]:`. */
+const BARE_CITE_MARKER_RE = /\[(\d+)\](?!\(|:)/g;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -135,4 +140,42 @@ export function extractCitations(parts: unknown[]): Citation[] {
 		citations.push({ ...entry, number: citations.length + 1 });
 	}
 	return citations;
+}
+
+/**
+ * Turn bare `[n]` markers in assistant prose into markdown links that Markdown
+ * can render as AICSS-style citation chips (`#ryu-cite-n`). Skips code fences,
+ * inline code, existing links, and numbers with no matching citation.
+ */
+export function linkifyCitationMarkers(
+	text: string,
+	citations: Citation[] | undefined
+): string {
+	if (!citations?.length) {
+		return text;
+	}
+	const known = new Set(citations.map((c) => c.number));
+	return text
+		.split(CODE_FENCE_SPLIT_RE)
+		.map((segment) => {
+			if (segment.startsWith("```")) {
+				return segment;
+			}
+			return segment
+				.split(INLINE_CODE_SPLIT_RE)
+				.map((part) => {
+					if (part.startsWith("`")) {
+						return part;
+					}
+					return part.replace(BARE_CITE_MARKER_RE, (match, nStr: string) => {
+						const n = Number(nStr);
+						if (!known.has(n)) {
+							return match;
+						}
+						return `[${n}](#ryu-cite-${n})`;
+					});
+				})
+				.join("");
+		})
+		.join("");
 }

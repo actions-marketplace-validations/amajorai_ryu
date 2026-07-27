@@ -1,23 +1,23 @@
 // Main-process dictation pipeline: turn captured audio into text typed straight
-// into whatever native app has OS focus (WhisprFlow / SuperWhisper style).
+// into whatever native app has OS focus (WhisprFlow / SuperWhisper style), or
+// run an agent on the spoken question and paste the answer (agent-ask mode).
 //
-// The renderer only captures the WAV; everything after lands here because it needs
-// the Electron `clipboard` module (paste insertion) and Core's MCP bridge (ghost
-// synthetic input). The stages:
+// Owned by the `dictation` apps-store app; Island is the OS surface. Stages:
 //   1. transcribe  — Core `/api/voice/transcribe` with the configured engine.
-//   2. post-process — optional LLM cleanup (fast local model OR a full agent);
-//      fails open to the raw transcript so speech is never silently dropped.
-//   3. insert       — type (ghost `ghost_type`) or paste (clipboard + paste chord
-//      via ghost `ghost_hotkey`, with optional clipboard restore), then an
-//      optional Enter (ghost `ghost_press`) when auto-send is on.
+//   2. task branch:
+//        - transcribe → optional LLM cleanup (postProcess selection), then insert
+//        - ask        → run agent/model from ask.selection, insert the answer
+//   3. insert       — type (ghost `ghost_type`) or paste (clipboard + paste chord).
 //
-// ghost is reached over Core's `/api/mcp/tools/call` under the flagship `ryu`
-// agent, whose allowlist is unrestricted by default so the ghost tools resolve.
+// Selection resolve: non-empty agent_id → runAgentText (agent tools/Spaces apply);
+// otherwise → completions with optional model id (fast local default when blank).
 
 import { clipboard } from "electron";
+import type { AgentSelection } from "../../shared/agent-selection.ts";
 import { DEFAULT_AGENT_ID } from "../../shared/agents.ts";
 import {
 	type DictationPrefs,
+	type DictationTask,
 	parseDictationPrefs,
 } from "../../shared/dictation.ts";
 import type {
@@ -28,8 +28,7 @@ import { callTool, completions, runAgentText, transcribe } from "./core.ts";
 
 /**
  * Delay before restoring the pre-paste clipboard. The paste chord is dispatched
- * asynchronously through the OS, so restoring too early races the paste and the
- * app receives the old clipboard instead. A short delay lets the paste land first.
+ * asynchronously through the OS, so restoring too early races the paste.
  */
 const CLIPBOARD_RESTORE_DELAY_MS = 400;
 
@@ -49,9 +48,36 @@ function pasteKeysFor(prefs: DictationPrefs): string[] {
 }
 
 /**
- * Optionally clean the raw transcript with an LLM. Empty `agent` uses the fast
- * local default model (one gateway completion); a non-empty id routes through that
- * agent. Fails open: any unavailable/empty result returns the raw transcript.
+ * Run a standard AgentSelection: agent_id → full agent turn (tools/Spaces from
+ * that agent); otherwise a one-shot completion with optional model id.
+ */
+async function runSelection(
+	selection: AgentSelection,
+	systemPrompt: string,
+	userText: string
+): Promise<string | null> {
+	const messages: CoreChatMessage[] = [
+		{ role: "system", content: systemPrompt },
+		{ role: "user", content: userText },
+	];
+	const agentId = selection.agent_id.trim();
+	const result =
+		agentId.length > 0
+			? await runAgentText(agentId, messages)
+			: await completions({
+					messages,
+					model: selection.model.trim() || undefined,
+				});
+	if (!result.available) {
+		return null;
+	}
+	const text = result.text.trim();
+	return text.length > 0 ? text : null;
+}
+
+/**
+ * Optionally clean the raw transcript with the postProcess selection. Fails open
+ * to the raw transcript when disabled or when the model/agent returns nothing.
  */
 async function postProcess(
 	text: string,
@@ -60,22 +86,24 @@ async function postProcess(
 	if (!prefs.postProcess.enabled) {
 		return text;
 	}
-	const messages: CoreChatMessage[] = [
-		{ role: "system", content: prefs.postProcess.prompt },
-		{ role: "user", content: text },
-	];
-	const agent = prefs.postProcess.agent.trim();
-	const result =
-		agent.length > 0
-			? await runAgentText(agent, messages)
-			: await completions({ messages });
-	if (result.available) {
-		const cleaned = result.text.trim();
-		if (cleaned.length > 0) {
-			return cleaned;
-		}
-	}
-	return text;
+	// Empty selection = fast local default model (omit model id).
+	const cleaned = await runSelection(
+		prefs.postProcess.selection,
+		prefs.postProcess.prompt,
+		text
+	);
+	return cleaned ?? text;
+}
+
+/**
+ * Run ask-mode: selection must produce an answer. Fails closed to empty when
+ * unavailable — agent-ask should not silently paste the raw question.
+ */
+async function runAsk(
+	question: string,
+	prefs: DictationPrefs
+): Promise<string | null> {
+	return runSelection(prefs.ask.selection, prefs.ask.prompt, question);
 }
 
 /** Insert `text` into the focused app per the configured insertion mode. */
@@ -110,15 +138,18 @@ async function insertText(text: string, prefs: DictationPrefs): Promise<void> {
 }
 
 /**
- * Run the full dictation pipeline on captured WAV bytes. `rawPrefs` is the current
- * `dictation` preference blob (raw JSON). Returns a small result the renderer can
- * flash on the recording pill; never rejects.
+ * Run the full dictation pipeline on captured WAV bytes. `task` selects
+ * transcribe (insert transcript) vs ask (insert agent answer). Never rejects.
  */
 export async function runDictation(
 	audio: ArrayBuffer,
-	rawPrefs: string | null
+	rawPrefs: string | null,
+	task: DictationTask = "transcribe"
 ): Promise<DictationSubmitResult> {
 	const prefs = parseDictationPrefs(rawPrefs);
+	if (!prefs.enabled) {
+		return { ok: false, reason: "disabled" };
+	}
 	const transcript = await transcribe(audio, prefs.engine);
 	if (!transcript.available) {
 		return { ok: false, reason: transcript.reason };
@@ -127,10 +158,24 @@ export async function runDictation(
 	if (raw.length === 0) {
 		return { ok: false, reason: "empty" };
 	}
-	const finalText = (await postProcess(raw, prefs)).trim();
-	if (finalText.length === 0) {
-		return { ok: false, reason: "empty" };
+
+	let finalText: string;
+	if (task === "ask") {
+		if (!prefs.ask.enabled) {
+			return { ok: false, reason: "ask-disabled" };
+		}
+		const answer = await runAsk(raw, prefs);
+		if (!answer) {
+			return { ok: false, reason: "ask-failed" };
+		}
+		finalText = answer;
+	} else {
+		finalText = (await postProcess(raw, prefs)).trim();
+		if (finalText.length === 0) {
+			return { ok: false, reason: "empty" };
+		}
 	}
+
 	try {
 		await insertText(finalText, prefs);
 	} catch (error) {

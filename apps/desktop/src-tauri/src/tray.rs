@@ -116,9 +116,10 @@ fn read_hide_tray<R: Runtime, M: Manager<R>>(app: &M) -> bool {
 
 pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 	let show = MenuItem::with_id(app, "show", "Show Ryu", true, None::<&str>)?;
+	// # 0.1.0: Island disabled — uncomment when re-enabling the companion tray item
 	// The island (companion overlay) and its capture pipeline are driven from here
 	// now that the island has no menu-bar icon of its own.
-	let companion = MenuItem::with_id(app, "companion", "Show/Hide Companion", true, None::<&str>)?;
+	// let companion = MenuItem::with_id(app, "companion", "Show/Hide Companion", true, None::<&str>)?;
 	let capture = MenuItem::with_id(app, "capture", "Pause Capture", true, None::<&str>)?;
 	let timeline = MenuItem::with_id(app, "timeline", "Open Timeline", true, None::<&str>)?;
 	let palette = MenuItem::with_id(app, "palette", "Search Everything…", true, None::<&str>)?;
@@ -129,7 +130,8 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 	let menu = Menu::with_items(
 		app,
 		&[
-			&show, &sep1, &companion, &capture, &sep2, &timeline, &palette, &sep3, &quit,
+			// # 0.1.0: Island disabled — restore `&companion,` after `&sep1,`
+			&show, &sep1, /* &companion, */ &capture, &sep2, &timeline, &palette, &sep3, &quit,
 		],
 	)?;
 
@@ -158,10 +160,11 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 			"show" => {
 				focus_main(app);
 			}
-			// Toggle the Electron island overlay via its loopback control server.
-			"companion" => {
-				tauri::async_runtime::spawn(island_control("toggle"));
-			}
+			// # 0.1.0: Island disabled — uncomment when re-enabling Show/Hide Companion
+			// // Toggle the Electron island overlay via its loopback control server.
+			// "companion" => {
+			// 	tauri::async_runtime::spawn(island_control("toggle"));
+			// }
 			// Pause/resume Shadow capture, then reflect the new state in the label.
 			"capture" => {
 				let item = capture_item.clone();

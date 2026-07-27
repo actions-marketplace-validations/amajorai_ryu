@@ -100,7 +100,7 @@ function CustomModelRow({
 		}
 	};
 	return (
-		<div className="border-border/60 border-t p-1.5">
+		<div>
 			<span className="px-1.5 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
 				Custom model
 			</span>

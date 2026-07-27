@@ -98,11 +98,23 @@ export function normalizeChord(chord: Chord): Chord {
 }
 
 /**
+ * Minimal keydown shape for chord matching. Accepts DOM `KeyboardEvent` and
+ * React synthetic events (and plain objects used in unit tests).
+ */
+export interface ChordKeyboardEvent {
+	altKey: boolean;
+	ctrlKey: boolean;
+	key: string;
+	metaKey: boolean;
+	shiftKey: boolean;
+}
+
+/**
  * Build the canonical chord for a keydown event, or `null` while the user is
  * still holding only modifiers (no main key yet). `Ctrl` and `Cmd` both fold to
  * `Mod` so a single binding works cross-platform.
  */
-export function eventToChord(e: KeyboardEvent): Chord | null {
+export function eventToChord(e: ChordKeyboardEvent): Chord | null {
 	if (MODIFIER_ONLY_KEYS.has(e.key)) {
 		return null;
 	}
@@ -121,7 +133,7 @@ export function eventToChord(e: KeyboardEvent): Chord | null {
 }
 
 /** True when a chord matches a keydown event. */
-export function chordMatches(chord: Chord, e: KeyboardEvent): boolean {
+export function chordMatches(chord: Chord, e: ChordKeyboardEvent): boolean {
 	const eventChord = eventToChord(e);
 	if (eventChord === null) {
 		return false;

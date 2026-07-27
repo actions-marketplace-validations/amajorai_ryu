@@ -6,7 +6,6 @@ import { useNavigate } from "react-router-dom";
 import { sileo } from "sileo";
 import { WEB_URL } from "@/lib/app-urls.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
-import { MicPermissionPrompt } from "@/src/components/permissions/MicPermissionPrompt.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import { track } from "@/src/lib/analytics.ts";
@@ -16,7 +15,9 @@ import {
 	installAgent,
 } from "@/src/lib/api/agents.ts";
 import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
-import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
+// # 0.1.0: Island disabled — uncomment with the onboarding install below
+// import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
+import { ensureMicPermission } from "@/src/lib/audio/devices.ts";
 import { setFeatureEnabled, TOGGLEABLE_FEATURES } from "@/src/lib/features.ts";
 import { fetchCatalog, installSidecar } from "@/src/lib/services-api.ts";
 import { useAppStore } from "@/src/store/useAppStore.ts";
@@ -64,23 +65,30 @@ type Phase =
 	| "finishing"
 	| "done";
 
-const STATUS_MESSAGES: Record<Phase, string> = {
-	starting: "Setting things up",
+const PHASE_TITLES: Record<Phase, string> = {
+	starting: "Welcome to Ryu",
 	choose: "How do you want to run Ryu?",
-	installing: "Getting your local AI ready",
+	installing: "Welcome to Ryu",
 	agents: "Add your agents",
 	features: "Choose your features",
-	mic: "Enable voice input",
-	finishing: "Almost there",
-	done: "Ready!",
+	mic: "Allow Ryu to access microphone",
+	finishing: "Welcome to Ryu",
+	done: "You're all set",
+};
+
+const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
+	choose: "Run AI on this device, or let us host it for you",
+	agents: "Pick which ones to add — you can install more later",
+	features: "Turn features on or off — you can change this anytime",
+	mic: "So you can talk to your agents — skip anytime, change later in Settings",
+	done: "Ready to go",
 };
 
 // The auto-advancing phases (`starting`/`installing`/`finishing`) can sit for a
 // long time — `waitForLocalStack` polls the bundled inference install for up to
 // 30 minutes. A single frozen line reads as "nothing is happening", so on those
-// phases we cycle through several lines to make the wait feel alive. Interactive
-// phases keep their single static heading from STATUS_MESSAGES.
-const ROTATING_MESSAGES: Partial<Record<Phase, string[]>> = {
+// phases we cycle the PageHeader subtitle to make the wait feel alive.
+const ROTATING_SUBTITLES: Partial<Record<Phase, string[]>> = {
 	starting: [
 		"Setting things up",
 		"Warming up the engine",
@@ -358,10 +366,11 @@ export default function OnboardingPage() {
 			const target = toTarget(node);
 
 			setPhase("installing");
+			// # 0.1.0: Island disabled — uncomment when re-enabling Island onboarding
 			// Best-effort: get the Island companion installed + launched during
 			// onboarding so it's ready by first chat. Fire-and-forget (no `await`) and
 			// non-fatal — it must never block or fail onboarding, and dev is a no-op.
-			installAndLaunchIsland().catch(() => undefined);
+			// installAndLaunchIsland().catch(() => undefined);
 			await waitForLocalStack(node, () => cancelledRef.current);
 			if (cancelledRef.current) {
 				return;
@@ -513,11 +522,12 @@ export default function OnboardingPage() {
 		beginLocalSetup,
 	]);
 
-	// Cycle the status copy while a long auto-advancing phase is on screen so the
-	// view never looks frozen. Resets to the first line whenever the phase flips,
-	// and tears the interval down on any phase the map doesn't cover.
+	// Cycle the PageHeader subtitle while a long auto-advancing phase is on
+	// screen so the view never looks frozen. Resets to the first line whenever
+	// the phase flips, and tears the interval down on any phase the map doesn't
+	// cover.
 	useEffect(() => {
-		const messages = ROTATING_MESSAGES[phase];
+		const messages = ROTATING_SUBTITLES[phase];
 		if (!messages) {
 			return;
 		}
@@ -533,8 +543,9 @@ export default function OnboardingPage() {
 	// otherwise sit forever on "starting" with a shimmering progress bar and no
 	// way out. We render a dedicated error state with a restart button instead.
 	const coreFailed = coreStatus === "stopped";
-	const statusMessage =
-		ROTATING_MESSAGES[phase]?.[rotateIndex] ?? STATUS_MESSAGES[phase];
+	const subtitle =
+		ROTATING_SUBTITLES[phase]?.[rotateIndex] ?? PHASE_SUBTITLES[phase];
+	const title = PHASE_TITLES[phase];
 
 	// Restart the whole app so it re-attempts startup from scratch; fall back to a
 	// plain reload if the Tauri process plugin isn't reachable.
@@ -563,12 +574,27 @@ export default function OnboardingPage() {
 		goToFeatures(Array.from(selected));
 	}, [goToFeatures, selected]);
 
-	// Finish from the mic step (either "Continue" after enabling, or "Skip").
-	const handleFinish = useCallback(() => {
+	// Finish from the mic step. Skip jumps straight to finish; Allow requests
+	// mic access first (non-blocking — a denial still completes onboarding).
+	const handleSkipMic = useCallback(() => {
 		if (submitting) {
 			return;
 		}
 		setSubmitting(true);
+		const target = toTarget(getActiveNode());
+		finish(target, pendingAgents);
+	}, [submitting, getActiveNode, finish, pendingAgents]);
+
+	const handleAllowMic = useCallback(async () => {
+		if (submitting) {
+			return;
+		}
+		setSubmitting(true);
+		try {
+			await ensureMicPermission();
+		} catch {
+			// Permission prompt denied or unavailable — still finish onboarding.
+		}
 		const target = toTarget(getActiveNode());
 		finish(target, pendingAgents);
 	}, [submitting, getActiveNode, finish, pendingAgents]);
@@ -607,24 +633,24 @@ export default function OnboardingPage() {
 				managedBusy={managedBusy}
 				managedEntitled={Boolean(entitlement?.managedInference)}
 				managedLoading={entitlementLoading}
-				micPrompt={<MicPermissionPrompt />}
 				micSubmitting={submitting}
 				onChooseLocal={handleChooseLocal}
 				onChooseManaged={handleChooseManaged}
 				onContinueAgents={handleContinue}
-				onContinueMic={handleFinish}
+				onContinueMic={handleAllowMic}
 				onDownloadDesktop={handleDownloadDesktop}
 				onEnableFeature={() => applyFeatureChoice(true)}
 				onSkipAgents={() => goToFeatures([])}
 				onSkipFeature={() => applyFeatureChoice(false)}
-				onSkipMic={handleFinish}
+				onSkipMic={handleSkipMic}
 				onToggleAgent={toggle}
 				progress={PHASE_PROGRESS[phase]}
 				selected={selected}
-				statusMessage={statusMessage}
 				step={phase}
+				subtitle={subtitle}
 				suggestedAgents={suggestedAgents.map(withAgentLogo)}
-			/>
+				title={title}
+			/>{" "}
 		</div>
 	);
 }

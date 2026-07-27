@@ -20,8 +20,6 @@ export type GatewaySection =
 	| "guardrails"
 	| "budgets"
 	| "keys"
-	| "channels"
-	| "identities"
 	| "integrations"
 	| "usage"
 	| "audit"

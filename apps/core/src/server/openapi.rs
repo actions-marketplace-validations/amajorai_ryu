@@ -95,6 +95,7 @@ use utoipa::OpenApi;
         super::models_catalog_uninstall,
         super::models_device,
         super::models_context_window,
+        super::models_insight,
         super::models_engines,
         super::system_info_handler,
         super::catalog_sources_list,
@@ -182,6 +183,7 @@ use utoipa::OpenApi;
         super::set_conversation_pinned_handler,
         super::set_conversation_archived_handler,
         super::set_conversation_title_handler,
+        super::get_conversation_title_history_handler,
         super::get_participants_handler,
         super::add_participant_handler,
         super::remove_participant_handler,
@@ -365,6 +367,9 @@ use utoipa::OpenApi;
         super::gifs::search,
         super::media::serve_media,
         super::media::upload_media,
+        // Uploads (user files → Uploads system space)
+        super::uploads::serve_upload,
+        super::uploads::upload_file,
         // Meetings runs out-of-process (`ryu-meetings` sidecar); its `/api/meetings/*`
         // spec is owned by the sidecar and served through the ext-proxy `public_mount`,
         // so it is NOT merged into Core's spec — same posture as monitors/quests.

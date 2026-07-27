@@ -16,9 +16,13 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
+import { PageHeader } from "@ryu/ui/components/page-header";
+import { PlanBadge } from "@ryu/ui/components/plan-badge";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { TextSwap } from "@ryu/ui/components/text-swap";
-import type { ReactNode } from "react";
+import { MetalFx } from "metal-fx";
+import { useTheme } from "next-themes";
+import { type ReactNode, useEffect, useState } from "react";
 
 /** A detectable CLI agent as the picker needs it. Mirrors the container's
  *  `AgentCatalogEntry` (only the fields the view renders). */
@@ -57,8 +61,8 @@ export type OnboardingStep =
 	| "finishing"
 	| "done";
 
-/** The status line under the title for each step. The container maps its own
- *  phase enum onto these. */
+/** Login-style PageHeader copy for each step. The container maps its phase
+ *  onto `title` + optional `subtitle` (rotating loading lines use subtitle). */
 export interface OnboardingViewProps {
 	/** Agents found on the user's system (detected on PATH), shown under the
 	 *  "Found on your system" header on the `agents` step and pre-selected. */
@@ -109,18 +113,24 @@ export interface OnboardingViewProps {
 	progress?: number;
 	/** Ids of the currently-selected agents. */
 	selected?: ReadonlySet<string>;
-	statusMessage: string;
 	step: OnboardingStep;
+	/** Supporting line under the title (login-style PageHeader). Rotating
+	 *  loading copy is swapped in place via TextSwap in the shell. */
+	subtitle?: string;
 	/** A curated set of popular agents the user can opt into, shown under the
 	 *  "Suggested" header on the `agents` step (not pre-selected). */
 	suggestedAgents?: OnboardingAgentOption[];
+	/** Main heading (login-style PageHeader title). */
+	title: string;
 }
 
 function OnboardingShell({
-	statusMessage,
+	title,
+	subtitle,
 	children,
 }: {
-	statusMessage: string;
+	title: string;
+	subtitle?: string;
 	children?: ReactNode;
 }) {
 	return (
@@ -145,14 +155,12 @@ function OnboardingShell({
 					<div className="shrink-0">
 						<GhostOrb size="50px" variant="outline" />
 					</div>
-					<div className="space-y-1 text-left">
-						<p className="max-w-md text-left font-medium text-muted-foreground text-xl">
-							{/* Swap the status/phase line in place (blur-rise) whenever it
-							    changes, so the rotating loading copy animates instead of
-							    hard-cutting. */}
-							<TextSwap>{statusMessage}</TextSwap>
-						</p>
-					</div>
+					{/* Same title + muted subtitle stack as LoginView's PageHeader.
+					    TextSwap keeps rotating loading lines from hard-cutting. */}
+					<PageHeader
+						subtitle={subtitle ? <TextSwap>{subtitle}</TextSwap> : undefined}
+						title={title}
+					/>
 					{children}
 				</StaggerReveal>
 			</div>
@@ -160,29 +168,72 @@ function OnboardingShell({
 	);
 }
 
+/** Soft ceiling for the fake crawl so a long wait never claims "almost done"
+ *  (and so the next phase jump still reads as forward motion). */
+function progressCrawlCeiling(floor: number): number {
+	if (floor >= 90) {
+		return 98;
+	}
+	if (floor >= 50) {
+		return 88;
+	}
+	return 50;
+}
+
+const PROGRESS_CRAWL_MS = 3500;
+
 /** Progress bar shown on the auto-advancing steps. The phase-derived percentage
- *  drives the primary fill's general position, but the numeric percent is
- *  deliberately hidden and a continuously-sweeping marquee (`t-progress-marquee`)
- *  rides on top so the bar is never visually frozen — the auto-advancing phases
- *  can sit for minutes waiting on the local install, and a static fill reads as
- *  "stuck". `done` pins it to 100% and drops the motion. Styling mirrors the
- *  shared Progress track/indicator (`h-3`, `rounded-full`, `bg-muted`/`bg-primary`). */
+ *  is the floor; a +1 crawl every few seconds inches toward a soft ceiling so
+ *  the bar never looks frozen during long waits (local install can take minutes).
+ *  A continuously-sweeping marquee (`t-progress-marquee`) rides inside the fill
+ *  for extra motion. The marquee is clipped to the filled portion only. `done`
+ *  pins to 100% and drops the motion. Styling mirrors the shared Progress
+ *  track/indicator (`h-3`, `rounded-full`, `bg-muted`/`bg-primary`). */
 function ProgressBar({ value, done }: { value?: number; done?: boolean }) {
-	const pct = done ? 100 : Math.max(0, Math.min(100, value ?? 0));
+	const floor = Math.max(0, Math.min(100, value ?? 0));
+	const [display, setDisplay] = useState(floor);
+
+	// Snap up when the phase advances past where the crawl has reached.
+	useEffect(() => {
+		setDisplay((prev) => Math.max(prev, floor));
+	}, [floor]);
+
+	// Fake crawl: +1 every few seconds, capped below the next phase jump.
+	useEffect(() => {
+		if (done) {
+			return;
+		}
+		const ceiling = progressCrawlCeiling(floor);
+		const id = setInterval(() => {
+			setDisplay((prev) => {
+				if (prev >= ceiling) {
+					return prev;
+				}
+				return Math.min(ceiling, prev + 1);
+			});
+		}, PROGRESS_CRAWL_MS);
+		return () => clearInterval(id);
+	}, [done, floor]);
+
+	const pct = done ? 100 : display;
 	return (
 		<div className="flex w-60 flex-col gap-1.5">
 			<div
 				aria-label="Setting up"
+				aria-valuemax={100}
+				aria-valuemin={0}
+				aria-valuenow={Math.round(pct)}
 				className="t-progress-track relative h-3 w-full overflow-hidden rounded-full bg-muted"
 				role="progressbar"
 			>
 				<div
-					className="h-full rounded-full bg-primary transition-[width] duration-700 ease-out"
+					className="relative h-full overflow-hidden rounded-full bg-primary transition-[width] duration-700 ease-out"
 					style={{ width: `${pct}%` }}
-				/>
-				{done ? null : (
-					<span aria-hidden="true" className="t-progress-marquee" />
-				)}
+				>
+					{done ? null : (
+						<span aria-hidden="true" className="t-progress-marquee" />
+					)}
+				</div>
 			</div>
 		</div>
 	);
@@ -202,10 +253,8 @@ function AgentRow({
 	return (
 		<button
 			aria-pressed={isSelected}
-			className={`flex items-start gap-3 rounded-lg border p-3 text-left transition-colors ${
-				isSelected
-					? "border-primary bg-primary/5"
-					: "border-border hover:bg-muted/50"
+			className={`flex items-start gap-3 rounded-4xl p-3 text-left transition-colors ${
+				isSelected ? "bg-primary/10" : "bg-card hover:bg-muted/50"
 			}`}
 			onClick={() => onToggleAgent?.(agent.id)}
 			type="button"
@@ -294,10 +343,9 @@ function AgentPicker({
 	const selectedCount = selected?.size ?? 0;
 	return (
 		<div className="flex w-full max-w-md flex-col gap-3">
-			{/* `scroll-fade-effect-y` (apps/desktop/src/index.css) fades the top/bottom
-			    edges as you scroll, the same scroll-driven mask the rest of the app
-			    uses for its lists. */}
-			<div className="scroll-fade-effect-y -mr-1 flex max-h-[45vh] flex-col gap-4 overflow-y-auto pr-1">
+			{/* The shell owns scrolling (see OnboardingShell). Nesting a max-height
+			    scroller here fought the page scroll and left the list feeling stuck. */}
+			<div className="flex flex-col gap-4">
 				<AgentSection
 					agents={agents}
 					onToggleAgent={onToggleAgent}
@@ -312,7 +360,7 @@ function AgentPicker({
 				/>
 			</div>
 
-			<div className="mt-2 flex items-center justify-end gap-2">
+			<div className="sticky bottom-0 mt-2 flex items-center justify-end gap-2 bg-background/80 py-2 backdrop-blur-sm">
 				<Button onClick={onSkipAgents} size="sm" variant="ghost">
 					Skip
 				</Button>
@@ -410,16 +458,29 @@ function ChooseStep({
 		managedLabel = "Upgrade to unlock";
 	}
 	const showProBadge = !(managedEntitled || managedLoading);
+	const { resolvedTheme } = useTheme();
+	const metalTheme = resolvedTheme === "light" ? "light" : "dark";
+
+	const managedButton = (
+		<Button
+			className="w-full"
+			disabled={managedBusy || managedLoading}
+			onClick={onChooseManaged}
+			size="lg"
+			variant="outline"
+		>
+			{managedLabel}
+		</Button>
+	);
 
 	return (
 		<div className="flex w-full max-w-md flex-col gap-3">
 			{localUnreachable ? (
-				<div className="rounded-lg border border-border p-4 text-left">
-					<p className="font-semibold text-lg">No local node detected</p>
+				<div className="rounded-4xl border border-border p-4 text-left">
+					<p className="font-semibold text-lg">Desktop app needed</p>
 					<p className="mt-1 text-muted-foreground text-sm">
-						Running your own models needs the Ryu desktop app on this machine —
-						it is what hosts the local node this page talks to. Install it, then
-						retry.
+						To run AI on this device, install the Ryu desktop app first. Then
+						come back and try again.
 					</p>
 					<Button
 						className="mt-3 w-full"
@@ -440,11 +501,11 @@ function ChooseStep({
 					</Button>
 				</div>
 			) : (
-				<div className="rounded-lg border border-border p-4 text-left">
-					<p className="font-semibold text-lg">Bring your own keys</p>
+				<div className="rounded-4xl border border-border p-4 text-left">
+					<p className="font-semibold text-lg">Run AI locally</p>
 					<p className="mt-1 text-muted-foreground text-sm">
-						Run models on this device or connect your own API keys. Private,
-						free, and works offline.
+						Run AI on this device, or connect your own keys. Private, free, and
+						works offline.
 					</p>
 					<Button
 						className="mt-3 w-full"
@@ -453,35 +514,33 @@ function ChooseStep({
 						size="lg"
 						variant="mono"
 					>
-						{localChecking
-							? "Checking for a local node…"
-							: "Continue with local"}
+						{localChecking ? "Checking…" : "Continue"}
 					</Button>
 				</div>
 			)}
 
-			<div className="rounded-lg border border-border p-4 text-left">
+			<div className="rounded-4xl border border-border p-4 text-left">
 				<div className="flex items-center gap-2">
 					<p className="font-semibold text-lg">Use Ryu Cloud</p>
-					{showProBadge ? (
-						<Badge className="text-xs" variant="secondary">
-							Pro
-						</Badge>
-					) : null}
+					{showProBadge ? <PlanBadge plan="pro" size="sm" /> : null}
 				</div>
 				<p className="mt-1 text-muted-foreground text-sm">
-					Managed inference on Ryu-hosted servers. Nothing to install;
-					provisioning and billing stay on the web.
+					We host AI for you in the cloud — always on, on your own server. More
+					secure than running it on your computer.
 				</p>
-				<Button
-					className="mt-3 w-full"
-					disabled={managedBusy || managedLoading}
-					onClick={onChooseManaged}
-					size="lg"
-					variant="outline"
-				>
-					{managedLabel}
-				</Button>
+				{showProBadge ? (
+					<MetalFx
+						className="mt-3 w-full"
+						preset="chromatic"
+						strength={0.9}
+						theme={metalTheme}
+						variant="button"
+					>
+						{managedButton}
+					</MetalFx>
+				) : (
+					<div className="mt-3">{managedButton}</div>
+				)}
 			</div>
 		</div>
 	);
@@ -499,8 +558,8 @@ function MicStep({
 	return (
 		<div className="flex w-full max-w-md flex-col gap-4">
 			<p className="text-muted-foreground text-sm">
-				Want to talk to your agents? Enable the microphone for voice input. You
-				can always do this later from Settings.
+				Ryu can listen when you want to talk to your agents. You can always
+				change this later in Settings.
 			</p>
 
 			{micPrompt}
@@ -520,7 +579,7 @@ function MicStep({
 					size="lg"
 					variant="mono"
 				>
-					Continue
+					{micSubmitting ? "Requesting…" : "Allow"}
 				</Button>
 			</div>
 		</div>
@@ -528,11 +587,27 @@ function MicStep({
 }
 
 export function OnboardingView(props: OnboardingViewProps) {
-	const { step, statusMessage } = props;
+	const { step, title, subtitle } = props;
+
+	// Agents step: when we detected installs, lead with that — otherwise a
+	// generic pick-your-agents prompt. Overrides the container's default copy.
+	let headerTitle = title;
+	let headerSubtitle = subtitle;
+	if (step === "agents") {
+		const detectedCount = props.agents?.length ?? 0;
+		if (detectedCount > 0) {
+			headerTitle = "We found agents on this device";
+			headerSubtitle = "Pick which ones to add — you can install more later";
+		} else {
+			headerTitle = "Add your agents";
+			headerSubtitle =
+				"Pick any you'd like to set up — you can install more later";
+		}
+	}
 
 	if (step === "choose") {
 		return (
-			<OnboardingShell statusMessage={statusMessage}>
+			<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
 				<ChooseStep {...props} />
 			</OnboardingShell>
 		);
@@ -540,7 +615,7 @@ export function OnboardingView(props: OnboardingViewProps) {
 
 	if (step === "agents") {
 		return (
-			<OnboardingShell statusMessage={statusMessage}>
+			<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
 				<AgentPicker {...props} />
 			</OnboardingShell>
 		);
@@ -548,7 +623,7 @@ export function OnboardingView(props: OnboardingViewProps) {
 
 	if (step === "features") {
 		return (
-			<OnboardingShell statusMessage={statusMessage}>
+			<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
 				<FeatureStep {...props} />
 			</OnboardingShell>
 		);
@@ -556,14 +631,14 @@ export function OnboardingView(props: OnboardingViewProps) {
 
 	if (step === "mic") {
 		return (
-			<OnboardingShell statusMessage={statusMessage}>
+			<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
 				<MicStep {...props} />
 			</OnboardingShell>
 		);
 	}
 
 	return (
-		<OnboardingShell statusMessage={statusMessage}>
+		<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
 			<ProgressBar done={step === "done"} value={props.progress} />
 		</OnboardingShell>
 	);

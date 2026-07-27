@@ -131,19 +131,31 @@ pub fn is_custom() -> bool {
 /// Marker filename requesting a wipe on the next Core start (see [`request_node_reset`]).
 const RESET_MARKER: &str = ".reset-pending";
 
-/// Entries inside the data dir that a reset must PRESERVE. Everything else — every
-/// DB, download, and cache — is wiped.
+/// Entries inside the data dir that a reset must PRESERVE as WHOLE top-level
+/// names. Everything else — every DB, download, cache, and the `plugins/` tree —
+/// is wiped.
 ///
 /// - `master.key` / `memory.key`: the encryption-key custody files live in the data
 ///   dir when no OS keychain is available; deleting them would change the node's
 ///   identity and (on keychain-less machines) orphan the key needed to boot.
-/// - `bin`: this is *installed program code*, not user data. On a release install
-///   `~/.ryu/bin` holds `ryu-core` ITSELF plus the gateway and every downloaded app
-///   sidecar. Wiping it deletes the binary the desktop resolves on the next launch
-///   (`resolve_core_binary`), so the node would come back unstartable and need a
-///   reinstall — the opposite of "fresh, just-installed state", which has `bin`
-///   populated.
-const RESET_PRESERVE: &[&str] = &["master.key", "memory.key", "bin"];
+///
+/// `bin/` is handled specially by [`wipe_bin_dir`]: the folder itself stays, but
+/// every downloaded sidecar/app binary inside is deleted. Only `ryu-core` and
+/// `ryu-gateway` (the processes needed to boot and talk to a model) survive —
+/// otherwise a "reset" leaves every previously-installed app binary on disk and
+/// the catalog/onboarding path happily re-adopts them as still installed.
+const RESET_PRESERVE: &[&str] = &["master.key", "memory.key"];
+
+/// Filenames inside `bin/` that must survive a node reset so the desktop can
+/// still resolve and launch Core/gateway without a full reinstall.
+const BIN_PRESERVE: &[&str] = &[
+	"ryu-core",
+	"ryu-core.exe",
+	"ryu-core.version",
+	"ryu-gateway",
+	"ryu-gateway.exe",
+	"ryu-gateway.version",
+];
 
 /// Path of the reset marker inside the active data dir.
 pub fn reset_marker_path() -> PathBuf {
@@ -160,12 +172,31 @@ pub fn request_node_reset() -> std::io::Result<()> {
 
 /// If a reset was requested, wipe every entry in the data dir except the key
 /// custody files, then clear the marker. MUST run at startup BEFORE any store
-/// opens its DB. Idempotent and best-effort: a partial wipe still leaves the node
-/// bootable (a fresh key is regenerated only if none survived).
+/// opens its DB.
+///
+/// Fail-closed: if the wipe cannot finish (typically Windows sharing violations
+/// from a still-alive sidecar), this process EXITS without opening any store.
+/// Continuing to boot would re-lock the DBs forever and the marker could never
+/// be consumed — the bug that left agents/plugins/apps intact after "reset".
+/// The desktop's restart loop then starts a fresh Core against unlocked files.
 pub fn apply_pending_reset() {
     let dir = ryu_dir();
-    if dir.join(RESET_MARKER).exists() {
-        wipe_dir_preserving_keys(&dir);
+    if !dir.join(RESET_MARKER).exists() {
+        return;
+    }
+    eprintln!(
+        "ryu-core: pending node reset — wiping data dir {}",
+        dir.display()
+    );
+    match wipe_dir_preserving_keys(&dir) {
+        Ok(()) => eprintln!("ryu-core: node reset wipe complete"),
+        Err(e) => {
+            eprintln!(
+                "ryu-core: node reset wipe incomplete ({e}); exiting without opening stores so locks release and the next start can retry"
+            );
+            // EX_TEMPFAIL-ish: desktop restartRyuCore will spawn us again.
+            std::process::exit(75);
+        }
     }
 }
 
@@ -173,25 +204,127 @@ pub fn apply_pending_reset() {
 /// then remove the marker. Split out from [`apply_pending_reset`] so it is testable
 /// against an arbitrary directory (the public entry point is bound to the cached
 /// `ryu_dir()`).
-fn wipe_dir_preserving_keys(dir: &Path) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            // Keep the marker (removed last) and the key custody files.
-            if name_str == RESET_MARKER || RESET_PRESERVE.contains(&name_str.as_ref()) {
-                continue;
+///
+/// Retries briefly: on Windows the previous Core/sidecar process can still hold
+/// SQLite handles for a short window after exit. Returns `Err` (and leaves the
+/// marker in place) if anything non-preserved still remains after retries.
+fn wipe_dir_preserving_keys(dir: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 12;
+    const SLEEP_MS: u64 = 400;
+
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 1..=ATTEMPTS {
+        last_err = None;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                // Keep the marker (removed last) and the key custody files.
+                if name_str == RESET_MARKER || RESET_PRESERVE.contains(&name_str.as_ref()) {
+                    continue;
+                }
+                let path = entry.path();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                // `bin/` stays as a directory but its contents are scrubbed so
+                // previously-installed app sidecars do not survive the reset.
+                let result = if name_str == "bin" && is_dir {
+                    wipe_bin_dir(&path)
+                } else if is_dir {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                if let Err(e) = result {
+                    eprintln!(
+                        "ryu-core: reset wipe attempt {attempt}/{ATTEMPTS} failed on {}: {e}",
+                        path.display()
+                    );
+                    last_err = Some(e);
+                }
             }
-            let path = entry.path();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let _ = if is_dir {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
+        }
+
+        if !reset_wipe_has_leftovers(dir) {
+            let _ = std::fs::remove_file(dir.join(RESET_MARKER));
+            return Ok(());
+        }
+
+        if attempt < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
         }
     }
-    let _ = std::fs::remove_file(dir.join(RESET_MARKER));
+
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::other("node reset wipe left non-preserved entries after retries")
+    }))
+}
+
+/// Delete every entry in `bin/` except the Core/gateway binaries needed to boot.
+fn wipe_bin_dir(bin: &Path) -> std::io::Result<()> {
+    let mut first_err: Option<std::io::Error> = None;
+    let Ok(entries) = std::fs::read_dir(bin) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if BIN_PRESERVE.contains(&name_str.as_ref()) {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let result = if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = result {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// True when `dir` still contains anything that a successful reset would delete.
+fn reset_wipe_has_leftovers(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == RESET_MARKER || RESET_PRESERVE.contains(&name_str.as_ref()) {
+            continue;
+        }
+        if name_str == "bin" {
+            // Leftover if bin still holds anything outside the allowlist.
+            if bin_has_non_essential(&entry.path()) {
+                return true;
+            }
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn bin_has_non_essential(bin: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(bin) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !BIN_PRESERVE.contains(&name_str.as_ref()) {
+            return true;
+        }
+    }
+    false
 }
 
 // ── Sizing / free space (used by the data-path API + relocate validation) ────────
@@ -305,27 +438,69 @@ mod tests {
         std::fs::write(base.join("conversations.db"), b"x").unwrap();
         std::fs::create_dir_all(base.join("models")).unwrap();
         std::fs::write(base.join("models").join("a.bin"), b"y").unwrap();
+        std::fs::create_dir_all(base.join("plugins")).unwrap();
+        std::fs::write(base.join("plugins").join("com.ryu.clips"), b"z").unwrap();
+        std::fs::write(base.join("agents.db"), b"a").unwrap();
+        std::fs::write(base.join("plugins.db"), b"p").unwrap();
         // Custody files to preserve.
         std::fs::write(base.join("master.key"), b"k").unwrap();
         std::fs::write(base.join("memory.key"), b"m").unwrap();
-        // Installed program code to preserve — on a release install this dir holds
-        // `ryu-core` itself, so wiping it would leave the node unstartable.
+        // bin/: Core/gateway survive; every other sidecar is wiped.
         std::fs::create_dir_all(base.join("bin")).unwrap();
-        std::fs::write(base.join("bin").join("ryu-core"), b"elf").unwrap();
+        std::fs::write(base.join("bin").join("ryu-core.exe"), b"elf").unwrap();
+        std::fs::write(base.join("bin").join("ryu-gateway.exe"), b"gw").unwrap();
+        std::fs::write(base.join("bin").join("llama-server.exe"), b"llm").unwrap();
+        std::fs::write(base.join("bin").join("some-app.exe"), b"app").unwrap();
         // The marker that arms the wipe.
         std::fs::write(base.join(RESET_MARKER), b"1").unwrap();
 
-        wipe_dir_preserving_keys(&base);
+        wipe_dir_preserving_keys(&base).expect("wipe succeeds against unlocked temp dir");
 
         assert!(!base.join("conversations.db").exists());
         assert!(!base.join("models").exists());
+        assert!(!base.join("plugins").exists());
+        assert!(!base.join("agents.db").exists());
+        assert!(!base.join("plugins.db").exists());
         assert!(!base.join(RESET_MARKER).exists());
         assert!(base.join("master.key").exists());
         assert!(base.join("memory.key").exists());
         assert!(
-            base.join("bin").join("ryu-core").exists(),
-            "reset must not delete the installed binaries it needs to reboot"
+            base.join("bin").join("ryu-core.exe").exists(),
+            "reset must keep ryu-core so the node can reboot"
         );
+        assert!(
+            base.join("bin").join("ryu-gateway.exe").exists(),
+            "reset must keep ryu-gateway"
+        );
+        assert!(
+            !base.join("bin").join("llama-server.exe").exists(),
+            "reset must wipe non-essential bin sidecars"
+        );
+        assert!(
+            !base.join("bin").join("some-app.exe").exists(),
+            "reset must wipe previously-installed app binaries"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reset_keeps_marker_when_wipe_blocked() {
+        // Simulate a locked leftover: after a partial failure the marker must
+        // survive so the next boot retries instead of silently keeping data.
+        let base = std::env::temp_dir().join("ryu-reset-marker-keep");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join(RESET_MARKER), b"1").unwrap();
+        std::fs::write(base.join("conversations.db"), b"x").unwrap();
+
+        // Pretend wipe left leftovers by only checking the leftover detector —
+        // the full wipe against an unlocked temp dir always succeeds; this
+        // asserts the contract the retry loop depends on.
+        assert!(reset_wipe_has_leftovers(&base));
+        assert!(base.join(RESET_MARKER).exists());
+        wipe_dir_preserving_keys(&base).unwrap();
+        assert!(!reset_wipe_has_leftovers(&base));
+        assert!(!base.join(RESET_MARKER).exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 

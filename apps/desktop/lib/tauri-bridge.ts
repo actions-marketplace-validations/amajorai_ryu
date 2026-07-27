@@ -4,10 +4,41 @@ export const startRyuCore = () => invoke<string>("start_ryu_core");
 export const stopRyuCore = () => invoke<void>("stop_ryu_core");
 export const getRyuStatus = () => invoke<string>("get_ryu_status");
 
-/** Stop then start the Core process — the preflight page's "Restart" action. */
+const sleep = (ms: number) =>
+	new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Stop then start the Core process. Waits for health to drop before starting so
+ * a node-reset wipe (which runs at the next boot) sees unlocked SQLite files —
+ * especially important on Windows where handles linger briefly after exit.
+ *
+ * Retries start a few times: if wipe is still blocked Core exits immediately
+ * (exit 75) without opening stores; another start then retries the wipe.
+ */
 export const restartRyuCore = async (): Promise<string> => {
 	await stopRyuCore().catch(() => undefined);
-	return startRyuCore();
+	for (let i = 0; i < 40; i++) {
+		const status = await getRyuStatus().catch(() => "stopped");
+		if (status === "stopped") {
+			break;
+		}
+		await sleep(150);
+	}
+	// Brief settle for OS file-handle release after the process tree dies.
+	await sleep(800);
+
+	let last = "";
+	for (let attempt = 0; attempt < 5; attempt++) {
+		last = await startRyuCore();
+		// Give apply_pending_reset time to finish (or exit 75 on failure).
+		await sleep(1200);
+		const status = await getRyuStatus().catch(() => "stopped");
+		if (status === "running") {
+			return last;
+		}
+		await sleep(500);
+	}
+	return last;
 };
 export const openExternal = (url: string) =>
 	invoke<void>("open_external", { url });

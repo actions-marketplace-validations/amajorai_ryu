@@ -1,14 +1,14 @@
 "use client";
 
 import { motion } from "motion/react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { cn } from "../lib/utils.ts";
 
 interface PageHeaderProps {
 	animate?: boolean;
 	className?: string;
 	style?: CSSProperties;
-	subtitle?: string;
+	subtitle?: ReactNode;
 	subtitleDelay?: number;
 	title: string;
 	titleClassName?: string;

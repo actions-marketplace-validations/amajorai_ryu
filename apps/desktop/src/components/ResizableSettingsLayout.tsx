@@ -115,7 +115,7 @@ export default function ResizableSettingsLayout({
 				>
 					<div className="h-full min-w-0 overflow-hidden p-2 pr-0">
 						<Sidebar className="h-full w-full rounded-xl" collapsible="none">
-							<SidebarContent className="scroll-fade-effect-y overflow-x-hidden pt-2 pb-12">
+							<SidebarContent className="scroll-fade-effect-y overflow-x-hidden pt-2">
 								{sidebar}
 							</SidebarContent>
 						</Sidebar>

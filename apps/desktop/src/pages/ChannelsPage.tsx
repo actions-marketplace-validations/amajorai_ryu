@@ -1,17 +1,9 @@
-// apps/desktop/src/components/gateway/ChannelsSection.tsx
-//
-// Channel-bot management, hosted inside the Gateway settings dialog. Channels
-// are a gateway concern (the gateway runs the platform listeners), so this lives
-// under Gateway → Channels rather than as a standalone page.
-//
-// It is a thin container: it loads channel configs, agents, and teams via hooks
-// and renders the presentational `ChannelsView` from `@ryu/blocks/desktop/channels`
-// (shared with the storyboard). Configs live in the control-plane server
-// (lib/api/channels.ts → :3000) and are account-global — unlike the rest of the
-// gateway dialog, they are not scoped to the active Core node. A bot routes to a
-// single agent OR a team (whose lead agent orchestrates the members). Secrets are
-// write-only: existing tokens are never shown; leaving a credential field blank on
-// edit keeps the stored value.
+// Channel-bot management as a standalone tab page (ported out of the Gateway
+// settings dialog). Configs live in the control-plane server (lib/api/channels.ts
+// → :3000) and are account-global — not scoped to the active Core node. A bot
+// routes to a single agent OR a team. Secrets are write-only: existing tokens
+// are never shown; leaving a credential field blank on edit keeps the stored
+// value.
 
 import {
 	type ChannelConfigView,
@@ -19,7 +11,6 @@ import {
 	ChannelsView,
 } from "@ryu/blocks/desktop/channels";
 import { useState } from "react";
-import { SettingsSection } from "@/src/components/settings/shared/settings-items.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useChannels } from "@/src/hooks/useChannels.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
@@ -41,7 +32,13 @@ function toView(c: ChannelConfig): ChannelConfigView {
 	};
 }
 
-export function ChannelsSection() {
+export default function ChannelsPage({
+	initialNew = false,
+	initialSelectedId = null,
+}: {
+	initialNew?: boolean;
+	initialSelectedId?: string | null;
+}) {
 	const { channels, loading, error, authed, create, update, remove } =
 		useChannels();
 	const { agents } = useAgents();
@@ -105,20 +102,18 @@ export function ChannelsSection() {
 		}
 	};
 
-	// Render through the shared SettingsSection so this reads as a native gateway
-	// dialog section (header + caption + the iOS-grouped `bg-muted/40` surface),
-	// not a one-off bordered card. The shared ChannelsView is a full-height
-	// master-detail layout and the dialog content pane is scroll-bounded, so the
-	// surface gets a definite height for its internal list/form scroll regions to
-	// resolve against.
+	// Sidebar is the channel picker; this page is create/edit only (no in-page
+	// list). Bots are account-global on the gateway — not scoped to the active node.
 	return (
-		<SettingsSection caption="Channel bots run on the gateway and are account-global — not scoped to the active node. A bot routes to a single agent or a team.">
-			<div className="h-[60vh] min-h-[420px] overflow-hidden rounded-[10px] bg-muted/40">
+		<div className="flex h-full flex-col overflow-hidden">
+			<div className="min-h-0 flex-1 overflow-hidden">
 				<ChannelsView
 					agents={agents.map((a) => ({ id: a.id, name: a.name }))}
 					authed={authed}
 					channels={channels.map(toView)}
 					error={error}
+					initialNew={initialNew}
+					initialSelectedId={initialSelectedId}
 					loading={loading}
 					onDelete={handleDelete}
 					onSave={handleSave}
@@ -131,6 +126,6 @@ export function ChannelsSection() {
 					teams={teams.map((t) => ({ id: t.id, name: t.name }))}
 				/>
 			</div>
-		</SettingsSection>
+		</div>
 	);
 }

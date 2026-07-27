@@ -312,7 +312,7 @@ export function StatsTab() {
 						value={formatNumber(stats?.byFeatureTotals.island ?? 0)}
 					/>
 					<StatCard
-						title="Predictions accepted"
+						title="Autocomplete accepted"
 						value={formatNumber(stats?.byFeatureTotals.predictAccepted ?? 0)}
 					/>
 				</div>

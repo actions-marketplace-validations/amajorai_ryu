@@ -9,6 +9,7 @@ import { registerCatalogIpc } from "./catalog.ts";
 import { registerConsentIpc } from "./consent.ts";
 import { registerCoreIpc } from "./core.ts";
 import { registerDictationIpc } from "./dictation.ts";
+import { registerKeybindingsIpc } from "./keybindings.ts";
 import { registerMeetingsIpc } from "./meetings.ts";
 import { registerPluginsIpc } from "./plugins.ts";
 import { registerQuestsIpc } from "./quests.ts";
@@ -64,6 +65,7 @@ export function registerIpc(
 	registerVoiceIpc(() => activeWindow);
 	registerDictationIpc(() => activeWindow);
 	registerAgentsIpc(() => activeWindow);
+	registerKeybindingsIpc(() => activeWindow);
 	registerTtsIpc(() => activeWindow);
 	registerWindowIpc();
 }

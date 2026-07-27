@@ -7,6 +7,7 @@
 // size the compact bar to it. While a reply streams a small stop control appears.
 
 import {
+	type KeyboardEvent,
 	type ReactNode,
 	useCallback,
 	useEffect,
@@ -33,6 +34,11 @@ interface MessageInputProps {
 	disabled?: boolean;
 	/** Agent · Model · Thinking picker (desktop composer parity). */
 	leftActions?: ReactNode;
+	/**
+	 * Focus-scoped composer settings shortcuts (cycle agent/mode/model/thinking).
+	 * Return true when handled so Enter-to-send is skipped.
+	 */
+	onComposerKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean;
 	/** Report the measured composer height so the island can size the compact bar. */
 	onComposerResize?: (height: number) => void;
 	/** Called once the prefill has been applied so the store can clear it. */
@@ -57,6 +63,7 @@ export function MessageInput({
 	disabled,
 	leftActions,
 	prefill,
+	onComposerKeyDown,
 	onPrefillConsumed,
 	onComposerResize = noop,
 	onRemoveAttachment,
@@ -177,6 +184,9 @@ export function MessageInput({
 					disabled={disabled}
 					onChange={(event) => setValue(event.target.value)}
 					onKeyDown={(event) => {
+						if (onComposerKeyDown?.(event)) {
+							return;
+						}
 						if (event.key === "Enter" && !event.shiftKey) {
 							event.preventDefault();
 							submit();

@@ -1,3 +1,4 @@
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import {
 	createContext,
 	type ReactNode,
@@ -7,7 +8,10 @@ import {
 	useMemo,
 	useState,
 } from "react";
-import { setConversationTitle } from "@/src/lib/api/conversation-flags.ts";
+import {
+	setConversationIcon,
+	setConversationTitle,
+} from "@/src/lib/api/conversation-flags.ts";
 import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import type { Conversation, Message } from "@/types/chat.ts";
@@ -48,6 +52,8 @@ interface ChatHistoryContextValue {
 	 * reloads the active path to re-render the selected branch. */
 	selectVersion: (id: string, versionId: string) => Promise<boolean>;
 	setActiveConversationId: (id: string | null) => void;
+	/** Set or clear a conversation glyph (optimistic + Core write-through). */
+	setConversationGlyph: (id: string, icon: GlyphValue) => void;
 }
 
 const ChatHistoryContext = createContext<ChatHistoryContextValue | null>(null);
@@ -69,6 +75,7 @@ interface CoreConversationSummary {
 	branch: string | null;
 	created_at: number;
 	folder_path: string | null;
+	icon?: GlyphValue;
 	id: string;
 	message_count: number;
 	participants?: string[];
@@ -120,6 +127,7 @@ function summaryToConversation(summary: CoreConversationSummary): Conversation {
 		runStatus: summary.run_status ?? undefined,
 		pinned: summary.pinned ?? false,
 		archived: summary.archived ?? false,
+		icon: summary.icon ?? null,
 	};
 }
 
@@ -213,6 +221,19 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			// title already shows; a failed write just means it isn't server-backed.
 			const { url, token } = activeNode;
 			Promise.resolve(setConversationTitle({ url, token }, id, trimmed)).catch(
+				() => undefined
+			);
+		},
+		[activeNode]
+	);
+
+	const setConversationGlyph = useCallback(
+		(id: string, icon: GlyphValue) => {
+			setConversations((prev) =>
+				prev.map((c) => (c.id === id ? { ...c, icon } : c))
+			);
+			const { url, token } = activeNode;
+			Promise.resolve(setConversationIcon({ url, token }, id, icon)).catch(
 				() => undefined
 			);
 		},
@@ -372,6 +393,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			getConversation,
 			deleteConversation,
 			renameConversation,
+			setConversationGlyph,
 			setActiveConversationId,
 			listConversations,
 			loadMessages,
@@ -388,6 +410,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			getConversation,
 			deleteConversation,
 			renameConversation,
+			setConversationGlyph,
 			listConversations,
 			loadMessages,
 			forkConversation,

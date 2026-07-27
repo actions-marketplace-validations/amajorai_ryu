@@ -262,8 +262,9 @@ pub const VOICE_PLUGIN_ID: &str = "com.ryu.voice";
 /// `/api/gifs/search`). Governance-shell leaf: default-on, no `requires`. Gate-only,
 /// so it is NOT behind a cargo feature. The gate covers ONLY the producers; the shared
 /// no-cloud blob store (`/api/media/:file` serve + `/api/media/upload`) stays UNGATED
-/// kernel storage because it also serves TTS audio output and chat uploads — gating it
-/// here would couple Voice/chat to the Media app's enabled bit.
+/// kernel storage because it also serves TTS audio and legacy media URLs. New user
+/// uploads (chat / editor / `ui.uploadFile`) go to `/api/uploads` → the Uploads
+/// system space instead — also ungated, for the same reason.
 pub const MEDIA_PLUGIN_ID: &str = "com.ryu.media";
 
 /// The Memory app's plugin id — the `/api/memory` + `/api/memory/:id` long-term memory
@@ -367,15 +368,20 @@ pub const CORE_PLUGINS: &[&str] = &[
     MAIL_PLUGIN_ID,
     // RAG capability provider (default in-process embeddings+retrieval).
     RAG_PLUGIN_ID,
-    // System-wide predictive typing. Core-tier but opt-in (NOT in CORE_DEFAULT_ON):
+    // System-wide autocomplete. Core-tier but opt-in (NOT in CORE_DEFAULT_ON):
     // enabling it is the single on/off switch for the /api/predict/* brain, and it
     // sends text from arbitrary apps to a model, so it ships disabled.
     "predict",
+    // System-wide dictation + agent-ask (Island surface). Core-tier; default-on
+    // (see CORE_DEFAULT_ON) so the previously-hardcoded Island feature keeps
+    // working on a fresh install. Enabling the plugin is the single switch.
+    "dictation",
     "engines",
     "durable",
     "goal",
     "proof",
     "double-check",
+    "chat-title",
     // Pre-turn prompt-improver: rewrites the outgoing message via a configurable
     // model before it is sent. Reverse-DNS id (matches its manifest + composer flag).
     "com.ryuhq.auto-expand",
@@ -474,20 +480,23 @@ pub const CORE_PLUGINS: &[&str] = &[
 /// opt-in Core plugins (firewall/routing/sandbox/headroom) are deliberately
 /// excluded — they only activate when the user enables them.
 ///
-/// The chat turn-hook plugins (`goal`/`proof`/`double-check`) ship default-on so
-/// their features (persistent goals, proof-of-work verification, answer review)
-/// work on **every surface** with zero setup, exactly like the built-in chat
-/// commands they replaced. This is only affordable because each declares a cheap
-/// `match` pre-gate (see [`crate::plugin_manifest::HookMatch`]): an idle hook
-/// costs a flag/prefix check or one KV read, never a sandbox spawn. They stay
-/// real, swappable plugins — a user can disable any of them, and the fixture is
-/// the reference a third party can fork.
+/// The chat turn-hook plugins (`goal`/`proof`/`double-check`/`chat-title`) ship
+/// default-on so their features (persistent goals, proof-of-work verification,
+/// answer review, progressive chat titles) work on **every surface** with zero
+/// setup, exactly like the built-in chat commands they replaced. This is only
+/// affordable because each declares a cheap `match` pre-gate (see
+/// [`crate::plugin_manifest::HookMatch`]) — or, for `chat-title`, a preference
+/// read inside the hook: an idle hook costs a flag/prefix check or one KV read,
+/// never a sandbox spawn when matched out. They stay real, swappable plugins —
+/// a user can disable any of them, and the fixture is the reference a third
+/// party can fork.
 pub const CORE_DEFAULT_ON: &[&str] = &[
     "engines",
     "durable",
     "goal",
     "proof",
     "double-check",
+    "chat-title",
     // The default tool apps — auto-installed (record seeded enabled) on a fresh
     // install so they show up like the auto-downloaded default models. The actual
     // process runs through its own sidecar/MCP lifecycle; enabling the record just
@@ -561,13 +570,18 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // fresh install — only the explicit Memory surface waits until the user enables it.
     //
     // NOTE: `predict` is deliberately absent — it is in CORE_PLUGINS but stays OPT-IN
-    // (NOT default-on). Enabling the Predict plugin flips the system-wide predictive-
-    // typing brain ON (`main.rs` seeds `predict::set_enabled(rec.enabled)` at boot),
+    // (NOT default-on). Enabling the Predict plugin flips the system-wide autocomplete
+    // brain ON (`main.rs` seeds `predict::set_enabled(rec.enabled)` at boot),
     // which sends text from arbitrary apps to a model; the codebase ships it OFF by
     // design (fixture note + `predict::ENABLED = AtomicBool::new(false)`). Gating its
     // `/api/predict/*` routes on the opt-in app breaks no working install: the brain is
     // already default-off, so any install where predict actually works already has the
     // record enabled → the gate passes. Default-on would be a privacy regression.
+    //
+    // Dictation is default-on: it was previously hardcoded into Island with
+    // enabled-by-default prefs. Seeding the plugin enabled preserves that UX while
+    // making the plugin the single switch (synced into the `dictation` pref blob).
+    "dictation",
     VOICE_PLUGIN_ID,
     MEDIA_PLUGIN_ID,
     // W7: the webhooks companion, default-on so it is present on every fresh install
@@ -1222,9 +1236,12 @@ mod tests {
         assert!(!is_default_on("routing"));
         assert!(!is_default_on("sandbox"));
         assert!(!is_default_on("headroom"));
-        // Predictive typing is Core-tier but opt-in (sends text to a model).
+        // Autocomplete is Core-tier but opt-in (sends text to a model).
         assert!(CORE_PLUGINS.contains(&"predict"));
         assert!(!is_default_on("predict"));
+        // Dictation is Core-tier and default-on (Island surface, previously hardcoded).
+        assert!(CORE_PLUGINS.contains(&"dictation"));
+        assert!(is_default_on("dictation"));
     }
 
     // ── Registration integrity: every id in a membership list must exist ──────

@@ -40,6 +40,18 @@ function subscribe(key: string, cb: () => void): () => void {
 	};
 }
 
+/** Write a persisted boolean and notify every consumer of `key`. */
+export function setPersistedToggle(key: string, value: boolean): void {
+	try {
+		localStorage.setItem(key, value ? "true" : "false");
+	} catch {
+		// Persistence is best-effort.
+	}
+	for (const cb of listeners.get(key) ?? []) {
+		cb();
+	}
+}
+
 /** `[value, setValue]` for a persisted boolean, synced across all consumers. */
 export function usePersistedToggle(
 	key: string,
@@ -53,14 +65,7 @@ export function usePersistedToggle(
 
 	const setValue = useCallback(
 		(v: boolean) => {
-			try {
-				localStorage.setItem(key, v ? "true" : "false");
-			} catch {
-				// Persistence is best-effort.
-			}
-			for (const cb of listeners.get(key) ?? []) {
-				cb();
-			}
+			setPersistedToggle(key, v);
 		},
 		[key]
 	);

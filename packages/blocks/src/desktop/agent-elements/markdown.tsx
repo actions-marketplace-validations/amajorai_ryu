@@ -4,6 +4,8 @@ import { cn } from "@ryu/ui/lib/utils";
 import { createCodePlugin } from "@streamdown/code";
 import { type Components, Streamdown } from "streamdown";
 import "streamdown/styles.css";
+import { type Citation, CitationMarkLink } from "./inline-citation.tsx";
+import { linkifyCitationMarkers } from "./utils/citations.ts";
 
 // Fixed streaming-animation treatment (Streamdown's animate plugin). Word-by-word
 // blur-in is the softest of the built-ins; the toggle lives upstream (settings),
@@ -53,6 +55,8 @@ function normalizeCodeFenceLanguages(text: string): string {
 }
 
 export interface MarkdownProps {
+	/** Web-tool citations for this turn; bare `[n]` markers become inline chips. */
+	citations?: Citation[];
 	className?: string;
 	content: string;
 	fileReferences?: FileReference[];
@@ -131,6 +135,7 @@ function enrichInlineFileReferences(
 }
 
 export function Markdown({
+	citations,
 	content,
 	className,
 	fileReferences,
@@ -138,7 +143,12 @@ export function Markdown({
 	onOpenFile,
 }: MarkdownProps) {
 	const safeContent = normalizeCodeFenceLanguages(
-		fixNumberedListBreaks(enrichInlineFileReferences(content, fileReferences))
+		fixNumberedListBreaks(
+			linkifyCitationMarkers(
+				enrichInlineFileReferences(content, fileReferences),
+				citations
+			)
+		)
 	);
 	const components: Components = {
 		h1: ({ children, ...props }) => (
@@ -198,6 +208,16 @@ export function Markdown({
 		a: ({ href, children, ...props }) => {
 			if (!href) {
 				return <span>{children}</span>;
+			}
+			if (href.startsWith("#ryu-cite-")) {
+				const n = Number(href.replace("#ryu-cite-", ""));
+				const citation = Number.isFinite(n)
+					? citations?.find((c) => c.number === n)
+					: undefined;
+				if (!citation) {
+					return <span>{children}</span>;
+				}
+				return <CitationMarkLink citation={citation} />;
 			}
 			if (href.startsWith("#ryu-file-")) {
 				const index = Number(href.replace("#ryu-file-", ""));

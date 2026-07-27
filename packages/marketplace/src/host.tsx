@@ -43,6 +43,30 @@ export interface SellerState {
 	status: SellerStatus | null;
 }
 
+/** One row of the seller reports inbox (quality reports on the org's listings). */
+export interface SellerReportRow {
+	details: string | null;
+	id: string;
+	itemId: string;
+	itemKind: string;
+	itemName: string | null;
+	reason: string;
+	status: string;
+}
+
+export interface SellerReportsState {
+	authed: boolean;
+	error: MarketplaceHostError | null;
+	loading: boolean;
+	refresh: () => Promise<void> | void;
+	reports: SellerReportRow[];
+	resolve: (input: {
+		id: string;
+		note?: string | null;
+		status: "resolved" | "dismissed" | "reviewing" | "open";
+	}) => Promise<void>;
+}
+
 /** The full set of services the shared store UI needs from its host surface. */
 export interface MarketplaceHost {
 	/** Open an external URL (Tauri shell on desktop, navigation on web). */
@@ -54,6 +78,8 @@ export interface MarketplaceHost {
 	}) => Promise<PurchaseResult>;
 	/** The surface's owned-licenses hook (called at component top level). */
 	useLicenses: () => LicensesState;
+	/** Optional seller-reports inbox for org admins. */
+	useSellerReports?: () => SellerReportsState;
 	/** The surface's seller-status hook (called at component top level). */
 	useSellerStatus: () => SellerState;
 }

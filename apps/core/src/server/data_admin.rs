@@ -206,7 +206,7 @@ pub struct ResetNodeRequest {
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 pub async fn node_reset(
-    State(_state): State<ServerState>,
+    State(state): State<ServerState>,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(req): Json<ResetNodeRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -238,10 +238,31 @@ pub async fn node_reset(
     }
 
     match crate::paths::request_node_reset() {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(json!({ "ok": true, "restart_required": true })),
-        ),
+        Ok(()) => {
+            // The wipe cannot run while this process (and its sidecars) hold
+            // SQLite handles open. Arming the marker alone used to rely on the
+            // desktop restarting Core — but in practice that restart was often a
+            // no-op (dev: turbo owns Core; release: Tauri lost the child handle
+            // and `start` saw "already running"). Exit ourselves after the
+            // response flushes so the next boot always consumes the marker.
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tracing::warn!("node reset armed — stopping sidecars/gateway before exit");
+                state.manager.stop_all().await;
+                if let Err(e) = state.gateway.stop().await {
+                    tracing::warn!("node reset: gateway stop failed: {e}");
+                }
+                // Brief settle so Windows releases file handles before the
+                // replacement process's `apply_pending_reset` runs.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                tracing::warn!("node reset: exiting so wipe can run on next boot");
+                std::process::exit(0);
+            });
+            (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "restart_required": true })),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),

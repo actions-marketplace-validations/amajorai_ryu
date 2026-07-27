@@ -508,7 +508,7 @@ export function ProfileStatsPanel({
 				<StatCard
 					icon={<Cpu className="size-4" />}
 					sub="accepted"
-					title="Predictions"
+					title="Autocomplete"
 					value={formatCompact(featureTotals?.predictAccepted ?? 0)}
 				/>
 				<StatCard

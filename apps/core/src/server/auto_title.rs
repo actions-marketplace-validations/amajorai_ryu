@@ -1,30 +1,21 @@
-//! Auto-rename for chats and meetings (ChatGPT/Claude-style).
+//! Auto-rename helpers for chats and meetings.
 //!
-//! When a conversation gets its *first* user message, [`ConversationStore`]
-//! [`append_message`] hands the id to [`run_auto_title_loop`], which asks the
-//! default local model for a concise title and applies it — unless the user has
-//! already renamed the chat (`title_custom`).
+//! Chat LLM auto-rename now lives in the `chat-title` turn-hook plugin
+//! (`post_assistant_turn`): it re-titles after every N completed assistant
+//! turns via `host.setConversationTitle`. This module still owns:
+//! - [`sanitize_title`] (shared by the plugin bridge + meetings)
+//! - [`generate_meeting_title`] (meetings host)
+//! - [`run_auto_title_loop`] (legacy channel consumer; chat triggers no longer
+//!   enqueue — kept so older wiring / tests remain compiling)
 //!
-//! Placement / privacy: this is a Core background task (it decides *what runs* —
-//! a title for a chat). The **default** path calls the resident local engine
-//! *directly*, because (a) the user asked for "the default local model" and (b)
-//! it guarantees the first message never leaves the machine. Routing the call
-//! through the Gateway instead risks the request falling through to the cloud
-//! `default_provider` when the local model id doesn't match a local-family
-//! prefix — so the direct call is the safe default. A power user can set the
-//! `auto-title-model` preference to route through the Gateway with any model id
-//! (tagged `x-ryu-priority: background` so it can't starve the interactive
-//! reply).
+//! Placement / privacy: title *generation* for meetings still prefers the
+//! resident local engine directly (see [`generate`]). The chat-title plugin
+//! uses `host.sideModel`, which resolves `auto-title-model` → node default →
+//! local engine through the same preference chain.
 //!
-//! The model is resolved through [`crate::agent_selection`], so the chain is
-//! `auto-title-model` → the node-wide default selection → this local-direct
-//! path. Privacy consequence worth knowing: configuring a node-wide default
-//! *does* route titling through the Gateway with it. The local-direct guarantee
-//! holds whenever nothing is configured at either level, which is the default
-//! state.
-//!
-//! [`ConversationStore`]: super::conversations::ConversationStore
-//! [`append_message`]: super::conversations::ConversationStore::append_message
+//! [`sanitize_title`]: sanitize_title
+//! [`generate_meeting_title`]: generate_meeting_title
+//! [`run_auto_title_loop`]: run_auto_title_loop
 
 use serde_json::json;
 

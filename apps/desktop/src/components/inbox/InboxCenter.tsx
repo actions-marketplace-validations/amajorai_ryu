@@ -12,8 +12,8 @@
 // something. Clicking the row body opens the full Inbox; the popover is
 // controlled so those clicks dismiss it.
 //
-// Chrome comes from TrayPopover, shared with the Downloads tray so both trays
-// read as the same object.
+// Chrome comes from TrayPopover (plain shadcn Popover + shared row/header
+// primitives), matching the Downloads tray so both read as the same object.
 
 import {
 	Calendar04Icon,

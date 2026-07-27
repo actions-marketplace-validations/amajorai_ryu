@@ -1,7 +1,6 @@
 import {
 	Add01Icon,
 	Delete02Icon,
-	Globe02Icon,
 	Key01Icon,
 	Link01Icon,
 	RefreshIcon,
@@ -30,7 +29,7 @@ import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { sileo } from "sileo";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
@@ -54,7 +53,15 @@ function StatusBadge({ status }: { status: ConnectionStatus }) {
 	);
 }
 
-export default function IdentitiesPage() {
+export default function IdentitiesPage({
+	initialNew = false,
+	initialProfileId = null,
+}: {
+	/** Open the create-connection form on mount (e.g. `/identities/new`). */
+	initialNew?: boolean;
+	/** Focus the first connection under this profile when the list loads. */
+	initialProfileId?: string | null;
+}) {
 	const {
 		profiles,
 		loading,
@@ -72,12 +79,43 @@ export default function IdentitiesPage() {
 		polling,
 	} = useIdentities();
 
-	// Right pane: either the create form or a selected connection's detail.
+	// Detail pane: create form or a selected connection. The Identities sidebar
+	// section is the profile picker — this page no longer ships a left list.
 	const [selectedId, setSelectedId] = useState<string | null>(null);
-	const [showCreate, setShowCreate] = useState(false);
+	const [showCreate, setShowCreate] = useState(initialNew);
+	const [profileFocusApplied, setProfileFocusApplied] = useState(false);
 
+	const focusedProfile =
+		profiles.find((p) => p.profile_id === initialProfileId) ?? null;
+	const focusedConnections = focusedProfile?.connections ?? [];
 	const allConnections = profiles.flatMap((p) => p.connections);
 	const selected = allConnections.find((c) => c.id === selectedId) ?? null;
+
+	// Deep-link focus: once profiles load, select the first connection under the
+	// requested profile (sidebar / Library card). Skipped when creating.
+	useEffect(() => {
+		if (profileFocusApplied || initialNew || !initialProfileId || loading) {
+			return;
+		}
+		const profile = profiles.find((p) => p.profile_id === initialProfileId);
+		const first = profile?.connections[0];
+		if (first) {
+			setSelectedId(first.id);
+			setShowCreate(false);
+		}
+		setProfileFocusApplied(true);
+	}, [initialNew, initialProfileId, loading, profileFocusApplied, profiles]);
+
+	// Re-seed when the manage route switches profile or opens create.
+	useEffect(() => {
+		setShowCreate(initialNew);
+		if (initialNew) {
+			setSelectedId(null);
+			setProfileFocusApplied(true);
+			return;
+		}
+		setProfileFocusApplied(false);
+	}, [initialNew, initialProfileId]);
 
 	const openCreate = useCallback(() => {
 		setSelectedId(null);
@@ -100,69 +138,21 @@ export default function IdentitiesPage() {
 		[remove, selectedId]
 	);
 
-	return (
-		<div className="flex h-full overflow-hidden">
-			<div className="flex w-72 shrink-0 flex-col border-r">
-				<div className="flex items-center justify-between border-b px-3 py-2">
-					<span className="font-semibold text-sm">Identities</span>
-					<div className="flex items-center gap-1">
-						<Button
-							onClick={() => refetch()}
-							size="sm"
-							title="Refresh"
-							variant="ghost"
-						>
-							<HugeiconsIcon className="size-4" icon={RefreshIcon} />
-						</Button>
-						<Button
-							onClick={openCreate}
-							size="sm"
-							title="New connection"
-							variant="ghost"
-						>
-							<HugeiconsIcon className="size-4" icon={Add01Icon} />
-						</Button>
-					</div>
-				</div>
-				{loading ? (
-					<div className="flex flex-1 items-center justify-center">
-						<Spinner />
-					</div>
-				) : (
-					<div className="flex-1 overflow-y-auto p-1">
-						{profiles.length === 0 ? (
-							<p className="px-3 py-6 text-center text-muted-foreground text-xs">
-								No connections yet. Create one to log an agent in to a domain.
-							</p>
-						) : (
-							profiles.map((profile) => (
-								<div className="mb-2" key={profile.profile_id}>
-									<div className="px-2 py-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-										{profile.profile_id}
-									</div>
-									<ul className="space-y-0.5">
-										{profile.connections.map((conn) => (
-											<ConnectionRow
-												connection={conn}
-												isActive={selectedId === conn.id}
-												key={conn.id}
-												onSelect={() => {
-													setSelectedId(conn.id);
-													setShowCreate(false);
-												}}
-											/>
-										))}
-									</ul>
-								</div>
-							))
-						)}
-					</div>
-				)}
+	if (loading) {
+		return (
+			<div className="flex h-full items-center justify-center">
+				<Spinner />
 			</div>
+		);
+	}
 
+	return (
+		<div className="flex h-full flex-col overflow-hidden">
 			<div className="flex-1 overflow-y-auto p-6">
-				{error && <p className="mb-3 text-destructive text-sm">{error}</p>}
-				{showCreate && (
+				{error ? (
+					<p className="mb-3 text-destructive text-sm">{error}</p>
+				) : null}
+				{showCreate ? (
 					<CreateConnectionForm
 						creating={creating}
 						existingProfileIds={profiles.map((p) => p.profile_id)}
@@ -185,72 +175,138 @@ export default function IdentitiesPage() {
 							}
 						}}
 					/>
-				)}
-				{!showCreate && selected && (
-					<ConnectionDetail
-						connection={selected}
-						deleting={deleting === selected.id}
-						importing={importing}
-						loggingIn={loggingIn === selected.id}
-						onDelete={() => handleDelete(selected.id)}
-						onImport={async (state) => {
-							try {
-								await importState(selected.id, state);
-								sileo.success({ title: "Credentials imported" });
-							} catch (e) {
-								sileo.error({
-									title:
-										e instanceof Error ? e.message : "Could not import state",
-								});
-							}
-						}}
-						onLogin={async () => {
-							try {
-								const flow = await login(selected.id);
-								if (flow.kind.kind === "hosted") {
-									await openExternal(flow.kind.url);
-									sileo.info({
+				) : null}
+				{!(showCreate || selected) && initialProfileId && focusedProfile ? (
+					<div className="mx-auto max-w-xl space-y-4">
+						<div className="flex items-center justify-between gap-3">
+							<div>
+								<h2 className="font-semibold text-lg">
+									{focusedProfile.profile_id}
+								</h2>
+								<p className="text-muted-foreground text-sm">
+									No connections under this profile yet.
+								</p>
+							</div>
+							<Button onClick={openCreate} size="sm" variant="ghost">
+								<HugeiconsIcon className="size-4" icon={Add01Icon} />
+								Add connection
+							</Button>
+						</div>
+					</div>
+				) : null}
+				{!showCreate && selected ? (
+					<div className="mx-auto max-w-xl space-y-4">
+						{focusedConnections.length > 1 ? (
+							<div className="flex flex-wrap gap-1">
+								{focusedConnections.map((conn) => (
+									<Button
+										key={conn.id}
+										onClick={() => setSelectedId(conn.id)}
+										size="sm"
+										variant={selectedId === conn.id ? "secondary" : "ghost"}
+									>
+										{conn.domain}
+									</Button>
+								))}
+								<Button
+									onClick={openCreate}
+									size="sm"
+									title="New connection"
+									variant="ghost"
+								>
+									<HugeiconsIcon className="size-4" icon={Add01Icon} />
+								</Button>
+							</div>
+						) : (
+							<div className="flex justify-end gap-1">
+								<Button
+									onClick={() => refetch()}
+									size="sm"
+									title="Refresh"
+									variant="ghost"
+								>
+									<HugeiconsIcon className="size-4" icon={RefreshIcon} />
+								</Button>
+								<Button
+									onClick={openCreate}
+									size="sm"
+									title="New connection"
+									variant="ghost"
+								>
+									<HugeiconsIcon className="size-4" icon={Add01Icon} />
+								</Button>
+							</div>
+						)}
+						<ConnectionDetail
+							connection={selected}
+							deleting={deleting === selected.id}
+							importing={importing}
+							loggingIn={loggingIn === selected.id}
+							onDelete={() => handleDelete(selected.id)}
+							onImport={async (state) => {
+								try {
+									await importState(selected.id, state);
+									sileo.success({ title: "Credentials imported" });
+								} catch (e) {
+									sileo.error({
 										title:
-											"Login page opened in your browser — finish signing in, then select Check status",
-									});
-								} else {
-									sileo.info({
-										title: "This domain uses manual import — paste below",
+											e instanceof Error ? e.message : "Could not import state",
 									});
 								}
-							} catch (e) {
-								sileo.error({
-									title:
-										e instanceof Error ? e.message : "Could not start login",
-								});
-							}
-						}}
-						onRefresh={async () => {
-							try {
-								await poll(selected.id);
-							} catch (e) {
-								sileo.error({
-									title:
-										e instanceof Error ? e.message : "Could not check status",
-								});
-							}
-						}}
-						polling={polling === selected.id}
-					/>
-				)}
-				{!(showCreate || selected) && (
+							}}
+							onLogin={async () => {
+								try {
+									const flow = await login(selected.id);
+									if (flow.kind.kind === "hosted") {
+										await openExternal(flow.kind.url);
+										sileo.info({
+											title:
+												"Login page opened in your browser — finish signing in, then select Check status",
+										});
+									} else {
+										sileo.info({
+											title: "This domain uses manual import — paste below",
+										});
+									}
+								} catch (e) {
+									sileo.error({
+										title:
+											e instanceof Error ? e.message : "Could not start login",
+									});
+								}
+							}}
+							onRefresh={async () => {
+								try {
+									await poll(selected.id);
+								} catch (e) {
+									sileo.error({
+										title:
+											e instanceof Error ? e.message : "Could not check status",
+									});
+								}
+							}}
+							polling={polling === selected.id}
+						/>
+					</div>
+				) : null}
+				{showCreate ||
+				selected ||
+				(initialProfileId && focusedProfile) ? null : (
 					<Empty>
 						<EmptyHeader>
 							<HugeiconsIcon
 								className="size-8 text-muted-foreground"
 								icon={Link01Icon}
 							/>
-							<EmptyTitle>Identities</EmptyTitle>
+							<EmptyTitle>
+								{profiles.length === 0
+									? "No identities yet"
+									: "Select an identity"}
+							</EmptyTitle>
 							<EmptyDescription>
-								Connect an agent to the websites and services it acts on. Each
-								connection logs in to one domain; group them under a profile and
-								bind that profile to an agent. Credentials are encrypted at rest
-								and never sent to the model.
+								{profiles.length === 0
+									? "Connect an agent to the websites and services it acts on. Each connection logs in to one domain; group them under a profile and bind that profile to an agent."
+									: "Pick an identity from the sidebar to manage its connections, or create a new one."}
 							</EmptyDescription>
 						</EmptyHeader>
 						<Button onClick={openCreate}>
@@ -261,41 +317,6 @@ export default function IdentitiesPage() {
 				)}
 			</div>
 		</div>
-	);
-}
-
-function ConnectionRow({
-	connection,
-	isActive,
-	onSelect,
-}: {
-	connection: Connection;
-	isActive: boolean;
-	onSelect: () => void;
-}) {
-	return (
-		<li>
-			<button
-				className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent ${
-					isActive ? "bg-accent" : ""
-				}`}
-				onClick={onSelect}
-				type="button"
-			>
-				<HugeiconsIcon
-					className="size-3.5 shrink-0 opacity-60"
-					icon={Globe02Icon}
-				/>
-				<span className="min-w-0 flex-1 truncate text-sm">
-					{connection.domain}
-				</span>
-				<span
-					className={`size-2 shrink-0 rounded-full ${
-						connection.status === "AUTHENTICATED" ? "bg-success" : "bg-warning"
-					}`}
-				/>
-			</button>
-		</li>
 	);
 }
 

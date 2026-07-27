@@ -20,7 +20,7 @@ interface InputConfig {
 }
 
 const DEFAULT_INPUT_CONFIG: InputConfig = {
-	inputBarPlaceholder: "Send a message...",
+	inputBarPlaceholder: "What do you want to do?",
 	attachmentButtonPosition: "left",
 	attachmentPreviewStyle: "thumbnail",
 };
@@ -68,6 +68,31 @@ export interface AttachedFile {
 	filename: string;
 	id: string;
 	size?: number;
+}
+
+/**
+ * Composer info-bar strip (top or bottom of the outer card). Use
+ * `variant: "destructive"` for errors — `bg-destructive/10` so they sit above
+ * the input instead of crowding the workspace / sources footer.
+ */
+export interface InputBarInfoBar {
+	/** Optional primary action rendered on the right (e.g. "Upgrade"). */
+	action?: {
+		label: string;
+		onClick: () => void;
+	};
+	/** Optional compact actions rendered on the right, before `action`. */
+	actions?: {
+		label: string;
+		onClick: () => void;
+		variant?: "default" | "secondary" | "ghost";
+	}[];
+	description?: string;
+	onClose?: () => void;
+	position?: "top" | "bottom";
+	title?: string;
+	/** Visual tone. `"destructive"` uses a soft red wash for composer errors. */
+	variant?: "default" | "destructive";
 }
 
 export interface InputBarProps {
@@ -152,23 +177,7 @@ export interface InputBarProps {
 	 */
 	goalControls?: GoalControls;
 
-	infoBar?: {
-		title?: string;
-		description?: string;
-		onClose?: () => void;
-		position?: "top" | "bottom";
-		/** Optional primary action rendered on the right (e.g. "Upgrade"). */
-		action?: {
-			label: string;
-			onClick: () => void;
-		};
-		/** Optional compact actions rendered on the right, before `action`. */
-		actions?: {
-			label: string;
-			onClick: () => void;
-			variant?: "default" | "secondary" | "ghost";
-		}[];
-	};
+	infoBar?: InputBarInfoBar;
 	isDragOver?: boolean;
 
 	/** Content rendered on the left of the toolbar, next to the attachment button. */
@@ -368,6 +377,7 @@ export const InputBar = memo(function InputBar({
 		state: voiceState,
 		levels: voiceLevels,
 		error: voiceError,
+		clearError: clearVoiceError,
 		start: startVoice,
 		stop: stopVoice,
 	} = useVoiceRecorder({
@@ -376,6 +386,31 @@ export const InputBar = memo(function InputBar({
 	});
 	const isRecording = voiceState === "recording";
 	const isTranscribing = voiceState === "transcribing";
+
+	// Voice / mic failures surface on the top info-bar (destructive) so they
+	// don't crowd the workspace / sources footer under the input.
+	const effectiveInfoBar: InputBarInfoBar | undefined = voiceError
+		? {
+				description: voiceError,
+				variant: "destructive",
+				position: "top",
+				onClose: clearVoiceError,
+			}
+		: infoBar;
+
+	// Re-open the strip whenever its content changes (new error, new banner).
+	useEffect(() => {
+		if (
+			effectiveInfoBar &&
+			(effectiveInfoBar.title || effectiveInfoBar.description)
+		) {
+			setIsInfoBarOpen(true);
+		}
+	}, [
+		effectiveInfoBar?.title,
+		effectiveInfoBar?.description,
+		effectiveInfoBar?.variant,
+	]);
 
 	// Image generation: take the composer text as the prompt, hand it to the host
 	// (which calls Core's /api/images/generate and surfaces the result), then clear
@@ -476,14 +511,20 @@ export const InputBar = memo(function InputBar({
 
 	const handleInfoBarClose = useCallback(() => {
 		setIsInfoBarOpen(false);
-		infoBar?.onClose?.();
-	}, [infoBar]);
+		if (voiceError) {
+			clearVoiceError();
+		} else {
+			infoBar?.onClose?.();
+		}
+	}, [voiceError, clearVoiceError, infoBar]);
 
-	const infoBarPosition = infoBar?.position ?? "top";
+	const infoBarPosition = effectiveInfoBar?.position ?? "top";
+	const infoBarVariant = effectiveInfoBar?.variant ?? "default";
+	const isDestructiveInfoBar = infoBarVariant === "destructive";
 	const shouldShowInfoBar = Boolean(
-		infoBar && (infoBar.title || infoBar.description)
+		effectiveInfoBar && (effectiveInfoBar.title || effectiveInfoBar.description)
 	);
-	const infoBarData = infoBar ?? {};
+	const infoBarData = effectiveInfoBar ?? {};
 
 	const infoBarNode = shouldShowInfoBar ? (
 		<div
@@ -491,15 +532,28 @@ export const InputBar = memo(function InputBar({
 				"flex h-[34px] items-center justify-between gap-3 px-3",
 				"overflow-hidden transition-all duration-150 ease-out",
 				isInfoBarOpen ? "max-h-[34px] opacity-100" : "max-h-0 opacity-0",
-				infoBarPosition === "top" ? "rounded-t-2xl" : "rounded-b-2xl"
+				infoBarPosition === "top" ? "rounded-t-2xl" : "rounded-b-2xl",
+				isDestructiveInfoBar && "bg-destructive/10"
 			)}
+			role={isDestructiveInfoBar ? "alert" : undefined}
 		>
-			<div className="min-w-0 truncate text-foreground text-xs">
+			<div
+				className={cn(
+					"min-w-0 truncate text-xs",
+					isDestructiveInfoBar ? "text-destructive" : "text-foreground"
+				)}
+			>
 				{infoBarData.title && (
 					<span className="font-medium">{infoBarData.title}</span>
 				)}
 				{infoBarData.description && (
-					<span className="text-muted-foreground/80">
+					<span
+						className={
+							isDestructiveInfoBar
+								? "text-destructive/80"
+								: "text-muted-foreground/80"
+						}
+					>
 						{infoBarData.title
 							? ` ${infoBarData.description}`
 							: infoBarData.description}
@@ -532,7 +586,12 @@ export const InputBar = memo(function InputBar({
 				{infoBarData.onClose && (
 					<Button
 						aria-label="Close"
-						className="size-6 shrink-0 text-muted-foreground/70 hover:text-foreground"
+						className={cn(
+							"size-6 shrink-0",
+							isDestructiveInfoBar
+								? "text-destructive/70 hover:text-destructive"
+								: "text-muted-foreground/70 hover:text-foreground"
+						)}
 						onClick={handleInfoBarClose}
 						size="icon"
 						type="button"
@@ -719,12 +778,19 @@ export const InputBar = memo(function InputBar({
 	);
 
 	const handleContainerClick = useCallback((e: React.MouseEvent) => {
+		const target = e.target as HTMLElement;
+		// Portaled menus/popovers (agent picker search, etc.) still bubble through
+		// the React tree into this container. Skip any interactive control so a
+		// click on the picker's search field cannot yank focus back to the prompt.
 		if (
-			e.target === e.currentTarget ||
-			!(e.target as HTMLElement).closest("button, textarea")
+			target !== e.currentTarget &&
+			target.closest(
+				"button, textarea, input, select, a, [role='menuitem'], [contenteditable='true']"
+			)
 		) {
-			textareaRef.current?.focus();
+			return;
 		}
+		textareaRef.current?.focus();
 	}, []);
 
 	const handleSuggestionSelect = useCallback(
@@ -786,24 +852,21 @@ export const InputBar = memo(function InputBar({
 		);
 	} else {
 		inputContent = (
-			<>
-				<textarea
-					className={cn(
-						"peer w-full resize-none border-0 bg-transparent text-[14px] text-foreground leading-[1.6] outline-none placeholder:text-muted-foreground",
-						"overflow-hidden",
-						disabled && "cursor-not-allowed opacity-50"
-					)}
-					disabled={disabled}
-					onChange={(e) => setInput(e.target.value)}
-					onKeyDown={handleKeyDown}
-					onPaste={onPaste}
-					placeholder={effectivePlaceholder}
-					ref={textareaRef}
-					rows={1}
-					value={input}
-				/>
-				<div className="pointer-events-none absolute inset-0 z-20 rounded-2xl opacity-0 outline-2 outline-ring transition-opacity duration-75 ease-in-out peer-focus:opacity-100 peer-focus-visible:opacity-100" />
-			</>
+			<textarea
+				className={cn(
+					"w-full resize-none border-0 bg-transparent text-[14px] text-foreground leading-[1.6] outline-none placeholder:text-muted-foreground",
+					"overflow-hidden",
+					disabled && "cursor-not-allowed opacity-50"
+				)}
+				disabled={disabled}
+				onChange={(e) => setInput(e.target.value)}
+				onKeyDown={handleKeyDown}
+				onPaste={onPaste}
+				placeholder={effectivePlaceholder}
+				ref={textareaRef}
+				rows={1}
+				value={input}
+			/>
 		);
 	}
 
@@ -998,9 +1061,6 @@ export const InputBar = memo(function InputBar({
 						)}
 					</div>
 
-					{voice && voiceError && (
-						<p className="px-3 pt-1 text-destructive text-xs">{voiceError}</p>
-					)}
 					{suggestionItems.length > 0 && (
 						<Suggestions
 							className={cn("mt-4 px-3", suggestionsClassName)}

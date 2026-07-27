@@ -229,6 +229,20 @@ export interface SidebarSectionSpec {
 	};
 	/** Per-row context-menu actions (delete, rename, …). */
 	itemActions?: ViewAction[];
+	/**
+	 * Optional hover preview for each row. Templates use the same `{{item.*}}`
+	 * vocabulary as `itemTarget`. When set, the shell shows a right-side
+	 * HoverCard with the full title (wrapping) plus optional description/meta
+	 * instead of an overflow-only tooltip.
+	 */
+	itemPreview?: {
+		/** Longer body under the title (e.g. `{{item.summary}}`). */
+		description?: string;
+		/** Key/value rows under the description (branch, path, …). */
+		meta?: Array<{ label: string; value: string }>;
+		/** Override the preview title template; defaults to the row's display title. */
+		title?: string;
+	};
 	/** Route template opened when a row is clicked. */
 	itemTarget?: string;
 	/** Live rows for the section (same primitive `list-detail` uses). */

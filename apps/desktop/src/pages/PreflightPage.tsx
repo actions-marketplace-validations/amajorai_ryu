@@ -12,7 +12,10 @@
 // every probe to "unknown" when Core is unreachable.
 
 import { Button } from "@ryu/ui/components/button";
+import { Logo as GhostOrb } from "@ryu/ui/components/logo";
+import { PageHeader } from "@ryu/ui/components/page-header";
 import { toast } from "@ryu/ui/components/sileo";
+import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { cn } from "@ryu/ui/lib/utils";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -230,12 +233,13 @@ export function PreflightPage({
 			: health.gatewayReachable
 				? "ok"
 				: "bad";
-	const islandTone: Tone =
-		health.islandReachable == null
-			? "pending"
-			: health.islandReachable
-				? "ok"
-				: "warn";
+	// # 0.1.0: Island disabled — uncomment when re-enabling the Island accordion item
+	// const islandTone: Tone =
+	// 	health.islandReachable == null
+	// 		? "pending"
+	// 		: health.islandReachable
+	// 			? "ok"
+	// 			: "warn";
 	// Hide engines that aren't installed, or that this node can't run (e.g. MLX on
 	// non-Apple-Silicon), from the sidecar list. They're registered in the catalog
 	// but never installed, so surfacing them as health rows just nags.
@@ -284,10 +288,7 @@ export function PreflightPage({
 			),
 			description: (
 				<div className="flex flex-col gap-3">
-					<p>
-						The orchestration engine. Everything routes through it; if it is
-						down, chat, agents, and automations can't run.
-					</p>
+					<p>Ryu's brain. Chat, agents, and automations all need it running.</p>
 					<div className="flex flex-wrap gap-2">
 						{health.coreState === "running" ? null : (
 							<ActionButton
@@ -320,7 +321,7 @@ export function PreflightPage({
 					{health.coreState === "running" && visibleSidecars.length > 0 ? (
 						<div className="flex flex-col gap-2 border-border/60 border-t pt-3">
 							<span className="text-foreground text-xs">
-								Sidecars ({visibleSidecars.length - failedSidecars.length}/
+								Helpers ({visibleSidecars.length - failedSidecars.length}/
 								{visibleSidecars.length} running)
 							</span>
 							{visibleSidecars.map((sc) => (
@@ -367,15 +368,15 @@ export function PreflightPage({
 				gatewayTone,
 				health.coreState === "running"
 					? health.gatewayReachable
-						? "reachable"
-						: "unreachable"
-					: "needs Core"
+						? "connected"
+						: "can't connect"
+					: "waiting for Core"
 			),
 			description: (
 				<div className="flex flex-col gap-3">
 					<p>
-						The governance layer — routing, firewall, budgets, audit. Core
-						manages it; restart respawns the process.
+						Keeps Ryu safe — what it can do, and how much it uses. Restart if it
+						looks stuck.
 					</p>
 					<div className="flex flex-wrap gap-2">
 						<ActionButton
@@ -386,7 +387,7 @@ export function PreflightPage({
 								toast[ok ? "info" : "warning"](
 									ok
 										? "Restarting Gateway…"
-										: "Gateway is externally managed — can't restart from here"
+										: "Gateway can't be restarted from here"
 								);
 								await refresh();
 							}}
@@ -400,7 +401,7 @@ export function PreflightPage({
 			title: componentTitle("Desktop", "ok", "this app"),
 			description: (
 				<div className="flex flex-col gap-3">
-					<p>The app you're looking at. Relaunch to recover a wedged window.</p>
+					<p>This app. Relaunch if the window freezes or looks stuck.</p>
 					<div className="flex flex-wrap gap-2">
 						<ActionButton
 							busyLabel="Relaunching…"
@@ -411,109 +412,117 @@ export function PreflightPage({
 				</div>
 			),
 		},
-		{
-			id: "island",
-			title: componentTitle(
-				"Island",
-				islandTone,
-				health.islandReachable == null
-					? "checking…"
-					: health.islandReachable
-						? "running"
-						: "not running"
-			),
-			description: (
-				<div className="flex flex-col gap-3">
-					<p>
-						The dynamic-island companion (a separate process). If it isn't
-						running, launch it from the tray; Show brings it forward.
-					</p>
-					<div className="flex flex-wrap gap-2">
-						<ActionButton
-							busyLabel="…"
-							label="Show Island"
-							onRun={async () => {
-								try {
-									await fetch(ISLAND_CONTROL_URL, {
-										method: "POST",
-										headers: { "Content-Type": "application/json" },
-										body: JSON.stringify({ action: "show" }),
-									});
-									toast.info("Showing Island…");
-								} catch {
-									toast.warning("Island isn't running");
-								}
-								await refresh();
-							}}
-						/>
-					</div>
-				</div>
-			),
-		},
+		// # 0.1.0: Island disabled — re-enable by uncommenting this block
+		// {
+		// 	id: "island",
+		// 	title: componentTitle(
+		// 		"Island",
+		// 		islandTone,
+		// 		health.islandReachable == null
+		// 			? "checking…"
+		// 			: health.islandReachable
+		// 				? "running"
+		// 				: "not running"
+		// 	),
+		// 	description: (
+		// 		<div className="flex flex-col gap-3">
+		// 			<p>
+		// 				The floating companion at the top of your screen. Use Show to bring
+		// 				it back if it's hidden.
+		// 			</p>
+		// 			<div className="flex flex-wrap gap-2">
+		// 				<ActionButton
+		// 					busyLabel="…"
+		// 					label="Show Island"
+		// 					onRun={async () => {
+		// 						try {
+		// 							await fetch(ISLAND_CONTROL_URL, {
+		// 								method: "POST",
+		// 								headers: { "Content-Type": "application/json" },
+		// 								body: JSON.stringify({ action: "show" }),
+		// 							});
+		// 							toast.info("Showing Island…");
+		// 						} catch {
+		// 							toast.warning("Island isn't running");
+		// 						}
+		// 						await refresh();
+		// 					}}
+		// 				/>
+		// 			</div>
+		// 		</div>
+		// 	),
+		// },
 	];
 
-	return (
-		<div
-			// Full-window (non-embedded) boot screen renders outside Layout, so it
-			// has no TitleBar drag region — mark the background draggable so the
-			// window can still be moved. Embedded (inside Settings) must not drag.
-			className={cn(
-				embedded
-					? "flex w-full flex-col gap-5"
-					: "flex h-full w-full items-center justify-center overflow-y-auto bg-background p-6"
-			)}
-			data-tauri-drag-region={embedded ? undefined : true}
-		>
-			<div
-				className={cn("flex w-full flex-col gap-5", !embedded && "max-w-md")}
-			>
-				{embedded ? null : (
-					<header className="flex flex-col gap-1 text-center">
-						<h1 className="font-semibold text-foreground text-xl">
-							{health.coreState === "running"
-								? "Almost there"
-								: "Getting Ryu ready"}
-						</h1>
-						<p className="text-muted-foreground text-sm">
-							{health.coreState === "running"
-								? "Core is up. Check any component below, then continue."
-								: "Core isn't running yet. It should start automatically — or start it below."}
-						</p>
-					</header>
-				)}
+	const body = (
+		<>
+			<BouncyAccordion items={items} onValueChange={setOpen} value={open} />
 
-				<BouncyAccordion items={items} onValueChange={setOpen} value={open} />
-
-				<div className="flex items-center justify-between gap-2">
-					<div className="flex gap-2">
-						<ActionButton
-							busyLabel="Copying…"
-							label="Copy diagnostics"
-							onRun={async () => {
-								await copyDiagnostics(target);
-								toast.success("Diagnostics copied to clipboard");
-							}}
-						/>
-						<ActionButton
-							busyLabel="Reporting…"
-							label="Report issue"
-							onRun={async () => {
-								await reportIssue(target);
-								toast.success("Issue reported");
-							}}
-						/>
-					</div>
-					{embedded ? (
-						<Button onClick={() => refresh()} size="sm" variant="outline">
-							Refresh
-						</Button>
-					) : health.coreState === "running" ? (
-						<Button onClick={() => refresh()} size="sm" variant="default">
-							Continue
-						</Button>
-					) : null}
+			<div className="flex items-center justify-between gap-2">
+				<div className="flex gap-2">
+					<ActionButton
+						busyLabel="Reporting…"
+						label="Report issue"
+						onRun={async () => {
+							await reportIssue(target);
+							toast.success("Issue reported");
+						}}
+						variant="default"
+					/>
+					<ActionButton
+						busyLabel="Copying…"
+						label="Copy diagnostics"
+						onRun={async () => {
+							await copyDiagnostics(target);
+							toast.success("Diagnostics copied to clipboard");
+						}}
+					/>
 				</div>
+				{embedded ? (
+					<Button onClick={() => refresh()} size="sm" variant="outline">
+						Refresh
+					</Button>
+				) : health.coreState === "running" ? (
+					<Button onClick={() => refresh()} size="sm" variant="default">
+						Continue
+					</Button>
+				) : null}
 			</div>
+		</>
+	);
+
+	// Embedded (Settings) keeps a compact stack. Full-window boot matches Login /
+	// onboarding: GhostOrb + PageHeader + staggered reveal.
+	if (embedded) {
+		return <div className="flex w-full flex-col gap-5">{body}</div>;
+	}
+
+	return (
+		// Full-window boot screen renders outside Layout, so it has no TitleBar
+		// drag region — mark the background draggable so the window can still be
+		// moved. Interactive children override it.
+		<div
+			className="flex h-full w-full flex-col items-center justify-center gap-8 overflow-y-auto bg-background p-8"
+			data-tauri-drag-region="true"
+		>
+			<StaggerReveal>
+				<div className="shrink-0">
+					<GhostOrb size="50px" variant="outline" />
+				</div>
+				<PageHeader
+					subtitle={
+						health.coreState === "running"
+							? "Core is up. Check any component below, then continue."
+							: "Core isn't running yet. It should start automatically, or start it below."
+					}
+					title={
+						health.coreState === "running"
+							? "Almost there"
+							: "Getting Ryu ready"
+					}
+				/>
+				<div className="flex w-full max-w-md flex-col gap-5">{body}</div>
+			</StaggerReveal>
 		</div>
 	);
 }

@@ -4,8 +4,10 @@ import type {
 	ComposerSettingsSection,
 } from "./composer-settings-menu.tsx";
 import {
+	type ComposerShortcutBindings,
 	type ComposerShortcutEvent,
 	handleComposerSettingsShortcut,
+	resolveComposerShortcutBindings,
 } from "./composer-shortcuts.ts";
 
 type Changes = string[];
@@ -48,6 +50,8 @@ function keyEvent(partial: Partial<ComposerShortcutEvent> & { key: string }): {
 	return { event, prevented: () => didPrevent };
 }
 
+const defaults = resolveComposerShortcutBindings();
+
 describe("handleComposerSettingsShortcut - guards", () => {
 	const sections = [{ key: "agent", items: items("a1", "a2"), value: "a1" }];
 
@@ -55,11 +59,11 @@ describe("handleComposerSettingsShortcut - guards", () => {
 		["altKey", { altKey: true }],
 		["ctrlKey", { ctrlKey: true }],
 		["metaKey", { metaKey: true }],
-	])("ignores Tab when %s is held", (_name, mods) => {
+	])("ignores Tab when %s is held (defaults)", (_name, mods) => {
 		const changes: Changes = [];
 		const secs = sections.map((s) => makeSection(s, changes));
 		const { event } = keyEvent({ key: "Tab", ...mods });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(false);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(false);
 		expect(changes).toEqual([]);
 	});
 
@@ -70,7 +74,7 @@ describe("handleComposerSettingsShortcut - guards", () => {
 			key: "Tab",
 			nativeEvent: { isComposing: true },
 		});
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(false);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(false);
 		expect(changes).toEqual([]);
 	});
 
@@ -78,7 +82,7 @@ describe("handleComposerSettingsShortcut - guards", () => {
 		const changes: Changes = [];
 		const secs = sections.map((s) => makeSection(s, changes));
 		const { event } = keyEvent({ key: "j" });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(false);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(false);
 		expect(changes).toEqual([]);
 	});
 });
@@ -93,7 +97,7 @@ describe("Tab cycles the agent section", () => {
 			),
 		];
 		const { event, prevented } = keyEvent({ key: "Tab" });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["a2"]);
 		expect(prevented()).toBe(true);
 	});
@@ -107,7 +111,7 @@ describe("Tab cycles the agent section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "Tab" });
-		handleComposerSettingsShortcut(event, secs);
+		handleComposerSettingsShortcut(event, secs, defaults);
 		expect(changes).toEqual(["a1"]);
 	});
 
@@ -124,7 +128,7 @@ describe("Tab cycles the agent section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "Tab" });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["a2"]);
 	});
 
@@ -137,7 +141,7 @@ describe("Tab cycles the agent section", () => {
 			),
 		];
 		const { event, prevented } = keyEvent({ key: "Tab" });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(false);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(false);
 		expect(changes).toEqual([]);
 		expect(prevented()).toBe(false);
 	});
@@ -151,11 +155,11 @@ describe("Tab cycles the agent section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "Tab" });
-		handleComposerSettingsShortcut(event, secs);
+		handleComposerSettingsShortcut(event, secs, defaults);
 		expect(changes).toEqual(["a1"]);
 	});
 
-	it("accepts an upper-case Tab key spelling", () => {
+	it("matches the canonical Tab key from a KeyboardEvent", () => {
 		const changes: Changes = [];
 		const secs = [
 			makeSection(
@@ -163,8 +167,8 @@ describe("Tab cycles the agent section", () => {
 				changes
 			),
 		];
-		const { event } = keyEvent({ key: "TAB" });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		const { event } = keyEvent({ key: "Tab" });
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["a2"]);
 	});
 });
@@ -179,7 +183,7 @@ describe("Shift+Tab cycles the approval section", () => {
 			),
 		];
 		const { event, prevented } = keyEvent({ key: "Tab", shiftKey: true });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["auto"]);
 		expect(prevented()).toBe(true);
 	});
@@ -193,7 +197,7 @@ describe("Shift+Tab cycles the approval section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "Tab", shiftKey: true });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["m2"]);
 	});
 
@@ -206,7 +210,7 @@ describe("Shift+Tab cycles the approval section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "Tab", shiftKey: true });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(false);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(false);
 		expect(changes).toEqual([]);
 	});
 });
@@ -221,7 +225,7 @@ describe("Shift+M cycles the model section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "m", shiftKey: true });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["claude"]);
 	});
 
@@ -234,7 +238,7 @@ describe("Shift+M cycles the model section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "m" });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(false);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(false);
 		expect(changes).toEqual([]);
 	});
 });
@@ -254,7 +258,7 @@ describe("Shift+T cycles the thinking section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "t", shiftKey: true });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["high"]);
 	});
 
@@ -280,7 +284,7 @@ describe("Shift+T cycles the thinking section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "t", shiftKey: true });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["chatty"]);
 	});
 
@@ -301,8 +305,69 @@ describe("Shift+T cycles the thinking section", () => {
 			),
 		];
 		const { event } = keyEvent({ key: "t", shiftKey: true });
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(false);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(false);
 		expect(changes).toEqual([]);
+	});
+});
+
+describe("custom bindings", () => {
+	it("honors a rebound cycle-agent chord", () => {
+		const changes: Changes = [];
+		const secs = [
+			makeSection(
+				{ key: "agent", items: items("a1", "a2"), value: "a1" },
+				changes
+			),
+		];
+		const bindings: ComposerShortcutBindings = {
+			...defaults,
+			"composer.cycle-agent": "Shift+A",
+		};
+		const { event, prevented } = keyEvent({ key: "a", shiftKey: true });
+		expect(handleComposerSettingsShortcut(event, secs, bindings)).toBe(true);
+		expect(changes).toEqual(["a2"]);
+		expect(prevented()).toBe(true);
+		const { event: tab } = keyEvent({ key: "Tab" });
+		expect(handleComposerSettingsShortcut(tab, secs, bindings)).toBe(false);
+	});
+
+	it("skips an unbound action", () => {
+		const changes: Changes = [];
+		const secs = [
+			makeSection(
+				{ key: "model", items: items("gpt", "claude"), value: "gpt" },
+				changes
+			),
+		];
+		const bindings: ComposerShortcutBindings = {
+			...defaults,
+			"composer.cycle-model": null,
+		};
+		const { event } = keyEvent({ key: "m", shiftKey: true });
+		expect(handleComposerSettingsShortcut(event, secs, bindings)).toBe(false);
+		expect(changes).toEqual([]);
+	});
+
+	it("supports a Mod-bearing custom binding", () => {
+		const changes: Changes = [];
+		const secs = [
+			makeSection(
+				{ key: "model", items: items("gpt", "claude"), value: "gpt" },
+				changes
+			),
+		];
+		const bindings: ComposerShortcutBindings = {
+			...defaults,
+			"composer.cycle-model": "Mod+Shift+M",
+		};
+		const { event, prevented } = keyEvent({
+			key: "m",
+			shiftKey: true,
+			metaKey: true,
+		});
+		expect(handleComposerSettingsShortcut(event, secs, bindings)).toBe(true);
+		expect(changes).toEqual(["claude"]);
+		expect(prevented()).toBe(true);
 	});
 });
 
@@ -322,7 +387,7 @@ describe("edge behavior", () => {
 			shiftKey: false,
 			key: "Tab",
 		};
-		expect(handleComposerSettingsShortcut(event, secs)).toBe(true);
+		expect(handleComposerSettingsShortcut(event, secs, defaults)).toBe(true);
 		expect(changes).toEqual(["a2"]);
 	});
 
@@ -332,7 +397,7 @@ describe("edge behavior", () => {
 			makeSection({ key: "agent", items: items("a1", "a2", "a3") }, changes),
 		];
 		const { event } = keyEvent({ key: "Tab" });
-		handleComposerSettingsShortcut(event, secs);
+		handleComposerSettingsShortcut(event, secs, defaults);
 		expect(changes).toEqual(["a2"]);
 	});
 });

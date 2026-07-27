@@ -148,6 +148,20 @@
       "tsHost": true
     },
     {
+      "capability": "conversation.title",
+      "grant": "conversation:set-title",
+      "method": "conversation.setTitle",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "preferences.read",
+      "grant": "preferences:read",
+      "method": "preferences.get",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
       "capability": "agent.run",
       "grant": "hook:run-agent",
       "method": "agent.run.stream",
@@ -977,6 +991,13 @@
       "capability": "shell.integrate",
       "grant": "shell:integrate",
       "method": "shell.registerCommand",
+      "streaming": true,
+      "tsHost": true
+    },
+    {
+      "capability": "shell.integrate",
+      "grant": "shell:integrate",
+      "method": "shell.registerTabIcon",
       "streaming": true,
       "tsHost": true
     },

@@ -34,14 +34,15 @@ import { useCallback, useEffect, useState } from "react";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	DEFAULT_DICTATION_PREFS,
-	DEFAULT_ISLAND_COMMAND_SHORTCUT,
-	DEFAULT_VOICE_PREFS,
+	// # 0.1.0: Island disabled — restore with the Island GlobalRows below
+	// DEFAULT_ISLAND_COMMAND_SHORTCUT,
+	// DEFAULT_VOICE_PREFS,
 	getDictationPrefs,
-	getIslandCommandShortcut,
-	getVoiceInputPrefs,
+	// getIslandCommandShortcut,
+	// getVoiceInputPrefs,
 	setDictationPrefs,
-	setIslandCommandShortcut,
-	setVoiceInputPrefs,
+	// setIslandCommandShortcut,
+	// setVoiceInputPrefs,
 } from "@/src/lib/api/preferences.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import {
@@ -326,6 +327,7 @@ export function KeyboardShortcutsTab() {
 				title="Global"
 			>
 				<SettingsGroup>
+					{/* # 0.1.0: Island disabled — uncomment when re-enabling Island
 					<GlobalRow
 						defaultAccelerator={DEFAULT_ISLAND_COMMAND_SHORTCUT}
 						description="Open the island command bar from anywhere."
@@ -348,9 +350,10 @@ export function KeyboardShortcutsTab() {
 							});
 						}}
 					/>
+					*/}
 					<GlobalRow
 						defaultAccelerator={DEFAULT_DICTATION_PREFS.shortcut}
-						description="Toggle inline dictation anywhere on the desktop."
+						description="Dictate into the focused app (Dictation plugin)."
 						label="System-wide dictation"
 						load={() =>
 							getDictationPrefs(activeTarget()).then((p) => p.shortcut)
@@ -360,6 +363,21 @@ export function KeyboardShortcutsTab() {
 							return setDictationPrefs(activeTarget(), {
 								...prefs,
 								shortcut: acc,
+							});
+						}}
+					/>
+					<GlobalRow
+						defaultAccelerator={DEFAULT_DICTATION_PREFS.ask.shortcut}
+						description="Speak a question; paste the agent answer (Dictation → Agent ask)."
+						label="Agent ask"
+						load={() =>
+							getDictationPrefs(activeTarget()).then((p) => p.ask.shortcut)
+						}
+						save={async (acc) => {
+							const prefs = await getDictationPrefs(activeTarget());
+							return setDictationPrefs(activeTarget(), {
+								...prefs,
+								ask: { ...prefs.ask, shortcut: acc },
 							});
 						}}
 					/>

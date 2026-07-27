@@ -7,6 +7,7 @@ import {
 } from "../context/island-composer-context.tsx";
 import { useActiveContext } from "../hooks/use-active-context.ts";
 import { useCommandSummon } from "../hooks/use-command-summon.ts";
+import { useComposerShortcutBindings } from "../hooks/use-composer-shortcut-bindings.ts";
 import { useDevStateSwitcher } from "../hooks/use-dev-state-switcher.ts";
 import { useDictation } from "../hooks/use-dictation.ts";
 import { useEyeCursor } from "../hooks/use-eye-cursor.ts";
@@ -236,6 +237,7 @@ export function Island() {
 
 function IslandShell() {
 	const { agentId, leftActions, sections } = useIslandComposerContext();
+	const composerShortcuts = useComposerShortcutBindings();
 	const state = useIslandState((store) => store.state);
 	const setState = useIslandState((store) => store.setState);
 	const openPanel = useIslandState((store) => store.openPanel);
@@ -306,7 +308,7 @@ function IslandShell() {
 	const voiceMode = useVoiceMode({
 		agentId: agentId.length > 0 ? agentId : undefined,
 	});
-	useVoiceModeShortcuts(voiceMode.active, sections);
+	useVoiceModeShortcuts(voiceMode.active, sections, composerShortcuts);
 	const handleVoiceMode = (): void => {
 		voiceMode.start();
 		openVoice();

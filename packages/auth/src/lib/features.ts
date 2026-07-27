@@ -84,8 +84,8 @@ export const FEATURES: FeatureDef[] = [
 	},
 	{
 		key: "predict",
-		title: "Predictions",
-		description: "Inline next-step suggestions as you work.",
+		title: "Autocomplete",
+		description: "Inline autocomplete suggestions as you work.",
 		icon: "wand",
 		tier: "progressive",
 		pointsCost: 400,

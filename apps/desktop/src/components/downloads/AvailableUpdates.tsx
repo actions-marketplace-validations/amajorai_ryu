@@ -7,21 +7,17 @@
 // surfaces never drift.
 //
 // `compact` renders it as a tray section: the shared TrayRow, so an update sits
-// in the same rhythm as a download or an approval, with a labelled "Update" pill
-// instead of the old bare chevron (which read as "expand", not "install"). The
-// full page keeps a heading, description and roomier rows.
+// in the same rhythm as a download or an approval, with a default "Update"
+// button. The full page keeps a heading, description and roomier rows.
 //
 // Renders nothing when there are no updates, so it can be dropped in
 // unconditionally.
 
-import { ArrowUp01Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useState } from "react";
 import {
-	TrayAction,
 	TrayRow,
 	TrayRowIcon,
 	TraySectionLabel,
@@ -70,7 +66,12 @@ function CompactUpdateRow({
 }) {
 	return (
 		<TrayRow
-			actions={<TrayAction busy={applying} label="Update" onClick={onApply} />}
+			actions={
+				<Button disabled={applying} onClick={onApply} size="xs">
+					{applying ? <Spinner className="size-3" /> : null}
+					Update
+				</Button>
+			}
 			icon={kindIcon(update.kind)}
 			meta={trayMeta(KIND_LABEL[update.kind], versionText(update))}
 			title={update.name}
@@ -112,13 +113,8 @@ function PageUpdateRow({
 				disabled={applying}
 				onClick={onApply}
 				size="sm"
-				variant="outline"
 			>
-				{applying ? (
-					<Spinner className="size-4" />
-				) : (
-					<HugeiconsIcon className="size-4" icon={ArrowUp01Icon} />
-				)}
+				{applying ? <Spinner className="size-4" /> : null}
 				Update
 			</Button>
 		</div>
@@ -136,19 +132,34 @@ export function AvailableUpdates({ compact = false }: { compact?: boolean }) {
 	}
 
 	const runOne = (update: AvailableUpdate) => {
-		applyUpdate(update).catch(() => undefined);
+		console.info(
+			`[FIX] AvailableUpdates.runOne: key=${update.key} kind=${update.kind}`
+		);
+		applyUpdate(update).catch((err: unknown) => {
+			console.info(
+				`[FIX] AvailableUpdates.runOne.swallowed: key=${update.key} err=${err instanceof Error ? err.message : String(err)}`
+			);
+		});
 	};
 
 	const runAll = async () => {
+		console.info(
+			`[FIX] AvailableUpdates.runAll.entry: count=${updates.length} keys=${updates.map((u) => u.key).join(",")}`
+		);
 		setUpdatingAll(true);
 		try {
 			for (const update of updates) {
 				// Sequential on purpose — see note above.
-				await applyUpdate(update).catch(() => undefined);
+				await applyUpdate(update).catch((err: unknown) => {
+					console.info(
+						`[FIX] AvailableUpdates.runAll.swallowed: key=${update.key} err=${err instanceof Error ? err.message : String(err)}`
+					);
+				});
 			}
 		} finally {
 			setUpdatingAll(false);
 			refresh();
+			console.info("[FIX] AvailableUpdates.runAll.exit");
 		}
 	};
 
@@ -198,11 +209,7 @@ export function AvailableUpdates({ compact = false }: { compact?: boolean }) {
 					</span>
 				</div>
 				<Button disabled={updatingAll} onClick={startAll} size="sm">
-					{updatingAll ? (
-						<Spinner className="size-4" />
-					) : (
-						<HugeiconsIcon className="size-4" icon={Refresh01Icon} />
-					)}
+					{updatingAll ? <Spinner className="size-4" /> : null}
 					Update all
 				</Button>
 			</div>

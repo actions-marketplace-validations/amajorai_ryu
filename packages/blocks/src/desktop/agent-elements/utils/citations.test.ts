@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { extractCitations } from "./citations.ts";
+import { extractCitations, linkifyCitationMarkers } from "./citations.ts";
 
 function webFetch(input: unknown, output: unknown) {
 	return { type: "tool-WebFetch", input, output };
@@ -150,5 +150,52 @@ describe("extractCitations - aggregate behavior", () => {
 
 	it("returns an empty array when no web tools were used", () => {
 		expect(extractCitations([{ type: "tool-Read" }])).toEqual([]);
+	});
+});
+
+describe("linkifyCitationMarkers", () => {
+	const citations = [
+		{
+			number: 1,
+			title: "Attention Is All You Need",
+			url: "https://arxiv.org/abs/1706.03762",
+		},
+		{
+			number: 2,
+			title: "Efficient Transformers",
+			url: "https://arxiv.org/abs/2009.06732",
+		},
+	];
+
+	it("turns bare [n] into #ryu-cite-n links for known citations", () => {
+		expect(
+			linkifyCitationMarkers(
+				"Transformers scale well[1], though attention is quadratic[2].",
+				citations
+			)
+		).toBe(
+			"Transformers scale well[1](#ryu-cite-1), though attention is quadratic[2](#ryu-cite-2)."
+		);
+	});
+
+	it("leaves unknown numbers, existing links, and definitions alone", () => {
+		expect(
+			linkifyCitationMarkers(
+				"see [9] and [1](https://x.io) and [2]:",
+				citations
+			)
+		).toBe("see [9] and [1](https://x.io) and [2]:");
+	});
+
+	it("skips markers inside code fences and inline code", () => {
+		const text = "prose [1]\n```\ncode [1]\n```\nand `[1]` stays";
+		expect(linkifyCitationMarkers(text, citations)).toBe(
+			"prose [1](#ryu-cite-1)\n```\ncode [1]\n```\nand `[1]` stays"
+		);
+	});
+
+	it("is a no-op without citations", () => {
+		expect(linkifyCitationMarkers("hello [1]", undefined)).toBe("hello [1]");
+		expect(linkifyCitationMarkers("hello [1]", [])).toBe("hello [1]");
 	});
 });

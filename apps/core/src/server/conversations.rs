@@ -337,6 +337,17 @@ pub struct MessageSearchHit {
     pub score: f32,
 }
 
+/// One past title for a conversation (auto-rename / manual rename history).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TitleHistoryEntry {
+    pub id: String,
+    pub title: String,
+    /// `"auto"` | `"user"` | `"derived"`.
+    pub source: String,
+    /// Unix milliseconds.
+    pub created_at: i64,
+}
+
 /// Lightweight conversation summary used by the list endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSummary {
@@ -365,6 +376,10 @@ pub struct ConversationSummary {
     /// Archived by a coordinator thread to hide a finished worker. Defaults false.
     #[serde(default)]
     pub archived: bool,
+    /// Optional Notion-style glyph (`GlyphValue` JSON from `@ryu/ui`). Null =
+    /// title-only row (no leading custom icon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<serde_json::Value>,
 }
 
 /// Detail view of a conversation, including messages and participants.
@@ -757,7 +772,16 @@ impl ConversationStore {
                  created_at      INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_btw_conversation
-                 ON btw_entries(conversation_id, created_at);",
+                 ON btw_entries(conversation_id, created_at);
+             CREATE TABLE IF NOT EXISTS conversation_title_history (
+                 id              TEXT PRIMARY KEY,
+                 conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                 title           TEXT NOT NULL,
+                 source          TEXT NOT NULL,
+                 created_at      INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_title_history_conversation
+                 ON conversation_title_history(conversation_id, created_at);",
         )
         .context("initializing conversation schema")?;
 
@@ -852,6 +876,10 @@ impl ConversationStore {
             (
                 "native_session_id",
                 "ALTER TABLE conversations ADD COLUMN native_session_id TEXT",
+            ),
+            (
+                "icon",
+                "ALTER TABLE conversations ADD COLUMN icon TEXT",
             ),
         ] {
             if !existing_conv_columns.contains(col) {
@@ -1089,13 +1117,14 @@ impl ConversationStore {
                 "SELECT c.id, c.title, c.agent_id, c.created_at, c.updated_at,
                         (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
                         c.folder_path, c.branch, c.worktree_path, c.run_status,
-                        c.participants, c.pinned, c.archived
+                        c.participants, c.pinned, c.archived, c.icon
                  FROM conversations c
                  WHERE c.id = ?1",
             )?;
             stmt.query_row(params![conversation_id], |row| {
                 let participants_json: Option<String> = row.get(10)?;
                 let participants = parse_participants_json(participants_json.as_deref());
+                let icon_raw: Option<String> = row.get(13)?;
                 Ok(ConversationSummary {
                     id: row.get(0)?,
                     title: row.get(1)?,
@@ -1110,6 +1139,7 @@ impl ConversationStore {
                     participants,
                     pinned: row.get::<_, i64>(11)? != 0,
                     archived: row.get::<_, i64>(12)? != 0,
+                    icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
                 })
             })
             .optional()?
@@ -1139,13 +1169,15 @@ impl ConversationStore {
             params![sealed, now, conversation_id],
         )
         .context("setting conversation title")?;
+        Self::push_title_history_locked(&conn, &self.cipher, conversation_id, title, "user", now)?;
         Ok(())
     }
 
-    /// Apply an auto-generated title (from the background auto-namer) to a
-    /// conversation, but **only** when the user hasn't chosen one themselves
-    /// (`title_custom = 0`). The guard makes the write a no-op if a manual rename
-    /// raced ahead, so an LLM title can never clobber a deliberate one.
+    /// Apply an auto-generated title (from the chat-title plugin / background
+    /// auto-namer) to a conversation, but **only** when the user hasn't chosen
+    /// one themselves (`title_custom = 0`). The guard makes the write a no-op if
+    /// a manual rename raced ahead, so an LLM title can never clobber a deliberate
+    /// one.
     ///
     /// Unlike [`set_title`] this does NOT set `title_custom` — an auto title stays
     /// replaceable, and a later manual rename still locks it. Returns whether a
@@ -1161,7 +1193,80 @@ impl ConversationStore {
                 params![sealed, now, conversation_id],
             )
             .context("auto-setting conversation title")?;
+        if changed > 0 {
+            Self::push_title_history_locked(
+                &conn,
+                &self.cipher,
+                conversation_id,
+                title,
+                "auto",
+                now,
+            )?;
+        }
         Ok(changed > 0)
+    }
+
+    /// Append one title-history row. Titles are sealed at rest like conversation
+    /// titles. `source` is a short tag (`"auto"` | `"user"` | `"derived"`).
+    fn push_title_history_locked(
+        conn: &Connection,
+        cipher: &ryu_crypto::FieldCipher,
+        conversation_id: &str,
+        title: &str,
+        source: &str,
+        created_at: i64,
+    ) -> Result<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let sealed = cipher.seal(title)?;
+        conn.execute(
+            "INSERT INTO conversation_title_history
+                (id, conversation_id, title, source, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, conversation_id, sealed, source, created_at],
+        )
+        .context("inserting title history")?;
+        Ok(())
+    }
+
+    /// Title history for a conversation, oldest → newest (decrypted).
+    pub async fn list_title_history(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<TitleHistoryEntry>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, source, created_at
+                 FROM conversation_title_history
+                 WHERE conversation_id = ?1
+                 ORDER BY created_at ASC, rowid ASC",
+            )
+            .context("preparing title history query")?;
+        let rows = stmt
+            .query_map(params![conversation_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .context("querying title history")?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, sealed, source, created_at) = row.context("reading title history row")?;
+            let title = self
+                .cipher
+                .open(&sealed)
+                .unwrap_or_else(|_| "[unable to decrypt]".to_owned());
+            out.push(TitleHistoryEntry {
+                id,
+                title,
+                source,
+                created_at,
+            });
+        }
+        Ok(out)
     }
 
     /// Whether a conversation's title is user-chosen (locked against auto-rename).
@@ -1201,6 +1306,27 @@ impl ConversationStore {
         )
         .context("setting archived flag")?;
         Ok(())
+    }
+
+    /// Set or clear a conversation's Notion-style glyph. `None` clears it.
+    pub async fn set_icon(
+        &self,
+        conversation_id: &str,
+        icon: Option<&serde_json::Value>,
+    ) -> Result<bool> {
+        let now = now_millis();
+        let icon_str = match icon {
+            Some(v) => Some(serde_json::to_string(v).context("serializing conversation icon")?),
+            None => None,
+        };
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE conversations SET icon = ?1, updated_at = ?2 WHERE id = ?3",
+                params![icon_str, now, conversation_id],
+            )
+            .context("setting conversation icon")?;
+        Ok(n > 0)
     }
 
     /// Append a message and bump the conversation's `updated_at`. Returns the new
@@ -1264,11 +1390,29 @@ impl ConversationStore {
 
         let conn = self.conn.lock().await;
         // Derive a first-pass title from the first user message (sealed at rest).
-        let title = if role == "user" {
-            self.seal_opt(Some(&derive_title(content)))?
+        // Only applied when the conversation has no title yet (COALESCE in upsert).
+        let derived = if role == "user" {
+            Some(derive_title(content))
         } else {
             None
         };
+        let title = derived
+            .as_deref()
+            .map(|t| self.seal_opt(Some(t)))
+            .transpose()?
+            .flatten();
+        // Was this conversation untitled before this append? Used to record the
+        // derived title in history exactly once.
+        let had_title: bool = conn
+            .query_row(
+                "SELECT title IS NOT NULL FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or(false);
         upsert_conversation_row(
             &conn,
             conversation_id,
@@ -1281,6 +1425,18 @@ impl ConversationStore {
             },
             Touch::Set,
         )?;
+        if let (Some(derived_title), false) = (derived.as_deref(), had_title) {
+            if role == "user" {
+                let _ = Self::push_title_history_locked(
+                    &conn,
+                    &self.cipher,
+                    conversation_id,
+                    derived_title,
+                    "derived",
+                    now,
+                );
+            }
+        }
         // Version-tree linkage: if this conversation has been branched (its
         // `active_leaf_message_id` is set), attach the new turn beneath the
         // current leaf and advance the leaf to this message. Conversations that
@@ -1315,35 +1471,10 @@ impl ConversationStore {
             .context("advancing active leaf on append")?;
         }
 
-        // Auto-rename trigger: when this is the conversation's *first* user
-        // message and the title hasn't been user-locked, hand the id to the
-        // server-side auto-namer (ChatGPT/Claude-style). We fire exactly once per
-        // conversation (guarded on user-message count == 1) so the model is asked
-        // for a title only at the start; the consumer re-checks `title_custom`
-        // before writing, so a manual rename that races still wins.
-        if role == "user" {
-            if let Some(tx) = &self.auto_title_tx {
-                let user_count: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM messages
-                         WHERE conversation_id = ?1 AND role = 'user'",
-                        params![conversation_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(0);
-                let already_custom: i64 = conn
-                    .query_row(
-                        "SELECT title_custom FROM conversations WHERE id = ?1",
-                        params![conversation_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(0);
-                if user_count == 1 && already_custom == 0 {
-                    // Best-effort: a full/closed channel just skips auto-naming.
-                    let _ = tx.send(conversation_id.to_owned());
-                }
-            }
-        }
+        // Chat LLM auto-rename moved to the `chat-title` turn-hook plugin
+        // (`post_assistant_turn`). The first-message-derived title above still
+        // provides an instant placeholder; the plugin re-titles after every N
+        // completed assistant turns.
         // Release the conversation DB lock before fanning out — the publish is a
         // non-blocking broadcast send on a different mutex, but there is no reason
         // to hold the conn lock across it.
@@ -1527,7 +1658,7 @@ impl ConversationStore {
             "SELECT c.id, c.title, c.agent_id, c.created_at, c.updated_at,
                     (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
                     c.folder_path, c.branch, c.worktree_path, c.run_status,
-                    c.participants, c.pinned, c.archived
+                    c.participants, c.pinned, c.archived, c.icon
              FROM conversations c
              WHERE {TENANCY_VISIBLE_PREDICATE} {extra}
              ORDER BY c.updated_at DESC"
@@ -1543,6 +1674,7 @@ impl ConversationStore {
             |row| {
                 let participants_json: Option<String> = row.get(10)?;
                 let participants = parse_participants_json(participants_json.as_deref());
+                let icon_raw: Option<String> = row.get(13)?;
                 Ok(ConversationSummary {
                     id: row.get(0)?,
                     title: row.get(1)?,
@@ -1557,6 +1689,7 @@ impl ConversationStore {
                     participants,
                     pinned: row.get::<_, i64>(11)? != 0,
                     archived: row.get::<_, i64>(12)? != 0,
+                    icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
                 })
             },
         )?;
@@ -2295,6 +2428,7 @@ impl ConversationStore {
             participants: parse_participants_json(Some(&participants_json)),
             pinned: false,
             archived: false,
+            icon: None,
         }))
     }
 

@@ -523,6 +523,19 @@ export type SkillWriteRecord = Record<string, unknown>;
  *  opaque here — the app owns the full type). */
 export type SkillVersionRecord = Record<string, unknown>;
 
+/** One file returned by {@link HostServices.uploadFile} — persisted in Uploads. */
+export interface UploadFileResult {
+	/** `data:` URL so CSP-locked frames (`img-src data:`) can render the bytes. */
+	data_url: string;
+	id: string;
+	mime_type: string;
+	name: string;
+	size: number;
+	space_id: string;
+	/** Absolute Core URL (`…/api/uploads/<id>`) for host-side fetches. */
+	url: string;
+}
+
 /** The privileged service callbacks the trusted host injects. The plugin can only
  *  reach these indirectly, through {@link dispatchRpc}, and only for methods whose
  *  capability it was granted.
@@ -751,6 +764,11 @@ export interface HostServices {
 	}): void;
 	/** Rename a meeting (`POST /api/meetings/:id/title`). Returns the updated record. */
 	meetingsRename?(input: { id: string; title: string }): Promise<MeetingRecord>;
+	/** Set or clear a meeting glyph (`POST /api/meetings/:id/icon`). */
+	meetingsSetIcon?(input: {
+		id: string;
+		icon: unknown | null;
+	}): Promise<MeetingRecord>;
 	/** Start a recording (`POST /api/meetings`). Returns the created meeting. */
 	meetingsStart?(input: MeetingStartPayload): Promise<MeetingRecord>;
 	/** Read a meeting's transcript (`GET /api/meetings/:id/transcript`). */
@@ -913,16 +931,16 @@ export interface HostServices {
 
 	// --- Shell primitives (grant `shell:integrate`). The generic `window.ryu.shell.*`
 	// lane a DECOUPLED companion uses for shell integration. The host owns the tabs /
-	// theme / palette / event-stream seams (no Core fetch). `shellOpenTab` is unary and
+	// theme / palette / tab-icon / event-stream seams (no Core fetch). `shellOpenTab` is unary and
 	// MUST validate `path` against the host's safe-route allowlist before navigating
 	// (a granted plugin can still only open a first-party destination — the anti-phishing
-	// gate). The three subscribe/register verbs are STREAMING (dispatched by
+	// gate). The subscribe/register verbs are STREAMING (dispatched by
 	// `ExtensionHost`'s streaming path, torn down on frame unmount): each attaches its
 	// listener and releases it when `signal` aborts. All optional so a non-shell host is
 	// unaffected. ---
 
 	/** Open a shell tab at an ALLOWLISTED route, forwarding `openTab` options
-	 *  (`title`/`conversationId`/`forceNew`/`initialPrompt`). Rejects (`denied`) any
+	 *  (`title`/`conversationId`/`forceNew`/`initialPrompt`/`icon`). Rejects (`denied`) any
 	 *  path not on the host's safe-route allowlist or the caller's own `/plugin/<id>`. */
 	shellOpenTab?(input: {
 		path: string;
@@ -930,11 +948,22 @@ export interface HostServices {
 		conversationId?: string;
 		forceNew?: boolean;
 		initialPrompt?: string;
+		/** Entity glyph (same GlyphValue shape the sidebar uses). */
+		icon?: unknown;
 	}): Promise<void>;
 	/** Contribute Cmd+K palette commands. `input.commands` is `{ id, title, group?,
 	 *  keywords? }[]`; each invocation emits the invoked command id (a JSON string) back
 	 *  to the frame. The commands are removed from the palette when `signal` aborts. */
 	shellRegisterCommand?(
+		input: Record<string, unknown>,
+		emit: (delta: string) => void,
+		signal: AbortSignal
+	): Promise<void>;
+	/** Register default title-bar tab icons for path prefixes. `input.icons` is
+	 *  `{ pathPrefix, pathIncludes?, icon }[]` — `icon` is an Iconify/Hugeicons id
+	 *  (same vocabulary as companion / sidebar contribution icons). Rules are removed
+	 *  when `signal` aborts (frame unmount). */
+	shellRegisterTabIcon?(
 		input: Record<string, unknown>,
 		emit: (delta: string) => void,
 		signal: AbortSignal
@@ -1066,6 +1095,15 @@ export interface HostServices {
 		speed?: number;
 		language?: string;
 	}): Promise<string>;
+	/**
+	 * Open a native file picker, upload selected file(s) into the Uploads system
+	 * space, and return metadata + a `data:` URL (CSP-safe for sandboxed frames).
+	 * Returns `null` when the user cancels. With `multiple: true`, returns an array.
+	 */
+	uploadFile?(input?: {
+		accept?: string;
+		multiple?: boolean;
+	}): Promise<UploadFileResult | UploadFileResult[] | null>;
 
 	// --- Inbound webhook registry (grant `webhooks:crud`). The `com.ryu.webhooks` app
 	// renders Core's read-only webhook endpoint registry from its sandboxed companion.
@@ -1572,9 +1610,18 @@ export async function dispatchRpc(
 			await services.openExternal(input);
 			return null;
 		}
-		// File methods: KNOWN so they reject with a clean structured error, never the
-		// unknown-method deny (which reads like a bug). Wire minimally later.
-		case "ui.uploadFile":
+		case "ui.uploadFile": {
+			const input = asUploadFileArg(args[0]);
+			if (!services.uploadFile) {
+				throw new CodedRpcError(
+					"server_error",
+					"ui.uploadFile is not available"
+				);
+			}
+			return await services.uploadFile(input);
+		}
+		// Remaining file methods: KNOWN so they reject with a clean structured error,
+		// never the unknown-method deny (which reads like a bug). Wire later.
 		case "ui.selectFiles":
 		case "ui.getFileDownloadUrl":
 		case "ui.setOpenInAppUrl":
@@ -2967,6 +3014,22 @@ export async function dispatchRpc(
 			}
 			return await services.meetingsRename(input);
 		}
+		case "meetings.setIcon": {
+			const input = asMeetingSetIconArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"meetings.setIcon requires a { id: string, icon: unknown | null }"
+				);
+			}
+			if (!services.meetingsSetIcon) {
+				throw new CodedRpcError(
+					"server_error",
+					"meetings.setIcon is not available"
+				);
+			}
+			return await services.meetingsSetIcon(input);
+		}
 		case "meetings.import":
 			if (!services.meetingsImport) {
 				throw new CodedRpcError(
@@ -3197,6 +3260,7 @@ export function asShellOpenTabArg(data: unknown): {
 	conversationId?: string;
 	forceNew?: boolean;
 	initialPrompt?: string;
+	icon?: unknown;
 } | null {
 	if (typeof data !== "object" || data === null) {
 		return null;
@@ -3211,6 +3275,7 @@ export function asShellOpenTabArg(data: unknown): {
 		conversationId?: string;
 		forceNew?: boolean;
 		initialPrompt?: string;
+		icon?: unknown;
 	} = { path: c.path };
 	if (typeof c.title === "string") {
 		out.title = c.title;
@@ -3223,6 +3288,9 @@ export function asShellOpenTabArg(data: unknown): {
 	}
 	if (typeof c.initialPrompt === "string") {
 		out.initialPrompt = c.initialPrompt;
+	}
+	if ("icon" in c) {
+		out.icon = c.icon ?? null;
 	}
 	return out;
 }
@@ -3268,6 +3336,25 @@ export function asOpenExternalArg(data: unknown): { href: string } | null {
 		return null;
 	}
 	return { href: parsed.href };
+}
+
+/** Narrow to optional `{ accept?, multiple? }` for `ui.uploadFile`. */
+export function asUploadFileArg(data: unknown): {
+	accept?: string;
+	multiple?: boolean;
+} {
+	if (!data || typeof data !== "object") {
+		return {};
+	}
+	const obj = data as { accept?: unknown; multiple?: unknown };
+	const out: { accept?: string; multiple?: boolean } = {};
+	if (typeof obj.accept === "string" && obj.accept.trim()) {
+		out.accept = obj.accept.trim();
+	}
+	if (typeof obj.multiple === "boolean") {
+		out.multiple = obj.multiple;
+	}
+	return out;
 }
 
 /** Read an optional string field, returning `undefined` for absent and `null` for a
@@ -3990,6 +4077,24 @@ export function asMeetingRenameArg(
 		return null;
 	}
 	return { id: o.id, title: o.title };
+}
+
+/** Narrow an RPC argument to `{ id: string, icon: unknown | null }` for
+ *  `meetings.setIcon`. `icon` may be null (clear) or any JSON glyph object. */
+export function asMeetingSetIconArg(
+	data: unknown
+): { id: string; icon: unknown | null } | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (typeof o.id !== "string" || o.id.length === 0) {
+		return null;
+	}
+	if (!("icon" in o)) {
+		return null;
+	}
+	return { id: o.id, icon: o.icon ?? null };
 }
 
 /** Narrow an RPC argument to `{ id: string, title? }` for the `meetings.open`

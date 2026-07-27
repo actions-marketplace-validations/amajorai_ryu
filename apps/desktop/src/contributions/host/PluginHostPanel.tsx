@@ -28,12 +28,14 @@ import {
 	type MailMessage,
 	type MonitorRecord,
 	type QuestRecord,
+	type UploadFileResult,
 	validatePluginRoute,
 } from "@ryu/app-host/rpc";
 import {
 	htmlCompanionSrcdoc,
 	thirdPartyPluginSrcdoc,
 } from "@ryu/app-host/third-party-plugin";
+import { asGlyphValue } from "@ryu/ui/components/glyph.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { getActiveUserId, useSession } from "@/lib/auth-client.ts";
@@ -46,6 +48,7 @@ import {
 	type CommandEntry,
 	contributionRegistry,
 } from "@/src/contributions/registry.ts";
+import { registerTabIcon } from "@/src/contributions/tab-icon-registry.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { listActivity } from "@/src/lib/api/activity.ts";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
@@ -86,6 +89,7 @@ import {
 	importMeeting,
 	listMeetings,
 	renameMeeting,
+	setMeetingIcon,
 	startMeeting,
 } from "@/src/lib/api/meetings.ts";
 import {
@@ -148,6 +152,7 @@ import {
 	snapshotSkill,
 	updateSkill,
 } from "@/src/lib/api/skills.ts";
+import { fileToDataUrl, uploadUserFile } from "@/src/lib/api/uploads.ts";
 import { generateVideo as apiGenerateVideo } from "@/src/lib/api/video.ts";
 import {
 	speakText as apiSpeakText,
@@ -236,6 +241,48 @@ function pickAudioFile(): Promise<File | null> {
 		};
 		input.addEventListener("change", () => done(input.files?.[0] ?? null));
 		// Modern Chromium/Tauri webviews fire `cancel` when the dialog is dismissed.
+		input.addEventListener("cancel", () => done(null));
+		window.addEventListener("focus", onFocus);
+		input.style.display = "none";
+		document.body.appendChild(input);
+		input.click();
+	});
+}
+
+/** Open the OS file dialog for `ui.uploadFile`. Same cancel/focus fallback as
+ *  {@link pickAudioFile}. Resolves to the chosen files, or `null` on cancel. */
+function pickFiles(opts?: {
+	accept?: string;
+	multiple?: boolean;
+}): Promise<File[] | null> {
+	return new Promise((resolve) => {
+		const input = document.createElement("input");
+		input.type = "file";
+		if (opts?.accept) {
+			input.accept = opts.accept;
+		}
+		input.multiple = opts?.multiple === true;
+		let settled = false;
+		const onFocus = () => {
+			window.setTimeout(() => {
+				if (!input.files?.length) {
+					done(null);
+				}
+			}, 300);
+		};
+		const done = (files: File[] | null) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			window.removeEventListener("focus", onFocus);
+			input.remove();
+			resolve(files);
+		};
+		input.addEventListener("change", () => {
+			const list = input.files ? Array.from(input.files) : [];
+			done(list.length > 0 ? list : null);
+		});
 		input.addEventListener("cancel", () => done(null));
 		window.addEventListener("focus", onFocus);
 		input.style.display = "none";
@@ -400,7 +447,7 @@ export function PluginHostPanel({
 	// chat tab for an item's session through the `activityOpenSession` bridge verb (the
 	// extracted page used `useTabsContext().openTab` directly; the sandboxed frame reaches
 	// it here). PluginHostPanel renders as tab content, so it sits under TabsProvider.
-	const { openTab, updateTabTitle } = useTabsContext();
+	const { openTab, updateTabTitle, updateTabsIconWhere } = useTabsContext();
 	// The current tab id — the `com.ryu.skill-editor` companion's `skills.setTitle` verb
 	// renames its own owning tab (the desktop page's `updateTabTitle(currentTabId, …)`).
 	const currentTabId = useCurrentTabId();
@@ -610,6 +657,36 @@ export function PluginHostPanel({
 					blob,
 					input.filename ?? "recording.wav"
 				);
+			},
+			// User file upload → Uploads system space. Host opens the picker (frame
+			// cannot), uploads, and returns a data_url so CSP-locked frames can render.
+			uploadFile: async (input) => {
+				const files = await pickFiles({
+					accept: input?.accept,
+					multiple: input?.multiple,
+				});
+				if (!files || files.length === 0) {
+					return null;
+				}
+				const target = toTarget(node);
+				const base = node.url.replace(/\/$/, "");
+				const results: UploadFileResult[] = [];
+				for (const file of files) {
+					const [dataUrl, uploaded] = await Promise.all([
+						fileToDataUrl(file),
+						uploadUserFile(target, file),
+					]);
+					results.push({
+						id: uploaded.id,
+						space_id: uploaded.spaceId,
+						name: uploaded.fileName,
+						size: uploaded.size,
+						mime_type: uploaded.contentType,
+						url: `${base}${uploaded.url}`,
+						data_url: dataUrl,
+					});
+				}
+				return input?.multiple ? results : (results[0] ?? null);
 			},
 			listEngineModels: () => fetchEngineModels(toTarget(node)),
 			listTtsEngines: () => listTtsEngines(toTarget(node)),
@@ -1038,6 +1115,17 @@ export function PluginHostPanel({
 				renameMeeting(toTarget(node), id, title) as unknown as Promise<
 					Record<string, unknown>
 				>,
+			meetingsSetIcon: async ({ id, icon }) => {
+				const updated = await setMeetingIcon(toTarget(node), id, icon);
+				const glyph = asGlyphValue(icon) ?? null;
+				updateTabsIconWhere(
+					(t) =>
+						t.path === `/meetings/${id}` ||
+						t.path.startsWith(`/meetings/${id}?`),
+					glyph
+				);
+				return updated as unknown as Record<string, unknown>;
+			},
 			meetingsImport: async () => {
 				const file = await pickAudioFile();
 				if (!file) {
@@ -1113,6 +1201,7 @@ export function PluginHostPanel({
 				conversationId,
 				forceNew,
 				initialPrompt,
+				icon,
 			}) => {
 				const ownPath = `/plugin/${encodeURIComponent(companion.pluginId)}`;
 				if (!isShellSafeRoute(path, ownPath)) {
@@ -1120,7 +1209,13 @@ export function PluginHostPanel({
 						`shell.openTab: '${path}' is not an allowed shell destination`
 					);
 				}
-				openTab(path, { title, conversationId, forceNew, initialPrompt });
+				openTab(path, {
+					title,
+					conversationId,
+					forceNew,
+					initialPrompt,
+					icon: asGlyphValue(icon),
+				});
 				return Promise.resolve();
 			},
 			shellThemeSubscribe: (_input, emit, signal) =>
@@ -1196,6 +1291,51 @@ export function PluginHostPanel({
 						signal.addEventListener("abort", done, { once: true });
 					}
 				}),
+			shellRegisterTabIcon: (input, _emit, signal) =>
+				new Promise<void>((resolve) => {
+					const raw = Array.isArray((input as { icons?: unknown }).icons)
+						? ((input as { icons: unknown[] }).icons as Record<
+								string,
+								unknown
+							>[])
+						: [];
+					const disposers: (() => void)[] = [];
+					for (const [i, entry] of raw.entries()) {
+						if (
+							!entry ||
+							typeof entry.pathPrefix !== "string" ||
+							entry.pathPrefix.length === 0 ||
+							typeof entry.icon !== "string" ||
+							entry.icon.length === 0
+						) {
+							continue;
+						}
+						disposers.push(
+							registerTabIcon({
+								id: `plugin:${companion.pluginId}:tab-icon:${i}:${entry.pathPrefix}`,
+								pathPrefix: entry.pathPrefix,
+								pathIncludes:
+									typeof entry.pathIncludes === "string"
+										? entry.pathIncludes
+										: undefined,
+								icon: entry.icon,
+								priority:
+									typeof entry.priority === "number" ? entry.priority : 30,
+							})
+						);
+					}
+					const done = () => {
+						for (const dispose of disposers) {
+							dispose();
+						}
+						resolve();
+					};
+					if (signal.aborted) {
+						done();
+					} else {
+						signal.addEventListener("abort", done, { once: true });
+					}
+				}),
 			shellEventsSubscribe: (input, emit, signal) =>
 				new Promise<void>((resolve) => {
 					const requested = Array.isArray(
@@ -1239,6 +1379,7 @@ export function PluginHostPanel({
 			openGateway,
 			openTab,
 			updateTabTitle,
+			updateTabsIconWhere,
 			currentTabId,
 			meId,
 		]

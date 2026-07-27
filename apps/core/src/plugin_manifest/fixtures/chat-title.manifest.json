@@ -1,0 +1,52 @@
+{
+  "id": "chat-title",
+  "name": "Chat Title",
+  "version": "1.0.0",
+  "runnables": [],
+  "permission_grants": [
+    "hook:side-model",
+    "conversation:set-title",
+    "preferences:read"
+  ],
+  "activation_events": ["*"],
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "chat-title.settings",
+        "title": "Chat titles",
+        "scope": "node",
+        "fields": [
+          {
+            "type": "toggle",
+            "pref_key": "auto-title-enabled",
+            "label": "Auto-rename chats",
+            "description": "Generate short titles as the conversation progresses. Off leaves the first-message placeholder.",
+            "default": true
+          },
+          {
+            "type": "number",
+            "pref_key": "auto-title-every-n",
+            "label": "Rename every N turns",
+            "description": "Re-title after this many completed assistant turns (1 = every turn). Default 5.",
+            "default": 5,
+            "min": 1,
+            "max": 100
+          },
+          {
+            "type": "model_picker",
+            "pref_key": "auto-title-model",
+            "label": "Title model",
+            "description": "Optional. Empty uses the local engine (or the node default)."
+          }
+        ]
+      }
+    ],
+    "turn_hooks": [
+      {
+        "id": "chat-title.rename",
+        "on": "post_assistant_turn",
+        "code": "const convId = ctx.conversation_id; if (!convId) { return { kind: 'none' }; } const enabled = await host.getPreference({ key: 'auto-title-enabled' }); if (enabled === 'false') { return { kind: 'none' }; } let everyN = parseInt(await host.getPreference({ key: 'auto-title-every-n' }) || '5', 10); if (!Number.isFinite(everyN) || everyN < 1) { everyN = 5; } if (everyN > 100) { everyN = 100; } const assistantTurns = (ctx.transcript || []).filter(m => m.role === 'assistant').length; if (assistantTurns < 1 || assistantTurns % everyN !== 0) { return { kind: 'none' }; } const recent = (ctx.transcript || []).slice(-12).map(m => (m.role || '?') + ': ' + String(m.content || '').slice(0, 500)).join('\\n'); if (!recent.trim()) { return { kind: 'none' }; } const raw = await host.sideModel({ system: 'You write a short, specific title for a chat conversation based on the recent turns. Reply with ONLY the title: 3 to 6 words, in the same language as the chat, no surrounding quotes, no trailing punctuation, no markdown. Do not answer the chat — only title it.', prompt: recent, model_pref_key: 'auto-title-model' }); if (!raw || !String(raw).trim()) { return { kind: 'none' }; } try { await host.setConversationTitle({ id: convId, title: String(raw).trim(), mode: 'auto' }); } catch (e) { host.log('chat-title: setTitle failed', e); } return { kind: 'none' };"
+      }
+    ]
+  }
+}

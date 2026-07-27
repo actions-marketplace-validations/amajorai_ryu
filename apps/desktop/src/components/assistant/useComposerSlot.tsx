@@ -3,21 +3,22 @@
 // It produces the SAME composer the main chat page renders: the Agent · Model ·
 // Thinking settings menu (from `useComposerAgentControls` + `useComposerAcpSections`,
 // the single source ChatPage/launchpad also use), STT voice input, the ChatGPT-style
-// voice mode, image attachments (the "+"), and the single-row compact layout once a
-// thread has history. Before this, each surface hand-rolled a lighter bar (or none),
-// so the dock/builders silently lost the agent picker, thinking selector, voice, and
-// attachments — the exact drift the user kept hitting ("still so different"). Route a
-// surface through this and it can never drift from the chat page again.
+// voice mode, image attachments (the "+"), and optional single-row compact layout
+// / compact agent-picker trigger. Before this, each surface hand-rolled a lighter
+// bar (or none), so the dock/builders silently lost the agent picker, thinking
+// selector, voice, and attachments — the exact drift the user kept hitting
+// ("still so different"). Route a surface through this and it can never drift
+// from the chat page again.
 //
 // The slot identity must stay stable across renders or the textarea loses focus on
 // every keystroke, so every injected prop rides a ref the memoized slot reads — the
 // same pattern as ChatPage's `councilInputBar`.
 
+import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
 import type { ReactNode } from "react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useComposerAgentControls } from "@/components/agent-elements/input/composer-agent-controls.tsx";
 import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
-import { handleComposerSettingsShortcut } from "@/components/agent-elements/input/composer-shortcuts.ts";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import {
 	type AttachedImage,
@@ -27,8 +28,10 @@ import {
 import { VoiceModeSurface } from "@/src/components/voice/VoiceModeSurface.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import type { BuilderRuntime } from "@/src/hooks/useBuilderRuntime.ts";
+import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
+import { stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { transcribeAudio } from "@/src/lib/api/voice.ts";
 
 /** An AI-SDK file part, ready for `sendMessage({ text, files })`. */
@@ -92,6 +95,11 @@ export interface ComposerSlot {
 export interface ComposerSlotOptions {
 	/** Single-row compact layout (used once the thread has history). */
 	compact?: boolean;
+	/**
+	 * Compact the agent-picker trigger only (`[logo] agent [usage]`), keeping the
+	 * roomy stacked textarea. Used by the narrow Ask Ryu floating/docked panel.
+	 */
+	compactTrigger?: boolean;
 	/** Bind voice-mode turns to this conversation so history persists. */
 	conversationId?: string;
 	/**
@@ -123,6 +131,7 @@ export function useComposerSlot(
 	const {
 		target,
 		compact = false,
+		compactTrigger = false,
 		placeholder,
 		conversationId,
 		onGenerateImage,
@@ -152,30 +161,32 @@ export function useComposerSlot(
 			modelSection: acp.modelSection,
 			extraSections: acp.extraSections,
 			compact,
+			compactTrigger,
 		});
 
-	// Staged image attachments (the composer "+"). Read into data URLs in-browser
-	// and sent as AI-SDK file parts, matching ChatPage's attachment path exactly.
+	// Staged image attachments (the composer "+"). Data URL for the model turn;
+	// also persisted into the Uploads system space (best-effort), matching ChatPage.
 	const [images, setImages] = useState<AttachedImage[]>([]);
-	const addImages = useCallback((files: File[]) => {
-		const imageFiles = files.filter((f) => f.type.startsWith("image/"));
-		for (const file of imageFiles) {
-			const reader = new FileReader();
-			reader.onload = () => {
-				setImages((prev) => [
-					...prev,
-					{
-						id: `img-${Date.now()}-${Math.random()}`,
-						filename: file.name,
-						url: reader.result as string,
-						mimeType: file.type,
-						size: file.size,
-					},
-				]);
-			};
-			reader.readAsDataURL(file);
-		}
-	}, []);
+	const addImages = useCallback(
+		(files: File[]) => {
+			const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+			for (const file of imageFiles) {
+				void stageImageUpload(target, file).then(({ dataUrl, upload }) => {
+					setImages((prev) => [
+						...prev,
+						{
+							id: upload?.id ?? `img-${Date.now()}-${Math.random()}`,
+							filename: file.name,
+							url: dataUrl,
+							mimeType: file.type,
+							size: file.size,
+						},
+					]);
+				});
+			}
+		},
+		[target]
+	);
 	const onAttach = useCallback(() => {
 		const input = document.createElement("input");
 		input.type = "file";
@@ -258,6 +269,7 @@ export function useComposerSlot(
 		agentId: runtime.agentId,
 		conversationId,
 	});
+	const composerShortcuts = useComposerShortcutBindings();
 
 	// Every injected prop rides one ref so the memoized slot identity stays stable.
 	const liveRef = useRef<{
@@ -268,6 +280,7 @@ export function useComposerSlot(
 		placeholder?: string;
 		right: ReactNode;
 		sections: ComposerSettingsSection[];
+		shortcuts: typeof composerShortcuts;
 	}>({
 		compact,
 		left: leftActions,
@@ -276,6 +289,7 @@ export function useComposerSlot(
 		placeholder,
 		right: rightActions,
 		sections,
+		shortcuts: composerShortcuts,
 	});
 	liveRef.current = {
 		compact,
@@ -285,6 +299,7 @@ export function useComposerSlot(
 		placeholder,
 		right: rightActions,
 		sections,
+		shortcuts: composerShortcuts,
 	};
 
 	const inputBar = useMemo(
@@ -298,7 +313,13 @@ export function useComposerSlot(
 						leftActions={live.left}
 						onGenerateImage={live.onGenerateImage}
 						onTextareaKeyDown={(event) => {
-							if (handleComposerSettingsShortcut(event, live.sections)) {
+							if (
+								handleComposerSettingsShortcut(
+									event,
+									live.sections,
+									live.shortcuts
+								)
+							) {
 								event.preventDefault();
 							}
 							props.onTextareaKeyDown?.(event);

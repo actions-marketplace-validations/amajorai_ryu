@@ -174,6 +174,12 @@ const CHUNK_CHAR_SIZE: usize = 1_000;
 /// The danger-zone "delete all spaces" preserves and ignores this Space.
 const MEETINGS_SPACE_NAME: &str = "Meetings";
 
+/// Name of the default, undeletable system Space that holds **user**-initiated
+/// file uploads (chat attachments, page/editor media, `ui.uploadFile`). Twin of
+/// the Artifacts space (agent-created files). Seeded at Core boot; callers resolve
+/// it via [`SpaceStore::ensure_system_space`].
+pub const UPLOADS_SPACE_NAME: &str = "Uploads";
+
 // ── Per-resource tenancy (twin of conversations.rs) ──────────────────────────
 //
 // Spaces/documents mirror the conversation plane exactly (`conversations.rs`):
@@ -205,8 +211,8 @@ const DOC_TENANCY_VISIBLE_PREDICATE: &str = "(
 
 /// Space visibility filter — the SQL twin for the `spaces` table (alias `s`).
 /// Identical to [`DOC_TENANCY_VISIBLE_PREDICATE`] PLUS `OR s.system = 1`: system
-/// spaces (Artifacts / Meetings / Canvas / Clips) are node singletons with no owner
-/// and MUST stay visible to every member, or the whole node loses them.
+/// spaces (Artifacts / Uploads / Meetings / Canvas / Clips) are node singletons with
+/// no owner and MUST stay visible to every member, or the whole node loses them.
 const SPACE_TENANCY_VISIBLE_PREDICATE: &str = "(
         s.system = 1
         OR :bound = 0
@@ -407,6 +413,10 @@ pub struct Space {
     /// suppression + the "Artifacts" resolver.
     #[serde(default)]
     pub system: bool,
+    /// Optional Notion-style glyph (`GlyphValue` JSON from `@ryu/ui`). Null =
+    /// use the surface fallback icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<serde_json::Value>,
 }
 
 /// A document belonging to a Space.
@@ -429,6 +439,9 @@ pub struct Document {
     /// Byte size for `kind='file'` documents (`None` otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_size: Option<i64>,
+    /// Optional Notion-style glyph (`GlyphValue` JSON). Null = kind default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<serde_json::Value>,
 }
 
 /// A document with its full editable markdown source (Notion-style page).
@@ -449,6 +462,9 @@ pub struct DocumentContent {
     pub kind: String,
     /// Parent document id when this is a database "row page"; `None` otherwise.
     pub parent_id: Option<String>,
+    /// Optional Notion-style glyph (`GlyphValue` JSON). Null = kind default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<serde_json::Value>,
 }
 
 /// One app-owned document as returned to a full-page Companion app (grant
@@ -1249,6 +1265,10 @@ impl SpaceStore {
         let _ =
             conn.execute_batch("ALTER TABLE spaces ADD COLUMN system INTEGER NOT NULL DEFAULT 0;");
 
+        // Notion-style entity glyphs (GlyphValue JSON from the shared GlyphPicker).
+        let _ = conn.execute_batch("ALTER TABLE spaces ADD COLUMN icon TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE documents ADD COLUMN icon TEXT;");
+
         // Multi-user tenancy for SPACES (collaboration epic). `documents` already
         // carries this quartet (above); spaces did not. Guarded by a PRAGMA
         // table_info existence check (mirroring the documents block) so each ALTER
@@ -1406,7 +1426,7 @@ impl SpaceStore {
             "SELECT s.id, s.name, s.description, s.created_at, s.updated_at,
                     (SELECT COUNT(*) FROM documents d
                         WHERE d.space_id = s.id AND d.parent_id IS NULL),
-                    s.retrieval_mode, s.system
+                    s.retrieval_mode, s.system, s.icon
              FROM spaces s
              WHERE {SPACE_TENANCY_VISIBLE_PREDICATE}
              ORDER BY s.updated_at DESC"
@@ -1420,6 +1440,7 @@ impl SpaceStore {
             },
             |row| {
                 let mode_str: String = row.get(6)?;
+                let icon_raw: Option<String> = row.get(8)?;
                 Ok(Space {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -1429,6 +1450,7 @@ impl SpaceStore {
                     document_count: row.get(5)?,
                     retrieval_mode: RetrievalMode::from_str(&mode_str),
                     system: row.get(7)?,
+                    icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
                 })
             },
         )?;
@@ -1452,7 +1474,7 @@ impl SpaceStore {
         let sql = format!(
             "SELECT d.id, d.space_id, d.title, d.created_at,
                     (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id),
-                    d.kind, d.parent_id, d.mime, d.byte_size
+                    d.kind, d.parent_id, d.mime, d.byte_size, d.icon
              FROM documents d
              WHERE d.space_id = :space_id AND d.parent_id IS NULL
                AND {DOC_TENANCY_VISIBLE_PREDICATE}
@@ -1467,6 +1489,7 @@ impl SpaceStore {
                 ":org": filter.org_id,
             },
             |row| {
+                let icon_raw: Option<String> = row.get(9)?;
                 Ok(Document {
                     id: row.get(0)?,
                     space_id: row.get(1)?,
@@ -1477,6 +1500,7 @@ impl SpaceStore {
                     parent_id: row.get(6)?,
                     mime: row.get(7)?,
                     byte_size: row.get(8)?,
+                    icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
                 })
             },
         )?;
@@ -1793,8 +1817,8 @@ impl SpaceStore {
     }
 
     /// Get-or-create a **system** Space by name. System spaces (e.g. the default
-    /// "Artifacts" and "Meetings" collections) are Ryu-owned: they cannot be
-    /// deleted individually and are skipped by the danger-zone bulk clear. Called
+    /// "Artifacts", "Uploads", and "Meetings" collections) are Ryu-owned: they cannot
+    /// be deleted individually and are skipped by the danger-zone bulk clear. Called
     /// idempotently at startup, so a matching row is reused and its `system` flag
     /// is (re-)asserted. Returns the space id.
     pub async fn ensure_system_space(
@@ -2018,10 +2042,11 @@ impl SpaceStore {
             .query_row(
                 "SELECT d.id, d.space_id, d.title, d.source, d.created_at, d.updated_at,
                         (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id),
-                        d.kind, d.parent_id
+                        d.kind, d.parent_id, d.icon
                  FROM documents d WHERE d.id = ?1",
                 params![doc_id],
                 |row| {
+                    let icon_raw: Option<String> = row.get(9)?;
                     Ok(DocumentContent {
                         id: row.get(0)?,
                         space_id: row.get(1)?,
@@ -2032,12 +2057,77 @@ impl SpaceStore {
                         chunk_count: row.get(6)?,
                         kind: row.get(7)?,
                         parent_id: row.get(8)?,
+                        icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
                     })
                 },
             )
             .optional()
             .context("reading document")?;
         Ok(doc)
+    }
+
+    /// Set (or clear) a Space's Notion-style glyph. Does not touch documents.
+    /// Returns `false` when no such space exists.
+    pub async fn set_space_icon(
+        &self,
+        space_id: &str,
+        icon: Option<&serde_json::Value>,
+    ) -> Result<bool> {
+        let now = now_millis();
+        let icon_str = match icon {
+            Some(v) => Some(serde_json::to_string(v).context("serializing space icon")?),
+            None => None,
+        };
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE spaces SET icon = ?1, updated_at = ?2 WHERE id = ?3",
+                params![icon_str, now, space_id],
+            )
+            .context("updating space icon")?;
+        Ok(n > 0)
+    }
+
+    /// Set (or clear) a document's Notion-style glyph without re-embedding.
+    /// Returns `false` when no such document exists.
+    pub async fn set_document_icon(
+        &self,
+        doc_id: &str,
+        icon: Option<&serde_json::Value>,
+    ) -> Result<bool> {
+        let now = now_millis();
+        let icon_str = match icon {
+            Some(v) => Some(serde_json::to_string(v).context("serializing document icon")?),
+            None => None,
+        };
+        let mut conn = self.conn.lock().await;
+        let tx = conn
+            .transaction()
+            .context("starting document icon transaction")?;
+        let space_id: Option<String> = tx
+            .query_row(
+                "SELECT space_id FROM documents WHERE id = ?1",
+                params![doc_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("looking up document for icon update")?;
+        let Some(space_id) = space_id else {
+            return Ok(false);
+        };
+        tx.execute(
+            "UPDATE documents SET icon = ?1, updated_at = ?2 WHERE id = ?3",
+            params![icon_str, now, doc_id],
+        )
+        .context("updating document icon")?;
+        tx.execute(
+            "UPDATE spaces SET updated_at = ?1 WHERE id = ?2",
+            params![now, space_id],
+        )
+        .context("bumping space updated_at")?;
+        tx.commit()
+            .context("committing document icon update")?;
+        Ok(true)
     }
 
     /// Save an edited page: replace the document's chunks + vectors (+ graph) from

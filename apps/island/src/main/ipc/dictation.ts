@@ -29,9 +29,13 @@ export function registerDictationIpc(
 
 	ipcMain.handle(
 		IPC.dictation.submit,
-		async (_event, audio: ArrayBuffer): Promise<DictationSubmitResult> => {
+		async (
+			_event,
+			audio: ArrayBuffer,
+			task: "transcribe" | "ask" = "transcribe"
+		): Promise<DictationSubmitResult> => {
 			const rawPrefs = await getPreferenceRaw(DICTATION_PREF_KEY);
-			return runDictation(audio, rawPrefs);
+			return runDictation(audio, rawPrefs, task);
 		}
 	);
 

@@ -76,15 +76,15 @@ export function PredictSettings() {
 		void setPredictConfig(activeTarget(), next)
 			.then((ok) => {
 				if (ok) {
-					toast.success("Predictive typing settings saved");
+					toast.success("Autocomplete settings saved");
 				} else {
-					toast.error("Couldn't save predictive typing settings", {
+					toast.error("Couldn't save autocomplete settings", {
 						description: "Your change wasn't saved. Please try again.",
 					});
 				}
 			})
 			.catch(() => {
-				toast.error("Couldn't save predictive typing settings", {
+				toast.error("Couldn't save autocomplete settings", {
 					description: "Your change wasn't saved. Please try again.",
 				});
 			});
@@ -147,13 +147,12 @@ export function PredictSettings() {
 						read.
 					</>
 				}
-				title="Predictive typing (everywhere)"
+				title="Autocomplete (everywhere)"
 			>
 				<SettingsCard>
 					<p className="text-muted-foreground text-sm">
-						Predictive typing is on because the{" "}
-						<strong>Predictive Typing</strong> plugin is enabled. To turn it off
-						everywhere, disable the plugin in{" "}
+						Autocomplete is on because the <strong>Autocomplete</strong> plugin
+						is enabled. To turn it off everywhere, disable the plugin in{" "}
 						<strong>Settings → Plugins</strong>. The settings below tune what it
 						does once it is on.
 					</p>
@@ -201,7 +200,7 @@ export function PredictSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Limit predictive typing to specific apps, or leave empty to allow every app. Enter one app name per line (for example, Chrome or Notes). Password and secure fields are always excluded, whatever you list here."
+				caption="Limit autocomplete to specific apps, or leave empty to allow every app. Enter one app name per line (for example, Chrome or Notes). Password and secure fields are always excluded, whatever you list here."
 				title="App allowlist"
 			>
 				<SettingsCard className="space-y-4">
@@ -250,7 +249,7 @@ export function PredictSettings() {
 							Settings → Editor &amp; Embeddings → Inline AI editing
 						</strong>
 						. That picker drives autocomplete inside Spaces documents; this page
-						drives system-wide predictive typing.
+						drives system-wide autocomplete.
 					</p>
 				</SettingsCard>
 			</SettingsSection>

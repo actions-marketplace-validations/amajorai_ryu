@@ -36,8 +36,7 @@ import { Switch } from "@ryu/ui/components/switch";
 import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
 import { cn } from "@ryu/ui/lib/utils";
 import { useTheme } from "next-themes";
-import { useCallback, useState } from "react";
-import { resetBackgroundCustomization } from "@/src/hooks/useBackgroundCustomization.ts";
+import { useCallback, useEffect, useState } from "react";
 import { useChatDateGrouping } from "@/src/hooks/useChatDateGrouping.ts";
 import {
 	setChromeShadows,
@@ -50,14 +49,12 @@ import {
 import {
 	type DiffViewPrefs,
 	diffViewPrefsToOptions,
-	resetDiffViewPrefs,
 	setDiffViewPrefs,
 	useDiffViewPrefs,
 } from "@/src/hooks/useDiffViewPrefs.ts";
 import {
 	type FileTreePrefs,
 	fileTreePrefsToOptions,
-	resetFileTreePrefs,
 	setFileTreePrefs,
 	useFileTreePrefs,
 } from "@/src/hooks/useFileTreePrefs.ts";
@@ -84,7 +81,6 @@ import {
 	HEADING_FONTS,
 	MAX_SIDEBAR_WIDTH,
 	MIN_SIDEBAR_WIDTH,
-	resetCardSpacing,
 	SIDEBAR_WIDTH_KEY,
 	setCardSpacing,
 	setChatWidth,
@@ -100,10 +96,15 @@ import {
 	UI_FONTS,
 } from "@/src/hooks/useThemePreset.ts";
 import {
-	resetUsageBarPrefs,
 	setUsageBarPrefs,
 	useUsageBarPrefs,
 } from "@/src/hooks/useUsageBarPrefs.ts";
+import {
+	APPEARANCE_DEFAULTS,
+	APPEARANCE_KEYS,
+	bindAppearanceThemeMode,
+	resetAppearanceSettings,
+} from "@/src/lib/appearance-settings.ts";
 import {
 	type CustomTokens,
 	customTokensToVariant,
@@ -727,6 +728,11 @@ function FileTreePreview({ prefs }: { prefs: FileTreePrefs }) {
 
 export function AppearanceTab() {
 	const { theme, setTheme } = useTheme();
+	// next-themes' setter lives in React; bind it so registry reset can call it.
+	useEffect(() => {
+		bindAppearanceThemeMode(setTheme);
+		return () => bindAppearanceThemeMode(null);
+	}, [setTheme]);
 	const pointerCursorEnabled = usePointerCursor();
 	const chromeShadowsEnabled = useChromeShadows();
 	const dialogOverlayBlurEnabled = useDialogOverlayBlur();
@@ -736,31 +742,34 @@ export function AppearanceTab() {
 	const [sidebarMode, setSidebarMode] = useSidebarMode();
 	const [sidebarVariant, setSidebarVariant] = useSidebarVariant();
 	const [sidebarOverflowPopover, setSidebarOverflowPopover] =
-		usePersistedToggle("ryu:sidebar-overflow-popover", false);
+		usePersistedToggle(
+			APPEARANCE_KEYS.sidebarOverflowPopover,
+			APPEARANCE_DEFAULTS.sidebarOverflowPopover
+		);
 	const usageBarPrefs = useUsageBarPrefs();
 	const [groupToolUses, setGroupToolUses] = usePersistedToggle(
-		"ryu:group-tool-uses",
-		true
+		APPEARANCE_KEYS.groupToolUses,
+		APPEARANCE_DEFAULTS.groupToolUses
 	);
 	const [expandFileEdits, setExpandFileEdits] = usePersistedToggle(
-		"ryu:expand-file-edits",
-		false
+		APPEARANCE_KEYS.expandFileEdits,
+		APPEARANCE_DEFAULTS.expandFileEdits
 	);
 	const [expandCommands, setExpandCommands] = usePersistedToggle(
-		"ryu:expand-commands",
-		false
+		APPEARANCE_KEYS.expandCommands,
+		APPEARANCE_DEFAULTS.expandCommands
 	);
 	const [pinUserMessage, setPinUserMessage] = usePersistedToggle(
-		"ryu:pin-user-message",
-		true
+		APPEARANCE_KEYS.pinUserMessage,
+		APPEARANCE_DEFAULTS.pinUserMessage
 	);
 	const [animationsEnabled, setAnimationsEnabled] = usePersistedToggle(
-		"ryu:animations-enabled",
-		true
+		APPEARANCE_KEYS.animationsEnabled,
+		APPEARANCE_DEFAULTS.animationsEnabled
 	);
 	const [streamAnimation, setStreamAnimation] = usePersistedToggle(
-		"ryu:stream-animation",
-		true
+		APPEARANCE_KEYS.streamAnimation,
+		APPEARANCE_DEFAULTS.streamAnimation
 	);
 	const diffPrefs = useDiffViewPrefs();
 	const fileTreePrefs = useFileTreePrefs();
@@ -941,16 +950,19 @@ export function AppearanceTab() {
 	}, [darkSaveName, darkTokens]);
 
 	const handleLightDiscard = useCallback(() => {
+		// Re-apply the saved preset variant (not customTokensToVariant on the
+		// 7 base fields). customTokensToVariant invents primary-foreground and
+		// would leave Switch thumbs / primary ink wrong after a swatch edit.
 		setLightTokens(lightBaseTokens);
-		applyCustomTokensLive("light", lightBaseTokens);
 		setLightSaveDialog(false);
-	}, [lightBaseTokens]);
+		setLightPreset(lightPresetId);
+	}, [lightBaseTokens, lightPresetId]);
 
 	const handleDarkDiscard = useCallback(() => {
 		setDarkTokens(darkBaseTokens);
-		applyCustomTokensLive("dark", darkBaseTokens);
 		setDarkSaveDialog(false);
-	}, [darkBaseTokens]);
+		setDarkPreset(darkPresetId);
+	}, [darkBaseTokens, darkPresetId]);
 
 	const handleUiFont = (value: string | null) => {
 		if (!value) {
@@ -1025,55 +1037,31 @@ export function AppearanceTab() {
 	};
 
 	const resetAppearanceDefaults = () => {
-		// Theme mode + presets
-		setTheme("system");
-		handleLightPreset(DEFAULT_LIGHT_ID);
-		handleDarkPreset(DEFAULT_DARK_ID);
+		// Registry owns every appearance preference — adding a setting means
+		// registering it in appearance-settings.ts, not extending this list.
+		resetAppearanceSettings();
 
-		// Typography
-		handleUiFont(UI_FONTS[0].value);
-		handleHeadingFont(HEADING_FONTS[0].value);
-		handleCodeFont(CODE_FONTS[0].value);
-
-		// Sliders
-		setContrastValue(50);
-		setContrast(50);
-		setRadiusValue(DEFAULT_RADIUS);
-		setRadius(DEFAULT_RADIUS);
-		setSpacingValue(DEFAULT_SPACING);
-		setSpacing(DEFAULT_SPACING);
+		// Sync local useState mirrors (sliders / font selects / preset editors).
+		// Hook-backed toggles update themselves via their external stores.
+		const lightTok = initTokens(APPEARANCE_DEFAULTS.lightPreset);
+		setLightPresetId(APPEARANCE_DEFAULTS.lightPreset);
+		setLightTokens(lightTok);
+		setLightBaseTokens(lightTok);
+		setLightSaveDialog(false);
+		const darkTok = initTokens(APPEARANCE_DEFAULTS.darkPreset);
+		setDarkPresetId(APPEARANCE_DEFAULTS.darkPreset);
+		setDarkTokens(darkTok);
+		setDarkBaseTokens(darkTok);
+		setDarkSaveDialog(false);
+		setUiFontState(APPEARANCE_DEFAULTS.uiFont);
+		setHeadingFontState(APPEARANCE_DEFAULTS.headingFont);
+		setCodeFontState(APPEARANCE_DEFAULTS.codeFont);
+		setContrastValue(APPEARANCE_DEFAULTS.contrast);
+		setRadiusValue(APPEARANCE_DEFAULTS.radius);
+		setSpacingValue(APPEARANCE_DEFAULTS.spacing);
 		setCardSpacingValue(DEFAULT_CARD_SPACING);
-		resetCardSpacing();
-		setChatWidthValue(DEFAULT_CHAT_WIDTH);
-		setChatWidth(DEFAULT_CHAT_WIDTH);
-		setSidebarWidthValue(DEFAULT_SIDEBAR_WIDTH);
-		setSidebarWidthSetting(DEFAULT_SIDEBAR_WIDTH);
-
-		// Friendly names (on by default)
-		setFriendlyNames(true);
-
-		// Pointer cursor
-		setPointerCursor(false);
-
-		// Navigation & sidebar shadows (on by default)
-		setChromeShadows(true);
-
-		// Dialog overlays (transparent by default)
-		setDialogOverlayBlur(false);
-
-		// Custom sidebar/page backgrounds (off by default)
-		resetBackgroundCustomization();
-
-		// Composer usage meters (visible, bar-on, percent-off, used mode)
-		resetUsageBarPrefs();
-
-		// Diff viewer options
-		resetDiffViewPrefs();
-
-		// File tree options
-		resetFileTreePrefs();
-
-		setPinUserMessage(true);
+		setChatWidthValue(APPEARANCE_DEFAULTS.chatWidth);
+		setSidebarWidthValue(APPEARANCE_DEFAULTS.sidebarWidth);
 
 		setAppearanceResetConfirm(false);
 	};
@@ -2089,7 +2077,7 @@ export function AppearanceTab() {
 								</Button>
 							)
 						}
-						description="Restore theme, typography, and layout to their defaults. Saved custom presets are kept."
+						description="Restore every appearance setting to its default. Saved custom theme presets are kept."
 						title="Reset appearance"
 					/>
 				</SettingsGroup>

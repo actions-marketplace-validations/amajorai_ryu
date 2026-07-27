@@ -35,6 +35,8 @@ export interface PluginSelectOption {
 
 /** A single configurable field, bound to one preference key. */
 export interface PluginSettingsField {
+	/** Optional default when the preference is unset (bool/number/string). */
+	default?: boolean | number | string;
 	/** Optional helper text shown under the field. */
 	description?: string;
 	/** The display label for the field (falls back to the pref key). */
@@ -123,6 +125,13 @@ function parseField(raw: unknown): PluginSettingsField | null {
 		return null;
 	}
 	const type = asString(obj.type) ?? "text";
+	const defaultRaw = obj.default;
+	const defaultValue =
+		typeof defaultRaw === "boolean" ||
+		typeof defaultRaw === "number" ||
+		typeof defaultRaw === "string"
+			? defaultRaw
+			: undefined;
 	return {
 		type,
 		prefKey,
@@ -130,6 +139,7 @@ function parseField(raw: unknown): PluginSettingsField | null {
 		description: asString(obj.description),
 		placeholder: asString(obj.placeholder),
 		options: parseOptions(obj.options),
+		default: defaultValue,
 	};
 }
 
@@ -225,9 +235,9 @@ export function splitScopedTabs(
 }
 
 /** Coerce a stored bare-string preference into a boolean (for `toggle` fields). */
-export function prefToBool(raw: string | null): boolean {
+export function prefToBool(raw: string | null, fallback = false): boolean {
 	if (raw === null) {
-		return false;
+		return fallback;
 	}
 	const value = raw.trim().toLowerCase();
 	return value === "true" || value === "1" || value === "on" || value === "yes";

@@ -1,71 +1,109 @@
 // System-wide dictation preference: the cross-process contract persisted in Core
-// under the `dictation` key. Separate from `voice-input` (`shared/voice.ts`) on
-// purpose — voice input drops a transcript into the island chat to run an agent,
-// while dictation types the transcript straight into whatever native app has OS
-// focus (WhisprFlow / SuperWhisper style). Each gets its own global shortcut so
-// the two never fight over one key.
+// under the `dictation` key. Owned by the `dictation` apps-store app (plugin enable
+// is the single on/off switch); Island is the OS surface that registers shortcuts
+// and runs capture → STT → insert. Separate from `voice-input` (`shared/voice.ts`)
+// on purpose — voice input drops a transcript into the island chat to run an agent,
+// while dictation types into whatever native app has OS focus (WhisprFlow /
+// SuperWhisper style). Agent-ask is a second mode on this same surface: speak a
+// question, run an agent, paste the finished answer.
 //
-// The desktop writes this blob from its Island settings; the island companion (a
-// separate Electron process) reads it on startup, subscribes to live changes, and
-// uses it to (1) register the dictation global shortcut and (2) drive the capture
-// → transcribe → optional post-process → insert pipeline.
-//
-// Like every Ryu default, the engine/model/shortcut/insertion are swappable,
-// never a lock.
+// postProcess and ask both use the standard AgentSelection (same picker as other
+// apps/plugins): pick an agent OR a model. Cross-app reach (Spaces, MCP tools from
+// other apps) lives on the *chosen agent*'s allowlists — Dictation settings expose
+// those inline when an agent is selected.
 
+import {
+	type AgentSelection,
+	EMPTY_AGENT_SELECTION,
+	parseAgentSelectionWithLegacyAgent,
+} from "./agent-selection.ts";
 import type { VoiceEngine } from "./voice.ts";
+
+export type { AgentSelection } from "./agent-selection.ts";
+export {
+	EMPTY_AGENT_SELECTION,
+	isAgentSelectionEmpty,
+	parseAgentSelection,
+} from "./agent-selection.ts";
 
 /** Preference key shared with the desktop's preferences client + Core KV store. */
 export const DICTATION_PREF_KEY = "dictation";
 
+/** Stable plugin / fixture id for the Dictation apps-store app. */
+export const DICTATION_PLUGIN_ID = "dictation";
+
 /**
  * How the dictation shortcut behaves. Mirrors {@link VoiceInputMode}:
- * - `"push-to-talk"`: hold the key to record, release to stop + insert. Needs a
- *   global key-*up* signal (the main process observes it through the shared
- *   `uiohook` hold hook). Falls back to `"toggle"` for any accelerator whose
- *   primary key cannot be mapped to a hook keycode.
+ * - `"push-to-talk"`: hold the key to record, release to stop + insert.
  * - `"toggle"`: press once to start, again to stop.
  */
 export type DictationMode = "toggle" | "push-to-talk";
 
 /**
+ * Pipeline task after transcription:
+ * - `"transcribe"`: insert the (optionally cleaned) transcript.
+ * - `"ask"`: run an agent on the transcript and insert the agent's answer.
+ */
+export type DictationTask = "transcribe" | "ask";
+
+/**
  * How the transcribed (and optionally post-processed) text lands in the focused
  * app:
- * - `"type"`: synthetic Unicode keystrokes via ghost (`ghost__ghost_type`). No
- *   clipboard clobber; works everywhere; slightly slower for long dictations.
- * - `"paste"`: write the text to the clipboard, then send the paste chord
- *   (`pasteKeys`). Instant even for long text; can restore the prior clipboard.
+ * - `"type"`: synthetic Unicode keystrokes via ghost (`ghost__ghost_type`).
+ * - `"paste"`: clipboard + paste chord via ghost (`ghost__ghost_hotkey`).
  */
 export type DictationInsertMode = "type" | "paste";
 
 /**
- * Optional LLM cleanup of the raw transcript before it is inserted. `agent` picks
- * where it runs: empty = the fast local default model (one `/v1/chat/completions`
- * turn through the gateway), otherwise a full agent id (e.g. the flagship `ryu`).
+ * Optional LLM cleanup of the raw transcript before it is inserted. `selection`
+ * is the standard agent/model picker value (empty = fast local default model).
  * Fails open — if the model is unavailable or returns empty, the raw transcript
- * is inserted unchanged, so post-processing never silently swallows speech.
+ * is inserted unchanged.
  */
 export interface DictationPostProcess {
-	/** Agent id to run cleanup through; empty = fast local default model. */
-	agent: string;
 	enabled: boolean;
-	/** System prompt handed the cleanup model. */
+	/** System prompt handed the cleanup model/agent. */
 	prompt: string;
+	/** Standard agent OR model selection (same as other plugins). */
+	selection: AgentSelection;
+}
+
+/**
+ * Agent-ask mode: speak a question anywhere, run an agent/model, paste the answer
+ * into the focused app. Separate shortcut from plain dictation so the two never
+ * fight. When `selection` names an agent, that agent's tool/Spaces allowlists
+ * control cross-app reach (Ghost, Spaces, chats tooling, etc.).
+ */
+export interface DictationAskPrefs {
+	enabled: boolean;
+	mode: DictationMode;
+	/** System prompt for the ask agent/model. */
+	prompt: string;
+	/** Standard agent OR model selection. */
+	selection: AgentSelection;
+	/** Electron accelerator for agent-ask (distinct from {@link DictationPrefs.shortcut}). */
+	shortcut: string;
 }
 
 /** The dictation settings blob persisted under {@link DICTATION_PREF_KEY}. */
 export interface DictationPrefs {
+	/** Agent-ask mode (speak a question → paste the answer). */
+	ask: DictationAskPrefs;
 	/** Press Enter after inserting (send the message / newline). */
 	autoSend: boolean;
+	/**
+	 * Operational on/off mirrored from the Dictation plugin enable state. The
+	 * plugin is the product switch; this field is what Island reads for shortcut
+	 * registration and is synced by Core on plugin enable/disable.
+	 */
 	enabled: boolean;
 	/** Transcription engine — the `?engine=` value Core's transcribe endpoint takes. */
 	engine: VoiceEngine;
 	insertMode: DictationInsertMode;
 	mode: DictationMode;
 	/**
-	 * Paste chord for `insertMode: "paste"`, as `+`-joined tokens (e.g. `"ctrl+v"`,
-	 * `"cmd+shift+v"`). Empty = the platform default (`cmd+v` on macOS, else
-	 * `ctrl+v`), resolved in the main process where the platform is known.
+	 * Paste chord for `insertMode: "paste"`, as `+`-joined tokens (e.g. `"ctrl+v"`).
+	 * Empty = platform default.
 	 */
 	pasteKeys: string;
 	postProcess: DictationPostProcess;
@@ -79,14 +117,28 @@ export interface DictationPrefs {
 export const DEFAULT_DICTATION_POSTPROCESS_PROMPT =
 	"You clean up dictated speech into polished written text. Fix grammar, punctuation, and capitalization, and remove filler words (um, uh, like, you know) and false starts. Preserve the original meaning and wording as much as possible. Output ONLY the cleaned text, with no preamble, quotes, or commentary.";
 
-/**
- * Default dictation shortcut. Deliberately a chord (not a bare key) so it does not
- * hijack a common single key while the island runs; rebindable in Island settings.
- */
+/** Default ask prompt: answer the spoken question; output only the answer. */
+export const DEFAULT_DICTATION_ASK_PROMPT =
+	"You answer the user's spoken question. Be concise and directly useful. Output ONLY the answer text that should be pasted into their focused app — no preamble, no quotes, no commentary about the fact they dictated.";
+
+/** Default dictation shortcut. */
 export const DEFAULT_DICTATION_SHORTCUT = "CommandOrControl+Shift+D";
+
+/** Default agent-ask shortcut (distinct chord so it never fights dictation). */
+export const DEFAULT_DICTATION_ASK_SHORTCUT = "CommandOrControl+Shift+A";
+
+/** Default agent-ask settings: off until the user opts in and picks a target. */
+export const DEFAULT_DICTATION_ASK: DictationAskPrefs = {
+	enabled: false,
+	mode: "push-to-talk",
+	prompt: DEFAULT_DICTATION_ASK_PROMPT,
+	selection: EMPTY_AGENT_SELECTION,
+	shortcut: DEFAULT_DICTATION_ASK_SHORTCUT,
+};
 
 /** Default dictation settings: enabled, hold-to-talk, parakeet, type-insertion. */
 export const DEFAULT_DICTATION_PREFS: DictationPrefs = {
+	ask: DEFAULT_DICTATION_ASK,
 	autoSend: false,
 	enabled: true,
 	engine: "parakeet",
@@ -94,9 +146,9 @@ export const DEFAULT_DICTATION_PREFS: DictationPrefs = {
 	mode: "push-to-talk",
 	pasteKeys: "",
 	postProcess: {
-		agent: "",
 		enabled: false,
 		prompt: DEFAULT_DICTATION_POSTPROCESS_PROMPT,
+		selection: EMPTY_AGENT_SELECTION,
 	},
 	restoreClipboard: true,
 	shortcut: DEFAULT_DICTATION_SHORTCUT,
@@ -119,15 +171,35 @@ function coerceInsertMode(value: unknown): DictationInsertMode {
 
 /** Parse the optional post-process block, filling every field from the default. */
 function parsePostProcess(value: unknown): DictationPostProcess {
-	const raw = (value ?? {}) as Partial<DictationPostProcess>;
+	const raw = (value ?? {}) as Record<string, unknown>;
 	const prompt =
 		typeof raw.prompt === "string" && raw.prompt.trim().length > 0
 			? raw.prompt
 			: DEFAULT_DICTATION_POSTPROCESS_PROMPT;
 	return {
-		agent: typeof raw.agent === "string" ? raw.agent : "",
 		enabled: raw.enabled === true,
 		prompt,
+		selection: parseAgentSelectionWithLegacyAgent(raw.selection, raw.agent),
+	};
+}
+
+/** Parse the optional agent-ask block, filling every field from the default. */
+function parseAsk(value: unknown): DictationAskPrefs {
+	const raw = (value ?? {}) as Record<string, unknown>;
+	const shortcut =
+		typeof raw.shortcut === "string" && raw.shortcut.trim().length > 0
+			? raw.shortcut.trim()
+			: DEFAULT_DICTATION_ASK_SHORTCUT;
+	const prompt =
+		typeof raw.prompt === "string" && raw.prompt.trim().length > 0
+			? raw.prompt
+			: DEFAULT_DICTATION_ASK_PROMPT;
+	return {
+		enabled: raw.enabled === true,
+		mode: coerceMode(raw.mode),
+		prompt,
+		selection: parseAgentSelectionWithLegacyAgent(raw.selection, raw.agent),
+		shortcut,
 	};
 }
 
@@ -147,6 +219,7 @@ export function parseDictationPrefs(raw: string | null): DictationPrefs {
 				? parsed.shortcut.trim()
 				: DEFAULT_DICTATION_SHORTCUT;
 		return {
+			ask: parseAsk(parsed.ask),
 			autoSend: parsed.autoSend === true,
 			enabled: parsed.enabled !== false,
 			engine: coerceEngine(parsed.engine),

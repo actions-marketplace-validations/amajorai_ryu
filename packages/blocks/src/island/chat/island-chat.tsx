@@ -9,6 +9,7 @@
 // Presentational view: the live island wraps this and supplies the real chat
 // state (messages/sending/error) + send/stop/retry/inbox handlers.
 
+import type { KeyboardEvent, ReactNode } from "react";
 import { type ComposerAttachment, MessageInput } from "./message-input.tsx";
 import { type IslandChatMessage, MessageList } from "./message-list.tsx";
 
@@ -20,11 +21,13 @@ export interface IslandChatViewProps {
 	 * (double-check, plugin composer actions, …). Kept out of the composer's
 	 * cramped left edge so the buttons stay readable and tappable.
 	 */
-	belowInputActions?: React.ReactNode;
+	belowInputActions?: ReactNode;
 	error?: string | null;
-	leftActions?: React.ReactNode;
+	leftActions?: ReactNode;
 	messages?: IslandChatMessage[];
 	offline?: boolean;
+	/** Focus-scoped composer settings shortcuts (cycle agent/mode/model/thinking). */
+	onComposerKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean;
 	/** Report the composer height so the island can size the compact bar. */
 	onComposerResize?: (height: number) => void;
 	onPrefillConsumed?: () => void;
@@ -54,6 +57,7 @@ export function IslandChatView({
 	onStop = noop,
 	onRetry = noop,
 	onComposerResize = noop,
+	onComposerKeyDown,
 	onPrefillConsumed,
 	onRemoveAttachment,
 }: IslandChatViewProps) {
@@ -93,6 +97,7 @@ export function IslandChatView({
 					attachments={attachments}
 					disabled={offline}
 					leftActions={leftActions}
+					onComposerKeyDown={onComposerKeyDown}
 					onComposerResize={onComposerResize}
 					onPrefillConsumed={onPrefillConsumed}
 					onRemoveAttachment={onRemoveAttachment}

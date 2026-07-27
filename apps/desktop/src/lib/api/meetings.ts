@@ -31,6 +31,8 @@ export interface Meeting {
 	/** Space document holding the editable notes markdown (set on finalize). */
 	doc_id?: string | null;
 	ended_at?: string | null;
+	/** Notion-style glyph from the shared GlyphPicker. */
+	icon?: unknown | null;
 	id: string;
 	notes?: MeetingNotes | null;
 	participants: string[];
@@ -143,6 +145,23 @@ export async function renameMeeting(
 	);
 	if (!json.meeting) {
 		throw new Error(json.error ?? "failed to rename meeting");
+	}
+	return json.meeting;
+}
+
+/** Set or clear a meeting's Notion-style glyph. Returns the updated meeting. */
+export async function setMeetingIcon(
+	target: ApiTarget,
+	id: string,
+	icon: unknown | null
+): Promise<Meeting> {
+	const json = await request<{ meeting?: Meeting; error?: string }>(
+		target,
+		`/api/meetings/${id}/icon`,
+		{ method: "POST", body: { icon } }
+	);
+	if (!json.meeting) {
+		throw new Error(json.error ?? "failed to set meeting icon");
 	}
 	return json.meeting;
 }

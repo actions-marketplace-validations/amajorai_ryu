@@ -97,8 +97,11 @@ export interface ComposerSettingsMenuProps {
 	 * section) with a caller-owned dropdown body — the universal picker's
 	 * grouped `Ryu (providers nested) · External Agents` layout. The trigger
 	 * summary still derives from `sections` (so `Ryu · Sonnet · Plan` stays
-	 * glanceable); only the popover body changes. `close` collapses the menu
-	 * after a selection. When omitted, the sections render as before.
+	 * glanceable); only the popover body changes. `close` is for navigation
+	 * actions that leave the picker (configure credentials, create agent, …);
+	 * setting picks (model / thinking / approval) stay open so the user can
+	 * adjust several without re-opening. When omitted, the sections render as
+	 * before.
 	 */
 	renderBody?: (close: () => void) => ReactNode;
 	sections: ComposerSettingsSection[];
@@ -198,9 +201,9 @@ export function ComposerSettingsMenu({
 			} => s !== null
 		);
 
-	const closeAfter = (section: ComposerSettingsSection) => (id: string) => {
+	/** Apply a setting without dismissing — users often chain model + thinking. */
+	const selectItem = (section: ComposerSettingsSection) => (id: string) => {
 		section.onChange(id);
-		setOpen(false);
 	};
 
 	const renderRow =
@@ -213,8 +216,9 @@ export function ComposerSettingsMenu({
 						"flex-col items-start gap-0.5",
 						isActive && "bg-foreground/10"
 					)}
+					closeOnClick={false}
 					key={item.id}
-					onClick={() => closeAfter(section)(item.id)}
+					onClick={() => selectItem(section)(item.id)}
 				>
 					<span className="flex w-full items-center gap-2.5">
 						{deco && (
@@ -343,7 +347,7 @@ export function ComposerSettingsMenu({
 									</div>
 								);
 							} else if (section.renderContent) {
-								sectionBody = section.renderContent(closeAfter(section));
+								sectionBody = section.renderContent(selectItem(section));
 							} else {
 								sectionBody = section.items.map(renderRow(section));
 							}
@@ -387,11 +391,7 @@ export function ComposerSettingsMenu({
 								</DropdownMenuSub>
 							);
 						})}
-				{footer && (
-					<div className="mt-1 border-border/60 border-t px-2 pt-2 pb-1 empty:hidden">
-						{footer}
-					</div>
-				)}
+				{footer && <div className="px-2 pt-2 pb-1 empty:hidden">{footer}</div>}
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);

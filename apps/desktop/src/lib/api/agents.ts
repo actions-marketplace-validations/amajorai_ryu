@@ -136,22 +136,34 @@ export interface DitherSpec {
 	to?: string | null;
 }
 
+/** A DiceBear avatar spec (style id + seed). Mirrors Core's `DicebearSpec`. */
+export interface DicebearSpec {
+	seed?: string | null;
+	style?: string | null;
+}
+
 /** Persona fields that travel with an agent save.
  *
- * The avatar has three mutually-exclusive sources, resolved in priority order by
- * the client: an uploaded image ({@link avatar_url}), a custom {@link icon} id,
- * or a {@link dither} gradient. Saving one clears the others. */
+ * Glyph sources from the shared GlyphPicker. Dither may layer as a background
+ * under emoji or icon (never under DiceBear or an uploaded image). Saving a
+ * primary source clears incompatible fields. */
 export interface AgentPersona {
 	/** Custom avatar image for the agent, stored inline as a data URL (or a
 	 * remote URL). Null = no custom image; clients fall back to the engine logo. */
 	avatar_url?: string | null;
+	/** DiceBear generative avatar (style + seed). Null = none. */
+	dicebear?: DicebearSpec | null;
 	/** Display name the agent uses when introducing itself (optional). */
 	display_name: string | null;
 	/** Dither-gradient avatar spec (alternative avatar source). Null = none. */
 	dither?: DitherSpec | null;
+	/** Native emoji used as the avatar glyph. Null = none. */
+	emoji?: string | null;
 	/** Custom icon id (Iconify / icons0 / Hugeicons), an alternative avatar
 	 * source to an uploaded image or a dither gradient. Null = none. */
 	icon?: string | null;
+	/** Optional hex tint for {@link icon}. Null = theme `currentColor`. */
+	icon_color?: string | null;
 	/** Tone string: "neutral" | "professional" | "friendly" | "pirate" | any custom string. Null = default. */
 	tone: string | null;
 }

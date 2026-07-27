@@ -20,6 +20,7 @@ import {
 	IconChevronLeft,
 	IconChevronRight,
 	IconCopy,
+	IconGitBranch,
 	IconPencil,
 	IconRefresh,
 	IconThumbDown,
@@ -30,8 +31,11 @@ import type { ChatStatus, UIMessage } from "ai";
 import type React from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChatDisplayPrefs } from "./chat-display-prefs.tsx";
-import { ChatToc, type ChatTocItem } from "./chat-toc.tsx";
-import { CheckpointIcon } from "./checkpoint.tsx";
+import {
+	ChatToc,
+	type ChatTocFileChange,
+	type ChatTocItem,
+} from "./chat-toc.tsx";
 import { ErrorMessage } from "./error-message.tsx";
 import { usePinnedUserMessage } from "./hooks/use-pinned-user-message.ts";
 import { CitationSources } from "./inline-citation.tsx";
@@ -329,6 +333,43 @@ function getTextFromParts(parts: unknown[], joiner: string): string {
 		.join(joiner);
 }
 
+/** Collect unique file paths touched by Edit/Write/Read tool parts in a turn. */
+function getChangedFilesFromParts(parts: unknown[]): ChatTocFileChange[] {
+	const seen = new Set<string>();
+	const files: ChatTocFileChange[] = [];
+	for (const part of parts) {
+		if (!isV5ToolPart(part)) {
+			continue;
+		}
+		const toolName =
+			typeof (part as { toolName?: unknown }).toolName === "string"
+				? (part as { toolName: string }).toolName
+				: typeof part.type === "string" && part.type.startsWith("tool-")
+					? part.type.slice("tool-".length)
+					: "";
+		if (!/^(Edit|Write|Read)$/i.test(toolName)) {
+			continue;
+		}
+		const input = isRecord((part as { input?: unknown }).input)
+			? (part as { input: Record<string, unknown> }).input
+			: {};
+		const output = (part as { output?: unknown }).output;
+		const pathRaw =
+			typeof input.file_path === "string"
+				? input.file_path
+				: isRecord(output) && typeof output.path === "string"
+					? output.path
+					: null;
+		if (!pathRaw || seen.has(pathRaw)) {
+			continue;
+		}
+		seen.add(pathRaw);
+		const name = pathRaw.split(/[\\/]/).pop() ?? pathRaw;
+		files.push({ name });
+	}
+	return files;
+}
+
 function formatTimestamp(date: Date): string {
 	return dateTimeFormatter.format(date);
 }
@@ -406,7 +447,7 @@ function BranchButton({ onBranch }: { onBranch: () => void }) {
 			type="button"
 			variant="ghost"
 		>
-			<CheckpointIcon className="text-muted-foreground" />
+			<IconGitBranch className="h-3.5 w-3.5 text-muted-foreground" />
 		</Button>
 	);
 }
@@ -672,7 +713,9 @@ function MessageToolbar({
 			onMouseDown={(event) => event.stopPropagation()}
 			onPointerDown={(event) => event.stopPropagation()}
 		>
-			{timestamp && <span>{timestamp}</span>}
+			{timestamp ? (
+				<span className="inline-flex h-6 items-center">{timestamp}</span>
+			) : null}
 			{text && <CopyButton onCopied={onCopied} text={text} />}
 			{onEdit && <EditButton onEdit={onEdit} />}
 			{onRegenerate && <RegenerateButton onRegenerate={onRegenerate} />}
@@ -789,10 +832,21 @@ export const MessageList = memo(function MessageList({
 				continue;
 			}
 			const title = text.length > 80 ? `${text.slice(0, 80)}…` : text;
-			items.push({ id: turn.userMsg.id, title });
+			const assistantParts = turn.assistantMsgs.flatMap((m) => m.parts ?? []);
+			const reply = getTextFromParts(assistantParts, " ").trim();
+			const description =
+				reply.length > 160 ? `${reply.slice(0, 160)}…` : reply || undefined;
+			items.push({
+				id: turn.userMsg.id,
+				title,
+				description,
+				agentAvatar: assistantAvatar,
+				agentName: assistantName,
+				files: getChangedFilesFromParts(assistantParts),
+			});
 		}
 		return items;
-	}, [turns]);
+	}, [turns, assistantAvatar, assistantName]);
 	const showPlanning = useMemo(() => {
 		const lastMessage = normalizedMessages.at(-1);
 		if (!lastMessage) {
@@ -1038,7 +1092,7 @@ export const MessageList = memo(function MessageList({
 																<MessageToolbar
 																	alignClass="justify-start"
 																	feedbackRating={feedbackRating}
-																	heightClass="h-[48px] flex items-start w-full"
+																	heightClass="h-[28px] w-full"
 																	hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
 																	// Latest turn: pin the action buttons open so they
 																	// don't require a hover; older turns stay hover-only
@@ -1058,7 +1112,7 @@ export const MessageList = memo(function MessageList({
 																<MessageToolbar
 																	alignClass="justify-start"
 																	feedbackRating={feedbackRating}
-																	heightClass="h-[48px] flex items-start w-full"
+																	heightClass="h-[28px] w-full"
 																	hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
 																	isVisible={true}
 																	onBranch={onBranchTurn}
@@ -1132,6 +1186,9 @@ function AssistantParts({
 
 	const { elements } = useMemo(() => {
 		const elems: React.ReactNode[] = [];
+		// Extract once so text parts can render inline `[n]` chips against the
+		// same numbered list shown in the sources footer.
+		const citations = extractCitations(parts);
 		const taskPartIds = new Set(
 			parts
 				.filter(
@@ -1190,6 +1247,7 @@ function AssistantParts({
 							{...messageSelectableProps}
 						>
 							<Markdown
+								citations={citations.length > 0 ? citations : undefined}
 								className="leading-relaxed [&_p]:leading-relaxed"
 								content={text}
 							/>
@@ -1317,9 +1375,7 @@ function AssistantParts({
 		}
 
 		// Cited sources from this turn's web tools (WebFetch/WebSearch) render as
-		// a hover-pill "Sources" strip below the reply. Empty when no web tools
-		// ran, so ordinary turns are unaffected.
-		const citations = extractCitations(parts);
+		// an AICSS-style footer under the reply. Empty when no web tools ran.
 		if (citations.length > 0) {
 			elems.push(
 				<CitationSources citations={citations} key={`${msg.id}-citations`} />

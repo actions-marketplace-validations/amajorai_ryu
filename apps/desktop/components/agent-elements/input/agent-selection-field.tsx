@@ -105,7 +105,7 @@ function CustomModelRow({
 		}
 	};
 	return (
-		<div className="border-border/60 border-t p-1.5">
+		<div>
 			<span className="px-1.5 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
 				Custom model
 			</span>
@@ -141,7 +141,7 @@ function CustomModelRow({
 /** "Use the default" row — the only way back to an unset field once picked. */
 function InheritRow({ onClear }: { onClear: () => void }) {
 	return (
-		<div className="border-border/60 border-t p-1.5">
+		<div>
 			<button
 				className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-[13px] text-muted-foreground hover:bg-muted/40 hover:text-foreground"
 				onClick={onClear}

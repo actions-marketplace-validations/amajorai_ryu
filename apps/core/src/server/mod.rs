@@ -37,6 +37,7 @@ pub mod hardware_ws;
 pub mod identity_api;
 pub mod learning;
 pub mod media;
+pub mod uploads;
 /// Re-export of the extracted [`ryu_memory`] crate under the historical
 /// `server::memory` path. The long-term memory store, scope model, and recall now
 /// live in `crates/ryu-memory`; the Core-coupled default constructor lives in
@@ -2212,6 +2213,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/models/device", get(models_device))
         .route("/api/models/llmfit-estimate", get(models_llmfit_estimate))
         .route("/api/models/context-window", get(models_context_window))
+        .route("/api/models/insight", get(models_insight))
         .route("/api/models/engines", get(models_engines))
         .route("/api/models/installed", get(models_installed))
         .route("/api/models/updates", get(models_updates))
@@ -2521,6 +2523,14 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             "/api/conversations/:id/title",
             post(set_conversation_title_handler),
         )
+        .route(
+            "/api/conversations/:id/title-history",
+            get(get_conversation_title_history_handler),
+        )
+        .route(
+            "/api/conversations/:id/icon",
+            post(set_conversation_icon_handler),
+        )
         // Goal + double-check are now plugins (goal / double-check)
         // driven by the plugin turn-hook runtime; their old Core endpoints are
         // removed. See docs/plugin-runtime.md.
@@ -2652,8 +2662,8 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // ── Generative-media producers (image/video/gif) ─────────────────────
         // Gated on the (default-on) Media app in its own sub-router (see
         // `media_routes`). The shared no-cloud blob store below (`/api/media/upload` +
-        // `/api/media/:file`) stays UNGATED kernel storage — it also serves TTS audio
-        // output and chat uploads, so gating it would couple Voice/chat to Media.
+        // `/api/media/:file`) stays UNGATED kernel storage — it still serves TTS audio
+        // and legacy media URLs. User chat/editor uploads go to `/api/uploads`.
         .merge(media_routes(&state.app_store))
         .route(
             "/api/media/upload",
@@ -2661,6 +2671,14 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
                 .layer(axum::extract::DefaultBodyLimit::max(media::MAX_MEDIA_BYTES)),
         )
         .route("/api/media/:file", get(media::serve_media))
+        // User uploads → Uploads system space (ungated kernel storage, twin of
+        // `/api/media/*`). Chat / editor / `ui.uploadFile` all land here.
+        .route(
+            "/api/uploads",
+            post(uploads::upload_file)
+                .layer(axum::extract::DefaultBodyLimit::max(uploads::MAX_UPLOAD_BYTES)),
+        )
+        .route("/api/uploads/:id", get(uploads::serve_upload))
         // ── Autoresearch data path (`/api/research/*`) is served out-of-process by
         // the `ryu-research` sidecar via the manifest `public_mount` — no in-process
         // route (see `com.ryu.research`).
@@ -2940,6 +2958,7 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/spaces", get(list_spaces).post(create_space))
         .route("/api/spaces/:id", axum::routing::delete(delete_space))
+        .route("/api/spaces/:id/icon", post(set_space_icon))
         .route(
             "/api/spaces/:id/documents",
             get(list_documents).post(ingest_document),
@@ -2954,6 +2973,10 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
             get(get_document)
                 .put(update_document)
                 .delete(delete_document),
+        )
+        .route(
+            "/api/spaces/:id/documents/:doc_id/icon",
+            post(set_document_icon),
         )
         // Page version history (Prompt-Studio-style, server-backed).
         .route(
@@ -3396,8 +3419,8 @@ fn voice_routes(app_store: &PluginStore) -> Router<ServerState> {
 /// Governance-shell leaf: the `media`/`gifs` modules stay in-crate. Only the producers
 /// (image/video/gif) are gated; the shared no-cloud blob store (`/api/media/upload` +
 /// `/api/media/:file`) stays UNGATED kernel storage in the main protected chain — it
-/// also serves TTS audio output and chat uploads, so gating it here would couple
-/// Voice/chat to the Media app's enabled bit. Default-on, so the gate is transparent.
+/// still serves TTS audio and legacy media URLs. New user uploads (chat / editor /
+/// `ui.uploadFile`) go to `/api/uploads` → the Uploads system space instead.
 fn media_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/gifs/search", get(gifs::search))
@@ -4128,6 +4151,39 @@ async fn models_context_window(
 #[derive(serde::Deserialize)]
 struct ModelsContextWindowQuery {
     model: String,
+}
+
+/// `GET /api/models/insight?model=<id>&provider=<optional>` — unified hover-card
+/// metadata (cost, context, modalities, AA benchmarks, 1–5 bar scores). Cascade:
+/// models.dev → OpenRouter → Artificial Analysis. Fail-open: `{ "insight": null }`.
+#[utoipa::path(
+    get,
+    path = "/api/models/insight",
+    tag = "Models",
+    summary = "Resolve model hover-card insight (models.dev / OpenRouter / AA)",
+    params(
+        ("model" = String, Query, description = "Model id (bare or provider/id)"),
+        ("provider" = Option<String>, Query, description = "Optional provider id to disambiguate")
+    ),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn models_insight(
+    axum::extract::Query(q): axum::extract::Query<ModelsInsightQuery>,
+) -> Json<serde_json::Value> {
+    let provider = q
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let insight = crate::model_catalog::insight::insight_for(&q.model, provider).await;
+    Json(json!({ "insight": insight }))
+}
+
+#[derive(serde::Deserialize)]
+struct ModelsInsightQuery {
+    model: String,
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 /// SSE stream of preference changes. The island companion subscribes to this so
@@ -10071,6 +10127,33 @@ async fn push_gateway_policy_section(
     }
 }
 
+/// Sync the Dictation plugin's enabled state into the `dictation` preference
+/// blob so Island's preference subscription rebinds global shortcuts live when
+/// the user enables/disables the plugin. Best-effort: preference I/O failures
+/// are logged and do not fail the policy apply.
+async fn sync_dictation_pref_enabled(state: &ServerState, enabled: bool) {
+    let key = crate::dictation::DICTATION_PREF_KEY;
+    let next = match state.preferences.get(key).await {
+        Ok(Some(raw)) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(mut value) => {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+                }
+                value.to_string()
+            }
+            Err(_) => serde_json::json!({ "enabled": enabled }).to_string(),
+        },
+        Ok(None) => serde_json::json!({ "enabled": enabled }).to_string(),
+        Err(e) => {
+            tracing::warn!("dictation: could not read preference to sync enabled={enabled}: {e}");
+            return;
+        }
+    };
+    if let Err(e) = state.preferences.set(key, &next).await {
+        tracing::warn!("dictation: could not sync preference enabled={enabled}: {e}");
+    }
+}
+
 /// Apply a manifest's **policy** runtime side effects (the async work the sync
 /// [`RunnableRegistry`] Policy handler cannot do — it stays validate-only per the
 /// Core-vs-Gateway rule). Dispatches on each `Policy` runnable's `policy_type`.
@@ -10089,8 +10172,8 @@ async fn push_gateway_policy_section(
 ///   the gateway's `ConfigPatch`), so it flips the flag + runs the local proxy
 ///   side effect and a batched `gateway.refresh()` re-reads `gateway_spawn_env`.
 ///
-/// `sandbox` / `predict` are Core-local (no gateway). Unknown `policy_type` is a
-/// logged no-op. All steps are best-effort and logged.
+/// `sandbox` / `predict` / `dictation` are Core-local (no gateway). Unknown
+/// `policy_type` is a logged no-op. All steps are best-effort and logged.
 async fn apply_policy(
     state: &ServerState,
     manifest: &crate::plugin_manifest::PluginManifest,
@@ -10214,12 +10297,20 @@ async fn apply_policy(
                 crate::sidecar::mcp::sandbox::set_enabled(enabled);
             }
             "predict" => {
-                // System-wide predictive typing (the `/api/predict/*` brain used by
+                // System-wide autocomplete (the `/api/predict/*` brain used by
                 // the `apps-store/predict` overlay and any predict client) — a Core-local
                 // feature, no gateway respawn. Enabling this plugin IS the on/off
                 // switch (there is no separate settings toggle); disabling makes
                 // `complete()` refuse every request, so the feature is fully inert.
                 crate::predict::set_enabled(enabled);
+            }
+            "dictation" => {
+                // System-wide dictation + agent-ask (Island companion surface) —
+                // Core-local, no gateway respawn. Enabling this plugin IS the on/off
+                // switch; we also sync the `dictation` preference `enabled` field so
+                // Island's preference subscription rebinds shortcuts live.
+                crate::dictation::set_enabled(enabled);
+                sync_dictation_pref_enabled(state, enabled).await;
             }
             other => {
                 tracing::debug!(
@@ -13051,6 +13142,71 @@ async fn set_conversation_title_handler(
     }
     match state.conversations.set_title(&id, title).await {
         Ok(()) => Json(json!({ "ok": true, "title": title })).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `GET /api/conversations/:id/title-history` — past titles for a conversation
+/// (derived placeholder, auto-renames, and manual renames), oldest → newest.
+#[utoipa::path(
+    get,
+    path = "/api/conversations/{id}/title-history",
+    tag = "Conversations",
+    summary = "List conversation title history",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_conversation_title_history_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if let Err(resp) = require_resource_read(
+        state.conversations.get_access_meta(&id).await,
+        caller.as_ref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return resp;
+    }
+    match state.conversations.list_title_history(&id).await {
+        Ok(entries) => Json(json!({ "history": entries })).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `POST /api/conversations/:id/icon` — set or clear a conversation glyph.
+#[utoipa::path(
+    post,
+    path = "/api/conversations/{id}/icon",
+    tag = "Conversations",
+    summary = "Set or clear a conversation glyph",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn set_conversation_icon_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SetEntityIconBody>,
+) -> axum::response::Response {
+    if let Err(resp) = require_resource_write(
+        state.conversations.get_access_meta(&id).await,
+        caller.as_ref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return resp;
+    }
+    match state
+        .conversations
+        .set_icon(&id, body.icon.as_ref())
+        .await
+    {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => json_error(
+            StatusCode::NOT_FOUND,
+            format!("conversation '{id}' not found"),
+        ),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -16511,6 +16667,59 @@ async fn delete_space(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct SetEntityIconBody {
+    /// Notion-style glyph JSON from the shared GlyphPicker, or `null` to clear.
+    icon: Option<serde_json::Value>,
+}
+
+/// `POST /api/spaces/:id/icon` — set or clear a Space's glyph (no document touch).
+#[utoipa::path(
+    post,
+    path = "/api/spaces/{id}/icon",
+    tag = "Spaces",
+    summary = "Set or clear a space glyph",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn set_space_icon(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SetEntityIconBody>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.write".to_owned(),
+        );
+    }
+    if let Err(resp) = require_resource_write(
+        spaces::space_access_meta(&state.spaces, &id).await,
+        caller.as_ref(),
+        "space not found",
+    ) {
+        return resp;
+    }
+    match state
+        .spaces
+        .set_space_icon(&id, body.icon.as_ref())
+        .await
+    {
+        Ok(true) => Json(json!({ "success": true })).into_response(),
+        Ok(false) => json_error(StatusCode::NOT_FOUND, "space not found".to_owned()),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/spaces/{id}/documents",
@@ -17258,6 +17467,53 @@ async fn update_document(
             };
             json_error(status, msg)
         }
+    }
+}
+
+/// `POST /api/spaces/:id/documents/:doc_id/icon` — set/clear glyph without re-embed.
+#[utoipa::path(
+    post,
+    path = "/api/spaces/{id}/documents/{doc_id}/icon",
+    tag = "Spaces",
+    summary = "Set or clear a document glyph",
+    params(("id" = String, Path), ("doc_id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn set_document_icon(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path((_id, doc_id)): axum::extract::Path<(String, String)>,
+    Json(body): Json<SetEntityIconBody>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.write".to_owned(),
+        );
+    }
+    if let Err(resp) = require_resource_write(
+        spaces::doc_access_meta(&state.spaces, &doc_id).await,
+        caller.as_ref(),
+        "document not found",
+    ) {
+        return resp;
+    }
+    match state
+        .spaces
+        .set_document_icon(&doc_id, body.icon.as_ref())
+        .await
+    {
+        Ok(true) => Json(json!({ "success": true })).into_response(),
+        Ok(false) => json_error(StatusCode::NOT_FOUND, "document not found".to_owned()),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -24226,6 +24482,7 @@ mod gateway_policy_patch_tests {
         assert!(!policy_requires_respawn("routing"));
         assert!(!policy_requires_respawn("sandbox"));
         assert!(!policy_requires_respawn("predict"));
+        assert!(!policy_requires_respawn("dictation"));
     }
 
     /// Enabling forces `firewall.enabled = true` while PRESERVING every other field

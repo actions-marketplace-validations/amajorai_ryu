@@ -38,20 +38,20 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { SvglIcon } from "@ryu/blocks/web/svgl-icon.tsx";
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	DropdownMenuItem,
 	DropdownMenuSub,
 	DropdownMenuSubContent,
 	DropdownMenuSubTrigger,
-} from "@ryu/ui/components/dropdown-menu";
-import { Input } from "@ryu/ui/components/input";
+} from "@ryu/ui/components/dropdown-menu.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/tooltip.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useMemo, useState } from "react";
 import type {
@@ -230,6 +230,7 @@ function SettingItemRow({
 				"flex-col items-start gap-0.5",
 				isActive && "bg-foreground/10"
 			)}
+			closeOnClick={false}
 			key={item.id}
 			onClick={() => onSelect(item.id)}
 		>
@@ -261,13 +262,7 @@ function SettingItemRow({
  * searchable model list), else a flat checked list with the section's optional
  * CLI-style decoration (approval tones). Hidden when it has nothing to offer.
  */
-function SettingSub({
-	section,
-	close,
-}: {
-	close: () => void;
-	section: ComposerSettingsSection;
-}) {
+function SettingSub({ section }: { section: ComposerSettingsSection }) {
 	const loadingEmpty = Boolean(section.loading) && section.items.length === 0;
 	if (section.items.length === 0 && !section.renderContent && !loadingEmpty) {
 		return null;
@@ -275,9 +270,9 @@ function SettingSub({
 	const active =
 		section.items.find((it) => it.id === section.value) ?? section.items[0];
 	const activeDeco = active ? section.decorate?.(active) : undefined;
+	// Keep the root menu open so model → thinking → approval can be chained.
 	const onSelect = (id: string) => {
 		section.onChange(id);
-		close();
 	};
 	return (
 		<DropdownMenuSub>
@@ -348,7 +343,7 @@ function UseTargetItem({
 	onSelect: () => void;
 }) {
 	return (
-		<DropdownMenuItem className="gap-2" onClick={onSelect}>
+		<DropdownMenuItem className="gap-2" closeOnClick={false} onClick={onSelect}>
 			<HugeiconsIcon
 				className={cn(
 					"shrink-0",
@@ -384,11 +379,9 @@ function ExternalAgentSettings({
 	agents,
 	isActive,
 	onSelect,
-	close,
 }: {
 	agent: AgentSummary;
 	agents: AgentSummary[];
-	close: () => void;
 	isActive: boolean;
 	onSelect: () => void;
 }) {
@@ -423,13 +416,11 @@ function ExternalAgentSettings({
 				label={`Use ${agent.name}`}
 				onSelect={() => {
 					onSelect();
-					close();
 				}}
 			/>
-			<SettingSub close={close} section={modelAsSection} />
+			<SettingSub section={modelAsSection} />
 			{extraSections.map((section) => (
 				<SettingSub
-					close={close}
 					key={section.key}
 					section={{
 						...section,
@@ -630,15 +621,10 @@ function ProviderSubBody({
 			<UseTargetItem
 				isActive={provider.isActive}
 				label={`Use ${provider.label}`}
-				onSelect={() => {
-					onUse();
-					close();
-				}}
+				onSelect={onUse}
 			/>
-			<SettingSub close={close} section={modelSection} />
-			{thinkingLevels.length > 0 && (
-				<SettingSub close={close} section={thinkingSection} />
-			)}
+			<SettingSub section={modelSection} />
+			{thinkingLevels.length > 0 && <SettingSub section={thinkingSection} />}
 		</>
 	);
 }
@@ -775,6 +761,7 @@ function AutoTargetRow({
 					"min-w-0 flex-1 flex-col items-start gap-0.5",
 					isActive && "bg-foreground/10"
 				)}
+				closeOnClick={false}
 				onClick={onSelect}
 			>
 				<span className="flex w-full items-center gap-2">
@@ -944,10 +931,10 @@ export function UniversalPickerBody({
 						<UseTargetItem
 							isActive
 							label={`Use ${agent.name}`}
-							onSelect={close}
+							onSelect={() => onSelectAgent(agent.id)}
 						/>
 						{activeSections.map((section) => (
-							<SettingSub close={close} key={section.key} section={section} />
+							<SettingSub key={section.key} section={section} />
 						))}
 					</>
 				) : (
@@ -957,7 +944,6 @@ export function UniversalPickerBody({
 					<ExternalAgentSettings
 						agent={agent}
 						agents={agents}
-						close={close}
 						isActive={isActive}
 						onSelect={() => onSelectAgent(agent.id)}
 					/>
@@ -971,10 +957,10 @@ export function UniversalPickerBody({
 		return (
 			<DropdownMenuItem
 				className={cn("gap-2", isActive && "bg-foreground/10")}
+				closeOnClick={false}
 				key={agent.id}
 				onClick={() => {
 					onSelectAgent(agent.id);
-					close();
 				}}
 			>
 				{agent.avatarUrl ? (
@@ -1017,16 +1003,14 @@ export function UniversalPickerBody({
 				label={`Use ${ryuAgent.name}`}
 				onSelect={() => {
 					onSelectAgent(ryuAgent.id);
-					close();
 				}}
 			/>
 			{ryuActive &&
 				activeSections.map((section) => (
-					<SettingSub close={close} key={section.key} section={section} />
+					<SettingSub key={section.key} section={section} />
 				))}
 			{providers.length > 0 && (
 				<>
-					<div className="my-1 border-border/60 border-t" />
 					<SectionHeader
 						label="Providers"
 						tooltip="Routes Ryu can send your turns through. Pick a provider to use its models with your own credentials or subscription."
@@ -1040,12 +1024,14 @@ export function UniversalPickerBody({
 	return (
 		<div className="flex flex-col">
 			{showSearch && (
-				<div>
+				<div className="px-2 pb-1">
 					<Input
 						aria-label="Search agents, providers and models"
 						className="h-8 border-0 bg-transparent px-1 text-[13px] shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
 						onChange={(e) => setQuery(e.target.value)}
+						onClick={(e) => e.stopPropagation()}
 						onKeyDown={(e) => e.stopPropagation()}
+						onPointerDown={(e) => e.stopPropagation()}
 						placeholder="Search agents, providers…"
 						spellCheck={false}
 						value={query}
@@ -1053,7 +1039,7 @@ export function UniversalPickerBody({
 				</div>
 			)}
 
-			<div className="min-h-0 flex-1 p-1">
+			<div className="min-h-0 flex-1">
 				{nothingMatches && (
 					<p className="px-3 py-4 text-center text-muted-foreground text-xs">
 						No matches for &ldquo;{query.trim()}&rdquo;
@@ -1070,7 +1056,6 @@ export function UniversalPickerBody({
 						}}
 						onSelect={() => {
 							onSelectAgent(AUTO_AGENT_ID);
-							close();
 						}}
 					/>
 				)}
@@ -1150,10 +1135,10 @@ export function UniversalPickerBody({
 						{filteredTeams.map((team) => (
 							<DropdownMenuItem
 								className={cn("gap-2", team.isActive && "bg-foreground/10")}
+								closeOnClick={false}
 								key={team.id}
 								onClick={() => {
 									onSelectTeam(team.id);
-									close();
 								}}
 							>
 								<AgentLogo
@@ -1177,24 +1162,21 @@ export function UniversalPickerBody({
 
 				{/* New agent… */}
 				{onCreateAgent && !q && (
-					<>
-						<div className="my-1 border-border/60 border-t" />
-						<DropdownMenuItem
-							className="gap-2"
-							onClick={() => {
-								onCreateAgent();
-								close();
-							}}
-						>
-							<HugeiconsIcon
-								className="shrink-0 text-muted-foreground"
-								icon={Download04Icon}
-								size={16}
-								strokeWidth={2}
-							/>
-							<span className="flex-1 truncate">New agent…</span>
-						</DropdownMenuItem>
-					</>
+					<DropdownMenuItem
+						className="gap-2"
+						onClick={() => {
+							onCreateAgent();
+							close();
+						}}
+					>
+						<HugeiconsIcon
+							className="shrink-0 text-muted-foreground"
+							icon={Download04Icon}
+							size={16}
+							strokeWidth={2}
+						/>
+						<span className="flex-1 truncate">New agent…</span>
+					</DropdownMenuItem>
 				)}
 			</div>
 		</div>

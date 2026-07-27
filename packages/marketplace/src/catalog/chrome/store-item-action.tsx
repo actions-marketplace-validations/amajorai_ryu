@@ -13,6 +13,7 @@
 // `enabled={undefined}`; sections that have one (Apps, Skills) pass a boolean.
 
 import {
+	Alert02Icon,
 	CheckmarkCircle02Icon,
 	Delete01Icon,
 	MoreHorizontalIcon,
@@ -26,9 +27,12 @@ import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
+	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { useOptionalReport } from "../../report/report-provider.tsx";
+import type { ReportTarget } from "../../report/types.ts";
 
 export interface StoreItemActionProps {
 	/** Rendered instead of the lifecycle buttons on a read-only surface (web). */
@@ -45,9 +49,13 @@ export interface StoreItemActionProps {
 	onDisable?: () => void;
 	onEnable?: () => void;
 	onInstall?: () => void;
+	/** Explicit report handler; falls back to ReportProvider + reportTarget. */
+	onReport?: () => void;
 	onUninstall?: () => void;
 	/** Live install completion 0–100 (or null when the size is unknown). */
 	percent?: number | null;
+	/** Identity passed to the shared ReportProvider when onReport is omitted. */
+	reportTarget?: ReportTarget;
 }
 
 export default function StoreItemAction({
@@ -61,36 +69,101 @@ export default function StoreItemAction({
 	onUninstall,
 	onEnable,
 	onDisable,
+	onReport,
+	reportTarget,
 	affordance,
 	className,
 }: StoreItemActionProps) {
+	const reportCtx = useOptionalReport();
+	const canReport = Boolean(onReport || (reportCtx && reportTarget));
+	const handleReport = () => {
+		if (onReport) {
+			onReport();
+			return;
+		}
+		if (reportCtx && reportTarget) {
+			reportCtx.open(reportTarget);
+		}
+	};
+
 	if (affordance) {
-		return <>{affordance}</>;
+		if (!canReport) {
+			return <>{affordance}</>;
+		}
+		return (
+			<div className="flex items-center gap-0.5">
+				{affordance}
+				<ReportMenuItem
+					className={className}
+					onReport={handleReport}
+					standalone
+				/>
+			</div>
+		);
 	}
 
 	if (!installed) {
+		if (!canReport) {
+			return (
+				<InstallProgressButton
+					className={className}
+					idleVariant="ghost"
+					installing={busy}
+					onClick={onInstall}
+					percent={percent}
+				>
+					Install
+				</InstallProgressButton>
+			);
+		}
 		return (
-			<InstallProgressButton
-				className={className}
-				idleVariant="ghost"
-				installing={busy}
-				onClick={onInstall}
-				percent={percent}
-			>
-				Install
-			</InstallProgressButton>
+			<div className="flex items-center gap-0.5">
+				<InstallProgressButton
+					idleVariant="ghost"
+					installing={busy}
+					onClick={onInstall}
+					percent={percent}
+				>
+					Install
+				</InstallProgressButton>
+				{busy ? null : (
+					<ReportMenuItem
+						className={className}
+						onReport={handleReport}
+						standalone
+					/>
+				)}
+			</div>
 		);
 	}
 
 	if (locked) {
+		if (!canReport) {
+			return (
+				<Button className={className} disabled size="sm" variant="secondary">
+					<HugeiconsIcon
+						className="size-3.5 text-success"
+						icon={CheckmarkCircle02Icon}
+					/>
+					{lockedLabel}
+				</Button>
+			);
+		}
 		return (
-			<Button className={className} disabled size="sm" variant="secondary">
-				<HugeiconsIcon
-					className="size-3.5 text-success"
-					icon={CheckmarkCircle02Icon}
+			<div className="flex items-center gap-0.5">
+				<Button disabled size="sm" variant="secondary">
+					<HugeiconsIcon
+						className="size-3.5 text-success"
+						icon={CheckmarkCircle02Icon}
+					/>
+					{lockedLabel}
+				</Button>
+				<ReportMenuItem
+					className={className}
+					onReport={handleReport}
+					standalone
 				/>
-				{lockedLabel}
-			</Button>
+			</div>
 		);
 	}
 
@@ -98,7 +171,7 @@ export default function StoreItemAction({
 	// so the row stays quiet at rest and the lifecycle actions (enable/disable +
 	// uninstall) live behind one deliberate click. `enabled === undefined` means
 	// the item has no enable/disable concept (Models per-file, Agents, MCP, and
-	// Skills whose CLI can't toggle) — the menu then holds only Uninstall.
+	// Skills whose CLI can't toggle) — the menu then holds only Uninstall (+ Report).
 	const hasEnableConcept = enabled !== undefined;
 	const isEnabled = enabled === true;
 
@@ -145,12 +218,63 @@ export default function StoreItemAction({
 							Enable
 						</DropdownMenuItem>
 					))}
-				{onUninstall ? (
-					<DropdownMenuItem onClick={onUninstall} variant="destructive">
-						<HugeiconsIcon className="size-4" icon={Delete01Icon} />
-						Uninstall
+				{canReport ? (
+					<DropdownMenuItem onClick={handleReport}>
+						<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+						Report
 					</DropdownMenuItem>
 				) : null}
+				{onUninstall ? (
+					<>
+						{canReport || hasEnableConcept ? <DropdownMenuSeparator /> : null}
+						<DropdownMenuItem onClick={onUninstall} variant="destructive">
+							<HugeiconsIcon className="size-4" icon={Delete01Icon} />
+							Uninstall
+						</DropdownMenuItem>
+					</>
+				) : null}
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
+/** Compact overflow used next to Install / locked / web affordance. */
+function ReportMenuItem({
+	onReport,
+	className,
+	standalone,
+}: {
+	className?: string;
+	onReport: () => void;
+	standalone?: boolean;
+}) {
+	if (!standalone) {
+		return (
+			<DropdownMenuItem onClick={onReport}>
+				<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+				Report
+			</DropdownMenuItem>
+		);
+	}
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger
+				render={
+					<Button
+						aria-label="More actions"
+						className={className}
+						size="icon-sm"
+						variant="ghost"
+					>
+						<HugeiconsIcon className="size-4" icon={MoreHorizontalIcon} />
+					</Button>
+				}
+			/>
+			<DropdownMenuContent align="end">
+				<DropdownMenuItem onClick={onReport}>
+					<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+					Report
+				</DropdownMenuItem>
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);

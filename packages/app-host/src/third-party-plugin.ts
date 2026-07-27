@@ -382,6 +382,11 @@ export function thirdPartyPluginSrcdoc(
             h.promise.catch(function () {});
             return { dispose: h.cancel };
           },
+          registerTabIcon: function (icons) {
+            var h = callStream("shell.registerTabIcon", [{ icons: icons || [] }], function () {});
+            h.promise.catch(function () {});
+            return { dispose: h.cancel };
+          },
           subscribeEvents: function (opts) {
             opts = opts || {};
             var h = callStream("shell.eventsSubscribe", [{ channels: opts.channels || [] }], function (d) {
@@ -838,8 +843,9 @@ function htmlCompanionHeadFragment(
         start: function (a) { return call("meetings.start", [a || {}]); },
         finalize: function (a) { return call("meetings.finalize", [a || {}]); },
         remove: function (a) { return call("meetings.delete", [a || {}]); },
-        rename: function (a) { return call("meetings.rename", [a || {}]); },
-        import: function () { return call("meetings.import", []); },
+          rename: function (a) { return call("meetings.rename", [a || {}]); },
+          setIcon: function (a) { return call("meetings.setIcon", [a || {}]); },
+          import: function () { return call("meetings.import", []); },
         open: function (a) { return call("meetings.open", [a || {}]); },
         openNotes: function (a) { return call("meetings.openNotes", [a || {}]); },
         openList: function () { return call("meetings.openList", []); }
@@ -878,6 +884,11 @@ function htmlCompanionHeadFragment(
           var h = callStream("shell.registerCommand", [{ commands: commands || [] }], function (d) {
             if (opts.onInvoke) { try { opts.onInvoke(JSON.parse(d)); } catch (e) {} }
           });
+          h.promise.catch(function () {});
+          return { dispose: h.cancel };
+        },
+        registerTabIcon: function (icons) {
+          var h = callStream("shell.registerTabIcon", [{ icons: icons || [] }], function () {});
           h.promise.catch(function () {});
           return { dispose: h.cancel };
         },

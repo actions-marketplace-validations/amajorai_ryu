@@ -163,6 +163,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"shell.openTab": "shell.integrate",
 	"shell.themeSubscribe": "shell.integrate",
 	"shell.registerCommand": "shell.integrate",
+	"shell.registerTabIcon": "shell.integrate",
 	"shell.eventsSubscribe": "shell.integrate",
 };
 
@@ -201,6 +202,7 @@ const OLD_STREAMING_METHODS: readonly string[] = [
 	"finetune.stream",
 	"shell.themeSubscribe",
 	"shell.registerCommand",
+	"shell.registerTabIcon",
 	"shell.eventsSubscribe",
 ];
 

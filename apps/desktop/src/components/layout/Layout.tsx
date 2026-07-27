@@ -19,11 +19,13 @@ import {
 } from "@ryu/ui/components/tooltip.tsx";
 import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatDisplayPrefs } from "@/src/components/chat/ChatDisplayPrefsProvider.tsx";
 import { DeepLinkController } from "@/src/components/deeplink/DeepLinkController.tsx";
 import { EmptyTabsState } from "@/src/components/layout/EmptyTabsState.tsx";
+import { DesktopReportHost } from "@/src/components/marketplace/report-host.tsx";
+import { ProjectDockHost } from "@/src/components/panels/ProjectDockHost.tsx";
 import { PrivacyDisclosure } from "@/src/components/settings/privacy-disclosure.tsx";
 import { SupportAccessBanner } from "@/src/components/settings/support-access-banner.tsx";
 import { AutoUpdater } from "@/src/components/updater/AutoUpdater.tsx";
@@ -42,10 +44,14 @@ import {
 	TabsProvider,
 	useTabsContext,
 } from "@/src/contexts/TabsContext.tsx";
-import { TitleBarProvider } from "@/src/contexts/TitleBarContext.tsx";
+import {
+	TitleBarProvider,
+	useTitleBarContext,
+} from "@/src/contexts/TitleBarContext.tsx";
 import { seedBuiltinRoutes } from "@/src/contributions/builtins.ts";
 import { RouteOutlet } from "@/src/contributions/RouteOutlet.tsx";
 import { useApprovalEvents } from "@/src/hooks/useApprovalEvents.ts";
+import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
 import { useDesktopNotificationsStream } from "@/src/hooks/useDesktopNotificationsStream.ts";
 import { useDownloadsStream } from "@/src/hooks/useDownloadsStream.ts";
 import { useEditorUploader } from "@/src/hooks/useEditorUploader.ts";
@@ -55,9 +61,11 @@ import { useNotificationEvents } from "@/src/hooks/useNotificationEvents.ts";
 import {
 	usePluginContributionRoutes,
 	usePluginContributionsLiveRefresh,
+	usePluginContributionTabIcons,
 } from "@/src/hooks/usePluginContributions.ts";
 import { useQuestEvents } from "@/src/hooks/useQuestEvents.ts";
 import { useRegisterEditorAi } from "@/src/hooks/useRegisterEditorAi.ts";
+import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import {
 	DEFAULT_SIDEBAR_WIDTH,
@@ -85,7 +93,7 @@ import {
 	paneRectStyle,
 	SplitGutters,
 } from "./SplitView.tsx";
-import { TabGlyph, TitleBar } from "./TitleBar.tsx";
+import { TabGlyph, TitleBar, useTabBusy } from "./TitleBar.tsx";
 import { TabDndProvider } from "./tabDnd.tsx";
 import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
 
@@ -96,134 +104,25 @@ seedBuiltinRoutes();
 
 const isMac = navigator.userAgent.includes("Mac");
 
-// Hover-reveal header shown at the top of each split pane. Appears when the
-// pointer is near the top edge of the pane, showing the tab's icon and title.
-// Uses the same frosted pill style as the titlebar actions container.
-function PaneHeader({
-	activeSplit,
-	containerRef,
-	focused,
-	tab,
-}: {
-	activeSplit: boolean;
-	containerRef: React.RefObject<HTMLElement | null>;
-	focused: boolean;
-	tab: Tab;
-}) {
-	const headerRef = useRef<HTMLDivElement>(null);
-	const [visible, setVisible] = useState(false);
-	const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-	// biome-ignore lint/correctness/useExhaustiveDependencies: containerRef is stable
-	useEffect(() => {
-		if (!activeSplit) {
-			return;
-		}
-		const container = containerRef.current;
-		if (!container) {
-			return;
-		}
-
-		const PROXIMITY_THRESHOLD = 48;
-		const HIDE_DELAY = 300;
-
-		const onMove = (e: PointerEvent) => {
-			const pane = headerRef.current?.parentElement;
-			if (!pane) {
-				return;
-			}
-			const rect = pane.getBoundingClientRect();
-			const distFromTop = e.clientY - rect.top;
-			if (distFromTop < PROXIMITY_THRESHOLD && distFromTop >= 0) {
-				if (hideTimer.current) {
-					clearTimeout(hideTimer.current);
-					hideTimer.current = null;
-				}
-				setVisible(true);
-			} else if (visible && !hideTimer.current) {
-				hideTimer.current = setTimeout(() => {
-					setVisible(false);
-					hideTimer.current = null;
-				}, HIDE_DELAY);
-			}
-		};
-
-		const onLeave = (e: PointerEvent) => {
-			const pane = headerRef.current?.parentElement;
-			if (!pane) {
-				return;
-			}
-			const related = e.relatedTarget as HTMLElement | null;
-			if (!(related && pane.contains(related))) {
-				if (hideTimer.current) {
-					clearTimeout(hideTimer.current);
-					hideTimer.current = null;
-				}
-				setVisible(false);
-			}
-		};
-
-		container.addEventListener("pointermove", onMove);
-		container.addEventListener("pointerout", onLeave);
-		return () => {
-			container.removeEventListener("pointermove", onMove);
-			container.removeEventListener("pointerout", onLeave);
-			if (hideTimer.current) {
-				clearTimeout(hideTimer.current);
-			}
-		};
-	}, [activeSplit, containerRef, visible]);
-
-	if (!activeSplit) {
-		return null;
-	}
-
-	return (
-		<div
-			className="pointer-events-none absolute top-1.5 left-0 z-10 flex w-full justify-center"
-			ref={headerRef}
-		>
-			<div
-				className={cn(
-					"pointer-events-auto flex items-center gap-1.5 rounded-full px-2.5 py-1 shadow-lg backdrop-blur-sm transition-all duration-200",
-					focused
-						? "bg-background/80 text-foreground ring-1 ring-border/40"
-						: "bg-muted/70 text-muted-foreground ring-1 ring-border/20",
-					visible ? "translate-y-0 opacity-100" : "-translate-y-2 opacity-0"
-				)}
-			>
-				<TabGlyph
-					className={cn(
-						"size-3 shrink-0",
-						focused ? "text-foreground" : "text-muted-foreground"
-					)}
-					logoSize="12px"
-					path={tab.path}
-				/>
-				<span className="max-w-40 truncate font-medium text-xs">
-					{tab.title}
-				</span>
-			</div>
-		</div>
-	);
-}
-
-// Distance-based floating badge shown at the bottom-left of each split pane.
-// Fades to invisible as the pointer moves away so the user can reach content
-// behind it; fully opaque when the pointer is near the badge.
+// Floating chrome at the bottom-left of each split pane: a title pill (always
+// visible; fades only when the pointer is near it so content behind stays
+// reachable) plus, on the focused pane, the page actions which never fade.
 function PaneBadge({
+	actions,
 	activeSplit,
 	containerRef,
 	focused,
 	tab,
 }: {
+	actions?: ReactNode;
 	activeSplit: boolean;
 	containerRef: React.RefObject<HTMLElement | null>;
 	focused: boolean;
 	tab: Tab;
 }) {
-	const badgeRef = useRef<HTMLDivElement>(null);
-	const [opacity, setOpacity] = useState(1);
+	const pillRef = useRef<HTMLDivElement>(null);
+	const [pillOpacity, setPillOpacity] = useState(1);
+	const busy = useTabBusy(tab);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: containerRef is stable
 	useEffect(() => {
@@ -235,19 +134,23 @@ function PaneBadge({
 			return;
 		}
 
+		const FADE_RADIUS = 120;
+
 		const onMove = (e: PointerEvent) => {
-			const badge = badgeRef.current;
-			if (!badge) {
+			const pill = pillRef.current;
+			if (!pill) {
 				return;
 			}
-			const rect = badge.getBoundingClientRect();
+			const rect = pill.getBoundingClientRect();
 			const cx = rect.left + rect.width / 2;
 			const cy = rect.top + rect.height / 2;
 			const dist = Math.hypot(e.clientX - cx, e.clientY - cy);
-			setOpacity(Math.max(0, 1 - dist / 120));
+			// Far = fully opaque; near the pill = transparent so content behind is
+			// clickable. Actions sit beside the pill and are not part of this fade.
+			setPillOpacity(Math.min(1, dist / FADE_RADIUS));
 		};
 
-		const onLeave = () => setOpacity(1);
+		const onLeave = () => setPillOpacity(1);
 
 		container.addEventListener("pointermove", onMove);
 		container.addEventListener("pointerleave", onLeave);
@@ -262,25 +165,45 @@ function PaneBadge({
 	}
 
 	return (
-		<div
-			className={cn(
-				"pointer-events-none absolute bottom-2 left-2 z-10 flex items-center gap-1.5 rounded-full px-2.5 py-1 backdrop-blur-sm transition-opacity duration-300",
-				focused
-					? "bg-primary text-primary-foreground"
-					: "bg-muted/70 text-muted-foreground ring-1 ring-border/20"
-			)}
-			ref={badgeRef}
-			style={{ opacity }}
-		>
-			<TabGlyph
+		<div className="pointer-events-none absolute bottom-2 left-2 z-10 flex items-center gap-1.5">
+			<div
 				className={cn(
-					"size-3 shrink-0",
-					focused ? "text-primary-foreground" : "text-muted-foreground"
+					"flex items-center gap-1.5 rounded-full px-2.5 py-1 backdrop-blur-sm transition-opacity duration-300",
+					focused
+						? "bg-primary text-primary-foreground"
+						: "bg-muted/70 text-muted-foreground ring-1 ring-border/20"
 				)}
-				logoSize="12px"
-				path={tab.path}
-			/>
-			<span className="max-w-32 truncate font-medium text-xs">{tab.title}</span>
+				ref={pillRef}
+				style={{ opacity: pillOpacity }}
+			>
+				<TabGlyph
+					busy={busy}
+					className={cn(
+						"size-3 shrink-0",
+						focused ? "text-primary-foreground" : "text-muted-foreground"
+					)}
+					logoSize="12px"
+					path={tab.path}
+					unloaded={tab.unloaded}
+				/>
+				{busy && !tab.unloaded ? (
+					<span className="an-text-shimmer an-text-shimmer--active max-w-32 truncate font-medium text-xs [animation-duration:2s]">
+						{tab.title}
+					</span>
+				) : (
+					<span className="max-w-32 truncate font-medium text-xs">
+						{tab.title}
+					</span>
+				)}
+			</div>
+			{focused && actions ? (
+				<div
+					className="pointer-events-auto flex shrink-0 flex-row items-center gap-1 rounded-2xl bg-background/80 px-1 shadow-lg ring-1 ring-border/40 backdrop-blur-sm"
+					data-tauri-drag-region={false}
+				>
+					{actions}
+				</div>
+			) : null}
 		</div>
 	);
 }
@@ -343,6 +266,7 @@ function LayoutContent({
 	// because LayoutContent is always mounted; a disabled plugin's route then
 	// resolves to null (blank) — the "route disappears" behavior of #446.
 	usePluginContributionRoutes();
+	usePluginContributionTabIcons();
 
 	// Live refresh for the contributions cache: Core broadcasts on the
 	// `system:plugins` realtime room after every plugin enable/disable/grants
@@ -365,6 +289,15 @@ function LayoutContent({
 	// Reserve room on the right when the "Ask Ryu" assistant is docked as a
 	// sidebar, so the page content slides in beside it rather than under it.
 	const assistantMode = useAssistantStore((s) => s.mode);
+	const [sidebarVariant] = useSidebarVariant();
+	// Floating dock is inset 8px from the right edge (380 + 8); inset mode is a
+	// flush rail so only the panel width is reserved.
+	const assistantDockReserve =
+		assistantMode === "sidebar" && !isMobile
+			? sidebarVariant === "floating"
+				? 388
+				: 380
+			: undefined;
 	const {
 		tabs,
 		splits,
@@ -377,7 +310,12 @@ function LayoutContent({
 		canGoBack,
 		canGoForward,
 	} = useTabsContext();
+	const { actions: titleBarActions } = useTitleBarContext();
 	const tabLayout = useTabLayout();
+	const [autoHideTitleBar] = useAutoHideTitleBar();
+	// Auto-hide frees the top clearance so content fills the window; the bar
+	// overlays on hover. Mobile never auto-hides (see TitleBar).
+	const titleBarClearsContent = !(autoHideTitleBar && !isMobile);
 	const [floatOpen, setFloatOpen] = useState(false);
 	const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// The positioned content area; SplitGutters measures it to translate drag
@@ -719,15 +657,23 @@ function LayoutContent({
 			)}
 
 			<SidebarInset
-				className="relative flex flex-col overflow-hidden transition-[padding] duration-300 ease-out"
+				className={cn(
+					"relative flex flex-col overflow-hidden transition-[padding] duration-300 ease-out",
+					// Inset mode normally keeps mr-2 so the canvas clears the window
+					// edge; when the Ask Ryu rail is docked it plays the same role as
+					// the left sidebar (ml-0), so drop the right margin and let the
+					// canvas abut the flush rail.
+					assistantMode === "sidebar" &&
+						sidebarVariant === "inset" &&
+						!isMobile &&
+						"md:mr-0"
+				)}
 				style={{
-					// Reserves room for the docked assistant's inset floating card
-					// (380px wide + 8px right inset) so page content sits beside it
-					// rather than under it. On a phone the card goes full-width instead
-					// of docking, so reserving 388px would leave the page with negative
-					// room — skip the reservation entirely there.
-					paddingRight:
-						assistantMode === "sidebar" && !isMobile ? 388 : undefined,
+					// Reserves room for the docked assistant so page content sits
+					// beside it rather than under it. Floating chrome is 380px + 8px
+					// right inset; inset chrome is a flush 380px rail. On a phone the
+					// panel goes full-width instead of docking, so skip the reservation.
+					paddingRight: assistantDockReserve,
 				}}
 			>
 				{/* Tab panels fill the entire inset and scroll UNDER the frosted
@@ -768,6 +714,7 @@ function LayoutContent({
 							// height so its header sits cleanly below the solid tab bar.
 							const scrollsUnderTitlebar = pathScrollsUnderTitlebar(tab.path);
 							const needsClearance =
+								titleBarClearsContent &&
 								!scrollsUnderTitlebar &&
 								(paneRect ? paneNeedsTopClearance(paneRect) : true);
 							return (
@@ -780,14 +727,7 @@ function LayoutContent({
 											<div
 												className={cn(
 													"flex flex-col overflow-hidden",
-													needsClearance && "pt-12",
-													// Card background + rounded corners for split panes
-													activeSplit && visible && "rounded-lg bg-card",
-													// Subtle border for non-active split panes
-													activeSplit &&
-														visible &&
-														!focused &&
-														"ring-1 ring-border/20"
+													needsClearance && "pt-12"
 												)}
 												// Clicking anywhere in a non-focused pane focuses it
 												// (no nav-history entry) before the inner UI reacts.
@@ -798,17 +738,12 @@ function LayoutContent({
 												}
 												style={style}
 											>
-												<PaneHeader
-													activeSplit={!!activeSplit && visible}
-													containerRef={contentRef}
-													focused={focused}
-													tab={tab}
-												/>
 												<RouteOutlet
 													onClose={() => closeTab(tab.id)}
 													tab={tab}
 												/>
 												<PaneBadge
+													actions={focused ? titleBarActions : undefined}
 													activeSplit={!!activeSplit && visible}
 													containerRef={contentRef}
 													focused={focused}
@@ -833,8 +768,14 @@ function LayoutContent({
 				<TitleBar />
 
 				{/* Status banners float just below the titlebar so they never push the
-				    content down or break the under-the-bar scroll. */}
-				<div className="pointer-events-none absolute top-12 right-0 left-0 z-20 [&>*]:pointer-events-auto">
+				    content down or break the under-the-bar scroll. When the titlebar
+				    auto-hides, sit them at the top edge instead. */}
+				<div
+					className={cn(
+						"pointer-events-none absolute right-0 left-0 z-20 [&>*]:pointer-events-auto",
+						titleBarClearsContent ? "top-12" : "top-0"
+					)}
+				>
 					<AutoUpdater />
 				</div>
 			</SidebarInset>
@@ -926,10 +867,14 @@ export default function Layout() {
 											registry={DESKTOP_HOTKEYS}
 											storage={coreKvHotkeyStorage}
 										>
-											<LayoutContent
-												onSidebarWidthChange={handleSidebarWidthChange}
-												sidebarWidth={sidebarWidth}
-											/>
+											<DesktopReportHost>
+												<ProjectDockHost>
+													<LayoutContent
+														onSidebarWidthChange={handleSidebarWidthChange}
+														sidebarWidth={sidebarWidth}
+													/>
+												</ProjectDockHost>
+											</DesktopReportHost>
 										</HotkeysProvider>
 									</SystemStatusProvider>
 								</SpacesProvider>

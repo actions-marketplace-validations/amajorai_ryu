@@ -990,6 +990,10 @@ export const IPC = {
 		set: "agents:set",
 		changed: "agents:changed",
 	},
+	keybindings: {
+		get: "keybindings:get",
+		changed: "keybindings:changed",
+	},
 	tts: {
 		get: "tts:get",
 		changed: "tts:changed",
@@ -1137,8 +1141,9 @@ export interface VoiceTarget {
  * System-wide dictation methods exposed to the renderer (`window.island.dictation`).
  * Distinct from {@link IslandVoiceApi}: dictation types the transcript into the
  * focused native app rather than into the island chat, on its own global shortcut.
- * The renderer only captures audio; `submit` hands the WAV to the main process,
- * which transcribes, optionally post-processes, and inserts.
+ * Agent-ask uses the same capture path with `task: "ask"` so the main process runs
+ * an agent and pastes the answer. The renderer only captures audio; `submit` hands
+ * the WAV to the main process.
  */
 export interface IslandDictationApi {
 	/** Read the current dictation blob (raw JSON), or `null` if unset. */
@@ -1146,21 +1151,25 @@ export interface IslandDictationApi {
 	/** Subscribe to live dictation setting changes (raw JSON). Returns unsubscribe. */
 	onChanged(listener: (value: string) => void): () => void;
 	/** Subscribe to a push-to-talk *start* signal (hold-to-talk key-down). */
-	onStart(listener: () => void): () => void;
+	onStart(listener: (task: "transcribe" | "ask") => void): () => void;
 	/** Subscribe to a push-to-talk *stop* signal (hold-to-talk key release). */
 	onStop(listener: () => void): () => void;
 	/** Subscribe to dictation shortcut presses (toggle mode). Returns unsubscribe. */
-	onToggle(listener: () => void): () => void;
+	onToggle(listener: (task: "transcribe" | "ask") => void): () => void;
 	/**
 	 * Report whether capture is active so the main process arms its global key hook
-	 * (hold-to-talk release) only while recording. Fire-and-forget.
+	 * (hold-to-talk release) only while recording. Pass `task` so agent-ask uses its
+	 * own hold channel. Fire-and-forget.
 	 */
-	setRecording(active: boolean): void;
+	setRecording(active: boolean, task?: "transcribe" | "ask"): void;
 	/**
-	 * Hand captured 16 kHz mono WAV to the main process for transcription,
-	 * optional post-processing, and insertion into the focused app. Never rejects.
+	 * Hand captured 16 kHz mono WAV to the main process for transcription /
+	 * agent-ask and insertion into the focused app. Never rejects.
 	 */
-	submit(audio: ArrayBuffer): Promise<DictationSubmitResult>;
+	submit(
+		audio: ArrayBuffer,
+		task?: "transcribe" | "ask"
+	): Promise<DictationSubmitResult>;
 }
 
 /**
@@ -1180,6 +1189,18 @@ export interface IslandAgentsApi {
 	 * default. Never rejects.
 	 */
 	set(raw: string): Promise<void>;
+}
+
+/**
+ * Shared keyboard-shortcut overrides (`window.island.keybindings`). Raw JSON of
+ * the desktop `keybindings` preference map; the renderer resolves composer
+ * defaults via `@ryu/blocks/composer/composer-shortcuts`.
+ */
+export interface IslandKeybindingsApi {
+	/** Read the current overrides blob (raw JSON), or `null` if unset. */
+	get(): Promise<string | null>;
+	/** Subscribe to live keybinding changes (raw JSON). Returns an unsubscribe. */
+	onChanged(listener: (value: string) => void): () => void;
 }
 
 /**
@@ -1353,6 +1374,7 @@ export interface IslandApi {
 	consent: IslandConsentApi;
 	core: IslandCoreApi;
 	dictation: IslandDictationApi;
+	keybindings: IslandKeybindingsApi;
 	meetings: IslandMeetingsApi;
 	plugins: IslandPluginsApi;
 	quests: IslandQuestsApi;

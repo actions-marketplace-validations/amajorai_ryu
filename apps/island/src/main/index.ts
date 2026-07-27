@@ -16,6 +16,7 @@ import {
 } from "../shared/consent.ts";
 import {
 	DICTATION_PREF_KEY,
+	type DictationTask,
 	parseDictationPrefs,
 } from "../shared/dictation.ts";
 import { parseEdgeOffset } from "../shared/edge-offset.ts";
@@ -115,6 +116,10 @@ let lastVoiceRaw: string | null = null;
 // Dictation is system-wide dictation (types into the focused app), distinct from
 // push-to-talk voice input, and gets its own rebindable shortcut.
 let dictationShortcut: string | null = null;
+
+// The currently-registered agent-ask accelerator (null when disabled/unset).
+// Agent-ask shares the dictation capture pipeline but pastes an agent answer.
+let dictationAskShortcut: string | null = null;
 
 // The latest raw dictation preference blob, kept so a command- or voice-shortcut
 // change can re-reconcile dictation (which defers to both) without a fresh read.
@@ -250,18 +255,127 @@ function sendCycleAgent(direction: 1 | -1): void {
 }
 
 /** Tell the renderer the dictation toggle-mode shortcut fired (start OR stop). */
-function sendDictationToggle(): void {
-	sendVoiceSignal(IPC.dictation.toggle);
+function sendDictationToggle(task: DictationTask = "transcribe"): void {
+	if (islandWindow && !islandWindow.isDestroyed()) {
+		islandWindow.webContents.send(IPC.dictation.toggle, task);
+	}
 }
 
 /** Tell the renderer to start dictation capture (push-to-talk key held down). */
-function sendDictationStart(): void {
-	sendVoiceSignal(IPC.dictation.start);
+function sendDictationStart(task: DictationTask = "transcribe"): void {
+	if (islandWindow && !islandWindow.isDestroyed()) {
+		islandWindow.webContents.send(IPC.dictation.start, task);
+	}
 }
 
 /** Tell the renderer to stop dictation capture (push-to-talk key released). */
 function sendDictationStop(): void {
 	sendVoiceSignal(IPC.dictation.stop);
+}
+
+/**
+ * Register one dictation-family shortcut (plain dictation or agent-ask). Returns
+ * the registered accelerator on success, otherwise `null`.
+ */
+function registerDictationShortcut(
+	shortcut: string,
+	task: DictationTask,
+	holdChannel: string,
+	mode: "toggle" | "push-to-talk",
+	occupied: Set<string>
+): string | null {
+	if (occupied.has(shortcut)) {
+		configureHold(holdChannel, {
+			pttMode: false,
+			keycode: null,
+			onRelease: sendDictationStop,
+		});
+		return null;
+	}
+	const primaryKeycode = acceleratorPrimaryKeycode(shortcut);
+	const holdToTalk = mode === "push-to-talk" && primaryKeycode !== null;
+	configureHold(holdChannel, {
+		pttMode: holdToTalk,
+		keycode: primaryKeycode,
+		onRelease: sendDictationStop,
+	});
+	try {
+		const ok = globalShortcut.register(shortcut, () => {
+			// Deliberately no showWindow()/focus: dictation types into the currently
+			// focused native app, so stealing focus here would break insertion.
+			if (holdToTalk && isHoldArmed(holdChannel)) {
+				noteHoldPressed(holdChannel);
+				sendDictationStart(task);
+			} else {
+				sendDictationToggle(task);
+			}
+		});
+		return ok ? shortcut : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * (Re)register system-wide dictation + agent-ask global shortcuts from the
+ * `dictation` preference. Unregisters previous accelerators first, skips when
+ * the Dictation plugin (prefs.enabled) is off, and refuses to clobber the
+ * command-summon or push-to-talk shortcuts.
+ */
+function applyDictationPrefs(raw: string | null): void {
+	if (dictationShortcut) {
+		globalShortcut.unregister(dictationShortcut);
+		dictationShortcut = null;
+	}
+	if (dictationAskShortcut) {
+		globalShortcut.unregister(dictationAskShortcut);
+		dictationAskShortcut = null;
+	}
+	const prefs = parseDictationPrefs(raw);
+	const occupied = new Set(
+		[commandShortcut, voiceShortcut].filter((s): s is string => Boolean(s))
+	);
+
+	if (!prefs.enabled) {
+		configureHold("dictation", {
+			pttMode: false,
+			keycode: null,
+			onRelease: sendDictationStop,
+		});
+		configureHold("dictation-ask", {
+			pttMode: false,
+			keycode: null,
+			onRelease: sendDictationStop,
+		});
+		return;
+	}
+
+	dictationShortcut = registerDictationShortcut(
+		prefs.shortcut,
+		"transcribe",
+		"dictation",
+		prefs.mode,
+		occupied
+	);
+	if (dictationShortcut) {
+		occupied.add(dictationShortcut);
+	}
+
+	if (prefs.ask.enabled) {
+		dictationAskShortcut = registerDictationShortcut(
+			prefs.ask.shortcut,
+			"ask",
+			"dictation-ask",
+			prefs.ask.mode,
+			occupied
+		);
+	} else {
+		configureHold("dictation-ask", {
+			pttMode: false,
+			keycode: null,
+			onRelease: sendDictationStop,
+		});
+	}
 }
 
 /**
@@ -320,55 +434,6 @@ function applyVoicePrefs(raw: string | null): void {
 }
 
 /**
- * (Re)register the system-wide dictation global shortcut from the `dictation`
- * preference. Unregisters the previous accelerator first, skips when disabled, and
- * refuses to clobber either the command-summon or the push-to-talk shortcut
- * (dictation defers to both). Pressing it does NOT show/focus the island — the
- * target app must keep OS focus so the transcript types into it — it only signals
- * the renderer to capture; the renderer then submits the audio for transcription
- * and insertion into whatever app is focused.
- */
-function applyDictationPrefs(raw: string | null): void {
-	if (dictationShortcut) {
-		globalShortcut.unregister(dictationShortcut);
-		dictationShortcut = null;
-	}
-	const prefs = parseDictationPrefs(raw);
-	const canRegister =
-		prefs.enabled &&
-		prefs.shortcut !== commandShortcut &&
-		prefs.shortcut !== voiceShortcut;
-	const primaryKeycode = acceleratorPrimaryKeycode(prefs.shortcut);
-	const holdToTalk =
-		canRegister && prefs.mode === "push-to-talk" && primaryKeycode !== null;
-	configureHold("dictation", {
-		pttMode: holdToTalk,
-		keycode: primaryKeycode,
-		onRelease: sendDictationStop,
-	});
-	if (!canRegister) {
-		return;
-	}
-	try {
-		const ok = globalShortcut.register(prefs.shortcut, () => {
-			// Deliberately no showWindow()/focus: dictation types into the currently
-			// focused native app, so stealing focus here would break insertion.
-			if (holdToTalk && isHoldArmed("dictation")) {
-				noteHoldPressed("dictation");
-				sendDictationStart();
-			} else {
-				sendDictationToggle();
-			}
-		});
-		if (ok) {
-			dictationShortcut = prefs.shortcut;
-		}
-	} catch {
-		// Invalid accelerator string: leave dictation unbound until corrected.
-	}
-}
-
-/**
  * (Re)register the command-summon global shortcut from the `island-command-shortcut`
  * preference. Unregisters the previous accelerator first, frees the slot if the
  * push-to-talk shortcut currently holds it (the command summon always wins the
@@ -391,6 +456,10 @@ function applyCommandShortcut(raw: string | null): void {
 	if (dictationShortcut === next) {
 		globalShortcut.unregister(dictationShortcut);
 		dictationShortcut = null;
+	}
+	if (dictationAskShortcut === next) {
+		globalShortcut.unregister(dictationAskShortcut);
+		dictationAskShortcut = null;
 	}
 	try {
 		if (globalShortcut.register(next, () => summonCommand())) {
@@ -512,11 +581,15 @@ async function bootstrap(): Promise<void> {
 		setRecording("voice", active === true);
 	});
 
-	// Same for dictation capture, so the shared key hook arms for its hold-to-talk
-	// release only while dictation is recording.
-	ipcMain.on(IPC.dictation.recordingState, (_event, active: boolean) => {
-		setRecording("dictation", active === true);
-	});
+	// Same for dictation / agent-ask capture, so the shared key hook arms for the
+	// matching hold-to-talk release only while that mode is recording.
+	ipcMain.on(
+		IPC.dictation.recordingState,
+		(_event, active: boolean, task?: string) => {
+			const channel = task === "ask" ? "dictation-ask" : "dictation";
+			setRecording(channel, active === true);
+		}
+	);
 
 	// Two-way consent sync with Core's `island-consent` preference so the desktop
 	// app can edit the privacy toggles (the island's own Settings tab was removed).

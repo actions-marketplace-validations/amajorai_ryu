@@ -129,15 +129,22 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // firewall/routing/sandbox: enabling the plugin is the single switch for the
     // /api/predict/* brain — there is no separate config toggle.
     include_str!("fixtures/predict.manifest.json"),
+    // System-wide dictation + agent-ask (Policy-gated, Core-local). Default-on:
+    // Island hosts the OS surface; enabling the plugin is the single switch.
+    // Formerly hardcoded into Island — extracted as an apps-store app so settings
+    // register via contributes.settings_tabs like predict.
+    include_str!("fixtures/dictation.manifest.json"),
     // Turn-hook plugins (the migrated, formerly-hardcoded features). These ship
     // as built-in fixtures but are built exactly like a third-party plugin would
     // be: a manifest + an inline JS hook reaching Core only through the
-    // capability-gated plugin host. `goal`/`proof`/`double-check` are Core-tier
-    // and default-on (see `plugins::builtins::CORE_DEFAULT_ON`) so their features
-    // work on every surface with zero setup, gated cheaply by each hook's `match`
-    // block; `advisor` stays Community (install-then-enable).
+    // capability-gated plugin host. `goal`/`proof`/`double-check`/`chat-title`
+    // are Core-tier and default-on (see `plugins::builtins::CORE_DEFAULT_ON`) so
+    // their features work on every surface with zero setup, gated cheaply by each
+    // hook's `match` block (or preference read for chat-title); `advisor` stays
+    // Community (install-then-enable).
     include_str!("fixtures/double-check.manifest.json"),
     include_str!("fixtures/goal.manifest.json"),
+    include_str!("fixtures/chat-title.manifest.json"),
     include_str!("fixtures/advisor.manifest.json"),
     // `proof` is `goal`'s stronger sibling: instead of a one-line transcript
     // judge, each round spawns an INDEPENDENT verifier sub-agent (grant
@@ -861,6 +868,7 @@ mod tests {
             ("dashboards", "dashboards.manifest.json"),
             ("healing", "healing.manifest.json"),
             ("predict", "predict.manifest.json"),
+            ("dictation", "dictation.manifest.json"),
             ("recipes", "recipes.manifest.json"),
             ("research", "research.manifest.json"),
             ("teams", "teams.manifest.json"),

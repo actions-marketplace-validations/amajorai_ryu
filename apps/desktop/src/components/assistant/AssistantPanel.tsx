@@ -36,6 +36,10 @@ import {
 	type BuilderBodyFields,
 	useBuilderRuntime,
 } from "@/src/hooks/useBuilderRuntime.ts";
+import {
+	sidebarFloatingChrome,
+	useSidebarVariant,
+} from "@/src/hooks/useSidebarVariant.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
 import { respondPermission } from "@/src/lib/api/acp.ts";
 import { chatHeaders, chatStreamUrl } from "@/src/lib/api/chat.ts";
@@ -494,15 +498,14 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	);
 
 	// The full chat composer — the SAME one the main chat page renders (Agent ·
-	// Model · Thinking menu + STT voice + voice mode + image attachments + the
-	// single-row compact layout once a thread has history) — built once by the
-	// shared `useComposerSlot`. Both runtimes get a composer (no conditional hooks);
-	// the active one is picked. The builder pane relabels its placeholder. Compact
-	// flips on as soon as the thread has messages, matching ChatPage.
-	const hasMessages = messages.length > 0;
+	// Model · Thinking menu + STT voice + voice mode + image attachments) — built
+	// once by the shared `useComposerSlot`. Both runtimes get a composer (no
+	// conditional hooks); the active one is picked. The builder pane relabels its
+	// placeholder. The narrow floating/docked panel keeps the roomy stacked
+	// textarea and only compactifies the agent-picker trigger.
 	const genericComposer = useComposerSlot(genericRuntime, {
 		target: chatTarget,
-		compact: hasMessages,
+		compactTrigger: true,
 		conversationId: convId,
 		// Image-gen only on the chat composer — the builder pane describes what to
 		// build, where a free-form "generate image" prompt has no place.
@@ -510,7 +513,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	});
 	const builderComposer = useComposerSlot(builderRuntime, {
 		target: chatTarget,
-		compact: hasMessages,
+		compactTrigger: true,
 		placeholder: BUILDER_PLACEHOLDER,
 		conversationId: activeConvId,
 	});
@@ -706,6 +709,11 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 		close();
 	}, [convId, openTab, setConversationId, close]);
 
+	// Docked shell chrome tracks the app sidebar variant (must run before any
+	// early return — bare/closed paths still need a stable hook order).
+	const [sidebarVariant] = useSidebarVariant();
+	const floatingChrome = sidebarVariant === "floating";
+
 	if (mode === "closed") {
 		return null;
 	}
@@ -861,16 +869,21 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 		return <div className={cn(ASSISTANT_SURFACE_CONTENT)}>{body}</div>;
 	}
 
-	// Docked sidebar: an inset, floating rounded card wearing the same treatment
-	// as the chat page's right panel (rounded-xl + shadow + ring, inset from the
-	// edges), rather than a flush full-height rail. Below `md` a 380px rail
-	// would be wider than the page it is supposed to sit beside, so the card
-	// spans the viewport instead — Layout drops its 388px reservation at the
-	// same breakpoint, so nothing is left holding empty space.
+	// Docked sidebar: mirrors the left rail + workspace right dock. Floating
+	// variant = inset rounded card (`rounded-3xl` tracks Appearance roundness);
+	// inset variant = flush rail (the main SidebarInset already wears the card).
+	// Below `md` a 380px rail would be wider than the page it sits beside, so the
+	// panel spans the viewport instead — Layout drops its width reservation at
+	// the same breakpoint.
 	return (
 		<aside
 			aria-label={builder ? "Ryu builder" : "Ask Ryu assistant"}
-			className="fixed top-12 right-2 bottom-2 left-2 z-[55] flex flex-col overflow-hidden rounded-xl bg-sidebar text-sidebar-foreground shadow-2xl ring-1 ring-border/40 md:left-auto md:w-[380px]"
+			className={cn(
+				"fixed z-[55] flex flex-col overflow-hidden bg-sidebar text-sidebar-foreground md:left-auto md:w-[380px]",
+				floatingChrome
+					? cn("top-12 right-2 bottom-2 left-2", sidebarFloatingChrome)
+					: "inset-y-0 right-0 left-0 md:left-auto"
+			)}
 		>
 			{body}
 		</aside>

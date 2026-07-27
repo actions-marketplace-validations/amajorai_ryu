@@ -14,6 +14,8 @@ export interface Space {
 	createdAt: number;
 	description: string | null;
 	documentCount: number;
+	/** Notion-style glyph JSON (GlyphValue), when set. */
+	icon: unknown | null;
 	id: string;
 	name: string;
 	/** Unix milliseconds. */
@@ -25,6 +27,8 @@ export interface SpaceDocument {
 	chunkCount: number;
 	/** Unix milliseconds. */
 	createdAt: number;
+	/** Notion-style glyph JSON (GlyphValue), when set. */
+	icon: unknown | null;
 	id: string;
 	spaceId: string;
 	title: string;
@@ -43,6 +47,7 @@ interface SpaceWire {
 	created_at: number;
 	description?: string | null;
 	document_count: number;
+	icon?: unknown | null;
 	id: string;
 	name: string;
 	updated_at: number;
@@ -51,6 +56,7 @@ interface SpaceWire {
 interface DocumentWire {
 	chunk_count: number;
 	created_at: number;
+	icon?: unknown | null;
 	id: string;
 	space_id: string;
 	title: string;
@@ -71,6 +77,7 @@ function toSpace(s: SpaceWire): Space {
 		createdAt: s.created_at,
 		updatedAt: s.updated_at,
 		documentCount: s.document_count,
+		icon: s.icon ?? null,
 	};
 }
 
@@ -81,6 +88,7 @@ function toDocument(d: DocumentWire): SpaceDocument {
 		title: d.title,
 		createdAt: d.created_at,
 		chunkCount: d.chunk_count,
+		icon: d.icon ?? null,
 	};
 }
 
@@ -127,6 +135,31 @@ export async function deleteSpace(
 	return json?.removed ?? false;
 }
 
+/** Set or clear a Space glyph (`POST /api/spaces/:id/icon`). */
+export async function setSpaceIcon(
+	target: ApiTarget,
+	id: string,
+	icon: unknown | null
+): Promise<void> {
+	await request(target, `/api/spaces/${id}/icon`, {
+		method: "POST",
+		body: { icon },
+	});
+}
+
+/** Set or clear a document glyph without re-embedding. */
+export async function setDocumentIcon(
+	target: ApiTarget,
+	spaceId: string,
+	documentId: string,
+	icon: unknown | null
+): Promise<void> {
+	await request(target, `/api/spaces/${spaceId}/documents/${documentId}/icon`, {
+		method: "POST",
+		body: { icon },
+	});
+}
+
 /** List the documents in a Space. */
 export async function fetchDocuments(
 	target: ApiTarget,
@@ -162,6 +195,8 @@ export interface SpaceDocumentContent {
 	chunkCount: number;
 	/** Unix milliseconds. */
 	createdAt: number;
+	/** Notion-style glyph JSON (GlyphValue), when set. */
+	icon: unknown | null;
 	id: string;
 	/** Canonical markdown source of the page. */
 	source: string;
@@ -174,6 +209,7 @@ export interface SpaceDocumentContent {
 interface DocumentContentWire {
 	chunk_count: number;
 	created_at: number;
+	icon?: unknown | null;
 	id: string;
 	source: string;
 	space_id: string;
@@ -190,6 +226,7 @@ function toDocumentContent(d: DocumentContentWire): SpaceDocumentContent {
 		createdAt: d.created_at,
 		updatedAt: d.updated_at,
 		chunkCount: d.chunk_count,
+		icon: d.icon ?? null,
 	};
 }
 

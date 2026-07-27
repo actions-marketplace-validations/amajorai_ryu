@@ -38,6 +38,8 @@ interface UseVoiceRecorderOptions {
 
 interface UseVoiceRecorder {
 	cancel: () => void;
+	/** Clear a sticky error without tearing down capture (info-bar dismiss). */
+	clearError: () => void;
 	error: string | null;
 	/** Amplitude history (0..1), oldest-to-newest, updated live while recording. */
 	levels: number[];
@@ -287,6 +289,10 @@ export function useVoiceRecorder({
 		setError(null);
 	}, [teardown]);
 
+	const clearError = useCallback(() => {
+		setError(null);
+	}, []);
+
 	// Release the mic if the component unmounts mid-recording.
 	useEffect(() => {
 		return () => {
@@ -294,5 +300,5 @@ export function useVoiceRecorder({
 		};
 	}, [teardown]);
 
-	return { state, levels, error, start, stop, cancel };
+	return { state, levels, error, clearError, start, stop, cancel };
 }

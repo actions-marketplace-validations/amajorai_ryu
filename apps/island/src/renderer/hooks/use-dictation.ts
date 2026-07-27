@@ -1,10 +1,11 @@
-// System-wide dictation capture for the island companion.
+// System-wide dictation + agent-ask capture for the island companion.
 //
 // Distinct from `use-voice-input.ts`: that hook drops the transcript into the
-// island chat to run an agent. This one captures on a SEPARATE global shortcut and
-// hands the WAV to the main process, which transcribes, optionally post-processes,
-// and types/pastes the text into whatever native app currently has OS focus. It
-// therefore never opens chat and never steals focus.
+// island chat to run an agent. This one captures on SEPARATE global shortcuts and
+// hands the WAV to the main process, which either:
+//   - transcribe: types/pastes the transcript into the focused app, or
+//   - ask: runs an agent on the spoken question and pastes the answer.
+// It therefore never opens chat and never steals focus.
 //
 // Capture mirrors the voice hook: raw Float32 PCM via the Web Audio graph (not
 // MediaRecorder), downsampled to 16 kHz mono and encoded as WAV — the format
@@ -14,6 +15,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import {
 	DEFAULT_DICTATION_PREFS,
+	type DictationTask,
 	parseDictationPrefs,
 } from "../../shared/dictation.ts";
 import { downsample, encodeWav, TARGET_SAMPLE_RATE } from "../lib/wav.ts";
@@ -26,10 +28,10 @@ const ENGINE_SIDECARS: Record<string, string> = {
 };
 
 /**
- * Wire the dictation shortcut to mic capture + insertion. The renderer only
- * captures; the main process runs transcription and inserts the text into the
- * focused app. Returns nothing — dictation has no in-island UI beyond a brief
- * recording indicator on the pill.
+ * Wire the dictation / agent-ask shortcuts to mic capture + insertion. The
+ * renderer only captures; the main process runs transcription / agent-ask and
+ * inserts the text into the focused app. Returns nothing — dictation has no
+ * in-island UI beyond a brief recording indicator on the pill.
  */
 export function useDictation(): void {
 	const setIslandState = useIslandState((s) => s.setState);
@@ -38,6 +40,7 @@ export function useDictation(): void {
 
 	const engineRef = useRef<string>(DEFAULT_DICTATION_PREFS.engine);
 	const recordingRef = useRef(false);
+	const taskRef = useRef<DictationTask>("transcribe");
 
 	const streamRef = useRef<MediaStream | null>(null);
 	const ctxRef = useRef<AudioContext | null>(null);
@@ -102,48 +105,55 @@ export function useDictation(): void {
 		return { samples: merged, rate };
 	}, []);
 
-	const startRecording = useCallback(async (): Promise<void> => {
-		if (recordingRef.current || !navigator.mediaDevices?.getUserMedia) {
-			return;
-		}
-		try {
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			streamRef.current = stream;
+	const startRecording = useCallback(
+		async (task: DictationTask): Promise<void> => {
+			if (recordingRef.current || !navigator.mediaDevices?.getUserMedia) {
+				return;
+			}
+			taskRef.current = task;
+			try {
+				const stream = await navigator.mediaDevices.getUserMedia({
+					audio: true,
+				});
+				streamRef.current = stream;
 
-			const ctx = new AudioContext();
-			ctxRef.current = ctx;
-			const source = ctx.createMediaStreamSource(stream);
-			sourceRef.current = source;
+				const ctx = new AudioContext();
+				ctxRef.current = ctx;
+				const source = ctx.createMediaStreamSource(stream);
+				sourceRef.current = source;
 
-			const processor = ctx.createScriptProcessor(4096, 1, 1);
-			processorRef.current = processor;
-			chunksRef.current = [];
-			processor.onaudioprocess = (e) => {
-				chunksRef.current.push(
-					new Float32Array(e.inputBuffer.getChannelData(0))
-				);
-			};
+				const processor = ctx.createScriptProcessor(4096, 1, 1);
+				processorRef.current = processor;
+				chunksRef.current = [];
+				processor.onaudioprocess = (e) => {
+					chunksRef.current.push(
+						new Float32Array(e.inputBuffer.getChannelData(0))
+					);
+				};
 
-			source.connect(processor);
-			processor.connect(ctx.destination);
+				source.connect(processor);
+				processor.connect(ctx.destination);
 
-			recordingRef.current = true;
-			window.island.dictation.setRecording(true);
-			// A brief recording indicator on the pill; dictation has no other UI.
-			setIslandStateRef.current("recording");
-		} catch {
-			teardown();
-			recordingRef.current = false;
-			window.island.dictation.setRecording(false);
-		}
-	}, [teardown]);
+				recordingRef.current = true;
+				window.island.dictation.setRecording(true, task);
+				// A brief recording indicator on the pill; dictation has no other UI.
+				setIslandStateRef.current("recording");
+			} catch {
+				teardown();
+				recordingRef.current = false;
+				window.island.dictation.setRecording(false, task);
+			}
+		},
+		[teardown]
+	);
 
 	const stopRecording = useCallback((): void => {
 		if (!recordingRef.current) {
 			return;
 		}
+		const task = taskRef.current;
 		recordingRef.current = false;
-		window.island.dictation.setRecording(false);
+		window.island.dictation.setRecording(false, task);
 		setIslandStateRef.current("collapsed");
 		const captured = teardown();
 		if (!captured || captured.samples.length === 0) {
@@ -152,7 +162,7 @@ export function useDictation(): void {
 		const pcm = downsample(captured.samples, captured.rate, TARGET_SAMPLE_RATE);
 		const wav = encodeWav(pcm, TARGET_SAMPLE_RATE);
 		window.island.dictation
-			.submit(wav)
+			.submit(wav, task)
 			.then((result) => {
 				if (result.ok) {
 					return;
@@ -171,22 +181,25 @@ export function useDictation(): void {
 			});
 	}, [teardown]);
 
-	const toggle = useCallback((): void => {
-		if (recordingRef.current) {
-			stopRecording();
-		} else {
-			startRecording().catch(() => undefined);
-		}
-	}, [startRecording, stopRecording]);
+	const toggle = useCallback(
+		(task: DictationTask): void => {
+			if (recordingRef.current) {
+				stopRecording();
+			} else {
+				startRecording(task).catch(() => undefined);
+			}
+		},
+		[startRecording, stopRecording]
+	);
 
 	// Wire the three activation signals from the main process (mirrors voice input):
 	//  - toggle: shortcut press toggles capture (toggle mode).
 	//  - start/stop: push-to-talk key-down / key-release (hold-to-talk mode), where
 	//    the release is seen through the main process's global key hook.
 	useEffect(() => {
-		const offToggle = window.island.dictation.onToggle(toggle);
-		const offStart = window.island.dictation.onStart(() => {
-			startRecording().catch(() => undefined);
+		const offToggle = window.island.dictation.onToggle((task) => toggle(task));
+		const offStart = window.island.dictation.onStart((task) => {
+			startRecording(task).catch(() => undefined);
 		});
 		const offStop = window.island.dictation.onStop(stopRecording);
 		return () => {

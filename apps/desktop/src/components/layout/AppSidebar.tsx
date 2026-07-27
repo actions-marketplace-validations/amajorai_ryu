@@ -8,6 +8,7 @@ import {
 	BubbleChatIcon,
 	Cancel01Icon,
 	ChatAdd01Icon,
+	ClipboardIcon,
 	ConnectIcon,
 	CpuIcon,
 	DatabaseIcon,
@@ -22,6 +23,7 @@ import {
 	ImageAdd01Icon,
 	Key01Icon,
 	LibraryIcon,
+	Mail01Icon,
 	MessageQuestionIcon,
 	MoreHorizontalIcon,
 	Mortarboard01Icon,
@@ -52,6 +54,7 @@ import {
 	sourceItemsFromResponse,
 	type ViewActionHttp,
 } from "@ryu/app-host/views";
+import { useOptionalReport } from "@ryu/marketplace/report";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -62,6 +65,7 @@ import {
 	AlertDialogHeader,
 	AlertDialogTitle,
 } from "@ryu/ui/components/alert-dialog";
+import { BorderBeam } from "@ryu/ui/components/border-beam";
 import {
 	ContextMenu,
 	ContextMenuContent,
@@ -81,7 +85,10 @@ import {
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
+import { asGlyphValue, type GlyphValue } from "@ryu/ui/components/glyph.ts";
+import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
 import { Icon } from "@ryu/ui/components/icon";
+import { Logo } from "@ryu/ui/components/logo";
 import {
 	Popover,
 	PopoverContent,
@@ -112,6 +119,7 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
 import { useQuery } from "@tanstack/react-query";
+import { useTheme } from "next-themes";
 import {
 	type DragEvent as ReactDragEvent,
 	type ReactNode,
@@ -128,10 +136,12 @@ import {
 	CreateFolderDialog,
 	ProjectPickerContent,
 } from "@/src/components/chat/ProjectPicker.tsx";
+import { EntityIconDialog } from "@/src/components/layout/EntityIconDialog.tsx";
 import {
 	ProjectGlyph,
 	ProjectIconDialog,
 } from "@/src/components/layout/ProjectIconDialog.tsx";
+import { ProjectSettingsDialog } from "@/src/components/layout/ProjectSettingsDialog.tsx";
 import { NodeSelector } from "@/src/components/shell/NodeSelector.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
 import {
@@ -176,6 +186,7 @@ import {
 	AgentAvatar,
 	AgentLogo,
 	engineForAgent,
+	personaToGlyph,
 } from "@/src/lib/agent-logos.tsx";
 import type { BtwEntry } from "@/src/lib/api/btw.ts";
 import { listBtw } from "@/src/lib/api/btw.ts";
@@ -183,8 +194,10 @@ import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
 import {
+	getConversationTitleHistory,
 	setConversationArchived,
 	setConversationPinned,
+	type TitleHistoryEntry,
 } from "@/src/lib/api/conversation-flags.ts";
 import { synthesizeSkill } from "@/src/lib/api/learn.ts";
 import type {
@@ -193,6 +206,8 @@ import type {
 } from "@/src/lib/api/plugins.ts";
 import { listSkills } from "@/src/lib/api/skills.ts";
 import type { Space, SpaceDocument } from "@/src/lib/api/spaces.ts";
+import { useBuildProfile } from "@/src/lib/build-profile.ts";
+import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import {
 	DEFAULT_HIDDEN_CHROME,
 	DEFAULT_HIDDEN_SECTIONS,
@@ -202,6 +217,7 @@ import {
 	persistHiddenChrome,
 	persistHiddenSections,
 } from "@/src/lib/features.ts";
+import { useReleaseChannel } from "@/src/lib/release-channel.ts";
 import { compactAge } from "@/src/lib/time.ts";
 import {
 	scheduleJobFor,
@@ -209,18 +225,29 @@ import {
 } from "@/src/lib/workflow-triggers.tsx";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
-import type { Conversation } from "@/types/chat.ts";
+import type { Conversation, Message } from "@/types/chat.ts";
 import { AnnouncementsSection } from "./AnnouncementsSection.tsx";
 import { CustomizeSidebarDialog } from "./CustomizeSidebarDialog.tsx";
 import { NavUser } from "./NavUser.tsx";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { SidebarSectionNav } from "./SidebarSectionNav.tsx";
+import {
+	ChatRowSubAccordion,
+	SidebarChatMessages,
+} from "./sidebar-chat-messages.tsx";
+import {
+	SidebarItemPreview,
+	SidebarPreviewMeta,
+	SidebarPreviewTitle,
+	SidebarPreviewTitleHistory,
+} from "./sidebar-item-preview.tsx";
 // The section vocabulary (built-in keys + labels + glyphs) and the order
 // persistence/reconciliation that goes with it. Kept in its own module so the
 // part that must never lose a user's saved layout is unit-testable without a DOM.
 import {
 	type BuiltinSectionKey,
 	DEFAULT_SECTION_ORDER,
+	isDynamicSectionKey,
 	isSectionKey,
 	loadSectionOrder,
 	SECTION_ICONS,
@@ -228,7 +255,7 @@ import {
 	type SectionKey,
 	saveSectionOrder,
 } from "./sidebar-sections.ts";
-import { TabGlyph } from "./TitleBar.tsx";
+import { TabGlyph, useTabBusy } from "./TitleBar.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
 
 // Re-exported so the sidebar stays the single import surface for its own types
@@ -303,9 +330,21 @@ function runStatusDotClass(status: string | undefined): string {
 	return "bg-primary";
 }
 
-/** Leaf folder name from a workspace path, used as a project's label. */
-function projectName(path: string): string {
+/** Leaf folder name from a workspace path, used as a project's default label. */
+function projectFolderLeaf(path: string): string {
 	return path.split(PATH_SEP_RE).pop() ?? path;
+}
+
+/** Sidebar/picker label: custom display name when set, otherwise the folder leaf. */
+function projectName(
+	path: string,
+	names?: Record<string, string> | null
+): string {
+	const custom = names?.[path]?.trim();
+	if (custom) {
+		return custom;
+	}
+	return projectFolderLeaf(path);
 }
 
 /** Adapt a hugeicons glyph into the lucide-shaped IconComponent the TabsSubtle
@@ -785,7 +824,7 @@ export function SectionOverflowPopover<T>({
 
 	return (
 		<Popover onOpenChange={onOpenChange} open={open}>
-			<div className="mt-0.5 flex items-center gap-1 px-1">
+			<div className="mt-0.5 flex items-center gap-1 pl-6">
 				<PopoverTrigger className="rounded px-2 py-1 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground">
 					Show {remaining} more
 				</PopoverTrigger>
@@ -861,7 +900,7 @@ function SectionPagingControls<T>({
 		);
 	}
 	return (
-		<div className="mt-0.5 flex items-center gap-1 px-1">
+		<div className="mt-0.5 flex items-center gap-1 pl-6">
 			{paged.hasMore ? (
 				<ShowMoreButton onClick={paged.showMore} remaining={paged.remaining} />
 			) : null}
@@ -914,12 +953,18 @@ function ShowLessButton({
 interface ChatRowHandlers {
 	activeConversationId: string | null;
 	archivedIds: Set<string>;
+	loadMessages: (id: string) => Promise<Message[]>;
 	onDeleteConversation: (id: string) => void;
+	onJumpToMessage: (conversationId: string, messageId: string) => void;
+	onMarkRead: (id: string) => void;
+	onMarkUnread: (id: string) => void;
 	onOpenInNewTab: (id: string) => void;
 	/** Open a persisted side chat: select the thread + surface it in the overlay. */
 	onOpenSideChat: (conversationId: string, entry: BtwEntry) => void;
 	onRenameConversation: (id: string, title: string) => void;
 	onSelectConversation: (id: string) => void;
+	/** Set or clear a conversation's Notion-style glyph. */
+	onSetConversationIcon: (id: string, icon: GlyphValue) => void;
 	onToggleArchive: (id: string) => void;
 	onTogglePin: (id: string) => void;
 	pinnedIds: Set<string>;
@@ -999,6 +1044,35 @@ function SidebarSideChats({
 	);
 }
 
+/** Lazily loads title history for the chat-row hover preview. */
+function ChatTitleHistoryPreview({
+	conversationId,
+	target,
+}: {
+	conversationId: string;
+	target: ApiTarget;
+}) {
+	const [entries, setEntries] = useState<TitleHistoryEntry[]>([]);
+	const targetRef = useRef(target);
+	targetRef.current = target;
+
+	useEffect(() => {
+		let cancelled = false;
+		getConversationTitleHistory(targetRef.current, conversationId).then(
+			(rows) => {
+				if (!cancelled) {
+					setEntries(rows);
+				}
+			}
+		);
+		return () => {
+			cancelled = true;
+		};
+	}, [conversationId]);
+
+	return <SidebarPreviewTitleHistory entries={entries} />;
+}
+
 /** A single-line chat row, Codex style: title only, actions on hover. */
 function ChatRow({
 	conv,
@@ -1012,11 +1086,16 @@ function ChatRow({
 		archivedIds,
 		pinnedIds,
 		unreadIds,
+		loadMessages,
 		onDeleteConversation,
+		onJumpToMessage,
+		onMarkRead,
+		onMarkUnread,
 		onOpenInNewTab,
 		onOpenSideChat,
 		onRenameConversation,
 		onSelectConversation,
+		onSetConversationIcon,
 		onToggleArchive,
 		onTogglePin,
 		target,
@@ -1025,12 +1104,15 @@ function ChatRow({
 	const isUnread = unreadIds.has(conv.id);
 	const isPinned = pinnedIds.has(conv.id);
 	const isArchived = archivedIds.has(conv.id);
-	const showDot = isUnread && !!conv.runStatus;
+	// Unread badge always shows when marked unread; color still reflects run status.
+	const showDot = isUnread;
+	const isRunning = conv.runStatus === "running";
 
 	const pinLabel = isPinned ? "Unpin" : "Pin";
 	const pinIcon = isPinned ? PinOffIcon : PinIcon;
 	const archiveLabel = isArchived ? "Unarchive" : "Archive";
 	const archiveIcon = isArchived ? ArchiveRestoreIcon : Archive01Icon;
+	const readLabel = isUnread ? "Mark as read" : "Mark as unread";
 
 	// Inline rename: when `isEditing`, the title is replaced by a text input.
 	// Commit on Enter / blur, cancel on Escape. Seeded from the current title.
@@ -1038,13 +1120,15 @@ function ChatRow({
 	const [draftTitle, setDraftTitle] = useState(conv.title);
 	const inputRef = useRef<HTMLInputElement | null>(null);
 
-	// Side-chats disclosure: a hover-revealed chevron toggles an indented list of
-	// this thread's persisted `/btw` asides (lazily fetched only while expanded).
+	// Row disclosure expands nested Messages + Side chats sub-accordions.
+	const [rowExpanded, setRowExpanded] = useState(false);
+	const [messagesExpanded, setMessagesExpanded] = useState(true);
 	const [sideChatsExpanded, setSideChatsExpanded] = useState(false);
 
 	// Deleting a chat is permanent, so both the dropdown and context-menu Delete
 	// actions open a confirmation dialog rather than wiping the thread outright.
 	const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+	const [iconDialogOpen, setIconDialogOpen] = useState(false);
 
 	const startEditing = () => {
 		setDraftTitle(conv.title);
@@ -1068,6 +1152,47 @@ function ChatRow({
 			inputRef.current?.select();
 		}
 	}, [isEditing]);
+
+	const folderLeaf = conv.folderPath
+		? (conv.folderPath.split(PATH_SEP_RE).pop() ?? conv.folderPath)
+		: null;
+	const worktreeLeaf = conv.worktreePath
+		? (conv.worktreePath.split(PATH_SEP_RE).pop() ?? conv.worktreePath)
+		: null;
+	const previewContent = (
+		<SidebarPreviewTitle title={conv.title}>
+			{conv.branch ? (
+				<SidebarPreviewMeta label="Branch" value={conv.branch} />
+			) : null}
+			{folderLeaf ? (
+				<SidebarPreviewMeta label="Folder" value={folderLeaf} />
+			) : null}
+			{worktreeLeaf ? (
+				<SidebarPreviewMeta label="Worktree" value={worktreeLeaf} />
+			) : null}
+			{(conv.participants?.length || conv.agentId) && (
+				<SidebarPreviewMeta
+					label="Agents"
+					value={(conv.participants ?? (conv.agentId ? [conv.agentId] : []))
+						.map((id) => id.split("/").pop() ?? id)
+						.join(", ")}
+				/>
+			)}
+			{conv.runStatus ? (
+				<SidebarPreviewMeta
+					label="Status"
+					value={
+						conv.runStatus === "running"
+							? "In progress"
+							: conv.runStatus === "failed"
+								? "Failed"
+								: "Completed"
+					}
+				/>
+			) : null}
+			<ChatTitleHistoryPreview conversationId={conv.id} target={target} />
+		</SidebarPreviewTitle>
+	);
 
 	return (
 		<SidebarMenuItem>
@@ -1094,12 +1219,12 @@ function ChatRow({
 					>
 						<button
 							aria-label={
-								sideChatsExpanded ? "Hide side chats" : "Show side chats"
+								rowExpanded ? "Collapse chat details" : "Expand chat details"
 							}
 							className="relative flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
 							onClick={(e) => {
 								e.stopPropagation();
-								setSideChatsExpanded((v) => !v);
+								setRowExpanded((v) => !v);
 							}}
 							type="button"
 						>
@@ -1109,7 +1234,7 @@ function ChatRow({
 							{showDot && (
 								<span
 									className={`absolute inset-0 m-auto size-1.5 rounded-full transition-opacity ${
-										sideChatsExpanded
+										rowExpanded
 											? "opacity-0"
 											: "opacity-100 group-hover/row:opacity-0"
 									} ${runStatusDotClass(conv.runStatus)}`}
@@ -1119,13 +1244,18 @@ function ChatRow({
 							    un-rotated) once expanded so it can be collapsed again. */}
 							<HugeiconsIcon
 								className={`size-3 transition-all ${
-									sideChatsExpanded
+									rowExpanded
 										? "opacity-100"
 										: "-rotate-90 opacity-0 group-hover/row:opacity-100"
 								}`}
 								icon={ArrowDown01Icon}
 							/>
 						</button>
+						{conv.icon ? (
+							<span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
+								<GlyphDisplay fallback={null} size={14} value={conv.icon} />
+							</span>
+						) : null}
 						{isPinned && (
 							<HugeiconsIcon
 								className="size-3 shrink-0 text-muted-foreground/70"
@@ -1150,8 +1280,8 @@ function ChatRow({
 								value={draftTitle}
 							/>
 						) : (
-							// Wrap the tooltip so a double-click on the title starts an
-							// inline rename (OverflowTooltip doesn't forward DOM handlers).
+							// Wrap the preview so a double-click on the title starts an
+							// inline rename (SidebarItemPreview doesn't forward DOM handlers).
 							// biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: double-click rename on tooltip wrapper
 							<span
 								className="flex min-w-0 flex-1"
@@ -1160,14 +1290,22 @@ function ChatRow({
 									startEditing();
 								}}
 							>
-								<OverflowTooltip
-									className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm"
-									fade
-									text={conv.title}
-								/>
+								<SidebarItemPreview content={previewContent}>
+									{isRunning ? (
+										<span className="an-text-shimmer an-text-shimmer--active inline-block max-w-full truncate text-sm [animation-duration:2s]">
+											{conv.title}
+										</span>
+									) : (
+										<span
+											className={`min-w-0 flex-1 overflow-hidden truncate whitespace-nowrap text-sm ${isUnread ? "font-medium" : ""}`}
+										>
+											{conv.title}
+										</span>
+									)}
+								</SidebarItemPreview>
 							</span>
 						)}
-						{conv.runStatus === "running" ? (
+						{isRunning ? (
 							// A live run shows a spinner in place of the age (like ChatGPT's
 							// per-chat "running" indicator) so several concurrent chats are
 							// legible at a glance. Hidden on hover so the ⋯ menu can take its slot.
@@ -1209,6 +1347,32 @@ function ChatRow({
 								<DropdownMenuItem
 									onClick={(e) => {
 										e.stopPropagation();
+										void copyChatTranscript(() => loadMessages(conv.id));
+									}}
+								>
+									<HugeiconsIcon
+										className="mr-2"
+										icon={ClipboardIcon}
+										size={12}
+									/>
+									Copy transcript
+								</DropdownMenuItem>
+								<DropdownMenuItem
+									onClick={(e) => {
+										e.stopPropagation();
+										if (isUnread) {
+											onMarkRead(conv.id);
+										} else {
+											onMarkUnread(conv.id);
+										}
+									}}
+								>
+									<HugeiconsIcon className="mr-2" icon={Mail01Icon} size={12} />
+									{readLabel}
+								</DropdownMenuItem>
+								<DropdownMenuItem
+									onClick={(e) => {
+										e.stopPropagation();
 										startEditing();
 									}}
 								>
@@ -1218,6 +1382,19 @@ function ChatRow({
 										size={12}
 									/>
 									Rename
+								</DropdownMenuItem>
+								<DropdownMenuItem
+									onClick={(e) => {
+										e.stopPropagation();
+										setIconDialogOpen(true);
+									}}
+								>
+									<HugeiconsIcon
+										className="mr-2"
+										icon={ImageAdd01Icon}
+										size={12}
+									/>
+									Change icon…
 								</DropdownMenuItem>
 								<DropdownMenuItem
 									onClick={(e) => {
@@ -1286,9 +1463,29 @@ function ChatRow({
 						<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
 						Open in new tab
 					</ContextMenuItem>
+					<ContextMenuItem
+						onClick={() => {
+							void copyChatTranscript(() => loadMessages(conv.id));
+						}}
+					>
+						<HugeiconsIcon className="mr-2 size-4" icon={ClipboardIcon} />
+						Copy transcript
+					</ContextMenuItem>
+					<ContextMenuItem
+						onClick={() =>
+							isUnread ? onMarkRead(conv.id) : onMarkUnread(conv.id)
+						}
+					>
+						<HugeiconsIcon className="mr-2 size-4" icon={Mail01Icon} />
+						{readLabel}
+					</ContextMenuItem>
 					<ContextMenuItem onClick={startEditing}>
 						<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
 						Rename
+					</ContextMenuItem>
+					<ContextMenuItem onClick={() => setIconDialogOpen(true)}>
+						<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
+						Change icon…
 					</ContextMenuItem>
 					<ContextMenuItem onClick={() => onTogglePin(conv.id)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={pinIcon} />
@@ -1308,12 +1505,31 @@ function ChatRow({
 					</ContextMenuItem>
 				</ContextMenuContent>
 			</ContextMenu>
-			{sideChatsExpanded && (
-				<SidebarSideChats
-					conversationId={conv.id}
-					onOpen={(entry) => onOpenSideChat(conv.id, entry)}
-					target={target}
-				/>
+			{rowExpanded && (
+				<div className="flex flex-col gap-0.5 pb-1">
+					<ChatRowSubAccordion
+						expanded={messagesExpanded}
+						label="Messages"
+						onToggle={() => setMessagesExpanded((v) => !v)}
+					>
+						<SidebarChatMessages
+							conversationId={conv.id}
+							loadMessages={loadMessages}
+							onJump={(messageId) => onJumpToMessage(conv.id, messageId)}
+						/>
+					</ChatRowSubAccordion>
+					<ChatRowSubAccordion
+						expanded={sideChatsExpanded}
+						label="Side chats"
+						onToggle={() => setSideChatsExpanded((v) => !v)}
+					>
+						<SidebarSideChats
+							conversationId={conv.id}
+							onOpen={(entry) => onOpenSideChat(conv.id, entry)}
+							target={target}
+						/>
+					</ChatRowSubAccordion>
+				</div>
 			)}
 			<AlertDialog onOpenChange={setConfirmDeleteOpen} open={confirmDeleteOpen}>
 				<AlertDialogContent>
@@ -1334,6 +1550,14 @@ function ChatRow({
 					</AlertDialogFooter>
 				</AlertDialogContent>
 			</AlertDialog>
+			<EntityIconDialog
+				description={conv.title}
+				onChange={(icon) => onSetConversationIcon(conv.id, icon)}
+				onOpenChange={setIconDialogOpen}
+				open={iconDialogOpen}
+				title="Chat icon"
+				value={conv.icon ?? null}
+			/>
 		</SidebarMenuItem>
 	);
 }
@@ -1739,6 +1963,7 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 		tab.id,
 		"y"
 	);
+	const busy = useTabBusy(tab);
 	const rowState = isActive ? "bg-muted" : "hover:bg-muted/60";
 	const textState = isActive ? "text-foreground" : "text-muted-foreground";
 
@@ -1794,7 +2019,9 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 							type="button"
 						>
 							<TabGlyph
+								busy={busy}
 								className="absolute size-4 transition-all duration-150 group-hover/row:scale-50 group-hover/row:opacity-0"
+								icon={tab.icon}
 								logoSize="16px"
 								path={tab.path}
 								unloaded={tab.unloaded}
@@ -1804,11 +2031,21 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 								icon={Cancel01Icon}
 							/>
 						</button>
-						<OverflowTooltip
-							className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState} ${tab.unloaded ? "italic" : ""}`}
-							fade
-							text={tab.title}
-						/>
+						{busy && !tab.unloaded ? (
+							<span
+								className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState}`}
+							>
+								<span className="an-text-shimmer an-text-shimmer--active inline-block max-w-full truncate [animation-duration:2s]">
+									{tab.title}
+								</span>
+							</span>
+						) : (
+							<OverflowTooltip
+								className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState} ${tab.unloaded ? "italic" : ""}`}
+								fade
+								text={tab.title}
+							/>
+						)}
 					</div>
 				</ContextMenuTrigger>
 				<ContextMenuContent>
@@ -2030,12 +2267,22 @@ function AgentsSection({
 	);
 
 	const openAgent = (id: string, name: string, forceNew = false) => {
-		openTab(`/agents/${id}/edit`, { title: name, forceNew });
+		const agent = agents.find((a) => a.id === id);
+		openTab(`/agents/${id}/edit`, {
+			title: name,
+			forceNew,
+			icon: personaToGlyph({ avatarUrl: agent?.avatarUrl }),
+		});
 	};
 
 	// Start a fresh chat with this agent pre-selected (ChatPage reads initialAgent).
 	const startChatWithAgent = (id: string) => {
-		openTab("/chat", { forceNew: true, initialAgent: id });
+		const agent = agents.find((a) => a.id === id);
+		openTab("/chat", {
+			forceNew: true,
+			initialAgent: id,
+			icon: personaToGlyph({ avatarUrl: agent?.avatarUrl }),
+		});
 	};
 
 	const emptyMessage = loading ? "Loading…" : "No agents yet";
@@ -2531,13 +2778,21 @@ function SidebarSpaceDocs({
 	spaceId,
 	listDocuments,
 	onOpenDoc,
+	setDocumentIcon,
 }: {
 	listDocuments: (spaceId: string) => Promise<SpaceDocument[]>;
-	onOpenDoc: (doc: SpaceDocument) => void;
+	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
+	setDocumentIcon: (
+		spaceId: string,
+		documentId: string,
+		icon: GlyphValue
+	) => Promise<void>;
 	spaceId: string;
 }) {
+	const { updateTabsIconWhere } = useTabsContext();
 	const [docs, setDocs] = useState<SpaceDocument[]>([]);
 	const [loading, setLoading] = useState(true);
+	const [iconTarget, setIconTarget] = useState<SpaceDocument | null>(null);
 	const listRef = useRef(listDocuments);
 	listRef.current = listDocuments;
 
@@ -2573,27 +2828,92 @@ function SidebarSpaceDocs({
 		);
 	}
 	return (
-		<SidebarMenu className="gap-0.5">
-			{docs.map((doc) => (
-				<SidebarMenuItem key={doc.id}>
-					<button
-						className="flex h-7 w-full items-center gap-2 rounded-md pr-2 pl-8 text-left transition-colors hover:bg-muted"
-						onClick={() => onOpenDoc(doc)}
-						type="button"
-					>
-						<HugeiconsIcon
-							className="size-3 shrink-0 text-muted-foreground"
-							icon={doc.kind === "database" ? DatabaseIcon : File01Icon}
-						/>
-						<OverflowTooltip
-							className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-muted-foreground text-xs"
-							fade
-							text={doc.title}
-						/>
-					</button>
-				</SidebarMenuItem>
-			))}
-		</SidebarMenu>
+		<>
+			<SidebarMenu className="gap-0.5">
+				{docs.map((doc) => (
+					<SidebarMenuItem key={doc.id}>
+						<ContextMenu>
+							<ContextMenuTrigger>
+								<button
+									className="flex h-7 w-full items-center gap-2 rounded-md pr-2 pl-8 text-left transition-colors hover:bg-muted"
+									onAuxClick={(e) => {
+										if (e.button === 1) {
+											e.preventDefault();
+											onOpenDoc(doc, true);
+										}
+									}}
+									onClick={() => onOpenDoc(doc)}
+									type="button"
+								>
+									<GlyphDisplay
+										className="shrink-0 text-muted-foreground"
+										fallback={
+											<HugeiconsIcon
+												className="size-3 shrink-0 text-muted-foreground"
+												icon={
+													doc.kind === "database" ? DatabaseIcon : File01Icon
+												}
+											/>
+										}
+										size={12}
+										value={doc.icon}
+									/>
+									<OverflowTooltip
+										className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-muted-foreground text-xs"
+										fade
+										text={doc.title}
+									/>
+								</button>
+							</ContextMenuTrigger>
+							<ContextMenuContent>
+								<ContextMenuItem onClick={() => onOpenDoc(doc, true)}>
+									<HugeiconsIcon
+										className="mr-2 size-4"
+										icon={ArrowUpRight01Icon}
+									/>
+									Open in new tab
+								</ContextMenuItem>
+								<ContextMenuItem onClick={() => setIconTarget(doc)}>
+									<HugeiconsIcon
+										className="mr-2 size-4"
+										icon={ImageAdd01Icon}
+									/>
+									Change icon…
+								</ContextMenuItem>
+							</ContextMenuContent>
+						</ContextMenu>
+					</SidebarMenuItem>
+				))}
+			</SidebarMenu>
+			{iconTarget ? (
+				<EntityIconDialog
+					description={iconTarget.title}
+					onChange={(next) => {
+						const docId = iconTarget.id;
+						setDocs((prev) =>
+							prev.map((d) => (d.id === docId ? { ...d, icon: next } : d))
+						);
+						updateTabsIconWhere(
+							(t) =>
+								t.path === `/spaces/${spaceId}/doc/${docId}` ||
+								t.path === `/spaces/${spaceId}/db/${docId}`,
+							next
+						);
+						void setDocumentIcon(spaceId, docId, next).catch(() => {
+							toast.error("Couldn't update page icon");
+						});
+					}}
+					onOpenChange={(open) => {
+						if (!open) {
+							setIconTarget(null);
+						}
+					}}
+					open
+					title="Page icon"
+					value={iconTarget.icon}
+				/>
+			) : null}
+		</>
 	);
 }
 
@@ -2608,6 +2928,8 @@ function SpaceSidebarRow({
 	onOpenInNewTab,
 	onOpenDoc,
 	onRequestDelete,
+	setDocumentIcon,
+	setSpaceIcon,
 }: {
 	/** Icon id registered by the space's owning app (Iconify/icons0/Hugeicons id),
 	 *  resolved through the shared <Icon> primitive. Undefined for a plain
@@ -2615,13 +2937,37 @@ function SpaceSidebarRow({
 	appIcon?: string;
 	listDocuments: (spaceId: string) => Promise<SpaceDocument[]>;
 	onOpen: () => void;
-	onOpenDoc: (doc: SpaceDocument) => void;
+	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
 	onOpenInNewTab: () => void;
 	onRequestDelete: () => void;
+	setDocumentIcon: (
+		spaceId: string,
+		documentId: string,
+		icon: GlyphValue
+	) => Promise<void>;
+	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
 	space: Space;
 }) {
+	const { updateTabsIconWhere } = useTabsContext();
 	const [expanded, setExpanded] = useState(false);
+	const [iconDialogOpen, setIconDialogOpen] = useState(false);
 	const toggle = () => setExpanded((v) => !v);
+	const fallbackIcon = appIcon ? (
+		<Icon
+			className={`absolute inset-0 m-auto transition-opacity ${
+				expanded ? "opacity-0" : "opacity-100 group-hover/row:opacity-0"
+			}`}
+			icon={appIcon}
+			size={16}
+		/>
+	) : (
+		<HugeiconsIcon
+			className={`absolute inset-0 m-auto size-4 transition-opacity ${
+				expanded ? "opacity-0" : "opacity-100 group-hover/row:opacity-0"
+			}`}
+			icon={DeliverySecure01Icon}
+		/>
+	);
 	return (
 		<SidebarMenuItem>
 			<ContextMenu>
@@ -2648,25 +2994,18 @@ function SpaceSidebarRow({
 						    space icon at rest and morphs to a chevron on hover / once
 						    expanded, so the row reads as an expandable folder. */}
 						<span className="relative flex size-4 shrink-0 items-center justify-center text-muted-foreground">
-							{appIcon ? (
-								<Icon
-									className={`absolute inset-0 m-auto transition-opacity ${
+							{space.icon ? (
+								<span
+									className={`absolute inset-0 m-auto flex items-center justify-center transition-opacity ${
 										expanded
 											? "opacity-0"
 											: "opacity-100 group-hover/row:opacity-0"
 									}`}
-									icon={appIcon}
-									size={16}
-								/>
+								>
+									<GlyphDisplay fallback={null} size={16} value={space.icon} />
+								</span>
 							) : (
-								<HugeiconsIcon
-									className={`absolute inset-0 m-auto size-4 transition-opacity ${
-										expanded
-											? "opacity-0"
-											: "opacity-100 group-hover/row:opacity-0"
-									}`}
-									icon={DeliverySecure01Icon}
-								/>
+								fallbackIcon
 							)}
 							<HugeiconsIcon
 								className={`size-3 transition-all ${
@@ -2699,6 +3038,10 @@ function SpaceSidebarRow({
 						<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
 						Open in new tab
 					</ContextMenuItem>
+					<ContextMenuItem onClick={() => setIconDialogOpen(true)}>
+						<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
+						Change icon…
+					</ContextMenuItem>
 					<ContextMenuSeparator />
 					<ContextMenuItem onClick={onRequestDelete} variant="destructive">
 						<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
@@ -2710,9 +3053,23 @@ function SpaceSidebarRow({
 				<SidebarSpaceDocs
 					listDocuments={listDocuments}
 					onOpenDoc={onOpenDoc}
+					setDocumentIcon={setDocumentIcon}
 					spaceId={space.id}
 				/>
 			)}
+			<EntityIconDialog
+				description={space.name}
+				onChange={(next) => {
+					updateTabsIconWhere((t) => t.path === `/spaces/${space.id}`, next);
+					void setSpaceIcon(space.id, next).catch(() => {
+						toast.error("Couldn't update space icon");
+					});
+				}}
+				onOpenChange={setIconDialogOpen}
+				open={iconDialogOpen}
+				title="Space icon"
+				value={space.icon}
+			/>
 		</SidebarMenuItem>
 	);
 }
@@ -2726,8 +3083,17 @@ function SpacesSection({
 	sort,
 }: SectionProps) {
 	const { openTab } = useTabsContext();
-	const { spaces, loading, error, reload, create, remove, listDocuments } =
-		useSpacesContext();
+	const {
+		spaces,
+		loading,
+		error,
+		reload,
+		create,
+		remove,
+		listDocuments,
+		setSpaceIcon,
+		setDocumentIcon,
+	} = useSpacesContext();
 	const [createOpen, setCreateOpen] = useState(false);
 	// Deleting a space is permanent, so the right-click Delete action opens a
 	// confirmation dialog (rather than removing it outright); the pending target
@@ -2764,14 +3130,20 @@ function SpacesSection({
 	// Open a specific space's page (`/spaces/:id`), pre-selecting it — the Spaces
 	// page no longer renders its own space list, so selection is driven from here.
 	const openSpace = (space: (typeof visibleSpaces)[number], forceNew = false) =>
-		openTab(`/spaces/${space.id}`, { title: space.name, forceNew });
+		openTab(`/spaces/${space.id}`, {
+			title: space.name,
+			forceNew,
+			icon: space.icon ?? null,
+		});
 
 	// Open a document inside a space directly in its editor (databases use the
 	// data-grid route, pages the markdown route) — mirrors SpacesPage.openDoc.
-	const openDoc = (spaceId: string, doc: SpaceDocument) => {
+	const openDoc = (spaceId: string, doc: SpaceDocument, forceNew = false) => {
 		const segment = doc.kind === "database" ? "db" : "doc";
 		openTab(`/spaces/${spaceId}/${segment}/${doc.id}`, {
 			title: doc.title || "Untitled",
+			icon: doc.icon ?? null,
+			forceNew,
 		});
 	};
 
@@ -2802,11 +3174,13 @@ function SpacesSection({
 				key={space.id}
 				listDocuments={listDocuments}
 				onOpen={() => openSpace(space)}
-				onOpenDoc={(doc) => openDoc(space.id, doc)}
+				onOpenDoc={(doc, forceNew) => openDoc(space.id, doc, forceNew)}
 				onOpenInNewTab={() => openSpace(space, true)}
 				onRequestDelete={() =>
 					setPendingDelete({ id: space.id, name: space.name })
 				}
+				setDocumentIcon={setDocumentIcon}
+				setSpaceIcon={setSpaceIcon}
 				space={space}
 			/>
 		));
@@ -3031,8 +3405,8 @@ function WorkflowsSection({
 }
 
 /** Channels list in the sidebar — each row is a Telegram/Slack/WhatsApp/Discord
- *  bot. Rows and the "+" open the Gateway dialog's Channels section, where bots
- *  are created and configured. Hidden by default (opt-in feature). */
+ *  bot. Rows open the channel manage page; "+" opens create. Hidden by default
+ *  (opt-in feature). This is the picker; the manage tab is create/edit only. */
 function ChannelsSection({
 	collapsed,
 	dnd,
@@ -3042,13 +3416,16 @@ function ChannelsSection({
 	sort,
 }: SectionProps) {
 	const { channels, loading, authed } = useChannels();
-	const openGateway = useGatewayDialog((s) => s.openGateway);
+	const { openTab } = useTabsContext();
 	const paged = usePaged(
 		sortItems(channels, sort, NAMED_SORT_ACCESSORS),
 		pageSize
 	);
 
-	const openChannels = () => openGateway("channels");
+	const openChannel = (id: string, name: string, forceNew = false) =>
+		openTab(`/channels/${id}`, { title: name, forceNew });
+	const openNewChannel = () =>
+		openTab("/channels/new", { title: "New channel" });
 
 	let emptyMessage = "No channels yet";
 	if (loading) {
@@ -3060,40 +3437,61 @@ function ChannelsSection({
 	const renderChannelRows = (list: typeof channels) =>
 		list.map((channel) => (
 			<SidebarMenuItem key={channel.id}>
-				{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-				<div
-					className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-					onClick={openChannels}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") {
-							openChannels();
-						}
-					}}
-					role="button"
-					tabIndex={0}
-				>
-					<HugeiconsIcon
-						className="size-4 shrink-0 text-muted-foreground"
-						icon={BubbleChatIcon}
-					/>
-					<OverflowTooltip
-						className="min-w-0 flex-1 truncate text-sm"
-						text={channel.name}
-					/>
-					<span className="shrink-0 text-muted-foreground/70 text-xs">
-						{CHANNEL_LABELS[channel.channelType]}
-					</span>
-					{/* A dim dot marks a disabled bot; enabled bots show none. */}
-					{!channel.enabled && (
-						<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
-					)}
-				</div>
+				<ContextMenu>
+					<ContextMenuTrigger>
+						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+						<div
+							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							onAuxClick={(e) => {
+								if (e.button === 1) {
+									e.preventDefault();
+									openChannel(channel.id, channel.name, true);
+								}
+							}}
+							onClick={() => openChannel(channel.id, channel.name)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									openChannel(channel.id, channel.name);
+								}
+							}}
+							role="button"
+							tabIndex={0}
+						>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-muted-foreground"
+								icon={BubbleChatIcon}
+							/>
+							<OverflowTooltip
+								className="min-w-0 flex-1 truncate text-sm"
+								text={channel.name}
+							/>
+							<span className="shrink-0 text-muted-foreground/70 text-xs">
+								{CHANNEL_LABELS[channel.channelType]}
+							</span>
+							{/* A dim dot marks a disabled bot; enabled bots show none. */}
+							{!channel.enabled && (
+								<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
+							)}
+						</div>
+					</ContextMenuTrigger>
+					<ContextMenuContent>
+						<ContextMenuItem
+							onClick={() => openChannel(channel.id, channel.name, true)}
+						>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={ArrowUpRight01Icon}
+							/>
+							Open in new tab
+						</ContextMenuItem>
+					</ContextMenuContent>
+				</ContextMenu>
 			</SidebarMenuItem>
 		));
 
 	return (
 		<SidebarSection
-			action={<SectionAddButton onClick={openChannels} title="Add channel" />}
+			action={<SectionAddButton onClick={openNewChannel} title="Add channel" />}
 			collapsed={collapsed}
 			dnd={dnd}
 			label="Channels"
@@ -3302,8 +3700,9 @@ function IntegrationsSection({
 }
 
 /** Identities list in the sidebar — saved login profiles agents reuse. Each row
- *  is a profile (a named grouping of per-domain connections). Rows and the "+"
- *  open the Gateway dialog's Identities section. Hidden by default. */
+ *  is a profile (a named grouping of per-domain connections). Rows open the
+ *  identities manage page focused on that profile; "+" opens create. Hidden by
+ *  default. This is the picker; the manage tab is create/edit only. */
 function IdentitiesSection({
 	collapsed,
 	dnd,
@@ -3313,7 +3712,7 @@ function IdentitiesSection({
 	sort,
 }: SectionProps) {
 	const { profiles, loading, error, refetch } = useIdentities();
-	const openGateway = useGatewayDialog((s) => s.openGateway);
+	const { openTab } = useTabsContext();
 	const rows = useMemo(
 		() =>
 			profiles.map((profile) => ({
@@ -3325,44 +3724,69 @@ function IdentitiesSection({
 	);
 	const paged = usePaged(sortItems(rows, sort, NAMED_SORT_ACCESSORS), pageSize);
 
-	const openIdentities = () => openGateway("identities");
+	const openIdentity = (profileId: string, forceNew = false) =>
+		openTab(`/identities/profile/${encodeURIComponent(profileId)}`, {
+			title: profileId,
+			forceNew,
+		});
+	const openNewIdentity = () =>
+		openTab("/identities/new", { title: "New identity" });
 
 	const emptyMessage = loading ? "Loading…" : "No identities yet";
 
 	const renderIdentityRows = (list: typeof rows) =>
 		list.map((row) => (
 			<SidebarMenuItem key={row.id}>
-				{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-				<div
-					className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-					onClick={openIdentities}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") {
-							openIdentities();
-						}
-					}}
-					role="button"
-					tabIndex={0}
-				>
-					<HugeiconsIcon
-						className="size-4 shrink-0 text-muted-foreground"
-						icon={Key01Icon}
-					/>
-					<OverflowTooltip
-						className="min-w-0 flex-1 truncate text-sm"
-						text={row.name}
-					/>
-					<span className="shrink-0 text-muted-foreground/70 text-xs tabular-nums">
-						{row.count}
-					</span>
-				</div>
+				<ContextMenu>
+					<ContextMenuTrigger>
+						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+						<div
+							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							onAuxClick={(e) => {
+								if (e.button === 1) {
+									e.preventDefault();
+									openIdentity(row.id, true);
+								}
+							}}
+							onClick={() => openIdentity(row.id)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									openIdentity(row.id);
+								}
+							}}
+							role="button"
+							tabIndex={0}
+						>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-muted-foreground"
+								icon={Key01Icon}
+							/>
+							<OverflowTooltip
+								className="min-w-0 flex-1 truncate text-sm"
+								text={row.name}
+							/>
+							<span className="shrink-0 text-muted-foreground/70 text-xs tabular-nums">
+								{row.count}
+							</span>
+						</div>
+					</ContextMenuTrigger>
+					<ContextMenuContent>
+						<ContextMenuItem onClick={() => openIdentity(row.id, true)}>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={ArrowUpRight01Icon}
+							/>
+							Open in new tab
+						</ContextMenuItem>
+					</ContextMenuContent>
+				</ContextMenu>
 			</SidebarMenuItem>
 		));
 
 	return (
 		<SidebarSection
 			action={
-				<SectionAddButton onClick={openIdentities} title="Add identity" />
+				<SectionAddButton onClick={openNewIdentity} title="Add identity" />
 			}
 			collapsed={collapsed}
 			dnd={dnd}
@@ -3433,7 +3857,8 @@ function SkillsSection({
 		pageSize
 	);
 
-	const openSkills = () => openTab("/skills", { title: "Skills" });
+	const openSkills = (forceNew = false) =>
+		openTab("/skills", { title: "Skills", forceNew });
 
 	const emptyMessage = skillsQuery.isLoading
 		? "Loading…"
@@ -3442,36 +3867,57 @@ function SkillsSection({
 	const renderSkillRows = (list: typeof skills) =>
 		list.map((skill) => (
 			<SidebarMenuItem key={skill.id}>
-				{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-				<div
-					className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-					onClick={openSkills}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") {
-							openSkills();
-						}
-					}}
-					role="button"
-					tabIndex={0}
-				>
-					<HugeiconsIcon
-						className="size-4 shrink-0 text-muted-foreground"
-						icon={Mortarboard01Icon}
-					/>
-					<OverflowTooltip
-						className="min-w-0 flex-1 truncate text-sm"
-						text={skill.name}
-					/>
-					{!skill.enabled && (
-						<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
-					)}
-				</div>
+				<ContextMenu>
+					<ContextMenuTrigger>
+						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+						<div
+							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							onAuxClick={(e) => {
+								if (e.button === 1) {
+									e.preventDefault();
+									openSkills(true);
+								}
+							}}
+							onClick={() => openSkills()}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									openSkills();
+								}
+							}}
+							role="button"
+							tabIndex={0}
+						>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-muted-foreground"
+								icon={Mortarboard01Icon}
+							/>
+							<OverflowTooltip
+								className="min-w-0 flex-1 truncate text-sm"
+								text={skill.name}
+							/>
+							{!skill.enabled && (
+								<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
+							)}
+						</div>
+					</ContextMenuTrigger>
+					<ContextMenuContent>
+						<ContextMenuItem onClick={() => openSkills(true)}>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={ArrowUpRight01Icon}
+							/>
+							Open in new tab
+						</ContextMenuItem>
+					</ContextMenuContent>
+				</ContextMenu>
 			</SidebarMenuItem>
 		));
 
 	return (
 		<SidebarSection
-			action={<SectionAddButton onClick={openSkills} title="Add skill" />}
+			action={
+				<SectionAddButton onClick={() => openSkills()} title="Add skill" />
+			}
 			collapsed={collapsed}
 			dnd={dnd}
 			label="Skills"
@@ -3536,43 +3982,65 @@ function McpSection({
 		pageSize
 	);
 
-	const openTools = () => openTab("/tools", { title: "Tools" });
+	const openTools = (forceNew = false) =>
+		openTab("/tools", { title: "Tools", forceNew });
 
 	const emptyMessage = loading ? "Loading…" : "No MCP servers";
 
 	const renderServerRows = (list: typeof servers) =>
 		list.map((server) => (
 			<SidebarMenuItem key={server.name}>
-				{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-				<div
-					className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-					onClick={openTools}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") {
-							openTools();
-						}
-					}}
-					role="button"
-					tabIndex={0}
-				>
-					<HugeiconsIcon
-						className="size-4 shrink-0 text-muted-foreground"
-						icon={ServerStack01Icon}
-					/>
-					<OverflowTooltip
-						className="min-w-0 flex-1 truncate text-sm"
-						text={server.name}
-					/>
-					{!server.enabled && (
-						<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
-					)}
-				</div>
+				<ContextMenu>
+					<ContextMenuTrigger>
+						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+						<div
+							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							onAuxClick={(e) => {
+								if (e.button === 1) {
+									e.preventDefault();
+									openTools(true);
+								}
+							}}
+							onClick={() => openTools()}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									openTools();
+								}
+							}}
+							role="button"
+							tabIndex={0}
+						>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-muted-foreground"
+								icon={ServerStack01Icon}
+							/>
+							<OverflowTooltip
+								className="min-w-0 flex-1 truncate text-sm"
+								text={server.name}
+							/>
+							{!server.enabled && (
+								<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
+							)}
+						</div>
+					</ContextMenuTrigger>
+					<ContextMenuContent>
+						<ContextMenuItem onClick={() => openTools(true)}>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={ArrowUpRight01Icon}
+							/>
+							Open in new tab
+						</ContextMenuItem>
+					</ContextMenuContent>
+				</ContextMenu>
 			</SidebarMenuItem>
 		));
 
 	return (
 		<SidebarSection
-			action={<SectionAddButton onClick={openTools} title="Add MCP server" />}
+			action={
+				<SectionAddButton onClick={() => openTools()} title="Add MCP server" />
+			}
 			collapsed={collapsed}
 			dnd={dnd}
 			label="MCP"
@@ -3637,40 +4105,62 @@ function ToolsSection({
 		pageSize
 	);
 
-	const openTools = () => openTab("/tools", { title: "Tools" });
+	const openTools = (forceNew = false) =>
+		openTab("/tools", { title: "Tools", forceNew });
 
 	const emptyMessage = loading ? "Loading…" : "No tools";
 
 	const renderToolRows = (list: typeof tools) =>
 		list.map((tool) => (
 			<SidebarMenuItem key={tool.id}>
-				{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-				<div
-					className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-					onClick={openTools}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") {
-							openTools();
-						}
-					}}
-					role="button"
-					tabIndex={0}
-				>
-					<HugeiconsIcon
-						className="size-4 shrink-0 text-muted-foreground"
-						icon={Wrench01Icon}
-					/>
-					<OverflowTooltip
-						className="min-w-0 flex-1 truncate text-sm"
-						text={tool.name}
-					/>
-				</div>
+				<ContextMenu>
+					<ContextMenuTrigger>
+						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+						<div
+							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							onAuxClick={(e) => {
+								if (e.button === 1) {
+									e.preventDefault();
+									openTools(true);
+								}
+							}}
+							onClick={() => openTools()}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									openTools();
+								}
+							}}
+							role="button"
+							tabIndex={0}
+						>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-muted-foreground"
+								icon={Wrench01Icon}
+							/>
+							<OverflowTooltip
+								className="min-w-0 flex-1 truncate text-sm"
+								text={tool.name}
+							/>
+						</div>
+					</ContextMenuTrigger>
+					<ContextMenuContent>
+						<ContextMenuItem onClick={() => openTools(true)}>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={ArrowUpRight01Icon}
+							/>
+							Open in new tab
+						</ContextMenuItem>
+					</ContextMenuContent>
+				</ContextMenu>
 			</SidebarMenuItem>
 		));
 
 	return (
 		<SidebarSection
-			action={<SectionAddButton onClick={openTools} title="Browse tools" />}
+			action={
+				<SectionAddButton onClick={() => openTools()} title="Browse tools" />
+			}
 			collapsed={collapsed}
 			dnd={dnd}
 			label="Tools"
@@ -3735,51 +4225,73 @@ function PluginsSection({
 		pageSize
 	);
 
-	const openPlugins = () => openTab("/apps", { title: "Plugins" });
+	const openPlugins = (forceNew = false) =>
+		openTab("/apps", { title: "Plugins", forceNew });
 
 	const emptyMessage = loading ? "Loading…" : "No plugins installed";
 
 	const renderPluginRows = (list: typeof installed) =>
 		list.map((app) => (
 			<SidebarMenuItem key={app.id}>
-				{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-				<div
-					className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-					onClick={openPlugins}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") {
-							openPlugins();
-						}
-					}}
-					role="button"
-					tabIndex={0}
-				>
-					{app.companion?.icon ? (
-						<Icon
-							className="size-4 shrink-0 text-muted-foreground"
-							icon={app.companion.icon}
-							size={16}
-						/>
-					) : (
-						<HugeiconsIcon
-							className="size-4 shrink-0 text-muted-foreground"
-							icon={PuzzleIcon}
-						/>
-					)}
-					<OverflowTooltip
-						className="min-w-0 flex-1 truncate text-sm"
-						text={app.name}
-					/>
-					{!app.enabled && (
-						<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
-					)}
-				</div>
+				<ContextMenu>
+					<ContextMenuTrigger>
+						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+						<div
+							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							onAuxClick={(e) => {
+								if (e.button === 1) {
+									e.preventDefault();
+									openPlugins(true);
+								}
+							}}
+							onClick={() => openPlugins()}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									openPlugins();
+								}
+							}}
+							role="button"
+							tabIndex={0}
+						>
+							{app.companion?.icon ? (
+								<Icon
+									className="size-4 shrink-0 text-muted-foreground"
+									icon={app.companion.icon}
+									size={16}
+								/>
+							) : (
+								<HugeiconsIcon
+									className="size-4 shrink-0 text-muted-foreground"
+									icon={PuzzleIcon}
+								/>
+							)}
+							<OverflowTooltip
+								className="min-w-0 flex-1 truncate text-sm"
+								text={app.name}
+							/>
+							{!app.enabled && (
+								<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
+							)}
+						</div>
+					</ContextMenuTrigger>
+					<ContextMenuContent>
+						<ContextMenuItem onClick={() => openPlugins(true)}>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={ArrowUpRight01Icon}
+							/>
+							Open in new tab
+						</ContextMenuItem>
+					</ContextMenuContent>
+				</ContextMenu>
 			</SidebarMenuItem>
 		));
 
 	return (
 		<SidebarSection
-			action={<SectionAddButton onClick={openPlugins} title="Add plugin" />}
+			action={
+				<SectionAddButton onClick={() => openPlugins()} title="Add plugin" />
+			}
 			collapsed={collapsed}
 			dnd={dnd}
 			label="Plugins"
@@ -3841,6 +4353,7 @@ function AppsSection({
 }: SectionProps) {
 	const { openTab } = useTabsContext();
 	const { companions } = usePluginContributions();
+	const report = useOptionalReport();
 
 	// Critical: an always-rendered empty header would appear for every user on
 	// upgrade (loadSectionOrder splices missing default keys into persisted orders),
@@ -3863,39 +4376,72 @@ function AppsSection({
 			<SidebarMenu className="gap-0.5">
 				{companions.map((c) => {
 					const label = c.label || c.name;
-					const open = () =>
-						openTab(pluginCompanionPath(c.id), { title: label });
+					const open = (forceNew = false) =>
+						openTab(pluginCompanionPath(c.id), { title: label, forceNew });
+					const reportApp = () => {
+						report?.open({
+							id: c.pluginId || c.id,
+							kind: "plugin",
+							itemName: label,
+							source: "installed",
+						});
+					};
 					return (
 						<SidebarMenuItem key={c.id}>
-							{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-							<div
-								className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-								onClick={open}
-								onKeyDown={(e) => {
-									if (e.key === "Enter") {
-										open();
-									}
-								}}
-								role="button"
-								tabIndex={0}
-							>
-								{c.icon ? (
-									<Icon
-										className="size-4 shrink-0 text-muted-foreground"
-										icon={c.icon}
-										size={16}
-									/>
-								) : (
-									<HugeiconsIcon
-										className="size-4 shrink-0 text-muted-foreground"
-										icon={GridIcon}
-									/>
-								)}
-								<OverflowTooltip
-									className="min-w-0 flex-1 truncate text-sm"
-									text={label}
-								/>
-							</div>
+							<ContextMenu>
+								<ContextMenuTrigger>
+									{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+									<div
+										className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+										onAuxClick={(e) => {
+											if (e.button === 1) {
+												e.preventDefault();
+												open(true);
+											}
+										}}
+										onClick={() => open()}
+										onKeyDown={(e) => {
+											if (e.key === "Enter") {
+												open();
+											}
+										}}
+										role="button"
+										tabIndex={0}
+									>
+										{c.icon ? (
+											<Icon
+												className="size-4 shrink-0 text-muted-foreground"
+												icon={c.icon}
+												size={16}
+											/>
+										) : (
+											<HugeiconsIcon
+												className="size-4 shrink-0 text-muted-foreground"
+												icon={GridIcon}
+											/>
+										)}
+										<OverflowTooltip
+											className="min-w-0 flex-1 truncate text-sm"
+											text={label}
+										/>
+									</div>
+								</ContextMenuTrigger>
+								<ContextMenuContent>
+									<ContextMenuItem onClick={() => open()}>Open</ContextMenuItem>
+									<ContextMenuItem onClick={() => open(true)}>
+										<HugeiconsIcon
+											className="mr-2 size-4"
+											icon={ArrowUpRight01Icon}
+										/>
+										Open in new tab
+									</ContextMenuItem>
+									{report ? (
+										<ContextMenuItem onClick={reportApp}>
+											Report
+										</ContextMenuItem>
+									) : null}
+								</ContextMenuContent>
+							</ContextMenu>
 						</SidebarMenuItem>
 					);
 				})}
@@ -3965,6 +4511,7 @@ function DynamicSidebarSection({
 			openTab(renderTemplate(spec.itemTarget, { item }, { uriEncode: true }), {
 				title,
 				forceNew,
+				icon: asGlyphValue(item.icon),
 			});
 		}
 	};
@@ -4085,17 +4632,65 @@ function DynamicSidebarSection({
 										role="button"
 										tabIndex={0}
 									>
-										{contribution.icon ? (
-											<Icon
-												className="size-4 shrink-0 text-muted-foreground"
-												icon={contribution.icon}
-												size={16}
-											/>
-										) : null}
-										<OverflowTooltip
-											className="min-w-0 flex-1 truncate text-sm"
-											text={title}
-										/>
+										{(() => {
+											const glyph = asGlyphValue(row.raw.icon) ?? null;
+											return (
+												<GlyphDisplay
+													className="size-4 shrink-0 text-muted-foreground"
+													fallback={
+														contribution.icon ? (
+															<Icon
+																className="size-4 shrink-0 text-muted-foreground"
+																icon={contribution.icon}
+																size={16}
+															/>
+														) : null
+													}
+													size={16}
+													value={glyph}
+												/>
+											);
+										})()}
+										<SidebarItemPreview
+											content={
+												<SidebarPreviewTitle
+													title={
+														spec?.itemPreview?.title
+															? renderTemplate(
+																	spec.itemPreview.title,
+																	{ item: row.raw },
+																	{}
+																)
+															: title
+													}
+												>
+													{spec?.itemPreview?.description ? (
+														<p className="line-clamp-4 text-muted-foreground text-xs leading-relaxed">
+															{renderTemplate(
+																spec.itemPreview.description,
+																{ item: row.raw },
+																{}
+															)}
+														</p>
+													) : null}
+													{spec?.itemPreview?.meta?.map((meta) => (
+														<SidebarPreviewMeta
+															key={meta.label}
+															label={meta.label}
+															value={renderTemplate(
+																meta.value,
+																{ item: row.raw },
+																{}
+															)}
+														/>
+													))}
+												</SidebarPreviewTitle>
+											}
+										>
+											<span className="min-w-0 flex-1 truncate text-sm">
+												{title}
+											</span>
+										</SidebarItemPreview>
 									</div>
 								</ContextMenuTrigger>
 								<ContextMenuContent>
@@ -4181,44 +4776,66 @@ function EnginesSection({
 		pageSize
 	);
 
-	const openEngines = () => openTab("/engines", { title: "Engines" });
+	const openEngines = (forceNew = false) =>
+		openTab("/engines", { title: "Engines", forceNew });
 
 	const emptyMessage = loading ? "Loading…" : "No engines installed";
 
 	const renderEngineRows = (list: typeof rows) =>
 		list.map((engine) => (
 			<SidebarMenuItem key={engine.name}>
-				{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-				<div
-					className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
-					onClick={openEngines}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") {
-							openEngines();
-						}
-					}}
-					role="button"
-					tabIndex={0}
-				>
-					<HugeiconsIcon
-						className="size-4 shrink-0 text-muted-foreground"
-						icon={CpuIcon}
-					/>
-					<OverflowTooltip
-						className="min-w-0 flex-1 truncate text-sm"
-						text={engine.displayName}
-					/>
-					{/* The resident engine gets a live dot. */}
-					{engine.active && (
-						<span className="size-1.5 shrink-0 rounded-full bg-primary" />
-					)}
-				</div>
+				<ContextMenu>
+					<ContextMenuTrigger>
+						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+						<div
+							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							onAuxClick={(e) => {
+								if (e.button === 1) {
+									e.preventDefault();
+									openEngines(true);
+								}
+							}}
+							onClick={() => openEngines()}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									openEngines();
+								}
+							}}
+							role="button"
+							tabIndex={0}
+						>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-muted-foreground"
+								icon={CpuIcon}
+							/>
+							<OverflowTooltip
+								className="min-w-0 flex-1 truncate text-sm"
+								text={engine.displayName}
+							/>
+							{/* The resident engine gets a live dot. */}
+							{engine.active && (
+								<span className="size-1.5 shrink-0 rounded-full bg-primary" />
+							)}
+						</div>
+					</ContextMenuTrigger>
+					<ContextMenuContent>
+						<ContextMenuItem onClick={() => openEngines(true)}>
+							<HugeiconsIcon
+								className="mr-2 size-4"
+								icon={ArrowUpRight01Icon}
+							/>
+							Open in new tab
+						</ContextMenuItem>
+					</ContextMenuContent>
+				</ContextMenu>
 			</SidebarMenuItem>
 		));
 
 	return (
 		<SidebarSection
-			action={<SectionAddButton onClick={openEngines} title="Add engine" />}
+			action={
+				<SectionAddButton onClick={() => openEngines()} title="Add engine" />
+			}
 			collapsed={collapsed}
 			dnd={dnd}
 			label="Engines"
@@ -4907,7 +5524,12 @@ function ProjectRow({
 	const customIcon = useWorkspaceStore(
 		(state) => state.projectIcons[bucket.path]
 	);
+	const customName = useWorkspaceStore(
+		(state) => state.projectNames[bucket.path]
+	);
+	const label = customName?.trim() || bucket.name;
 	const [iconDialogOpen, setIconDialogOpen] = useState(false);
+	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
 	const noun = count === 1 ? "chat" : "chats";
 	return (
@@ -4931,7 +5553,7 @@ function ProjectRow({
 								<ProjectGlyph fallback={null} icon={customIcon} />
 							) : undefined
 						}
-						label={bucket.name}
+						label={label}
 						onToggleCollapsed={onToggleCollapsed}
 						sectionKey={bucket.path}
 					>
@@ -4948,6 +5570,10 @@ function ProjectRow({
 					</SubSection>
 				</ContextMenuTrigger>
 				<ContextMenuContent>
+					<ContextMenuItem onClick={() => setSettingsOpen(true)}>
+						<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
+						Edit project…
+					</ContextMenuItem>
 					<ContextMenuItem onClick={() => onSetActive(bucket.path)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={FolderOpenIcon} />
 						Set as active project
@@ -4979,8 +5605,13 @@ function ProjectRow({
 					</ContextMenuItem>
 				</ContextMenuContent>
 			</ContextMenu>
+			<ProjectSettingsDialog
+				onOpenChange={setSettingsOpen}
+				open={settingsOpen}
+				path={bucket.path}
+			/>
 			<ProjectIconDialog
-				name={bucket.name}
+				name={label}
 				onOpenChange={setIconDialogOpen}
 				open={iconDialogOpen}
 				path={bucket.path}
@@ -4988,9 +5619,9 @@ function ProjectRow({
 			<AlertDialog onOpenChange={setConfirmDeleteOpen} open={confirmDeleteOpen}>
 				<AlertDialogContent>
 					<AlertDialogHeader>
-						<AlertDialogTitle>{`Delete all ${count} ${noun} in ${bucket.name}?`}</AlertDialogTitle>
+						<AlertDialogTitle>{`Delete all ${count} ${noun} in ${label}?`}</AlertDialogTitle>
 						<AlertDialogDescription>
-							{`This permanently deletes ${count} ${noun} in the "${bucket.name}" project. The project folder itself is untouched. This cannot be undone.`}
+							{`This permanently deletes ${count} ${noun} in the "${label}" project. The project folder itself is untouched. This cannot be undone.`}
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>
@@ -5610,9 +6241,20 @@ export function SidebarPanelContent({
 	onNewConversation,
 	onDeleteConversation,
 }: AppSidebarProps) {
-	const { listConversations, conversations, renameConversation, refresh } =
-		useChatHistoryContext();
-	const { openTab } = useTabsContext();
+	const {
+		listConversations,
+		conversations,
+		renameConversation,
+		setConversationGlyph,
+		refresh,
+		loadMessages,
+	} = useChatHistoryContext();
+	const { openTab, updateTabsIconWhere, requestScrollToMessage } =
+		useTabsContext();
+	const { resolvedTheme } = useTheme();
+	const beamTheme = resolvedTheme === "light" ? "light" : "dark";
+	const { dev } = useBuildProfile();
+	const [channel] = useReleaseChannel();
 	const activeNode = useActiveNode();
 	const { agents } = useAgents();
 	// Plugin enabled-state, used to hide a plugin-owned section (Meetings/Spaces)
@@ -5641,6 +6283,7 @@ export function SidebarPanelContent({
 	const workspaceFolder = useWorkspaceStore((s) => s.folder);
 	const recentFolders = useWorkspaceStore((s) => s.recentFolders);
 	const removedProjects = useWorkspaceStore((s) => s.removedProjects);
+	const projectNames = useWorkspaceStore((s) => s.projectNames);
 	// Drives whether the "Tabs" section renders (vertical layout) or is skipped
 	// (horizontal layout, where the title-bar strip owns the tabs).
 	const tabLayout = useTabLayout();
@@ -5822,6 +6465,18 @@ export function SidebarPanelContent({
 		});
 	};
 
+	const markUnread = (id: string) => {
+		setUnreadIds((prev) => {
+			if (prev.has(id)) {
+				return prev;
+			}
+			const next = new Set(prev);
+			next.add(id);
+			saveIdSet(UNREAD_KEY, next);
+			return next;
+		});
+	};
+
 	const toggleInSet = (
 		setter: typeof setPinnedIds,
 		key: string,
@@ -5860,7 +6515,22 @@ export function SidebarPanelContent({
 	const handleSelectConversation = (id: string) => {
 		markRead(id);
 		onSelectConversation?.(id);
-		openTab("/chat", { conversationId: id });
+		const conv = conversations.find((c) => c.id === id);
+		openTab("/chat", {
+			conversationId: id,
+			title: conv?.title,
+			icon: conv?.icon ?? null,
+		});
+	};
+
+	const handleJumpToMessage = (conversationId: string, messageId: string) => {
+		handleSelectConversation(conversationId);
+		requestScrollToMessage(conversationId, messageId);
+		window.dispatchEvent(
+			new CustomEvent("ryu:scroll-to-message", {
+				detail: { messageId },
+			})
+		);
 	};
 
 	// Open a persisted side chat from the sidebar: bring its thread into focus,
@@ -5878,7 +6548,13 @@ export function SidebarPanelContent({
 
 	const handleOpenConversationInNewTab = (id: string) => {
 		markRead(id);
-		openTab("/chat", { conversationId: id, forceNew: true });
+		const conv = conversations.find((c) => c.id === id);
+		openTab("/chat", {
+			conversationId: id,
+			forceNew: true,
+			title: conv?.title,
+			icon: conv?.icon ?? null,
+		});
 	};
 
 	// Archived chats drop into a collapsed bucket (still reachable, so they can be
@@ -5906,14 +6582,18 @@ export function SidebarPanelContent({
 			...projects.map((p) => p.path),
 		]),
 	].filter((path) => !removedSet.has(path));
-	const projectList: ProjectBucket[] = projectPaths.map(
-		(path) =>
-			bucketByPath.get(path) ?? {
-				conversations: [],
-				name: projectName(path),
-				path,
-			}
-	);
+	const projectList: ProjectBucket[] = projectPaths.map((path) => {
+		const existing = bucketByPath.get(path);
+		const name = projectName(path, projectNames);
+		if (existing) {
+			return existing.name === name ? existing : { ...existing, name };
+		}
+		return {
+			conversations: [],
+			name,
+			path,
+		};
+	});
 	const looseChats: Conversation[] = [
 		...loose,
 		...projects
@@ -6192,11 +6872,19 @@ export function SidebarPanelContent({
 		archivedIds,
 		pinnedIds,
 		unreadIds,
+		loadMessages,
 		onDeleteConversation: onDeleteConversation ?? (() => undefined),
+		onJumpToMessage: handleJumpToMessage,
+		onMarkRead: markRead,
+		onMarkUnread: markUnread,
 		onOpenInNewTab: handleOpenConversationInNewTab,
 		onOpenSideChat: handleOpenSideChat,
 		onRenameConversation: renameConversation,
 		onSelectConversation: handleSelectConversation,
+		onSetConversationIcon: (id, icon) => {
+			setConversationGlyph(id, icon);
+			updateTabsIconWhere((t) => t.conversationId === id, icon);
+		},
 		onToggleArchive: handleToggleArchive,
 		onTogglePin: handleTogglePin,
 		target: toTarget(activeNode),
@@ -6464,7 +7152,7 @@ export function SidebarPanelContent({
 			? []
 			: tabbedKeys.map((key) => ({
 					key,
-					label: SECTION_LABELS[key as BuiltinSectionKey] ?? key,
+					label: sectionLabels[key] ?? key,
 				}));
 
 	return (
@@ -6480,11 +7168,10 @@ export function SidebarPanelContent({
 						className="flex items-center gap-2 px-2 pt-2 pb-1"
 						data-tauri-drag-region
 					>
-						{/* The logo and the back/forward/sidebar-toggle/search cluster all
-						    live pinned at the window's top-left (in Layout). The node
-						    selector is right-aligned here so it never collides with that
-						    cluster. The build badge ("Dev" / channel) moved down beside the
-						    account button (see NavUser). */}
+						{/* Back/forward/sidebar-toggle/search live pinned at the window's
+						    top-left (in Layout). The node selector is right-aligned here so
+						    it never collides with that cluster. The build badge ("Dev" /
+						    channel) sits beside the account button (see NavUser). */}
 						<div
 							className="ml-auto flex items-center gap-0.5"
 							data-tauri-drag-region={false}
@@ -6493,6 +7180,44 @@ export function SidebarPanelContent({
 								<NodeSelector mode="compact-dropdown" />
 							)}
 						</div>
+					</div>
+				)}
+				{/* Logo lockup + Research Preview pill. BorderBeam matches BuildBadge
+				    (metal-fx freezes after first paint in the sidebar WebView). */}
+				{!hiddenChrome.has("logo") && (
+					<div
+						className={`flex w-full items-center gap-4 px-3 py-1.5 ${
+							hiddenChrome.has("node-selector") ? "pt-2" : ""
+						}`}
+					>
+						<button
+							aria-label="Home"
+							className="shrink-0 text-left transition-opacity hover:opacity-80"
+							onClick={() => openTab("/home")}
+							type="button"
+						>
+							<Logo className="text-foreground" size="20px" variant="outline" />
+						</button>
+						<BorderBeam
+							borderRadius={10}
+							className="inline-flex shrink-0 overflow-visible"
+							colorVariant="colorful"
+							size="sm"
+							strength={0.85}
+							style={{ borderRadius: "999px 999px 999px 0" }}
+							theme={beamTheme}
+						>
+							<button
+								className="inline-flex h-5 items-center bg-muted px-2 font-medium text-xs leading-none transition-opacity hover:opacity-80"
+								onClick={() => openTab("/home")}
+								style={{ borderRadius: "999px 999px 999px 0" }}
+								type="button"
+							>
+								{dev || channel !== "stable"
+									? `Research Preview (${dev ? "Dev" : channel === "canary" ? "Canary" : channel === "nightly" ? "Nightly" : "Beta"})`
+									: "Research Preview"}
+							</button>
+						</BorderBeam>
 					</div>
 				)}
 				<SidebarMenu>

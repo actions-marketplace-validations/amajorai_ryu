@@ -10,8 +10,8 @@ import {
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Checkbox } from "@ryu/ui/components/checkbox";
-import type { GradientDirection } from "@ryu/ui/components/dither-kit/gradient";
 import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
+import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { Label } from "@ryu/ui/components/label";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
@@ -24,11 +24,7 @@ import { AgentCalendarView } from "@/src/components/agents/AgentCalendarView.tsx
 import { AgentCapabilitiesPanel } from "@/src/components/agents/AgentCapabilitiesPanel.tsx";
 import { AgentChannelsSection } from "@/src/components/agents/AgentChannelsSection.tsx";
 import { AgentEvalsView } from "@/src/components/agents/AgentEvalsView.tsx";
-import {
-	type AgentAvatarValue,
-	type AgentDitherValue,
-	AgentImageField,
-} from "@/src/components/agents/AgentImageField.tsx";
+import { AgentImageField } from "@/src/components/agents/AgentImageField.tsx";
 import { AgentLanyardCard } from "@/src/components/agents/AgentLanyardCard.tsx";
 import { AgentRunHistoryView } from "@/src/components/agents/AgentRunHistoryView.tsx";
 import { AgentSmartRouteOverride } from "@/src/components/agents/AgentSmartRouteOverride.tsx";
@@ -389,46 +385,82 @@ const ACP_CUSTOM_ENGINE = "__acp_exec_custom__";
 /** Engine prefix Core treats as a literal ACP spawn command (`agent_route`). */
 const ACP_EXEC_PREFIX = "acp-exec:";
 
-const DITHER_DIRECTIONS: GradientDirection[] = ["up", "down", "left", "right"];
-
-/** Coerce a persisted direction string to a valid {@link GradientDirection}. */
-function coerceDirection(value: string | null | undefined): GradientDirection {
-	return DITHER_DIRECTIONS.find((d) => d === value) ?? "up";
-}
-
-/**
- * Reconstruct a typed dither avatar from a persisted persona spec, or null when
- * absent / invalid (`from` must be a known palette colour).
- */
-function personaToDither(
-	dither: AgentPersona["dither"]
-): AgentDitherValue | null {
-	if (!(dither && isDitherColor(dither.from))) {
+/** Fold a saved persona into a GlyphPicker value. */
+function personaToGlyphValue(
+	persona: AgentPersona | null | undefined
+): GlyphValue {
+	if (!persona) {
 		return null;
 	}
-	return {
-		from: dither.from,
-		to: isDitherColor(dither.to) ? dither.to : null,
-		direction: coerceDirection(dither.direction),
-	};
-}
-
-/** Fold the three avatar-source states into the field's discriminated value. */
-function toAvatarValue(
-	image: string | null,
-	icon: string | null,
-	dither: AgentDitherValue | null
-): AgentAvatarValue {
-	if (image) {
-		return { kind: "image", dataUrl: image };
+	if (persona.avatar_url) {
+		return { kind: "avatar", dataUrl: persona.avatar_url };
 	}
-	if (icon) {
-		return { kind: "icon", id: icon };
+	const ditherLayer: GlyphDitherValue | undefined =
+		persona.dither && isDitherColor(persona.dither.from)
+			? {
+					from: persona.dither.from,
+					to: isDitherColor(persona.dither.to) ? persona.dither.to : null,
+					direction:
+						persona.dither.direction === "down" ||
+						persona.dither.direction === "left" ||
+						persona.dither.direction === "right"
+							? persona.dither.direction
+							: "up",
+				}
+			: undefined;
+	if (persona.emoji) {
+		return {
+			kind: "emoji",
+			emoji: persona.emoji,
+			...(ditherLayer ? { dither: ditherLayer } : {}),
+		};
 	}
-	if (dither) {
-		return { kind: "dither", dither };
+	if (persona.icon) {
+		return {
+			kind: "icon",
+			id: persona.icon,
+			...(persona.icon_color ? { color: persona.icon_color } : {}),
+			...(ditherLayer ? { dither: ditherLayer } : {}),
+		};
+	}
+	if (persona.dicebear?.style && persona.dicebear.seed) {
+		return {
+			kind: "dicebear",
+			style: persona.dicebear.style,
+			seed: persona.dicebear.seed,
+		};
+	}
+	if (ditherLayer) {
+		return { kind: "dither", dither: ditherLayer };
 	}
 	return null;
+}
+
+/** Split a GlyphPicker value into persona avatar fields.
+ * Dither may coexist with icon/emoji as a background; never with dicebear/avatar. */
+function glyphToPersonaFields(
+	glyph: GlyphValue
+): Pick<
+	AgentPersona,
+	"avatar_url" | "emoji" | "icon" | "icon_color" | "dicebear" | "dither"
+> {
+	const ditherBg =
+		glyph?.kind === "icon" || glyph?.kind === "emoji"
+			? (glyph.dither ?? null)
+			: glyph?.kind === "dither"
+				? glyph.dither
+				: null;
+	return {
+		avatar_url: glyph?.kind === "avatar" ? glyph.dataUrl : null,
+		emoji: glyph?.kind === "emoji" ? glyph.emoji : null,
+		icon: glyph?.kind === "icon" ? glyph.id : null,
+		icon_color: glyph?.kind === "icon" ? (glyph.color ?? null) : null,
+		dicebear:
+			glyph?.kind === "dicebear"
+				? { style: glyph.style, seed: glyph.seed }
+				: null,
+		dither: ditherBg,
+	};
 }
 
 function agentEngineOptionId(agent: AgentSummary): string | null {
@@ -559,14 +591,9 @@ export default function AgentEditPage({
 	const [personaDisplayName, setPersonaDisplayName] = useState("");
 	const [tone, setTone] = useState<ToneOption>("neutral");
 	const [customTone, setCustomTone] = useState("");
-	// Custom agent avatar. Three mutually-exclusive sources — a cropped image
-	// stored inline as a data URL, a custom icon id, or a dither gradient. All
-	// null = use the engine logo. Setting one clears the others on save.
-	const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
-	const [avatarIcon, setAvatarIcon] = useState<string | null>(null);
-	const [avatarDither, setAvatarDither] = useState<AgentDitherValue | null>(
-		null
-	);
+	// Custom agent avatar — single GlyphValue covering avatar/icon/emoji/
+	// dicebear/dither. Null = use the engine logo.
+	const [avatarGlyph, setAvatarGlyph] = useState<GlyphValue>(null);
 
 	// ── Advanced inference (per-agent sampling defaults) ─────────────────────────
 	const [sampling, setSampling] = useState<SamplingConfig>({});
@@ -880,9 +907,7 @@ export default function AgentEditPage({
 			// (and a subsequent save no longer overwrites them with defaults).
 			const persona = existing.persona;
 			setPersonaDisplayName(persona?.display_name ?? "");
-			setAvatarUrl(persona?.avatar_url ?? null);
-			setAvatarIcon(persona?.icon ?? null);
-			setAvatarDither(personaToDither(persona?.dither));
+			setAvatarGlyph(personaToGlyphValue(persona));
 			const savedTone = persona?.tone ?? null;
 			const presetTone = savedTone
 				? TONE_OPTIONS.find(
@@ -1039,9 +1064,7 @@ export default function AgentEditPage({
 			persona: {
 				display_name: personaDisplayName.trim() || null,
 				tone: toneValue === "neutral" ? null : toneValue,
-				avatar_url: avatarUrl,
-				icon: avatarIcon,
-				dither: avatarDither,
+				...glyphToPersonaFields(avatarGlyph),
 			},
 			// Advanced sampling defaults — passed through to Core's agent record.
 			inference: sampling,
@@ -1400,13 +1423,8 @@ export default function AgentEditPage({
 						<AgentImageField
 							disabled={isLocked}
 							fallback={<AgentLogo engine={chatModel} size="24px" />}
-							onChange={(next) => {
-								// A single active source: setting one clears the others.
-								setAvatarUrl(next?.kind === "image" ? next.dataUrl : null);
-								setAvatarIcon(next?.kind === "icon" ? next.id : null);
-								setAvatarDither(next?.kind === "dither" ? next.dither : null);
-							}}
-							value={toAvatarValue(avatarUrl, avatarIcon, avatarDither)}
+							onChange={setAvatarGlyph}
+							value={avatarGlyph}
 						/>
 					}
 					byoaPanel={

@@ -4,16 +4,20 @@
 // whether there is history (so the island grows from a compact composer bar to the
 // full panel) and the composer's height (so the compact bar tracks the draft).
 
+import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
 import { IslandChatView } from "@ryu/blocks/island/chat/island-chat";
+import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useIslandComposerContext } from "../../context/island-composer-context.tsx";
+import { useComposerShortcutBindings } from "../../hooks/use-composer-shortcut-bindings.ts";
 import { useIslandState } from "../../store/island-state.ts";
 import { useIslandChat } from "./use-island-chat.ts";
 
 type Reachability = "checking" | "offline" | "online";
 
 export function IslandChat() {
-	const { leftActions, getAcpPayload } = useIslandComposerContext();
+	const { leftActions, getAcpPayload, sections } = useIslandComposerContext();
+	const composerShortcuts = useComposerShortcutBindings();
 	// Session-scoped double-check toggle. Read via a getter so useIslandChat's
 	// `send` callback never closes over a stale value.
 	const [doubleCheck, setDoubleCheck] = useState(false);
@@ -74,6 +78,12 @@ export function IslandChat() {
 		</button>
 	);
 
+	const onComposerKeyDown = useCallback(
+		(event: KeyboardEvent<HTMLTextAreaElement>): boolean =>
+			handleComposerSettingsShortcut(event, sections, composerShortcuts),
+		[sections, composerShortcuts]
+	);
+
 	return (
 		<div className="flex h-full w-full flex-col gap-2">
 			{notes.length > 0 ? (
@@ -125,6 +135,7 @@ export function IslandChat() {
 					leftActions={leftActions}
 					messages={messages}
 					offline={offline}
+					onComposerKeyDown={onComposerKeyDown}
 					onComposerResize={setComposerHeight}
 					onPrefillConsumed={clearChatPrefill}
 					onRemoveAttachment={removeAttachment}

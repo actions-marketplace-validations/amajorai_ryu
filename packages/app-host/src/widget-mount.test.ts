@@ -341,8 +341,36 @@ describe("window.openai parity methods", () => {
 			// A KNOWN-but-unimplemented method → structured server_error with a clear
 			// message, NOT the unknown-method CapabilityError.
 			expect((err as PortError).code).toBe("server_error");
+			expect((err as Error).message).toMatch(/not available/);
+		}
+		try {
+			await call("ui.selectFiles", [{}]);
+			throw new Error("expected rejection");
+		} catch (err) {
+			expect((err as PortError).code).toBe("server_error");
 			expect((err as Error).message).toMatch(/not supported/);
 		}
+		close();
+	});
+
+	it("ui.uploadFile delegates to the host service", async () => {
+		const uploaded = {
+			id: "doc-1",
+			space_id: "space-up",
+			name: "a.png",
+			size: 12,
+			mime_type: "image/png",
+			url: "http://node/api/uploads/doc-1",
+			data_url: "data:image/png;base64,AAAA",
+		};
+		const svc: HostServices = {
+			listAgents: () => Promise.resolve([]),
+			registerRoute: () => Promise.resolve(null),
+			uploadFile: () => Promise.resolve(uploaded),
+		};
+		const { call, close } = channelPair(LOCAL_CAPS, svc);
+		const result = await call("ui.uploadFile", [{ accept: "image/*" }]);
+		expect(result).toEqual(uploaded);
 		close();
 	});
 });

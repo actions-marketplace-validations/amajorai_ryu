@@ -279,16 +279,23 @@ const api: IslandApi = {
 		get: (): Promise<string | null> => ipcRenderer.invoke(IPC.dictation.get),
 		onChanged: (listener: (value: string) => void): (() => void) =>
 			subscribe(IPC.dictation.changed, listener),
-		onToggle: (listener: () => void): (() => void) =>
+		onToggle: (listener: (task: "transcribe" | "ask") => void): (() => void) =>
 			subscribe(IPC.dictation.toggle, listener),
-		onStart: (listener: () => void): (() => void) =>
+		onStart: (listener: (task: "transcribe" | "ask") => void): (() => void) =>
 			subscribe(IPC.dictation.start, listener),
 		onStop: (listener: () => void): (() => void) =>
 			subscribe(IPC.dictation.stop, listener),
-		setRecording: (active: boolean): void =>
-			ipcRenderer.send(IPC.dictation.recordingState, active),
-		submit: (audio: ArrayBuffer): Promise<DictationSubmitResult> =>
-			ipcRenderer.invoke(IPC.dictation.submit, audio),
+		setRecording: (active: boolean, task?: "transcribe" | "ask"): void =>
+			ipcRenderer.send(
+				IPC.dictation.recordingState,
+				active,
+				task ?? "transcribe"
+			),
+		submit: (
+			audio: ArrayBuffer,
+			task?: "transcribe" | "ask"
+		): Promise<DictationSubmitResult> =>
+			ipcRenderer.invoke(IPC.dictation.submit, audio, task ?? "transcribe"),
 	},
 	agents: {
 		get: (): Promise<string | null> => ipcRenderer.invoke(IPC.agents.get),
@@ -296,6 +303,11 @@ const api: IslandApi = {
 			ipcRenderer.invoke(IPC.agents.set, raw),
 		onChanged: (listener: (value: string) => void): (() => void) =>
 			subscribe(IPC.agents.changed, listener),
+	},
+	keybindings: {
+		get: (): Promise<string | null> => ipcRenderer.invoke(IPC.keybindings.get),
+		onChanged: (listener: (value: string) => void): (() => void) =>
+			subscribe(IPC.keybindings.changed, listener),
 	},
 	tts: {
 		get: (): Promise<string | null> => ipcRenderer.invoke(IPC.tts.get),

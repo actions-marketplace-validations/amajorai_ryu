@@ -1,4 +1,5 @@
 import { planLimit } from "@ryu/auth/lib/plans";
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import type { ReactNode } from "react";
 import {
 	createContext,
@@ -44,9 +45,18 @@ export type {
 } from "@/src/lib/splitTree.ts";
 
 export interface Tab {
+	/** Live run in progress for this tab (streaming chat, etc.). Runtime-only —
+	    drives the tab-strip spinner + title shimmer; never persisted. */
+	busy?: boolean;
 	conversationId?: string;
 	/** Membership in a TabGroup (see `groups`); pinned tabs are never grouped. */
 	groupId?: string;
+	/**
+	 * Optional entity glyph (chat / space / page / agent / meeting / plugin row).
+	 * When set, the title-bar tab strip renders it instead of the path Hugeicon —
+	 * same value the sidebar shows. `null` / absent → path fallback.
+	 */
+	icon?: GlyphValue;
 	id: string;
 	initialAgent?: string;
 	/** One-shot image attachments staged on the launchpad composer, carried into
@@ -74,6 +84,9 @@ export interface Tab {
 	path: string;
 	/** Pinned tabs sit in a compact block at the left and never auto-unload. */
 	pinned?: boolean;
+	/** One-shot message id to scroll into view once the chat tab hydrates.
+	    Runtime-only; ChatPage clears it after consuming. */
+	scrollToMessageId?: string;
 	/** Membership in a Split view (see `splits`). Mirrors `groupId`: the tab is
 	    the source of truth for its split membership, so `normalize` keeps split
 	    members contiguous and the strip can bracket them. A tab is never both
@@ -201,6 +214,8 @@ interface TabsContextValue {
 	addTabToSplit: (splitId: string, tabId: string) => void;
 	canGoBack: boolean;
 	canGoForward: boolean;
+	/** Clear a tab's pending scroll-to-message after ChatPage consumes it. */
+	clearScrollToMessage: (tabId: string) => void;
 	closeGroup: (groupId: string) => void;
 	closeTab: (id: string) => void;
 	// Grouping
@@ -225,12 +240,16 @@ interface TabsContextValue {
 			initialImages?: AttachedImage[];
 			initialAgent?: string;
 			initialProject?: string;
+			/** Entity glyph to show in the tab strip (mirrors the sidebar). */
+			icon?: GlyphValue;
 		}
 	) => string;
 	/** Drop a single tab out of its split (dissolving the split if <2 remain).*/
 	removeFromSplit: (tabId: string) => void;
 	removeTabFromGroup: (tabId: string) => void;
 	renameGroup: (groupId: string, name: string) => void;
+	/** Queue a one-shot scroll-to-message for a chat tab (consumed by ChatPage). */
+	requestScrollToMessage: (conversationId: string, messageId: string) => void;
 	restoreTab: () => void;
 	setGroupColor: (groupId: string, color: TabGroupColor) => void;
 	setSplitOrientation: (splitId: string, orientation: SplitOrientation) => void;
@@ -261,6 +280,15 @@ interface TabsContextValue {
 	unloadTab: (id: string) => void;
 	/** Dissolve the entire split that `tabId` belongs to. */
 	unsplit: (tabId: string) => void;
+	/** Toggle the runtime-only busy flag (spinner + shimmer on the tab chip). */
+	updateTabBusy: (id: string, busy: boolean) => void;
+	/** Set or clear a tab's leading glyph (title bar + vertical tabs). */
+	updateTabIcon: (id: string, icon: GlyphValue) => void;
+	/**
+	 * Patch `icon` on every open tab matching `match` — used when an entity's
+	 * glyph changes so already-open tabs stay in sync with the sidebar.
+	 */
+	updateTabsIconWhere: (match: (tab: Tab) => boolean, icon: GlyphValue) => void;
 	updateTabTitle: (id: string, title: string) => void;
 }
 
@@ -326,10 +354,19 @@ const PATH_TITLES: Record<string, string> = {
 	"/library/space": "Spaces",
 	"/library/workflow": "Workflows",
 	"/library/chat": "Chats",
+	"/library/channel": "Channels",
+	"/library/identity": "Identities",
 	"/library/memory": "Memory",
+	"/channels": "Channels",
+	"/identities": "Identities",
+	"/identities/new": "New identity",
 	"/engines": "Engines",
 	"/store": "Customize",
 	"/store/agents": "Customize",
+	"/store/apps": "Customize",
+	"/store/plugins": "Customize",
+	"/store/workflows": "Customize",
+	"/marketplace": "Customize",
 	"/models": "Models",
 	"/skills": "Skills",
 	"/spaces": "Spaces",
@@ -337,7 +374,14 @@ const PATH_TITLES: Record<string, string> = {
 	"/workflows": "Workflows",
 	"/workflows/build": "Build a workflow",
 	"/calendar": "Calendar",
+	"/meetings": "Meetings",
+	"/quests": "Quests",
+	"/timeline": "Timeline",
+	"/activity": "Activity",
+	"/review": "Weekly review",
 	"/approvals": "Inbox",
+	"/inbox": "Inbox",
+	"/downloads": "Downloads",
 	"/settings": "Settings",
 	"/extensions": "Extensions",
 	"/apps": "Plugins",
@@ -357,6 +401,17 @@ function makeSplitId(): string {
 }
 
 const AGENT_EDIT_TITLE_RE = /^\/agents\/.+\/edit$/;
+const CHANNEL_DETAIL_TITLE_RE = /^\/channels\/[^/]+$/;
+const IDENTITY_PROFILE_TITLE_RE = /^\/identities\/profile\/[^/]+$/;
+
+/** Title-case a path segment (`downloads` → `Downloads`, `weekly-review` → `Weekly Review`). */
+function humanizePathSegment(segment: string): string {
+	return segment
+		.split(/[-_]/)
+		.filter(Boolean)
+		.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+		.join(" ");
+}
 
 function defaultTitle(path: string): string {
 	const base = path.split("?")[0];
@@ -364,7 +419,18 @@ function defaultTitle(path: string): string {
 	if (AGENT_EDIT_TITLE_RE.test(base)) {
 		return base.includes("/new/") ? "New agent" : "Edit agent";
 	}
-	return PATH_TITLES[base] ?? base.split("/").filter(Boolean).at(-1) ?? "Page";
+	if (CHANNEL_DETAIL_TITLE_RE.test(base)) {
+		return base.endsWith("/new") ? "New channel" : "Channel";
+	}
+	if (IDENTITY_PROFILE_TITLE_RE.test(base)) {
+		return "Identities";
+	}
+	const mapped = PATH_TITLES[base];
+	if (mapped) {
+		return mapped;
+	}
+	const segment = base.split("/").filter(Boolean).at(-1);
+	return segment ? humanizePathSegment(segment) : "Page";
 }
 
 // /chat tabs can have multiple instances; all other paths are singletons
@@ -426,6 +492,7 @@ function normalize(tabs: Tab[]): Tab[] {
     "open in new window" tear-off to seed the new window with one conversation. */
 export interface InitialTab {
 	conversationId?: string;
+	icon?: GlyphValue;
 	/** Pin this window's seeded tab to a specific node (carried from the source
 	    tab so a remote-targeted chat keeps targeting that node). */
 	node?: string;
@@ -444,6 +511,8 @@ const SESSION_TABS_KEY = "ryu_session_tabs";
     `PersistedSession.splits`) so a tiled workspace survives a relaunch. */
 interface PersistedTab {
 	conversationId?: string;
+	/** Serialized GlyphValue (or null). Omitted on older sessions. */
+	icon?: GlyphValue;
 	initialAgent?: string;
 	initialProject?: string;
 	path: string;
@@ -538,6 +607,7 @@ function persistSession(tabs: Tab[], activeTabId: string, splits: Split[]) {
 			initialAgent: t.initialAgent,
 			initialProject: t.initialProject,
 			pinned: t.pinned,
+			icon: t.icon,
 		}));
 		const activeIndex = Math.max(
 			0,
@@ -582,6 +652,7 @@ function restoreSession(): StartupState | null {
 			initialAgent: t.initialAgent,
 			initialProject: t.initialProject,
 			pinned: t.pinned,
+			icon: t.icon,
 		}));
 		// Revive split layouts over the fresh ids, then stamp membership onto the
 		// member tabs (membership drives normalize + the strip brackets).
@@ -813,6 +884,7 @@ export function TabsProvider({
 				initialImages?: AttachedImage[];
 				initialAgent?: string;
 				initialProject?: string;
+				icon?: GlyphValue;
 			}
 			// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
 		): string => {
@@ -823,6 +895,9 @@ export function TabsProvider({
 			// from anywhere (sidebar, palette, Library). No-ops for routes that
 			// carry no resolvable item.
 			stampRecentFromPath(base, opts?.conversationId);
+
+			const patchIcon = <T extends Tab>(tab: T): T =>
+				opts?.icon === undefined ? tab : { ...tab, icon: opts.icon };
 
 			// The unified Library is one tab that switches sections in place: any
 			// `/library` or `/library/<section>` navigation reuses an existing
@@ -835,13 +910,16 @@ export function TabsProvider({
 					(t) => t.path === "/library" || t.path.startsWith("/library/")
 				);
 				if (existing) {
-					if (existing.path !== base) {
-						const reused: Tab = {
+					if (existing.path !== base || opts?.icon !== undefined) {
+						const reused: Tab = patchIcon({
 							...existing,
 							path: base,
 							title: opts?.title ?? defaultTitle(path),
-							navToken: (existing.navToken ?? 0) + 1,
-						};
+							navToken:
+								existing.path === base
+									? existing.navToken
+									: (existing.navToken ?? 0) + 1,
+						});
 						setTabs((prev) => {
 							const next = normalize(
 								prev.map((t) => (t.id === reused.id ? reused : t))
@@ -859,6 +937,16 @@ export function TabsProvider({
 			if (isSingleton(base) && !opts?.forceNew) {
 				const existing = current.find((t) => t.path === base);
 				if (existing) {
+					if (opts?.icon !== undefined && existing.icon !== opts.icon) {
+						const patched = patchIcon(existing);
+						setTabs((prev) => {
+							const next = normalize(
+								prev.map((t) => (t.id === patched.id ? patched : t))
+							);
+							tabsRef.current = next;
+							return next;
+						});
+					}
 					markActive(existing.id);
 					pushHistory(existing.id);
 					return existing.id;
@@ -870,6 +958,22 @@ export function TabsProvider({
 					(t) => t.path === "/chat" && t.conversationId === opts.conversationId
 				);
 				if (existing) {
+					if (
+						opts.icon !== undefined ||
+						(opts.title !== undefined && opts.title !== existing.title)
+					) {
+						const patched: Tab = {
+							...patchIcon(existing),
+							...(opts.title === undefined ? {} : { title: opts.title }),
+						};
+						setTabs((prev) => {
+							const next = normalize(
+								prev.map((t) => (t.id === patched.id ? patched : t))
+							);
+							tabsRef.current = next;
+							return next;
+						});
+					}
 					markActive(existing.id);
 					pushHistory(existing.id);
 					return existing.id;
@@ -890,7 +994,7 @@ export function TabsProvider({
 				!activeTab.pinned &&
 				!activeTab.splitId
 			) {
-				const reused: Tab = {
+				const reused: Tab = patchIcon({
 					...activeTab,
 					path: base,
 					title: opts?.title ?? defaultTitle(path),
@@ -904,7 +1008,7 @@ export function TabsProvider({
 					// (otherwise ChatPage keeps rendering the previous thread).
 					navToken: (activeTab.navToken ?? 0) + 1,
 					unloaded: false,
-				};
+				});
 				setTabs((prev) => {
 					const next = normalize(
 						prev.map((t) => (t.id === reused.id ? reused : t))
@@ -926,7 +1030,7 @@ export function TabsProvider({
 				return activeTabIdRef.current;
 			}
 
-			const newTab: Tab = {
+			const newTab: Tab = patchIcon({
 				id: makeTabId(),
 				path: base,
 				title: opts?.title ?? defaultTitle(path),
@@ -936,7 +1040,7 @@ export function TabsProvider({
 				initialImages: opts?.initialImages,
 				initialAgent: opts?.initialAgent,
 				initialProject: opts?.initialProject,
-			};
+			});
 			setTabs((prev) => {
 				const next = normalize([...prev, newTab]);
 				tabsRef.current = next;
@@ -1047,7 +1151,11 @@ export function TabsProvider({
 			if (stack.length === 0) {
 				return stack;
 			}
-			const { tab, index } = stack.at(-1);
+			const last = stack.at(-1);
+			if (!last) {
+				return stack;
+			}
+			const { tab, index } = last;
 			// Drop any stale split membership — the split was almost certainly
 			// dissolved when this tab closed, so restore it as a standalone tab.
 			const restored: Tab = {
@@ -1108,6 +1216,74 @@ export function TabsProvider({
 
 	const updateTabTitle = useCallback((id: string, title: string) => {
 		setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, title } : t)));
+	}, []);
+
+	const updateTabIcon = useCallback((id: string, icon: GlyphValue) => {
+		setTabs((prev) => {
+			const next = prev.map((t) => (t.id === id ? { ...t, icon } : t));
+			tabsRef.current = next;
+			return next;
+		});
+	}, []);
+
+	const updateTabsIconWhere = useCallback(
+		(match: (tab: Tab) => boolean, icon: GlyphValue) => {
+			setTabs((prev) => {
+				let changed = false;
+				const next = prev.map((t) => {
+					if (!match(t)) {
+						return t;
+					}
+					changed = true;
+					return { ...t, icon };
+				});
+				if (!changed) {
+					return prev;
+				}
+				tabsRef.current = next;
+				return next;
+			});
+		},
+		[]
+	);
+
+	const updateTabBusy = useCallback((id: string, busy: boolean) => {
+		setTabs((prev) => {
+			const target = prev.find((t) => t.id === id);
+			if (!target || target.busy === busy) {
+				return prev;
+			}
+			return prev.map((t) => (t.id === id ? { ...t, busy } : t));
+		});
+	}, []);
+
+	const requestScrollToMessage = useCallback(
+		(conversationId: string, messageId: string) => {
+			setTabs((prev) => {
+				const target = prev.find(
+					(t) => t.path === "/chat" && t.conversationId === conversationId
+				);
+				if (!target) {
+					return prev;
+				}
+				return prev.map((t) =>
+					t.id === target.id ? { ...t, scrollToMessageId: messageId } : t
+				);
+			});
+		},
+		[]
+	);
+
+	const clearScrollToMessage = useCallback((tabId: string) => {
+		setTabs((prev) => {
+			const target = prev.find((t) => t.id === tabId);
+			if (!target?.scrollToMessageId) {
+				return prev;
+			}
+			return prev.map((t) =>
+				t.id === tabId ? { ...t, scrollToMessageId: undefined } : t
+			);
+		});
 	}, []);
 
 	// --- Reordering ------------------------------------------------------------
@@ -1690,6 +1866,11 @@ export function TabsProvider({
 				activateTab,
 				focusTab,
 				updateTabTitle,
+				updateTabIcon,
+				updateTabsIconWhere,
+				updateTabBusy,
+				requestScrollToMessage,
+				clearScrollToMessage,
 				restoreTab,
 				hasClosedTabs: closedTabs.length > 0,
 				goBack,

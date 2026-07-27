@@ -17,6 +17,7 @@ import {
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { TAB_UNLOAD_MINUTES_KEY } from "@/src/contexts/TabsContext.tsx";
+import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
 import { useAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
 import {
 	setNodeTabOverride,
@@ -39,6 +40,11 @@ import {
 	useTabOpenBehavior,
 } from "@/src/hooks/useTabOpenBehavior.ts";
 import { setTabSizing, useTabSizing } from "@/src/hooks/useTabSizing.ts";
+import {
+	setTabSwitchBehavior,
+	type TabSwitchBehavior,
+	useTabSwitchBehavior,
+} from "@/src/hooks/useTabSwitchBehavior.ts";
 import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import {
@@ -86,12 +92,20 @@ const TAB_UNLOAD_OPTIONS = [
 	{ value: "60", label: "After 1 hour" },
 ];
 
+// Ctrl/Cmd+Tab cycle order — sequential strip order (default) or MRU.
+const TAB_SWITCH_OPTIONS: { value: TabSwitchBehavior; label: string }[] = [
+	{ value: "sequential", label: "In order (left to right)" },
+	{ value: "recent", label: "Most recently used" },
+];
+
 export function GeneralTab() {
 	const navigate = useNavigate();
 	const tabOverrideEnabled = useNodeTabOverride();
 	const tabLayout = useTabLayout();
 	const tabSizing = useTabSizing();
+	const [autoHideTitleBar, setAutoHideTitleBar] = useAutoHideTitleBar();
 	const tabOpenBehavior = useTabOpenBehavior();
+	const tabSwitchBehavior = useTabSwitchBehavior();
 	const startupBehavior = useStartupBehavior();
 	const queueDrainMode = useQueueDrainMode();
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
@@ -248,6 +262,33 @@ export function GeneralTab() {
 					/>
 					<SettingsItem
 						actions={
+							<Select
+								items={TAB_SWITCH_OPTIONS}
+								onValueChange={(v) =>
+									setTabSwitchBehavior(v as TabSwitchBehavior)
+								}
+								value={tabSwitchBehavior}
+							>
+								<SelectTrigger
+									className="h-8 w-56 flex-shrink-0 text-sm"
+									id="tab-switch-behavior-select"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{TAB_SWITCH_OPTIONS.map((opt) => (
+										<SelectItem key={opt.value} value={opt.value}>
+											{opt.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Ctrl/Cmd+Tab and Ctrl/Cmd+Shift+Tab cycle open tabs. In order walks the tab strip left to right; most recently used jumps between tabs you've viewed lately (hold the modifier and press Tab repeatedly to keep cycling)."
+						title="Switch tabs with Ctrl/Cmd+Tab"
+					/>
+					<SettingsItem
+						actions={
 							<Switch
 								checked={tabLayout === "vertical"}
 								id="vertical-tabs-toggle"
@@ -258,6 +299,17 @@ export function GeneralTab() {
 						}
 						description="Show open tabs as a collapsible list in the left sidebar (Zen-browser style) instead of a horizontal bar at the top."
 						title="Vertical tabs"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={autoHideTitleBar}
+								id="auto-hide-titlebar-toggle"
+								onCheckedChange={setAutoHideTitleBar}
+							/>
+						}
+						description="Tuck the title bar and tab strip away until you move the cursor near the top of the window, like the floating sidebar peek. Off by default — the bar stays docked and always visible."
+						title="Auto-hide title bar"
 					/>
 					<SettingsItem
 						actions={

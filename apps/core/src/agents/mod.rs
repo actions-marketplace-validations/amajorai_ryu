@@ -120,25 +120,48 @@ pub struct DitherSpec {
     pub direction: Option<String>,
 }
 
+/// DiceBear avatar spec: a style id from https://www.dicebear.com/styles/ plus a
+/// seed string. Core stores it verbatim; the client builds the SVG URL.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DicebearSpec {
+    /// DiceBear style id (e.g. `"notionists"`, `"bottts-neutral"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+    /// Deterministic seed for the style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+}
+
 /// Persona slot: name, avatar, and tone instructions.
 ///
-/// The avatar can be any one of three mutually-exclusive sources, resolved in
-/// priority order by the client: an uploaded image ([`avatar_url`]), a custom
-/// icon id ([`icon`], resolved through the shared Icon primitive), or a
-/// dither-gradient ([`dither`]). Setting one clears the others on save; Core
-/// stores whichever are present and never interprets them.
+/// Glyph sources from the shared GlyphPicker, resolved client-side:
+/// uploaded image ([`avatar_url`]), emoji ([`emoji`]), custom icon
+/// ([`icon`] + optional [`icon_color`]), DiceBear ([`dicebear`]), or a
+/// dither-gradient ([`dither`]). Dither may layer as a *background* under
+/// emoji or icon (never under DiceBear or an uploaded image). Setting a
+/// primary source clears the others on save; Core stores whatever is present
+/// and never interprets the fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PersonaSlot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
+    /// Native emoji character used as the avatar glyph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
     /// Custom icon id (Iconify / icons0 / Hugeicons), an alternative avatar
     /// source to an uploaded image or a dither gradient.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// Dither-gradient avatar, an alternative avatar source to an uploaded image
-    /// or a custom icon.
+    /// Optional hex tint for [`icon`] (e.g. `"#3b82f6"`). Absent = theme
+    /// `currentColor`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<String>,
+    /// DiceBear generative avatar (style + seed). Does not mix with dither.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dicebear: Option<DicebearSpec>,
+    /// Dither-gradient: standalone avatar, or background under [`emoji`]/[`icon`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dither: Option<DitherSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1441,10 +1464,8 @@ mod tests {
         };
         let persona = PersonaSlot {
             display_name: Some("Aria".into()),
-            avatar_url: None,
-            icon: None,
-            dither: None,
             tone: Some("friendly".into()),
+            ..Default::default()
         };
         let policy = PolicyRef {
             policy_id: Some("strict".into()),
@@ -1941,10 +1962,8 @@ mod tests {
         // Both name and tone present.
         let persona = PersonaSlot {
             display_name: Some("Aria".to_owned()),
-            avatar_url: None,
-            icon: None,
-            dither: None,
             tone: Some("pirate".to_owned()),
+            ..Default::default()
         };
         // Build the prefix the same way route_chat_stream does (inline logic test).
         let prefix = {
@@ -1976,11 +1995,8 @@ mod tests {
     #[test]
     fn persona_tone_prefix_tone_only() {
         let persona = PersonaSlot {
-            display_name: None,
-            avatar_url: None,
-            icon: None,
-            dither: None,
             tone: Some("pirate".to_owned()),
+            ..Default::default()
         };
         let prefix = {
             let mut p = String::new();
@@ -2009,12 +2025,14 @@ mod tests {
         // Icon avatar source survives a serialize → parse round-trip.
         let icon_persona = PersonaSlot {
             icon: Some("lucide:sparkles".to_owned()),
+            icon_color: Some("#3b82f6".to_owned()),
             ..Default::default()
         };
         let json = serde_json::to_string(&icon_persona).unwrap();
         let parsed: PersonaSlot = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, icon_persona);
         assert_eq!(parsed.icon.as_deref(), Some("lucide:sparkles"));
+        assert_eq!(parsed.icon_color.as_deref(), Some("#3b82f6"));
         assert!(parsed.dither.is_none());
 
         // Dither avatar source (nested spec) survives the same round-trip and
@@ -2034,6 +2052,19 @@ mod tests {
         );
         let parsed: PersonaSlot = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, dither_persona);
+
+        // DiceBear + emoji sources round-trip too.
+        let dice_persona = PersonaSlot {
+            emoji: Some("🚀".to_owned()),
+            dicebear: Some(DicebearSpec {
+                style: Some("notionists".to_owned()),
+                seed: Some("aria".to_owned()),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&dice_persona).unwrap();
+        let parsed: PersonaSlot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, dice_persona);
 
         // An empty persona serializes without any of the optional keys.
         let empty = serde_json::to_string(&PersonaSlot::default()).unwrap();

@@ -29,9 +29,11 @@ pub mod aa;
 pub mod capabilities;
 pub mod device;
 pub mod gguf;
+pub mod insight;
 pub mod installed;
 pub mod llmfit;
 pub mod models_dev;
+pub mod openrouter_meta;
 pub(crate) mod win_process;
 
 use std::path::PathBuf;

@@ -14,12 +14,12 @@ import {
 	SettingsCard,
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useChannels } from "@/src/hooks/useChannels.ts";
 import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
-import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 
 export function AgentChannelsSection({ agentId }: { agentId: string | null }) {
-	const openGateway = useGatewayDialog((s) => s.openGateway);
+	const { openTab } = useTabsContext();
 	const { channels, loading, authed } = useChannels();
 
 	const bound = useMemo(
@@ -35,7 +35,7 @@ export function AgentChannelsSection({ agentId }: { agentId: string | null }) {
 						<Badge variant="secondary">{bound.length}</Badge>
 					) : null}
 					<Button
-						onClick={() => openGateway("channels")}
+						onClick={() => openTab("/channels/new", { title: "New channel" })}
 						size="sm"
 						variant="ghost"
 					>

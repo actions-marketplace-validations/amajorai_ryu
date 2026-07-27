@@ -149,10 +149,18 @@ export interface ComposerAgentControlsConfig {
 	 * whole cluster moves to the composer's RIGHT (`rightActions`), to the left of
 	 * the mic/send, and `leftActions` is `null` so only the "+" stays on the left.
 	 * The subscription usage meters — which no longer fit as standalone chips —
-	 * fold into the settings-menu dropdown as a footer. Defaults to the roomy
-	 * left-aligned stacked layout.
+	 * fold into the settings-menu trigger as trailing. Implies the compact
+	 * trigger (agent name + logo + usage). Defaults to the roomy left-aligned
+	 * stacked layout.
 	 */
 	compact?: boolean;
+	/**
+	 * Compact the settings-menu trigger to `[logo] agent [usage] ⌄` without
+	 * moving the cluster to the right. Used by narrow surfaces (Ask Ryu floating
+	 * / docked) that keep the roomy stacked textarea but still need the short
+	 * trigger. Ignored when {@link compact} is true (that already includes it).
+	 */
+	compactTrigger?: boolean;
 	/**
 	 * Extra `ComposerSettingsMenu` sections appended after Agent + Model — e.g.
 	 * ChatPage's Approval (permission mode) and any agent-advertised config
@@ -226,6 +234,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		modelLabel,
 		extraSections = [],
 		compact = false,
+		compactTrigger = false,
 	} = config;
 
 	const modes = useComposerAgentModes(agents, teams, {
@@ -364,11 +373,25 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		leading = <ActiveIcon className="size-4 shrink-0" />;
 	}
 
+	// Compact trigger: `[logo] agent [usage] ⌄` — model/approval stay inside the
+	// dropdown. Shared by the single-row layout (cluster on the right) and the
+	// narrow-panel roomy layout (cluster stays on the left).
+	const settingsMenu = (
+		<ComposerSettingsMenu
+			compact={compact || compactTrigger}
+			leading={leading}
+			renderBody={renderBody}
+			sections={sections}
+			trailing={
+				compact || compactTrigger ? (
+					<UsageBar agentId={agentId} className="ml-0.5" compact />
+				) : undefined
+			}
+		/>
+	);
+
 	// Compact single-row composer: the cluster moves to the RIGHT of the input
-	// (left of the mic/send). The trigger names only the active agent — with its
-	// engine logo (or custom avatar) leading and the usage meters trailing, right
-	// beside the name — so the whole composer fits on one line while model/approval
-	// stay reachable inside the dropdown.
+	// (left of the mic/send) so the whole bar fits on one line.
 	if (compact) {
 		const rightActions = (
 			<div className="flex items-center gap-0.5">
@@ -377,14 +400,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 				{showCapabilityBadges && (
 					<CapabilityBadges capabilities={capabilities} />
 				)}
-				{/* Agent picker: [logo] agent name [usage] ⌄ — model/approval inside. */}
-				<ComposerSettingsMenu
-					compact
-					leading={leading}
-					renderBody={renderBody}
-					sections={sections}
-					trailing={<UsageBar agentId={agentId} className="ml-0.5" compact />}
-				/>
+				{settingsMenu}
 			</div>
 		);
 		return { leftActions: null, rightActions, sections, renderBody };
@@ -392,16 +408,12 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 
 	const leftActions = (
 		<div className="flex min-w-0 items-center gap-0.5">
-			<ComposerSettingsMenu
-				leading={leading}
-				renderBody={renderBody}
-				sections={sections}
-			/>
+			{settingsMenu}
 			{/* Read-only capability badges (tools / thinking / vision) — local
 			    models / flagship Ryu only; hidden for external ACP harnesses. */}
 			{showCapabilityBadges && <CapabilityBadges capabilities={capabilities} />}
-			{/* Subscription usage meters (5h + weekly) for the active agent. */}
-			<UsageBar agentId={agentId} />
+			{/* Full trigger still shows usage as a standalone chip beside the menu. */}
+			{compactTrigger ? null : <UsageBar agentId={agentId} />}
 		</div>
 	);
 

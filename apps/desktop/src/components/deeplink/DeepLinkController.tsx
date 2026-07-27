@@ -6,7 +6,6 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { useEffect } from "react";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useDeepLinkStore } from "@/src/store/useDeepLinkStore.ts";
-import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { DeepLinkConfirmDialog } from "./DeepLinkConfirmDialog.tsx";
 
@@ -25,6 +24,10 @@ const PAGE_ROUTES: Record<string, string> = {
 	tools: "/tools",
 	spaces: "/library/space",
 	workflows: "/library/workflow",
+	// Channels/Identities browse in Library; manage pages are /channels/:id and
+	// /identities/profile/:id (see builtins.ts).
+	channels: "/library/channel",
+	identities: "/library/identity",
 	// `automations` was merged into Workflows; keep the alias pointing at the
 	// surviving surface so existing ryu://…automations deep links still resolve.
 	automations: "/library/workflow",
@@ -64,17 +67,7 @@ function isMainWindow(): boolean {
  */
 function navigateForIntent(intent: DeepLinkIntent, openTab: OpenTab): boolean {
 	if (intent.kind === "page") {
-		// Channels and Identities live inside the Gateway dialog; Credits lives in
-		// App Settings → Services. These have no standalone route, so open the
-		// relevant dialog at that section instead of navigating to a tab.
-		if (intent.page === "channels") {
-			useGatewayDialog.getState().openGateway("channels");
-			return true;
-		}
-		if (intent.page === "identities") {
-			useGatewayDialog.getState().openGateway("identities");
-			return true;
-		}
+		// Credits lives in App Settings → Services (no standalone route).
 		if (intent.page === "credits") {
 			useSettingsDialog.getState().openSettings("credits");
 			return true;

@@ -1,9 +1,7 @@
-import {
-	DitherGradient,
-	type GradientDirection,
-} from "@ryu/ui/components/dither-kit/gradient";
+import type { GradientDirection } from "@ryu/ui/components/dither-kit/gradient";
 import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
-import { Icon } from "@ryu/ui/components/icon";
+import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
+import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ComponentType } from "react";
@@ -188,64 +186,111 @@ export interface AvatarDitherSpec {
 
 const DITHER_DIRECTIONS: GradientDirection[] = ["up", "down", "left", "right"];
 
+/** A DiceBear avatar spec as stored on `persona.dicebear`. */
+export interface AvatarDicebearSpec {
+	seed?: string | null;
+	style?: string | null;
+}
+
+/**
+ * Fold persona avatar fields into a {@link GlyphValue} for {@link GlyphDisplay}.
+ * Priority: avatar_url → emoji (+ optional dither bg) → icon (+ optional dither
+ * bg) → dicebear → dither-only.
+ */
+export function personaToGlyph(persona: {
+	avatarUrl?: string | null;
+	dicebear?: AvatarDicebearSpec | null;
+	dither?: AvatarDitherSpec | null;
+	emoji?: string | null;
+	icon?: string | null;
+	iconColor?: string | null;
+}): GlyphValue {
+	if (persona.avatarUrl) {
+		return { kind: "avatar", dataUrl: persona.avatarUrl };
+	}
+	const ditherLayer: GlyphDitherValue | undefined =
+		persona.dither && isDitherColor(persona.dither.from)
+			? {
+					from: persona.dither.from,
+					to: isDitherColor(persona.dither.to) ? persona.dither.to : null,
+					direction:
+						DITHER_DIRECTIONS.find((d) => d === persona.dither?.direction) ??
+						"up",
+				}
+			: undefined;
+	if (persona.emoji) {
+		return {
+			kind: "emoji",
+			emoji: persona.emoji,
+			...(ditherLayer ? { dither: ditherLayer } : {}),
+		};
+	}
+	if (persona.icon) {
+		return {
+			kind: "icon",
+			id: persona.icon,
+			...(persona.iconColor ? { color: persona.iconColor } : {}),
+			...(ditherLayer ? { dither: ditherLayer } : {}),
+		};
+	}
+	if (persona.dicebear?.style && persona.dicebear.seed) {
+		return {
+			kind: "dicebear",
+			style: persona.dicebear.style,
+			seed: persona.dicebear.seed,
+		};
+	}
+	if (ditherLayer) {
+		return { kind: "dither", dither: ditherLayer };
+	}
+	return null;
+}
+
 /**
  * Renders an agent's avatar, resolving the persona's avatar source in priority
- * order: an uploaded image (`persona.avatar_url`), then a custom icon
- * (`persona.icon`), then a dither gradient (`persona.dither`), and finally the
- * branded engine logo. Use this at every call site that shows "an agent" so a
- * custom avatar wins over the engine default consistently (sidebar rows, picker
- * items, etc.).
+ * order: uploaded image → emoji → icon → DiceBear → dither → engine logo.
+ * Use this at every call site that shows "an agent" so a custom avatar wins
+ * over the engine default consistently.
  */
 export function AgentAvatar({
 	avatarUrl,
+	emoji,
 	icon,
+	iconColor,
+	dicebear,
 	dither,
 	engine,
 	className,
 	size,
 }: {
 	avatarUrl?: string | null;
-	icon?: string | null;
-	dither?: AvatarDitherSpec | null;
-	engine?: string | null;
 	className?: string;
+	dicebear?: AvatarDicebearSpec | null;
+	dither?: AvatarDitherSpec | null;
+	emoji?: string | null;
+	engine?: string | null;
+	icon?: string | null;
+	iconColor?: string | null;
 	size?: string;
 }) {
-	const style = size ? { width: size, height: size } : undefined;
-	if (avatarUrl) {
+	const parsed = size ? Number.parseInt(size, 10) : Number.NaN;
+	const px = Number.isNaN(parsed) ? 16 : parsed;
+	const glyph = personaToGlyph({
+		avatarUrl,
+		emoji,
+		icon,
+		iconColor,
+		dicebear,
+		dither,
+	});
+	if (glyph) {
 		return (
-			// biome-ignore lint/performance/noImgElement lint/correctness/useImageSize: user avatar data URL
-			<img
+			<GlyphDisplay
 				alt="agent avatar"
-				className={cn(className, "object-cover")}
-				draggable={false}
-				src={avatarUrl}
-				style={style}
+				className={cn(className, "rounded-[inherit] object-cover")}
+				size={px}
+				value={glyph}
 			/>
-		);
-	}
-	if (icon) {
-		const parsed = size ? Number.parseInt(size, 10) : Number.NaN;
-		const px = Number.isNaN(parsed) ? undefined : parsed;
-		return <Icon className={className} icon={icon} size={px} />;
-	}
-	if (dither) {
-		// DitherGradient is `position:absolute; inset:0` and fills its nearest
-		// positioned ancestor, so it needs a sized `relative` box clipped round.
-		const from = isDitherColor(dither.from) ? dither.from : "grey";
-		const to = isDitherColor(dither.to) ? dither.to : "transparent";
-		const direction =
-			DITHER_DIRECTIONS.find((d) => d === dither.direction) ?? "up";
-		return (
-			<span
-				className={cn(
-					"relative inline-block shrink-0 overflow-hidden rounded-full",
-					className
-				)}
-				style={style}
-			>
-				<DitherGradient direction={direction} from={from} to={to} />
-			</span>
 		);
 	}
 	return <AgentLogo className={className} engine={engine} size={size} />;

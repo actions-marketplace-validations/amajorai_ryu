@@ -318,10 +318,11 @@ async fn configure_agent(args: Value, store: AgentStore) -> Result<Value> {
     if let Some(persona) = args.get("persona").filter(|p| p.is_object()) {
         patch.persona = Some(PersonaSlot {
             display_name: persona["display_name"].as_str().map(str::to_owned),
-            avatar_url: None,
-            icon: None,
-            dither: None,
             tone: persona["tone"].as_str().map(str::to_owned),
+            // Avatar glyph fields (avatar_url / emoji / icon / dicebear / dither)
+            // are edited through the desktop GlyphPicker, not the builder tools —
+            // leave them unset here so a builder patch doesn't wipe a custom glyph.
+            ..Default::default()
         });
     }
     if let Some(inference) = args.get("inference").filter(|i| i.is_object()) {

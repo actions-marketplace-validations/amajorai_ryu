@@ -1,0 +1,35 @@
+{
+  "id": "dictation",
+  "name": "Dictation",
+  "version": "1.0.0",
+  "description": "System-wide dictation and agent-ask via the Island companion: speak anywhere to type a transcript, or ask an agent and paste the answer into the focused app.",
+  "engines": {
+    "ryu": ">=0.0.1"
+  },
+  "runnables": [
+    {
+      "id": "policy-dictation",
+      "name": "System-wide dictation (on/off)",
+      "kind": "policy",
+      "config": {
+        "policy_type": "dictation",
+        "definition": {
+          "surface": "island",
+          "note": "On/off switch for system-wide dictation + agent-ask hosted by the Island companion. Enabling this plugin is the single switch — there is no separate settings master toggle. Island registers the global shortcuts and drives capture → Core STT → optional agent → ghost insert. Core-local — no gateway restart."
+        }
+      }
+    }
+  ],
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "dictation.settings",
+        "title": "Dictation",
+        "scope": "node",
+        "view": "dictation"
+      }
+    ],
+    "policies": [{ "id": "policy-dictation", "title": "Dictation" }]
+  },
+  "permission_grants": []
+}

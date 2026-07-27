@@ -44,7 +44,12 @@
 @property --bottom-mask-height {
 	syntax: "<length>";
 	inherits: true;
-	initial-value: 48px;
+	/* 0 when the scroll timeline is inactive (content fits — no overflow),
+	   matching --top-mask-height. An initial 48px left non-scrolling panes
+	   permanently faded at the bottom; callers then papered over it with
+	   pb-12 hacks. The `from` keyframe below re-applies the mask once the
+	   timeline is active and you're not yet at the bottom. */
+	initial-value: 0px;
 }
 
 @keyframes show-top-mask {
@@ -54,6 +59,9 @@
 }
 
 @keyframes hide-bottom-mask {
+	from {
+		--bottom-mask-height: var(--mask-height);
+	}
 	to {
 		--bottom-mask-height: 0px;
 	}
@@ -140,10 +148,17 @@
 		-webkit-user-drag: none;
 	}
 
-	/* Allow text selection inside chat bubbles for both agent and user
-     messages. Agent content renders through `.an-markdown`; user messages
-     render inside the `group/user-message` bubble. `.prose`/`.select-text`/
-     `.shiki` remain opt-in escape hatches elsewhere in the app. */
+	/* Allow text selection only in real text surfaces: form fields, rich
+	   editors, and chat message bodies. Agent content renders through
+	   `.an-markdown`; user messages use `group/user-message` and
+	   `[data-message-selectable]`. `.prose`/`.select-text`/`.shiki` remain
+	   opt-in escape hatches elsewhere in the app. */
+	input,
+	textarea,
+	[contenteditable="true"],
+	[contenteditable=""],
+	[data-message-selectable],
+	[data-message-selectable] *,
 	.prose,
 	.prose *,
 	.select-text,
@@ -249,7 +264,7 @@ html:not([data-dialog-overlay-blur="on"]) [data-slot="dialog-content"],
 html:not([data-dialog-overlay-blur="on"]) [data-slot="alert-dialog-content"],
 html:not([data-dialog-overlay-blur="on"]) [data-slot="sheet-content"],
 html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"] {
-	border: 1px solid var(--border) !important;
+	border: 1px solid color-mix(in oklch, var(--border) 50%, transparent) !important;
 	box-shadow: none !important;
 }
 
@@ -376,6 +391,15 @@ body.maximized button#decorum-tb-close {
 }
 
 div[data-tauri-decorum-tb] {
+	pointer-events: none !important;
+}
+
+/* Auto-hide peek: TitleBar toggles .ryu-titlebar-hidden; applyDecorumChrome
+   sets inline opacity/transform. Keep hit-testing off while tucked even if
+   Decorum rewrites its own styles briefly. */
+html.ryu-titlebar-hidden div[data-tauri-decorum-tb],
+html.ryu-titlebar-hidden div[data-tauri-decorum-tb] button,
+html.ryu-titlebar-hidden div[data-tauri-decorum-tb] .decorum-tb-btn {
 	pointer-events: none !important;
 }
 

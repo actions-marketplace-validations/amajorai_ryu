@@ -7,6 +7,7 @@
 
 import { ArrowDown01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { cn } from "@ryu/ui/lib/utils";
@@ -30,7 +31,6 @@ import {
 	useState,
 } from "react";
 import { useComposerAgentControls } from "@/components/agent-elements/input/composer-agent-controls.tsx";
-import { handleComposerSettingsShortcut } from "@/components/agent-elements/input/composer-shortcuts.ts";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import {
 	type AttachedImage,
@@ -45,6 +45,7 @@ import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
+import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import { useGettingStarted } from "@/src/hooks/useGettingStarted.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
@@ -372,6 +373,7 @@ function LaunchpadComposer() {
 	const { teams } = useTeams();
 	const engineModels = useEngineModels();
 	const activeNode = useActiveNode();
+	const composerShortcuts = useComposerShortcutBindings();
 
 	const [agentId, setAgentId] = useState<string | null>(() =>
 		localStorage.getItem("ryu_default_agent")
@@ -557,11 +559,13 @@ function LaunchpadComposer() {
 					}}
 					onStop={() => undefined}
 					onTextareaKeyDown={(event) => {
-						if (handleComposerSettingsShortcut(event, sections)) {
+						if (
+							handleComposerSettingsShortcut(event, sections, composerShortcuts)
+						) {
 							event.preventDefault();
 						}
 					}}
-					placeholder="Ask anything, or start a new chat…"
+					placeholder="What do you want to do?"
 					rightActions={rightActions}
 					status="ready"
 					voice={{ transcribe: voiceTranscribe }}

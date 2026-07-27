@@ -1521,6 +1521,8 @@ pub fn capability_label(grant: &str) -> String {
         "hook:side-model" => "Second-model review".to_string(),
         "hook:run-agent" => "Runs sub-agents".to_string(),
         "hook:storage" => "Local storage".to_string(),
+        "conversation:set-title" => "Renames chats".to_string(),
+        "preferences:read" => "Reads preferences".to_string(),
         // Spaces + media capabilities (full-page companion apps).
         "spaces:docs" => "Spaces documents".to_string(),
         "storage:kv" => "Local storage".to_string(),

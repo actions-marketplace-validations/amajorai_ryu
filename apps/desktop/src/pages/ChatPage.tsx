@@ -1,4 +1,7 @@
 import { useChat } from "@ai-sdk/react";
+import { ClipboardIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,
@@ -22,7 +25,6 @@ import {
 } from "@/components/agent-elements/empty-state-header.tsx";
 import { useComposerAgentControls } from "@/components/agent-elements/input/composer-agent-controls.tsx";
 import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
-import { handleComposerSettingsShortcut } from "@/components/agent-elements/input/composer-shortcuts.ts";
 import type {
 	GhostControls,
 	PluginComposerControlRow,
@@ -66,11 +68,16 @@ import { VoiceModeOverlay } from "@/src/components/voice/VoiceModeOverlay.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
-import { useIsActiveTab, useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import {
+	useCurrentTabId,
+	useIsActiveTab,
+	useTabsContext,
+} from "@/src/contexts/TabsContext.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { AppWidget } from "@/src/contributions/host/AppWidget.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
+import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
 import { useMessageQueue } from "@/src/hooks/useMessageQueue.ts";
@@ -110,6 +117,7 @@ import {
 	getVoiceModeReadbackPrefs,
 } from "@/src/lib/api/preferences.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
+import { stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { generateVideo } from "@/src/lib/api/video.ts";
 import { speakText, transcribeAudio } from "@/src/lib/api/voice.ts";
 import {
@@ -117,6 +125,7 @@ import {
 	widgetFollowUp,
 	widgetSetState,
 } from "@/src/lib/api/widgets.ts";
+import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import {
 	PLUGIN_RUNTIME_FLAG,
 	shouldRenderWidget,
@@ -424,6 +433,7 @@ function CouncilInputBar({
 	onTextareaKeyDown,
 	...rest
 }: CouncilInputBarProps) {
+	const composerShortcuts = useComposerShortcutBindings();
 	// Band-2 gate (free-tier plan): council (multi-agent) chat is a Pro feature.
 	// A team @mention is the entry into council, so gate the two paths that set a
 	// team target — the mention-menu pick and the send-time team resolution — and
@@ -559,7 +569,13 @@ function CouncilInputBar({
 				onChange={handleChange}
 				onSend={handleSend}
 				onTextareaKeyDown={(event) => {
-					if (handleComposerSettingsShortcut(event, composerSections)) {
+					if (
+						handleComposerSettingsShortcut(
+							event,
+							composerSections,
+							composerShortcuts
+						)
+					) {
 						event.preventDefault();
 					}
 					onTextareaKeyDown?.(event);
@@ -738,7 +754,12 @@ export default function ChatPage({
 	// Remember the last picked agent so a new chat opens with it preselected. The
 	// agent itself is owned by Core (CRUD via U6); this is only the local "last
 	// used" hint, not agent storage.
-	const { openTab } = useTabsContext();
+	const { openTab, updateTabBusy, tabs, clearScrollToMessage } =
+		useTabsContext();
+	const currentTabId = useCurrentTabId();
+	const scrollToMessageId = currentTabId
+		? tabs.find((t) => t.id === currentTabId)?.scrollToMessageId
+		: undefined;
 
 	// Model options follow the active agent's engine binding. The effective
 	// value prefers the explicit in-session pick, then the persisted per-agent
@@ -2064,6 +2085,12 @@ export default function ChatPage({
 	// record the conversation id so DiffReviewPane can fetch the run's diff.
 	const prevStatus = useRef(status);
 	useEffect(() => {
+		// Keep the tab chip in sync with the live stream so the spinner/shimmer
+		// appear as soon as the user sends — before Core's run_status catches up.
+		if (currentTabId) {
+			const busy = status === "streaming" || status === "submitted";
+			updateTabBusy(currentTabId, busy);
+		}
 		// A new turn is in flight — drop stale chips and cancel any pending fetch.
 		if (status === "streaming" || status === "submitted") {
 			setFollowUps([]);
@@ -2094,9 +2121,8 @@ export default function ChatPage({
 					handleSpeakRef.current(text)?.catch(() => undefined);
 				}
 			});
-			// Core auto-renames a new chat with the local model shortly after the
-			// first turn (ChatGPT-style). That title lands a moment after the
-			// stream ends, so re-sync once more to pick it up without a reload.
+			// The chat-title plugin may re-title after a completed turn. Refresh
+			// once more so the sidebar picks up the new title without a reload.
 			const t = setTimeout(refresh, 2500);
 			prevStatus.current = status;
 			// Ask Core for follow-up prompts for the turn that just finished.
@@ -2118,7 +2144,40 @@ export default function ChatPage({
 			return () => clearTimeout(t);
 		}
 		prevStatus.current = status;
-	}, [status, refresh, activeConversationId, messages]);
+	}, [
+		status,
+		refresh,
+		activeConversationId,
+		messages,
+		currentTabId,
+		updateTabBusy,
+	]);
+
+	// Clear busy on unmount so a closed streaming tab doesn't leave a stale spinner.
+	useEffect(() => {
+		return () => {
+			if (currentTabId) {
+				updateTabBusy(currentTabId, false);
+			}
+		};
+	}, [currentTabId, updateTabBusy]);
+
+	// Sidebar / TOC jump: once messages are hydrated, ask the message list to
+	// scroll to the pending anchor and clear the one-shot tab flag.
+	useEffect(() => {
+		if (!(scrollToMessageId && currentTabId && messages.length > 0)) {
+			return;
+		}
+		const timer = window.setTimeout(() => {
+			window.dispatchEvent(
+				new CustomEvent("ryu:scroll-to-message", {
+					detail: { messageId: scrollToMessageId },
+				})
+			);
+			clearScrollToMessage(currentTabId);
+		}, 80);
+		return () => window.clearTimeout(timer);
+	}, [scrollToMessageId, currentTabId, messages.length, clearScrollToMessage]);
 
 	// Switching threads must not carry chips across conversations.
 	useEffect(() => {
@@ -2127,29 +2186,29 @@ export default function ChatPage({
 		followUpAbort.current = null;
 	}, []);
 
-	const addImages = useCallback((files: File[]) => {
-		const imageFiles = files.filter((f) => f.type.startsWith("image/"));
-		if (imageFiles.length === 0) {
-			return;
-		}
-		for (const file of imageFiles) {
-			const reader = new FileReader();
-			reader.onload = () => {
-				const url = reader.result as string;
-				setAttachedImages((prev) => [
-					...prev,
-					{
-						id: `img-${Date.now()}-${Math.random()}`,
-						filename: file.name,
-						url,
-						mimeType: file.type,
-						size: file.size,
-					},
-				]);
-			};
-			reader.readAsDataURL(file);
-		}
-	}, []);
+	const addImages = useCallback(
+		(files: File[]) => {
+			const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+			if (imageFiles.length === 0) {
+				return;
+			}
+			for (const file of imageFiles) {
+				void stageImageUpload(chatTarget, file).then(({ dataUrl, upload }) => {
+					setAttachedImages((prev) => [
+						...prev,
+						{
+							id: upload?.id ?? `img-${Date.now()}-${Math.random()}`,
+							filename: file.name,
+							url: dataUrl,
+							mimeType: file.type,
+							size: file.size,
+						},
+					]);
+				});
+			}
+		},
+		[chatTarget]
+	);
 
 	const handleAttach = useCallback(() => {
 		const input = document.createElement("input");
@@ -3426,7 +3485,7 @@ export default function ChatPage({
 	const titlebarActions = useMemo(() => {
 		// The agent info icon, branch, council participants, and sessions moved
 		// into the composer toolbar (see composerControlsRef.left). Only the tool
-		// count and the panel toggles remain in the titlebar.
+		// count, copy transcript, and the panel toggles remain in the titlebar.
 		const threadActions =
 			hasThread && agentTools.length > 0 ? (
 				<Tooltip>
@@ -3441,9 +3500,30 @@ export default function ChatPage({
 				</Tooltip>
 			) : null;
 
+		const copyTranscriptAction = hasMessages ? (
+			<Tooltip>
+				<TooltipTrigger
+					render={
+						<button
+							aria-label="Copy transcript"
+							className="flex size-8 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+							onClick={() => {
+								void copyChatTranscript(messages);
+							}}
+							type="button"
+						>
+							<HugeiconsIcon className="size-4" icon={ClipboardIcon} />
+						</button>
+					}
+				/>
+				<TooltipContent>Copy transcript</TooltipContent>
+			</Tooltip>
+		) : null;
+
 		return (
 			<>
 				{threadActions}
+				{copyTranscriptAction}
 				<PanelToggleButtons
 					bottomOpen={bottomPanelOpen}
 					folder={folder}
@@ -3461,6 +3541,7 @@ export default function ChatPage({
 		hasThread,
 		hasMessages,
 		agentTools,
+		messages,
 		bottomPanelOpen,
 		rightPanelOpen,
 		folder,

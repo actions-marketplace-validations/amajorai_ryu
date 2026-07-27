@@ -398,6 +398,12 @@ export default function InstalledSection() {
 						// Errors surface via the shared toggleError banner.
 					});
 				}}
+				reportTarget={{
+					id: app.id,
+					kind: "plugin",
+					itemName: app.name,
+					source: "installed",
+				}}
 			/>
 		);
 	};

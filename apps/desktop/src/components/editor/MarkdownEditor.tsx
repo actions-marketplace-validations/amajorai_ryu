@@ -55,8 +55,14 @@ export function MarkdownEditor({
 	initialMarkdown,
 	onChangeMarkdown,
 	collab,
+	compact = false,
 }: {
 	collab?: MarkdownCollab;
+	/**
+	 * Tighter padding for dialogs / inline surfaces (Prompt Studio, project
+	 * settings). Full-page Spaces/file editors keep the default page layout.
+	 */
+	compact?: boolean;
 	initialMarkdown: string;
 	onChangeMarkdown: (markdown: string) => void;
 }) {
@@ -191,11 +197,14 @@ export function MarkdownEditor({
 				onChangeMarkdown(ed.api.markdown.serialize())
 			}
 		>
-			<EditorContainer variant="default">
+			<EditorContainer
+				className={compact ? "max-h-[min(50vh,360px)] min-h-48" : undefined}
+				variant={compact ? "select" : "default"}
+			>
 				<Editor
 					placeholder="Start writing, or press / for commands…"
 					readOnly={readOnly}
-					variant="default"
+					variant={compact ? "select" : "default"}
 				/>
 			</EditorContainer>
 		</Plate>

@@ -96,3 +96,5 @@ apps/desktop/src-tauri/Python/
 .venv/
 __pycache__/
 *.pyc
+
+nul

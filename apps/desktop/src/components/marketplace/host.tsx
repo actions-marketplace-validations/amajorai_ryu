@@ -13,6 +13,7 @@ import {
 import type { ReactNode } from "react";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useMyLicenses } from "@/src/hooks/useMyLicenses.ts";
+import { useSellerReports } from "@/src/hooks/useSellerReports.ts";
 import { useSellerStatus } from "@/src/hooks/useSellerStatus.ts";
 import { startPurchase } from "@/src/lib/api/marketplace.ts";
 
@@ -21,6 +22,7 @@ const desktopMarketplaceHost: MarketplaceHost = {
 	startPurchase,
 	useLicenses: useMyLicenses,
 	useSellerStatus,
+	useSellerReports,
 };
 
 /** Mount once above every store surface that renders the shared money layer. */

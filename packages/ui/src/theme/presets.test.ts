@@ -112,13 +112,31 @@ describe("customTokensToVariant / variantToCustomTokens", () => {
 		expect(v.tokens["--popover"]).toBe(tokens.sidebar);
 	});
 
-	test("primary-foreground and destructive flip with mode", () => {
+	test("destructive flips with mode; primary-foreground follows primary luminance", () => {
 		const light = customTokensToVariant("i", "l", "light", tokens);
 		const dark = customTokensToVariant("i", "d", "dark", tokens);
+		// #2563eb is a mid/dark blue — white ink in both modes (not mode-hardcoded black).
 		expect(light.tokens["--primary-foreground"]).toBe("#ffffff");
-		expect(dark.tokens["--primary-foreground"]).toBe("#000000");
+		expect(dark.tokens["--primary-foreground"]).toBe("#ffffff");
 		expect(light.tokens["--destructive"]).toBe("#ef4444");
 		expect(dark.tokens["--destructive"]).toBe("#f87171");
+	});
+
+	test("light primary colours get black primary-foreground even in dark mode", () => {
+		const pale = customTokensToVariant("i", "d", "dark", {
+			...tokens,
+			primary: "#fafafa",
+		});
+		expect(pale.tokens["--primary-foreground"]).toBe("#000000");
+		expect(pale.tokens["--sidebar-primary-foreground"]).toBe("#000000");
+	});
+
+	test("oklch brand blue (ryu-dark primary) gets light primary-foreground", () => {
+		const v = customTokensToVariant("i", "d", "dark", {
+			...tokens,
+			primary: "oklch(0.6690 0.1837 248.81)",
+		});
+		expect(v.tokens["--primary-foreground"]).toBe("#ffffff");
 	});
 
 	test("round-trips all seven fields losslessly (variant -> tokens -> variant)", () => {

@@ -81,7 +81,6 @@ import {
 	EvaluatorEditorDialog,
 	type EvaluatorEditorMode,
 } from "@/src/components/evaluators/EvaluatorEditorDialog.tsx";
-import { ChannelsSection } from "@/src/components/gateway/ChannelsSection.tsx";
 import { UsageCostSection } from "@/src/components/gateway/UsageCostSection.tsx";
 import { WorkspaceSection } from "@/src/components/gateway/WorkspaceSection.tsx";
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
@@ -179,7 +178,6 @@ import {
 	setReplicateApiKey,
 } from "@/src/lib/api/preferences.ts";
 import { deleteProviderKey, setProviderKey } from "@/src/lib/api/secrets.ts";
-import IdentitiesPage from "@/src/pages/IdentitiesPage.tsx";
 import { PreflightPage } from "@/src/pages/PreflightPage.tsx";
 import type { GatewaySection } from "@/src/store/useGatewayDialog.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
@@ -4873,8 +4871,6 @@ const GATEWAY_SECTIONS: {
 	{ value: "guardrails", label: "Guardrails", icon: Shield01Icon },
 	{ value: "budgets", label: "Budgets", icon: Dollar01Icon },
 	{ value: "keys", label: "Keys", icon: Key01Icon },
-	{ value: "identities", label: "Identities", icon: SquareLock01Icon },
-	{ value: "channels", label: "Channels", icon: BubbleChatIcon },
 	{ value: "integrations", label: "Integrations", icon: Share08Icon },
 	{ value: "usage", label: "Usage & Cost", icon: Dollar01Icon },
 	{ value: "audit", label: "Audit", icon: Activity01Icon },
@@ -5034,8 +5030,6 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 			"guardrails",
 			"budgets",
 			"keys",
-			"identities",
-			"channels",
 			"integrations",
 		],
 	},
@@ -5283,14 +5277,6 @@ export function GatewayDialog({
 						/>
 					</>
 				) : null}
-				{section === "identities" ? (
-					<SettingsSection caption="Per-domain agent logins, governed by the gateway. Credentials are encrypted at rest and never sent to the model. Bind a profile to an agent to let it act on those domains.">
-						<div className="h-[60vh] min-h-[420px] overflow-hidden rounded-[10px] bg-muted/40">
-							<IdentitiesPage />
-						</div>
-					</SettingsSection>
-				) : null}
-				{section === "channels" ? <ChannelsSection /> : null}
 				{section === "integrations" ? <IntegrationsTab /> : null}
 				{section === "usage" ? (
 					<UsageCostSection
@@ -5326,12 +5312,7 @@ export function GatewayDialog({
 				<ResizableSettingsLayout
 					content={
 						<div className="px-4 py-4 md:px-8 md:py-6">
-							<div className="mb-6 flex items-center gap-2">
-								<h2 className="font-semibold text-base">{activeLabel}</h2>
-								<Badge variant={reachable ? "default" : "destructive"}>
-									{reachable ? "Up" : "Down"}
-								</Badge>
-							</div>
+							<h2 className="mb-6 font-semibold text-base">{activeLabel}</h2>
 							{body}
 						</div>
 					}

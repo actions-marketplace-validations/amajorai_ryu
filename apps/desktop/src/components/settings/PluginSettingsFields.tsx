@@ -76,19 +76,20 @@ interface FieldControlProps {
 }
 
 function ToggleField({ field, target }: FieldControlProps) {
-	const [checked, setChecked] = useState(false);
+	const defaultOn = field.default === true;
+	const [checked, setChecked] = useState(defaultOn);
 
 	useEffect(() => {
 		let cancelled = false;
 		getPreference(target, field.prefKey).then((raw) => {
 			if (!cancelled) {
-				setChecked(prefToBool(raw));
+				setChecked(prefToBool(raw, defaultOn));
 			}
 		});
 		return () => {
 			cancelled = true;
 		};
-	}, [target, field.prefKey]);
+	}, [target, field.prefKey, defaultOn]);
 
 	return (
 		<SettingsItem
@@ -155,20 +156,24 @@ function SelectField({ field, target }: FieldControlProps) {
 }
 
 function TextField({ field, target }: FieldControlProps) {
-	const [value, setValue] = useState("");
+	const fallback =
+		field.default === undefined || field.default === null
+			? ""
+			: String(field.default);
+	const [value, setValue] = useState(fallback);
 	const isTextarea = field.type === "textarea";
 
 	useEffect(() => {
 		let cancelled = false;
 		getPreference(target, field.prefKey).then((raw) => {
 			if (!cancelled) {
-				setValue(raw ?? "");
+				setValue(raw ?? fallback);
 			}
 		});
 		return () => {
 			cancelled = true;
 		};
-	}, [target, field.prefKey]);
+	}, [target, field.prefKey, fallback]);
 
 	const save = () => {
 		saveField(target, field.prefKey, value.trim()).catch(() => {

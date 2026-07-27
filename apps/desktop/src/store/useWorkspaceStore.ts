@@ -1,3 +1,5 @@
+import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
+import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { create } from "zustand";
 import { listDirectory } from "@/src/lib/api/workspace.ts";
 import { isLocalNode, useNodeStore } from "./useNodeStore.ts";
@@ -9,17 +11,82 @@ const WORKTREE_MODE_KEY = "ryu_workspace_worktree_mode";
 const WORKTREE_BRANCH_KEY = "ryu_workspace_worktree_branch";
 const TERMINAL_SHELL_KEY = "ryu_workspace_terminal_shell";
 const ICONS_KEY = "ryu_workspace_icons";
+const NAMES_KEY = "ryu_workspace_names";
 const MAX_RECENTS = 10;
 
 /**
- * A per-project custom glyph, keyed by folder path. Either a single emoji or an
- * uploaded image stored inline as a (small, downscaled) data URL — both are
- * purely presentational desktop-local state, so they live here in localStorage
- * alongside the other workspace preferences rather than in Core.
+ * A per-project custom glyph, keyed by folder path. Uses the shared
+ * {@link GlyphValue} shape (avatar / icon / emoji / dicebear) — purely
+ * presentational desktop-local state in localStorage.
  */
-export type ProjectIcon =
-	| { type: "emoji"; value: string }
-	| { type: "image"; value: string };
+export type ProjectIcon = Exclude<GlyphValue, null>;
+
+/** Parse an optional dither layer from a stored glyph object. */
+function normalizeDither(raw: unknown): GlyphDitherValue | undefined {
+	if (!raw || typeof raw !== "object") {
+		return undefined;
+	}
+	const d = raw as Record<string, unknown>;
+	if (!isDitherColor(d.from)) {
+		return undefined;
+	}
+	const direction =
+		d.direction === "down" || d.direction === "left" || d.direction === "right"
+			? d.direction
+			: "up";
+	return {
+		from: d.from,
+		to: isDitherColor(d.to) ? d.to : null,
+		direction,
+	};
+}
+
+/** Migrate legacy `{ type, value }` icons and validate new glyph shapes. */
+function normalizeProjectIcon(raw: unknown): ProjectIcon | null {
+	if (!raw || typeof raw !== "object") {
+		return null;
+	}
+	const r = raw as Record<string, unknown>;
+	const dither = normalizeDither(r.dither);
+
+	// Legacy shape from the emoji-grid / upload dialog.
+	if (r.type === "emoji" && typeof r.value === "string") {
+		return { kind: "emoji", emoji: r.value };
+	}
+	if (r.type === "image" && typeof r.value === "string") {
+		return { kind: "avatar", dataUrl: r.value };
+	}
+
+	if (r.kind === "emoji" && typeof r.emoji === "string") {
+		return {
+			kind: "emoji",
+			emoji: r.emoji,
+			...(dither ? { dither } : {}),
+		};
+	}
+	if (r.kind === "avatar" && typeof r.dataUrl === "string") {
+		return { kind: "avatar", dataUrl: r.dataUrl };
+	}
+	if (r.kind === "icon" && typeof r.id === "string") {
+		return {
+			kind: "icon",
+			id: r.id,
+			...(typeof r.color === "string" ? { color: r.color } : {}),
+			...(dither ? { dither } : {}),
+		};
+	}
+	if (
+		r.kind === "dicebear" &&
+		typeof r.style === "string" &&
+		typeof r.seed === "string"
+	) {
+		return { kind: "dicebear", style: r.style, seed: r.seed };
+	}
+	if (r.kind === "dither" && dither) {
+		return { kind: "dither", dither };
+	}
+	return null;
+}
 
 interface WorkspaceState {
 	/**
@@ -34,9 +101,17 @@ interface WorkspaceState {
 	clearFolder: () => void;
 	/** Remove any custom icon for a project, reverting it to the folder glyph. */
 	clearProjectIcon: (path: string) => void;
+	/** Clear a custom display name, reverting to the folder basename. */
+	clearProjectName: (path: string) => void;
 	folder: string | null;
-	/** Custom per-project glyphs (emoji or uploaded image), keyed by folder path. */
+	/** Custom per-project glyphs (avatar/icon/emoji/dicebear), keyed by folder path. */
 	projectIcons: Record<string, ProjectIcon>;
+	/**
+	 * Optional display labels keyed by folder path. When unset, the sidebar and
+	 * picker fall back to the folder basename. Purely presentational — the on-disk
+	 * path is unchanged.
+	 */
+	projectNames: Record<string, string>;
 	recentFolders: string[];
 	/** Replace the suggested branch name with a freshly generated friendly one. */
 	regenerateWorktreeBranch: () => void;
@@ -57,8 +132,10 @@ interface WorkspaceState {
 	/** Drop a recent without marking it removed (e.g. a stale/missing path). */
 	removeRecentFolder: (path: string) => void;
 	setFolder: (path: string) => Promise<void>;
-	/** Assign a custom glyph (emoji or uploaded image) to a project folder. */
+	/** Assign a custom glyph (avatar/icon/emoji/dicebear) to a project folder. */
 	setProjectIcon: (path: string, icon: ProjectIcon) => void;
+	/** Assign a custom sidebar/picker label for a project folder. */
+	setProjectName: (path: string, name: string) => void;
 	/**
 	 * Choose which shell the built-in terminal and git actions run through.
 	 * The value is either `"auto"` (the OS default) or one of the allowlisted
@@ -124,7 +201,19 @@ function loadIcons(): Record<string, ProjectIcon> {
 			return {};
 		}
 		const parsed = JSON.parse(raw);
-		return parsed && typeof parsed === "object" ? parsed : {};
+		if (!(parsed && typeof parsed === "object")) {
+			return {};
+		}
+		const out: Record<string, ProjectIcon> = {};
+		for (const [path, value] of Object.entries(
+			parsed as Record<string, unknown>
+		)) {
+			const icon = normalizeProjectIcon(value);
+			if (icon) {
+				out[path] = icon;
+			}
+		}
+		return out;
 	} catch {
 		return {};
 	}
@@ -132,6 +221,34 @@ function loadIcons(): Record<string, ProjectIcon> {
 
 function saveIcons(icons: Record<string, ProjectIcon>) {
 	localStorage.setItem(ICONS_KEY, JSON.stringify(icons));
+}
+
+function loadNames(): Record<string, string> {
+	try {
+		const raw = localStorage.getItem(NAMES_KEY);
+		if (!raw) {
+			return {};
+		}
+		const parsed = JSON.parse(raw);
+		if (!(parsed && typeof parsed === "object")) {
+			return {};
+		}
+		const out: Record<string, string> = {};
+		for (const [path, value] of Object.entries(
+			parsed as Record<string, unknown>
+		)) {
+			if (typeof value === "string" && value.trim()) {
+				out[path] = value.trim();
+			}
+		}
+		return out;
+	} catch {
+		return {};
+	}
+}
+
+function saveNames(names: Record<string, string>) {
+	localStorage.setItem(NAMES_KEY, JSON.stringify(names));
 }
 
 // Conductor-style memorable, collision-resistant names so parallel worktrees
@@ -191,6 +308,7 @@ function loadWorktreeBranch(): string {
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 	folder: localStorage.getItem(STORAGE_KEY) ?? null,
 	projectIcons: loadIcons(),
+	projectNames: loadNames(),
 	recentFolders: loadRecents(),
 	removedProjects: loadRemoved(),
 	terminalShell: localStorage.getItem(TERMINAL_SHELL_KEY) ?? "auto",
@@ -274,6 +392,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 		});
 	},
 
+	setProjectName: (path, name) => {
+		const trimmed = name.trim();
+		set((state) => {
+			if (!trimmed) {
+				if (!(path in state.projectNames)) {
+					return state;
+				}
+				const { [path]: _removed, ...rest } = state.projectNames;
+				saveNames(rest);
+				return { projectNames: rest };
+			}
+			const next = { ...state.projectNames, [path]: trimmed };
+			saveNames(next);
+			return { projectNames: next };
+		});
+	},
+
+	clearProjectName: (path) => {
+		set((state) => {
+			if (!(path in state.projectNames)) {
+				return state;
+			}
+			const { [path]: _removed, ...rest } = state.projectNames;
+			saveNames(rest);
+			return { projectNames: rest };
+		});
+	},
+
 	removeRecentFolder: (path) => {
 		set((state) => {
 			const next = state.recentFolders.filter((p) => p !== path);
@@ -298,19 +444,26 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 			if (folder === null) {
 				localStorage.removeItem(STORAGE_KEY);
 			}
-			// Drop any custom icon so a re-imported folder starts fresh and stale
-			// data URLs don't linger in localStorage.
+			// Drop any custom icon / display name so a re-imported folder starts
+			// fresh and stale data URLs don't linger in localStorage.
 			let projectIcons = state.projectIcons;
 			if (path in projectIcons) {
 				const { [path]: _dropped, ...rest } = projectIcons;
 				projectIcons = rest;
 				saveIcons(rest);
 			}
+			let projectNames = state.projectNames;
+			if (path in projectNames) {
+				const { [path]: _dropped, ...rest } = projectNames;
+				projectNames = rest;
+				saveNames(rest);
+			}
 			return {
 				recentFolders: next,
 				removedProjects: removed,
 				folder,
 				projectIcons,
+				projectNames,
 			};
 		});
 	},

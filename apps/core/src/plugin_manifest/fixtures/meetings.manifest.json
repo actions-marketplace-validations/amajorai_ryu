@@ -14,7 +14,17 @@
       "config": {
         "label": "Meetings",
         "ui_entry": "./dist/index.html",
-        "ui_format": "html"
+        "ui_format": "html",
+        "csp": {
+          "connect_domains": [
+            "https://api.iconify.design",
+            "https://api.dicebear.com"
+          ],
+          "resource_domains": [
+            "https://api.iconify.design",
+            "https://api.dicebear.com"
+          ]
+        }
       }
     }
   ],
@@ -41,6 +51,7 @@
           { "path": "/" },
           { "path": "/:id" },
           { "path": "/:id/title" },
+          { "path": "/:id/icon" },
           { "path": "/:id/chunk" },
           { "path": "/:id/finalize" },
           { "path": "/:id/transcript" }

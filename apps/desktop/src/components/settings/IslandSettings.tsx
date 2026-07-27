@@ -1,5 +1,4 @@
 import { ElasticSlider } from "@ryu/ui/components/elastic-slider";
-import { Input } from "@ryu/ui/components/input";
 import {
 	Select,
 	SelectContent,
@@ -8,7 +7,6 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { Switch } from "@ryu/ui/components/switch";
-import { Textarea } from "@ryu/ui/components/textarea";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useShadowCapture } from "@/src/hooks/useShadowCapture.ts";
@@ -16,7 +14,6 @@ import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	clampIslandEdgeOffset,
 	DEFAULT_AGENT_ID,
-	DEFAULT_DICTATION_PREFS,
 	DEFAULT_ISLAND_AUTO_JUMP,
 	DEFAULT_ISLAND_COMMAND_SHORTCUT,
 	DEFAULT_ISLAND_CONSENT,
@@ -25,10 +22,6 @@ import {
 	DEFAULT_ISLAND_SCREEN_PRIVACY,
 	DEFAULT_ISLAND_TTS_PREFS,
 	DEFAULT_VOICE_PREFS,
-	type DictationInsertMode,
-	type DictationMode,
-	type DictationPrefs,
-	getDictationPrefs,
 	getIslandAgentPrefs,
 	getIslandAutoJump,
 	getIslandBackground,
@@ -45,7 +38,6 @@ import {
 	type IslandTtsPrefs,
 	MAX_ISLAND_EDGE_OFFSET,
 	MIN_ISLAND_EDGE_OFFSET,
-	setDictationPrefs,
 	setIslandAgentPrefs,
 	setIslandAutoJump,
 	setIslandBackground,
@@ -78,21 +70,6 @@ const LOCAL_MODEL_OPTION = "__local__";
 const VOICE_MODE_OPTIONS: { value: VoiceInputMode; label: string }[] = [
 	{ value: "toggle", label: "Press to start / stop" },
 	{ value: "push-to-talk", label: "Hold to talk" },
-];
-
-/** Activation-mode choices for the dictation shortcut. */
-const DICTATION_MODE_OPTIONS: { value: DictationMode; label: string }[] = [
-	{ value: "push-to-talk", label: "Hold to talk" },
-	{ value: "toggle", label: "Press to start / stop" },
-];
-
-/** How dictated text lands in the focused app. */
-const DICTATION_INSERT_OPTIONS: {
-	value: DictationInsertMode;
-	label: string;
-}[] = [
-	{ value: "type", label: "Type (synthetic keystrokes)" },
-	{ value: "paste", label: "Paste (clipboard)" },
 ];
 
 /** Debounce for the offset slider's Core write (the slider fires continuously). */
@@ -316,30 +293,6 @@ export function IslandSettings() {
 			VOICE_ENGINES.find((e) => e.engine === engine)?.model ??
 			DEFAULT_VOICE_PREFS.model;
 		writeVoicePrefs({ ...voicePrefs, engine, model });
-	};
-
-	// System-wide dictation: a separate global shortcut that types the transcript
-	// straight into the focused native app. Its own cross-process pref; the island
-	// registers the shortcut and runs the capture → transcribe → insert pipeline.
-	const [dictationPrefs, setDictationPrefsState] = useState<DictationPrefs>(
-		DEFAULT_DICTATION_PREFS
-	);
-	useEffect(() => {
-		let cancelled = false;
-		const target = toTarget(useNodeStore.getState().getActiveNode());
-		getDictationPrefs(target).then((prefs) => {
-			if (!cancelled) {
-				setDictationPrefsState(prefs);
-			}
-		});
-		return () => {
-			cancelled = true;
-		};
-	}, []);
-	const writeDictationPrefs = (next: DictationPrefs) => {
-		setDictationPrefsState(next);
-		const target = toTarget(useNodeStore.getState().getActiveNode());
-		setDictationPrefs(target, next).catch(() => undefined);
 	};
 
 	// Command-bar summon shortcut: the global hotkey that shows + focuses the
@@ -608,7 +561,7 @@ export function IslandSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Global hotkeys for the island. Summon the command bar from anywhere to type into the island; push-to-talk dictates by voice. Click a shortcut, then press the new key combination (Esc cancels)."
+				caption="Global hotkeys for the island. Summon the command bar from anywhere to type into the island; push-to-talk dictates by voice. System-wide dictation (type into any app) lives under Settings → Plugins → Dictation. Click a shortcut, then press the new key combination (Esc cancels)."
 				title="Shortcuts"
 			>
 				<SettingsGroup>
@@ -694,277 +647,6 @@ export function IslandSettings() {
 								}
 								title="Activation"
 							/>
-						</>
-					) : null}
-				</SettingsGroup>
-			</SettingsSection>
-
-			<SettingsSection
-				caption="System-wide dictation: hold a separate shortcut, speak, and the transcript is typed straight into whatever app you're in — a text field, a chat box, an editor. Unlike push-to-talk voice input (which runs an agent in the island), this just enters text. Optionally clean it up with a model before it lands."
-				title="Dictation"
-			>
-				<SettingsGroup>
-					<SettingsItem
-						actions={
-							<Switch
-								aria-label="Enable system-wide dictation"
-								checked={dictationPrefs.enabled}
-								onCheckedChange={(v) =>
-									writeDictationPrefs({ ...dictationPrefs, enabled: v })
-								}
-							/>
-						}
-						description="Speak anywhere; the text is typed into the focused app."
-						title="System-wide dictation"
-					/>
-					{dictationPrefs.enabled ? (
-						<>
-							<SettingsItem
-								actions={
-									<ShortcutCapture
-										ariaLabel="Set dictation shortcut"
-										onChange={(acc) =>
-											writeDictationPrefs({ ...dictationPrefs, shortcut: acc })
-										}
-										onReset={() =>
-											writeDictationPrefs({
-												...dictationPrefs,
-												shortcut: DEFAULT_DICTATION_PREFS.shortcut,
-											})
-										}
-										value={dictationPrefs.shortcut}
-									/>
-								}
-								description="Global key to dictate into the focused app. Kept separate from the voice-input shortcut."
-								title="Dictation shortcut"
-							/>
-							<SettingsItem
-								actions={
-									<Select
-										items={DICTATION_MODE_OPTIONS}
-										onValueChange={(v) =>
-											writeDictationPrefs({
-												...dictationPrefs,
-												mode: v as DictationMode,
-											})
-										}
-										value={dictationPrefs.mode}
-									>
-										<SelectTrigger
-											aria-label="Dictation activation mode"
-											className="h-8 w-56 text-sm"
-										>
-											<SelectValue />
-										</SelectTrigger>
-										<SelectContent>
-											{DICTATION_MODE_OPTIONS.map((option) => (
-												<SelectItem key={option.value} value={option.value}>
-													{option.label}
-												</SelectItem>
-											))}
-										</SelectContent>
-									</Select>
-								}
-								description={
-									dictationPrefs.mode === "push-to-talk"
-										? "Hold the shortcut to record; release to insert."
-										: "Press once to start, again to stop and insert."
-								}
-								title="Activation"
-							/>
-							<SettingsItem
-								actions={
-									<Select
-										items={sttEngineOptions}
-										onValueChange={(v) =>
-											writeDictationPrefs({
-												...dictationPrefs,
-												engine: v as VoiceEngine,
-											})
-										}
-										value={dictationPrefs.engine}
-									>
-										<SelectTrigger
-											aria-label="Dictation engine"
-											className="h-8 w-56 text-sm"
-										>
-											<SelectValue />
-										</SelectTrigger>
-										<SelectContent>
-											{sttEngineOptions.map((opt) => (
-												<SelectItem key={opt.value} value={opt.value}>
-													{opt.label}
-												</SelectItem>
-											))}
-										</SelectContent>
-									</Select>
-								}
-								description="Speech-to-text engine used for dictation."
-								title="Engine"
-							/>
-							<SettingsItem
-								actions={
-									<Select
-										items={DICTATION_INSERT_OPTIONS}
-										onValueChange={(v) =>
-											writeDictationPrefs({
-												...dictationPrefs,
-												insertMode: v as DictationInsertMode,
-											})
-										}
-										value={dictationPrefs.insertMode}
-									>
-										<SelectTrigger
-											aria-label="Dictation insertion method"
-											className="h-8 w-56 text-sm"
-										>
-											<SelectValue />
-										</SelectTrigger>
-										<SelectContent>
-											{DICTATION_INSERT_OPTIONS.map((option) => (
-												<SelectItem key={option.value} value={option.value}>
-													{option.label}
-												</SelectItem>
-											))}
-										</SelectContent>
-									</Select>
-								}
-								description={
-									dictationPrefs.insertMode === "paste"
-										? "Copies the text and sends the paste shortcut — instant even for long dictations."
-										: "Types the text character by character. No clipboard clobber; works everywhere."
-								}
-								title="Insertion"
-							/>
-							{dictationPrefs.insertMode === "paste" ? (
-								<>
-									<SettingsItem
-										actions={
-											<Input
-												aria-label="Paste command"
-												className="h-8 w-56 text-sm"
-												onChange={(e) =>
-													writeDictationPrefs({
-														...dictationPrefs,
-														pasteKeys: e.target.value,
-													})
-												}
-												placeholder={
-													IS_WINDOWS ? "ctrl+v (default)" : "cmd+v (default)"
-												}
-												value={dictationPrefs.pasteKeys}
-											/>
-										}
-										description="Key combo to paste, `+`-joined (e.g. ctrl+v, cmd+shift+v). Empty uses the platform default."
-										title="Paste command"
-									/>
-									<SettingsItem
-										actions={
-											<Switch
-												aria-label="Restore clipboard after paste"
-												checked={dictationPrefs.restoreClipboard}
-												onCheckedChange={(v) =>
-													writeDictationPrefs({
-														...dictationPrefs,
-														restoreClipboard: v,
-													})
-												}
-											/>
-										}
-										description="Put your previous clipboard back after pasting the dictation."
-										title="Restore clipboard"
-									/>
-								</>
-							) : null}
-							<SettingsItem
-								actions={
-									<Switch
-										aria-label="Auto-send after dictation"
-										checked={dictationPrefs.autoSend}
-										onCheckedChange={(v) =>
-											writeDictationPrefs({ ...dictationPrefs, autoSend: v })
-										}
-									/>
-								}
-								description="Press Enter after inserting — sends the message in a chat box (or adds a newline in an editor)."
-								title="Auto-send (press Enter)"
-							/>
-							<SettingsItem
-								actions={
-									<Switch
-										aria-label="Clean up dictation with a model"
-										checked={dictationPrefs.postProcess.enabled}
-										onCheckedChange={(v) =>
-											writeDictationPrefs({
-												...dictationPrefs,
-												postProcess: {
-													...dictationPrefs.postProcess,
-													enabled: v,
-												},
-											})
-										}
-									/>
-								}
-								description="Run the raw transcript through a model to fix grammar/punctuation and drop filler words before it lands. Falls back to the raw text if the model is unavailable."
-								title="Clean up with a model"
-							/>
-							{dictationPrefs.postProcess.enabled ? (
-								<>
-									<SettingsItem
-										actions={
-											<Select
-												items={agentOptions}
-												onValueChange={(v) =>
-													writeDictationPrefs({
-														...dictationPrefs,
-														postProcess: {
-															...dictationPrefs.postProcess,
-															agent: fromAgentValue(v),
-														},
-													})
-												}
-												value={toAgentValue(dictationPrefs.postProcess.agent)}
-											>
-												<SelectTrigger
-													aria-label="Dictation cleanup model"
-													className="h-8 w-56 text-sm"
-												>
-													<SelectValue />
-												</SelectTrigger>
-												<SelectContent>
-													{agentOptions.map((opt) => (
-														<SelectItem key={opt.value} value={opt.value}>
-															{opt.label}
-														</SelectItem>
-													))}
-												</SelectContent>
-											</Select>
-										}
-										description="The fast local model is instant; a full agent can be smarter but slower."
-										title="Cleanup model"
-									/>
-									<SettingsItem
-										actions={
-											<Textarea
-												aria-label="Dictation cleanup prompt"
-												className="min-h-24 w-72 text-sm"
-												onChange={(e) =>
-													writeDictationPrefs({
-														...dictationPrefs,
-														postProcess: {
-															...dictationPrefs.postProcess,
-															prompt: e.target.value,
-														},
-													})
-												}
-												value={dictationPrefs.postProcess.prompt}
-											/>
-										}
-										description="Instructions for the cleanup model. It sees this plus your raw transcript."
-										title="Cleanup prompt"
-									/>
-								</>
-							) : null}
 						</>
 					) : null}
 				</SettingsGroup>

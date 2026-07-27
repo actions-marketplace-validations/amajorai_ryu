@@ -51,7 +51,6 @@ import {
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
 	DropdownMenuItem,
-	DropdownMenuSeparator,
 	DropdownMenuSub,
 	DropdownMenuSubContent,
 	DropdownMenuSubTrigger,
@@ -401,7 +400,6 @@ export function NodeLayerMenu({
 						{caption ?? label}
 					</p>
 				</div>
-				{hasBody && <DropdownMenuSeparator />}
 				{actions.map((action) => {
 					const busy = pending === `action:${action.id}`;
 					return (
@@ -426,7 +424,6 @@ export function NodeLayerMenu({
 				})}
 				{installed.length > 0 && (
 					<>
-						{actions.length > 0 && <DropdownMenuSeparator />}
 						<SectionLabel>
 							{selectionMode === "toggle" ? "Installed · running" : "Installed"}
 						</SectionLabel>
@@ -444,7 +441,6 @@ export function NodeLayerMenu({
 				)}
 				{available.length > 0 && (
 					<>
-						<DropdownMenuSeparator />
 						<SectionLabel>Not installed</SectionLabel>
 						{available.map((option) => (
 							<OptionRow

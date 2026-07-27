@@ -153,14 +153,7 @@ fn resolve_core_binary() -> Option<std::path::PathBuf> {
 
 #[tauri::command]
 async fn start_ryu_core(state: tauri::State<'_, CoreState>) -> Result<String, String> {
-	// In dev builds, ryu-core is owned by the `core#dev` turbo task (`cargo run`).
-	// Spawning it here would lock the binary and block recompilation.
-	// The frontend's health-poll loop will detect when core comes online.
-	#[cfg(debug_assertions)]
-	return Ok("connecting".to_string());
-
-	// Check if we already have a running process
-	#[allow(unreachable_code)]
+	// Check if we already have a running process we own
 	{
 		let mut guard = state.process.lock().map_err(|e| e.to_string())?;
 		if let Some(ref mut process) = *guard {
@@ -168,6 +161,23 @@ async fn start_ryu_core(state: tauri::State<'_, CoreState>) -> Result<String, St
 				return Ok("already running".to_string());
 			}
 		}
+	}
+
+	// In dev builds, ryu-core is normally owned by the `core#dev` turbo task
+	// (`cargo run`). Spawning a second copy would lock the binary and block
+	// recompilation — so when Core is healthy we just report "connecting" and
+	// let the frontend health-poll. But after a node reset Core exits itself
+	// (and turbo's cargo run dies with it), so when health is down we MUST
+	// spawn for recovery or reset would leave the node permanently stopped.
+	#[cfg(debug_assertions)]
+	{
+		let probe = RyuCoreProcess::new(std::path::PathBuf::from("ryu-core"));
+		if probe.is_already_running().await {
+			return Ok("connecting".to_string());
+		}
+		tracing::warn!(
+			"dev: Core is down — spawning for recovery (turbo may have exited after a reset)"
+		);
 	}
 
 	let binary = match resolve_core_binary() {
@@ -263,12 +273,13 @@ async fn stop_ryu_core(state: tauri::State<'_, CoreState>) -> Result<(), String>
 		guard.take()
 	};
 
-	if let Some(mut process) = process {
-		process
-			.stop()
-			.await
-			.map_err(|e| format!("Failed to stop Ryu Core: {}", e))?;
-	}
+	// Always run stop — even without an owned child handle it kills via PID file
+	// and by profile port, which is what makes reset work against turbo-owned Core.
+	let mut process = process.unwrap_or_else(|| RyuCoreProcess::new(std::path::PathBuf::from("ryu-core")));
+	process
+		.stop()
+		.await
+		.map_err(|e| format!("Failed to stop Ryu Core: {}", e))?;
 
 	Ok(())
 }
@@ -996,6 +1007,18 @@ async fn open_tab_window(
 	Ok(())
 }
 
+/// Toggle the WebView inspector (DevTools). Used by the global right-click menu.
+/// Requires the `devtools` feature on the `tauri` dependency (enabled for
+/// packaged builds so Settings → Developer Mode can open the inspector).
+#[tauri::command]
+fn toggle_devtools(window: tauri::WebviewWindow) {
+	if window.is_devtools_open() {
+		window.close_devtools();
+	} else {
+		window.open_devtools();
+	}
+}
+
 /// Read a UTF-8 text file by absolute path — backs the in-app markdown editor
 /// opening project files from the active workspace folder.
 #[tauri::command]
@@ -1254,12 +1277,13 @@ pub fn run() {
                 // a restart where it is already running self-exits. Dev is owned by
                 // turbo, same gate as the sidecars.
                 //
-                // v1: island autostart is DISABLED to shrink the shippable
-                // surface (the Electron island is deferred out of the first
-                // release). The install+launch code below is left intact and
-                // still referenced, so nothing here goes stale. The tray toggle
-                // and the `install_and_launch_island` command still work if a
-                // user opts in manually — this only removes the boot autostart.
+                // v1 / 0.1.0: island autostart is DISABLED to shrink the
+                // shippable surface (the Electron island is deferred out of
+                // the first release). The install+launch code below is left
+                // intact. Desktop UI entry points (NodeSelector row, Settings
+                // tab, onboarding install, tray Show/Hide Companion) are also
+                // commented with `# 0.1.0: Island disabled` — uncomment those
+                // and flip ISLAND_AUTOSTART to `true` to re-enable.
                 // TO RE-ENABLE: flip ISLAND_AUTOSTART to `true`.
                 #[cfg(not(debug_assertions))]
                 {
@@ -1305,6 +1329,7 @@ pub fn run() {
             startup::get_start_hidden,
             startup::set_start_hidden,
             shell_execute,
+            toggle_devtools,
             read_project_file,
             write_project_file,
             list_project_markdown,

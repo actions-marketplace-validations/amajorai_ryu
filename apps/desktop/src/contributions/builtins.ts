@@ -48,10 +48,12 @@ import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { WHITEBOARD_PLUGIN_ID } from "@/src/lib/whiteboard/app.ts";
 import AgentEditPage from "@/src/pages/AgentEditPage.tsx";
+import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
 import ChatPage from "@/src/pages/ChatPage.tsx";
 import DownloadsPage from "@/src/pages/DownloadsPage.tsx";
 import FileEditorPage from "@/src/pages/FileEditorPage.tsx";
 import HomePage from "@/src/pages/HomePage.tsx";
+import IdentitiesPage from "@/src/pages/IdentitiesPage.tsx";
 import LibraryPage from "@/src/pages/LibraryPage.tsx";
 import PluginCompanionPage, {
 	CompanionUnavailable,
@@ -68,6 +70,10 @@ import WorkflowsPage from "@/src/pages/WorkflowsPage.tsx";
 import { resolveCompanionAlias, topLevelAlias } from "./companion-alias.ts";
 import { contributionRegistry, type RouteTab } from "./registry.ts";
 
+// /channels/:id — manage a channel bot ("new" opens create mode).
+const CHANNEL_DETAIL = /^\/channels\/[^/]+$/;
+// /identities/profile/:profileId — manage identities with a profile focused.
+const IDENTITY_PROFILE = /^\/identities\/profile\/[^/]+$/;
 // A Notion-style markdown page inside a Space: /spaces/:spaceId/doc/:docId
 const SPACE_DOC = /^\/spaces\/[^/]+\/doc\/[^/]+$/;
 // A single database row's detail: /spaces/:spaceId/db/:databaseId/row/:rowId
@@ -223,6 +229,18 @@ export function seedBuiltinRoutes(): void {
 		createElement(StorePage, { initialSection: "workflows" })
 	);
 	exact("/library", () => createElement(LibraryPage));
+	// Channels/Identities: bare routes open the Library collection tab; manage
+	// CRUD lives on `/channels/:id`, `/channels/new`, `/identities/new`, and
+	// `/identities/profile/:profileId` (profiles are named strings, not UUIDs).
+	exact("/channels", () =>
+		createElement(LibraryPage, { initialSection: "channel" })
+	);
+	exact("/identities", () =>
+		createElement(LibraryPage, { initialSection: "identity" })
+	);
+	exact("/identities/new", () =>
+		createElement(IdentitiesPage, { initialNew: true })
+	);
 	exact("/models", () =>
 		createElement(StorePage, { initialSection: "models" })
 	);
@@ -303,6 +321,24 @@ export function seedBuiltinRoutes(): void {
 	pattern(LIBRARY_SECTION, (tab) =>
 		createElement(LibraryPage, { initialSection: tab.path.split("/")[2] })
 	);
+	// /channels/:id ("new" => create form) — channel-bot manage page.
+	pattern(CHANNEL_DETAIL, (tab) => {
+		const id = tab.path.split("/")[2];
+		return createElement(ChannelsPage, {
+			initialNew: id === "new",
+			initialSelectedId: id === "new" ? null : id,
+		});
+	});
+	// /identities/profile/:profileId — manage page focused on a profile.
+	pattern(IDENTITY_PROFILE, (tab) => {
+		let profileId = tab.path.split("/")[3] ?? "";
+		try {
+			profileId = decodeURIComponent(profileId);
+		} catch {
+			// keep raw segment
+		}
+		return createElement(IdentitiesPage, { initialProfileId: profileId });
+	});
 	// /spaces/:spaceId/doc/:docId
 	pattern(SPACE_DOC, (tab) => {
 		const segments = tab.path.split("/");

@@ -925,6 +925,9 @@ export function setVoiceInputPrefs(
 
 export const DICTATION_PREF_KEY = "dictation";
 
+/** Stable plugin / fixture id for the Dictation apps-store app. */
+export const DICTATION_PLUGIN_ID = "dictation";
+
 /** Activation behavior: hold-to-talk (default) vs. press-to-toggle. */
 export type DictationMode = "toggle" | "push-to-talk";
 
@@ -933,15 +936,24 @@ export type DictationInsertMode = "type" | "paste";
 
 /** Optional LLM cleanup of the transcript before insertion. */
 export interface DictationPostProcess {
-	/** Agent id to run cleanup through; empty = the fast local default model. */
-	agent: string;
 	enabled: boolean;
 	/** System prompt handed the cleanup model. */
 	prompt: string;
+	selection: AgentSelection;
+}
+
+/** Agent-ask mode: speak a question, run an agent, paste the answer. */
+export interface DictationAskPrefs {
+	enabled: boolean;
+	mode: DictationMode;
+	prompt: string;
+	selection: AgentSelection;
+	shortcut: string;
 }
 
 /** The dictation settings blob persisted under {@link DICTATION_PREF_KEY}. */
 export interface DictationPrefs {
+	ask: DictationAskPrefs;
 	/** Press Enter after inserting (send the message / newline). */
 	autoSend: boolean;
 	enabled: boolean;
@@ -961,8 +973,28 @@ export interface DictationPrefs {
 export const DEFAULT_DICTATION_POSTPROCESS_PROMPT =
 	"You clean up dictated speech into polished written text. Fix grammar, punctuation, and capitalization, and remove filler words (um, uh, like, you know) and false starts. Preserve the original meaning and wording as much as possible. Output ONLY the cleaned text, with no preamble, quotes, or commentary.";
 
+/** Default ask prompt (mirrors the island's default). */
+export const DEFAULT_DICTATION_ASK_PROMPT =
+	"You answer the user's spoken question. Be concise and directly useful. Output ONLY the answer text that should be pasted into their focused app — no preamble, no quotes, no commentary about the fact they dictated.";
+
+/** Default dictation shortcut (mirrors the island's default). */
+export const DEFAULT_DICTATION_SHORTCUT = "CommandOrControl+Shift+D";
+
+/** Default agent-ask shortcut (mirrors the island's default). */
+export const DEFAULT_DICTATION_ASK_SHORTCUT = "CommandOrControl+Shift+A";
+
+/** Default agent-ask settings (mirrors the island's default). */
+export const DEFAULT_DICTATION_ASK: DictationAskPrefs = {
+	enabled: false,
+	mode: "push-to-talk",
+	prompt: DEFAULT_DICTATION_ASK_PROMPT,
+	selection: EMPTY_AGENT_SELECTION,
+	shortcut: DEFAULT_DICTATION_ASK_SHORTCUT,
+};
+
 /** Default dictation settings (mirrors the island's `DEFAULT_DICTATION_PREFS`). */
 export const DEFAULT_DICTATION_PREFS: DictationPrefs = {
+	ask: DEFAULT_DICTATION_ASK,
 	autoSend: false,
 	enabled: true,
 	engine: "parakeet",
@@ -970,13 +1002,81 @@ export const DEFAULT_DICTATION_PREFS: DictationPrefs = {
 	mode: "push-to-talk",
 	pasteKeys: "",
 	postProcess: {
-		agent: "",
 		enabled: false,
 		prompt: DEFAULT_DICTATION_POSTPROCESS_PROMPT,
+		selection: EMPTY_AGENT_SELECTION,
 	},
 	restoreClipboard: true,
-	shortcut: "CommandOrControl+Shift+D",
+	shortcut: DEFAULT_DICTATION_SHORTCUT,
 };
+
+function coerceDictationMode(value: unknown): DictationMode {
+	return value === "toggle" ? "toggle" : "push-to-talk";
+}
+
+function coerceDictationInsertMode(value: unknown): DictationInsertMode {
+	return value === "paste" ? "paste" : "type";
+}
+
+function parseAgentSelectionValue(value: unknown): AgentSelection {
+	if (value == null) {
+		return EMPTY_AGENT_SELECTION;
+	}
+	if (typeof value === "object") {
+		return parseAgentSelection(JSON.stringify(value));
+	}
+	if (typeof value === "string") {
+		return parseAgentSelection(value);
+	}
+	return EMPTY_AGENT_SELECTION;
+}
+
+function parseAgentSelectionWithLegacyAgent(
+	selection: unknown,
+	legacyAgent: unknown
+): AgentSelection {
+	const fromSelection = parseAgentSelectionValue(selection);
+	if (!isAgentSelectionEmpty(fromSelection)) {
+		return fromSelection;
+	}
+	const agent = typeof legacyAgent === "string" ? legacyAgent.trim() : "";
+	if (agent.length > 0) {
+		return { ...EMPTY_AGENT_SELECTION, agent_id: agent };
+	}
+	return EMPTY_AGENT_SELECTION;
+}
+
+function parseDictationPostProcess(value: unknown): DictationPostProcess {
+	const raw = (value ?? {}) as Record<string, unknown>;
+	const prompt =
+		typeof raw.prompt === "string" && raw.prompt.trim().length > 0
+			? raw.prompt
+			: DEFAULT_DICTATION_POSTPROCESS_PROMPT;
+	return {
+		enabled: raw.enabled === true,
+		prompt,
+		selection: parseAgentSelectionWithLegacyAgent(raw.selection, raw.agent),
+	};
+}
+
+function parseDictationAsk(value: unknown): DictationAskPrefs {
+	const raw = (value ?? {}) as Record<string, unknown>;
+	const shortcut =
+		typeof raw.shortcut === "string" && raw.shortcut.trim().length > 0
+			? raw.shortcut.trim()
+			: DEFAULT_DICTATION_ASK_SHORTCUT;
+	const prompt =
+		typeof raw.prompt === "string" && raw.prompt.trim().length > 0
+			? raw.prompt
+			: DEFAULT_DICTATION_ASK_PROMPT;
+	return {
+		enabled: raw.enabled === true,
+		mode: coerceDictationMode(raw.mode),
+		prompt,
+		selection: parseAgentSelectionWithLegacyAgent(raw.selection, raw.agent),
+		shortcut,
+	};
+}
 
 /** Read the saved dictation settings, falling back to defaults. */
 export async function getDictationPrefs(
@@ -988,28 +1088,22 @@ export async function getDictationPrefs(
 	}
 	try {
 		const parsed = JSON.parse(raw) as Partial<DictationPrefs>;
-		const post = (parsed.postProcess ?? {}) as Partial<DictationPostProcess>;
+		const shortcut =
+			typeof parsed.shortcut === "string" && parsed.shortcut.trim().length > 0
+				? parsed.shortcut.trim()
+				: DEFAULT_DICTATION_SHORTCUT;
 		return {
+			ask: parseDictationAsk(parsed.ask),
 			autoSend: parsed.autoSend === true,
 			enabled: parsed.enabled !== false,
 			engine: parsed.engine === "whisper" ? "whisper" : "parakeet",
-			insertMode: parsed.insertMode === "paste" ? "paste" : "type",
-			mode: parsed.mode === "toggle" ? "toggle" : "push-to-talk",
+			insertMode: coerceDictationInsertMode(parsed.insertMode),
+			mode: coerceDictationMode(parsed.mode),
 			pasteKeys:
 				typeof parsed.pasteKeys === "string" ? parsed.pasteKeys.trim() : "",
-			postProcess: {
-				agent: typeof post.agent === "string" ? post.agent : "",
-				enabled: post.enabled === true,
-				prompt:
-					typeof post.prompt === "string" && post.prompt.trim().length > 0
-						? post.prompt
-						: DEFAULT_DICTATION_POSTPROCESS_PROMPT,
-			},
+			postProcess: parseDictationPostProcess(parsed.postProcess),
 			restoreClipboard: parsed.restoreClipboard !== false,
-			shortcut:
-				typeof parsed.shortcut === "string" && parsed.shortcut.trim().length > 0
-					? parsed.shortcut.trim()
-					: DEFAULT_DICTATION_PREFS.shortcut,
+			shortcut,
 		};
 	} catch {
 		return DEFAULT_DICTATION_PREFS;
@@ -1265,18 +1359,15 @@ export function setDoubleCheckConfig(
 }
 
 // --- Chat auto-rename (title) -----------------------------------------------
-// ChatGPT/Claude-style: when a chat gets its first user message, Core names it.
-// By default the resident LOCAL model does this DIRECTLY (the first message never
-// leaves the machine). Setting a model here routes the title call through the
-// Gateway with that model id instead — the fix for cloud-only setups where no
-// local engine is resident (so the direct path is a no-op and chats never get
-// named). Model + effort persist under `auto-title-*`; the master toggle under
-// `auto-title-enabled` (default ON). Core ignores `provider` (UI suggestion only)
-// and routes by the model id alone — nothing hardcoded.
+// Owned by the `chat-title` plugin (Gateway settings → Plugins → Chat titles).
+// Re-titles after every N completed assistant turns (default 5). Prefs:
+// `auto-title-enabled` (default ON), `auto-title-every-n`, `auto-title-model`.
 
 export const AUTO_TITLE_MODEL_PREF_KEY = "auto-title-model";
 export const AUTO_TITLE_EFFORT_PREF_KEY = "auto-title-effort";
 export const AUTO_TITLE_ENABLED_PREF_KEY = "auto-title-enabled";
+/** How often the `chat-title` plugin re-titles (completed assistant turns). Default 5. */
+export const AUTO_TITLE_EVERY_N_PREF_KEY = "auto-title-every-n";
 
 /** Read the chat-rename model's {model, effort} (provider not persisted). */
 export function getChatRenameConfig(

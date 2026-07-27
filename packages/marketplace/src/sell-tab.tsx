@@ -19,6 +19,7 @@ import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { useCallback } from "react";
 import { sileo } from "sileo";
 import { useMarketplaceHost } from "./host.tsx";
+import { SellerReportsPanel } from "./seller-reports.tsx";
 import { NoOrgState, SignedOutState } from "./states.tsx";
 import type { SellerOnboardingStatus } from "./types.ts";
 
@@ -149,6 +150,8 @@ export function SellTab() {
 					</div>
 				)}
 			</div>
+
+			<SellerReportsPanel />
 		</div>
 	);
 }

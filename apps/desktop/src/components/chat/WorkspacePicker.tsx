@@ -22,7 +22,7 @@ import {
 	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Dialog,
 	DialogClose,
@@ -31,26 +31,25 @@ import {
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
-} from "@ryu/ui/components/dialog";
+} from "@ryu/ui/components/dialog.tsx";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
-	DropdownMenuSeparator,
 	DropdownMenuSub,
 	DropdownMenuSubContent,
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
-} from "@ryu/ui/components/dropdown-menu";
-import { Input } from "@ryu/ui/components/input";
-import { Spinner } from "@ryu/ui/components/spinner";
+} from "@ryu/ui/components/dropdown-menu.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/tooltip.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { WORKSPACE_SELECT_TRIGGER } from "@/components/agent-elements/input/composer-select.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -604,7 +603,6 @@ function BranchList({
 				<p className="mt-1 px-2 py-1.5 text-[12px] text-destructive">{error}</p>
 			)}
 
-			<DropdownMenuSeparator />
 			{dirty ? (
 				<TooltipProvider>
 					<Tooltip>
@@ -747,35 +745,30 @@ function RunModeContent({
 				title="Isolated worktree"
 			/>
 			{worktreeMode && (
-				<>
-					<DropdownMenuSeparator />
-					<div className="flex flex-col gap-1.5 px-1.5 pb-1">
-						<span className="text-[11px] text-muted-foreground">
-							Branch name
-						</span>
-						<div className="flex items-center gap-1.5">
-							<Input
-								className="h-7 flex-1 font-mono text-[12px]"
-								onChange={(e) => onSetBranch(e.target.value)}
-								onKeyDown={(e) => e.stopPropagation()}
-								placeholder="ryu/my-feature"
-								spellCheck={false}
-								value={worktreeBranch}
-							/>
-							<Button
-								aria-label="Suggest a new branch name"
-								className="size-7 shrink-0"
-								onClick={onRegenerate}
-								size="icon"
-								title="Suggest a new name"
-								type="button"
-								variant="ghost"
-							>
-								<HugeiconsIcon className="size-4" icon={RefreshIcon} />
-							</Button>
-						</div>
+				<div className="flex flex-col gap-1.5 px-1.5 pb-1">
+					<span className="text-[11px] text-muted-foreground">Branch name</span>
+					<div className="flex items-center gap-1.5">
+						<Input
+							className="h-7 flex-1 font-mono text-[12px]"
+							onChange={(e) => onSetBranch(e.target.value)}
+							onKeyDown={(e) => e.stopPropagation()}
+							placeholder="ryu/my-feature"
+							spellCheck={false}
+							value={worktreeBranch}
+						/>
+						<Button
+							aria-label="Suggest a new branch name"
+							className="size-7 shrink-0"
+							onClick={onRegenerate}
+							size="icon"
+							title="Suggest a new name"
+							type="button"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-4" icon={RefreshIcon} />
+						</Button>
 					</div>
-				</>
+				</div>
 			)}
 		</>
 	);

@@ -240,6 +240,8 @@ export function ExtensionHost({
 					bindShellStream(servicesRef.current.shellThemeSubscribe);
 				} else if (req.method === "shell.registerCommand") {
 					bindShellStream(servicesRef.current.shellRegisterCommand);
+				} else if (req.method === "shell.registerTabIcon") {
+					bindShellStream(servicesRef.current.shellRegisterTabIcon);
 				} else if (req.method === "shell.eventsSubscribe") {
 					bindShellStream(servicesRef.current.shellEventsSubscribe);
 				} else if (req.method === "finetune.stream") {

@@ -2,8 +2,8 @@
 //
 // `@ryu/ui` must not know about Core URLs or the active node, so the host app
 // (the desktop) registers an uploader that persists the bytes wherever it wants
-// — for Ryu that is Core's LOCAL media store (`POST /api/media/upload`,
-// `~/.ryu/media/...`) — and returns a URL the editor can render in an <img>.
+// — for Ryu that is Core's Uploads system space (`POST /api/uploads`) — and
+// returns a URL the editor can render in an <img>.
 //
 // Default (no host registered): an in-memory object URL. That keeps the editor
 // usable with no backend, but such URLs are NOT persisted across reloads. The

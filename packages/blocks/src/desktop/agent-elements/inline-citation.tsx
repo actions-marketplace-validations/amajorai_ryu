@@ -4,6 +4,7 @@ import {
 	HoverCardTrigger,
 } from "@ryu/ui/components/hover-card";
 import { cn } from "@ryu/ui/lib/utils";
+import { ArrowUpRight } from "lucide-react";
 import type React from "react";
 
 /**
@@ -25,6 +26,22 @@ function hostnameOf(url: string): string {
 	} catch {
 		return url;
 	}
+}
+
+/** AICSS-style numbered chip used inline and in the sources footer. */
+export function CitationMark({
+	className,
+	...props
+}: React.ComponentProps<"span">) {
+	return (
+		<span
+			className={cn(
+				"inline-flex h-3 min-w-3 flex-none items-center justify-center rounded bg-muted px-0.5 align-[5.5px] font-semibold text-[9px] text-muted-foreground leading-none",
+				className
+			)}
+			{...props}
+		/>
+	);
 }
 
 export function InlineCitation({
@@ -133,9 +150,37 @@ export function InlineCitationQuote({
 }
 
 /**
- * A single citation rendered as a hover pill. `label` (e.g. "1") shows the
- * citation number; hovering reveals the source title, host, and any snippet.
+ * Inline `[n]` chip: numbered mark linking to the source, with a hover card for
+ * title / host / snippet (AICSS inline-citations pattern).
  */
+export function CitationMarkLink({ citation }: { citation: Citation }) {
+	return (
+		<InlineCitation className="mx-0.5">
+			<InlineCitationCard>
+				<HoverCardTrigger
+					className="inline-flex h-3 min-w-3 cursor-pointer items-center justify-center rounded bg-muted px-0.5 align-[5.5px] font-semibold text-[9px] text-muted-foreground leading-none no-underline transition-colors hover:bg-muted/80 hover:text-foreground"
+					href={citation.url}
+					rel="noopener noreferrer"
+					target="_blank"
+				>
+					{citation.number}
+				</HoverCardTrigger>
+				<InlineCitationCardBody>
+					<InlineCitationSource
+						description={citation.description}
+						title={citation.title}
+						url={citation.url}
+					/>
+					{citation.quote ? (
+						<InlineCitationQuote>{citation.quote}</InlineCitationQuote>
+					) : null}
+				</InlineCitationCardBody>
+			</InlineCitationCard>
+		</InlineCitation>
+	);
+}
+
+/** Hover pill with hostname — used when a compact labeled trigger is preferred. */
 export function CitationPill({ citation }: { citation: Citation }) {
 	return (
 		<InlineCitation>
@@ -160,24 +205,44 @@ export function CitationPill({ citation }: { citation: Citation }) {
 }
 
 /**
- * The compact "Sources" strip shown under an assistant turn that consulted the
- * web. Each source is a hover pill. This is the guaranteed-to-work anchor for
- * citations (every source has a real URL); mapping `[n]` markers inline in the
- * reply text is a follow-up once agents emit them reliably.
+ * AICSS-style sources footer under an assistant turn that consulted the web.
+ * Each row is `n · title · host ↗`. Empty when the turn used no web tools.
  */
 export function CitationSources({ citations }: { citations: Citation[] }) {
 	if (citations.length === 0) {
 		return null;
 	}
 	return (
-		<div className="flex flex-wrap items-center gap-1.5 pt-1">
-			<span className="text-muted-foreground/70 text-xs">Sources</span>
-			{citations.map((citation) => (
-				<CitationPill
-					citation={citation}
-					key={`${citation.number}-${citation.url}`}
-				/>
-			))}
+		<div className="mt-3 flex flex-col gap-1.5 border-border border-t pt-2.5">
+			{citations.map((citation) => {
+				const host = hostnameOf(citation.url);
+				return (
+					<a
+						className="group/cite-ref flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs leading-[18px] no-underline transition-colors hover:text-foreground"
+						href={citation.url}
+						key={`${citation.number}-${citation.url}`}
+						rel="noopener noreferrer"
+						target="_blank"
+					>
+						<CitationMark>{citation.number}</CitationMark>
+						<span className="min-w-0 truncate font-medium text-foreground">
+							{citation.title}
+						</span>
+						<span aria-hidden className="flex-none text-muted-foreground/70">
+							·
+						</span>
+						<span className="flex-none whitespace-nowrap transition-colors group-hover/cite-ref:text-foreground">
+							{host}
+						</span>
+						<span
+							aria-hidden
+							className="ml-[-2px] inline-flex flex-none text-muted-foreground/70 opacity-0 transition-opacity group-hover/cite-ref:opacity-100"
+						>
+							<ArrowUpRight className="size-2.5" />
+						</span>
+					</a>
+				);
+			})}
 		</div>
 	);
 }

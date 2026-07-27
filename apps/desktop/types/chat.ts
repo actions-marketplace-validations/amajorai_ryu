@@ -1,3 +1,5 @@
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
+
 export interface Agent {
 	description: string;
 	id: string;
@@ -42,6 +44,8 @@ export interface Conversation {
 	createdAt: number;
 	/** Active working folder at run start (M1). */
 	folderPath?: string;
+	/** Notion-style glyph from the shared GlyphPicker; null/undefined = title only. */
+	icon?: GlyphValue;
 	id: string;
 	messages: Message[];
 	/** Agent ids participating in this conversation (council / multi-agent). */

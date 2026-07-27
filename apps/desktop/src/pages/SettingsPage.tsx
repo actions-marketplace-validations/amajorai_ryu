@@ -14,19 +14,18 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Switch } from "@ryu/ui/components/switch";
 import { NavLink } from "react-router-dom";
 import { AudioDevicesSettings } from "@/src/components/settings/AudioDevicesSettings.tsx";
-import { ChatRenameSettings } from "@/src/components/settings/ChatRenameSettings.tsx";
 import { EditorEmbeddingSettings } from "@/src/components/settings/EditorEmbeddingSettings.tsx";
 import { TtsEngineSettings } from "@/src/components/settings/TtsEngineSettings.tsx";
 import { UpdatesSettings } from "@/src/components/settings/UpdatesSettings.tsx";
 import { VoiceInputSettings } from "@/src/components/settings/VoiceInputSettings.tsx";
 import { VoiceReadbackSettings } from "@/src/components/settings/VoiceReadbackSettings.tsx";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
-import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 
 export default function SettingsPage() {
 	const [developerMode, setDeveloperMode] = useDeveloperMode();
-	const openGateway = useGatewayDialog((s) => s.openGateway);
+	const { openTab } = useTabsContext();
 	const openSettings = useSettingsDialog((s) => s.openSettings);
 
 	const advancedLinks: {
@@ -49,7 +48,7 @@ export default function SettingsPage() {
 			description: "Buy paid items, view licenses, and sell",
 		},
 		{
-			onClick: () => openGateway("channels"),
+			onClick: () => openTab("/library/channel", { title: "Channels" }),
 			label: "Channels",
 			icon: BubbleChatIcon,
 			description: "Connect Telegram, Slack, WhatsApp, and Discord bots",
@@ -109,13 +108,6 @@ export default function SettingsPage() {
 					Updates
 				</h2>
 				<UpdatesSettings />
-			</section>
-
-			<section className="mb-8">
-				<h2 className="mb-4 font-medium text-muted-foreground text-sm uppercase tracking-wide">
-					Chat
-				</h2>
-				<ChatRenameSettings />
 			</section>
 
 			<section className="mb-8">

@@ -1,6 +1,28 @@
+import { type Chord, chordMatches, normalizeChord } from "@ryu/hotkeys/chord";
 import type { ComposerSettingsSection } from "./composer-settings-menu.tsx";
 
 const NON_CYCLABLE_AGENT_IDS = new Set(["__create_agent__"]);
+
+/** Stable action ids shared with the desktop hotkey registry + Core keybindings. */
+export const COMPOSER_SHORTCUT_IDS = [
+	"composer.cycle-agent",
+	"composer.cycle-mode",
+	"composer.cycle-model",
+	"composer.cycle-thinking",
+] as const;
+
+export type ComposerShortcutId = (typeof COMPOSER_SHORTCUT_IDS)[number];
+
+/** Default chords — focus-scoped (fire only inside the composer input). */
+export const COMPOSER_SHORTCUT_DEFAULTS: Record<ComposerShortcutId, Chord> = {
+	"composer.cycle-agent": "Tab",
+	"composer.cycle-mode": "Shift+Tab",
+	"composer.cycle-model": "Shift+M",
+	"composer.cycle-thinking": "Shift+T",
+};
+
+/** Effective bindings for the four composer cycle actions (`null` = unbound). */
+export type ComposerShortcutBindings = Record<ComposerShortcutId, Chord | null>;
 
 export interface ComposerShortcutEvent {
 	altKey: boolean;
@@ -10,6 +32,35 @@ export interface ComposerShortcutEvent {
 	nativeEvent?: { isComposing?: boolean };
 	preventDefault?: () => void;
 	shiftKey: boolean;
+}
+
+/** Merge saved overrides with composer defaults (absent key → default). */
+export function resolveComposerShortcutBindings(
+	overrides: Partial<Record<string, Chord | null>> = {}
+): ComposerShortcutBindings {
+	const bindings = {} as ComposerShortcutBindings;
+	for (const id of COMPOSER_SHORTCUT_IDS) {
+		if (Object.hasOwn(overrides, id)) {
+			const override = overrides[id];
+			bindings[id] = override ? normalizeChord(override) : null;
+		} else {
+			bindings[id] = normalizeChord(COMPOSER_SHORTCUT_DEFAULTS[id]);
+		}
+	}
+	return bindings;
+}
+
+/** Pick the four composer bindings out of a full hotkey id → chord map. */
+export function composerBindingsFromMap(
+	bindings: ReadonlyMap<string, Chord | null>
+): ComposerShortcutBindings {
+	const overrides: Partial<Record<string, Chord | null>> = {};
+	for (const id of COMPOSER_SHORTCUT_IDS) {
+		if (bindings.has(id)) {
+			overrides[id] = bindings.get(id) ?? null;
+		}
+	}
+	return resolveComposerShortcutBindings(overrides);
 }
 
 function currentIndex(section: ComposerSettingsSection): number {
@@ -81,60 +132,60 @@ function firstExtraConfigSection(
 	);
 }
 
-/** Cycle agent / model / thinking pickers from a keyboard event. Returns true when handled. */
-export function handleComposerSettingsShortcut(
-	event: ComposerShortcutEvent,
+function runComposerShortcut(
+	id: ComposerShortcutId,
 	sections: ComposerSettingsSection[]
 ): boolean {
-	if (
-		event.altKey ||
-		event.ctrlKey ||
-		event.metaKey ||
-		event.nativeEvent?.isComposing
-	) {
+	switch (id) {
+		case "composer.cycle-agent":
+			return cycleSection(
+				findSection(sections, (section) => section.key === "agent"),
+				(itemId) => {
+					if (NON_CYCLABLE_AGENT_IDS.has(itemId)) {
+						return false;
+					}
+					return !itemId.startsWith("team:");
+				}
+			);
+		case "composer.cycle-mode":
+			return cycleSection(findSection(sections, isApprovalSection));
+		case "composer.cycle-model":
+			return cycleSection(
+				findSection(sections, (section) => section.key === "model")
+			);
+		case "composer.cycle-thinking":
+			return cycleSection(
+				findSection(sections, isThinkingSection) ??
+					firstExtraConfigSection(sections)
+			);
+		default:
+			return false;
+	}
+}
+
+/**
+ * Cycle agent / mode / model / thinking pickers from a keyboard event.
+ * Returns true when handled. Bindings default to Tab / Shift+Tab / Shift+M /
+ * Shift+T; pass resolved overrides from Settings → Keyboard shortcuts.
+ */
+export function handleComposerSettingsShortcut(
+	event: ComposerShortcutEvent,
+	sections: ComposerSettingsSection[],
+	bindings: ComposerShortcutBindings = resolveComposerShortcutBindings()
+): boolean {
+	if (event.nativeEvent?.isComposing) {
 		return false;
 	}
 
-	const key = event.key.toLowerCase();
-	if (key === "tab" && !event.shiftKey) {
-		const handled = cycleSection(
-			findSection(sections, (section) => section.key === "agent"),
-			(id) => {
-				if (NON_CYCLABLE_AGENT_IDS.has(id)) {
-					return false;
-				}
-				return !id.startsWith("team:");
-			}
-		);
-		if (handled) {
-			event.preventDefault?.();
+	for (const id of COMPOSER_SHORTCUT_IDS) {
+		const chord = bindings[id];
+		if (!chord) {
+			continue;
 		}
-		return handled;
-	}
-
-	if (key === "tab" && event.shiftKey) {
-		const handled = cycleSection(findSection(sections, isApprovalSection));
-		if (handled) {
-			event.preventDefault?.();
+		if (!chordMatches(chord, event)) {
+			continue;
 		}
-		return handled;
-	}
-
-	if (key === "m" && event.shiftKey) {
-		const handled = cycleSection(
-			findSection(sections, (section) => section.key === "model")
-		);
-		if (handled) {
-			event.preventDefault?.();
-		}
-		return handled;
-	}
-
-	if (key === "t" && event.shiftKey) {
-		const handled = cycleSection(
-			findSection(sections, isThinkingSection) ??
-				firstExtraConfigSection(sections)
-		);
+		const handled = runComposerShortcut(id, sections);
 		if (handled) {
 			event.preventDefault?.();
 		}

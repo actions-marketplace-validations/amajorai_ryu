@@ -53,7 +53,6 @@ import {
 import { fireActivationEvent } from "@/src/lib/api/plugins.ts";
 import { indexChunk } from "@/src/lib/api/retrieval.ts";
 import { type ShadowSearchResult, searchShadow } from "@/src/lib/api/shadow.ts";
-import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 
 /** Safely read a string field off an opaque plugin-contribution record. */
@@ -139,7 +138,6 @@ export function CommandPalette() {
 	const { listConversations, setActiveConversationId } =
 		useChatHistoryContext();
 	const { handleSignOut, isSigningOut } = useAuthContext();
-	const openGateway = useGatewayDialog((s) => s.openGateway);
 	const activeNode = useActiveNode();
 	const target: ApiTarget = {
 		url: activeNode.url,
@@ -551,19 +549,15 @@ export function CommandPalette() {
 			});
 		}
 
-		// Channels and Identities live inside the Gateway dialog; Credits lives in
-		// App Settings → Services. Open the relevant dialog at that section rather
-		// than navigating to a (now-removed) route.
+		// Channels and Identities are Library collections with dedicated manage
+		// pages. Credits lives in App Settings → Services.
 		items.push({
 			id: "nav-channels",
 			group: "Navigation",
 			title: "Channels",
 			value: "navigate channels telegram slack discord whatsapp bots",
 			icon: BotIcon,
-			onSelect: () => {
-				openGateway("channels");
-				close();
-			},
+			onSelect: () => handleNavigate("/library/channel", "Channels"),
 		});
 
 		items.push({
@@ -572,10 +566,7 @@ export function CommandPalette() {
 			title: "Identities",
 			value: "navigate identities logins credentials connections vault",
 			icon: Key01Icon,
-			onSelect: () => {
-				openGateway("identities");
-				close();
-			},
+			onSelect: () => handleNavigate("/library/identity", "Identities"),
 		});
 
 		items.push({

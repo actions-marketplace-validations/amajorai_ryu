@@ -79,6 +79,7 @@ mod plugin_manifest;
 mod plugin_storage;
 mod plugins;
 mod policy_alerts;
+mod dictation;
 mod predict;
 mod predict_host;
 mod privacy;
@@ -641,6 +642,19 @@ async fn main() {
     {
         tracing::warn!("failed to ensure Artifacts system space: {e:#}");
     }
+    // Ensure the default, undeletable "Uploads" system space — where **user**-
+    // initiated files land (chat attachments, page/editor media, `ui.uploadFile`).
+    // Twin of Artifacts (agent-created). Seeded here so it exists even if Spaces
+    // UI is disabled; the ungated `/api/uploads` surface writes into it.
+    if let Err(e) = spaces
+        .ensure_system_space(
+            server::spaces::UPLOADS_SPACE_NAME,
+            Some("Files you upload in chat and pages"),
+        )
+        .await
+    {
+        tracing::warn!("failed to ensure Uploads system space: {e:#}");
+    }
     // Ensure the default, undeletable "Clips" system space exists — where the
     // out-of-process `com.ryu.clips` sidecar files recorded clips. The seed lives
     // here (not in the sidecar) so the Space is present and undeletable on every
@@ -1004,6 +1018,16 @@ async fn main() {
     if let Ok(Some(rec)) = app_store.get(crate::predict::PREDICT_PLUGIN_ID).await {
         crate::predict::set_enabled(rec.enabled);
     }
+    // Seed system-wide dictation from the Dictation plugin's persisted enabled
+    // state. Default-on (see CORE_DEFAULT_ON): Island hosts the OS surface and
+    // reads the synced `dictation` preference `enabled` field for live shortcut
+    // rebinding when the plugin flips.
+    if let Ok(Some(rec)) = app_store
+        .get(crate::dictation::DICTATION_PLUGIN_ID)
+        .await
+    {
+        crate::dictation::set_enabled(rec.enabled);
+    }
     // Default-on plugin seeding (#444) — the ONE definition lives in
     // `plugins::seed`. It seeds every `CORE_DEFAULT_ON` plugin INSTALLED +
     // ENABLED on a fresh install (the three companions with their grants +
@@ -1027,6 +1051,15 @@ async fn main() {
         // (it leaves any existing record alone so the user's choice wins). Runs at
         // most once per install, gated on the store's schema version.
         crate::plugins::seed::run_one_time_migrations(&app_store, &manifests).await;
+    }
+    // Re-read dictation after default-on seed: a fresh install may have just
+    // created the enabled record, and the pre-seed AtomicBool read above would
+    // have missed it.
+    if let Ok(Some(rec)) = app_store
+        .get(crate::dictation::DICTATION_PLUGIN_ID)
+        .await
+    {
+        crate::dictation::set_enabled(rec.enabled);
     }
     // Agent Skill registry (M3 / issue #145). Loads from the universal Agent
     // Skills directory `~/.claude/skills/<id>/SKILL.md` (overridable via

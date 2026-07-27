@@ -23,10 +23,12 @@ import { EntitlementProvider } from "@/src/contexts/entitlement-context.tsx";
 import { initAnalytics } from "@/src/lib/analytics.ts";
 import { fetchWaitlistMe } from "@/src/lib/api/waitlist.ts";
 import { initCrashReporting } from "@/src/lib/crash.ts";
+import { applyDecorumChrome } from "@/src/lib/decorumTitlebar.ts";
 import { AgentationToolbar } from "./components/AgentationToolbar.tsx";
 import { CrashBoundary } from "./components/CrashBoundary.tsx";
 import Layout from "./components/layout/Layout.tsx";
 import { PageWrapper } from "./components/layout/PageWrapper.tsx";
+import { GlobalContextMenu } from "./components/shell/GlobalContextMenu.tsx";
 import { initBackgroundCustomization } from "./hooks/useBackgroundCustomization.ts";
 import { initChromeShadows } from "./hooks/useChromeShadows.ts";
 import { initDialogOverlayBlur } from "./hooks/useDialogOverlayBlur.ts";
@@ -410,29 +412,6 @@ function MainApp() {
 	}, []);
 
 	useEffect(() => {
-		const fix = () => {
-			const container = document.querySelector(
-				"[data-tauri-decorum-tb]"
-			) as HTMLElement | null;
-			const dragRegion = document.querySelector(
-				"[data-tauri-decorum-tb] [data-tauri-drag-region]"
-			) as HTMLElement | null;
-			if (dragRegion) {
-				dragRegion.remove();
-			}
-			if (container) {
-				container.style.setProperty("top", "16px", "important");
-				container.style.setProperty("right", "12px", "important");
-				container.style.setProperty("left", "auto", "important");
-				container.style.setProperty("width", "auto", "important");
-				container.style.setProperty("pointer-events", "none", "important");
-				for (const btn of container.querySelectorAll<HTMLElement>(
-					"button, .decorum-tb-btn"
-				)) {
-					btn.style.setProperty("pointer-events", "auto", "important");
-				}
-			}
-		};
 		// tauri-plugin-decorum re-asserts its native titlebar (full width, with its
 		// own drag region) on window events — focus, maximize/restore, resize. The
 		// old fix only ran on a 5s interval, so any revert AFTER that window left a
@@ -440,7 +419,7 @@ function MainApp() {
 		// already stripped — making the titlebar undraggable AND the tabs unclickable.
 		// Re-assert the fix permanently: an observer (disconnected during our own
 		// writes so they don't re-trigger it) plus the same window events decorum
-		// reacts to. No teardown timeout — it must outlive the 5s window.
+		// reacts to. Also mirrors auto-hide tuck onto the caption buttons.
 		const observeOpts: MutationObserverInit = {
 			attributes: true,
 			attributeFilter: ["style", "class"],
@@ -454,7 +433,7 @@ function MainApp() {
 		const run = () => {
 			scheduled = false;
 			observer.disconnect();
-			fix();
+			applyDecorumChrome();
 			observer.observe(document.documentElement, observeOpts);
 		};
 		const observer = new MutationObserver(() => {
@@ -464,14 +443,14 @@ function MainApp() {
 			scheduled = true;
 			requestAnimationFrame(run);
 		});
-		fix();
+		applyDecorumChrome();
 		observer.observe(document.documentElement, observeOpts);
-		window.addEventListener("focus", fix);
-		window.addEventListener("resize", fix);
+		window.addEventListener("focus", applyDecorumChrome);
+		window.addEventListener("resize", applyDecorumChrome);
 		return () => {
 			observer.disconnect();
-			window.removeEventListener("focus", fix);
-			window.removeEventListener("resize", fix);
+			window.removeEventListener("focus", applyDecorumChrome);
+			window.removeEventListener("resize", applyDecorumChrome);
 		};
 	}, []);
 
@@ -491,47 +470,49 @@ function MainApp() {
 			<ThemeWatcher />
 			<Toaster position="bottom-right" theme="system" />
 			<AgentationToolbar />
-			{coreStatus === "stopped" ? (
-				<PageWrapper>
-					<PreflightPage />
-				</PageWrapper>
-			) : (isPending && !sessionSettledOnce) || waitlistResolving ? (
-				<PageWrapper>
-					<div
-						className="flex h-full w-full items-center justify-center"
-						data-tauri-drag-region
-					>
-						<OrbLogo size="56px" variant="shimmer" />
-					</div>
-				</PageWrapper>
-			) : waitlisted ? (
-				<PageWrapper>
-					<WaitlistPage userName={session?.user?.name ?? null} />
-				</PageWrapper>
-			) : showApp ? (
-				<AuthProvider>
+			<GlobalContextMenu>
+				{coreStatus === "stopped" ? (
 					<PageWrapper>
-						<EntitlementProvider>
-							<MemoryRouter
-								initialEntries={[
-									localStorage.getItem("ryu_onboarding_complete") === "true"
-										? "/chat"
-										: "/onboarding",
-								]}
-							>
-								<Routes>
-									<Route element={<OnboardingPage />} path="/onboarding" />
-									<Route element={<Layout />} path="/*" />
-								</Routes>
-							</MemoryRouter>
-						</EntitlementProvider>
+						<PreflightPage />
 					</PageWrapper>
-				</AuthProvider>
-			) : (
-				<PageWrapper>
-					<LoginPage />
-				</PageWrapper>
-			)}
+				) : (isPending && !sessionSettledOnce) || waitlistResolving ? (
+					<PageWrapper>
+						<div
+							className="flex h-full w-full items-center justify-center"
+							data-tauri-drag-region
+						>
+							<OrbLogo size="56px" variant="shimmer" />
+						</div>
+					</PageWrapper>
+				) : waitlisted ? (
+					<PageWrapper>
+						<WaitlistPage userName={session?.user?.name ?? null} />
+					</PageWrapper>
+				) : showApp ? (
+					<AuthProvider>
+						<PageWrapper>
+							<EntitlementProvider>
+								<MemoryRouter
+									initialEntries={[
+										localStorage.getItem("ryu_onboarding_complete") === "true"
+											? "/chat"
+											: "/onboarding",
+									]}
+								>
+									<Routes>
+										<Route element={<OnboardingPage />} path="/onboarding" />
+										<Route element={<Layout />} path="/*" />
+									</Routes>
+								</MemoryRouter>
+							</EntitlementProvider>
+						</PageWrapper>
+					</AuthProvider>
+				) : (
+					<PageWrapper>
+						<LoginPage />
+					</PageWrapper>
+				)}
+			</GlobalContextMenu>
 		</ThemeProvider>
 	);
 }

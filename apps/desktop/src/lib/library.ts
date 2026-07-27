@@ -1,9 +1,9 @@
 // Favorites + recents stores backing the unified Library page. Both are thin,
 // localStorage-backed sets of "references" — a `{ type, id }` pointer to a real
-// item (an agent, workflow, chat, space, team, or meeting) that lives behind its
-// own data hook. The Library page resolves these refs against the live hooks and
-// drops any that no longer resolve (the underlying item was deleted), so a stale
-// favorite or recent never renders a blank card.
+// item (an agent, workflow, chat, space, team, meeting, channel, or identity)
+// that lives behind its own data hook. The Library page resolves these refs
+// against the live hooks and drops any that no longer resolve (the underlying
+// item was deleted), so a stale favorite or recent never renders a blank card.
 //
 // This module owns its storage keys, change events, load/persist helpers and the
 // React subscriptions — mirroring `lib/features.ts`. Nothing here imports a page
@@ -18,7 +18,9 @@ export type LibraryItemType =
 	| "chat"
 	| "space"
 	| "team"
-	| "meeting";
+	| "meeting"
+	| "channel"
+	| "identity";
 
 /** A pointer to a real item, resolved against its data hook at render time. */
 export interface LibraryRef {
@@ -195,6 +197,24 @@ export function stampRecentFromPath(
 	// /meetings/:id
 	if (segments[0] === "meetings" && segments[1]) {
 		stampRecent("meeting", segments[1]);
+		return;
+	}
+	// /channels/:id (skip "new")
+	if (segments[0] === "channels" && segments[1] && segments[1] !== "new") {
+		stampRecent("channel", segments[1]);
+		return;
+	}
+	// /identities/profile/:profileId
+	if (
+		segments[0] === "identities" &&
+		segments[1] === "profile" &&
+		segments[2]
+	) {
+		try {
+			stampRecent("identity", decodeURIComponent(segments[2]));
+		} catch {
+			stampRecent("identity", segments[2]);
+		}
 	}
 }
 

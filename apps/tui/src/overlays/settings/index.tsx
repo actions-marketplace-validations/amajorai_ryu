@@ -7,7 +7,7 @@
 // Content reuse (no fetch logic rewritten): the Account-group panels render the
 // data-backed AccountTab (src/tabs/account.tsx) and the Services-group panels
 // render the data-backed ServicesTab (src/tabs/services.tsx). Desktop-only native
-// surfaces (Island, Shadow, Voice, Predictive typing, Updates) and control-plane
+// surfaces (Island, Shadow, Voice, Autocomplete, Updates) and control-plane
 // surfaces (Billing, Teams, Credits, ...) are light, clearly labeled placeholders.
 //
 // Keyboard: up/down (or j/k) move the nav selection. Nav keys never collide with
@@ -51,7 +51,7 @@ const NAV_GROUPS: NavGroup[] = [
 			{ id: "memory", label: "Memory" },
 			{ id: "meetings", label: "Meetings" },
 			{ id: "quests", label: "Tasks" },
-			{ id: "predict", label: "Predictive typing" },
+			{ id: "predict", label: "Autocomplete" },
 		],
 	},
 	{
@@ -140,9 +140,9 @@ const PANEL_META: Record<string, PanelMeta> = {
 			"Background tasks and quests. Track running work from the Tasks surface.",
 	},
 	predict: {
-		description: "Predictive typing suggestions are a native input feature.",
+		description: "Autocomplete suggestions are a native input feature.",
 		tone: "desktop",
-		note: "Open the desktop app to configure Predictive typing.",
+		note: "Open the desktop app to configure Autocomplete.",
 	},
 	"authorized-apps": {
 		description:

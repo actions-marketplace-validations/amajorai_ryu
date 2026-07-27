@@ -1,9 +1,8 @@
 // apps/desktop/src/components/shell/TrayPopover.tsx
 //
 // Shared chrome for the sidebar-footer tray popovers (Inbox, Downloads). Both
-// are the same object — a glass panel anchored to a 28px icon button — so they
-// share one shell here instead of each hand-rolling headers, rows, empty states
-// and the "open the full page" footer.
+// hang a plain shadcn Popover off a 28px icon button, and share one set of
+// headers, rows, empty states, and the "open the full page" footer here.
 //
 // Design rules the two trays obey, so they read as one component:
 //   * One row grid, always: 28px glyph · title + one meta line · action slot.
@@ -12,22 +11,22 @@
 //   * One meta line, dot-separated and truncated. Timestamps, sizes, speeds and
 //     risk tags all live there — nothing gets its own stacked line, so every row
 //     is the same height and the list scans as a column.
-//   * Actions are legible, not decorative: the affirmative one is a labelled
-//     pill, the rest are icon ghosts in a fixed-width slot (so hover never
-//     reflows the row). Nothing that decides something is hover-only.
+//   * Actions are labelled pills: the affirmative one is a filled default (or
+//     success) chip, the rest are icon ghosts in a fixed-width slot (so hover
+//     never reflows the row). Nothing that decides something is hover-only.
 //   * Tone is carried by the glyph and the meta text, never by tinted row
 //     backgrounds — a list of red-washed tiles reads as an error state.
 
 import { ArrowUpRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
-import { PopoverContent } from "@ryu/ui/components/popover";
-import { Spinner } from "@ryu/ui/components/spinner";
+import { PopoverContent } from "@ryu/ui/components/popover.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/tooltip.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	type ComponentProps,
 	type ReactNode,
@@ -41,7 +40,7 @@ export type TrayTone = "default" | "danger" | "success" | "primary";
 
 /** The 28px footer icon button both trays hang off. */
 export const trayTriggerClass =
-	"gooey-tap relative flex h-7 w-7 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-[popup-open]:bg-muted data-[popup-open]:text-foreground";
+	"relative flex h-7 w-7 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-[popup-open]:bg-muted data-[popup-open]:text-foreground";
 
 /** Row radius, concentric with the panel (24px panel − 6px padding). */
 const ROW_RADIUS = "rounded-[18px]";
@@ -84,9 +83,9 @@ export function TrayBadge({
 }
 
 /**
- * Glass panel sized and padded for a tray list. Slightly more opaque than the
- * house popover: these panels sit over the sidebar footer against arbitrary app
- * chrome, and at 70% the text lost contrast on a dark backdrop.
+ * Plain shadcn PopoverContent sized for a tray list. Same primitive as the rest
+ * of the app (SessionsPopover, etc.) — no glass-tray overrides beyond width and
+ * padding so the panel matches the house popover.
  */
 export function TrayPopoverContent({
 	className,
@@ -95,10 +94,7 @@ export function TrayPopoverContent({
 	return (
 		<PopoverContent
 			align="end"
-			className={cn(
-				"w-[23rem] gap-0 border-border/60 bg-popover/85 p-1.5 shadow-black/10 shadow-xl dark:bg-popover/90",
-				className
-			)}
+			className={cn("w-[23rem] gap-0 p-0", className)}
 			side="top"
 			sideOffset={8}
 			{...props}
@@ -181,7 +177,7 @@ export function TrayTextButton({
 
 /** Full-bleed hairline that ignores the panel's inset padding. */
 export function TrayDivider({ className }: { className?: string }) {
-	return <div className={cn("-mx-1.5 my-1 h-px bg-border/50", className)} />;
+	return <div className={cn("my-1 h-px bg-border/50", className)} />;
 }
 
 /**
@@ -190,7 +186,7 @@ export function TrayDivider({ className }: { className?: string }) {
  */
 export function TrayProgressLine({ percent }: { percent: number | null }) {
 	return (
-		<div className="relative -mx-1.5 mt-0.5 mb-1 h-0.5 overflow-hidden bg-border/50">
+		<div className="relative mt-0.5 mb-1 h-0.5 overflow-hidden bg-border/50">
 			{percent === null ? (
 				<span className="t-progress-marquee" />
 			) : (
@@ -246,7 +242,7 @@ export function TrayRowIcon({
 	return (
 		<span
 			className={cn(
-				"mt-px flex size-7 shrink-0 items-center justify-center rounded-[10px] bg-muted/60 text-muted-foreground ring-1 ring-border/50 ring-inset",
+				"mt-px flex size-7 shrink-0 items-center justify-center rounded-[10px] bg-muted text-muted-foreground",
 				tone === "danger" && "text-destructive",
 				tone === "success" && "text-success",
 				tone === "primary" && "text-primary",
@@ -260,11 +256,8 @@ export function TrayRowIcon({
 
 /**
  * A labelled affirmative action — the one control per row that must be read.
- *
- * Resting state is a neutral outline chip, not a tinted one: three stacked
- * green "Approve" pills read as a traffic light, and a `primary`-tinted chip is
- * just grey in this near-monochrome palette. The colour arrives on hover, where
- * it confirms what the click is about to do.
+ * Filled default button (or success fill); outline chips used to wash out next
+ * to icon ghosts and read as secondary.
  */
 export function TrayAction({
 	busy,
@@ -280,10 +273,10 @@ export function TrayAction({
 	return (
 		<button
 			className={cn(
-				"flex h-6 shrink-0 items-center gap-1 rounded-lg border border-border/70 bg-background/60 px-2 font-medium text-[11px] text-foreground/80 transition-colors disabled:opacity-60",
+				"flex h-6 shrink-0 items-center gap-1 rounded-lg px-2 font-medium text-[11px] transition-colors disabled:opacity-60",
 				tone === "success"
-					? "hover:border-success hover:bg-success hover:text-white"
-					: "hover:border-primary hover:bg-primary hover:text-primary-foreground"
+					? "bg-success text-white hover:bg-success/80"
+					: "bg-primary text-primary-foreground hover:bg-primary/80"
 			)}
 			disabled={busy}
 			onClick={onClick}
@@ -530,7 +523,7 @@ export function TrayEmpty({
 }) {
 	return (
 		<div className="flex flex-col items-center gap-2 px-8 py-7 text-center">
-			<span className="flex size-10 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground ring-1 ring-border/50 ring-inset">
+			<span className="flex size-10 items-center justify-center rounded-2xl bg-muted text-muted-foreground">
 				<HugeiconsIcon icon={icon} size={17} />
 			</span>
 			<span className="font-medium text-[13px]">{title}</span>
@@ -550,23 +543,20 @@ export function TrayFooter({
 	onClick: () => void;
 }) {
 	return (
-		<>
-			<TrayDivider />
-			<button
-				className={cn(
-					"flex w-full items-center gap-1.5 px-2.5 py-2 font-medium text-[12px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
-					ROW_RADIUS
-				)}
-				onClick={onClick}
-				type="button"
-			>
-				<span>{label}</span>
-				<HugeiconsIcon
-					className="ml-auto opacity-70"
-					icon={ArrowUpRight01Icon}
-					size={13}
-				/>
-			</button>
-		</>
+		<button
+			className={cn(
+				"flex w-full items-center gap-1.5 px-2.5 py-2 font-medium text-[12px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
+				ROW_RADIUS
+			)}
+			onClick={onClick}
+			type="button"
+		>
+			<span>{label}</span>
+			<HugeiconsIcon
+				className="ml-auto opacity-70"
+				icon={ArrowUpRight01Icon}
+				size={13}
+			/>
+		</button>
 	);
 }

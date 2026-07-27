@@ -49,9 +49,9 @@ export function setConversationArchived(
 
 /**
  * Manually rename a conversation server-side (`POST /api/conversations/:id/title`).
- * Marks the title user-chosen so Core's background auto-namer never overwrites
- * it. Resolves false on any transport failure so the caller can keep its
- * optimistic local title and not block the UI.
+ * Marks the title user-chosen so auto-rename never overwrites it. Resolves false
+ * on any transport failure so the caller can keep its optimistic local title and
+ * not block the UI.
  */
 export async function setConversationTitle(
 	target: ApiTarget,
@@ -63,6 +63,78 @@ export async function setConversationTitle(
 			target,
 			`/api/conversations/${encodeURIComponent(id)}/title`,
 			{ method: "POST", body: { title } }
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** One past title for a conversation (`GET /api/conversations/:id/title-history`). */
+export interface TitleHistoryEntry {
+	createdAt: number;
+	id: string;
+	/** `"auto"` | `"user"` | `"derived"`. */
+	source: string;
+	title: string;
+}
+
+/**
+ * Fetch title history for a conversation (oldest → newest). Returns `[]` on
+ * failure so hover previews stay quiet.
+ */
+export async function getConversationTitleHistory(
+	target: ApiTarget,
+	id: string
+): Promise<TitleHistoryEntry[]> {
+	try {
+		const res = await request<{
+			history?: Array<{
+				created_at?: number;
+				id?: string;
+				source?: string;
+				title?: string;
+			}>;
+		}>(target, `/api/conversations/${encodeURIComponent(id)}/title-history`);
+		const rows = Array.isArray(res.history) ? res.history : [];
+		return rows.flatMap((row) => {
+			if (
+				typeof row.id !== "string" ||
+				typeof row.title !== "string" ||
+				typeof row.source !== "string" ||
+				typeof row.created_at !== "number"
+			) {
+				return [];
+			}
+			return [
+				{
+					id: row.id,
+					title: row.title,
+					source: row.source,
+					createdAt: row.created_at,
+				},
+			];
+		});
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Set or clear a conversation glyph (`POST /api/conversations/:id/icon`).
+ * Resolves false on any transport failure so the caller can keep its optimistic
+ * local glyph and not block the UI.
+ */
+export async function setConversationIcon(
+	target: ApiTarget,
+	id: string,
+	icon: unknown | null
+): Promise<boolean> {
+	try {
+		await request<{ ok?: boolean }>(
+			target,
+			`/api/conversations/${encodeURIComponent(id)}/icon`,
+			{ method: "POST", body: { icon } }
 		);
 		return true;
 	} catch {

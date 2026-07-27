@@ -668,6 +668,8 @@ fn build_hook_program(ctx: &HookContext, entry_code: &str) -> String {
 const host = {{
   sideModel: (a) => tools.host.sideModel(a ?? {{}}),
   runAgent: (a) => tools.host.runAgent(a ?? {{}}),
+  setConversationTitle: (a) => tools.host.setConversationTitle(a ?? {{}}),
+  getPreference: (a) => tools.host.getPreference(a ?? {{}}),
   storage: {{
     get: (k, ns) => tools.host.storage_get({{ key: String(k), namespace: ns }}),
     set: (k, v, ns) => tools.host.storage_set({{ key: String(k), value: typeof v === "string" ? v : JSON.stringify(v), namespace: ns }}),

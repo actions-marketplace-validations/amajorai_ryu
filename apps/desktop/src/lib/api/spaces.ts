@@ -6,6 +6,7 @@
 // page through the `useSpaces` hook. Wire shapes mirror the Core handlers in
 // `apps/core/src/server/{mod,spaces}.rs` (snake_case on the wire).
 
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { type ApiTarget, request } from "./client.ts";
 
 /** A named document collection. `documentCount` is computed by Core. */
@@ -14,6 +15,8 @@ export interface Space {
 	createdAt: number;
 	description: string | null;
 	documentCount: number;
+	/** Notion-style glyph from the shared GlyphPicker; null = surface fallback. */
+	icon: GlyphValue;
 	id: string;
 	name: string;
 	/** Unix milliseconds. */
@@ -29,6 +32,8 @@ export interface SpaceDocument {
 	chunkCount: number;
 	/** Unix milliseconds. */
 	createdAt: number;
+	/** Notion-style glyph; null = kind default icon. */
+	icon: GlyphValue;
 	id: string;
 	/** `'page'` (markdown) or `'database'` (data grid). */
 	kind: DocumentKind;
@@ -53,6 +58,7 @@ interface SpaceWire {
 	created_at: number;
 	description?: string | null;
 	document_count: number;
+	icon?: GlyphValue;
 	id: string;
 	name: string;
 	updated_at: number;
@@ -61,6 +67,7 @@ interface SpaceWire {
 interface DocumentWire {
 	chunk_count: number;
 	created_at: number;
+	icon?: GlyphValue;
 	id: string;
 	kind?: string;
 	space_id: string;
@@ -82,6 +89,7 @@ function toSpace(s: SpaceWire): Space {
 		createdAt: s.created_at,
 		updatedAt: s.updated_at,
 		documentCount: s.document_count,
+		icon: s.icon ?? null,
 	};
 }
 
@@ -104,6 +112,7 @@ function toDocument(d: DocumentWire): SpaceDocument {
 		chunkCount: d.chunk_count,
 		kind: toDocumentKind(d.kind),
 		rawKind: d.kind ?? "",
+		icon: d.icon ?? null,
 	};
 }
 
@@ -150,6 +159,31 @@ export async function deleteSpace(
 	return json?.removed ?? false;
 }
 
+/** Set or clear a Space's Notion-style glyph. */
+export async function setSpaceIcon(
+	target: ApiTarget,
+	id: string,
+	icon: GlyphValue
+): Promise<void> {
+	await request(target, `/api/spaces/${id}/icon`, {
+		method: "POST",
+		body: { icon },
+	});
+}
+
+/** Set or clear a document's glyph without re-embedding the page. */
+export async function setDocumentIcon(
+	target: ApiTarget,
+	spaceId: string,
+	documentId: string,
+	icon: GlyphValue
+): Promise<void> {
+	await request(target, `/api/spaces/${spaceId}/documents/${documentId}/icon`, {
+		method: "POST",
+		body: { icon },
+	});
+}
+
 /** List the documents in a Space. */
 export async function fetchDocuments(
 	target: ApiTarget,
@@ -185,6 +219,8 @@ export interface SpaceDocumentContent {
 	chunkCount: number;
 	/** Unix milliseconds. */
 	createdAt: number;
+	/** Notion-style glyph; null = kind default. */
+	icon: GlyphValue;
 	id: string;
 	/** `'page'` (markdown) or `'database'` (data grid; `source` is grid JSON). */
 	kind: DocumentKind;
@@ -199,6 +235,7 @@ export interface SpaceDocumentContent {
 interface DocumentContentWire {
 	chunk_count: number;
 	created_at: number;
+	icon?: GlyphValue;
 	id: string;
 	kind?: string;
 	source: string;
@@ -217,6 +254,7 @@ function toDocumentContent(d: DocumentContentWire): SpaceDocumentContent {
 		updatedAt: d.updated_at,
 		chunkCount: d.chunk_count,
 		kind: toDocumentKind(d.kind),
+		icon: d.icon ?? null,
 	};
 }
 

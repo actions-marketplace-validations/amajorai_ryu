@@ -23,6 +23,7 @@ import {
 	dockTabKind,
 	findDockPanel,
 	isKnownDockPanelKind,
+	isPinnableDockTabKind,
 	isPluginTabKind,
 	nativeDockPanelKey,
 	panelDocksIn,
@@ -177,5 +178,21 @@ describe("panel render modes", () => {
 	test("a newer render mode is reported unknown, not assumed renderable", () => {
 		expect(isKnownDockPanelKind("hologram")).toBe(false);
 		expect(isKnownDockPanelKind("")).toBe(false);
+	});
+});
+
+describe("isPinnableDockTabKind", () => {
+	test("workspace infrastructure and app panels are pinnable", () => {
+		expect(isPinnableDockTabKind("terminal")).toBe(true);
+		expect(isPinnableDockTabKind("files")).toBe(true);
+		expect(isPinnableDockTabKind("codereview")).toBe(true);
+		expect(isPinnableDockTabKind("plugin:com.ryu.browser:browser")).toBe(true);
+	});
+
+	test("chat-run panels stay conversation-local", () => {
+		expect(isPinnableDockTabKind("cowork")).toBe(false);
+		expect(isPinnableDockTabKind("subagent")).toBe(false);
+		expect(isPinnableDockTabKind("artifact")).toBe(false);
+		expect(isPinnableDockTabKind("inspector")).toBe(false);
 	});
 });
