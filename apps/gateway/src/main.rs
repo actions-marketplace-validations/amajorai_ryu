@@ -114,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         slack = config.channels.slack.is_some(),
         discord = config.channels.discord.is_some(),
         whatsapp = config.channels.whatsapp.is_some(),
+        bluebubbles = config.channels.bluebubbles.is_some(),
         "configuration loaded"
     );
 

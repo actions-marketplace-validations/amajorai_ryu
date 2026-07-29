@@ -40,7 +40,7 @@ export interface SurfaceBackground {
 
 export const DEFAULT_SURFACE_BACKGROUND: SurfaceBackground = {
 	gradientEnabled: false,
-	gradientFrom: "#0088ff",
+	gradientFrom: "#0099ff",
 	gradientTo: "#7c3aed",
 	gradientAngle: 135,
 	gradientOpacity: 100,

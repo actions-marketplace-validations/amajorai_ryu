@@ -18,6 +18,14 @@ export interface CatalogItem {
 	 * install/enable controls regardless of the client's own platform.
 	 */
 	supported: boolean;
+	/**
+	 * Whether reinstalling would actually deliver a newer build — decided by the
+	 * NODE, never re-derived here. `installedVersion !== latestVersion` is not a
+	 * safe client-side substitute: a pinned downloader cannot reach upstream's
+	 * newest tag, and some installers record a sentinel ("latest", "adopted")
+	 * instead of a version. Both cases rendered an Update button that did nothing.
+	 */
+	updateAvailable: boolean;
 }
 
 // NOTE: agent CRUD (`/api/agents`) and engine endpoints (`/api/engines`,
@@ -134,6 +142,15 @@ export async function fetchCatalog(
 			// Default to supported when an older Core omits the field, so existing
 			// engines are never spuriously disabled by a version skew.
 			supported: s.supported ?? true,
+			// Absent on an older Core: fall back to the version comparison it
+			// expected clients to make. Newer Cores answer authoritatively.
+			updateAvailable:
+				s.update_available ??
+				(s.install_state === "installed" &&
+					!s.deprecated &&
+					s.installed_version != null &&
+					s.latest_version != null &&
+					s.installed_version !== s.latest_version),
 		})
 	);
 }
@@ -177,12 +194,29 @@ export async function fetchDependencies(
 	return Object.entries(deps).map(([name, installed]) => ({ name, installed }));
 }
 
+/**
+ * Install a sidecar. Idempotent by default — Core's installers open with an
+ * already-installed fast path, which is what makes the auto-install-on-first-use
+ * route safe to call repeatedly.
+ *
+ * Pass `force` to APPLY AN UPDATE: it tells Core to drop the entry's recorded
+ * version/checksum first, so the fast path misses and the artifact is genuinely
+ * re-downloaded. Without it an update press is indistinguishable from an install
+ * and silently does nothing.
+ */
 export async function installSidecar(
 	nodeUrl: string,
 	token: string | null,
-	name: string
+	name: string,
+	force = false
 ): Promise<void> {
-	await postAction(nodeUrl, token, `/api/setup/${name}/install`, "install");
+	const query = force ? "?force=true" : "";
+	await postAction(
+		nodeUrl,
+		token,
+		`/api/setup/${name}/install${query}`,
+		force ? "update" : "install"
+	);
 }
 
 export async function uninstallSidecar(

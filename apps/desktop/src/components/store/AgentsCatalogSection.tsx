@@ -30,7 +30,9 @@ import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
-import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreItemAction, {
+	StoreItemContextMenuContent,
+} from "@ryu/marketplace/catalog/chrome/store-item-action";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -271,6 +273,15 @@ function AgentList({
 							entry={entry}
 							size="20px"
 						/>
+					}
+					contextMenu={
+						!entry.added && (entry.available || entry.added) ? (
+							<StoreItemContextMenuContent
+								canReport={false}
+								onInstall={() => onInstall(entry.id)}
+								onReport={() => undefined}
+							/>
+						) : undefined
 					}
 					description={entry.description}
 					icon={<HugeiconsIcon icon={Robot01Icon} />}

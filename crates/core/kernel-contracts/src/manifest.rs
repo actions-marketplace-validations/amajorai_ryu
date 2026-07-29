@@ -1245,6 +1245,23 @@ pub enum SettingsFieldType {
     /// unset inherits the node-wide default selection either way, since the
     /// resolver reads both forms from the same key.
     AgentPicker,
+    /// A **write-only masked** credential input — the BYOK control.
+    ///
+    /// Unlike every other variant, this one does NOT persist to preferences. The
+    /// value is submitted to `PUT /api/plugins/{id}/secrets/{key}` and stored
+    /// **encrypted at rest** in the per-plugin secret store, keyed by
+    /// `(plugin_id, pref_key)`. It is never read back: the renderer can ask
+    /// whether a secret is set (`GET /api/plugins/{id}/secrets` returns names and
+    /// timestamps, never values) and shows "Set" or "Not set" beside an empty
+    /// input. Submitting a blank value CLEARS the secret.
+    ///
+    /// The stored value is what a manifest's `secret_headers` `env:VARNAME` token
+    /// falls back to when the process environment has no such var, so `pref_key`
+    /// must be the ENV VAR NAME the manifest already names (e.g.
+    /// `RYU_TAVILY_API_KEY`), not a preference-style dotted key. Process env still
+    /// wins when both are set, and the same namespace gate that restricts which
+    /// vars a plugin may read applies to the stored value.
+    Secret,
 }
 
 /// Coerce a raw field `type` to a known [`SettingsFieldType`], falling back to
@@ -1268,6 +1285,13 @@ where
         Some("select") => SettingsFieldType::Select,
         Some("model_picker") => SettingsFieldType::ModelPicker,
         Some("agent_picker") => SettingsFieldType::AgentPicker,
+        // NOTE the asymmetry with every arm above: an older desktop that does not
+        // know `secret` falls back to a plain TEXT input, which would persist the
+        // typed credential to preferences in the clear. That is a renderer
+        // obligation, not a parser one — the fallback here only decides what this
+        // Core believes the field is, and Core reads `Secret` to route the write to
+        // the encrypted store instead of the preference KV.
+        Some("secret") => SettingsFieldType::Secret,
         _ => SettingsFieldType::Text,
     })
 }
@@ -1375,6 +1399,17 @@ pub struct SettingsFieldContribution {
     /// Inclusive upper bound for a [`SettingsFieldType::Number`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+
+    /// Granularity for a [`SettingsFieldType::Number`] — the increment its stepper
+    /// moves by, and the grid a typed value must land on.
+    ///
+    /// Distinct from [`Self::min`]/[`Self::max`], which bound the range: a value can
+    /// sit inside the range and still be meaningless at this field's resolution
+    /// (`0.5` where the setting counts whole pages). The renderer enforces it, so a
+    /// field that declares it rejects an off-grid value rather than persisting one
+    /// the plugin cannot use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
 
     /// Minimum length for a text/textarea value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1547,6 +1582,34 @@ fn pref_key_char_is_legal(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':')
 }
 
+/// Longest accepted [`SettingsFieldType::Secret`] `pref_key`.
+pub const MAX_SECRET_KEY_LEN: usize = 128;
+
+/// Whether `name` is shaped like a POSIX environment variable
+/// (`[A-Za-z_][A-Za-z0-9_]*`, at most [`MAX_SECRET_KEY_LEN`] chars).
+///
+/// THE ONE DEFINITION of a legal [`SettingsFieldType::Secret`] key, shared by the
+/// manifest validator (which rejects a bad one at import) and Core's
+/// `PUT /api/plugins/{id}/secrets/{key}` handler (which rejects a bad one at
+/// write). Two copies would drift, and drift here means a field that validates on
+/// load and 400s on save — a failure the plugin author never sees because it only
+/// happens in the user's browser.
+///
+/// This is STRICTER than [`pref_key_char_is_legal`], which also admits `.`, `-`
+/// and `:`. It has to be: a secret's `pref_key` is not a preference key at all, it
+/// is the env var name the plugin's own `secret_headers` `env:` token names, and a
+/// name that could not be an env var can never be read back.
+pub fn is_env_var_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_SECRET_KEY_LEN {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    first_ok && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn validate_settings_field(tab_id: &str, field: &SettingsFieldContribution) -> Result<(), String> {
     let key = field.pref_key.trim();
     if key.is_empty() {
@@ -1568,6 +1631,20 @@ fn validate_settings_field(tab_id: &str, field: &SettingsFieldContribution) -> R
     if key.contains("..") {
         return Err(format!(
             "settings tab '{tab_id}' field pref_key '{key}' must not contain '..'"
+        ));
+    }
+    // A `secret` field's key is NOT a preference key: it is the environment
+    // variable name the plugin's own `secret_headers` `env:` token names, and it is
+    // what Core stores the credential under. The general `pref_key` alphabet admits
+    // `.`, `-` and `:`, none of which can appear in an env var — so a field
+    // declared as `"pref_key": "tavily.api-key"` would validate here, render
+    // normally, and then fail only when a user pressed Save. Rejecting at import
+    // puts the error in front of the author instead of the user.
+    if field.field_type == SettingsFieldType::Secret && !is_env_var_name(key) {
+        return Err(format!(
+            "settings tab '{tab_id}' field pref_key '{key}' is type 'secret', so it must be the \
+             environment variable name the manifest's secret_headers reads (a letter or \
+             underscore followed by letters, digits or underscores, e.g. 'RYU_TAVILY_API_KEY')"
         ));
     }
 
@@ -1609,10 +1686,20 @@ fn validate_settings_field_bounds(
     field: &SettingsFieldContribution,
 ) -> Result<(), String> {
     let is_number = field.field_type == SettingsFieldType::Number;
-    if (field.min.is_some() || field.max.is_some()) && !is_number {
+    if (field.min.is_some() || field.max.is_some() || field.step.is_some()) && !is_number {
         return Err(format!(
-            "settings tab '{tab_id}' field '{key}' declares min/max but is not type 'number'"
+            "settings tab '{tab_id}' field '{key}' declares min/max/step but is not type 'number'"
         ));
+    }
+    // A non-positive step is not a granularity — the renderer would either reject
+    // every value or divide by zero, so refuse it at import where the author can see
+    // it rather than at the first blur.
+    if let Some(step) = field.step {
+        if !(step.is_finite() && step > 0.0) {
+            return Err(format!(
+                "settings tab '{tab_id}' field '{key}' has step {step}, which must be a finite positive number"
+            ));
+        }
     }
     if let (Some(min), Some(max)) = (field.min, field.max) {
         if min > max {
@@ -1710,6 +1797,18 @@ fn validate_settings_field_default(
             if !(default.is_string() || default.is_object()) {
                 return Err(mismatch("agent_picker"));
             }
+        }
+        // A secret field has NO valid default. Whatever a manifest put there would
+        // be a credential shipped in a file that travels with the plugin — the
+        // exact thing this field type exists to stop — and it could never be
+        // honoured anyway, since the value lives in the encrypted store, not in
+        // preferences. Rejecting at import makes the mistake loud at the moment it
+        // is committed rather than silently ignored forever.
+        SettingsFieldType::Secret => {
+            return Err(format!(
+                "settings tab '{tab_id}' field '{key}' is type 'secret' and must not declare a \
+                 default (a credential must never ship inside a manifest)"
+            ));
         }
     }
     Ok(())
@@ -1850,7 +1949,7 @@ pub struct CapabilityReq {
 /// capability, plus the `grant` a consumer must hold to invoke it. The broker
 /// routes a consumer's `/api/host/capability/<cap>` call to this sidecar's route
 /// using the *provider's* minted token — the consumer never sees it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ProvidesEntry {
     /// The capability name this plugin serves (e.g. `"rag"`). Consumers match on
     /// this against their [`Requires::capabilities`].
@@ -1877,6 +1976,243 @@ pub struct ProvidesEntry {
     /// via the broker. Absent = no extra grant beyond declaring the edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<String>,
+
+    /// Opt in to the **selectable** flavour: many providers of this capability may
+    /// be enabled at once and the user *picks* one, exactly like a local engine.
+    ///
+    /// A non-selectable capability (the original, strict flavour used by `rag` /
+    /// `engines`) treats a second enabled provider as an explicit
+    /// `BindingError::Ambiguous` refusal. A selectable one resolves deterministically
+    /// instead: user override > sole provider > the provider declaring
+    /// [`Self::default_provider`] > lexicographically-lowest provider id. The pick is
+    /// a pure function of the candidate set, so the disable-safety reconstruction
+    /// argument in Core's binding registry is unchanged.
+    ///
+    /// Selectability is a property of the *capability*, so every provider of a given
+    /// capability must agree on the flag; the loader rejects a mixed declaration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub selectable: bool,
+
+    /// Preferred pick among the providers of a [`Self::selectable`] capability when
+    /// the user has set no override. At most one provider per capability may declare
+    /// it. Meaningless (and ignored) on a non-selectable capability.
+    #[serde(default, rename = "default", skip_serializing_if = "std::ops::Not::not")]
+    pub default_provider: bool,
+
+    /// WHAT this provider acts on, when the capability controls a machine or an
+    /// environment rather than answering a query.
+    ///
+    /// Exists because "swap the provider" quietly means two different things.
+    /// Swapping `web.search` from exa to tavily changes who answers; the question is
+    /// the same. Swapping `computer.control` from ghost to bytebot changes **which
+    /// computer gets typed on** — ghost drives the machine Ryu runs on, bytebot
+    /// drives the desktop `bytebotd` runs on (a containerized Linux desktop in the
+    /// shipped product). A picker that renders those two swaps identically is
+    /// telling the user something false, and until this field existed the
+    /// distinction lived only in a prose `description` that nothing structured
+    /// could read.
+    ///
+    /// Absent = not applicable or unspecified. That is the honest default for the
+    /// capabilities where locality is meaningless (`web.search`, `memory`, `rag`),
+    /// and it is deliberately NOT [`ProviderTarget::LocalMachine`]: defaulting to
+    /// "this machine" would silently mislabel every future hosted provider that
+    /// forgets to declare it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ProviderTarget>,
+
+    /// Capability **verb → this provider's tool** bindings, the seam that keeps the
+    /// model-visible tool surface stable across a swap.
+    ///
+    /// The key is a canonical verb from the host's capability verb table (e.g.
+    /// `"web__search"`); the value names the provider's own registered tool plus the
+    /// argument/response mapping into the canonical shape. A provider that omits a
+    /// verb simply does not serve it — the facade reports the verb unavailable
+    /// rather than guessing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, CapabilityToolBinding>,
+}
+
+/// What a capability provider acts on — see [`ProvidesEntry::target`].
+///
+/// Deliberately two coarse values rather than a taxonomy. The only question a user
+/// needs answered before swapping is "will this act on the machine in front of me,
+/// or somewhere else?", and a finer vocabulary (container / VM / cloud / another
+/// host) would be guesswork the manifests cannot honestly support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderTarget {
+    /// Acts on the machine Ryu itself is running on: `ghost` types on this
+    /// keyboard, the Chromium sidecar opens a window on this display.
+    LocalMachine,
+    /// Acts on a SEPARATE machine or virtual desktop — a container, a VM, a hosted
+    /// browser. Selecting it is not another way to drive your own computer, and the
+    /// picker must say so.
+    RemoteDesktop,
+}
+
+/// How one capability **verb** maps onto a concrete provider tool.
+///
+/// The facade tool (`web__search`, `browser__navigate`, …) is registered by the host
+/// from its canonical verb table; at call time it resolves the capability's bound
+/// provider, reads this binding, renames the arguments, re-enters tool dispatch on
+/// [`Self::tool`], and maps the response back. Swapping the provider therefore
+/// changes neither the tool id nor its schema.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CapabilityToolBinding {
+    /// The provider's own fully-qualified tool id (e.g. `"exa__search"`,
+    /// `"app__firecrawl_scrape"`) that implements this verb.
+    pub tool: String,
+
+    /// Canonical argument name → this provider's argument name. A canonical argument
+    /// with no entry is passed through under its own name; map it to the empty string
+    /// to drop it (the provider cannot express it).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub args: BTreeMap<String, String>,
+
+    /// Constant arguments merged into every call (provider-specific knobs the
+    /// canonical schema does not expose, e.g. `{"search_depth": "advanced"}`).
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub arg_defaults: serde_json::Map<String, serde_json::Value>,
+
+    /// A request-body TEMPLATE this provider needs, with `{canonical_arg}`
+    /// placeholders substituted from the call.
+    ///
+    /// `args` renames flat keys and `[]` wraps a scalar in an array; neither can build
+    /// a NESTED shape. Real APIs need them: Mem0's write endpoint takes
+    /// `messages: [{role, content}]`, so without a template the whole write half of
+    /// that provider is unbindable — which is precisely the gap that made Ryu's
+    /// memory bridges inert while Hermes, which writes per-provider adapter CODE, had
+    /// none. This closes it declaratively instead of admitting code per provider.
+    ///
+    /// A string that is EXACTLY `"{arg}"` is replaced by that argument's value with
+    /// its JSON type preserved (`5` stays a number); a string merely CONTAINING
+    /// `{arg}` interpolates as text. An argument consumed by the template is not also
+    /// passed through, so it cannot appear twice under two names.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub arg_template: serde_json::Map<String, serde_json::Value>,
+
+    /// Per-argument numeric limits this provider can actually honour, keyed by the
+    /// **canonical** argument name (before any rename).
+    ///
+    /// Exists because canonical schemas describe what agents may ask for, while
+    /// providers differ in what they accept: `web__search.limit` allows up to 100,
+    /// but Brave's `count` maxes at 20. Without this, selecting Brave turns a
+    /// perfectly valid `limit: 50` into an upstream 4xx — the swap stops being
+    /// transparent, which is the entire point of the facade. Clamping is the right
+    /// resolution rather than erroring: the caller asked for "up to N", and fewer
+    /// results is a normal outcome, whereas a failed search is not.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arg_clamp: BTreeMap<String, ArgBounds>,
+
+    /// Optional response normalization into the canonical result shape. Absent = the
+    /// provider's output is returned verbatim under `{ provider, raw }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<CapabilityResponseMap>,
+
+    /// Optional provider-shipped ADAPTER: JavaScript that maps this verb onto the
+    /// provider's tool when the shapes are too far apart for the declarative fields
+    /// above to bridge.
+    ///
+    /// The declarative path ([`Self::args`] … [`Self::response`]) stays the default
+    /// and covers the ~80% of providers that are a rename plus a field map: no code
+    /// review, no sandbox, no supply-chain surface, and a third party ships one file.
+    /// But some provider shapes no amount of JSON can express — an async job API that
+    /// must be polled (`POST /crawl` → job id → `GET /crawl/{id}`), a token vocabulary
+    /// that needs per-provider normalization, a body that must read a `pref:` value.
+    /// Growing the grammar one vendor quirk at a time pushed provider-specific logic
+    /// into shared kernel code; an adapter puts it back in the provider's own manifest.
+    ///
+    /// Present = the adapter REPLACES the declarative mapping for this verb: it
+    /// receives the canonical arguments and returns the canonical result, and
+    /// [`Self::args`] / [`Self::arg_template`] / [`Self::arg_clamp`] / [`Self::response`]
+    /// are not applied (the adapter is doing that job). [`Self::tool`] still names the
+    /// target and is still the ONLY tool the adapter can reach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<CapabilityAdapter>,
+}
+
+/// Provider-shipped JavaScript that maps one capability verb onto one provider tool.
+///
+/// Runs in the SAME Deno sandbox as an `inline_deno` plugin tool, under the same
+/// [`crate`-level] grant model: the providing plugin must hold `tool:execute`, so
+/// shipping code is a visible, approvable act rather than a silent one.
+///
+/// The program is handed:
+/// - `input` — the canonical verb arguments, after layer defaults are applied.
+/// - `defaults` — the provider's resolved `arg_defaults`, including any `pref:`
+///   tokens already looked up. This is what lets an adapter read per-install
+///   configuration a template could not (`arg_template` expands from the CALLER's
+///   arguments, so it can never see a resolved preference).
+/// - `callTool(args)` — invokes the provider's own [`CapabilityToolBinding::tool`]
+///   and resolves to its raw response. It takes NO tool id: the target is fixed by
+///   the manifest, so sandboxed code cannot redirect the call at another tool. An
+///   adapter therefore grants no authority the declarative path did not already
+///   grant — it is strictly the same single re-entry, expressed as code.
+///
+/// It returns the canonical result shape, which the facade passes through unchanged.
+///
+/// **Bounded by the sandbox wall-clock.** A run gets `DEFAULT_DEADLINE_SECS` of
+/// active compute, and time spent awaiting a tool call counts against it. An
+/// adapter that polls an async job must therefore treat "still running" as a normal
+/// outcome to report, not something to wait out.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CapabilityAdapter {
+    /// The adapter body. Evaluated as the tail of a sandbox program that has already
+    /// bound `input`, `defaults`, `callTool` and `callNamed`; it `return`s the
+    /// canonical result.
+    pub code: String,
+
+    /// ADDITIONAL provider tool ids this adapter may call, beyond
+    /// [`CapabilityToolBinding::tool`], reachable from the body as
+    /// `callNamed(id, args)`.
+    ///
+    /// Exists because a whole class of real APIs is two calls, not one: an async job
+    /// API starts work at one endpoint and reads the result from another
+    /// (`POST /crawl` → job id → `GET /crawl/{id}`). A single-tool adapter cannot
+    /// express that, so those providers would stay unbindable — the gap that
+    /// excluded every async API from every layer.
+    ///
+    /// This is an ALLOWLIST fixed by the manifest and checked host-side: a name not
+    /// listed here (and not [`CapabilityToolBinding::tool`]) is refused. Sandboxed
+    /// code chooses only *among* tools the provider declared, never a tool of its
+    /// own — which is what keeps the id-taking form from becoming an escalation seam.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+}
+
+/// Inclusive numeric bounds a provider can honour for one canonical argument.
+/// Integers, not floats. Every clampable canonical argument is a COUNT — result
+/// limits, crawl depth, page caps — so `i64` is the honest type, and it keeps the
+/// whole manifest tree `Eq` (a float would force `PartialEq`-only all the way up
+/// through `ProvidesEntry` and `PluginManifest`) while avoiding float comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ArgBounds {
+    /// Smallest value the provider accepts. Absent = no lower bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    /// Largest value the provider accepts. Absent = no upper bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
+}
+
+/// Normalizes one provider's response into the capability's canonical shape.
+///
+/// Deliberately a flat rename table rather than a general transform language: the
+/// canonical shapes are small and list-of-records shaped, and a manifest that can
+/// run arbitrary extraction logic is a much larger trust surface.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CapabilityResponseMap {
+    /// Dotted path to the provider's result array within its response (e.g.
+    /// `"results"`, `"data.items"`). Absent = the response itself is the array, or —
+    /// when it is not an array — a single record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<String>,
+
+    /// Canonical per-item field name → the provider's field name (dotted paths
+    /// allowed). Fields with no entry are dropped from the canonical item but remain
+    /// available under the item's `raw` key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, String>,
 }
 
 /// Per-surface support level a plugin declares for a [`Surface`] in the
@@ -2911,6 +3247,59 @@ mod tests {
         reject(r#"[{"pref_key":"../secrets"}]"#, "illegal characters");
         // Neither fields nor a view = an empty section.
         reject("[]", "empty section");
+    }
+
+    /// A `secret` field's `pref_key` is the ENV VAR NAME the plugin's own
+    /// `secret_headers` `env:` token reads, so it must be env-var-shaped even though
+    /// the general `pref_key` alphabet also admits `.`, `-` and `:`. Without this,
+    /// `"pref_key": "tavily.api-key"` validates at import, renders normally, and
+    /// then 400s the first time a user presses Save — a failure the author never
+    /// sees. And a `default` on a secret field is a credential committed to a file
+    /// that travels with the plugin.
+    #[test]
+    fn a_secret_field_must_name_an_env_var_and_carry_no_default() {
+        let with_field = |field: &str| {
+            format!(
+                r#"{{
+                    "id": "com.example.byok",
+                    "name": "BYOK",
+                    "version": "1.0.0",
+                    "runnables": [],
+                    "contributes": {{ "settings_tabs": [
+                        {{ "id": "t", "title": "T", "fields": [{field}] }}
+                    ] }}
+                }}"#
+            )
+        };
+        let reject = |field: &str, needle: &str| {
+            let err = PluginManifest::parse_and_validate(&with_field(field))
+                .expect_err("must be rejected");
+            assert!(err.contains(needle), "expected '{needle}', got: {err}");
+        };
+
+        // Every spelling the general pref_key alphabet allows but an env var cannot.
+        for bad_key in ["tavily.api_key", "tavily-api-key", "ryu:tavily", "1KEY"] {
+            reject(
+                &format!(r#"{{"type":"secret","pref_key":"{bad_key}"}}"#),
+                "environment variable name",
+            );
+        }
+        // A credential must never ship inside a manifest.
+        reject(
+            r#"{"type":"secret","pref_key":"RYU_TAVILY_API_KEY","default":"tvly-live-abc"}"#,
+            "must not declare a default",
+        );
+
+        // The shape a real BYOK provider declares loads cleanly.
+        let ok = PluginManifest::parse_and_validate(&with_field(
+            r#"{"type":"secret","pref_key":"RYU_TAVILY_API_KEY","label":"Tavily API key"}"#,
+        ))
+        .expect("an env-var-shaped secret field validates");
+        let tabs = ok.contributes.expect("contributes").settings_tabs;
+        assert_eq!(tabs[0]["fields"][0]["type"], "secret");
+        // The SAME predicate Core's PUT handler applies, so the two cannot drift.
+        assert!(is_env_var_name("RYU_TAVILY_API_KEY"));
+        assert!(!is_env_var_name("tavily.api_key"));
     }
 
     /// A control a NEWER desktop understands must not sink the whole manifest — the

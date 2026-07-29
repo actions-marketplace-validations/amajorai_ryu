@@ -47,8 +47,6 @@ import {
 	getCrashReportsEnabled,
 	getDiagnosticsExportEnabled,
 	getDiagnosticsOtlpEndpoint,
-	getLearningEnabled,
-	getLearningSkillsEnabled,
 	getProductAnalyticsEnabled,
 	getSupportAccessLocalEnabled,
 	getSupportAccessLocalExpiry,
@@ -56,8 +54,6 @@ import {
 	setCrashReportsEnabled,
 	setDiagnosticsExportEnabled,
 	setDiagnosticsOtlpEndpoint,
-	setLearningEnabled,
-	setLearningSkillsEnabled,
 	setProductAnalyticsEnabled,
 	setSupportAccessLocalEnabled,
 	setSupportAccessLocalExpiry,
@@ -105,10 +101,6 @@ export function PrivacySettings() {
 	const [otlpEndpoint, setOtlpEndpoint] = useState("");
 	const [supportAccess, setSupportAccess] = useState(false);
 	const [supportExpiry, setSupportExpiry] = useState(0);
-	const [learningEnabled, setLearningEnabledState] = useState(false);
-	// The local skills loop defaults ON (on-device, inbox-gated); seed the
-	// optimistic state to match so the toggle doesn't flicker off on first paint.
-	const [skillsEnabled, setSkillsEnabledState] = useState(true);
 	// Self-healing: master switch defaults ON, auto-decide defaults OFF (propose to
 	// the inbox, the user disposes). Seeded to match Core's defaults.
 	const [healEnabled, setHealEnabledState] = useState(true);
@@ -194,8 +186,6 @@ export function PrivacySettings() {
 			getDiagnosticsOtlpEndpoint(target),
 			getSupportAccessLocalEnabled(target),
 			getSupportAccessLocalExpiry(target),
-			getLearningEnabled(target),
-			getLearningSkillsEnabled(target),
 		]).then(
 			([
 				analytics,
@@ -205,8 +195,6 @@ export function PrivacySettings() {
 				endpoint,
 				support,
 				expiry,
-				learning,
-				skills,
 			]) => {
 				if (cancelled) {
 					return;
@@ -225,8 +213,6 @@ export function PrivacySettings() {
 				setOtlpEndpoint(endpoint);
 				setSupportAccess(support);
 				setSupportExpiry(expiry);
-				setLearningEnabledState(learning);
-				setSkillsEnabledState(skills);
 			}
 		);
 		return () => {
@@ -370,34 +356,6 @@ export function PrivacySettings() {
 				: DEFAULT_SUPPORT_DURATION_HOURS
 		);
 	}, []);
-	const handleLearning = useCallback(
-		async (next: boolean) => {
-			setLearningEnabledState(next); // optimistic
-			try {
-				await setLearningEnabled(target, next);
-			} catch {
-				setLearningEnabledState(!next);
-				toast.error("Couldn't save your learning choice", {
-					description: "Check your connection and try again.",
-				});
-			}
-		},
-		[target]
-	);
-	const handleSkills = useCallback(
-		async (next: boolean) => {
-			setSkillsEnabledState(next); // optimistic
-			try {
-				await setLearningSkillsEnabled(target, next);
-			} catch {
-				setSkillsEnabledState(!next);
-				toast.error("Couldn't save your skill-learning choice", {
-					description: "Check your connection and try again.",
-				});
-			}
-		},
-		[target]
-	);
 
 	return (
 		<div className="space-y-6">
@@ -580,36 +538,6 @@ export function PrivacySettings() {
 							</SelectContent>
 						</Select>
 					</SettingsItem>
-				</SettingsGroup>
-			</SettingsSection>
-
-			<SettingsSection
-				caption="Ryu can grow with you by learning from your conversations. This is split into two levels so you can keep the private, on-device part on while opting into the heavier part only if you want. You can leave out any individual conversation, and excluded conversations are never used."
-				title="Learn from my conversations"
-			>
-				<SettingsGroup>
-					<SettingsItem
-						actions={
-							<Switch
-								checked={skillsEnabled}
-								id="learning-skills-enabled"
-								onCheckedChange={handleSkills}
-							/>
-						}
-						description="On by default. Ryu distills reusable skills from your chats — entirely on this device — and proposes them in your Inbox for you to approve before they go live. No conversation text ever leaves your machine."
-						title="Learn skills from my chats"
-					/>
-					<SettingsItem
-						actions={
-							<Switch
-								checked={learningEnabled}
-								id="learning-enabled"
-								onCheckedChange={handleLearning}
-							/>
-						}
-						description="Off by default. Also rate your conversations with a stronger model and, on a device with a capable graphics card, fine-tune your local model on your best ones. Rating sends conversation text to that model, which may run in the cloud — so this stays opt-in."
-						title="Train my local model"
-					/>
 				</SettingsGroup>
 			</SettingsSection>
 

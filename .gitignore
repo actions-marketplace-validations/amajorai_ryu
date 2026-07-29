@@ -98,3 +98,7 @@ __pycache__/
 *.pyc
 
 nul
+
+# Playwright output written at the repo root (apps/desktop/.gitignore only covers
+# the copy under that app).
+test-results/

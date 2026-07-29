@@ -30,5 +30,15 @@
   "companion": {
     "label": "Learning",
     "icon": "mortarboard-01"
+  },
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "learning.settings",
+        "title": "Learning",
+        "scope": "node",
+        "view": "learning"
+      }
+    ]
   }
 }

@@ -26,7 +26,9 @@ import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
-import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreItemAction, {
+	StoreItemContextMenuContent,
+} from "@ryu/marketplace/catalog/chrome/store-item-action";
 import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
@@ -216,6 +218,15 @@ function TemplateList({
 										installed={installedIds.has(template.id)}
 										onInstall={() => onInstall(template)}
 									/>
+								}
+								contextMenu={
+									installedIds.has(template.id) ? undefined : (
+										<StoreItemContextMenuContent
+											canReport={false}
+											onInstall={() => onInstall(template)}
+											onReport={() => undefined}
+										/>
+									)
 								}
 								description={template.description}
 								icon={

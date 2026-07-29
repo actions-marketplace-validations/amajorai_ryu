@@ -22,7 +22,9 @@ use crate::sidecar::download_manager::{
 };
 
 /// Pinned whisper.cpp release that ships the Windows server asset.
-const TARGET_VERSION: &str = "v1.8.6";
+/// The release tag this build installs — pinned; see
+/// `catalog::registry::installer_pin`.
+pub const TARGET_VERSION: &str = "v1.8.6";
 
 /// Default GGML speech-to-text model (small English base — CPU-friendly).
 const DEFAULT_MODEL_FILE: &str = "ggml-base.en.bin";

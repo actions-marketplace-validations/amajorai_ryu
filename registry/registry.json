@@ -7,10 +7,17 @@
       "version": "1.0.0",
       "description": "Desktop automation: 29 screen perception and input control tools. Windows-first.",
       "source": "builtin",
-      "kinds": ["tool"],
-      "permission_grants": ["mcp:ghost"],
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "mcp:ghost"
+      ],
       "built_in": true,
-      "tags": ["automation", "desktop"]
+      "tags": [
+        "automation",
+        "desktop"
+      ]
     },
     {
       "id": "shadow",
@@ -18,10 +25,17 @@
       "version": "1.0.0",
       "description": "Search everything Shadow has captured (screen text, audio transcripts, input) and summarize recent activity. Exposed as declarative HTTP tools that reach the device-local Shadow sidecar through Core's authenticated `/api/shadow/*` proxy (which injects Shadow's bearer token).",
       "source": "builtin",
-      "kinds": ["tool"],
-      "permission_grants": ["tool:http-egress:127.0.0.1"],
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:127.0.0.1"
+      ],
       "built_in": true,
-      "tags": ["capture", "memory"]
+      "tags": [
+        "capture",
+        "memory"
+      ]
     },
     {
       "id": "spider",
@@ -29,10 +43,17 @@
       "version": "1.0.0",
       "description": "High-performance web crawling and content extraction via the Spider CLI (https://spider.cloud), exposed as a declarative `command` tool that shells out to the locally-installed `spider` binary. No API key.",
       "source": "builtin",
-      "kinds": ["tool"],
-      "permission_grants": ["tool:command:spider"],
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:command:spider"
+      ],
       "built_in": true,
-      "tags": ["web", "scraping"]
+      "tags": [
+        "web",
+        "scraping"
+      ]
     },
     {
       "id": "exa",
@@ -40,10 +61,54 @@
       "version": "1.0.0",
       "description": "Neural and keyword web search via the Exa API (https://exa.ai), exposed as two declarative HTTP tools: search and find-similar. Requires a BYOK Exa API key.",
       "source": "builtin",
-      "kinds": ["tool"],
-      "permission_grants": ["tool:http-egress:api.exa.ai"],
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:api.exa.ai"
+      ],
       "built_in": true,
-      "tags": ["search", "web"]
+      "tags": [
+        "search",
+        "web"
+      ]
+    },
+    {
+      "id": "tavily",
+      "name": "Tavily Search",
+      "version": "1.0.0",
+      "description": "Search-and-extract for agents via the Tavily API (https://tavily.com), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Tavily without changing what agents call. Requires a BYOK Tavily API key.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:api.tavily.com"
+      ],
+      "built_in": true,
+      "tags": [
+        "search",
+        "web",
+        "extract"
+      ]
+    },
+    {
+      "id": "brave",
+      "name": "Brave Search",
+      "version": "1.0.0",
+      "description": "Independent web search via the Brave Search API (https://brave.com/search/api/), exposed as one declarative HTTP tool. Provides the swappable `web.search` layer, so selecting it in the layer picker re-points the stable `web__search` tool at Brave's own crawled index without changing what agents call. Brave is search-only: it deliberately declares neither `web.extract` nor `web.crawl`. Requires a BYOK Brave Search API key.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:api.search.brave.com"
+      ],
+      "built_in": true,
+      "tags": [
+        "search",
+        "web"
+      ]
     },
     {
       "id": "headroom",
@@ -51,10 +116,136 @@
       "version": "1.0.0",
       "description": "Context compression (chopratejas/headroom): compress tool outputs, logs, files, and RAG chunks. 60-95% fewer tokens, reversible retrieval. Requires headroom-ai[mcp].",
       "source": "builtin",
-      "kinds": ["policy"],
+      "kinds": [
+        "policy"
+      ],
       "permission_grants": [],
       "built_in": true,
-      "tags": ["context", "compression"]
+      "tags": [
+        "context",
+        "compression"
+      ]
+    },
+    {
+      "id": "firecrawl",
+      "name": "Firecrawl",
+      "version": "1.0.0",
+      "description": "Web search and page scraping via the Firecrawl v2 API (https://firecrawl.dev), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Firecrawl without changing what agents call. Requires a BYOK Firecrawl API key.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:api.firecrawl.dev"
+      ],
+      "built_in": true,
+      "tags": [
+        "search",
+        "web",
+        "extract",
+        "scrape"
+      ]
+    },
+    {
+      "id": "serper",
+      "name": "Serper",
+      "version": "1.0.0",
+      "description": "Google's own search results as JSON via the Serper API (https://serper.dev), plus single-page scraping, exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Serper without changing what agents call. Serper is a paid, credit-metered API with a free allowance; requires a BYOK Serper API key.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:google.serper.dev",
+        "tool:http-egress:scrape.serper.dev"
+      ],
+      "built_in": true,
+      "tags": [
+        "search",
+        "web",
+        "google",
+        "scrape"
+      ]
+    },
+    {
+      "id": "mem0",
+      "name": "Mem0",
+      "version": "1.1.0",
+      "description": "Read and write a hosted Mem0 memory project (https://mem0.ai) through the Mem0 Platform REST API, exposed as three declarative HTTP tools. The SECOND provider of the swappable `memory` layer — the built-in store stays the default and keeps running alongside it — so selecting Mem0 re-points the stable `memory__search` / `memory__store` / `memory__sync` / `memory__forget` tools at your Mem0 project without changing what agents call, and turns on the kernel bridges that fold Mem0 into every turn's recall and echo this node's writes out to it. The one canonical verb Mem0 does NOT serve is `memory__context`: Mem0 publishes no standing-summary endpoint, and forcing the verb onto its get-all would dump raw facts at system rank under a label promising a synthesis. The two WRITE verbs both post to `POST /v3/memories/add/`, which is ASYNCHRONOUS — it answers `{message, status: \"PENDING\", event_id}` and never a fact id — so `memory__store` returns an accepted-for-processing envelope, not the id of the fact it created, and nothing may chain `memory__forget` onto its result. That is fine for the way both verbs are used: the kernel `mirror` and `sync` bridges are fire-and-forget and never read the response. The two verbs differ in ONE documented field: `store` sends `infer: false` because the caller has already decided the fact and Mem0 should keep the text as-is, while `sync` hands over a raw turn with Mem0's default inference on and lets Mem0 mine it. Note the entity id lives in two different places in Mem0's own API — nested inside `filters` for search, top-level for add — and both are pinned from the same `mem0.user-id` preference. Requires a BYOK Mem0 API key.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:api.mem0.ai"
+      ],
+      "built_in": true,
+      "tags": [
+        "memory",
+        "recall",
+        "facts",
+        "mem0"
+      ]
+    },
+    {
+      "id": "spidercloud",
+      "name": "Spider Cloud",
+      "version": "1.0.0",
+      "description": "Hosted multi-page web crawling via the Spider Cloud API (https://spider.cloud), exposed as one declarative HTTP tool. Provides the swappable `web.crawl` layer as a SECOND provider alongside the local `spider` CLI, so selecting it re-points the stable `web__crawl` tool at a hosted crawler that needs no local binary. The crawl is synchronous — `run_in_background` defaults to false and one request returns every fetched page's content, so there is no job id to poll. The canonical `depth` argument is deliberately DROPPED: Spider Cloud documents `depth: 0` as \"no limit will be applied\", the exact inverse of the canonical contract's \"0 = the start page only\". Requires a BYOK Spider Cloud API key.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:api.spider.cloud"
+      ],
+      "built_in": true,
+      "tags": [
+        "web",
+        "crawl",
+        "scraping"
+      ]
+    },
+    {
+      "id": "honcho",
+      "name": "Honcho",
+      "version": "1.0.0",
+      "description": "Give the swappable `memory` layer a provider that MODELS the user instead of only storing rows, via Honcho (https://honcho.dev) — the Plastic Labs identity layer Hermes uses for exactly this. Honcho watches the messages you hand it and derives a per-peer REPRESENTATION; its Dialectic endpoint (`POST /v3/workspaces/{workspace_id}/peers/{peer_id}/chat`) then answers a natural-language question about that peer with its own synthesis. That is what the canonical `memory__context` verb has always promised and no shipped provider served, so this is the first plugin to make the kernel's `context` bridge (`memory.provider-context`) do anything at all. Honcho here serves TWO verbs: `memory__context` (the Dialectic synthesis) and `memory__search` (`POST .../peers/{peer_id}/search`, documented as \"Search a Peer's messages\" — conversation text, not the conclusions Honcho derives from it, which matters because the `prefetch` bridge is on by default and will start injecting message excerpts each turn). It deliberately binds NO write and NO delete verb: Honcho's only documented write is `POST /v3/workspaces/{workspace_id}/sessions/{session_id}/messages`, whose `messages[]` items each require a `peer_id`, and the binding grammar's `arg_template` substitutes only from CALLER arguments — `arg_defaults` and its `pref:` tokens cannot reach inside a template — so the per-install peer id could not be placed there without hardcoding one bucket for every install; and Honcho documents no message-delete endpoint at all. So while Honcho is selected the facade stops serving `memory__store`, `memory__forget` and `memory__sync`, and `memory.mirror-builtin` (default ON) is inert. The built-in store's own `memorystore__save` tool and this node's per-turn memory write are kernel and untouched. Every call is scoped to one workspace and one peer, both set per install in the settings tab — a hardcoded pair would put every install in one shared bucket. Requires a BYOK Honcho API key.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:api.honcho.dev"
+      ],
+      "built_in": true,
+      "tags": [
+        "memory",
+        "context",
+        "identity",
+        "dialectic",
+        "honcho"
+      ]
+    },
+    {
+      "id": "bytebot",
+      "name": "Bytebot Desktop",
+      "version": "1.0.0",
+      "description": "Drives a Bytebot desktop (https://github.com/bytebot-ai/bytebot) through `bytebotd`, its local HTTP daemon, as the SECOND provider of the swappable `computer.control` layer — the first thing that makes that layer actually swappable rather than merely marked selectable. READ THIS BEFORE SELECTING IT: bytebotd drives the desktop IT runs on, which in the shipped Bytebot product is a containerized Linux desktop, NOT the machine running Ryu. Selecting it re-points `computer__capture` / `computer__click` / `computer__type` / `computer__key` / `computer__scroll` away from your own screen (`ghost`, the declared default) and onto that desktop — the same remote-target relationship `browser.control` already has between the local Chromium sidecar and a hosted browser. It serves FIVE of the six canonical verbs: `computer__focus_app` is deliberately NOT bound, because bytebotd's `application` action takes a closed seven-value enum (firefox, 1password, thunderbird, vscode, terminal, desktop, directory) while the canonical verb takes a free-form app name, so any other name would be a schema-legal call that 400s. The app switch is still reachable natively as `bytebot__application`, whose own schema carries that enum so an illegal call cannot be composed. Requires no API key — bytebotd ships with no authentication at all, which is also why this plugin only ever addresses it over loopback.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:127.0.0.1"
+      ],
+      "built_in": true,
+      "tags": [
+        "automation",
+        "desktop",
+        "computer-use",
+        "bytebot"
+      ]
     }
   ]
 }

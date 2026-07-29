@@ -549,8 +549,7 @@ export interface PluginChannel {
  *  (from `enable_app`), the ONLY correct source for building the host capability
  *  set (never the manifest's `permissionGrants` CLAIM). `hasUi` is true when the
  *  plugin carries a bundled UI (a `ui-bundle` is fetchable) — the third-party
- *  code-execution path only engages when this is true AND the experimental flag
- *  is on. */
+ *  code-execution path only engages when this is true. */
 /** A per-app CSP allowlist (the OpenAI-Apps-SDK `_meta.ui.csp` model). Declared in
  *  the companion manifest; the Path-B host widens the frame CSP for exactly these
  *  hosts. Only trusted/built-in manifests should carry it. */

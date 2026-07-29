@@ -13,6 +13,7 @@
 //! honor here is the per-agent `tools` list, which is part of "what runs."
 
 pub mod artifact_tool;
+pub mod capability_tools;
 pub mod catalog;
 pub mod channel_tool;
 pub mod client;
@@ -861,6 +862,161 @@ fn effective_tool_grants(
 /// declaration for a Core-tier one. (`plugin_host::collect_enabled_hooks` still
 /// reads `manifest.permission_grants` for the hook plane; that seam is unchanged
 /// here.)
+/// Stamp `provider` onto an adapter's returned envelope, matching what
+/// `capability_tools::map_response` writes on the declarative path.
+///
+/// An adapter that already reported a provider is left alone (it may be proxying
+/// and know better); a non-object result is wrapped rather than discarded, so a
+/// verb whose canonical result is a bare array or scalar still reports who served
+/// it instead of silently losing the field.
+fn stamp_provider(result: Value, provider_id: &str) -> Value {
+    match result {
+        Value::Object(mut map) => {
+            map.entry("provider".to_owned())
+                .or_insert_with(|| Value::String(provider_id.to_owned()));
+            Value::Object(map)
+        }
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("provider".to_owned(), Value::String(provider_id.to_owned()));
+            map.insert("raw".to_owned(), other);
+            Value::Object(map)
+        }
+    }
+}
+
+/// The host bridge a capability ADAPTER's `callTool` is wired to.
+///
+/// Deliberately the narrowest bridge in the codebase: it answers exactly one path
+/// ([`crate::tool_exec::CAPABILITY_ADAPTER_CALL_PATH`]) and dispatches it to ONE
+/// tool id fixed from the manifest before the sandbox started. Sandboxed JS can
+/// therefore neither name a different tool nor reach `host.*` — the plugin-hook
+/// surface (`sideModel`, `runAgent`, `storage`) is simply not bound, and any other
+/// path is refused rather than forwarded.
+///
+/// This is what keeps an adapter's authority a SUBSET of the declarative path it
+/// replaces: the declarative path re-enters dispatch on `binding.tool` once with
+/// the caller's identity, and so does this — the only new power is that the
+/// adapter chooses the arguments and may call more than once (the polling loop an
+/// async provider needs).
+struct CapabilityAdapterBridge {
+    registry: Arc<McpRegistry>,
+    /// The provider's own tool id, from `binding.tool`. Never caller-influenced.
+    target: String,
+    /// The ADDITIONAL ids `callNamed` may reach, from `adapter.tools`. Fixed by the
+    /// manifest; a name outside this set (and outside [`Self::target`]) is refused.
+    allowed: std::collections::HashSet<String>,
+    user_id: Option<String>,
+    profile_ids: Vec<String>,
+    session_id: Option<String>,
+    host_conversation_id: Option<String>,
+}
+
+impl CapabilityAdapterBridge {
+    /// Resolve the tool id one bridge call should dispatch to, or the reason it must
+    /// be refused. Split out from [`SandboxBridge::handle`] so the security-relevant
+    /// decision — which ids sandboxed JS can reach — is testable without a live
+    /// registry or a Deno subprocess.
+    fn resolve_target(&self, path: &str, args: &Value) -> Result<String, String> {
+        if path == crate::tool_exec::CAPABILITY_ADAPTER_CALL_PATH {
+            return Ok(self.target.clone());
+        }
+        if path == crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH {
+            let requested = args.get("tool").and_then(Value::as_str).unwrap_or_default();
+            if requested.is_empty() {
+                return Err("callNamed requires a tool id".to_owned());
+            }
+            // Fail-closed against the manifest's declared set. Note `target` is
+            // always reachable: naming the primary tool explicitly is not an
+            // escalation, it is the same call `callTool` makes.
+            if requested != self.target && !self.allowed.contains(requested) {
+                return Err(format!(
+                    "adapter may not call '{requested}': it is not declared in this \
+                     binding's `adapter.tools`"
+                ));
+            }
+            // Never let an adapter re-enter the facade (a manifest-driven infinite
+            // loop) — the same refusal the declarative arm applies to `binding.tool`.
+            if capability_tools::verb_by_id(requested).is_some() {
+                return Err(format!(
+                    "adapter may not call the capability facade tool '{requested}'"
+                ));
+            }
+            return Ok(requested.to_owned());
+        }
+        Err(format!(
+            "a capability adapter may only call '{}' or '{}', not '{path}'",
+            crate::tool_exec::CAPABILITY_ADAPTER_CALL_PATH,
+            crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH
+        ))
+    }
+}
+
+impl crate::tool_exec::SandboxBridge for CapabilityAdapterBridge {
+    fn handle(
+        &self,
+        path: String,
+        args: Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crate::tool_exec::InvokeOutcome> + Send + '_>,
+    > {
+        Box::pin(async move {
+            use crate::tool_exec::{InvokeOutcome, ToolInvokeResult};
+            // Fail-closed on any path or id the manifest did not declare. Surfaced as
+            // a catchable tool error rather than an abort so a buggy adapter reports
+            // cleanly instead of killing the turn.
+            let target = match self.resolve_target(&path, &args) {
+                Ok(target) => target,
+                Err(reason) => {
+                    return InvokeOutcome::Result(ToolInvokeResult {
+                        value: Value::Null,
+                        is_error: true,
+                        error: Some(reason),
+                    })
+                }
+            };
+            // `callNamed` wraps the real arguments; `callTool` passes them directly.
+            let args = if path == crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH {
+                args.get("args")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+            } else {
+                args
+            };
+            // `_no_gate`: the target is fixed by the provider's manifest, not chosen
+            // by the caller, so the facade's own arm applies here verbatim — it
+            // grants no authority the provider's tool would not grant on a direct
+            // call. `profile_ids` / `session_id` are threaded for the same reason the
+            // declarative arm threads them: a provider tool is typically a
+            // declarative `http` tool whose `secret_headers` resolve an Identity
+            // Vault credential, and dropping them would silently downgrade a
+            // vault-backed provider to anonymous.
+            let result = Box::pin(self.registry.call_tool_with_identity_no_gate(
+                &target,
+                args,
+                None,
+                self.user_id.as_deref(),
+                &self.profile_ids,
+                self.session_id.clone(),
+                self.host_conversation_id.as_deref(),
+            ))
+            .await;
+            match result {
+                Ok(value) => InvokeOutcome::Result(ToolInvokeResult {
+                    value,
+                    is_error: false,
+                    error: None,
+                }),
+                Err(e) => InvokeOutcome::Result(ToolInvokeResult {
+                    value: Value::Null,
+                    is_error: true,
+                    error: Some(e.to_string()),
+                }),
+            }
+        })
+    }
+}
+
 struct ResolvedAppTool {
     /// How this tool runs (`alias` re-enter | `inline_deno` sandbox | `http` proxy).
     backend: crate::plugin_manifest::schema::ToolBackend,
@@ -908,6 +1064,11 @@ pub struct McpRegistry {
     /// on demand (`prewarm_widgets`/`widget_resource`) and invalidated wherever
     /// `tool_cache` is cleared. Never held across an `.await`.
     resource_cache: Mutex<HashMap<String, HashMap<String, WidgetResource>>>,
+    /// Cached capability-verb resolutions, tagged with the
+    /// `capability_tools::generation()` they were computed at. Invalidated by
+    /// generation bump rather than by clearing, so a concurrent reader never sees a
+    /// half-built map. `Mutex` because writes are rare and never held across `.await`.
+    capability_cache: Mutex<Option<(u64, Vec<capability_tools::ResolvedVerb>)>>,
     /// In-memory tools registered by enabled apps (tool-as-Runnable, M3).
     /// These are always returned alongside server-provided tools; no spawning
     /// required. Protected by a `Mutex` because writes are rare.
@@ -967,6 +1128,7 @@ impl McpRegistry {
             tool_cache: Mutex::new(BTreeMap::new()),
             resource_cache: Mutex::new(HashMap::new()),
             app_tools: Mutex::new(Vec::new()),
+            capability_cache: Mutex::new(None),
             http: reqwest::Client::new(),
             self_build_manifests: None,
             self_build_app_store: None,
@@ -987,6 +1149,7 @@ impl McpRegistry {
             tool_cache: Mutex::new(BTreeMap::new()),
             resource_cache: Mutex::new(HashMap::new()),
             app_tools: Mutex::new(Vec::new()),
+            capability_cache: Mutex::new(None),
             http: reqwest::Client::new(),
             self_build_manifests: None,
             self_build_app_store: None,
@@ -1108,6 +1271,7 @@ impl McpRegistry {
             tool_cache: Mutex::new(BTreeMap::new()),
             resource_cache: Mutex::new(HashMap::new()),
             app_tools: Mutex::new(Vec::new()),
+            capability_cache: Mutex::new(None),
             http: reqwest::Client::new(),
             self_build_manifests: None,
             self_build_app_store: None,
@@ -1190,6 +1354,12 @@ impl McpRegistry {
     /// consistently. Never holds a lock across the recompute (the file read + the
     /// plugin-map snapshot both complete before the `servers` write lock is taken).
     fn rebuild_servers(&self) {
+        // An MCP-server-backed plugin (agentbrowser, ghost, …) can be a capability
+        // provider whose verbs map onto its `<server>__<tool>` ids, so registering or
+        // deregistering one changes what the facade can serve. Every register /
+        // deregister path funnels through here, which is why the invalidation sits at
+        // this choke point rather than on each caller.
+        capability_tools::invalidate();
         let plugin_snapshot = self
             .plugin_servers
             .read()
@@ -1298,6 +1468,10 @@ impl McpRegistry {
             || name == skills_tool::SERVER_NAME
             || name == ui_tool::SERVER_NAME
             || name == research::SERVER_NAME
+            // The capability facade's reserved names (`web`, `browser`, `computer`,
+            // `memory`). Reserved unconditionally, not only while a provider is
+            // bound, so a plugin can never squat a name the facade may later serve.
+            || capability_tools::is_server(name)
         {
             return true;
         }
@@ -1452,6 +1626,20 @@ impl McpRegistry {
                 available: Some(true),
             },
         ];
+        // Capability facade servers (the swappable layers). Listed unconditionally,
+        // because the names are reserved whether or not a provider is currently
+        // selected. `available` is deliberately `None` rather than a guess: knowing
+        // whether a layer can actually serve a call means resolving the bound
+        // provider over the enabled plugin set, which is an async read, and this
+        // accessor is sync. `GET /api/capabilities` is the endpoint that answers it.
+        summaries.extend(capability_tools::SERVERS.iter().map(|name| ServerSummary {
+            name: (*name).to_owned(),
+            command: "(built-in capability facade)".to_owned(),
+            args: vec![],
+            description: capability_tools::server_description(name).map(str::to_owned),
+            enabled: true,
+            available: None,
+        }));
         let servers = self.servers.read().expect("mcp servers RwLock poisoned");
         summaries.extend(servers.iter().map(|(name, cfg)| ServerSummary {
             name: name.clone(),
@@ -1819,6 +2007,11 @@ impl McpRegistry {
         let mut all = research::tools();
         // Built-in authenticated web fetch (Identity Vault credential consumer).
         all.extend(web_fetch::tools());
+        // Capability facade verbs (swappable layers). Feature-detected: only the
+        // verbs whose capability has a selected provider that serves them are
+        // listed, so an agent never sees `web__search` on a node with no search
+        // provider installed.
+        all.extend(capability_tools::tools(&self.capability_verbs().await));
         // Built-in wasmtime sandbox tools (M6 / issue #190) — always listed;
         // dispatch returns `available: false` when disabled or feature absent.
         all.extend(sandbox::tools());
@@ -2203,7 +2396,15 @@ impl McpRegistry {
         // when the id is a registered app tool. The bag is tiny + write-rare, so the
         // uncontended scan is negligible; a native app tool takes precedence over a
         // same-named external MCP server (an explicit enabled-plugin registration).
+        //
+        // The facade's reserved servers (`web`, `browser`, …) are excluded: a
+        // capability verb id must always reach the facade arm below, never be
+        // shadowed by a plugin that registered a tool under the same id. Registration
+        // already refuses such an id (`register_app_tool_tagged`), so this is the
+        // second of two locks on the same door — the bag can also be populated by
+        // older records seeded before the reservation existed.
         let is_native_app_tool = server != APP_TOOL_SERVER
+            && !capability_tools::is_server(server)
             && self
                 .app_tools
                 .lock()
@@ -2631,6 +2832,117 @@ impl McpRegistry {
             return skills_tool::dispatch(tool, arguments, skills).await;
         }
 
+        // Capability tool facade (swappable layers): a stable verb id
+        // (`web__search`, `browser__navigate`, `memory__store`, …) whose concrete
+        // provider is whatever the user has selected for that capability. Resolved
+        // per call — an override taken mid-session takes effect on the next call
+        // with no re-registration — then forwarded to the provider's own tool.
+        //
+        // The allowlist is enforced HERE, on the stable verb id, which is the point:
+        // an agent allowed `web__search` keeps that permission across a provider
+        // swap. The inner call carries NO allowlist because the target is fixed by
+        // the provider's manifest, not chosen by the caller — the same reasoning as
+        // the app-tool alias arm below, and the facade grants no authority the
+        // provider's own tool would not have granted on a direct call.
+        if capability_tools::is_server(server) {
+            if let Some(list) = allowlist {
+                let candidate = RegistryTool::candidate(tool_id, server, tool);
+                if !tool_allowed(&candidate, list) {
+                    return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
+                }
+            }
+            let Some(resolved) = self.resolve_capability_verb(tool_id).await else {
+                // Either no provider is selected for the capability, or the selected
+                // one does not serve this verb. Structured, not an Err, so the
+                // agent's turn continues and it can pick another approach.
+                let capability = capability_tools::verb_by_id(tool_id).map(|v| v.capability);
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "available": false,
+                    "capability": capability,
+                    "error": format!(
+                        "no provider is selected for '{}' that serves '{tool_id}' — install and \
+                         select one in the layer picker",
+                        capability.unwrap_or("this capability")
+                    ),
+                }));
+            };
+            let target = resolved.binding.tool.clone();
+            // Never let a provider point a verb back at the facade (a manifest-driven
+            // infinite loop), and never at an empty target.
+            if target.is_empty() || capability_tools::verb_by_id(&target).is_some() {
+                return Err(anyhow!(
+                    "provider '{}' maps '{tool_id}' to an invalid target '{target}'",
+                    resolved.provider_id
+                ));
+            }
+            // The user's per-layer argument defaults ("web search returns 25
+            // results", "crawl at most 50 pages"), merged UNDER the caller's own
+            // arguments. Read here rather than cached with the verb resolution
+            // because preferences change through the generic preferences API, which
+            // knows nothing about layers and so cannot invalidate a cache.
+            let layer_defaults = self.layer_defaults(resolved.verb).await;
+            let arguments = capability_tools::apply_layer_defaults(&layer_defaults, arguments);
+            // Resolve any `pref:` tokens the provider declared in its `arg_defaults`
+            // — per-install configuration that is not a canonical verb argument
+            // (Mem0's entity id, for instance). Without this a manifest could only
+            // hard-code such a value, giving every install the same fixed bucket.
+            let provider_defaults = self
+                .resolve_provider_defaults(&resolved.binding)
+                .await;
+            // A provider whose shape the declarative fields cannot bridge ships an
+            // ADAPTER instead: JS that receives the canonical arguments and returns
+            // the canonical result, calling its own bound tool through `callTool`.
+            // It REPLACES the declarative mapping for this verb (arg rename/template/
+            // clamp and the response map are that same job, done in JSON), so the
+            // canonical arguments go in untouched and the returned value comes out
+            // untouched. Everything the adapter can reach — one fixed tool, no
+            // `host.*`, deny-all sandbox — is a subset of the declarative path's
+            // authority, so this widens the trust surface only by the code itself,
+            // which is why it is gated on `tool:execute`.
+            if let Some(adapter) = resolved.binding.adapter.as_ref() {
+                return Box::pin(self.run_capability_adapter(
+                    tool_id,
+                    &resolved,
+                    adapter,
+                    provider_defaults,
+                    arguments,
+                    user_id,
+                    profile_ids,
+                    session_id.clone(),
+                    host_conversation_id,
+                ))
+                .await;
+            }
+            let mapped = capability_tools::map_args_with_defaults(
+                &resolved.binding,
+                provider_defaults,
+                arguments,
+            );
+            // `profile_ids` and `session_id` are threaded through, unlike the alias
+            // arm which drops both. They matter here: a provider tool is typically a
+            // declarative `http` tool whose `secret_headers` may resolve an Identity
+            // Vault credential, and `run_http_tool` reads the caller's bound profiles
+            // to do that. Dropping them would silently downgrade a vault-backed
+            // provider to anonymous — a swap-visible behaviour difference, which is
+            // exactly what this facade exists to prevent.
+            let raw = Box::pin(self.call_tool_with_identity_no_gate(
+                &target,
+                mapped,
+                None,
+                user_id,
+                profile_ids,
+                session_id.clone(),
+                host_conversation_id,
+            ))
+            .await?;
+            return Ok(capability_tools::map_response(
+                &resolved.binding,
+                &resolved.provider_id,
+                raw,
+            ));
+        }
+
         // Built-in authenticated web-fetch provider (Identity Vault consumer):
         // fetches a page over HTTPS, injecting the user's sealed session for the
         // URL's domain (resolved by the consult above) server-side. The credential
@@ -2770,6 +3082,19 @@ impl McpRegistry {
         description: Option<String>,
         app_backend: Option<AppToolBackendTag>,
     ) {
+        // A capability verb id (`web__search`, `browser__navigate`, …) is reserved
+        // by the facade. Letting a plugin register one would shadow the swappable
+        // layer with a fixed implementation — the exact coupling the facade exists
+        // to prevent — so the registration is refused rather than silently winning
+        // or silently losing. The plugin's own native id is unaffected; only the
+        // reserved verb id is off limits.
+        if capability_tools::verb_by_id(&id).is_some() {
+            tracing::warn!(
+                "refusing app tool registration for '{id}': that id is a reserved capability verb \
+                 served by the layer facade"
+            );
+            return;
+        }
         let tool = RegistryTool {
             description,
             app_backend,
@@ -2779,6 +3104,8 @@ impl McpRegistry {
             tools.retain(|t| t.id != id);
             tools.push(tool);
         }
+        // A newly available provider tool can make a capability verb serveable.
+        capability_tools::invalidate();
     }
 
     /// Remove an app-registered tool by id. Called when a plugin is disabled so
@@ -2788,6 +3115,257 @@ impl McpRegistry {
         if let Ok(mut tools) = self.app_tools.lock() {
             tools.retain(|t| t.id != id);
         }
+        // A removed provider tool can make a capability verb unserveable.
+        capability_tools::invalidate();
+    }
+
+    /// The ENABLED plugin manifests — the candidate set every capability binding is
+    /// resolved over. Enabled rather than merely installed because that is the set
+    /// the binding registry's invariants (deterministic pick, disable safety) are
+    /// stated over, and the set the broker actually sees at call time.
+    ///
+    /// `None` when the manifest store / app store is not wired (test + CLI contexts),
+    /// which callers treat as "no capabilities available" rather than an error.
+    async fn enabled_manifests(&self) -> Option<Vec<PluginManifest>> {
+        let manifests = self.self_build_manifests.as_ref()?;
+        let store = self.self_build_app_store.as_ref()?;
+        let enabled: std::collections::HashSet<String> = store
+            .list()
+            .await
+            .ok()?
+            .into_iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.id)
+            .collect();
+        let guard = manifests.read().await;
+        Some(
+            guard
+                .iter()
+                .filter(|m| enabled.contains(&m.id))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Every capability verb the facade can currently serve, given the enabled
+    /// providers and the user's binding overrides. Drives both tool listing and the
+    /// `GET /api/capabilities` read model.
+    pub async fn capability_verbs(&self) -> Vec<capability_tools::ResolvedVerb> {
+        // Served from cache unless the provider selection or the enabled plugin set
+        // has changed. Without this the enabled-set join (a plugin-store read plus a
+        // clone of every enabled manifest) would run on every facade tool call AND
+        // inside every `list_all_tools`, which is itself called per agent listing,
+        // per catalog search, and per describe.
+        let generation = capability_tools::generation();
+        if let Ok(cache) = self.capability_cache.lock() {
+            if let Some((cached_generation, verbs)) = cache.as_ref() {
+                if *cached_generation == generation {
+                    return verbs.clone();
+                }
+            }
+        }
+        let Some(enabled) = self.enabled_manifests().await else {
+            return Vec::new();
+        };
+        let verbs =
+            capability_tools::resolve_verbs(&enabled, &crate::plugins::binding::active_config());
+        if let Ok(mut cache) = self.capability_cache.lock() {
+            // Store the generation read BEFORE resolving: if an invalidation landed
+            // mid-resolve, the stored value is already stale and the next read
+            // recomputes rather than serving a torn snapshot.
+            *cache = Some((generation, verbs.clone()));
+        }
+        verbs
+    }
+
+    /// The user's stored defaults for one verb's canonical arguments, coerced to the
+    /// types its schema declares.
+    ///
+    /// Empty when preferences are not wired (test/CLI contexts) — a layer default is
+    /// a convenience, never a precondition, so its absence must never fail a call.
+    async fn layer_defaults(
+        &self,
+        verb: &capability_tools::Verb,
+    ) -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        let Some(prefs) = self.preferences.as_ref() else {
+            return out;
+        };
+        for arg in capability_tools::canonical_args(verb) {
+            let key = capability_tools::layer_default_key(verb.capability, &arg);
+            let Ok(Some(raw)) = prefs.get(&key).await else {
+                continue;
+            };
+            if let Some(value) = capability_tools::coerce_to_schema_type(verb, &arg, &raw) {
+                out.insert(arg, value);
+            }
+        }
+        out
+    }
+
+    /// A binding's `arg_defaults` with its `pref:` tokens substituted from the
+    /// preferences store.
+    ///
+    /// Falls back to the raw defaults when preferences are not wired (test/CLI): the
+    /// token then resolves to nothing and its argument is dropped, which surfaces as
+    /// the provider complaining about a missing field rather than as a literal
+    /// `"pref:..."` being sent upstream and treated as a real value.
+    async fn resolve_provider_defaults(
+        &self,
+        binding: &crate::plugin_manifest::CapabilityToolBinding,
+    ) -> serde_json::Map<String, Value> {
+        let keys = capability_tools::referenced_pref_keys(binding);
+        if keys.is_empty() {
+            return binding.arg_defaults.clone();
+        }
+        let mut resolved = std::collections::BTreeMap::new();
+        if let Some(prefs) = self.preferences.as_ref() {
+            for key in keys {
+                if let Ok(Some(value)) = prefs.get(&key).await {
+                    resolved.insert(key, value);
+                }
+            }
+        }
+        capability_tools::resolve_arg_defaults(binding, &resolved)
+    }
+
+    /// Run a provider's capability ADAPTER for one verb: the code path that exists
+    /// so a provider whose shape no JSON can express (an async job API that must be
+    /// polled, a token vocabulary needing normalization, a body that must read a
+    /// resolved `pref:`) stays bindable without growing the shared grammar.
+    ///
+    /// The adapter is handed the canonical arguments and returns the canonical
+    /// result, so the declarative arg/response mapping is deliberately NOT applied
+    /// around it — running both would apply the same transformation twice.
+    async fn run_capability_adapter(
+        &self,
+        tool_id: &str,
+        resolved: &capability_tools::ResolvedVerb,
+        adapter: &crate::plugin_manifest::CapabilityAdapter,
+        provider_defaults: serde_json::Map<String, Value>,
+        arguments: Value,
+        user_id: Option<&str>,
+        profile_ids: &[String],
+        session_id: Option<String>,
+        host_conversation_id: Option<&str>,
+    ) -> Result<Value> {
+        // Shipping code is a visible, approvable act: the providing plugin must hold
+        // `tool:execute`, the same grant an `inline_deno` tool is gated on. For a
+        // Community-tier provider this reads the Gateway-APPROVED set, not the
+        // manifest's self-declaration, so a third party cannot self-authorize.
+        let grants = self.provider_grants(&resolved.provider_id).await;
+        if !grants.contains(crate::tool_exec::GRANT_TOOL_EXECUTE) {
+            return Err(anyhow!(
+                "provider '{}' maps '{tool_id}' through an adapter but does not hold the \
+                 '{}' grant",
+                resolved.provider_id,
+                crate::tool_exec::GRANT_TOOL_EXECUTE
+            ));
+        }
+        let Some(registry) = global_registry() else {
+            return Err(anyhow!(
+                "adapter for '{tool_id}' unavailable: tool registry not initialized"
+            ));
+        };
+        let bridge = std::sync::Arc::new(CapabilityAdapterBridge {
+            registry,
+            target: resolved.binding.tool.clone(),
+            allowed: adapter.tools.iter().cloned().collect(),
+            user_id: user_id.map(str::to_owned),
+            profile_ids: profile_ids.to_vec(),
+            session_id,
+            host_conversation_id: host_conversation_id.map(str::to_owned),
+        });
+        let invoker = std::sync::Arc::new(crate::tool_exec::SandboxToolInvoker::bridge(bridge));
+        let program = crate::tool_exec::build_capability_adapter_program(
+            &arguments,
+            &Value::Object(provider_defaults),
+            &adapter.code,
+        );
+        // Deny-all sandbox: an adapter reshapes JSON and calls one tool, so it needs
+        // no FS, network or subprocess of its own. Its provider's HTTP egress still
+        // happens inside the bound tool, where the Gateway grant governs it — an
+        // adapter cannot reach the network directly to route around that.
+        //
+        // Boxed for the same reason the `inline_deno` arm is: the bridge re-enters
+        // tool dispatch, so this edge would otherwise make the future infinite-sized.
+        let outcome = Box::pin(crate::tool_exec::run_sandboxed(
+            program,
+            invoker,
+            &resolved.provider_id,
+        ))
+        .await;
+        match outcome {
+            crate::tool_exec::ExecOutcome::Completed {
+                result,
+                is_error,
+                error,
+                ..
+            } => {
+                if is_error {
+                    Err(anyhow!(
+                        "adapter for '{tool_id}' (provider '{}') failed: {}",
+                        resolved.provider_id,
+                        error.unwrap_or_default()
+                    ))
+                } else {
+                    // Stamp the envelope's `provider` exactly as `map_response`
+                    // does, so an adapter-backed verb is indistinguishable from a
+                    // declaratively-bound one. Leaving it to each adapter to
+                    // remember would make the swap observable in the one field that
+                    // reports which provider answered.
+                    Ok(stamp_provider(
+                        result.unwrap_or(Value::Null),
+                        &resolved.provider_id,
+                    ))
+                }
+            }
+            // An adapter maps one verb; it has no user to elicit from mid-call.
+            crate::tool_exec::ExecOutcome::Paused { .. } => Err(anyhow!(
+                "adapter for '{tool_id}' paused, which capability verbs do not support"
+            )),
+        }
+    }
+
+    /// The effective grant set of an ENABLED plugin, by id. Mirrors
+    /// [`Self::resolve_app_tool_backend`]'s source of truth exactly: the store
+    /// record's Gateway-approved grants for a Community-tier plugin, the manifest's
+    /// own declaration for a Core-tier one. An unknown or disabled plugin has no
+    /// grants, so every grant check over it fails closed.
+    async fn provider_grants(&self, plugin_id: &str) -> std::collections::HashSet<String> {
+        let empty = std::collections::HashSet::new();
+        let (Some(manifests), Some(store)) =
+            (self.self_build_manifests.as_ref(), self.self_build_app_store.as_ref())
+        else {
+            return empty;
+        };
+        let Ok(records) = store.list().await else {
+            return empty;
+        };
+        let Some(record) = records
+            .into_iter()
+            .find(|r| r.enabled && r.id == plugin_id)
+        else {
+            return empty;
+        };
+        let guard = manifests.read().await;
+        guard
+            .iter()
+            .find(|m| m.id == plugin_id)
+            .map(|m| effective_tool_grants(m, &record.approved_grants))
+            .unwrap_or(empty)
+    }
+
+    /// Resolve one capability verb id to its bound provider tool, or `None` when no
+    /// provider is selected for that capability or the selected one omits the verb.
+    async fn resolve_capability_verb(
+        &self,
+        tool_id: &str,
+    ) -> Option<capability_tools::ResolvedVerb> {
+        self.capability_verbs()
+            .await
+            .into_iter()
+            .find(|r| r.verb.id == tool_id)
     }
 
     /// Resolve the dispatch backend + grants for an `app__<slug>` tool id by
@@ -3035,6 +3613,130 @@ mod tests {
 
     fn sample_tool() -> RegistryTool {
         RegistryTool::candidate("fs__read_file", "fs", "read_file")
+    }
+
+    // ── capability adapter bridge: what sandboxed JS may reach ─────────────────
+    //
+    // The adapter seam's whole safety argument is that an adapter's authority is a
+    // SUBSET of the declarative path it replaces: the manifest fixes which tools
+    // are reachable, before the sandbox starts. These cover that decision directly
+    // (no Deno subprocess, no live registry needed).
+
+    fn adapter_bridge(target: &str, allowed: &[&str]) -> CapabilityAdapterBridge {
+        CapabilityAdapterBridge {
+            registry: global_registry().unwrap_or_else(|| {
+                // Only the resolve decision is under test; the registry handle is
+                // never dereferenced on these paths.
+                Arc::new(McpRegistry::default())
+            }),
+            target: target.to_owned(),
+            allowed: allowed.iter().map(|s| (*s).to_owned()).collect(),
+            user_id: None,
+            profile_ids: Vec::new(),
+            session_id: None,
+            host_conversation_id: None,
+        }
+    }
+
+    #[test]
+    fn adapter_primary_path_always_resolves_to_the_manifest_fixed_tool() {
+        let bridge = adapter_bridge("firecrawl__scrape", &[]);
+        let target = bridge
+            .resolve_target(
+                crate::tool_exec::CAPABILITY_ADAPTER_CALL_PATH,
+                &serde_json::json!({ "url": "https://example.com" }),
+            )
+            .expect("the primary path is always callable");
+        assert_eq!(target, "firecrawl__scrape");
+    }
+
+    #[test]
+    fn adapter_cannot_redirect_the_primary_path_at_another_tool() {
+        // Arguments are attacker-shaped (an adapter builds them freely), so a `tool`
+        // key riding along in them must NOT steer the primary call.
+        let bridge = adapter_bridge("firecrawl__scrape", &[]);
+        let target = bridge
+            .resolve_target(
+                crate::tool_exec::CAPABILITY_ADAPTER_CALL_PATH,
+                &serde_json::json!({ "tool": "fs__read_file" }),
+            )
+            .expect("primary path resolves");
+        assert_eq!(target, "firecrawl__scrape");
+    }
+
+    #[test]
+    fn adapter_named_path_refuses_a_tool_the_manifest_did_not_declare() {
+        let bridge = adapter_bridge("firecrawl__crawl_start", &["firecrawl__crawl_status"]);
+
+        let allowed = bridge
+            .resolve_target(
+                crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
+                &serde_json::json!({ "tool": "firecrawl__crawl_status" }),
+            )
+            .expect("a declared tool is callable");
+        assert_eq!(allowed, "firecrawl__crawl_status");
+
+        // The escalation this seam exists to prevent.
+        let denied = bridge.resolve_target(
+            crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
+            &serde_json::json!({ "tool": "fs__read_file" }),
+        );
+        assert!(denied.is_err(), "an undeclared tool must be refused");
+
+        // Naming the primary explicitly is the same call `callTool` makes.
+        assert_eq!(
+            bridge
+                .resolve_target(
+                    crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
+                    &serde_json::json!({ "tool": "firecrawl__crawl_start" }),
+                )
+                .expect("the primary tool is reachable by name"),
+            "firecrawl__crawl_start"
+        );
+    }
+
+    #[test]
+    fn adapter_cannot_re_enter_the_capability_facade() {
+        // A provider that declared a facade verb as a callable tool would loop the
+        // facade back into itself — the manifest-driven infinite loop the
+        // declarative arm already refuses for `binding.tool`.
+        let bridge = adapter_bridge("firecrawl__crawl_start", &["web__crawl"]);
+        let denied = bridge.resolve_target(
+            crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
+            &serde_json::json!({ "tool": "web__crawl" }),
+        );
+        assert!(denied.is_err(), "the facade must not be re-enterable");
+    }
+
+    #[test]
+    fn adapter_refuses_unknown_bridge_paths_and_empty_ids() {
+        let bridge = adapter_bridge("firecrawl__scrape", &["firecrawl__crawl_status"]);
+        // `host.*` is the plugin-hook surface an adapter deliberately does not get.
+        assert!(bridge
+            .resolve_target("host.sideModel", &serde_json::json!({}))
+            .is_err());
+        assert!(bridge
+            .resolve_target(
+                crate::tool_exec::CAPABILITY_ADAPTER_NAMED_PATH,
+                &serde_json::json!({})
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn adapter_results_carry_the_provider_like_declarative_ones() {
+        let stamped = stamp_provider(serde_json::json!({ "results": [] }), "firecrawl");
+        assert_eq!(stamped["provider"], serde_json::json!("firecrawl"));
+
+        // An adapter that reported its own provider is trusted over the stamp.
+        let explicit =
+            stamp_provider(serde_json::json!({ "provider": "proxied" }), "firecrawl");
+        assert_eq!(explicit["provider"], serde_json::json!("proxied"));
+
+        // A non-object result is wrapped, never dropped.
+        let wrapped = stamp_provider(serde_json::json!([1, 2]), "firecrawl");
+        assert_eq!(wrapped["provider"], serde_json::json!("firecrawl"));
+        assert_eq!(wrapped["raw"], serde_json::json!([1, 2]));
     }
 
     // ── plugin-declared mcp_servers registration ───────────────────────────────
@@ -3357,7 +4059,12 @@ mod tests {
 
     /// Agent Browser also moved from `builtin_servers()` to its plugin manifest's
     /// `mcp_servers` (fixtures/agentbrowser.manifest.json). Activating the plugin
-    /// registers the `npx agentbrowser` stdio server.
+    /// registers the `npx agent-browser mcp` stdio server.
+    ///
+    /// The package name is asserted EXACTLY because it was wrong: the manifest
+    /// launched `agentbrowser`, which 404s on npm, so this provider could never
+    /// start and served zero verbs. The real package is `agent-browser` and its
+    /// MCP mode is the `mcp` subcommand.
     #[test]
     fn agentbrowser_manifest_registers_via_npx() {
         let manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
@@ -3372,7 +4079,10 @@ mod tests {
             .get(AGENTBROWSER_SERVER)
             .expect("agentbrowser registered from manifest");
         assert_eq!(ab.command, "npx");
-        assert_eq!(ab.args, vec!["-y".to_owned(), "agentbrowser".to_owned()]);
+        assert_eq!(
+            ab.args,
+            vec!["-y".to_owned(), "agent-browser".to_owned(), "mcp".to_owned()]
+        );
         assert!(ab.enabled);
     }
 
@@ -3434,8 +4144,17 @@ mod tests {
         // are `command` tools); `shadow` and `advisor` were retired the same way
         // (see fixtures/shadow.manifest.json + fixtures/advisor.manifest.json — both
         // declarative `http` tools reaching a Core loopback bridge).
+        // Plus the 4 capability-facade servers (`web`, `browser`, `computer`,
+        // `memory`), which are listed unconditionally because their names are
+        // reserved whether or not a provider is currently selected.
         let summaries = reg.server_summaries();
-        assert_eq!(summaries.len(), 13);
+        assert_eq!(summaries.len(), 17);
+        for facade in capability_tools::SERVERS {
+            assert!(
+                summaries.iter().any(|s| &s.name == facade),
+                "facade server '{facade}' must be listed"
+            );
+        }
         assert!(!summaries.iter().any(|s| s.name == "shadow"));
         assert!(summaries.iter().any(|s| s.name == sandbox::SERVER_NAME));
         assert!(summaries

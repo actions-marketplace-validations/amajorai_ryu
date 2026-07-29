@@ -26,11 +26,12 @@
 // inside Core today (the original module carried the same allow).
 #[allow(unused_imports)]
 pub use ryu_tool_exec::{
-    build_inline_tool_program, detect_elicitation, is_available, run_sandboxed, schema,
-    tool_path_to_id, CodeExecutor, Elicitation, ExecOutcome, InvokeOutcome, RegistryToolInvoker,
-    ResumeDecision, SandboxBridge, SandboxToolInvoker, ToolCaller, ToolInvocation,
-    ToolInvokeResult, BACKEND_DENO, DEFAULT_DEADLINE_SECS, DEFAULT_MEMORY_MB, GRANT_TOOL_EXECUTE,
-    MAX_PARKED, MAX_PREVIEW_CHARS, PARKED_TTL,
+    build_capability_adapter_program, build_inline_tool_program, detect_elicitation, is_available,
+    run_sandboxed, schema, tool_path_to_id, CodeExecutor, Elicitation, ExecOutcome, InvokeOutcome,
+    RegistryToolInvoker, ResumeDecision, SandboxBridge, SandboxToolInvoker, ToolCaller,
+    ToolInvocation, ToolInvokeResult, BACKEND_DENO, CAPABILITY_ADAPTER_CALL_PATH,
+    CAPABILITY_ADAPTER_NAMED_PATH, DEFAULT_DEADLINE_SECS, DEFAULT_MEMORY_MB, GRANT_TOOL_EXECUTE, MAX_PARKED, MAX_PREVIEW_CHARS,
+    PARKED_TTL,
 };
 
 #[cfg(feature = "tool-exec-securexec")]
@@ -519,6 +520,10 @@ fn finalize_http_result(
 }
 
 /// One `env:`/`vault:` token's resolution within a `secret_headers` template.
+///
+/// `PartialEq`/`Debug` exist for the resolver's tests only — a real secret is
+/// never logged, and nothing on a production path formats this type.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum SecretToken {
     /// The word is not a secret token — the caller keeps it verbatim (literal
     /// text such as the `Bearer` scheme prefix).
@@ -611,7 +616,7 @@ fn plugin_env_prefix(plugin_id: &str) -> String {
 /// Provenance rather than a grant because there is no per-var approval to read: the
 /// Gateway vets grant STRINGS, and no grant vocabulary describes "may read env var
 /// X". Tightening the namespace is the control that exists.
-fn may_read_env_secret(plugin_id: &str, var: &str) -> bool {
+pub(crate) fn may_read_env_secret(plugin_id: &str, var: &str) -> bool {
     if crate::plugins::builtins::is_compiled_in_manifest(plugin_id) {
         return true;
     }
@@ -633,10 +638,81 @@ fn may_read_env_secret(plugin_id: &str, var: &str) -> bool {
         })
 }
 
+/// Resolve an `env:VARNAME` token to its value, from the process environment or —
+/// when the process has none — from the encrypted per-plugin secret store.
+///
+/// # Why the store is reached under the SAME name
+///
+/// A BYOK plugin declares its key as `env:RYU_TAVILY_API_KEY` today. Introducing a
+/// second grammar (`secret:RYU_TAVILY_API_KEY`) would mean every existing manifest
+/// had to be edited before its key became settable from the UI — including
+/// third-party ones nobody here can edit. Falling back under the identical name
+/// makes every plugin that already ships an `env:` token UI-configurable with ZERO
+/// manifest changes, which is the whole point of
+/// [`crate::plugin_secrets`].
+///
+/// # Precedence: process env FIRST, store second
+///
+/// An operator who exports a var in the service unit / shell profile expects that
+/// value to be the one in effect, and expects `env | grep` to explain what the
+/// process is doing. If the store won, a forgotten UI entry would silently shadow
+/// the deployment's configuration and there would be nothing in the environment to
+/// point at. So env wins and the store is the fallback — the UI is how you set a
+/// key you have *not* otherwise configured, never a way to override one you have.
+///
+/// # The namespace gate runs FIRST, before either source
+///
+/// [`may_read_env_secret`] restricts which names a disk manifest may name at all
+/// (its own [`plugin_env_prefix`] namespace plus the operator allowlist). It must
+/// gate the store lookup exactly as it gates the env read: without it, plugin A
+/// could name plugin B's key and — because the store is keyed by the CALLING
+/// plugin id — at minimum probe for, and at worst harvest, credentials outside its
+/// namespace. The gate is applied once, above the branch, so no future source can
+/// be added below it and miss the check.
+///
+/// `store` is passed in rather than read from the global so tests can exercise the
+/// real precedence against an in-memory store; production callers pass
+/// [`crate::plugin_secrets::global`].
+async fn resolve_env_secret_from(
+    plugin_id: &str,
+    var: &str,
+    store: Option<&crate::plugin_secrets::PluginSecretStore>,
+) -> SecretToken {
+    // Ungated var → treated exactly like "unset": the header is omitted and the
+    // tool surfaces its own auth error. Refusing loudly here would leak which
+    // env vars this Core process happens to carry.
+    if !may_read_env_secret(plugin_id, var) {
+        tracing::warn!(
+            "plugin '{plugin_id}' requested env var '{var}' in a secret header, but it is \
+             outside the plugin's '{}' namespace and not on the '{ENV_SECRET_ALLOWLIST}' \
+             operator allowlist; the header is omitted",
+            plugin_env_prefix(plugin_id)
+        );
+        return SecretToken::Absent;
+    }
+    if let Some(v) = std::env::var(var).ok().filter(|v| !v.is_empty()) {
+        return SecretToken::Value(v);
+    }
+    let Some(store) = store else {
+        return SecretToken::Absent;
+    };
+    match store.get(plugin_id, var).await {
+        Ok(Some(v)) if !v.is_empty() => SecretToken::Value(v),
+        Ok(_) => SecretToken::Absent,
+        Err(e) => {
+            // Storage failure is "absent", not a hard error: same soft-omit posture
+            // as an unset var, so a broken db degrades to the pre-store behaviour.
+            tracing::warn!("reading plugin secret '{var}' for '{plugin_id}' failed: {e:#}");
+            SecretToken::Absent
+        }
+    }
+}
+
 /// Resolve a single whitespace-delimited `word` against the secret grammar.
 /// A `word` that does not carry a known prefix is [`SecretToken::Literal`] —
 /// surrounding scheme text (e.g. `Bearer`) passes through untouched.
-///   - `env:VARNAME`    → `std::env::var` (the BYOK seam), gated by
+///   - `env:VARNAME`    → process env, else the encrypted plugin secret store
+///     (the BYOK seam — see [`resolve_env_secret_from`]), gated by
 ///     [`may_read_env_secret`]; empty/unset/ungated → absent.
 ///   - `vault:<domain>` → the governed `identity::read_credential` (grant
 ///     `identity.read` + audit) for the connection bound to `<domain>` among the
@@ -648,22 +724,7 @@ async fn resolve_secret_token(
     session_id: Option<&str>,
 ) -> SecretToken {
     if let Some(var) = word.strip_prefix("env:") {
-        // Ungated var → treated exactly like "unset": the header is omitted and the
-        // tool surfaces its own auth error. Refusing loudly here would leak which
-        // env vars this Core process happens to carry.
-        if !may_read_env_secret(plugin_id, var) {
-            tracing::warn!(
-                "plugin '{plugin_id}' requested env var '{var}' in a secret header, but it is \
-                 outside the plugin's '{}' namespace and not on the '{ENV_SECRET_ALLOWLIST}' \
-                 operator allowlist; the header is omitted",
-                plugin_env_prefix(plugin_id)
-            );
-            return SecretToken::Absent;
-        }
-        return match std::env::var(var).ok().filter(|v| !v.is_empty()) {
-            Some(v) => SecretToken::Value(v),
-            None => SecretToken::Absent,
-        };
+        return resolve_env_secret_from(plugin_id, var, crate::plugin_secrets::global()).await;
     }
     if let Some(domain) = word.strip_prefix("vault:") {
         let domain = domain.trim().to_ascii_lowercase();
@@ -702,8 +763,9 @@ async fn resolve_secret_token(
 /// prefix the wire wants), and the degenerate whole-value `"env:RYU_EXA_API_KEY"`
 /// still resolves to the bare secret (back-compat). Grammar mirrors
 /// `run_command_tool`'s `env:` seam plus a governed `vault:<domain>` read:
-///   - `env:VARNAME`    → `std::env::var` (the BYOK seam), scoped to what
-///     `plugin_id` may read (see [`may_read_env_secret`]).
+///   - `env:VARNAME`    → process env, else the encrypted plugin secret store
+///     (the BYOK seam), scoped to what `plugin_id` may read (see
+///     [`may_read_env_secret`] and [`resolve_env_secret_from`]).
 ///   - `vault:<domain>` → the governed `identity::read_credential` (grant
 ///     `identity.read` + audit) for the connection bound to `<domain>` among the
 ///     agent's `profile_ids`.
@@ -753,6 +815,71 @@ async fn resolve_secret_header_source(
         ));
     }
     Ok(Some(out))
+}
+
+
+/// The URL scheme a manifest uses to reach **this node's own Core** over loopback.
+///
+/// `core:/api/ext/com.ryu.browser/tabs` — note the single slash; everything after
+/// `core:` is the path, and the origin is filled in at call time.
+pub const CORE_URL_SCHEME: &str = "core:";
+
+/// Core's loopback origin for the ACTIVE profile.
+///
+/// Only the PORT is taken from `RYU_BIND`, never the host: a node bound to
+/// `0.0.0.0:7980` is listening everywhere, but the address to DIAL from inside the
+/// same process is still loopback, and `http://0.0.0.0/...` is not a route.
+fn core_loopback_origin() -> String {
+    let bind = std::env::var("RYU_BIND").ok();
+    format!("http://127.0.0.1:{}", core_port_from_bind(bind.as_deref()))
+}
+
+/// Core's port for this profile, given the raw `RYU_BIND` value. Pure, so the
+/// precedence is testable without mutating process env in a parallel test binary.
+///
+/// `RYU_BIND` is seeded per profile by `profile::apply_env_defaults`, so reading it
+/// keeps this in step with whatever Core actually bound — including an operator who
+/// set it by hand. Falling back through `profile::port` keeps the "one offset
+/// source" rule when it is absent.
+fn core_port_from_bind(bind: Option<&str>) -> u16 {
+    bind.and_then(|b| b.rsplit(':').next())
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .unwrap_or_else(|| crate::profile::port(CORE_BASE_PORT))
+}
+
+/// [`resolve_core_url`] against an explicit origin. Split out so the scheme
+/// expansion is testable independently of the ambient profile.
+fn resolve_core_url_with(url: &str, origin: &str) -> String {
+    match url.strip_prefix(CORE_URL_SCHEME) {
+        Some(path) => format!("{origin}/{}", path.trim_start_matches('/')),
+        None => url.to_owned(),
+    }
+}
+
+/// Core's base (release-profile) bind port. Every other profile is this plus the
+/// profile offset, resolved through `profile::port` — never hardcoded shifted.
+const CORE_BASE_PORT: u16 = 7980;
+
+/// Expand a `core:`-scheme url into a concrete loopback URL for this profile.
+/// Any other url is returned untouched.
+///
+/// # Why this scheme exists
+///
+/// A manifest that wants to reach Core's own HTTP surface (the ext-proxy, the memory
+/// CRUD) used to hardcode `http://127.0.0.1:7980`. That is wrong on every profile but
+/// `release`: `bun dev` runs the `dev` profile, where Core binds 8980, so the tool
+/// either reached nothing or — far worse — reached a *release-profile* Core that
+/// happened to be running, crossing two profiles' data. `profile.rs` states the rule
+/// this restores: there is exactly ONE offset source, and nothing hardcodes a shifted
+/// port.
+///
+/// The egress domain is unchanged (`127.0.0.1`), so a manifest's existing
+/// `tool:http-egress:127.0.0.1` grant still gates it.
+pub fn resolve_core_url(url: &str) -> String {
+    if !url.starts_with(CORE_URL_SCHEME) {
+        return url.to_owned();
+    }
+    resolve_core_url_with(url, &core_loopback_origin())
 }
 
 /// Proxy a plugin `http` tool call to `url`, Gateway-governed and egress-grant-gated.
@@ -811,8 +938,11 @@ pub async fn run_http_tool(
     let m = reqwest::Method::from_bytes(method_upper.as_bytes())
         .map_err(|_| format!("http tool: invalid method '{method}'"))?;
     let bodyless = matches!(m, reqwest::Method::GET | reqwest::Method::HEAD);
+    // Expand `core:` to this profile's loopback origin BEFORE the egress/SSRF
+    // guards, so they screen the URL that is actually dialled.
+    let url = resolve_core_url(url);
     let (final_url, query_pairs, mut body, headers) =
-        build_rest_request(url, &args, bodyless, header_params, &resolved_secret_headers)?;
+        build_rest_request(&url, &args, bodyless, header_params, &resolved_secret_headers)?;
 
     // 0c. Apply the manifest's static `body_defaults` UNDER the model-provided body
     //     (model args win; nested objects merge key-by-key). This is a declarative,
@@ -1393,6 +1523,16 @@ pub async fn run_command_tool(
                 );
                 continue;
             }
+            // DELIBERATELY process-env ONLY: this arm does NOT fall back to
+            // `crate::plugin_secrets` the way `resolve_secret_token` does. The
+            // fallback exists so a UI-entered BYOK key can be interpolated into a
+            // request header Core itself builds and sends to one known URL. Handing
+            // that same key to a spawned child — which can exfiltrate it anywhere,
+            // and whose whole reason for the scrubber above is to keep credentials
+            // OUT of child environments — is a materially larger blast radius for no
+            // demonstrated need (no in-repo command tool declares a BYOK key). If a
+            // command tool ever needs one, wire it here explicitly and with its own
+            // test, rather than by making the two paths implicitly symmetric.
             if let Ok(val) = std::env::var(var) {
                 child_env.insert(child_key.clone(), val);
             }
@@ -3174,6 +3314,134 @@ mod tests {
         assert!(!may_read_env_secret("com.acme.weather", "RYU_TOKEN"));
     }
 
+    // ── `env:` → encrypted plugin secret store fallback ──────────────────────
+
+    /// THE GAP THIS CLOSES: `exa`/`tavily` declare `env:RYU_<X>_API_KEY` and there
+    /// was no way to set such a var from the UI, so swapping the `web.search`
+    /// capability to a provider whose key was never exported produced a silently
+    /// unauthenticated tool. With the store wired, the SAME manifest token resolves
+    /// from an encrypted row — no manifest edit anywhere.
+    #[tokio::test]
+    async fn an_unset_env_var_falls_back_to_the_plugin_secret_store() {
+        let _lock = lock_env_secret();
+        std::env::remove_var("RYU_TAVILY_API_KEY");
+        std::env::remove_var(ENV_SECRET_ALLOWLIST);
+
+        let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
+        store
+            .set("tavily", "RYU_TAVILY_API_KEY", "tvly-from-ui")
+            .await
+            .unwrap();
+
+        let out = resolve_env_secret_from("tavily", "RYU_TAVILY_API_KEY", Some(&store)).await;
+        assert_eq!(out, SecretToken::Value("tvly-from-ui".to_string()));
+
+        // With no store published at all, behaviour is exactly the pre-store one.
+        assert_eq!(
+            resolve_env_secret_from("tavily", "RYU_TAVILY_API_KEY", None).await,
+            SecretToken::Absent
+        );
+    }
+
+    /// Precedence is env-then-store, never the reverse: an operator who exported the
+    /// var in a service unit must see that value in effect, and must be able to
+    /// explain the process with `env | grep`. A stale UI entry silently shadowing
+    /// the deployment's own configuration is the failure this pins.
+    #[tokio::test]
+    async fn the_process_environment_wins_over_a_stored_secret() {
+        let _lock = lock_env_secret();
+        std::env::set_var("RYU_TAVILY_API_KEY", "tvly-from-env");
+        std::env::remove_var(ENV_SECRET_ALLOWLIST);
+
+        let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
+        store
+            .set("tavily", "RYU_TAVILY_API_KEY", "tvly-from-ui")
+            .await
+            .unwrap();
+
+        let out = resolve_env_secret_from("tavily", "RYU_TAVILY_API_KEY", Some(&store)).await;
+        assert_eq!(out, SecretToken::Value("tvly-from-env".to_string()));
+
+        std::env::remove_var("RYU_TAVILY_API_KEY");
+    }
+
+    /// THE LOAD-BEARING GUARD. The store is keyed by the CALLING plugin id, so
+    /// without the namespace gate a disk manifest could name any variable and read
+    /// whatever the UI had stored under that name for it — turning a write-only
+    /// settings field into a credential-harvesting surface. The gate must run BEFORE
+    /// the fallback, not only before the env read.
+    ///
+    /// Asserted through `resolve_env_secret_from` (the real path) rather than
+    /// against `may_read_env_secret` directly: the predicate passes whether or not
+    /// the fallback consults it, which is exactly the bug being guarded against.
+    #[tokio::test]
+    async fn the_namespace_gate_also_guards_the_store_fallback() {
+        let _lock = lock_env_secret();
+        std::env::remove_var(ENV_SECRET_ALLOWLIST);
+        std::env::remove_var("ANTHROPIC_API_KEY");
+
+        let evil = "com.evil.plugin";
+        assert!(
+            !crate::plugins::builtins::is_compiled_in_manifest(evil),
+            "'{evil}' must be a disk-manifest id for this test to mean anything"
+        );
+
+        let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
+        // The attacker stored a value under its OWN row, using a name outside its
+        // namespace. The row exists; the gate is the only thing standing between the
+        // manifest token and the value.
+        store
+            .set(evil, "ANTHROPIC_API_KEY", "stolen-shape")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolve_env_secret_from(evil, "ANTHROPIC_API_KEY", Some(&store)).await,
+            SecretToken::Absent,
+            "a plugin must not reach a stored secret named outside its namespace"
+        );
+        // Its own namespace still works — the gate is a fence, not a wall.
+        store
+            .set(evil, "RYU_PLUGIN_COM_EVIL_PLUGIN_API_KEY", "mine")
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_env_secret_from(evil, "RYU_PLUGIN_COM_EVIL_PLUGIN_API_KEY", Some(&store)).await,
+            SecretToken::Value("mine".to_string())
+        );
+    }
+
+    /// An empty stored value is "absent", matching the env branch's
+    /// `.filter(|v| !v.is_empty())` — so the whole header is omitted rather than a
+    /// `Bearer ` with nothing after it being shipped to the provider.
+    #[tokio::test]
+    async fn an_empty_stored_secret_resolves_to_absent() {
+        let _lock = lock_env_secret();
+        std::env::remove_var("RYU_PLUGIN_COM_ACME_WEATHER_API_KEY");
+        std::env::remove_var(ENV_SECRET_ALLOWLIST);
+
+        let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
+        store
+            .set("com.acme.weather", "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY", "k")
+            .await
+            .unwrap();
+        // Clearing it through the same API used by `PUT` with a blank body.
+        store
+            .set("com.acme.weather", "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY", "  ")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolve_env_secret_from(
+                "com.acme.weather",
+                "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY",
+                Some(&store)
+            )
+            .await,
+            SecretToken::Absent
+        );
+    }
+
     // ── built-in command-bin allowlist seed ──────────────────────────────────
 
     /// The `rtk` allowlist entry must resolve to an operator-set absolute override
@@ -3277,5 +3545,91 @@ mod tests {
             stdout.contains("the-stderr"),
             "non-empty stderr must be merged into the output, got: {stdout:?}"
         );
+    }
+
+    /// The BYOK providers the layer feature ships MUST pass the namespace gate, or
+    /// the settings panel renders "Stored, but this plugin is not allowed to read
+    /// this name" on the one feature added to make them configurable.
+    ///
+    /// They pass by PROVENANCE, not tier: both are Community-tier yet compiled into
+    /// the binary, and `is_compiled_in_manifest` is what the gate consults. A future
+    /// change that moved either out of `BUILTIN_MANIFESTS` would silently break BYOK
+    /// for it, which is what this pins.
+    #[test]
+    fn the_shipped_byok_providers_may_read_their_own_keys() {
+        assert!(may_read_env_secret("tavily", "RYU_TAVILY_API_KEY"));
+        assert!(may_read_env_secret("exa", "RYU_EXA_API_KEY"));
+        // And the gate still holds sideways: one plugin cannot read another's key by
+        // simply naming it.
+        assert!(!may_read_env_secret("acme-thirdparty", "RYU_TAVILY_API_KEY"));
+    }
+
+    /// `core:` must resolve to the ACTIVE profile's Core port, never a hardcoded
+    /// 7980. The bug this pins: under the `dev` profile (what `bun dev` runs) Core
+    /// binds 8980, so a hardcoded manifest url reached nothing — or reached a
+    /// release-profile Core running alongside it, crossing two profiles' data.
+    #[test]
+    fn the_core_scheme_resolves_to_this_profiles_loopback_port() {
+        // Only the PORT is taken from RYU_BIND; a node bound to 0.0.0.0 is still
+        // dialled on loopback, because `http://0.0.0.0/...` is not a route.
+        // Only the PORT is taken from RYU_BIND; a node bound to 0.0.0.0 is still
+        // dialled on loopback, because `http://0.0.0.0/...` is not a route.
+        assert_eq!(core_port_from_bind(Some("0.0.0.0:8980")), 8980);
+        assert_eq!(core_port_from_bind(Some("127.0.0.1:7980")), 7980);
+        // Absent / malformed falls back through the ONE offset source.
+        assert_eq!(
+            core_port_from_bind(None),
+            crate::profile::port(CORE_BASE_PORT)
+        );
+        assert_eq!(
+            core_port_from_bind(Some("not-a-bind")),
+            crate::profile::port(CORE_BASE_PORT)
+        );
+
+        let origin = "http://127.0.0.1:8980";
+        assert_eq!(
+            resolve_core_url_with("core:/api/shadow/search", origin),
+            "http://127.0.0.1:8980/api/shadow/search"
+        );
+        // A leading slash is optional in the manifest and never doubles up.
+        assert_eq!(
+            resolve_core_url_with("core:api/memory", origin),
+            "http://127.0.0.1:8980/api/memory"
+        );
+    }
+
+    #[test]
+    fn a_non_core_url_is_returned_untouched() {
+        // The scheme is opt-in: every external provider url must pass through byte
+        // for byte, or the egress guard would screen something other than what is
+        // dialled.
+        for url in [
+            "https://api.exa.ai/search",
+            "https://api.tavily.com/extract",
+            "http://127.0.0.1:9999/whatever",
+        ] {
+            assert_eq!(resolve_core_url(url), url);
+            assert_eq!(resolve_core_url_with(url, "http://127.0.0.1:8980"), url);
+        }
+    }
+
+    /// Every shipped manifest that addresses Core must use `core:`, or it silently
+    /// breaks on a non-release profile. Guards the migration from regressing.
+    #[test]
+    fn no_shipped_manifest_hardcodes_cores_port() {
+        for manifest in crate::plugin_manifest::PluginManifestLoader::load_builtins() {
+            for entry in &manifest.runnables {
+                let Some(cfg) = entry.config.as_ref() else {
+                    continue;
+                };
+                let raw = cfg.to_string();
+                assert!(
+                    !raw.contains("127.0.0.1:7980"),
+                    "manifest '{}' hardcodes Core's release port; use the core: scheme \
+                     so it resolves per profile",
+                    manifest.id
+                );
+            }
+        }
     }
 }

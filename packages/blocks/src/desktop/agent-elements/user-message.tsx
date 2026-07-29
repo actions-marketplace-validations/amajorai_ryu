@@ -1,4 +1,12 @@
-﻿import { Button } from "@ryu/ui/components/button";
+﻿import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
+import { Button } from "@ryu/ui/components/button";
+import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@ryu/ui/components/tooltip";
 import { cn } from "@ryu/ui/lib/utils";
 import type { UIMessage } from "ai";
 import { memo, useEffect, useRef, useState } from "react";
@@ -13,6 +21,11 @@ import {
 
 export interface UserMessageProps {
 	className?: string;
+	/** Current signed-in user info for displaying avatar/name on own messages. */
+	currentUser?: {
+		avatar?: string;
+		name?: string;
+	};
 	/** When true, the bubble is replaced by an inline editor (ChatGPT/Claude-style
 	 * message editing). Saving calls `onEditSubmit`; Escape/Cancel calls
 	 * `onEditCancel`. */
@@ -91,10 +104,49 @@ interface FilePart {
  * optimistic messages, so only OTHER people get a name label.
  */
 interface MessageAuthor {
+	/** Avatar URL for the user. */
+	avatar?: string;
 	/** Stable Core user id (`author_user_id`). */
 	id?: string;
 	/** Display name (Core's `author_name`), falling back to the user id/email. */
 	name?: string;
+}
+
+function formatRelativeTime(date: Date): string {
+	const now = new Date();
+	const diffMs = now.getTime() - date.getTime();
+	const diffSeconds = Math.floor(diffMs / 1000);
+	const diffMinutes = Math.floor(diffSeconds / 60);
+	const diffHours = Math.floor(diffMinutes / 60);
+	const diffDays = Math.floor(diffHours / 24);
+
+	if (diffSeconds < 60) {
+		return "just now";
+	}
+	if (diffMinutes < 60) {
+		return `${diffMinutes}m ago`;
+	}
+	if (diffHours < 24) {
+		return `${diffHours}h ago`;
+	}
+	if (diffDays < 7) {
+		return `${diffDays}d ago`;
+	}
+	return date.toLocaleDateString("en-GB", {
+		day: "numeric",
+		month: "short",
+	});
+}
+
+function formatFullTimestamp(date: Date): string {
+	return date.toLocaleDateString("en-GB", {
+		day: "numeric",
+		month: "numeric",
+		year: "numeric",
+		hour: "numeric",
+		minute: "2-digit",
+		hour12: true,
+	});
 }
 
 function getAuthor(message: UIMessage): MessageAuthor | null {
@@ -217,6 +269,7 @@ function UserMessageEditor({
 export const UserMessage = memo(function UserMessage({
 	message,
 	className,
+	currentUser,
 	enableImagePreview = true,
 	editing = false,
 	onEditSubmit,
@@ -272,32 +325,49 @@ export const UserMessage = memo(function UserMessage({
 		filename: `image-${i + 1}`,
 	}));
 
-	const author = getAuthor(message);
+	const remoteAuthor = getAuthor(message);
+	const isOwnMessage = !remoteAuthor;
+	const author = isOwnMessage ? (currentUser ?? null) : remoteAuthor;
+	const createdAt = (message as { createdAt?: Date | string }).createdAt;
+	const timestamp = createdAt ? new Date(createdAt) : null;
 
-	return (
-		<div className={cn("flex flex-col items-end gap-1", className)}>
-			{author && (
-				<div className="flex min-w-0 max-w-full items-center justify-end px-3.5 font-medium text-muted-foreground text-xs">
-					{author.name || author.id}
+	const TimestampNode = timestamp ? (
+		<TooltipProvider delayDuration={0}>
+			<Tooltip>
+				<TooltipTrigger className="text-muted-foreground/70 text-xs">
+					{formatRelativeTime(timestamp)}
+				</TooltipTrigger>
+				<TooltipContent>
+					<p>{formatFullTimestamp(timestamp)}</p>
+				</TooltipContent>
+			</Tooltip>
+		</TooltipProvider>
+	) : null;
+
+	const MessageBubble = (
+		<>
+			{images.length > 0 && (
+				<div className="flex flex-col gap-1">
+					{images.map((url, i) => (
+						<div
+							className={cn(
+								"max-w-[200px] rounded-2xl bg-foreground/4 p-1.5",
+								enableImagePreview && "cursor-pointer"
+							)}
+							key={i}
+							onClick={
+								enableImagePreview ? () => setLightboxIndex(i) : undefined
+							}
+						>
+							<img
+								alt="attachment"
+								className="block max-h-[120px] max-w-[184px] rounded-xl object-cover"
+								src={url}
+							/>
+						</div>
+					))}
 				</div>
 			)}
-			{images.length > 0 &&
-				images.map((url, i) => (
-					<div
-						className={cn(
-							"max-w-[200px] rounded-2xl bg-foreground/4 p-1.5",
-							enableImagePreview && "cursor-pointer"
-						)}
-						key={i}
-						onClick={enableImagePreview ? () => setLightboxIndex(i) : undefined}
-					>
-						<img
-							alt="attachment"
-							className="block max-h-[120px] max-w-[184px] rounded-xl object-cover"
-							src={url}
-						/>
-					</div>
-				))}
 			{enableImagePreview && lightboxImages.length > 0 && (
 				<ImageLightbox
 					images={lightboxImages}
@@ -307,7 +377,7 @@ export const UserMessage = memo(function UserMessage({
 				/>
 			)}
 			{files.length > 0 && (
-				<div className="flex flex-col items-end gap-2">
+				<div className="flex flex-col gap-2">
 					{files.map((file, i) => (
 						<FileAttachment
 							filename={file.filename}
@@ -319,7 +389,7 @@ export const UserMessage = memo(function UserMessage({
 				</div>
 			)}
 			{text && (
-				<div className="ms-[70px] max-w-[calc(95%-40px)]">
+				<div className="max-w-[90%]">
 					<div className="rounded-2xl bg-muted px-3.5 py-1.5 text-foreground text-sm transition-colors">
 						{quote && <QuoteBlock text={quote} />}
 						{body && (
@@ -334,6 +404,46 @@ export const UserMessage = memo(function UserMessage({
 					</div>
 				</div>
 			)}
+		</>
+	);
+
+	const AvatarNode = author ? (
+		<Avatar className="size-8 shrink-0 rounded-full">
+			<AvatarImage src={author.avatar} />
+			<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
+				<DitherAvatar className="size-full" name={author.name || "ryu"} />
+			</AvatarFallback>
+		</Avatar>
+	) : null;
+
+	if (isOwnMessage) {
+		return (
+			<div className={cn("flex flex-col items-end gap-1", className)}>
+				{TimestampNode && (
+					<div className="flex h-4 items-center">{TimestampNode}</div>
+				)}
+				<div className="flex items-start gap-2">
+					{MessageBubble}
+					{AvatarNode}
+				</div>
+			</div>
+		);
+	}
+
+	return (
+		<div className={cn("flex flex-col items-start gap-1", className)}>
+			<div className="flex h-4 items-center gap-2">
+				{author && (
+					<span className="font-medium text-muted-foreground text-xs">
+						{author.name}
+					</span>
+				)}
+				{TimestampNode}
+			</div>
+			<div className="flex items-start gap-2">
+				{AvatarNode}
+				{MessageBubble}
+			</div>
 		</div>
 	);
 });

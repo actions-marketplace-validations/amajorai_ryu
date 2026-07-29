@@ -3,22 +3,31 @@ import {
 	Alert02Icon,
 	ArrowDown01Icon,
 	ArrowUp01Icon,
+	BrainIcon,
+	BrowserIcon,
 	Cancel01Icon,
 	CloudServerIcon,
+	ComputerIcon,
 	Copy01Icon,
 	CpuIcon,
 	Delete01Icon,
 	DollarCircleIcon,
 	Download04Icon,
+	FileSearchIcon,
+	GlobeIcon,
+	LaptopIcon,
+	Layers01Icon,
+	Link01Icon,
 	Mic01Icon,
 	PackageIcon,
+	Search01Icon,
 	Settings01Icon,
 	Share08Icon,
 	ViewIcon,
 	ViewOffSlashIcon,
 	VolumeHighIcon,
 } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
 	SettingsGroup,
 	SettingsItem,
@@ -58,10 +67,18 @@ import { cn } from "@/lib/utils.ts";
 import { AgentAutoRoutingEditor } from "@/src/components/agents/AgentAutoRoutingEditor.tsx";
 import { GatewayDialog } from "@/src/components/gateway/GatewayDialog.tsx";
 import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
+import {
+	type CapabilityLayerEntry,
+	useCapabilityLayers,
+} from "@/src/hooks/useCapabilityLayers.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { useNodeSandboxes } from "@/src/hooks/useNodeSandboxes.ts";
 import { useNodeSystemInfo } from "@/src/hooks/useNodeSystemInfo.ts";
 import { useNodeVersion } from "@/src/hooks/useNodeVersion.ts";
+import {
+	type CapabilityProvider,
+	describeBindingFailure,
+} from "@/src/lib/api/capability-layers.ts";
 import { type ApiTarget, currentClientId } from "@/src/lib/api/client.ts";
 import {
 	type ConnectedClient,
@@ -85,6 +102,7 @@ import {
 } from "@/src/lib/api/mesh.ts";
 import {
 	type EngineConcurrency,
+	enableApp,
 	fetchEngineConcurrency,
 	fetchSidecarDetails,
 	type SidecarDetail,
@@ -180,11 +198,11 @@ function resolveTone(
 	return "green";
 }
 
-const TONE_DOT: Record<Tone, string> = {
-	green: "bg-success",
-	amber: "bg-warning",
-	red: "bg-destructive",
-	pending: "bg-muted-foreground/40",
+const TONE_TEXT: Record<Tone, string> = {
+	green: "text-success",
+	amber: "text-warning",
+	red: "text-destructive",
+	pending: "text-muted-foreground/40",
 };
 
 const displayName = (name: string) =>
@@ -1165,7 +1183,6 @@ const RUN_ALONGSIDE_GROUPS: Array<{
 	category: CatalogItem["category"];
 	label: string;
 }> = [
-	{ label: "Speech", category: "voice" },
 	{ label: "Image", category: "media" },
 	{ label: "Embeddings", category: "embedding" },
 ];
@@ -1940,6 +1957,249 @@ function VoiceAndSandboxSection({
 	);
 }
 
+/** The capability layers in display order, with their icon + human label.
+ *
+ *  A "layer" here is a CAPABILITY (`web.search`, `browser.control`, …) that
+ *  several enabled apps can provide at once; picking a row pins the capability to
+ *  that app, exactly like swapping the chat engine pins the resident runtime.
+ *
+ *  This table is presentation only. A selectable capability Core reports that is
+ *  NOT listed still renders — it falls back to its raw name and the generic
+ *  layers icon — so a third-party app's capability is never silently hidden by a
+ *  closed list on the client. */
+const CAPABILITY_LAYERS: Array<{
+	capability: string;
+	icon: IconSvgElement;
+	label: string;
+}> = [
+	{ label: "Search", capability: "web.search", icon: Search01Icon },
+	{ label: "Extract", capability: "web.extract", icon: FileSearchIcon },
+	{ label: "Crawl", capability: "web.crawl", icon: GlobeIcon },
+	{ label: "Browser", capability: "browser.control", icon: BrowserIcon },
+	{ label: "Computer", capability: "computer.control", icon: ComputerIcon },
+	{ label: "Memory", capability: "memory", icon: BrainIcon },
+];
+
+interface CapabilityLayerRow {
+	entry: CapabilityLayerEntry;
+	icon: IconSvgElement;
+	label: string;
+}
+
+/** Known layers first in table order, then anything else Core reported. */
+function orderCapabilityLayers(
+	layers: CapabilityLayerEntry[]
+): CapabilityLayerRow[] {
+	const remaining = new Map(layers.map((layer) => [layer.capability, layer]));
+	const rows: CapabilityLayerRow[] = [];
+	for (const known of CAPABILITY_LAYERS) {
+		const entry = remaining.get(known.capability);
+		if (entry) {
+			remaining.delete(known.capability);
+			rows.push({ entry, icon: known.icon, label: known.label });
+		}
+	}
+	for (const entry of remaining.values()) {
+		rows.push({ entry, icon: Layers01Icon, label: entry.capability });
+	}
+	return rows;
+}
+
+/**
+ * `This computer` / `Remote desktop` — which machine a provider acts on.
+ *
+ * Returned only when the capability's providers actually DISAGREE. Labelling
+ * every row when they all drive the same machine is noise that trains the user to
+ * ignore the label, which is exactly when it stops working for the one layer
+ * (`computer.control`) where the difference is real.
+ */
+function providerTargetLabel(
+	provider: CapabilityProvider,
+	siblings: CapabilityProvider[]
+): string | null {
+	if (!provider.target) {
+		return null;
+	}
+	const distinct = new Set(siblings.map((p) => p.target ?? "unknown"));
+	if (distinct.size < 2) {
+		return null;
+	}
+	return provider.target === "local-machine"
+		? "this computer"
+		: "remote desktop";
+}
+
+/** `3 verbs` / `default · 3 verbs` — what this provider actually exposes. */
+function providerDetail(
+	provider: CapabilityProvider,
+	siblings: CapabilityProvider[]
+): string {
+	if (!provider.servesVerbs) {
+		return "no verbs";
+	}
+	const count = provider.verbs.length;
+	const parts = [`${count} verb${count === 1 ? "" : "s"}`];
+	if (provider.isDefault) {
+		parts.unshift("default");
+	}
+	// Leads the detail line: which computer this types on outranks how many verbs
+	// it exposes when the two candidates are not the same machine.
+	const where = providerTargetLabel(provider, siblings);
+	if (where) {
+		parts.unshift(where);
+	}
+	return parts.join(" · ");
+}
+
+/** "Pinned · 2 providers enabled" — where the current pick came from. */
+function layerCaption(entry: CapabilityLayerEntry): string {
+	if (!entry.boundProvider) {
+		return "No provider bound";
+	}
+	const count = entry.providers.length;
+	const origin = entry.overridden ? "Pinned" : "Auto-picked";
+	const base = `${origin} · ${count} provider${count === 1 ? "" : "s"} enabled`;
+	// When the candidates drive DIFFERENT machines, the caption is the only thing
+	// visible without opening the submenu — and "2 providers enabled" alone reads
+	// as "two ways to do the same thing", which is the misreading this exists to
+	// prevent. Name what the bound one actually acts on.
+	const where = providerTargetLabel(entry.boundProvider, entry.providers);
+	return where ? `${base} · ${where}` : base;
+}
+
+/**
+ * The "Toolkits" block in the node dropdown: every SELECTABLE capability on the
+ * node. Named "Toolkits" in the UI because that is what a user is picking - the
+ * set of tools behind web search or browsing - while "layer"/"capability" stays
+ * the internal vocabulary in Core and the manifests.
+ *
+ * node with the app currently serving it, and a swap to any other enabled
+ * provider. This is the client face of Core's binding ladder
+ * (override > sole provider > declared default > lowest id).
+ *
+ * Deliberately unlike the Engines block:
+ *   - no `available` list — the read model already reports only ENABLED apps,
+ *     and installing a provider is the Store's job, not the dropdown's;
+ *   - no `running` dot — a binding is a preference with no process behind it,
+ *     and a grey dot on something that cannot run reads as broken;
+ *   - non-selectable capabilities are absent entirely (the hook drops them):
+ *     Core will not auto-pick between them, so a picker would be a lie.
+ */
+function LayersSection({
+	target,
+	enabled,
+}: {
+	enabled: boolean;
+	target: ApiTarget;
+}) {
+	const { layers, refresh, select } = useCapabilityLayers(target, enabled);
+	const rows = orderCapabilityLayers(layers);
+
+	// Enabling a candidate for a toolkit that currently has none. Distinct from
+	// `pick`: there is nothing to swap TO yet, so the action is a lifecycle change
+	// on the plugin, after which Core's ladder binds it automatically (sole
+	// provider, or the declared default).
+	const enableProvider = async (
+		provider: CapabilityProvider,
+		label: string
+	) => {
+		try {
+			await enableApp(target, provider.id);
+			await refresh();
+			sileo.success({ title: `${label} → ${provider.name}` });
+		} catch (e) {
+			sileo.error({
+				title:
+					e instanceof Error ? e.message : `Couldn't enable ${provider.name}`,
+			});
+		}
+	};
+
+	const pick = async (
+		entry: CapabilityLayerEntry,
+		provider: CapabilityProvider,
+		label: string
+	) => {
+		// Re-clicking the row that is ALREADY serving the capability is a no-op, the
+		// same way re-picking the resident chat engine is. Writing here would turn
+		// Core's auto-pick into an explicit pin with no visible change and no way
+		// back — the dropdown has no "Auto" row to undo it with.
+		if (provider.id === entry.bound) {
+			return;
+		}
+		try {
+			await select(entry.capability, provider.id);
+			sileo.success({ title: `${label} → ${provider.name}` });
+		} catch (e) {
+			// Core's 409 names the plugin that would break and the binding_error
+			// code; surface both rather than a bare "request failed".
+			sileo.error({ title: describeBindingFailure(e, provider.name) });
+		}
+	};
+
+	if (!enabled || rows.length === 0) {
+		return null;
+	}
+
+	return (
+		<div className="px-1 py-0.5">
+			<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
+				Toolkits
+			</p>
+			{rows.map(({ entry, icon, label }) => (
+				<NodeLayerMenu
+					// Candidates that exist but are not enabled. Load-bearing for
+					// `web.search`, whose five providers all ship opt-in: without this
+					// the toolkit rendered as "No provider bound" with an empty menu and
+					// no hint that anything could serve it.
+					available={entry.available.map(
+						(provider): LayerOption => ({
+							name: provider.id,
+							label: provider.name,
+							active: false,
+							detail: provider.isDefault
+								? "default · not enabled"
+								: "not enabled",
+							select: () => enableProvider(provider, label),
+						})
+					)}
+					caption={layerCaption(entry)}
+					currentLabel={entry.boundProvider?.name ?? "None"}
+					icon={icon}
+					installed={entry.providers.map(
+						(provider): LayerOption => ({
+							name: provider.id,
+							label: provider.name,
+							active: provider.id === entry.bound,
+							detail: providerDetail(provider, entry.providers),
+							// A provider that binds no verbs is shown but NOT selectable.
+							// Selecting one resolves the capability to it and then finds
+							// nothing to serve, so every tool in the layer disappears —
+							// silently, with no error anywhere. Better to say why it
+							// cannot be picked than to let the layer go dark.
+							disabled: !provider.servesVerbs,
+							disabledReason: provider.servesVerbs
+								? null
+								: "serves no verbs yet",
+							select: () => pick(entry, provider, label),
+						})
+					)}
+					key={entry.capability}
+					label={label}
+					selectionMode="swap"
+					// No version badge. The only version available here is the
+					// CAPABILITY CONTRACT version from `provides[].version`, which every
+					// manifest in the repo declares as "1.0.0" — so every row would badge
+					// an identical, information-free "v1.0.0" in the same slot where the
+					// engine rows above show a real build. The provider app's own version
+					// would be meaningful, but the read model does not carry it.
+					version={null}
+				/>
+			))}
+		</div>
+	);
+}
+
 /** A reachable Core found by the LAN sweep (mirrors the Rust DiscoveredNode). */
 interface DiscoveredNode {
 	latency_ms: number;
@@ -2558,9 +2818,19 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 						/>
 					}
 				>
-					<span
-						className={cn("size-2 shrink-0 rounded-full", TONE_DOT[tone])}
-					/>
+					{isLocalNode(activeNode ?? LOCAL_FALLBACK) ? (
+						<HugeiconsIcon
+							className={cn("size-3.5 shrink-0", TONE_TEXT[tone])}
+							icon={LaptopIcon}
+							size={14}
+						/>
+					) : (
+						<HugeiconsIcon
+							className={cn("size-3.5 shrink-0", TONE_TEXT[tone])}
+							icon={Link01Icon}
+							size={14}
+						/>
+					)}
 					<span className="min-w-0 truncate">
 						{displayName(activeNode?.name ?? "local")}
 					</span>
@@ -2576,14 +2846,29 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							key={node.name}
 							onClick={() => setDefault(node.name)}
 						>
-							<span
-								className={cn(
-									"size-2 shrink-0 rounded-full",
-									node.name === defaultNode
-										? TONE_DOT[tone]
-										: "bg-muted-foreground/30"
-								)}
-							/>
+							{isLocalNode(node) ? (
+								<HugeiconsIcon
+									className={cn(
+										"size-3.5 shrink-0",
+										node.name === defaultNode
+											? TONE_TEXT[tone]
+											: "text-muted-foreground/30"
+									)}
+									icon={LaptopIcon}
+									size={14}
+								/>
+							) : (
+								<HugeiconsIcon
+									className={cn(
+										"size-3.5 shrink-0",
+										node.name === defaultNode
+											? TONE_TEXT[tone]
+											: "text-muted-foreground/30"
+									)}
+									icon={Link01Icon}
+									size={14}
+								/>
+							)}
 							<span className="flex-1">{displayName(node.name)}</span>
 							{node.name === defaultNode && (
 								<span className="text-muted-foreground text-xs">active</span>
@@ -2685,6 +2970,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 						enabled={coreReachable === true}
 						target={target}
 					/>
+					<LayersSection enabled={coreReachable === true} target={target} />
 					<SandboxesSection enabled={coreReachable === true} target={target} />
 					<MeshSection
 						ingress={ingress ?? null}

@@ -65,13 +65,16 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
 import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
+import { useOptionalReport } from "../report/report-provider.tsx";
 import CommunityTrustNotice from "./chrome/community-trust-notice.tsx";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
-import StoreItemAction from "./chrome/store-item-action.tsx";
+import StoreItemAction, {
+	StoreItemContextMenuContent,
+} from "./chrome/store-item-action.tsx";
 import {
 	ApiReferencePanel,
 	hasApiSurface,
@@ -585,6 +588,7 @@ function AppList({
 	 *  shared by Models/Skills/MCP/Agents and must not grow a notice slot. */
 	notice?: ReactNode;
 }) {
+	const reportCtx = useOptionalReport();
 	const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
 
 	if (loading && items.length === 0) {
@@ -639,6 +643,15 @@ function AppList({
 								onOpen={() => onSelect(it.entry.id)}
 								pending={pendingId === it.entry.id}
 							/>
+						}
+						contextMenu={
+							!it.installed && canInstall ? (
+								<StoreItemContextMenuContent
+									canReport={Boolean(reportTargetForApp(it))}
+									onInstall={() => onInstall(it.entry.id)}
+									onReport={() => reportCtx?.open(reportTargetForApp(it))}
+								/>
+							) : undefined
 						}
 						description={it.entry.description}
 						dither={it.entry.icon_dither}

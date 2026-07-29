@@ -9,10 +9,37 @@
         },
         "min_version": {
           "description": "Optional **minimum** version the dependency must satisfy.\n\nA bare version (`\"1.2.0\"`) is a *minimum*, i.e. `\">=1.2.0\"` — deliberately\nNOT semver's default caret (`^1.2.0`), which would reject `2.0.0`. Explicit\ncomparator syntax (`\">=1.2, <2\"`, `\"^1.2\"`, `\"~1.2\"`) is honoured verbatim.\nSee [`parse_min_version`], the single parser both validation and resolution\nuse.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["id"],
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "ArgBounds": {
+      "description": "Inclusive numeric bounds a provider can honour for one canonical argument.\nIntegers, not floats. Every clampable canonical argument is a COUNT — result\nlimits, crawl depth, page caps — so `i64` is the honest type, and it keeps the\nwhole manifest tree `Eq` (a float would force `PartialEq`-only all the way up\nthrough `ProvidesEntry` and `PluginManifest`) while avoiding float comparison.",
+      "properties": {
+        "max": {
+          "description": "Largest value the provider accepts. Absent = no upper bound.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min": {
+          "description": "Smallest value the provider accepts. Absent = no lower bound.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "AssetSpec": {
@@ -25,14 +52,20 @@
         "sha256": {
           "default": null,
           "description": "Optional SHA-256 for checksum verification (direct-URL assets).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "source": {
           "description": "A direct **https** URL, or an `hf:<owner>/<repo>/<path>` reference to a\nsingle file on the Hub. A repo-only `hf:<owner>/<repo>` ref (no file path)\nis **not** provisionable yet — full-repo snapshot needs Hub tree-listing\nthat is not wired into the provisioner. The provisioner\n(`crate::sidecar::external_runtime`) rejects `http://` and other schemes.",
           "type": "string"
         }
       },
-      "required": ["source", "dest_under_ryu"],
+      "required": [
+        "source",
+        "dest_under_ryu"
+      ],
       "type": "object"
     },
     "BinarySpec": {
@@ -41,7 +74,10 @@
         "archive": {
           "default": null,
           "description": "Archive format the URL points at: `\"tar.gz\"` | `\"tar.bz2\"` | `\"zip\"`. When\nset, the artifact is extracted (whole tree, so sibling libraries stay next\nto the executable) and [`binary_name`] names the executable to run. Absent =\nthe URL is a raw executable.\n\n[`binary_name`]: BinarySpec::binary_name",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "args": {
           "default": [],
@@ -54,7 +90,10 @@
         "binary_name": {
           "default": null,
           "description": "The executable to run, as a path relative to the extraction root (e.g.\n`\"bin/my-engine\"` or just `\"my-engine\"`). **Required** when [`archive`] is\nset; ignored for a raw binary (the filename is derived from the URL). Must be\na traversal-safe relative path.\n\n[`archive`]: BinarySpec::archive",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "env": {
           "additionalProperties": {
@@ -67,7 +106,10 @@
         "sha256": {
           "default": null,
           "description": "Optional lower-case-hex SHA-256 of the **downloaded artifact** (the raw\nbinary, or the archive file). When present the download is verified and\nre-fetched on mismatch (fail-closed); when absent an already-present\nartifact is trusted (idempotent skip).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "url": {
           "description": "Direct **https** URL to the executable, or to an archive when [`archive`] is\nset. Non-https is rejected by the SSRF egress screen at download time.\n\n[`archive`]: BinarySpec::archive",
@@ -78,7 +120,30 @@
           "type": "string"
         }
       },
-      "required": ["url", "version"],
+      "required": [
+        "url",
+        "version"
+      ],
+      "type": "object"
+    },
+    "CapabilityAdapter": {
+      "description": "Provider-shipped JavaScript that maps one capability verb onto one provider tool.\n\nRuns in the SAME Deno sandbox as an `inline_deno` plugin tool, under the same\n[`crate`-level] grant model: the providing plugin must hold `tool:execute`, so\nshipping code is a visible, approvable act rather than a silent one.\n\nThe program is handed:\n- `input` — the canonical verb arguments, after layer defaults are applied.\n- `defaults` — the provider's resolved `arg_defaults`, including any `pref:`\n  tokens already looked up. This is what lets an adapter read per-install\n  configuration a template could not (`arg_template` expands from the CALLER's\n  arguments, so it can never see a resolved preference).\n- `callTool(args)` — invokes the provider's own [`CapabilityToolBinding::tool`]\n  and resolves to its raw response. It takes NO tool id: the target is fixed by\n  the manifest, so sandboxed code cannot redirect the call at another tool. An\n  adapter therefore grants no authority the declarative path did not already\n  grant — it is strictly the same single re-entry, expressed as code.\n\nIt returns the canonical result shape, which the facade passes through unchanged.\n\n**Bounded by the sandbox wall-clock.** A run gets `DEFAULT_DEADLINE_SECS` of\nactive compute, and time spent awaiting a tool call counts against it. An\nadapter that polls an async job must therefore treat \"still running\" as a normal\noutcome to report, not something to wait out.",
+      "properties": {
+        "code": {
+          "description": "The adapter body. Evaluated as the tail of a sandbox program that has already\nbound `input`, `defaults`, `callTool` and `callNamed`; it `return`s the\ncanonical result.",
+          "type": "string"
+        },
+        "tools": {
+          "description": "ADDITIONAL provider tool ids this adapter may call, beyond\n[`CapabilityToolBinding::tool`], reachable from the body as\n`callNamed(id, args)`.\n\nExists because a whole class of real APIs is two calls, not one: an async job\nAPI starts work at one endpoint and reads the result from another\n(`POST /crawl` → job id → `GET /crawl/{id}`). A single-tool adapter cannot\nexpress that, so those providers would stay unbindable — the gap that\nexcluded every async API from every layer.\n\nThis is an ALLOWLIST fixed by the manifest and checked host-side: a name not\nlisted here (and not [`CapabilityToolBinding::tool`]) is refused. Sandboxed\ncode chooses only *among* tools the provider declared, never a tool of its\nown — which is what keeps the id-taking form from becoming an escalation seam.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "code"
+      ],
       "type": "object"
     },
     "CapabilityReq": {
@@ -90,10 +155,94 @@
         },
         "min_version": {
           "description": "Optional minimum **capability** version the bound provider must satisfy\n(bare `\"1.2.0\"` = `\">=1.2.0\"`, via [`parse_min_version`]). Absent = any\nversion of the capability is acceptable.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["capability"],
+      "required": [
+        "capability"
+      ],
+      "type": "object"
+    },
+    "CapabilityResponseMap": {
+      "description": "Normalizes one provider's response into the capability's canonical shape.\n\nDeliberately a flat rename table rather than a general transform language: the\ncanonical shapes are small and list-of-records shaped, and a manifest that can\nrun arbitrary extraction logic is a much larger trust surface.",
+      "properties": {
+        "fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Canonical per-item field name → the provider's field name (dotted paths\nallowed). Fields with no entry are dropped from the canonical item but remain\navailable under the item's `raw` key.",
+          "type": "object"
+        },
+        "results": {
+          "description": "Dotted path to the provider's result array within its response (e.g.\n`\"results\"`, `\"data.items\"`). Absent = the response itself is the array, or —\nwhen it is not an array — a single record.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CapabilityToolBinding": {
+      "description": "How one capability **verb** maps onto a concrete provider tool.\n\nThe facade tool (`web__search`, `browser__navigate`, …) is registered by the host\nfrom its canonical verb table; at call time it resolves the capability's bound\nprovider, reads this binding, renames the arguments, re-enters tool dispatch on\n[`Self::tool`], and maps the response back. Swapping the provider therefore\nchanges neither the tool id nor its schema.",
+      "properties": {
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapabilityAdapter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional provider-shipped ADAPTER: JavaScript that maps this verb onto the\nprovider's tool when the shapes are too far apart for the declarative fields\nabove to bridge.\n\nThe declarative path ([`Self::args`] … [`Self::response`]) stays the default\nand covers the ~80% of providers that are a rename plus a field map: no code\nreview, no sandbox, no supply-chain surface, and a third party ships one file.\nBut some provider shapes no amount of JSON can express — an async job API that\nmust be polled (`POST /crawl` → job id → `GET /crawl/{id}`), a token vocabulary\nthat needs per-provider normalization, a body that must read a `pref:` value.\nGrowing the grammar one vendor quirk at a time pushed provider-specific logic\ninto shared kernel code; an adapter puts it back in the provider's own manifest.\n\nPresent = the adapter REPLACES the declarative mapping for this verb: it\nreceives the canonical arguments and returns the canonical result, and\n[`Self::args`] / [`Self::arg_template`] / [`Self::arg_clamp`] / [`Self::response`]\nare not applied (the adapter is doing that job). [`Self::tool`] still names the\ntarget and is still the ONLY tool the adapter can reach."
+        },
+        "arg_clamp": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ArgBounds"
+          },
+          "description": "Per-argument numeric limits this provider can actually honour, keyed by the\n**canonical** argument name (before any rename).\n\nExists because canonical schemas describe what agents may ask for, while\nproviders differ in what they accept: `web__search.limit` allows up to 100,\nbut Brave's `count` maxes at 20. Without this, selecting Brave turns a\nperfectly valid `limit: 50` into an upstream 4xx — the swap stops being\ntransparent, which is the entire point of the facade. Clamping is the right\nresolution rather than erroring: the caller asked for \"up to N\", and fewer\nresults is a normal outcome, whereas a failed search is not.",
+          "type": "object"
+        },
+        "arg_defaults": {
+          "additionalProperties": true,
+          "description": "Constant arguments merged into every call (provider-specific knobs the\ncanonical schema does not expose, e.g. `{\"search_depth\": \"advanced\"}`).",
+          "type": "object"
+        },
+        "arg_template": {
+          "additionalProperties": true,
+          "description": "A request-body TEMPLATE this provider needs, with `{canonical_arg}`\nplaceholders substituted from the call.\n\n`args` renames flat keys and `[]` wraps a scalar in an array; neither can build\na NESTED shape. Real APIs need them: Mem0's write endpoint takes\n`messages: [{role, content}]`, so without a template the whole write half of\nthat provider is unbindable — which is precisely the gap that made Ryu's\nmemory bridges inert while Hermes, which writes per-provider adapter CODE, had\nnone. This closes it declaratively instead of admitting code per provider.\n\nA string that is EXACTLY `\"{arg}\"` is replaced by that argument's value with\nits JSON type preserved (`5` stays a number); a string merely CONTAINING\n`{arg}` interpolates as text. An argument consumed by the template is not also\npassed through, so it cannot appear twice under two names.",
+          "type": "object"
+        },
+        "args": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Canonical argument name → this provider's argument name. A canonical argument\nwith no entry is passed through under its own name; map it to the empty string\nto drop it (the provider cannot express it).",
+          "type": "object"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapabilityResponseMap"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional response normalization into the canonical result shape. Absent = the\nprovider's output is returned verbatim under `{ provider, raw }`."
+        },
+        "tool": {
+          "description": "The provider's own fully-qualified tool id (e.g. `\"exa__search\"`,\n`\"app__firecrawl_scrape\"`) that implements this verb.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool"
+      ],
       "type": "object"
     },
     "CliCommandSpec": {
@@ -101,7 +250,10 @@
       "properties": {
         "method": {
           "description": "HTTP method for the `ext_proxy` call. Absent = `POST`.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "description": "Subcommand token, e.g. `status` in `ryu mail status`.",
@@ -113,10 +265,16 @@
         },
         "summary": {
           "description": "One-line help shown in `ryu <app>` / `ryu <app> --help`.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["name", "path"],
+      "required": [
+        "name",
+        "path"
+      ],
       "type": "object"
     },
     "CompanionSurface": {
@@ -125,7 +283,10 @@
         "icon": {
           "default": null,
           "description": "Icon identifier (resolved by the desktop shell).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "label": {
           "description": "Display label for the companion panel tab or tooltip.",
@@ -134,10 +295,15 @@
         "shortcut": {
           "default": null,
           "description": "Keyboard shortcut string (e.g. `\"ctrl+shift+r\"`).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["label"],
+      "required": [
+        "label"
+      ],
       "type": "object"
     },
     "Contributes": {
@@ -272,10 +438,15 @@
         "title": {
           "default": null,
           "description": "Optional display title (e.g. the palette label for a command).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["id"],
+      "required": [
+        "id"
+      ],
       "type": "object"
     },
     "DockPanelContribution": {
@@ -283,7 +454,10 @@
       "properties": {
         "icon": {
           "description": "Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "id": {
           "description": "Stable id for this panel within the plugin (the dock's tab key, namespaced by\nthe shell as `plugin:<pluginId>:<id>` so two apps can reuse an id).",
@@ -292,7 +466,10 @@
         "order": {
           "description": "Optional ordering hint within the dock's tab-type menu (lower = earlier).",
           "format": "int64",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "panel": {
           "description": "The render-mode discriminant (`\"companion\"`, `\"view\"`, `\"native\"`, …). Opaque\nto Core; an unknown member is passed through so a newer shell can render it.",
@@ -311,7 +488,11 @@
           "type": "string"
         }
       },
-      "required": ["id", "title", "panel"],
+      "required": [
+        "id",
+        "title",
+        "panel"
+      ],
       "type": "object"
     },
     "DockPanelPlacement": {
@@ -342,7 +523,9 @@
           "type": "string"
         }
       },
-      "required": ["ryu"],
+      "required": [
+        "ryu"
+      ],
       "type": "object"
     },
     "ExternalRuntimeConfig": {
@@ -371,7 +554,10 @@
         "health_path": {
           "default": null,
           "description": "Health-check path on the runtime's server (e.g. `\"/health\"`).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "kind": {
           "default": "python",
@@ -384,21 +570,33 @@
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "port_env": {
           "description": "Optional env var the Python child reads for its **bind port**. When set, Core\ninjects `<port_env> = profile-shifted([`SidecarSpec::port`])` at spawn, so the\nchild binds the same profile-aware port Core health-checks + proxies to — the\nPython-sidecar analogue of [`LocalProcessSpec::port_env`] (without it a static\nport env collides across concurrent Core profiles).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pyproject_extra": {
           "default": null,
           "description": "Optional pyproject *extra* to install (`pip install -e \".[<extra>]\"`).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "python_version": {
           "default": null,
           "description": "Optional Python version hint (e.g. `\"3.11\"`). Advisory.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "requirements": {
           "default": [],
@@ -421,7 +619,9 @@
           "description": "Optional **source archive** to extract into the runtime dir before the venv\nis built. Needed when the entry module is a *first-party package the plugin\nships* (not on PyPI): a `pip install -e \".[extra]\"` needs the package's\n`pyproject.toml` + sources on disk first. Single-file `assets` cannot deliver\na source tree; this does. Omit for a pure-PyPI runtime."
         }
       },
-      "required": ["entry"],
+      "required": [
+        "entry"
+      ],
       "type": "object"
     },
     "FsPermissions": {
@@ -458,7 +658,10 @@
         "flag": {
           "default": null,
           "description": "Run only if the request set this composer flag true (`ctx.flags[flag]`),\ne.g. `\"io.ryu.double-check\"`.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "stateful": {
           "default": false,
@@ -498,17 +701,26 @@
           "description": "Maximum request body Core will buffer and forward, in bytes. Absent ⇒ Core's\nconservative default. Caps the proxy's memory exposure per request.",
           "format": "uint",
           "minimum": 0,
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "mount": {
           "default": null,
           "description": "Optional path prefix prepended to the forwarded sub-path when Core builds the\nupstream URL on the sidecar (e.g. `mount = \"/api/mail\"` turns an external\n`/api/ext/<id>/status` into an upstream `/api/mail/status`). Absent/empty ⇒\nthe sub-path after `/api/ext/<plugin_id>` is forwarded verbatim. Must start\nwith `/` when present.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "public_mount": {
           "default": null,
           "description": "Optional **public mount** — a stable, externally-committed URL prefix under\nwhich Core ALSO exposes this sidecar's routes, instead of only the generic\n`/api/ext/<plugin_id>/*` catch-all (e.g. `\"/api/mail\"` for a mail app whose\ninbound-webhook URL is baked into an external forwarder). Registered at\n`create_router` build time and only honoured for **built-in** manifests\n(axum routers are immutable after serve, so a runtime-installed third-party\napp cannot claim a custom prefix — it keeps `/api/ext/<id>/*`). Absent = no\npublic mount (the common case). The routes + per-route auth are the SAME\n[`routes`] list; this only changes the public prefix they answer on.\n\n[`routes`]: HttpProxySpec::routes",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "routes": {
           "default": [],
@@ -538,7 +750,10 @@
         },
         "command_env": {
           "description": "Optional env var whose value, when set and non-empty, **overrides** `command`\n(e.g. `\"RYU_MAIL_BIN\"` to point at a local dev build). Absent = always use\n`command`.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "env": {
           "additionalProperties": {
@@ -550,10 +765,15 @@
         },
         "port_env": {
           "description": "Optional env var the child reads for its **bind port**. When set, Core injects\n`<port_env> = profile-shifted(port)` at spawn, so the child binds the SAME\nprofile-aware port Core health-checks + proxies to. Without this, a static\nmanifest port collides across concurrent Core profiles (dev shifts ports by\n+offset; the child would bind the release port while Core proxies the dev\none). Absent = the child chooses its own port (must match the manifest `port`).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["command"],
+      "required": [
+        "command"
+      ],
       "type": "object"
     },
     "McpServerDecl": {
@@ -572,11 +792,17 @@
         },
         "command_env": {
           "description": "Optional env var whose value, when set, OVERRIDES [`command`] with an\nabsolute binary path. Lets a plugin ship a bare `command` that Core repoints\nat a profile-specific downloaded binary. Absent ⇒ use `command` verbatim.\n\n[`command`]: McpServerDecl::command",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "description": {
           "description": "Optional human description for the MCP listing endpoint.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "enabled": {
           "default": true,
@@ -591,7 +817,9 @@
           "type": "object"
         }
       },
-      "required": ["command"],
+      "required": [
+        "command"
+      ],
       "type": "object"
     },
     "NetworkPermission": {
@@ -619,10 +847,15 @@
         },
         "runtime": {
           "description": "Which runtime to use: `\"bun\"` or `\"node\"`. Absent = auto-detect, preferring\n`bun` on `PATH` then `node`. The bootstrap is dependency-free (`node:http`\nonly) so it runs identically on either.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["entry"],
+      "required": [
+        "entry"
+      ],
       "type": "object"
     },
     "PermissionSet": {
@@ -655,11 +888,17 @@
       "properties": {
         "api": {
           "description": "Pi `api` type the endpoint speaks. Defaults to `\"openai-completions\"`.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "base_path": {
           "description": "Path prefix appended to `http://127.0.0.1:<port>` to form the provider's\n`baseUrl`. Defaults to `\"/v1\"`.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "id": {
           "description": "Provider id as it appears in the model picker. Must not collide with a built-in\nprovider id, and must be a safe single token (lowercase alphanumerics, `-`, `_`).",
@@ -667,7 +906,10 @@
         },
         "label": {
           "description": "Human-readable label for the picker. Defaults to [`id`] when absent.\n\n[`id`]: ProviderRegistrationSpec::id",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "models": {
           "description": "Optional model ids to seed the entry with, for an endpoint whose `GET /models`\ndiscovery is unavailable or slow. Absent = rely on discovery.",
@@ -677,8 +919,25 @@
           "type": "array"
         }
       },
-      "required": ["id"],
+      "required": [
+        "id"
+      ],
       "type": "object"
+    },
+    "ProviderTarget": {
+      "description": "What a capability provider acts on — see [`ProvidesEntry::target`].\n\nDeliberately two coarse values rather than a taxonomy. The only question a user\nneeds answered before swapping is \"will this act on the machine in front of me,\nor somewhere else?\", and a finer vocabulary (container / VM / cloud / another\nhost) would be guesswork the manifests cannot honestly support.",
+      "oneOf": [
+        {
+          "const": "local-machine",
+          "description": "Acts on the machine Ryu itself is running on: `ghost` types on this\nkeyboard, the Chromium sidecar opens a window on this display.",
+          "type": "string"
+        },
+        {
+          "const": "remote-desktop",
+          "description": "Acts on a SEPARATE machine or virtual desktop — a container, a VM, a hosted\nbrowser. Selecting it is not another way to drive your own computer, and the\npicker must say so.",
+          "type": "string"
+        }
+      ]
     },
     "ProvidesEntry": {
       "description": "One **provided capability** entry (in [`PluginManifest::provides`]).\n\nBinds an abstract capability name to a concrete serving surface on THIS\nmanifest: the local `sidecar` name whose declared HTTP `route` implements the\ncapability, plus the `grant` a consumer must hold to invoke it. The broker\nroutes a consumer's `/api/host/capability/<cap>` call to this sidecar's route\nusing the *provider's* minted token — the consumer never sees it.",
@@ -687,24 +946,62 @@
           "description": "The capability name this plugin serves (e.g. `\"rag\"`). Consumers match on\nthis against their [`Requires::capabilities`].",
           "type": "string"
         },
+        "default": {
+          "description": "Preferred pick among the providers of a [`Self::selectable`] capability when\nthe user has set no override. At most one provider per capability may declare\nit. Meaningless (and ignored) on a non-selectable capability.",
+          "type": "boolean"
+        },
         "grant": {
           "description": "The grant a consumer must hold (Gateway-approved) to invoke this capability\nvia the broker. Absent = no extra grant beyond declaring the edge.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "route": {
           "description": "The proxied sub-path (on the named sidecar's [`crate::schema::HttpProxySpec`])\nthe broker forwards capability calls to (e.g. `\"/rag/query\"`). The loader\ncross-validates that the named sidecar declares a matching route.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectable": {
+          "description": "Opt in to the **selectable** flavour: many providers of this capability may\nbe enabled at once and the user *picks* one, exactly like a local engine.\n\nA non-selectable capability (the original, strict flavour used by `rag` /\n`engines`) treats a second enabled provider as an explicit\n`BindingError::Ambiguous` refusal. A selectable one resolves deterministically\ninstead: user override > sole provider > the provider declaring\n[`Self::default_provider`] > lexicographically-lowest provider id. The pick is\na pure function of the candidate set, so the disable-safety reconstruction\nargument in Core's binding registry is unchanged.\n\nSelectability is a property of the *capability*, so every provider of a given\ncapability must agree on the flag; the loader rejects a mixed declaration.",
+          "type": "boolean"
         },
         "sidecar": {
           "description": "The local `name` of one of this manifest's declared `sidecars` that serves\nthe capability. The loader cross-validates it exists. Absent = an in-process\ncapability with no dedicated sidecar (the broker declines to proxy it).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "WHAT this provider acts on, when the capability controls a machine or an\nenvironment rather than answering a query.\n\nExists because \"swap the provider\" quietly means two different things.\nSwapping `web.search` from exa to tavily changes who answers; the question is\nthe same. Swapping `computer.control` from ghost to bytebot changes **which\ncomputer gets typed on** — ghost drives the machine Ryu runs on, bytebot\ndrives the desktop `bytebotd` runs on (a containerized Linux desktop in the\nshipped product). A picker that renders those two swaps identically is\ntelling the user something false, and until this field existed the\ndistinction lived only in a prose `description` that nothing structured\ncould read.\n\nAbsent = not applicable or unspecified. That is the honest default for the\ncapabilities where locality is meaningless (`web.search`, `memory`, `rag`),\nand it is deliberately NOT [`ProviderTarget::LocalMachine`]: defaulting to\n\"this machine\" would silently mislabel every future hosted provider that\nforgets to declare it."
+        },
+        "tools": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CapabilityToolBinding"
+          },
+          "description": "Capability **verb → this provider's tool** bindings, the seam that keeps the\nmodel-visible tool surface stable across a swap.\n\nThe key is a canonical verb from the host's capability verb table (e.g.\n`\"web__search\"`); the value names the provider's own registered tool plus the\nargument/response mapping into the canonical shape. A provider that omits a\nverb simply does not serve it — the facade reports the verb unavailable\nrather than guessing.",
+          "type": "object"
         },
         "version": {
           "description": "The capability's own semver version (independent of the plugin version), so\na consumer's [`CapabilityReq::min_version`] floor can be checked against the\ncapability contract rather than the app release.",
           "type": "string"
         }
       },
-      "required": ["capability", "version"],
+      "required": [
+        "capability",
+        "version"
+      ],
       "type": "object"
     },
     "Requires": {
@@ -762,7 +1059,9 @@
           "type": "string"
         }
       },
-      "required": ["path"],
+      "required": [
+        "path"
+      ],
       "type": "object"
     },
     "RunnableEntry": {
@@ -785,7 +1084,11 @@
           "type": "string"
         }
       },
-      "required": ["id", "name", "kind"],
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
       "type": "object"
     },
     "RunnableKind": {
@@ -841,33 +1144,51 @@
         },
         "description": {
           "description": "Helper caption shown under the field.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "label": {
           "description": "Display label. Absent = the renderer shows the `pref_key`.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "max": {
           "description": "Inclusive upper bound for a [`SettingsFieldType::Number`].",
           "format": "double",
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "max_length": {
           "description": "Maximum length for a text/textarea value.",
           "format": "uint64",
           "minimum": 0,
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "min": {
           "description": "Inclusive lower bound for a [`SettingsFieldType::Number`].",
           "format": "double",
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "min_length": {
           "description": "Minimum length for a text/textarea value.",
           "format": "uint64",
           "minimum": 0,
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "options": {
           "description": "Choices for a [`SettingsFieldType::Select`]; required for that type and\ninert for every other one.",
@@ -878,7 +1199,10 @@
         },
         "placeholder": {
           "description": "Placeholder for text / model-picker inputs.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pref_key": {
           "description": "The preference key this field reads/writes. Required, non-empty, and\nrestricted to a path-safe alphabet (it becomes a URL path segment).",
@@ -889,13 +1213,23 @@
           "description": "Whether the user must supply a value (advisory: enforced by the renderer,\ndeclared here so the contract is one place).",
           "type": "boolean"
         },
+        "step": {
+          "description": "Granularity for a [`SettingsFieldType::Number`] — the increment its stepper\nmoves by, and the grid a typed value must land on.\n\nDistinct from [`Self::min`]/[`Self::max`], which bound the range: a value can\nsit inside the range and still be meaningless at this field's resolution\n(`0.5` where the setting counts whole pages). The renderer enforces it, so a\nfield that declares it rejects an off-grid value rather than persisting one\nthe plugin cannot use.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "type": {
           "$ref": "#/$defs/SettingsFieldType",
           "default": "text",
           "description": "The control to render. Absent or unrecognised = a plain text input."
         }
       },
-      "required": ["pref_key"],
+      "required": [
+        "pref_key"
+      ],
       "type": "object"
     },
     "SettingsFieldOption": {
@@ -909,14 +1243,19 @@
           "properties": {
             "label": {
               "description": "Display label. Absent = show the raw `value`.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "value": {
               "description": "The value persisted to the preference key.",
               "type": "string"
             }
           },
-          "required": ["value"],
+          "required": [
+            "value"
+          ],
           "type": "object"
         }
       ],
@@ -958,6 +1297,11 @@
         {
           "const": "agent_picker",
           "description": "The composer's FULL target picker — agent, provider, model, thinking\nlevel, reasoning effort, and ACP access mode — persisted as one\n`AgentSelection` JSON object.\n\nPrefer this over [`ModelPicker`](Self::ModelPicker) when the plugin can\nbe served by an *agent* and not only a raw model call; a field left\nunset inherits the node-wide default selection either way, since the\nresolver reads both forms from the same key.",
+          "type": "string"
+        },
+        {
+          "const": "secret",
+          "description": "A **write-only masked** credential input — the BYOK control.\n\nUnlike every other variant, this one does NOT persist to preferences. The\nvalue is submitted to `PUT /api/plugins/{id}/secrets/{key}` and stored\n**encrypted at rest** in the per-plugin secret store, keyed by\n`(plugin_id, pref_key)`. It is never read back: the renderer can ask\nwhether a secret is set (`GET /api/plugins/{id}/secrets` returns names and\ntimestamps, never values) and shows \"Set\" or \"Not set\" beside an empty\ninput. Submitting a blank value CLEARS the secret.\n\nThe stored value is what a manifest's `secret_headers` `env:VARNAME` token\nfalls back to when the process environment has no such var, so `pref_key`\nmust be the ENV VAR NAME the manifest already names (e.g.\n`RYU_TAVILY_API_KEY`), not a preference-style dotted key. Process env still\nwins when both are set, and the same namespace gate that restricts which\nvars a plugin may read applies to the stored value.",
           "type": "string"
         }
       ]
@@ -1003,10 +1347,15 @@
         },
         "view": {
           "description": "A rich settings view this app ships instead of declarative `fields`. Opaque\nhere — the settings renderer owns the vocabulary and resolves the name to a\ncomponent (first-party) or a sandboxed UI (third-party).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["id"],
+      "required": [
+        "id"
+      ],
       "type": "object"
     },
     "SidebarButtonContribution": {
@@ -1014,7 +1363,10 @@
       "properties": {
         "icon": {
           "description": "Optional glyph id resolved by the shell's Icon primitive.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "id": {
           "description": "Stable id for this button within the plugin.",
@@ -1023,7 +1375,10 @@
         "order": {
           "description": "Optional placement hint among the sidebar buttons.",
           "format": "int64",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "target": {
           "description": "The client route this button opens (e.g. `\"/library/memory\"`).",
@@ -1034,7 +1389,11 @@
           "type": "string"
         }
       },
-      "required": ["id", "title", "target"],
+      "required": [
+        "id",
+        "title",
+        "target"
+      ],
       "type": "object"
     },
     "SidebarSectionContribution": {
@@ -1042,7 +1401,10 @@
       "properties": {
         "icon": {
           "description": "Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "id": {
           "description": "Stable id for this section within the plugin (namespaced into the shell's\nsection key as `plugin:<pluginId>:<id>`).",
@@ -1051,7 +1413,10 @@
         "order": {
           "description": "Optional placement hint among the sidebar sections (lower = higher up).",
           "format": "int64",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "spec": {
           "description": "The opaque section spec (source/itemTarget/itemActions/create). Interpreted by\nthe desktop renderer, never by Core. Absent = a header with no rows."
@@ -1061,7 +1426,10 @@
           "type": "string"
         }
       },
-      "required": ["id", "title"],
+      "required": [
+        "id",
+        "title"
+      ],
       "type": "object"
     },
     "SidecarProcess": {
@@ -1076,7 +1444,9 @@
               "type": "string"
             }
           },
-          "required": ["kind"],
+          "required": [
+            "kind"
+          ],
           "type": "object"
         },
         {
@@ -1088,7 +1458,9 @@
               "type": "string"
             }
           },
-          "required": ["kind"],
+          "required": [
+            "kind"
+          ],
           "type": "object"
         },
         {
@@ -1100,7 +1472,9 @@
               "type": "string"
             }
           },
-          "required": ["kind"],
+          "required": [
+            "kind"
+          ],
           "type": "object"
         },
         {
@@ -1112,7 +1486,9 @@
               "type": "string"
             }
           },
-          "required": ["kind"],
+          "required": [
+            "kind"
+          ],
           "type": "object"
         }
       ]
@@ -1153,7 +1529,10 @@
           "description": "**Idle-stop timeout**, in seconds — scale-to-zero for this sidecar. When set,\nCore stops the process after it has served no request for this long (and has\nnone in flight); the next proxy/broker hit wakes it again (see [`lazy`]). Must\nbe `>= 30` (a shorter window churns the process). Absent = never idle-stopped\nby manifest declaration (the operator-level [`RYU_SIDECAR_IDLE_SECS`] env can\nstill opt a sidecar in). Additive; independent of [`lazy`] — an eager sidecar\nmay declare an idle timeout and will then wake-on-demand after a reap.\n\n[`lazy`]: SidecarSpec::lazy\n[`RYU_SIDECAR_IDLE_SECS`]: the manager's env-seeded idle config.",
           "format": "uint64",
           "minimum": 0,
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "lazy": {
           "description": "**Lazy activation** — spawn-on-first-use instead of at plugin-enable. When\n`true` the sidecar is *registered* (claims its port, appears in\n`/api/sidecar/status` as not-running) at enable but its process is NOT started\nuntil the first proxy/broker hit wakes it on demand; a bounded health-wait\nwarms it before the request is forwarded. `false` (the default) keeps the\neager behaviour every existing manifest has: started at enable. Additive.",
@@ -1186,7 +1565,11 @@
           "description": "Optional **model-provider** declaration: when present, this sidecar serves an\nOpenAI-compatible endpoint and Core registers it as a selectable provider once\nthe process reports healthy, then deregisters it when the plugin is disabled or\nuninstalled. This is what makes a third-party *auth bridge* possible without a\nCore change: the plugin performs its own login/refresh, serves `/v1`, and\ndeclares that fact here. Absent = the sidecar is not a model provider.\n\nA sidecar cannot self-register: it holds only `RYU_EXT_TOKEN` (scoped to the\next-proxy hop and `/api/host/*`), and the host-RPC vocabulary has no\nprovider-registration method. Registration is therefore Core-side, driven by\nthis declaration."
         }
       },
-      "required": ["name", "process", "port"],
+      "required": [
+        "name",
+        "process",
+        "port"
+      ],
       "type": "object"
     },
     "SourceArchiveSpec": {
@@ -1199,14 +1582,20 @@
         "sha256": {
           "default": null,
           "description": "Optional lower-case-hex SHA-256 of the archive; when present the download is\nverified and re-fetched on mismatch (fail-closed).",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "url": {
           "description": "Direct **https** URL to the archive. Non-https is rejected by the SSRF egress\nscreen at download time.",
           "type": "string"
         }
       },
-      "required": ["url", "format"],
+      "required": [
+        "url",
+        "format"
+      ],
       "type": "object"
     },
     "Surface": {
@@ -1310,14 +1699,19 @@
       "properties": {
         "reason": {
           "description": "Why the plugin hides it — surfaced in the plugin's listing so a user can see\nwhat a plugin is removing from the model's view before installing it.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tool": {
           "description": "Fully-qualified tool id (`<server>__<tool>`), optionally ending in `*` to\nhide every tool whose id starts with the preceding prefix.",
           "type": "string"
         }
       },
-      "required": ["tool"],
+      "required": [
+        "tool"
+      ],
       "type": "object"
     },
     "TurnHookContribution": {
@@ -1348,7 +1742,11 @@
           "type": "string"
         }
       },
-      "required": ["id", "on", "code"],
+      "required": [
+        "id",
+        "on",
+        "code"
+      ],
       "type": "object"
     },
     "ViewContribution": {
@@ -1363,14 +1761,20 @@
         },
         "title": {
           "description": "Optional human-facing title (tab label / palette entry). Absent = the shell\nderives one from the view kind or the plugin name.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "view": {
           "description": "The vocabulary member this view renders as — the discriminant the per-surface\nrenderer switches on (`\"list-detail\"`, `\"data-table\"`, `\"form\"`,\n`\"action-panel\"`, `\"filter-bar\"`, `\"empty-state\"`, `\"stat-card-row\"`). Opaque\nto Core; an unknown kind is passed through so a newer shell can render it.",
           "type": "string"
         }
       },
-      "required": ["id", "view"],
+      "required": [
+        "id",
+        "view"
+      ],
       "type": "object"
     },
     "WidgetContribution": {
@@ -1392,14 +1796,20 @@
         },
         "ui_entry": {
           "description": "Source entry (e.g. `src/apps/checklist/index.tsx`) for `ryu pack`.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "uri": {
           "description": "`ui://widget/<slug>.html` — the widget resource uri.",
           "type": "string"
         }
       },
-      "required": ["tool_id", "uri"],
+      "required": [
+        "tool_id",
+        "uri"
+      ],
       "type": "object"
     }
   },
@@ -1408,7 +1818,10 @@
   "properties": {
     "accentColor": {
       "description": "Primary brand accent color, hex (Ryu extension: `accentColor`).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "activation_events": {
       "default": [],
@@ -1423,11 +1836,17 @@
     },
     "backend_code": {
       "description": "The plugin's **backend bundle** — the JavaScript source of the extension-host\nentry module a [`crate::schema::SidecarProcess::Node`] sidecar runs (RFC Option\nB). This is the backend analogue of `ui_code`: a payload blob that Core writes\nto the plugin dir at the node sidecar's declared `entry` path at spawn, then\nloads via the embedded host bootstrap. Unlike `ui_code` (which the install path\nsplits into a DB column so the on-disk manifest stays small), the backend blob\nrides **inline** in the manifest so the spawn path is self-contained (it reads\nthe reconstituted manifest, no separate carriage channel) AND, for a\nmarketplace plugin, the code is INSIDE the Gateway-signed surface — the whole\nbackend is signed, not merely hash-bound. Absent for a plugin with no node\nbackend. Written by `ryu pack`/`ryu publish`.",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "backend_sha256": {
       "description": "Lower-case hex `sha256(utf8_bytes(backend_code))` — the integrity gate for the\nnode backend, mirroring [`ui_code_sha256`]. When present, Core recomputes the\nhash over the on-disk entry file at spawn and **refuses to start** the node\nsidecar on mismatch (fail-closed), so an entry file swapped on disk between\ninstall and spawn can never run. Absent = trust the bundle as written (the same\nposture `ui_code_sha256` uses when omitted).\n\n[`ui_code_sha256`]: PluginManifest::ui_code_sha256",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "banner": {
       "description": "Detail-page hero banner spec ({colors,style,seed}); opaque passthrough (Ryu ext)."
@@ -1441,7 +1860,10 @@
     },
     "category": {
       "description": "Free-text category (Claude `category`).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "companion": {
       "anyOf": [
@@ -1469,7 +1891,10 @@
     },
     "description": {
       "description": "Long plaintext/markdown description. Empty when absent (the built-in card\nhistorically emitted `\"\"` for this; preserved).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "engines": {
       "anyOf": [
@@ -1492,22 +1917,34 @@
     },
     "homepage": {
       "description": "Homepage/website URL (Claude `homepage`; emitted as `website`).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "icon": {
       "description": "Icon-primitive id for the listing card (Ryu extension: `icon`). An\nIconify/icons0 `prefix:name`, a bare Hugeicons name, or a URL — resolved by\nthe shared `Icon` primitive. Distinct from `icon_url`: this is a GLYPH id the\ncard masks with `currentColor`, `icon_url` is a raster logo. When absent the\ncard falls back to `icon_url`, then a default glyph.",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "iconBackground": {
       "description": "CSS background for the icon square (Ryu extension: `iconBackground`).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "iconDither": {
       "description": "Dithered-gradient background for the card's icon square (Ryu extension:\n`iconDither`). Opaque passthrough `{ from, to?, direction? }` mirroring\ndither-kit's `DitherGradient` props (`from`/`to` are a palette-colour name or\na hue number, `direction` is up|down|left|right). Kept as raw JSON like\n`banner` so an untrusted/typo'd value never fails the manifest parse — the\nrender layer validates and falls back before painting."
     },
     "iconUrl": {
       "description": "Logo URL (contract key `iconUrl`; Ryu extension).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "id": {
       "description": "Reverse-domain unique identifier for the app (e.g. `\"com.example.my-app\"`).",
@@ -1522,7 +1959,10 @@
     },
     "license": {
       "description": "SPDX license identifier (Claude `license`).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "mcp_servers": {
       "additionalProperties": {
@@ -1556,7 +1996,10 @@
     },
     "privacyPolicyUrl": {
       "description": "Privacy policy URL (contract key `privacyPolicyUrl`; Ryu extension).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "provides": {
       "description": "**Capabilities this plugin provides** — the inverse of\n[`Requires::capabilities`]. Each entry names a capability the plugin's\nsidecar can serve for other plugins through the capability broker, binding\nthe capability to one of this manifest's declared `sidecars` + a proxied\nroute. Absent/empty for the common case (a plugin that consumes but does not\nprovide capabilities). The loader cross-validates that every referenced\n`sidecar`/`route` exists (like `contributes`).",
@@ -1615,18 +2058,27 @@
     },
     "source": {
       "description": "Provenance hint for the marketplace index: `\"builtin\"`, an `owner/repo`\nslug, or a git/raw URL an external plugin ships from. Absent ⇒ `\"builtin\"`.\nThis is an index HINT only — Core derives the real trust tier from\n`plugins::builtins` membership at runtime, NOT from this field. Consumed by\nthe marketplace generator (`tools/mirror-plugins.sh`) to populate each\nentry's `source`/`builtin` pair.",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "surfaces": {
       "additionalProperties": {
         "$ref": "#/$defs/SurfaceEntry"
       },
       "description": "Per-surface support + UI declaration — the richer successor to [`targets`].\n\nWhen **present**, this map is authoritative and [`targets`] is ignored: a\nsurface is supported iff it has an entry whose [`SurfaceSupport`] is not\n[`SurfaceSupport::None`], and an **absent key means the surface is not\nsupported** (see [`PluginManifest::supports_surface`]). When **absent**, the\npredicate falls back to the legacy [`targets`] semantics (empty/absent =\nevery surface) — so every manifest that predates this field keeps its exact\nbehaviour. Never make an absent `surfaces` mean \"no surfaces\".\n\n[`targets`]: PluginManifest::targets",
-      "type": ["object", "null"]
+      "type": [
+        "object",
+        "null"
+      ]
     },
     "tagline": {
       "description": "Short one-line tagline shown under the name (Ryu extension).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "targets": {
       "description": "Host surfaces this plugin runs on (desktop / island / mobile / …).\n\n**Empty or absent = runs on EVERY surface.** This is the backward-compatible\ndefault and must never be read as \"runs nowhere\" — every manifest that\npredates this field declares no targets and must keep surfacing everywhere.\nFiltering happens ONLY when this list is explicitly non-empty, and only at\nthe read/surface boundary (see [`PluginManifest::supports_surface`]) — never\nin the storage layer, so an unsupported-target plugin stays installable and\ninspectable.",
@@ -1637,18 +2089,29 @@
     },
     "termsOfServiceUrl": {
       "description": "Terms-of-service URL (contract key `termsOfServiceUrl`; Ryu extension).",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "ui_code_sha256": {
       "description": "Lower-case hex `sha256(utf8_bytes(ui_code))` binding the plugin's bundled\nsandboxed-UI code to this manifest. Because the Gateway signs the manifest\nverbatim (canonical key-sorted encoding), this hash is INSIDE the signed\nsurface while the `ui_code` blob itself rides OUTSIDE it as payload; the\ninstall path recomputes the hash over the fetched code and rejects a\nmismatch fail-closed. Absent for a manifest-only plugin (no bundled UI) and\nfor unsigned seed items. Written by `ryu pack`/`ryu publish`.",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "version": {
       "description": "Semver version string (e.g. `\"1.0.0\"`).",
       "type": "string"
     }
   },
-  "required": ["id", "name", "version", "runnables"],
+  "required": [
+    "id",
+    "name",
+    "version",
+    "runnables"
+  ],
   "title": "PluginManifest",
   "type": "object"
 }

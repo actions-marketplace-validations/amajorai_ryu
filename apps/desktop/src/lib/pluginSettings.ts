@@ -25,7 +25,8 @@ export type PluginFieldType =
 	| "textarea"
 	| "toggle"
 	| "select"
-	| "number";
+	| "number"
+	| "secret";
 
 /** One selectable option for a `select` field. */
 export interface PluginSelectOption {
@@ -41,12 +42,23 @@ export interface PluginSettingsField {
 	description?: string;
 	/** The display label for the field (falls back to the pref key). */
 	label: string;
+	/** Inclusive upper bound for a `number` field (ignored otherwise). */
+	max?: number;
+	/** Inclusive lower bound for a `number` field (ignored otherwise). */
+	min?: number;
 	/** Options for a `select` field (ignored otherwise). */
 	options: PluginSelectOption[];
 	/** Placeholder for text/model inputs. */
 	placeholder?: string;
 	/** The preference key this field reads/writes (`/api/preferences/:key`). */
 	prefKey: string;
+	/**
+	 * Granularity for a `number` field's stepper. NOT declared in the Rust
+	 * `SettingsFieldContribution` — it survives only because `settings_tabs`
+	 * forwards the manifest's verbatim JSON, so a manifest that carries one is
+	 * honoured and one that doesn't falls back to the browser's default step.
+	 */
+	step?: number;
 	/** The control kind; unrecognized values render as a text input. */
 	type: PluginFieldType | string;
 }
@@ -113,6 +125,12 @@ function parseOptions(value: unknown): PluginSelectOption[] {
 	return out;
 }
 
+function asNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value)
+		? value
+		: undefined;
+}
+
 function parseField(raw: unknown): PluginSettingsField | null {
 	if (!raw || typeof raw !== "object") {
 		return null;
@@ -140,6 +158,9 @@ function parseField(raw: unknown): PluginSettingsField | null {
 		placeholder: asString(obj.placeholder),
 		options: parseOptions(obj.options),
 		default: defaultValue,
+		min: asNumber(obj.min),
+		max: asNumber(obj.max),
+		step: asNumber(obj.step),
 	};
 }
 

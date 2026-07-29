@@ -22,7 +22,8 @@
 
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
-import { installUpdate } from "@/src/components/updater/AutoUpdater.tsx";
+import { sileo } from "sileo";
+import { applyReleaseUpdate } from "@/src/components/updater/AutoUpdater.tsx";
 import { fetchAgentCatalog, runAgentUpdate } from "@/src/lib/api/agents.ts";
 import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import { installMcpServer, listMcpUpdates } from "@/src/lib/api/mcp.ts";
@@ -33,7 +34,11 @@ import {
 	updateInstalledPlugin,
 } from "@/src/lib/api/plugins.ts";
 import { installSkill, listSkillUpdates } from "@/src/lib/api/skills.ts";
-import { checkForUpdate, type UpdateCheck } from "@/src/lib/api/update.ts";
+import {
+	checkForUpdate,
+	type UpdateCheck,
+	updateCheckFailed,
+} from "@/src/lib/api/update.ts";
 import { fetchCatalog, installSidecar } from "@/src/lib/services-api.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
@@ -84,6 +89,10 @@ const MCP_UPDATES_KEY = (url: string) => ["mcp", "updates", url] as const;
 // keep them fresh for a minute so re-opening the popup is instant.
 const UPDATES_STALE_MS = 60_000;
 
+// When Core does the work in the background, re-check on this ladder after an
+// apply so the row reflects reality instead of the pre-press snapshot.
+const BACKGROUND_RECHECK_MS = [4000, 15_000, 45_000];
+
 /** A catalog category maps to the update kind shown in the UI. */
 function catalogKind(category: string): UpdateKind {
 	switch (category) {
@@ -98,6 +107,19 @@ function catalogKind(category: string): UpdateKind {
 		default:
 			return "tool";
 	}
+}
+
+/**
+ * What an apply achieved, so the result can be reported rather than guessed at.
+ *
+ * `silent` marks the one path that owns its own user-facing progress — the
+ * native desktop updater, which toasts download progress and then relaunches.
+ * Everything else reports through this hook, so there is exactly one place that
+ * decides what an update press says.
+ */
+interface ApplyOutcome {
+	detail: string | null;
+	silent: boolean;
 }
 
 export interface UseAvailableUpdatesResult {
@@ -124,7 +146,17 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 		queries: [
 			{
 				queryKey: APP_KEY(url),
-				queryFn: () => checkForUpdate(target),
+				// Throw on a FAILED check (rate limit, network) instead of accepting
+				// the fail-open sentinel: react-query then keeps the last good
+				// verdict, so an available-update row doesn't silently vanish the
+				// moment one background re-check hits GitHub's rate limit.
+				queryFn: async () => {
+					const verdict = await checkForUpdate(target);
+					if (updateCheckFailed(verdict)) {
+						throw new Error(verdict.error ?? "update check failed");
+					}
+					return verdict;
+				},
 				staleTime: UPDATES_STALE_MS,
 			},
 			{
@@ -211,13 +243,13 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 		if (item.category === "agent") {
 			continue;
 		}
-		const hasUpdate =
-			item.installState === "installed" &&
-			!item.deprecated &&
-			item.installedVersion != null &&
-			item.latestVersion != null &&
-			item.installedVersion !== item.latestVersion;
-		if (hasUpdate) {
+		// The NODE decides. Comparing installedVersion to latestVersion here was
+		// the bug behind "I press Update and nothing happens": engines whose
+		// downloader pins its version at compile time can never reach the upstream
+		// tag the catalog advertised, so the row was permanent and its Update
+		// press hit an already-installed fast path that returned 200 having done
+		// nothing.
+		if (item.updateAvailable) {
 			updates.push({
 				key: `${catalogKind(item.category)}:${item.name}`,
 				kind: catalogKind(item.category),
@@ -293,128 +325,132 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 
 	const applyMutation = useMutation({
 		mutationKey: ["available-updates", "apply", url],
-		mutationFn: async (update: AvailableUpdate): Promise<void> => {
-			const corr = `upd-${Date.now().toString(36)}`;
-			// [FIX] entry — discriminate soft-success vs throw vs silent no-op
-			console.info(
-				`[FIX] ${performance.now().toFixed(1)} apply.entry: corr=${corr} key=${update.key} kind=${update.kind} id=${update.id} current=${update.currentVersion} latest=${update.latestVersion} hasAppVerdict=${Boolean(update.appVerdict)} hasModel=${Boolean(update.model)}`
-			);
-			try {
-				switch (update.kind) {
-					case "app": {
-						if (!update.appVerdict) {
-							console.info(
-								`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=app-missing-verdict`
-							);
-							return;
-						}
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=app-installUpdate update_available=${update.appVerdict.update_available}`
-						);
-						await installUpdate(update.appVerdict);
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=app-resolved-no-throw`
-						);
-						return;
+		mutationFn: async (update: AvailableUpdate): Promise<ApplyOutcome> => {
+			switch (update.kind) {
+				case "app": {
+					if (!update.appVerdict?.update_available) {
+						return { detail: "Already on the latest release.", silent: false };
 					}
-					case "agent": {
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=agent-runAgentUpdate`
-						);
-						const res = await runAgentUpdate(target, update.id);
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=agent updated=${res.updated} installed=${res.installedVersion ?? "none"} error=${res.error ?? "none"}`
-						);
-						return;
-					}
-					case "plugin": {
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=plugin-updateInstalledPlugin`
-						);
-						const res = await updateInstalledPlugin(target, update.id);
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=plugin id=${res.id} installedVersion=${res.installedVersion ?? "none"}`
-						);
-						return;
-					}
-					// engine/tool/voice/media all reinstall via the sidecar setup path,
-					// which re-downloads the latest through the download center.
-					case "engine":
-					case "tool":
-					case "voice":
-					case "media": {
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=sidecar-installSidecar kind=${update.kind}`
-						);
-						await installSidecar(url, token, update.id);
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=sidecar-resolved`
-						);
-						return;
-					}
-					case "model": {
-						if (!update.model) {
-							console.info(
-								`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=model-missing-payload`
-							);
-							return;
-						}
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=model-installModelFile`
-						);
-						await installModelFile(
-							target,
-							update.model.repoId,
-							update.model.file
-						);
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=model-resolved`
-						);
-						return;
-					}
-					case "skill": {
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=skill-installSkill`
-						);
-						await installSkill(target, update.id);
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=skill-resolved`
-						);
-						return;
-					}
-					case "mcp": {
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=mcp-installMcpServer`
-						);
-						await installMcpServer(target, update.id, true);
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.exit: corr=${corr} result=mcp-resolved`
-						);
-						return;
-					}
-					default:
-						console.info(
-							`[FIX] ${performance.now().toFixed(1)} apply.branch: corr=${corr} took=unsupported`
-						);
-						throw new Error(`Updating ${update.kind} is not supported yet`);
+					// Which updater is correct depends on whether this node is the one
+					// the app is bundled with — `applyReleaseUpdate` owns that call.
+					// A null message means the native updater took over and is already
+					// reporting its own progress.
+					const message = await applyReleaseUpdate(
+						target,
+						node,
+						update.appVerdict
+					);
+					return { detail: message, silent: message === null };
 				}
-			} catch (err) {
-				console.info(
-					`[FIX] ${performance.now().toFixed(1)} apply.threw: corr=${corr} err=${err instanceof Error ? err.message : String(err)}`
-				);
-				throw err;
+				case "agent": {
+					const res = await runAgentUpdate(target, update.id);
+					if (res.error) {
+						throw new Error(res.error);
+					}
+					if (!res.updated) {
+						return {
+							detail: `${update.name} is already up to date.`,
+							silent: false,
+						};
+					}
+					return {
+						detail: res.installedVersion
+							? `${update.name} updated to ${res.installedVersion}.`
+							: `${update.name} updated.`,
+						silent: false,
+					};
+				}
+				case "plugin": {
+					const res = await updateInstalledPlugin(target, update.id);
+					return {
+						detail: res.installedVersion
+							? `${update.name} updated to ${res.installedVersion}.`
+							: `${update.name} updated.`,
+						silent: false,
+					};
+				}
+				// engine/tool/voice/media all reinstall through the sidecar setup path.
+				// `force` is what makes it an UPDATE rather than a no-op: Core drops the
+				// recorded version/checksum so its installer's already-installed fast
+				// path misses and the artifact is genuinely re-downloaded.
+				case "engine":
+				case "tool":
+				case "voice":
+				case "media": {
+					await installSidecar(url, token, update.id, true);
+					// Core installs in the background and streams bytes through the
+					// download center, so this resolves at the START of the work.
+					return {
+						detail: `Downloading ${update.name} — progress is in Downloads.`,
+						silent: false,
+					};
+				}
+				case "model": {
+					if (!update.model) {
+						throw new Error(
+							`No source file recorded for ${update.name}, so it cannot be re-downloaded.`
+						);
+					}
+					await installModelFile(
+						target,
+						update.model.repoId,
+						update.model.file
+					);
+					return {
+						detail: `Downloading ${update.name} — progress is in Downloads.`,
+						silent: false,
+					};
+				}
+				case "skill": {
+					await installSkill(target, update.id);
+					return { detail: `${update.name} updated.`, silent: false };
+				}
+				case "mcp": {
+					await installMcpServer(target, update.id, true);
+					return { detail: `${update.name} updated.`, silent: false };
+				}
+				default:
+					throw new Error(`Updating ${update.kind} is not supported yet`);
 			}
 		},
-		onSettled: (_data, err, update) => {
-			console.info(
-				`[FIX] ${performance.now().toFixed(1)} apply.onSettled: key=${update.key} kind=${update.kind} hadError=${Boolean(err)} err=${err instanceof Error ? err.message : err ? String(err) : "none"}`
-			);
+		// Every outcome is reported. Silence was the whole complaint: a successful
+		// apply looked identical to a failed one and to a no-op, because the only
+		// signal was a row that may or may not clear on the next refetch.
+		onSuccess: (outcome, update) => {
+			if (outcome.silent) {
+				return;
+			}
+			sileo.success({
+				title: `Updating ${update.name}`,
+				description: outcome.detail ?? undefined,
+				duration: 4000,
+			});
+		},
+		onError: (err, update) => {
+			sileo.error({
+				title: `Couldn't update ${update.name}`,
+				description: err instanceof Error ? err.message : String(err),
+				duration: null,
+			});
+		},
+		onSettled: (_data, _err, update) => {
 			// Revalidate the source that owned this update so the row clears once
 			// the new version is installed.
 			const invalidate = (key: readonly unknown[]) =>
 				Promise.resolve(qc.invalidateQueries({ queryKey: key })).catch(
 					() => undefined
 				);
+			// Kinds Core installs in the BACKGROUND resolve their request the moment
+			// the work is queued, so an immediate refetch still reports the old
+			// version and the row stays put looking like nothing happened. Re-check
+			// on a short ladder: the first pass catches the "installing" state (which
+			// drops the row), the later ones catch the finished version.
+			const recheck = (key: readonly unknown[]) => {
+				invalidate(key);
+				for (const delayMs of BACKGROUND_RECHECK_MS) {
+					setTimeout(() => invalidate(key), delayMs);
+				}
+			};
 			switch (update.kind) {
 				case "app":
 					invalidate(APP_KEY(url));
@@ -427,7 +463,7 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 					invalidate(PLUGINS_CATALOG_KEY(url));
 					break;
 				case "model":
-					invalidate(MODEL_UPDATES_KEY(url));
+					recheck(MODEL_UPDATES_KEY(url));
 					break;
 				case "skill":
 					invalidate(SKILL_UPDATES_KEY(url));
@@ -436,13 +472,15 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 					invalidate(MCP_UPDATES_KEY(url));
 					break;
 				default:
-					invalidate(SIDECAR_CATALOG_KEY(url));
+					recheck(SIDECAR_CATALOG_KEY(url));
 			}
 		},
 	});
 
 	const applyUpdate = useCallback(
-		(update: AvailableUpdate) => applyMutation.mutateAsync(update),
+		async (update: AvailableUpdate) => {
+			await applyMutation.mutateAsync(update);
+		},
 		[applyMutation]
 	);
 

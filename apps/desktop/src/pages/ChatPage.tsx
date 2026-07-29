@@ -127,11 +127,6 @@ import {
 } from "@/src/lib/api/widgets.ts";
 import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import {
-	PLUGIN_RUNTIME_FLAG,
-	shouldRenderWidget,
-	useExperimentalFlag,
-} from "@/src/lib/experimental.ts";
-import {
 	applyMention,
 	buildMentionGroups,
 } from "@/src/lib/mentions/candidates.ts";
@@ -971,21 +966,15 @@ export default function ChatPage({
 	// token and performs the Gateway-governed round-trips on a widget's behalf. The
 	// context value carries the WidgetRenderer slot (AppWidget) + node-scoped
 	// services; `@ryu/blocks`'s tool-renderer reads it to mount a widget for a
-	// `data-tool-widget-available` part. Gated behind PLUGIN_RUNTIME_FLAG: when OFF
-	// the value is null, so the tool row degrades to a plain tool output.
-	const { enabled: widgetRuntimeEnabled } =
-		useExperimentalFlag(PLUGIN_RUNTIME_FLAG);
-	const widgetHostValue = useMemo<WidgetHostValue | null>(() => {
-		if (!shouldRenderWidget(widgetRuntimeEnabled)) {
-			return null;
-		}
+	// `data-tool-widget-available` part.
+	const widgetHostValue = useMemo<WidgetHostValue>(() => {
 		const services: WidgetHostServices = {
 			callTool: (input) => widgetCallTool(chatTarget, input),
 			sendFollowUpMessage: (input) => widgetFollowUp(chatTarget, input),
 			setWidgetState: (input) => widgetSetState(chatTarget, input),
 		};
 		return { Renderer: AppWidget, services };
-	}, [widgetRuntimeEnabled, chatTarget]);
+	}, [chatTarget]);
 
 	// Voice input: a stable transcribe fn (reads the live node target via a ref)
 	// passed into the composer's mic button. Stable identity keeps the memoized
@@ -3508,11 +3497,17 @@ export default function ChatPage({
 							aria-label="Copy transcript"
 							className="flex size-8 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 							onClick={() => {
-								void copyChatTranscript(messages);
+								void copyChatTranscript(processedMessages, {
+									defaultUserName: oidcUser?.name || oidcUser?.email,
+								});
 							}}
 							type="button"
 						>
-							<HugeiconsIcon className="size-4" icon={ClipboardIcon} />
+							<HugeiconsIcon
+								className="size-4"
+								icon={ClipboardIcon}
+								stroke="currentColor"
+							/>
 						</button>
 					}
 				/>
@@ -3541,7 +3536,7 @@ export default function ChatPage({
 		hasThread,
 		hasMessages,
 		agentTools,
-		messages,
+		processedMessages,
 		bottomPanelOpen,
 		rightPanelOpen,
 		folder,
@@ -3597,6 +3592,10 @@ export default function ChatPage({
 							// conversation rests below the frosted bar yet scrolls under it.
 							classNames={{ messageList: "pt-12" }}
 							contextSize={contextSize}
+							currentUser={{
+								avatar: oidcUser?.picture,
+								name: oidcUser?.name || oidcUser?.email,
+							}}
 							emptyStateHeader={
 								<EmptyStateHeader
 									logo={emptyStateLogo}

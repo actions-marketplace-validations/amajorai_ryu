@@ -19,6 +19,7 @@ import type { ScopedNavEntity } from "@/src/hooks/useScopedSettingsNav.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { PluginSettingsTab } from "@/src/lib/pluginSettings.ts";
 import { DictationSettings } from "./DictationSettings.tsx";
+import { LearningSettings } from "./LearningSettings.tsx";
 import { MeetingsSettings } from "./MeetingsSettings.tsx";
 import { MemoryTab } from "./MemoryTab.tsx";
 import { PluginSettingsFields } from "./PluginSettingsFields.tsx";
@@ -40,6 +41,7 @@ import { SettingsSection } from "./shared/settings-items.tsx";
  * settings UI for third-party apps can hang off this same seam later.
  */
 const SETTINGS_VIEWS: Record<string, ComponentType> = {
+	"com.ryu.learning": LearningSettings,
 	"com.ryu.meetings": MeetingsSettings,
 	"com.ryu.memory": MemoryTab,
 	"com.ryu.quests": QuestsSettings,

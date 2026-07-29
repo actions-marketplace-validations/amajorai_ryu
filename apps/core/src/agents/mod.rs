@@ -92,8 +92,17 @@ pub struct MemorySlot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub space_ids: Vec<String>,
     /// Memory scope levels the agent may recall from: any subset of
-    /// `["user", "node", "project"]`. An **empty** list means "all three levels"
-    /// (the back-compat default for agents configured before this existed).
+    /// `["user", "node", "project", "org"]`. An **empty** list means the three
+    /// PERSONAL levels — `user`, `node`, `project` (the back-compat default for
+    /// agents configured before this existed).
+    ///
+    /// `"org"` is **not** in that default and must be named explicitly. Every agent
+    /// predating org scope has an empty list, so folding `org` into the default
+    /// would have granted all of them organization-wide recall the moment the level
+    /// shipped. Both readers enforce this: `MemoryStore::effective_levels` and
+    /// `ryu_rag::memory_level_matches` (which also excludes `org` from its
+    /// permissive `read_levels == None` branch, so the store and the retrieval index
+    /// agree about what an unconfigured agent can see).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_levels: Vec<String>,
     /// Whether the agent may write new memories during a session.

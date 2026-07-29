@@ -1,6 +1,6 @@
 use crate::win_process::NoWindow;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderValue, Method, Request, StatusCode},
     middleware,
     response::IntoResponse,
@@ -1046,9 +1046,13 @@ pub(crate) fn background_memory_user_id() -> String {
 
 /// Whether `caller` may READ/WRITE memory `entry`. UNBOUND node → always (one
 /// principal). BOUND node → `node`/`project`-scope facts are the shared brain (any
-/// member); a `user`-scope fact is private to its owner. Missing owner on a bound
-/// user-scope row (legacy `'local'`/None the backfill has not reached) → denied
-/// (fail closed).
+/// member); a `user`-scope fact is private to its owner; an `org`-scope fact is
+/// readable by any caller in THAT org. Missing owner on a bound user-scope row
+/// (legacy `'local'`/None the backfill has not reached) → denied (fail closed), as
+/// is an org fact with no scope id or a caller with no org.
+///
+/// This is the Rust twin of `MEMORY_VISIBLE_PREDICATE` in the memory crate; the two
+/// must stay in step, so every arm here has a matching clause there.
 fn memory_access_ok(
     caller: &Option<crate::identity_verify::VerifiedCaller>,
     entry: &memory::LongTermEntry,
@@ -1061,6 +1065,10 @@ fn memory_access_ok(
         memory::MemoryScope::User => matches!(
             (entry.owner_user_id.as_deref(), caller.as_ref()),
             (Some(owner), Some(c)) if owner == c.user_id
+        ),
+        memory::MemoryScope::Org => matches!(
+            (entry.scope_id.as_deref(), caller.as_ref().and_then(|c| c.org_id.as_deref())),
+            (Some(fact_org), Some(caller_org)) if fact_org == caller_org
         ),
     }
 }
@@ -2302,6 +2310,14 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/plugins/:id/uninstall", post(uninstall_app_handler))
         .route("/api/plugins/:id/update", post(update_app_handler))
         .route("/api/plugins/:id/ui-bundle", get(plugin_ui_bundle))
+        // Per-plugin BYOK secrets (the `secret` settings-field type). GET is
+        // metadata-only — it can never return a value. Protected router →
+        // inherits `require_auth`.
+        .route("/api/plugins/:id/secrets", get(list_plugin_secrets_handler))
+        .route(
+            "/api/plugins/:id/secrets/:key",
+            put(put_plugin_secret_handler).delete(delete_plugin_secret_handler),
+        )
         // App host-capability bridge (model.complete / agent.run / storage.*).
         // Protected router → inherits `require_auth`; grant-gated per enabled app.
         .route(
@@ -2454,6 +2470,10 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // text message into an assembled reply, using the Core session/memory path
         // so bot turns share conversation history with the Core conversation store.
         .route("/api/channels/run", post(channel_run))
+        // The slash-command menu a channel bot publishes: the same union the
+        // desktop composer offers (enabled plugins' commands + enabled skills), so
+        // `/proof` in Telegram does what `/proof` in the app does.
+        .route("/api/channels/commands", get(channel_commands))
         // Retrieval (index/search over memory+space chunks) is the RAG capability's
         // HTTP surface — gated on the (default-on) RAG app, in its own sub-router so a
         // single `route_layer` carries the gate. See `retrieval_routes`.
@@ -2831,6 +2851,9 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             "/api/capabilities/bindings",
             get(get_capability_bindings).put(set_capability_bindings),
         )
+        // The layer picker's read model: every capability, its candidate providers,
+        // and which one is currently selected.
+        .route("/api/capabilities", get(list_capabilities))
         // ── Email transport (BYO SMTP sink config + test send) ──────────────
         .route(
             "/api/email/transport",
@@ -3296,11 +3319,20 @@ fn approvals_routes(app_store: &PluginStore) -> Router<ServerState> {
 ///
 /// A governance-shell leaf. Learning `requires` the `skills` app because it writes
 /// synthesized skills, so the graph refuses to disable Skills out from under it.
-/// Default-on, so the gate is transparent on a fresh install.
+/// Default-on ([`crate::plugins::builtins::CORE_DEFAULT_ON`]), so on any install with
+/// no prior record — fresh or upgraded — the seed enables it and the gate is
+/// transparent. It is NOT transparent for a user who deliberately disabled the app;
+/// that is the point of the gate.
 ///
-/// Only the HTTP surface is gated — the in-process `state.experience`
-/// [`ExperienceStore`] keeps capturing `(user, assistant)` turns from the chat
-/// feedback path and the scheduler keeps running its `JobTarget::LearningCycle` job.
+/// Only the HTTP surface is gated — the scheduler keeps running its
+/// `JobTarget::LearningCycle` job, whose `run_skills_pass` leg is gated purely on
+/// `learning.skills-enabled` (default ON) and so synthesizes skills from real
+/// conversations regardless of this record; the in-process `state.experience`
+/// [`ExperienceStore`] likewise keeps capturing `(user, assistant)` turns, though
+/// only on the feedback path and only under `learning.enabled` (default OFF).
+/// That asymmetry is why the app is default-on: it owns the consent switches
+/// (`contributes.settings_tabs`), so hiding the record would hide the control while
+/// the capture it governs kept running.
 fn learning_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/learn/config", get(learning::config))
@@ -3493,26 +3525,48 @@ async fn get_version() -> Json<crate::update::VersionInfo> {
     Json(crate::update::version_info())
 }
 
+/// Query for `GET /api/update/check`.
+#[derive(serde::Deserialize, Default)]
+struct UpdateCheckQuery {
+    /// Release channel to check (`stable` / `beta` / `nightly` / `canary`).
+    ///
+    /// Omitted means "the channel this build is already on", derived from the
+    /// running version itself — so a nightly Core checks nightly with no stored
+    /// preference. The desktop passes its user-chosen channel explicitly so the
+    /// channel picker can move a user between channels.
+    channel: Option<String>,
+}
+
 /// `GET /api/update/check` — compares the installed version against the latest
-/// GitHub release. Fails open: a network/API error returns 200 with
+/// release ON ITS CHANNEL. Fails open: a network/API error returns 200 with
 /// `update_available: false` so a client never blocks launch on a flaky check.
 #[utoipa::path(
     get,
     path = "/api/update/check",
     tag = "Health",
-    summary = "Compare installed version against the latest release",
+    summary = "Compare installed version against the latest release on its channel",
+    params(("channel" = Option<String>, Query, description = "stable | beta | nightly | canary")),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn update_check(State(state): State<ServerState>) -> axum::response::Response {
-    match crate::update::check_for_update(&state.client).await {
+async fn update_check(
+    State(state): State<ServerState>,
+    Query(query): Query<UpdateCheckQuery>,
+) -> axum::response::Response {
+    let requested = query.channel.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    match crate::update::check_for_update_on_channel(&state.client, requested).await {
         Ok(verdict) => (StatusCode::OK, Json(json!(verdict))).into_response(),
         Err(e) => {
             tracing::warn!("update check failed (treating as up-to-date): {e}");
+            let current = crate::update::current_version();
+            let channel = requested
+                .map(str::to_string)
+                .unwrap_or_else(|| crate::update::channel_of(&current));
             (
                 StatusCode::OK,
                 Json(json!({
-                    "current": crate::update::current_version(),
-                    "latest": crate::update::current_version(),
+                    "current": current,
+                    "latest": current,
+                    "channel": channel,
                     "update_available": false,
                     "notes": serde_json::Value::Null,
                     "html_url": serde_json::Value::Null,
@@ -3721,6 +3775,83 @@ async fn set_preference(
 }
 
 // -- Capability bindings (the override-mutation API — Track A/B) ------------------
+
+/// `GET /api/capabilities` — the read model behind the layer picker: every
+/// capability any ENABLED plugin provides, its candidate providers, whether the
+/// capability is *selectable* (many providers may be enabled and one is picked, the
+/// engine-style UX) and which provider is bound right now.
+///
+/// Resolved over the ENABLED set, not the installed set, because that is the set the
+/// binding registry's invariants are stated over and the set a call actually sees. A
+/// capability whose provider is merely installed therefore reads as unbound, which is
+/// the truth: nothing would serve a call to it.
+#[utoipa::path(
+    get,
+    path = "/api/capabilities",
+    tag = "Plugins",
+    summary = "List capabilities, their providers, and the current selection",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn list_capabilities(State(state): State<ServerState>) -> axum::response::Response {
+    let records = match state.app_store.list().await {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let enabled_ids: std::collections::HashSet<String> = records
+        .iter()
+        .filter(|r| r.enabled)
+        .map(|r| r.id.clone())
+        .collect();
+    // `known` is every manifest Core has, enabled or not. The read model needs both:
+    // `enabled` decides what actually binds, `known` is what keeps a capability
+    // whose providers are all disabled VISIBLE (with its candidates listed under
+    // `available`) instead of vanishing from the response entirely.
+    let (enabled, known): (
+        Vec<crate::plugin_manifest::PluginManifest>,
+        Vec<crate::plugin_manifest::PluginManifest>,
+    ) = {
+        let manifests = state.app_manifests.read().await;
+        let known: Vec<_> = manifests.iter().cloned().collect();
+        let enabled: Vec<_> = known
+            .iter()
+            .filter(|m| enabled_ids.contains(&m.id))
+            .cloned()
+            .collect();
+        (enabled, known)
+    };
+
+    let json = state
+        .preferences
+        .get(crate::plugins::binding::BINDING_OVERRIDES_PREF_KEY)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "{}".to_owned());
+    let cfg = crate::plugins::binding::config_from_overrides_json(&json);
+    let capabilities =
+        crate::plugins::binding::describe_capabilities(&enabled, &known, &cfg);
+
+    // The stable verb ids the facade currently serves, so a picker can show what a
+    // layer actually exposes rather than only which app is selected.
+    let verbs: Vec<serde_json::Value> =
+        crate::sidecar::mcp::capability_tools::resolve_verbs(&enabled, &cfg)
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "id": r.verb.id,
+                    "capability": r.verb.capability,
+                    "provider": r.provider_id,
+                    "target": r.binding.tool,
+                })
+            })
+            .collect();
+
+    (
+        StatusCode::OK,
+        Json(json!({ "capabilities": capabilities, "verbs": verbs })),
+    )
+        .into_response()
+}
 
 /// `GET /api/capabilities/bindings` — the user's capability→provider overrides
 /// (the tie-breaker when 2+ enabled apps provide the same capability). Empty = the
@@ -6249,6 +6380,169 @@ async fn channel_run(
     }
 }
 
+// ── Channel command registry ─────────────────────────────────────────────────
+//
+// A channel bot is the same assistant reached over a different wire, so it must
+// offer the same slash commands the desktop composer does — otherwise `/proof`
+// works in the desktop and silently becomes a literal message in Telegram. The
+// gateway's `channels::commands` module is the client of this endpoint; it
+// normalises what we serve to the strictest platform menu rule and publishes it.
+//
+// Dispatch needs nothing new. Plugin commands are executed by the `pre_user_turn`
+// hooks inside `run_reply_text`, which the channel path (`POST /api/channels/run`)
+// already goes through; skills are selected by the model from the injected skill
+// block. What was missing was never execution — it was DISCOVERY.
+
+/// One row of the channel command registry, in the shape the gateway's
+/// `channels::ChannelCommand` deserializes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct ChannelCommandEntry {
+    /// Command name WITHOUT the leading slash. Left in Core's own casing/charset:
+    /// the gateway coerces it to each platform's rule (Telegram is the strictest),
+    /// and duplicating that coercion here would mean two places to keep in sync.
+    name: String,
+    /// One-line description for the menu row.
+    description: String,
+    /// `plugin` | `skill` — why the command is offered, so an operator reading the
+    /// published menu can tell where to go to turn one off.
+    source: &'static str,
+}
+
+/// Build the command union Core publishes to channels.
+///
+/// Precedence is deliberate: plugin commands are emitted first and win a name
+/// collision, because a plugin command has REAL dispatch (a `pre_user_turn` hook
+/// that intercepts the text) while a skill command is only a hint the model may
+/// act on. Shadowing the dispatching one with the advisory one would turn a
+/// working command into a suggestion. The ordering is load-bearing a second time
+/// downstream: the gateway de-duplicates AGAIN after coercing names to a platform
+/// charset (`-`/`.`/space → `_`), so a skill `my-skill` and a plugin `/my_skill`
+/// are distinct here but collide there — and its first-wins keeps whichever we
+/// emitted first. Do not sort this output.
+///
+/// Ryu's own desktop "local" commands are deliberately absent — see
+/// [`channel_commands`] for which were considered and why each was dropped.
+///
+/// Pure so the union rules are testable without a plugin store or a skills dir.
+fn build_channel_commands(
+    plugin_commands: &[serde_json::Value],
+    skills: &[ryu_skills::SkillRecord],
+) -> Vec<ChannelCommandEntry> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<ChannelCommandEntry> = Vec::new();
+
+    let mut push = |name: String, description: String, source: &'static str| {
+        let name = name.trim().trim_start_matches('/').trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        if !seen.insert(name.clone()) {
+            return;
+        }
+        out.push(ChannelCommandEntry {
+            name,
+            description: flatten_one_line(&description),
+            source,
+        });
+    };
+
+    // 1) Plugin contributions. The stored shape is `{ id, command: "/proof",
+    //    description }`; `command` is the user-visible token, `id` is the plugin's
+    //    internal handle and is NOT a command name, so an entry without `command`
+    //    is skipped rather than guessed at.
+    for value in plugin_commands {
+        let Some(command) = value.get("command").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let description = value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        push(command.to_string(), description.to_string(), "plugin");
+    }
+
+    // 2) Installed skills, addressed by id (the id is the stable handle; the
+    //    display `name` may contain spaces and capitals a command menu cannot
+    //    express). A skill with no description falls back to its display name so
+    //    the menu row is never blank.
+    for skill in skills {
+        let description = skill
+            .description
+            .clone()
+            .unwrap_or_else(|| skill.name.clone());
+        push(skill.id.clone(), description, "skill");
+    }
+
+    out
+}
+
+/// Collapse whitespace (including newlines) into single spaces so a multi-line
+/// manifest/front-matter description renders as one menu row.
+fn flatten_one_line(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `GET /api/channels/commands` — the slash commands a channel bot should publish.
+///
+/// The union of what the desktop composer offers, so the assistant reachable over
+/// Telegram/Discord/Slack/WhatsApp/iMessage has the same vocabulary as the one in
+/// the app:
+///
+/// - **plugin** commands, from the *enabled* plugins' `contributes.slash_commands`
+///   (the same walk `GET /api/plugins/contributions` serves — a disabled plugin's
+///   command is never published, or the bot would offer a command that does
+///   nothing);
+/// - **skill** commands, one per *enabled* installed skill. Disabled skills are
+///   excluded for the same reason: they are not injected into the turn, so naming
+///   one is a dead end.
+///
+/// Two things the desktop shows are deliberately NOT here:
+///
+/// - `/btw` — the desktop implements it entirely client-side (it calls the aside
+///   endpoint and renders the answer in an overlay that never enters the chat).
+///   Sent as literal text through `run_reply_text` it is just the word "btw", so
+///   publishing it to a channel would advertise a feature the channel cannot run.
+/// - `/goal` — not a Ryu built-in at all: it is contributed by the `goal` plugin
+///   and therefore already arrives via the plugin source, correctly gated on that
+///   plugin being enabled. Hardcoding it here would publish it even with the
+///   plugin off — the exact failure the enabled filter exists to prevent.
+///
+/// Agent-advertised (ACP `available_commands_update`) commands are also absent:
+/// they are per-agent and only known once a session is live, so there is nothing
+/// server-side to enumerate. The kernel keeps an `agent` source for them anyway.
+///
+/// Auth: node-token only (`require_auth`), with no per-caller `VerifiedCaller`
+/// check. That is the posture of both sources this endpoint unions
+/// (`GET /api/plugins/contributions`, `GET /api/skills`), so the union is no more
+/// open than its inputs. A coarse `enforce_permission` gate was considered and
+/// rejected: it 403s a `None` caller on an org-bound node, and the only caller
+/// here IS machine ingress with no user JWT — it would fail closed on exactly the
+/// nodes that run bots. Unlike `channel_run` there is no conversation id and
+/// nothing per-resource to scope to.
+#[utoipa::path(
+    get,
+    path = "/api/channels/commands",
+    tag = "Chat",
+    summary = "List the slash commands a channel bot should publish",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn channel_commands(State(state): State<ServerState>) -> axum::response::Response {
+    let enabled_records = match enabled_plugin_records(&state).await {
+        Ok(records) => records,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let enabled_ids: std::collections::HashSet<String> = enabled_records.into_keys().collect();
+    let manifests = state.app_manifests.read().await;
+    // No surface filter: a channel bot is not one of the declared `Surface`s, and
+    // an unknown surface means "do not filter" everywhere else in this file too.
+    let plugin_commands = collect_plugin_slash_commands(&manifests, &enabled_ids, None);
+    drop(manifests);
+
+    let skills = state.skills.enabled();
+    let commands = build_channel_commands(&plugin_commands, &skills);
+    Json(json!({ "commands": commands })).into_response()
+}
+
 #[utoipa::path(
     get,
     path = "/api/worktree/{run_id}/diff",
@@ -6676,7 +6970,7 @@ pub(crate) async fn index_memory_entry(state: &ServerState, entry: &memory::Long
     path = "/api/memory",
     tag = "Memory",
     summary = "List memory entries",
-    params(("scope" = Option<String>, Query, description = "user | node | project"), ("scope_id" = Option<String>, Query), ("category" = Option<String>, Query), ("limit" = Option<usize>, Query)),
+    params(("scope" = Option<String>, Query, description = "user | node | project | org"), ("scope_id" = Option<String>, Query), ("category" = Option<String>, Query), ("limit" = Option<usize>, Query)),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn list_memory(
@@ -6692,8 +6986,9 @@ async fn list_memory(
     };
     // Per-caller tenancy: a bound-node member sees the shared node/project brain plus
     // only their OWN user-scope facts. Unbound → unrestricted (byte-identical).
-    let vis = memory::MemoryVisibility::for_caller(
+    let vis = memory::MemoryVisibility::for_caller_in_org(
         caller.as_ref().map(|c| c.user_id.as_str()),
+        caller.as_ref().and_then(|c| c.org_id.as_deref()),
         node_org_id().is_some(),
     );
     match state.memory.list_visible(&filter, vis).await {
@@ -6707,14 +7002,34 @@ async fn create_memory(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<CreateMemoryBody>,
 ) -> axum::response::Response {
+    let scope = body
+        .scope
+        .as_deref()
+        .map(memory::MemoryScope::from_str)
+        .unwrap_or_default();
+    // An org-scope fact's owning org is SERVER-derived, never client-supplied:
+    // accepting a caller's `scope_id` here would let anyone publish a memory into an
+    // org they do not belong to. The caller's verified org wins, and with no
+    // resolvable org the write is refused rather than silently downgraded to a
+    // narrower scope the user did not ask for.
+    let scope_id = if scope == memory::MemoryScope::Org {
+        match caller.as_ref().and_then(|c| c.org_id.clone()) {
+            Some(org) => Some(org),
+            None => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "org-scope memory requires a caller with a verified organization"
+                        .to_string(),
+                )
+            }
+        }
+    } else {
+        body.scope_id
+    };
     let new = memory::NewMemory {
         content: body.content,
-        scope: body
-            .scope
-            .as_deref()
-            .map(memory::MemoryScope::from_str)
-            .unwrap_or_default(),
-        scope_id: body.scope_id,
+        scope,
+        scope_id,
         category: body
             .category
             .as_deref()
@@ -6794,10 +7109,32 @@ async fn update_memory(
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Ok(Some(_)) => {}
     }
+    // The gate above checks the row's CURRENT scope, but a patch may CHANGE it —
+    // so re-scoping needs its own gate, or any member could promote a personal fact
+    // to organization-wide (or pull an org fact down into their own private set).
+    // Server-derive the org id on a re-scope to `org` for the same reason
+    // `create_memory` does, and refuse when no org is resolvable.
+    let new_scope = body.scope.as_deref().map(memory::MemoryScope::from_str);
+    // `MemoryPatch::scope_id` is doubly-optional: `None` leaves it alone, `Some(None)`
+    // clears it. A re-scope to org must SET it, hence `Some(Some(org))`.
+    let scope_id = if new_scope == Some(memory::MemoryScope::Org) {
+        match caller.as_ref().and_then(|c| c.org_id.clone()) {
+            Some(org) => Some(Some(org)),
+            None => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "re-scoping a memory to org requires a caller with a verified organization"
+                        .to_string(),
+                )
+            }
+        }
+    } else {
+        body.scope_id
+    };
     let patch = memory::MemoryPatch {
         content: body.content,
-        scope: body.scope.as_deref().map(memory::MemoryScope::from_str),
-        scope_id: body.scope_id,
+        scope: new_scope,
+        scope_id,
         category: body
             .category
             .as_deref()
@@ -9761,6 +10098,66 @@ fn manifest_policy_types(manifest: &crate::plugin_manifest::PluginManifest) -> V
         .collect()
 }
 
+/// Snapshot of every **enabled** plugin's record, keyed by id.
+///
+/// Factored out because two readers must agree on what "enabled" means: the
+/// desktop's `GET /api/plugins/contributions` and the channel bots'
+/// `GET /api/channels/commands`. If they drifted, a bot would publish a command
+/// menu entry for a plugin whose `pre_user_turn` hook is not registered — tapping
+/// it would send a literal `/proof` to the model and get a shrug back, which is
+/// worse than the command not existing.
+///
+/// Returns the full records (not just ids) because the contributions handler also
+/// needs each record's GATEWAY-APPROVED grants for the companions payload.
+async fn enabled_plugin_records(
+    state: &ServerState,
+) -> Result<std::collections::HashMap<String, crate::plugins::PluginRecord>, String> {
+    match state.app_store.list().await {
+        Ok(records) => Ok(records
+            .into_iter()
+            .filter(|r| r.enabled)
+            .map(|r| (r.id.clone(), r))
+            .collect()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Walk the manifests and collect the `slash_commands` of every enabled plugin
+/// that targets `surface`, each tagged in place with its owning `plugin` id.
+///
+/// The entries stay `serde_json::Value` for the same reason the manifest contract
+/// stores them that way: a desktop newer than the node it talks to must not lose
+/// keys this Core build has never heard of.
+///
+/// `surface = None` means "no filter" (an absent/unknown `x-ryu-surface`), which
+/// is the case for every non-desktop reader — a channel bot is not one of the
+/// declared surfaces, so it sees the unfiltered set rather than nothing.
+fn collect_plugin_slash_commands(
+    manifests: &[crate::plugin_manifest::PluginManifest],
+    enabled_ids: &std::collections::HashSet<String>,
+    surface: Option<crate::plugin_manifest::Surface>,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for manifest in manifests {
+        if !enabled_ids.contains(&manifest.id) {
+            continue;
+        }
+        if !surface.is_none_or(|s| manifest.supports_surface(s)) {
+            continue;
+        }
+        let Some(c) = &manifest.contributes else {
+            continue;
+        };
+        out.extend(c.slash_commands.iter().cloned().map(|mut v| {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("plugin".to_string(), serde_json::json!(manifest.id));
+            }
+            v
+        }));
+    }
+    out
+}
+
 /// `GET /api/plugins/contributions` — the declarative UI contributions (composer
 /// controls, settings tabs, slash commands) of every **enabled** plugin, each
 /// tagged with its owning `plugin` id. The desktop renders the known widget types
@@ -9781,21 +10178,13 @@ async fn plugin_contributions(
     // Keep the full enabled records (not just ids): the companions payload maps
     // each enabled plugin's companion to that plugin's GATEWAY-APPROVED grants,
     // which live on the record (never the manifest's `permission_grants` claim).
-    let enabled_records: std::collections::HashMap<String, crate::plugins::PluginRecord> =
-        match state.app_store.list().await {
-            Ok(records) => records
-                .into_iter()
-                .filter(|r| r.enabled)
-                .map(|r| (r.id.clone(), r))
-                .collect(),
-            Err(e) => {
-                return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
-            }
-        };
+    let enabled_records = match enabled_plugin_records(&state).await {
+        Ok(records) => records,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let enabled_ids: std::collections::HashSet<String> = enabled_records.keys().cloned().collect();
     let mut composer_controls = Vec::new();
     let mut settings_tabs = Vec::new();
-    let mut slash_commands = Vec::new();
     let mut turn_hooks = Vec::new();
     let mut views = Vec::new();
     let mut sidebar_sections = Vec::new();
@@ -9809,6 +10198,10 @@ async fn plugin_contributions(
     let surface = surface_from_headers(&headers);
 
     let manifests = state.app_manifests.read().await;
+    // Slash commands are collected by a shared walk because a SECOND reader —
+    // `GET /api/channels/commands` — has to apply exactly the same enabled filter;
+    // see [`collect_plugin_slash_commands`].
+    let slash_commands = collect_plugin_slash_commands(&manifests, &enabled_ids, surface);
     for manifest in manifests.iter() {
         if !enabled_ids.contains(&manifest.id) {
             continue;
@@ -9829,7 +10222,6 @@ async fn plugin_contributions(
         };
         composer_controls.extend(c.composer_controls.iter().cloned().map(tag));
         settings_tabs.extend(c.settings_tabs.iter().cloned().map(tag));
-        slash_commands.extend(c.slash_commands.iter().cloned().map(tag));
         // Declarative views (the Raycast tier): serialize each typed contribution to
         // a Value and tag it with its owning plugin, exactly like the sibling families.
         views.extend(
@@ -10668,6 +11060,190 @@ async fn set_app_grants_handler(
         )
             .into_response(),
         Err(EnableError::Other(e)) => json_error(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+// ── Per-plugin BYOK secrets ───────────────────────────────────────────────────
+//
+// The write half of the `secret` settings-field type. A plugin's manifest already
+// names its credential as an `env:VARNAME` token in `secret_headers`; these three
+// routes let the UI fill that name in from an encrypted store instead of requiring
+// an exported env var and a Core restart (see `crate::plugin_secrets`).
+//
+// The single invariant: **no route here ever returns a secret value.** The listing
+// answers "is one set, and when was it written" and nothing more; there is
+// deliberately no read endpoint to add a leak to later.
+
+/// Body for `PUT /api/plugins/:id/secrets/:key`.
+#[derive(serde::Deserialize)]
+struct PutPluginSecretBody {
+    /// The credential. Empty/whitespace-only CLEARS the stored secret — the same
+    /// gesture as blanking the field in the UI, so "delete" needs no separate call
+    /// from the renderer's point of view.
+    value: String,
+}
+
+/// Resolve the process-global secret store, or the 503 a caller sees when the
+/// at-rest master key could not be loaded at boot (Core keeps running; secrets are
+/// simply unavailable).
+fn plugin_secret_store(
+) -> Result<&'static crate::plugin_secrets::PluginSecretStore, axum::response::Response> {
+    crate::plugin_secrets::global().ok_or_else(|| {
+        json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "plugin secret store unavailable (at-rest encryption key could not be loaded)"
+                .to_owned(),
+        )
+    })
+}
+
+/// `GET /api/plugins/:id/secrets` — which BYOK secrets this plugin has stored.
+///
+/// **Metadata only, by construction.** The response carries the key name, a `set`
+/// flag and the last-write timestamp; the ciphertext columns are not even selected
+/// by the query behind it, so there is no code path from this handler to a
+/// plaintext or an encrypted value. A masked settings field renders "Set"/"Not set"
+/// from this and nothing else.
+///
+/// Not manifest-gated: an id with no manifest (uninstalled, or renamed) yields an
+/// empty list rather than a 404, so the UI can always ask and cleanup can always
+/// proceed.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/{id}/secrets",
+    tag = "Plugins",
+    summary = "List a plugin's stored secret names (never their values)",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn list_plugin_secrets_handler(Path(id): Path<String>) -> axum::response::Response {
+    let store = match plugin_secret_store() {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    match store.list_keys(&id).await {
+        Ok(keys) => Json(json!({
+            "secrets": keys
+                .into_iter()
+                .map(|k| {
+                    // Two ways a stored secret can be real yet never actually used,
+                    // both of which would otherwise render as a confident "Set":
+                    //
+                    // `shadowed_by_env` — the resolver prefers an exported process
+                    // env var, so on a machine where the operator already exported
+                    // this name the stored value is inert. Showing "Set" there sends
+                    // the user hunting for the wrong problem when a key looks wrong.
+                    //
+                    // `readable` — `may_read_env_secret` restricts which names a
+                    // plugin may read at all (its own namespace, or the operator
+                    // allowlist). A plugin that stored a name outside that gate has a
+                    // credential the resolver will always skip.
+                    //
+                    // Neither is an error, so neither belongs in the status code;
+                    // they are facts about the row the UI must be able to say out loud.
+                    let shadowed_by_env = std::env::var(&k.key)
+                        .ok()
+                        .is_some_and(|v| !v.is_empty());
+                    json!({
+                        "key": k.key,
+                        "set": true,
+                        "updated_at": k.updated_at,
+                        "shadowed_by_env": shadowed_by_env,
+                        "readable": crate::tool_exec::may_read_env_secret(&id, &k.key),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `PUT /api/plugins/{id}/secrets/{key}` — store (or clear) one BYOK credential,
+/// encrypted at rest.
+///
+/// `key` is the ENV VAR NAME the plugin's manifest already names in its
+/// `secret_headers` (`RYU_TAVILY_API_KEY`), which is why it is validated as a POSIX
+/// env-var identifier: a name that could not be an env var could never be read back
+/// by the resolver, so accepting it would store a credential the user believes is
+/// live and nothing ever reads.
+///
+/// The write is NOT gated on `may_read_env_secret`. That gate is a READ-time
+/// control and stays the single authority: it consults an operator allowlist that
+/// can legitimately change after the fact, so refusing the write would let a
+/// today-ungated name become permanently unsettable even once an operator opens it.
+/// A stored row the gate refuses is inert — no path reads it.
+#[utoipa::path(
+    put,
+    path = "/api/plugins/{id}/secrets/{key}",
+    tag = "Plugins",
+    summary = "Set a plugin's BYOK secret (write-only; encrypted at rest)",
+    params(
+        ("id" = String, Path),
+        ("key" = String, Path, description = "The env var name the manifest names, e.g. RYU_TAVILY_API_KEY"),
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Malformed key name", body = serde_json::Value),
+        (status = 404, description = "No such plugin", body = serde_json::Value),
+    )
+)]
+async fn put_plugin_secret_handler(
+    State(state): State<ServerState>,
+    Path((id, key)): Path<(String, String)>,
+    Json(body): Json<PutPluginSecretBody>,
+) -> axum::response::Response {
+    if !crate::plugin_secrets::is_valid_secret_key(&key) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "'{key}' is not a valid secret name (expected an environment variable \
+                 identifier: a letter or underscore followed by letters, digits or underscores)"
+            ),
+        );
+    }
+    // Writes are bounded to plugins this node actually knows about, so the store
+    // cannot be used as an arbitrary encrypted dumping ground. Reads and deletes
+    // stay unbounded on purpose (an uninstalled plugin must still be cleanable).
+    if find_manifest(&state, &id).await.is_none() {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            format!("no manifest found for plugin '{id}'"),
+        );
+    }
+    let store = match plugin_secret_store() {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    match store.set(&id, &key, &body.value).await {
+        // The response deliberately echoes nothing back — not the value, not a
+        // masked preview, not a length.
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `DELETE /api/plugins/{id}/secrets/{key}` — clear one stored credential.
+/// Idempotent: deleting an absent secret is a 200, not a 404.
+#[utoipa::path(
+    delete,
+    path = "/api/plugins/{id}/secrets/{key}",
+    tag = "Plugins",
+    summary = "Clear a plugin's stored BYOK secret",
+    params(("id" = String, Path), ("key" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn delete_plugin_secret_handler(
+    Path((id, key)): Path<(String, String)>,
+) -> axum::response::Response {
+    let store = match plugin_secret_store() {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    match store.delete(&id, &key).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -20731,17 +21307,34 @@ async fn list_installed(State(state): State<ServerState>) -> Json<serde_json::Va
     Json(json!({ "installed": installed }))
 }
 
+/// Query for `POST /api/setup/{name}/install`.
+#[derive(serde::Deserialize, Default)]
+struct InstallSidecarQuery {
+    /// Re-download even when the entry is already installed.
+    ///
+    /// This is what an "Update" press sends. A plain install is idempotent by
+    /// design (it backs the auto-install-on-first-use path), so without this the
+    /// update and the install are indistinguishable and the update silently
+    /// no-ops.
+    #[serde(default)]
+    force: bool,
+}
+
 #[utoipa::path(
     post,
     path = "/api/setup/{name}/install",
     tag = "Sidecars",
     summary = "Install a sidecar (SSE progress)",
-    params(("name" = String, Path)),
+    params(
+        ("name" = String, Path),
+        ("force" = Option<bool>, Query, description = "Re-download even when already installed"),
+    ),
     responses((status = 200, description = "Server-Sent Events stream"))
 )]
 async fn install_sidecar(
     State(state): State<ServerState>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    Query(query): Query<InstallSidecarQuery>,
 ) -> Json<serde_json::Value> {
     use crate::sidecar::agents::zeroclaw::ZeroClawDownloader;
     use crate::sidecar::providers::llamacpp::LlamaCppDownloader;
@@ -20768,6 +21361,25 @@ async fn install_sidecar(
                 std::env::consts::ARCH
             ),
         }));
+    }
+
+    // A forced install is how an UPDATE is applied. Every downloader's
+    // `ensure_installed` opens with an already-installed fast path — keyed on the
+    // recorded version for pinned engines, on the recorded checksum for the
+    // archive downloaders, on mere presence for the subprocess installers. All
+    // three read `versions.json`, so dropping this entry's record (version AND
+    // checksum, atomically) is enough to make every variant miss and re-download.
+    // Without it, "Update" returned 200 having done nothing at all.
+    //
+    // The binary is deliberately left in place: the downloaders install
+    // atomically over it, so a failed re-download leaves the working install
+    // intact rather than a hole where the engine used to be.
+    if query.force {
+        if let Err(e) = crate::sidecar::download_manager::VersionStore::remove_persisted(&name) {
+            tracing::warn!("could not clear the version record for '{name}' before a forced reinstall: {e}");
+        } else {
+            tracing::info!("forced reinstall of '{name}' — cleared its version record");
+        }
     }
 
     // Mark as installing
@@ -20944,6 +21556,7 @@ async fn install_sidecar(
 
     Json(json!({
         "success": true,
+        "forced": query.force,
         "message": format!("Sidecar '{}' installation started in background", name)
     }))
 }
@@ -26054,6 +26667,105 @@ mod pure_helper_tests {
         assert_eq!(parsed["error"], msg);
     }
 
+    // ── plugin BYOK secrets ──────────────────────────────────────────────────
+
+    /// THE ONE PROPERTY OF THIS ENDPOINT: the listing must never carry a secret —
+    /// not the plaintext, not the encrypted form, not a masked preview, not a
+    /// length. Asserted four ways so a future field addition has to trip one: the
+    /// plaintext is absent, the ciphertext (base64 AND hex) is absent, each entry's
+    /// key set is EXACTLY the declared metadata set, and the two usability flags are
+    /// booleans (so they cannot smuggle bytes of the value).
+    #[tokio::test]
+    async fn listing_plugin_secrets_never_returns_a_value() {
+        use base64::Engine as _;
+
+        let plaintext = "tvly-PLAINTEXT-must-not-appear";
+        let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
+        store
+            .set("tavily", "RYU_TAVILY_API_KEY", plaintext)
+            .await
+            .unwrap();
+        let ciphertext = store
+            .raw_ciphertext_for_test("tavily", "RYU_TAVILY_API_KEY")
+            .await
+            .expect("the secret was stored");
+        // The global is a OnceLock; publishing an in-memory store here is safe
+        // because nothing else in the test binary publishes or reads it (the
+        // tool_exec fallback tests pass their store explicitly).
+        crate::plugin_secrets::set_global(store);
+
+        let resp = list_plugin_secrets_handler(Path("tavily".to_owned())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let raw_body = String::from_utf8_lossy(&bytes).into_owned();
+
+        assert!(
+            !raw_body.contains(plaintext),
+            "the response leaked the plaintext secret: {raw_body}"
+        );
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
+        assert!(
+            !raw_body.contains(&b64),
+            "the response leaked the base64 ciphertext: {raw_body}"
+        );
+        let hex: String = ciphertext.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(
+            !raw_body.contains(&hex),
+            "the response leaked the hex ciphertext: {raw_body}"
+        );
+
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        let entries = parsed["secrets"].as_array().expect("secrets is an array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["key"], "RYU_TAVILY_API_KEY");
+        assert_eq!(entries[0]["set"], true);
+        assert!(entries[0]["updated_at"].as_i64().unwrap_or(0) > 0);
+        let fields: std::collections::BTreeSet<&str> = entries[0]
+            .as_object()
+            .expect("entry is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "key",
+                "set",
+                "updated_at",
+                "shadowed_by_env",
+                "readable",
+            ]
+            .into_iter()
+            .collect(),
+            "an entry must carry NOTHING beyond the name, the set flag, the timestamp, and \
+             the two USABILITY facts (whether an env var shadows it, whether the plugin may \
+             read it) — all metadata, never any part of the value. Widening this list is a \
+             deliberate act: check the new field cannot carry, encode, or imply the secret."
+        );
+        // The two additions are booleans by construction, so they cannot smuggle
+        // bytes of the value even if a future refactor computed them differently.
+        assert!(entries[0]["shadowed_by_env"].is_boolean());
+        assert!(entries[0]["readable"].is_boolean());
+    }
+
+    /// The key doubles as an env var name and a URL path segment, so a name the
+    /// resolver could never read back is refused at the door rather than stored as
+    /// a credential the user believes is live.
+    #[test]
+    fn a_malformed_secret_key_is_refused() {
+        for bad in ["", "has-dash", "1leading", "../escape", "a b"] {
+            assert!(
+                !crate::plugin_secrets::is_valid_secret_key(bad),
+                "'{bad}' must be refused by PUT /api/plugins/:id/secrets/:key"
+            );
+        }
+        assert!(crate::plugin_secrets::is_valid_secret_key(
+            "RYU_TAVILY_API_KEY"
+        ));
+    }
+
     // ── download_control_result ──────────────────────────────────────────────
     #[test]
     fn download_control_result_maps_ok_and_missing() {
@@ -26403,5 +27115,154 @@ mod pure_helper_tests {
         assert_eq!(uid, None);
         assert_eq!(org, None);
         assert!(!bound);
+    }
+
+    // ── Channel command registry (GET /api/channels/commands) ────────────────
+
+    fn manifest(value: serde_json::Value) -> crate::plugin_manifest::PluginManifest {
+        serde_json::from_value(value).expect("test manifest deserializes")
+    }
+
+    fn enabled_set(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn skill(id: &str, name: &str, description: Option<&str>) -> ryu_skills::SkillRecord {
+        ryu_skills::SkillRecord {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            description: description.map(str::to_owned),
+            instructions: String::new(),
+            allowed_tools: Vec::new(),
+            enabled: true,
+            always_on: false,
+        }
+    }
+
+    #[test]
+    fn collect_plugin_slash_commands_only_walks_enabled_plugins() {
+        let manifests = vec![
+            manifest(json!({
+                "id": "proof", "name": "Proof", "version": "1.0.0", "runnables": [],
+                "contributes": { "slash_commands": [
+                    { "id": "proof.run", "command": "/proof", "description": "Prove it" }
+                ]}
+            })),
+            manifest(json!({
+                "id": "goal", "name": "Goal", "version": "1.0.0", "runnables": [],
+                "contributes": { "slash_commands": [
+                    { "id": "goal.set", "command": "/goal", "description": "Pursue a goal" }
+                ]}
+            })),
+        ];
+        let out = collect_plugin_slash_commands(&manifests, &enabled_set(&["proof"]), None);
+        assert_eq!(out.len(), 1, "a disabled plugin contributes nothing");
+        assert_eq!(out[0]["command"], "/proof");
+        // Each entry is tagged in place with its owning plugin id.
+        assert_eq!(out[0]["plugin"], "proof");
+    }
+
+    #[test]
+    fn collect_plugin_slash_commands_filters_by_surface_but_none_means_all() {
+        use crate::plugin_manifest::Surface;
+        let manifests = vec![manifest(json!({
+            "id": "proof", "name": "Proof", "version": "1.0.0", "runnables": [],
+            "targets": ["desktop"],
+            "contributes": { "slash_commands": [
+                { "id": "proof.run", "command": "/proof", "description": "Prove it" }
+            ]}
+        }))];
+        let enabled = enabled_set(&["proof"]);
+        assert_eq!(
+            collect_plugin_slash_commands(&manifests, &enabled, Some(Surface::Desktop)).len(),
+            1
+        );
+        assert_eq!(
+            collect_plugin_slash_commands(&manifests, &enabled, Some(Surface::Island)).len(),
+            0
+        );
+        // No surface (a channel bot) means "do not filter", never "filter all out".
+        assert_eq!(
+            collect_plugin_slash_commands(&manifests, &enabled, None).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn build_channel_commands_unions_plugins_then_skills() {
+        let plugins = vec![json!({
+            "id": "proof.run", "command": "/proof", "description": "Prove it", "plugin": "proof"
+        })];
+        let skills = vec![skill("web-researcher", "Web Researcher", Some("Research"))];
+        let out = build_channel_commands(&plugins, &skills);
+        assert_eq!(
+            out,
+            vec![
+                ChannelCommandEntry {
+                    name: "proof".to_owned(),
+                    description: "Prove it".to_owned(),
+                    source: "plugin",
+                },
+                ChannelCommandEntry {
+                    name: "web-researcher".to_owned(),
+                    description: "Research".to_owned(),
+                    source: "skill",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn build_channel_commands_lets_a_dispatching_plugin_win_a_collision() {
+        // A plugin command has a real `pre_user_turn` hook behind it; a skill of the
+        // same name is only a hint to the model, so it must not shadow the one that
+        // actually runs.
+        let plugins = vec![json!({ "command": "/goal", "description": "Plugin goal" })];
+        let skills = vec![skill("goal", "Goal", Some("Skill goal"))];
+        let out = build_channel_commands(&plugins, &skills);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, "plugin");
+        assert_eq!(out[0].description, "Plugin goal");
+    }
+
+    #[test]
+    fn build_channel_commands_skips_entries_with_no_usable_name() {
+        let plugins = vec![
+            // `id` alone is the plugin's internal handle, not a command name.
+            json!({ "id": "proof.run", "description": "no command key" }),
+            // A slash with nothing after it names nothing.
+            json!({ "command": "/", "description": "empty" }),
+            json!({ "command": "   ", "description": "blank" }),
+        ];
+        assert!(build_channel_commands(&plugins, &[]).is_empty());
+    }
+
+    #[test]
+    fn build_channel_commands_falls_back_to_the_skill_name_and_flattens_text() {
+        let skills = vec![
+            skill("no-desc", "No Description", None),
+            skill("multi", "Multi", Some("two\n  lines   here")),
+        ];
+        let out = build_channel_commands(&[], &skills);
+        assert_eq!(out[0].description, "No Description");
+        assert_eq!(out[1].description, "two lines here");
+    }
+
+    #[test]
+    fn build_channel_commands_serializes_to_the_published_shape() {
+        let plugins = vec![json!({ "command": "/proof", "description": "Prove it" })];
+        let value =
+            serde_json::to_value(build_channel_commands(&plugins, &[])).expect("entries serialize");
+        assert_eq!(
+            value,
+            json!([{ "name": "proof", "description": "Prove it", "source": "plugin" }])
+        );
+    }
+
+    #[test]
+    fn flatten_one_line_collapses_all_whitespace() {
+        assert_eq!(flatten_one_line("a\n\tb   c"), "a b c");
+        assert_eq!(flatten_one_line("  padded  "), "padded");
+        assert_eq!(flatten_one_line(""), "");
     }
 }

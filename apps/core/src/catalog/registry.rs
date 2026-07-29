@@ -61,6 +61,43 @@ pub struct CatalogEntry {
     pub recommended: bool,
 }
 
+/// The version installing `name` will actually deliver, when the installer pins
+/// it at compile time.
+///
+/// This exists because the catalog's `latest_version` was fetched from upstream
+/// (GitHub/npm) for EVERY entry, while several downloaders build their download
+/// URL from a hardcoded tag. Upstream's newer tag is unreachable by
+/// construction, so the client saw a permanent "b9670 → b10159, Update"
+/// row whose button hit `ensure_installed`'s already-installed fast path and did
+/// nothing. Reporting the pin makes the catalog honest: a pinned engine gains an
+/// update when Ryu ships a new pin, i.e. it rides the app release train.
+///
+/// `None` means the installer resolves upstream at install time (npm/pip, or a
+/// GitHub `releases/latest` lookup), so the fetched upstream version IS the
+/// deliverable one and a forced reinstall genuinely upgrades it.
+pub fn installer_pin(name: &str) -> Option<&'static str> {
+    match name {
+        "llamacpp" => Some(crate::sidecar::providers::llamacpp::downloader::TARGET_VERSION),
+        "whispercpp" => Some(crate::sidecar::providers::whispercpp::downloader::TARGET_VERSION),
+        "sdcpp" => Some(crate::sidecar::providers::sdcpp::downloader::TARGET_VERSION),
+        _ => None,
+    }
+}
+
+/// Version strings an installer records when it has no real version to record —
+/// a PATH-adopted binary, a brew/pip-git install, or a downloader that never
+/// learned the tag it fetched. They are sentinels, not versions: comparing them
+/// against an upstream version always "differs", which would advertise an update
+/// on every poll that no reinstall could ever clear.
+const SENTINEL_VERSIONS: &[&str] = &[
+    "latest", "adopted", "brew", "pip-git", "unknown", "installed", "skipped", "",
+];
+
+/// Whether `version` is a real version that may be compared against another.
+pub fn is_comparable_version(version: &str) -> bool {
+    !SENTINEL_VERSIONS.contains(&version.trim())
+}
+
 /// The OS families a catalog entry can run on. An empty slice means "every
 /// platform" (the common case). Surfaced to clients as the `platforms` list so a
 /// UI can label an entry (e.g. "macOS only"). Display-only — the authoritative

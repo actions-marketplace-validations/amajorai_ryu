@@ -15,7 +15,7 @@
         "slug": "shadow__search",
         "backend": "http",
         "method": "GET",
-        "url": "http://127.0.0.1:7980/api/shadow/search",
+        "url": "core:/api/shadow/search",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -47,7 +47,7 @@
         "slug": "shadow__semantic_search",
         "backend": "http",
         "method": "GET",
-        "url": "http://127.0.0.1:7980/api/shadow/search/semantic",
+        "url": "core:/api/shadow/search/semantic",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -79,7 +79,7 @@
         "slug": "shadow__timeline",
         "backend": "http",
         "method": "GET",
-        "url": "http://127.0.0.1:7980/api/shadow/timeline",
+        "url": "core:/api/shadow/timeline",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -110,7 +110,7 @@
         "slug": "shadow__recent_context",
         "backend": "http",
         "method": "GET",
-        "url": "http://127.0.0.1:7980/api/shadow/context/recent",
+        "url": "core:/api/shadow/context/recent",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },

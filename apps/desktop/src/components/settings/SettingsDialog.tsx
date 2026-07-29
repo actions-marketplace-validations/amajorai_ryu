@@ -34,7 +34,6 @@ import { AudioDevicesSettings } from "./AudioDevicesSettings.tsx";
 import { BillingTab } from "./BillingTab.tsx";
 import { DeveloperTab } from "./DeveloperTab.tsx";
 import { EntitySettings } from "./EntitySettings.tsx";
-import { ExperimentalSettings } from "./ExperimentalSettings.tsx";
 import { GeneralTab } from "./GeneralTab.tsx";
 // # 0.1.0: Island disabled — uncomment with the Island nav item below
 // import { IslandSettings } from "./IslandSettings.tsx";
@@ -98,7 +97,6 @@ const NAV_GROUPS: NavGroup[] = [
 			// { value: "island", label: "Island" },
 			{ value: "shadow", label: "Shadow" },
 			{ value: "voice", label: "Voice" },
-			{ value: "experimental", label: "Experimental" },
 			{ value: "developer", label: "Developer" },
 		],
 	},
@@ -150,8 +148,6 @@ function SectionContent({ value }: { value: SectionValue }) {
 			return <TeamsBillingTab />;
 		case "credits":
 			return <CreditsTab />;
-		case "experimental":
-			return <ExperimentalSettings />;
 		case "developer":
 			return <DeveloperTab />;
 		case "voice":

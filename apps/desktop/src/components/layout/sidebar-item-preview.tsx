@@ -28,7 +28,9 @@ export function SidebarItemPreview({
 }) {
 	return (
 		<HoverCard>
-			<HoverCardTrigger className="min-w-0 flex-1">{children}</HoverCardTrigger>
+			<HoverCardTrigger className="min-w-0 flex-1" closeDelay={0} delay={0}>
+				{children}
+			</HoverCardTrigger>
 			<HoverCardContent
 				align="start"
 				className={cn(

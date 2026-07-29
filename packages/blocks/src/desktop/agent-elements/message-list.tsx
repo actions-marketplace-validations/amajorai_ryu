@@ -14,6 +14,12 @@ import {
 	MessageScrollerProvider,
 	MessageScrollerViewport,
 } from "@ryu/ui/components/message-scroller";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@ryu/ui/components/tooltip";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	IconCheck,
@@ -73,6 +79,13 @@ export interface MessageListProps {
 	 * this size) in its stats footer. Omitted ⇒ speed only, no ring.
 	 */
 	contextSize?: number;
+	/**
+	 * Current signed-in user info for displaying avatar/name on own messages.
+	 */
+	currentUser?: {
+		avatar?: string;
+		name?: string;
+	};
 	/**
 	 * When true (default) clicking an attached image in a user message opens
 	 * the fullscreen lightbox preview. Set to false to disable previews.
@@ -146,6 +159,7 @@ export interface MessageListProps {
 		UserMessage?: React.ComponentType<{
 			message: UIMessage;
 			className?: string;
+			currentUser?: { avatar?: string; name?: string };
 			enableImagePreview?: boolean;
 			editing?: boolean;
 			onEditSubmit?: (text: string) => void;
@@ -173,6 +187,44 @@ const dateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
 	minute: "2-digit",
 	hour12: true,
 });
+
+function formatRelativeTime(date: Date): string {
+	const now = new Date();
+	const diffMs = now.getTime() - date.getTime();
+	const diffSeconds = Math.floor(diffMs / 1000);
+	const diffMinutes = Math.floor(diffSeconds / 60);
+	const diffHours = Math.floor(diffMinutes / 60);
+	const diffDays = Math.floor(diffHours / 24);
+
+	if (diffSeconds < 60) {
+		return "just now";
+	}
+	if (diffMinutes < 60) {
+		return `${diffMinutes}m ago`;
+	}
+	if (diffHours < 24) {
+		return `${diffHours}h ago`;
+	}
+	if (diffDays < 7) {
+		return `${diffDays}d ago`;
+	}
+	return date.toLocaleDateString("en-GB", {
+		day: "numeric",
+		month: "short",
+	});
+}
+
+function formatFullTimestamp(date: Date): string {
+	return date.toLocaleDateString("en-GB", {
+		day: "numeric",
+		month: "numeric",
+		year: "numeric",
+		hour: "numeric",
+		minute: "2-digit",
+		hour12: true,
+	});
+}
+
 interface ToolPartBase {
 	input?: unknown;
 	output?: unknown;
@@ -704,7 +756,7 @@ function MessageToolbar({
 	return (
 		<div
 			className={cn(
-				"pointer-events-none flex items-center gap-1 pt-1 text-muted-foreground/70 text-xs opacity-0 transition-opacity duration-100",
+				"pointer-events-none flex items-center gap-1 text-muted-foreground/70 text-xs opacity-0 transition-opacity duration-100",
 				heightClass,
 				alignClass,
 				hoverClass,
@@ -772,6 +824,7 @@ export const MessageList = memo(function MessageList({
 	enableImagePreview = true,
 	assistantAvatar,
 	assistantName,
+	currentUser,
 	slots,
 	classNames,
 	toolRenderers,
@@ -901,22 +954,14 @@ export const MessageList = memo(function MessageList({
 												if (!(text || hasParts)) {
 													return null;
 												}
-												const userCreatedAt = (
-													turn.userMsg as { createdAt?: Date | string }
-												)?.createdAt;
 												const userCopyKey = `user-${turn.userMsg.id}`;
 												const userCopyVisible = activeCopyId === userCopyKey;
-												const userTimestamp =
-													isMounted && userCreatedAt
-														? formatTimestamp(new Date(userCreatedAt))
-														: undefined;
 												// Only render the toolbar when it has content — copy
-												// button (gated by showCopyToolbar) or a timestamp.
+												// button (gated by showCopyToolbar).
 												// Otherwise a 28px-tall empty row inflates the gap to the
 												// assistant reply.
 												const showUserToolbar =
-													(showCopyToolbar && Boolean(text)) ||
-													Boolean(userTimestamp);
+													showCopyToolbar && Boolean(text);
 												const userMsgId = turn.userMsg.id;
 												const userVersion = versions?.[userMsgId];
 												const isEditingThis = editingId === userMsgId;
@@ -929,6 +974,7 @@ export const MessageList = memo(function MessageList({
 													>
 														<CustomUserMessage
 															className={classNames?.userMessage}
+															currentUser={currentUser}
 															editing={isEditingThis}
 															enableImagePreview={enableImagePreview}
 															message={turn.userMsg}
@@ -956,7 +1002,6 @@ export const MessageList = memo(function MessageList({
 																		: undefined
 																}
 																text={showCopyToolbar ? text : ""}
-																timestamp={userTimestamp}
 															/>
 														)}
 														{!isEditingThis &&
@@ -998,12 +1043,10 @@ export const MessageList = memo(function MessageList({
 												)?.createdAt;
 												const assistantTimestamp =
 													isMounted && assistantCreatedAt
-														? formatTimestamp(new Date(assistantCreatedAt))
-														: undefined;
+														? new Date(assistantCreatedAt)
+														: null;
 												const showToolbar =
-													(showCopyToolbar ||
-														Boolean(onSpeak) ||
-														Boolean(assistantTimestamp)) &&
+													(showCopyToolbar || Boolean(onSpeak)) &&
 													hasAssistantText &&
 													!isTurnStreaming;
 												const copyKey = `assistant-${turnKey}-all`;
@@ -1045,10 +1088,30 @@ export const MessageList = memo(function MessageList({
 																{assistantAvatar}
 															</MessageAvatar>
 														) : null}
-														<MessageContent>
+														<MessageContent className="gap-1.5">
 															{assistantName ? (
-																<MessageHeader className="px-0">
-																	{assistantName}
+																<MessageHeader className="gap-2 px-0">
+																	<span>{assistantName}</span>
+																	{assistantTimestamp && (
+																		<TooltipProvider delayDuration={0}>
+																			<Tooltip>
+																				<TooltipTrigger asChild>
+																					<span className="inline-flex items-center text-muted-foreground/70 text-xs">
+																						{formatRelativeTime(
+																							assistantTimestamp
+																						)}
+																					</span>
+																				</TooltipTrigger>
+																				<TooltipContent>
+																					<p>
+																						{formatFullTimestamp(
+																							assistantTimestamp
+																						)}
+																					</p>
+																				</TooltipContent>
+																			</Tooltip>
+																		</TooltipProvider>
+																	)}
 																</MessageHeader>
 															) : null}
 															<div className="flex flex-col gap-3">
@@ -1092,7 +1155,7 @@ export const MessageList = memo(function MessageList({
 																<MessageToolbar
 																	alignClass="justify-start"
 																	feedbackRating={feedbackRating}
-																	heightClass="h-[28px] w-full"
+																	heightClass="h-6 w-full"
 																	hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
 																	// Latest turn: pin the action buttons open so they
 																	// don't require a hover; older turns stay hover-only
@@ -1106,13 +1169,12 @@ export const MessageList = memo(function MessageList({
 																	onRegenerate={onRegenerateTurn}
 																	onSpeak={onSpeakTurn}
 																	text={toolbarText}
-																	timestamp={assistantTimestamp}
 																/>
 															) : activeCopyId === copyKey ? (
 																<MessageToolbar
 																	alignClass="justify-start"
 																	feedbackRating={feedbackRating}
-																	heightClass="h-[28px] w-full"
+																	heightClass="h-6 w-full"
 																	hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
 																	isVisible={true}
 																	onBranch={onBranchTurn}
@@ -1121,7 +1183,6 @@ export const MessageList = memo(function MessageList({
 																	onRegenerate={onRegenerateTurn}
 																	onSpeak={onSpeakTurn}
 																	text={toolbarText}
-																	timestamp={assistantTimestamp}
 																/>
 															) : null}
 															{assistantVersion &&

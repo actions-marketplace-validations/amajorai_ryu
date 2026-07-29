@@ -1,14 +1,16 @@
 import { useEffect, useRef } from "react";
 import { sileo } from "sileo";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
-import { toTarget } from "@/src/lib/api/client.ts";
+import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
+	applyNodeUpdate,
 	checkForUpdate,
 	FORCE_AUTO_UPDATE,
 	getAutoUpdateEnabled,
 	type UpdateCheck,
 } from "@/src/lib/api/update.ts";
 import { getReleaseChannel } from "@/src/lib/release-channel.ts";
+import { isLocalNode } from "@/src/store/useNodeStore.ts";
 
 // Launch-time auto-updater for the desktop. On mount it asks Core whether an
 // update is available (Core is the single source of truth for the verdict and
@@ -75,6 +77,37 @@ function openDownloads(url: string) {
 	window.open(url, "_blank", "noopener");
 }
 
+/**
+ * Apply the release-train update to the node the user is looking at.
+ *
+ * The single definition of "which updater is the right one", because it is not
+ * always this app's: Core, Gateway and the CLI ship INSIDE the desktop bundle,
+ * so for a local node the native updater moves all of them together. For a
+ * remote node (a cloud or LAN Core) that same updater would replace the local
+ * app and leave the remote binaries untouched — there the node must update
+ * itself through `POST /api/update/apply`.
+ *
+ * Returns a message when it did remote work, `null` when the native updater took
+ * over (it owns its own progress toasts and relaunch).
+ */
+export async function applyReleaseUpdate(
+	target: ApiTarget,
+	node: { url: string },
+	verdict: UpdateCheck
+): Promise<string | null> {
+	if (!isLocalNode(node)) {
+		if (!verdict.asset) {
+			throw new Error(
+				`No install asset published for v${verdict.latest} on this node's platform.`
+			);
+		}
+		const result = await applyNodeUpdate(target, verdict.asset);
+		return result.message;
+	}
+	await installUpdate(verdict);
+	return null;
+}
+
 // Drive the native install through tauri-plugin-updater, surfacing progress via
 // sileo. Falls back to a manual-download toast if the native feed is absent.
 // Exported so other surfaces (e.g. the node selector's Core/Gateway update
@@ -91,9 +124,6 @@ export async function installUpdate(verdict: UpdateCheck) {
 	// command is unavailable (older Core-less shell) or fails, we fall through to
 	// the manual-download fallback rather than trapping the user.
 	const channel = getReleaseChannel();
-	console.info(
-		`[FIX] installUpdate.entry: channel=${channel} current=${verdict.current} latest=${verdict.latest} update_available=${verdict.update_available} hasTauri=${typeof window !== "undefined" && "__TAURI_INTERNALS__" in window}`
-	);
 	if (channel !== "stable") {
 		const progressId = sileo.info({
 			title: `Downloading ${channel} update v${verdict.latest}…`,
@@ -154,9 +184,6 @@ export async function installUpdate(verdict: UpdateCheck) {
 		if (!update) {
 			// Core saw a release but the signed Tauri feed isn't reachable yet
 			// (typical in dev / before the release CI runs). Offer manual install.
-			console.info(
-				"[FIX] installUpdate.branch: took=stable-no-tauri-feed soft-success"
-			);
 			sileo.dismiss(progressId);
 			sileo.info({
 				title: `Update v${verdict.latest} available`,
@@ -172,7 +199,6 @@ export async function installUpdate(verdict: UpdateCheck) {
 			return;
 		}
 
-		console.info("[FIX] installUpdate.branch: took=stable-downloadAndInstall");
 		await update.downloadAndInstall();
 		sileo.dismiss(progressId);
 		sileo.success({
@@ -183,11 +209,7 @@ export async function installUpdate(verdict: UpdateCheck) {
 		setTimeout(() => {
 			relaunch().catch(() => undefined);
 		}, 1500);
-		console.info("[FIX] installUpdate.exit: result=installed-relaunching");
 	} catch (err) {
-		console.info(
-			`[FIX] installUpdate.threw-caught: err=${err instanceof Error ? err.message : String(err)} soft-success-no-rethrow`
-		);
 		sileo.dismiss(progressId);
 		sileo.error({
 			title: "Update failed",

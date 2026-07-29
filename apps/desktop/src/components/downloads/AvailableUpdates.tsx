@@ -131,35 +131,23 @@ export function AvailableUpdates({ compact = false }: { compact?: boolean }) {
 		return null;
 	}
 
+	// Failures are reported by `useAvailableUpdates` (one toast per outcome, for
+	// every kind), so callers only need to keep a rejection from escaping.
 	const runOne = (update: AvailableUpdate) => {
-		console.info(
-			`[FIX] AvailableUpdates.runOne: key=${update.key} kind=${update.kind}`
-		);
-		applyUpdate(update).catch((err: unknown) => {
-			console.info(
-				`[FIX] AvailableUpdates.runOne.swallowed: key=${update.key} err=${err instanceof Error ? err.message : String(err)}`
-			);
-		});
+		applyUpdate(update).catch(() => undefined);
 	};
 
 	const runAll = async () => {
-		console.info(
-			`[FIX] AvailableUpdates.runAll.entry: count=${updates.length} keys=${updates.map((u) => u.key).join(",")}`
-		);
 		setUpdatingAll(true);
 		try {
 			for (const update of updates) {
-				// Sequential on purpose — see note above.
-				await applyUpdate(update).catch((err: unknown) => {
-					console.info(
-						`[FIX] AvailableUpdates.runAll.swallowed: key=${update.key} err=${err instanceof Error ? err.message : String(err)}`
-					);
-				});
+				// Sequential on purpose — see note above. One failure must not abort
+				// the rest of the run, so each is caught individually.
+				await applyUpdate(update).catch(() => undefined);
 			}
 		} finally {
 			setUpdatingAll(false);
 			refresh();
-			console.info("[FIX] AvailableUpdates.runAll.exit");
 		}
 	};
 

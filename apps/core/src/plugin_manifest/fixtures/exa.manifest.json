@@ -55,6 +55,47 @@
       }
     },
     {
+      "id": "tool-exa-free-search",
+      "name": "Exa Search (no key)",
+      "kind": "tool",
+      "config": {
+        "slug": "exa__free_search",
+        "backend": "http",
+        "method": "POST",
+        "url": "https://mcp.exa.ai/mcp",
+        "header_params": ["Accept"],
+        "fail_open": true,
+        "unwrap_body": true,
+        "description": "Web search through Exa's PUBLIC MCP endpoint, which needs no API key. Rate-limited free tier, intended as the zero-setup fallback when RYU_EXA_API_KEY is unset; add a key to use the higher-limit exa__search instead. Speaks JSON-RPC: the caller supplies the whole `tools/call` envelope, and the reply is a text/event-stream frame, so the capability adapter parses it rather than a response map.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "Accept": {
+              "type": "string",
+              "description": "Sent as the Accept header. The endpoint 406s unless it names BOTH application/json and text/event-stream."
+            },
+            "jsonrpc": {
+              "type": "string",
+              "description": "JSON-RPC version, always \"2.0\"."
+            },
+            "id": {
+              "type": "integer",
+              "description": "JSON-RPC request id."
+            },
+            "method": {
+              "type": "string",
+              "description": "JSON-RPC method, always \"tools/call\"."
+            },
+            "params": {
+              "type": "object",
+              "description": "`{name, arguments}` naming the Exa MCP tool to call and its arguments."
+            }
+          },
+          "required": ["Accept", "jsonrpc", "id", "method", "params"]
+        }
+      }
+    },
+    {
       "id": "tool-exa-find-similar",
       "name": "Exa Find Similar",
       "kind": "tool",
@@ -91,5 +132,43 @@
       }
     }
   ],
-  "permission_grants": ["tool:http-egress:api.exa.ai"]
+  "provides": [
+    {
+      "capability": "web.search",
+      "version": "1.0.0",
+      "selectable": true,
+      "default": true,
+      "tools": {
+        "web__search": {
+          "tool": "exa__search",
+          "adapter": {
+            "tools": ["exa__free_search"],
+            "code": "// exa is the ONE search provider shipped enabled by default, so it has to work\n// with no credential at all. Exa's REST search needs a key; Exa's PUBLIC MCP\n// endpoint does not. Try the keyed path first (higher limits, richer fields) and\n// fall back to the free endpoint only when the key is genuinely absent.\n//\n// `fail_open` turns a 401/403 into {available:false,...}, which IS the\n// no-key signal and the only condition worth retrying. Anything else - a 5xx, a\n// rate limit, a transport failure - is passed straight through, so a broken key\n// costs ONE request rather than two.\n// `limit` is optional on the canonical verb. Passing it through as\n// `undefined` is SAFE and deliberate: the sandbox serializes args with\n// JSON.stringify, which omits undefined values entirely, so the key is\n// absent rather than null and exa__search's `body_defaults.num_results`\n// still applies. Do not \"fix\" this into a conditional - sending an\n// explicit null WOULD override the default.\nconst keyed = await callTool({ query: input.query, num_results: input.limit });\nconst shape = (items, provider) => ({\n  results: (items || []).map((it) => ({\n    title: it.title,\n    url: it.url,\n    snippet: it.snippet,\n    published: it.published,\n    author: it.author,\n    score: it.score,\n    raw: it.raw,\n  })),\n  via: provider,\n});\nif (keyed && Array.isArray(keyed.results)) {\n  return shape(\n    keyed.results.map((r) => ({\n      title: r.title,\n      url: r.url,\n      snippet: r.text,\n      published: r.publishedDate,\n      author: r.author,\n      score: r.score,\n      raw: r,\n    })),\n    \"api.exa.ai\"\n  );\n}\nif (!(keyed && keyed.available === false)) {\n  // Not a missing key: a real failure envelope. Pass it through untouched rather\n  // than masking a broken key or an outage behind free-tier results.\n  return { raw: keyed };\n}\nconst free = await callNamed(\"exa__free_search\", {\n  Accept: \"application/json, text/event-stream\",\n  jsonrpc: \"2.0\",\n  id: 1,\n  method: \"tools/call\",\n  params: {\n    name: \"web_search_exa\",\n    arguments: { query: input.query, numResults: input.limit },\n  },\n});\n// The endpoint answers text/event-stream, so the http tool hands back the raw\n// frame as a string: `event: message\\ndata: {json}`. Pull the JSON out.\nif (typeof free !== \"string\") {\n  return { raw: free };\n}\nlet payload = null;\nfor (const line of free.split(\"\\n\")) {\n  if (line.startsWith(\"data: \")) {\n    try {\n      payload = JSON.parse(line.slice(6));\n    } catch (e) {\n      payload = null;\n    }\n  }\n}\nconst text =\n  payload && payload.result && payload.result.content && payload.result.content[0]\n    ? payload.result.content[0].text\n    : null;\nif (typeof text !== \"string\") {\n  return { raw: free };\n}\n// Records are separated by a `---` line, each a block of `Key: value` headers\n// followed by a Highlights body. Verified against live output, not guessed.\nconst items = text\n  .split(/\\n-{3,}\\n/)\n  .map((block) => block.trim())\n  .filter(Boolean)\n  .map((block) => {\n    const field = (name) => {\n      const m = block.match(new RegExp(\"^\" + name + \": (.*)$\", \"m\"));\n      const v = m ? m[1].trim() : \"\";\n      return v && v !== \"N/A\" ? v : undefined;\n    };\n    const cut = block.indexOf(\"Highlights:\");\n    const body = cut >= 0 ? block.slice(cut + \"Highlights:\".length).trim() : \"\";\n    return {\n      title: field(\"Title\"),\n      url: field(\"URL\"),\n      snippet: body || undefined,\n      published: field(\"Published\"),\n      author: field(\"Author\"),\n      score: undefined,\n      raw: block,\n    };\n  });\nreturn shape(items, \"mcp.exa.ai (free tier, no key)\");"
+          }
+        }
+      }
+    }
+  ],
+  "permission_grants": [
+    "tool:http-egress:api.exa.ai",
+    "tool:http-egress:mcp.exa.ai",
+    "tool:execute"
+  ],
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "exa.settings",
+        "title": "Exa Search",
+        "scope": "node",
+        "fields": [
+          {
+            "type": "secret",
+            "pref_key": "RYU_EXA_API_KEY",
+            "label": "Exa API key",
+            "description": "Create a key at https://dashboard.exa.ai/api-keys and paste it here. Stored encrypted on this node and never shown again — re-paste to change it. Without a key the Exa tools stay installed but return nothing, so `web.search` falls back to whichever other provider you select."
+          }
+        ]
+      }
+    ]
+  }
 }

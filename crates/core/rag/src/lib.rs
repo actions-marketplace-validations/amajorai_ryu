@@ -1498,6 +1498,16 @@ fn memory_tenancy_allows(chunk: &RetrievableChunk, opts: &RetrievalOptions) -> b
     let scope = chunk.mem_scope.as_deref().unwrap_or("user");
     match scope {
         "node" | "project" => true,
+        // Org scope: visible to a caller in THAT org. Deliberately matched on
+        // `mem_scope_id` (which mirrors the store's `scope_id`) rather than the
+        // denormalized `owner_org_id`, so this stays the exact twin of
+        // `MEMORY_VISIBLE_PREDICATE` — the two must agree, and agreeing is easier to
+        // verify when they read the same field. A missing scope id or caller org
+        // fails closed.
+        "org" => matches!(
+            (chunk.mem_scope_id.as_deref(), opts.caller_org_id.as_deref()),
+            (Some(chunk_org), Some(caller_org)) if chunk_org == caller_org
+        ),
         // user scope (and any unknown scope, treated as user) → owner-only.
         _ => matches!(
             (chunk.owner_user_id.as_deref(), opts.caller_user_id.as_deref()),
@@ -1540,14 +1550,27 @@ fn space_tenancy_allows(chunk: &RetrievableChunk, opts: &RetrievalOptions) -> bo
 
 /// Whether a `Memory` chunk passes the caller's level + active-project filter.
 /// Legacy chunks with no `mem_scope` are treated as `"user"` (broadly visible).
-/// `read_levels == None` allows every level (unconfigured / back-compat).
+/// `read_levels == None` allows every level EXCEPT `"org"` (see below).
 /// Project-scoped chunks require `mem_scope_id == opts.project_id`.
+///
+/// **Org is opt-in.** `read_levels == None` means "unconfigured", and every agent
+/// that predates org scope is unconfigured. Letting the permissive default cover
+/// `"org"` would hand all of them organization-wide memory the moment the level
+/// shipped — a privacy default change smuggled in as a schema addition. So `"org"`
+/// is only ever returned when an agent NAMES it, matching
+/// `MemoryStore::effective_levels`, which excludes it from its default set for the
+/// same reason. The two defaults must agree or the store and the retrieval index
+/// disagree about what an unconfigured agent can see.
 fn memory_level_matches(chunk: &RetrievableChunk, opts: &RetrievalOptions) -> bool {
     let scope = chunk.mem_scope.as_deref().unwrap_or("user");
-    if let Some(levels) = &opts.read_levels {
-        if !levels.iter().any(|l| l == scope) {
-            return false;
+    match &opts.read_levels {
+        Some(levels) => {
+            if !levels.iter().any(|l| l == scope) {
+                return false;
+            }
         }
+        None if scope == "org" => return false,
+        None => {}
     }
     if scope == "project" {
         return match (chunk.mem_scope_id.as_deref(), opts.project_id.as_deref()) {

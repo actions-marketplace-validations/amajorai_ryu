@@ -502,7 +502,19 @@ async fn seed_optin_companion_ui(store: &PluginStore, manifests: &[PluginManifes
 }
 
 /// The store schema version this build expects. Bump when adding a migration below.
-const STORE_SCHEMA_VERSION: i64 = 1;
+///
+/// Each step below is gated on its OWN version (`current < N`), not just on this
+/// total. Re-running an earlier step at a later bump would re-assert a value the
+/// user is entitled to have changed since — e.g. bumping to 2 and letting v1 stores
+/// re-run the v1 grant backfill would re-grant `ghost:record` to everyone who
+/// revoked it between v1 and v2, which is exactly what
+/// `a_later_revocation_is_never_undone_by_a_second_run` forbids (that test cannot
+/// see it, because it only ever runs against one const value).
+///
+/// - v1: backfill host-api grants onto pre-existing records ([`backfill_host_api_grants`]).
+/// - v2: re-enable the Learning app's record so its consent switches are reachable
+///   again ([`restore_learning_consent_surface`]).
+const STORE_SCHEMA_VERSION: i64 = 2;
 
 /// One-time data migrations for ALREADY-INSTALLED stores.
 ///
@@ -537,6 +549,15 @@ const STORE_SCHEMA_VERSION: i64 = 1;
 /// `~/.ryu/plugins` must never self-approve, which is the whole point of the Gateway
 /// gate. Only grants the built-in's own fixture declares, and only ADDITIVE
 /// (`add_approved_grants` can never revoke).
+///
+/// # Steps
+///
+/// One fn per schema version, each gated on `current < N` so a store that already ran
+/// an earlier step never re-runs it (see [`STORE_SCHEMA_VERSION`]):
+///
+/// - v1 [`backfill_host_api_grants`] — the host-callback grant repair described above.
+/// - v2 [`restore_learning_consent_surface`] — re-enable `com.ryu.learning`, whose
+///   record now owns the consent switches for a capture path the kernel runs anyway.
 pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginManifest]) {
     let current = match store.schema_version().await {
         Ok(v) => v,
@@ -549,6 +570,28 @@ pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginMan
         return;
     }
 
+    if current < 1 {
+        backfill_host_api_grants(store, manifests).await;
+    }
+    if current < 2 {
+        restore_learning_consent_surface(store).await;
+    }
+
+    if let Err(e) = store.set_schema_version(STORE_SCHEMA_VERSION).await {
+        // Not fatal, but not free either: a failed version write means every step is
+        // attempted again next boot, and re-running a step RE-ASSERTS its value. If
+        // the user changed that value in between, the re-run silently overrides them
+        // — v1 would re-grant a revoked `ghost:record`, v2 would re-enable a Learning
+        // record the user just disabled. That is the same class of bug the version
+        // gate exists to prevent, narrowed to the window between a failed PRAGMA
+        // write and the next restart. Only a store that cannot be written to at all
+        // reaches here, so the narrow exposure is accepted rather than retried.
+        tracing::warn!("store migration: recording schema version failed: {e}");
+    }
+}
+
+/// **v1** — see [`run_one_time_migrations`] for the why.
+async fn backfill_host_api_grants(store: &PluginStore, manifests: &[PluginManifest]) {
     for manifest in manifests {
         if !crate::plugins::builtins::is_compiled_in_manifest(&manifest.id) {
             continue;
@@ -582,9 +625,9 @@ pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginMan
                 }
                 match store.add_approved_grants(&manifest.id, &missing).await {
                     Ok(_) => tracing::info!(
-                        "store migration v{STORE_SCHEMA_VERSION}: backfilled host-api grant(s) \
-                         {missing:?} for built-in '{}' (its host callbacks became \
-                         capability-gated; a pre-existing record predates the grant)",
+                        "store migration v1: backfilled host-api grant(s) {missing:?} for \
+                         built-in '{}' (its host callbacks became capability-gated; a \
+                         pre-existing record predates the grant)",
                         manifest.id
                     ),
                     Err(e) => tracing::warn!(
@@ -595,11 +638,123 @@ pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginMan
             }
         }
     }
+}
 
-    if let Err(e) = store.set_schema_version(STORE_SCHEMA_VERSION).await {
-        // Not fatal: the backfill is additive and idempotent, so a failed version
-        // write only means it is attempted again next boot.
-        tracing::warn!("store migration: recording schema version failed: {e}");
+/// **v2** — restore the Learning app's record (enabled) on installs that already
+/// had one, so its consent switches are reachable again.
+///
+/// # The regression this repairs
+///
+/// The two learning consent switches moved out of Privacy settings and into an
+/// app-registered settings tab (`contributes.settings_tabs` in the `com.ryu.learning`
+/// manifest, rendered by the desktop's `LearningSettings.tsx`). An app-registered tab
+/// only renders while its owning app is ENABLED. Adding the id to [`CORE_DEFAULT_ON`]
+/// fixes fresh installs only: [`seed_default_on`] short-circuits on
+/// `Ok(Some(_)) => continue`, and Learning was default-OFF until now, so essentially
+/// every pre-existing install carries a `com.ryu.learning` record at `enabled = false`.
+/// Those users would see NO consent switches at all.
+///
+/// # Why enabling the record is safe — the whole justification
+///
+/// **The app record is not the consent.** The consent is the two preferences, and this
+/// migration does not touch either: `learning.enabled` (the training/PRM opt-in) stays
+/// OFF, and `learning.skills-enabled` keeps whatever the user set. Enabling the record
+/// only makes the settings SURFACE and the `/api/learn/*` routes reachable again — it
+/// restores a control the user lost, it does not turn anything on.
+///
+/// Nothing about what actually RUNS changes, because the capture and the cycle were
+/// never gated on the record in the first place: the scheduler keeps running its
+/// `JobTarget::LearningCycle` job and the in-process `ExperienceStore` keeps capturing
+/// `(user, assistant)` turns whether the app is enabled or not (see the
+/// `learning_routes` doc — "Only the HTTP surface is gated"). Nor does any boot path
+/// seed global state from this record, the way `main.rs` seeds `dictation::set_enabled
+/// (rec.enabled)` and `predict::set_enabled(rec.enabled)`; and the manifest declares no
+/// sidecar and no `mcp_servers`, so flipping the bit spawns nothing. That asymmetry —
+/// still running, but no longer switchable off — is precisely why the surface must be
+/// restored.
+///
+/// # Scope
+///
+/// Exactly one id, looked up through [`default_on_specs`], which is derived from
+/// [`CORE_DEFAULT_ON`] ⊂ `CORE_PLUGINS` ⊂ compiled-in built-ins — a tighter scope than
+/// the v1 step's `is_compiled_in_manifest` guard, and self-limiting: if Learning ever
+/// leaves the default-on set again, this step stops asserting anything. No other app
+/// is touched, and a record that is already enabled (or absent — an install that never
+/// had Learning is a fresh-seed case, not an upgrade case) is left alone.
+///
+/// # Why this does not re-derive the dependency graph
+///
+/// The module header promises the store-only write never bypasses the graph, and
+/// Learning is the plugin that made that promise concrete — it `requires` the `skills`
+/// app. This step still calls `set_enabled` directly, deliberately: a satisfiability
+/// guard would turn a ONE-SHOT migration into a permanent no-op for anyone who has
+/// `skills` disabled, stranding exactly the users the repair exists for, with no second
+/// bump to save them. The exposure is small and recoverable in a way the alternative is
+/// not: `skills` is default-on (so a disabled dependency is rare), enabling Learning is
+/// one bit with no sidecar and no spawn, and a half-enabled pair is re-derived by the
+/// ordinary enable/disable path the moment either app is toggled — whereas a silently
+/// skipped one-shot migration is not recoverable at all.
+///
+/// # Why once, not every boot
+///
+/// The version gate is the entire safety property: a user who disables Learning AFTER
+/// this migration must stay disabled across every subsequent restart. A reconcile that
+/// re-enabled it on every boot would take the off-switch away permanently, which is the
+/// same class of bug as the one being repaired.
+async fn restore_learning_consent_surface(store: &PluginStore) {
+    let id = crate::plugins::builtins::LEARNING_PLUGIN_ID;
+    let Some(spec) = default_on_specs().into_iter().find(|s| s.id == id) else {
+        return;
+    };
+
+    let record = match store.get(id).await {
+        // Already enabled, or never installed — nothing to repair. (The absent case
+        // belongs to `seed_default_on`, which conjures no record it did not create.)
+        Ok(Some(record)) if record.enabled => return,
+        Ok(None) => return,
+        Ok(Some(record)) => record,
+        Err(e) => {
+            tracing::warn!("store migration v2: lookup '{id}' failed: {e}");
+            return;
+        }
+    };
+
+    // A record written during the default-OFF era has NO `ui_code`: nothing but
+    // `seed_overrides` sources a built-in's companion bundle (neither `install_app`
+    // nor `enable_app` does — that is the whole reason `seed_optin_companion_ui`
+    // exists), and the default-on seed loop skipped this record. Enabling without it
+    // would trade a missing switch for a companion that mounts as "no runnable UI".
+    // Only ever FILLS a gap; a record that already has a bundle is left alone.
+    if let Some(ui_code) = spec.ui_code {
+        match store.has_ui_code(id).await {
+            Ok(false) => {
+                if let Err(e) = store.set_ui_code(id, Some(ui_code)).await {
+                    tracing::warn!("store migration v2: set_ui_code '{id}' failed: {e}");
+                }
+            }
+            Ok(true) => {}
+            Err(e) => tracing::warn!("store migration v2: ui_code lookup '{id}' failed: {e}"),
+        }
+    }
+
+    // Union, never replace: the v1 step above adds grants WITHOUT touching `enabled`,
+    // so a record can reach here already carrying grants that a bare
+    // `set_enabled(id, &spec.grants)` would silently drop.
+    let mut grants = record.approved_grants.clone();
+    for g in spec.grants {
+        if !grants.iter().any(|have| have == *g) {
+            grants.push((*g).to_owned());
+        }
+    }
+
+    match store.set_enabled(id, &grants).await {
+        Ok(_) => tracing::info!(
+            "store migration v2: re-enabled '{id}' so its consent switches are reachable \
+             again (the record is not the consent — `learning.enabled` stays OFF and \
+             `learning.skills-enabled` is untouched; capture + the learning cycle were \
+             never gated on this record)"
+        ),
+        Err(e) => tracing::warn!("store migration v2: enabling '{id}' failed: {e}"),
     }
 }
 
@@ -689,6 +844,156 @@ mod migration_tests {
             record.approved_grants.is_empty(),
             "a disk manifest must never self-approve a host-api grant, got {:?}",
             record.approved_grants
+        );
+    }
+
+    const LEARNING: &str = crate::plugins::builtins::LEARNING_PLUGIN_ID;
+    const QUESTS: &str = crate::plugins::builtins::QUESTS_PLUGIN_ID;
+
+    /// THE consent-surface regression (v2). Learning was default-OFF until its two
+    /// consent switches moved onto its app-registered settings tab, so essentially
+    /// every pre-existing install has a `com.ryu.learning` record at `enabled = false`
+    /// — and an app-registered tab only renders while its app is enabled. The seed
+    /// loop cannot fix it (`Ok(Some(_)) => continue`), so those users lose the
+    /// off-switch for a capture path the kernel keeps running regardless of the record.
+    #[tokio::test]
+    async fn the_learning_consent_surface_is_restored_on_a_pre_existing_disabled_record() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        // The pre-upgrade state: installed, and the user (or the old default-OFF
+        // posture) left it disabled.
+        store.insert(LEARNING, "1.0.0").await.unwrap();
+        store.set_disabled(LEARNING).await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        let record = store.get(LEARNING).await.unwrap().unwrap();
+        let ui = store
+            .get_ui_code(LEARNING)
+            .await
+            .unwrap()
+            .expect("a re-enabled record must carry its companion bundle, not mount empty");
+        assert!(
+            ui.len() > 10_000 && ui.contains('<'),
+            "learning ui_code must be the real inlined companion bundle, got {} bytes",
+            ui.len()
+        );
+        assert!(
+            record.enabled,
+            "learning must be re-enabled so its settings tab (and /api/learn/*) is \
+             reachable again"
+        );
+        assert!(
+            record.approved_grants.iter().any(|g| g == "learning:crud"),
+            "a re-enabled record must carry the grants a fresh install would have, got {:?}",
+            record.approved_grants
+        );
+    }
+
+    /// The property that makes v2 safe, mirroring
+    /// `a_later_revocation_is_never_undone_by_a_second_run`: the version gate. A user
+    /// who disables Learning AFTER the migration must stay disabled across every later
+    /// restart — a boot reconcile would take the off-switch away permanently, the same
+    /// class of bug the migration repairs.
+    ///
+    /// This FAILS if the version gating is removed — but note it takes BOTH gates to
+    /// turn it red, because they are redundant for v2: dropping only the
+    /// `current >= STORE_SCHEMA_VERSION` early return still leaves `current < 2` false
+    /// on the second run, and dropping only `current < 2` still hits the early return.
+    /// So this test pins the PROPERTY (run-once, never a reconcile), not either gate in
+    /// isolation. `a_v1_store_gets_only_the_v2_step` is what pins the per-step gate.
+    /// The first assert below is load-bearing in the other direction: it fails if the
+    /// v2 step is removed outright, which keeps the tail assert from passing vacuously.
+    #[tokio::test]
+    async fn a_later_learning_disable_is_never_undone_by_a_second_run() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+        store.insert(LEARNING, "1.0.0").await.unwrap();
+        store.set_disabled(LEARNING).await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+        assert!(store.get(LEARNING).await.unwrap().unwrap().enabled);
+
+        // The user turns Learning off again.
+        store.set_disabled(LEARNING).await.unwrap();
+        // Every subsequent boot.
+        run_one_time_migrations(&store, &manifests).await;
+        run_one_time_migrations(&store, &manifests).await;
+
+        assert!(
+            !store.get(LEARNING).await.unwrap().unwrap().enabled,
+            "a deliberate disable must survive every later boot"
+        );
+    }
+
+    /// v2 is exactly one id. It must not become a general "re-enable the default-on
+    /// set" reconcile: another app the user disabled stays disabled, and a default-OFF
+    /// built-in is never enabled at all.
+    #[tokio::test]
+    async fn the_learning_migration_enables_no_other_app() {
+        assert!(
+            crate::plugins::builtins::CORE_PLUGINS.contains(&QUESTS)
+                && !CORE_DEFAULT_ON.contains(&QUESTS),
+            "'{QUESTS}' must be a built-in that is NOT default-on for this test to mean \
+             anything"
+        );
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        store.insert(LEARNING, "1.0.0").await.unwrap();
+        store.set_disabled(LEARNING).await.unwrap();
+        // A default-ON app the user deliberately turned off.
+        store.insert(RECIPES, "1.0.0").await.unwrap();
+        store.set_disabled(RECIPES).await.unwrap();
+        // A default-OFF built-in, never enabled.
+        store.insert(QUESTS, "1.0.0").await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        assert!(store.get(LEARNING).await.unwrap().unwrap().enabled);
+        assert!(
+            !store.get(RECIPES).await.unwrap().unwrap().enabled,
+            "another default-on app the user disabled must stay disabled"
+        );
+        assert!(
+            !store.get(QUESTS).await.unwrap().unwrap().enabled,
+            "a default-off built-in must never be enabled by this migration"
+        );
+    }
+
+    /// Each step is gated on its OWN version, so bumping the schema for v2 must NOT
+    /// drag the v1 grant backfill along for a store that already ran it: re-running it
+    /// would re-grant `ghost:record` to everyone who revoked it between v1 and v2 —
+    /// the same "a reconcile silently overrides the user" bug the version gate exists
+    /// to prevent, invisible to the single-version revocation test above.
+    #[tokio::test]
+    async fn a_v1_store_gets_only_the_v2_step() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+        store.set_schema_version(1).await.unwrap();
+
+        // Enabled, and the user revoked the grant the v1 backfill had given it.
+        store.insert(RECIPES, "1.0.0").await.unwrap();
+        store.set_enabled(RECIPES, &[]).await.unwrap();
+        store.insert(LEARNING, "1.0.0").await.unwrap();
+        store.set_disabled(LEARNING).await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        assert!(
+            store
+                .get(RECIPES)
+                .await
+                .unwrap()
+                .unwrap()
+                .approved_grants
+                .is_empty(),
+            "the v1 backfill must not re-run for a store already at v1"
+        );
+        assert!(
+            store.get(LEARNING).await.unwrap().unwrap().enabled,
+            "the v2 step must still run for a store at v1"
         );
     }
 
@@ -867,14 +1172,17 @@ mod tests {
         assert_eq!(
             with_ui,
             vec![
+                crate::plugins::builtins::LEARNING_PLUGIN_ID,
                 crate::plugins::builtins::WEBHOOKS_PLUGIN_ID,
                 crate::plugins::builtins::CALENDAR_PLUGIN_ID,
             ],
             "only the companions that STAY default-on ship a prebuilt UI bundle, in \
              CORE_DEFAULT_ON order. The other companion apps (whiteboard/canvas/finetune/ \
-             meetings/quests/approvals/learning/monitors/workflows/activity/timeline/ \
-             skill-editor) are now opt-in (default-off), so they leave the default-on seed \
-             even though their SeedSpec overrides still carry ui_code (inert until enabled)"
+             meetings/quests/approvals/monitors/workflows/activity/timeline/skill-editor) \
+             are opt-in (default-off), so they leave the default-on seed even though their \
+             SeedSpec overrides still carry ui_code (inert until enabled). `learning` is \
+             back in the set: it owns the consent switches for a capture path the kernel \
+             runs regardless of the record (see CORE_DEFAULT_ON)"
         );
         // Non-companion Core plugins seed with EMPTY grants, exactly as the generic
         // loop did before this module existed.

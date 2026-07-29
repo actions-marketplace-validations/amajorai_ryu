@@ -80,7 +80,33 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   allowlist. The native `sidecar/mcp/spider.rs` provider was deleted, so the
 ///   fixture is the SOLE owner of the tool (see the exception note below).
 /// - `agentbrowser.manifest.json` — Agent Browser web-browsing tool (system plugin, npx MCP-backed).
-/// - `exa.manifest.json` — Exa neural search tool plugin (U040, BYOK).
+/// - `exa.manifest.json` — Exa neural search tool plugin (U040, BYOK). Provides the
+///   selectable `web.search` capability and is its declared default.
+/// - `layers.manifest.json` — settings for the swappable capability layers. Owns the
+///   `layer.<capability>.default.<arg>` preferences the capability tool facade merges
+///   under every verb call. Deliberately NOT attached to any one provider: the
+///   defaults apply whichever provider is selected, so hanging them off `exa` would
+///   make them vanish the moment the user swapped to `tavily`.
+/// - `tavily.manifest.json` — Tavily search+extract tool plugin (BYOK). The second
+///   provider of `web.search`, which is what makes the layer demonstrably swappable:
+///   selecting it re-points the stable `web__search` tool without changing the id or
+///   schema an agent sees.
+/// - `brave.manifest.json` — Brave Search tool plugin (BYOK). A third `web.search`
+///   provider, and the one that proves the capability SPLIT was right: Brave's API is
+///   search-only, so it declares `web.search` and neither `web.extract` nor
+///   `web.crawl`. Its single tool is a GET whose arguments become query parameters,
+///   so the verb binding renames the canonical `query`/`limit` onto Brave's real
+///   query params `q`/`count`.
+/// - `serper.manifest.json` — Serper Google-results tool plugin (BYOK, paid/credit-metered).
+///   A `web.search` provider whose value is that the results are Google's own, and a
+///   `web.extract` provider through a SEPARATE host: search is `POST
+///   google.serper.dev/search`, scraping is `POST scrape.serper.dev` with no path at
+///   all, so the manifest carries two egress grants rather than one. Neither of
+///   Serper's argument names is canonical — the query is `q` and the result count is
+///   `num` — so both are renamed in the verb binding. The extract binding declares
+///   `response.fields` but NO `results` path on purpose: a scrape answers with a
+///   single record (`text` / `markdown`), not an array, which the contract reads as
+///   "the response itself is the record".
 /// - `ghost.manifest.json` — Ghost desktop-automation MCP tool (system plugin, Windows-first).
 /// - `shadow.manifest.json` — Shadow screen/audio capture + semantic memory (system plugin, Windows-first).
 ///
@@ -113,10 +139,146 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 /// - `engines.manifest.json` — Local engine bindings (llama.cpp + embeddings) as a default-on Core plugin (#448).
 /// - `durable.manifest.json` — Durable workflow execution engine as a default-on Core plugin (#448 dogfood).
 /// - `predict.manifest.json` — System-wide predictive typing on/off (a `predict` Policy runnable; Core-tier, opt-in). The plugin is the single switch for the `/api/predict/*` brain.
+/// - `firecrawl.manifest.json` — Firecrawl search+scrape tool plugin (BYOK, v2 API).
+///   A third provider of `web.search` and `web.extract`, claiming `default` on
+///   neither (`exa` owns the former, `spider` the latter). It deliberately does NOT
+///   provide `web.crawl`, even though Firecrawl has a crawl endpoint: `POST
+///   /v2/crawl` is ASYNCHRONOUS — it answers `{success, id, url}` and the pages only
+///   arrive from a second `GET /v2/crawl/{id}` poll. A declarative `http` tool is one
+///   request with no polling loop, so binding `web__crawl` to it would hand the model
+///   a job id where the verb promises page content. Declaring the capability with a
+///   partial `tools` map would be worse still: the entry would join resolution for
+///   `web.crawl` and could win the pick away from `spider`, silently killing a layer
+///   that currently works. Hence the entry is absent rather than empty.
+/// - `mem0.manifest.json` — Mem0 hosted memory tool plugin (BYOK, Platform REST API).
+///   The SECOND provider of the `memory` capability, and the one that makes that layer
+///   swappable at all — until it shipped, `com.ryu.memory` was the only provider, so
+///   `memory_provider.rs`'s four kernel bridges (each guarded by `if !is_external()`)
+///   were unreachable by construction. It is `selectable` and claims NO `default`:
+///   `com.ryu.memory` keeps that, so the built-in stays the zero-config pick.
+///   It binds `memory__search`, `memory__forget`, `memory__store` and `memory__sync`.
+///   The two WRITE verbs became bindable only with `CapabilityToolBinding.arg_template`:
+///   Mem0's write endpoint is `POST /v3/memories/add/`, whose `messages` field is an
+///   array of `{role, content}` OBJECTS, and the flat rename table's one shape
+///   transform — the `[]` suffix — produces an array of the SCALAR it was given,
+///   i.e. `["fact"]`, which is not the documented item type. The template builds the
+///   documented shape directly, so `memory_provider`'s `mirror` and `sync` bridges are
+///   now reachable. Both verbs post to the SAME endpoint and differ in one documented
+///   field: `memory__store` sends `infer: false` (the caller already decided the fact,
+///   so Mem0 stores the text as-is) while `memory__sync` leaves Mem0's default
+///   inference on and lets it mine the raw turn. That endpoint is ASYNCHRONOUS —
+///   it answers `{message, status: "PENDING", event_id}` — so neither verb returns a
+///   fact id and `event_id` must never be fed to `memory__forget`; both bridges are
+///   fire-and-forget and never read the response, which is why this is acceptable.
+///   `memory__context` stays UNBOUND because Mem0 publishes no standing-summary
+///   endpoint (see the memory section of https://docs.mem0.ai/llms.txt), so while Mem0
+///   is selected the facade serves four of the five memory verbs.
+///   The entity id is pinned from ONE `mem0.user-id` preference through `arg_defaults`
+///   but sits in two different places, because Mem0's own API does: INSIDE `filters`
+///   for search (a top-level `user_id` is rejected with 400) and TOP-LEVEL for add.
+///   Copying the search shape onto add would drop the entity and the write would be
+///   rejected — see `plugins-store/mem0/README.md`.
+/// - `honcho.manifest.json` — Honcho hosted memory tool plugin (BYOK, `api.honcho.dev`
+///   v3 REST API). The FIRST provider of `memory__context`, which is why it exists:
+///   `memory_provider::context` and the `memory.provider-context` setting had no
+///   provider that declared the verb, so that kernel bridge was unreachable by
+///   construction. `selectable`, claiming NO `default` — `com.ryu.memory` keeps it.
+///   `memory__context` binds Honcho's Dialectic endpoint,
+///   `POST /v3/workspaces/{workspace_id}/peers/{peer_id}/chat`, whose documented
+///   response is `{content}` — one of the four keys `memory_provider::summary_text`
+///   reads. That is why the binding declares NO `response` map: the facade's
+///   un-normalized `{provider, raw}` passthrough puts `content` exactly one level in,
+///   where `summary_text` finds it, whereas ANY `response` map would rewrite the
+///   payload into `{provider, results:[…]}` — a shape that function cannot read, so
+///   mapping it "properly" would silently produce no context at all.
+///   `memory__search` binds `POST .../peers/{peer_id}/search`, which searches that
+///   peer's MESSAGES (conversation text) rather than Honcho's derived conclusions;
+///   worth knowing because the `prefetch` bridge is on by default. Honcho's `limit`
+///   maxes at 100 against the canonical 50, so it NARROWS nothing and no `arg_clamp`
+///   is declared.
+///   Both WRITE verbs (`memory__sync`, `memory__store`) are bound through an
+///   ADAPTER, and the reason they need one is the cleanest example of why adapters
+///   exist. Honcho's only documented write is
+///   `POST /v3/workspaces/{workspace_id}/sessions/{session_id}/messages`, whose
+///   `messages[]` items each require a `peer_id`. `arg_template` can build an array of
+///   objects, but `map_args_with_defaults` expands the template from the CALLER's
+///   arguments only — `arg_defaults`, and therefore `pref:` tokens, are merged after
+///   and cannot reach inside it — so the per-install peer id had nowhere to go and
+///   both verbs went unbound, which is what made `memory.mirror-builtin` (default ON)
+///   inert while Honcho was selected. An adapter receives those defaults ALREADY
+///   RESOLVED, so the peer lands inside `messages[]` without hardcoding one bucket
+///   for every install. Session and peers are caller-named and the adapter upserts
+///   them on first write (optimistically: one request in the steady state, two extra
+///   only when the write reports the resource missing), so nothing has to be created
+///   by hand. Ryu's own replies are written as a SEPARATE peer — attributing an
+///   assistant turn to the user's peer would poison the representation Honcho derives
+///   about them. `memory__forget` is still unbound: Honcho documents no
+///   message-delete endpoint, which no adapter can invent.
+///   Workspace and peer are pinned per install from `honcho.workspace-id` /
+///   `honcho.peer-id` through `arg_defaults`, filling the two URL path placeholders;
+///   unset, the token drops and the call fails loudly with a missing path parameter
+///   rather than quietly reading somebody else's bucket. `reasoning_level` is layered:
+///   the tool's `body_defaults` pin `minimal` (the kernel abandons a memory provider
+///   after `PROVIDER_TIMEOUT`, 4s, and a deeper Dialectic pass routinely costs more),
+///   and the optional `honcho.reasoning-level` preference overrides it because
+///   `body_defaults` merge UNDER the args — see `plugins-store/honcho/README.md`.
+/// - `bytebot.manifest.json` — the SECOND provider of `computer.control`, which until
+///   now had only `ghost` and so could not be swapped at all. It binds Bytebot's
+///   `bytebotd` daemon (https://github.com/bytebot-ai/bytebot), a documented local
+///   HTTP surface: every action is `POST /computer-use` with `{action, …}`, so the
+///   six runnables differ only in an `action` constant in `body_defaults` and each
+///   verb binding stays a pure rename. `selectable`, claiming NO `default` — ghost
+///   keeps it. THE TARGET IS NOT THIS MACHINE: bytebotd drives the desktop it runs
+///   on, a containerized Linux desktop in the shipped product, the same
+///   local-vs-remote relationship `browser.control` has between the Chromium sidecar
+///   and a hosted browser. The daemon has NO authentication, hence no BYOK secret
+///   field and a loopback-only URL (grant `tool:http-egress:127.0.0.1`, already in
+///   the Gateway allowlist); its port is fixed at Bytebot's documented 9990.
+///   That port is fixed by CHOICE, not by the grammar. A `pref:` token cannot be
+///   written into a `url` string, but a resolved `arg_defaults` value lands in the
+///   args map and the args map is exactly what fills `{placeholder}` path segments
+///   — which is how honcho pins its workspace and peer ids into a URL today (see
+///   the honcho note above). The blocker is behavioural: an unresolved `pref:`
+///   DROPS its argument, and a missing path parameter is a hard error, so a
+///   `{port}` placeholder would turn a fresh install from "works at 9990" into
+///   "fails until you open settings" (a settings field's `default` is UI-only and
+///   is never seeded into the preferences store).
+///   FIVE of the six verbs are served, and the three exclusions are each a rule, not
+///   an omission:
+///   * `computer__focus_app` is UNBOUND. Bytebot's `application` action validates a
+///     closed seven-value enum (firefox/1password/thunderbird/vscode/terminal/
+///     desktop/directory) while the canonical verb takes a free-form app name, so
+///     `focus_app("Safari")` would be a schema-legal call that 400s. The action is
+///     still reachable natively as `bytebot__application`, whose own `input_schema`
+///     carries that enum so an illegal call cannot be composed.
+///   * `computer__scroll` DROPS the canonical `x`/`y` instead of templating them.
+///     `arg_template` builds an object shape unconditionally, and Bytebot's
+///     `coordinates` is `@IsOptional @ValidateNested` over a `{x, y}` both
+///     `@IsNumber` — so a scroll with no coordinates (legal: they are optional in the
+///     canonical schema) would send `coordinates: {}` and be rejected. Dropping them
+///     scrolls at the pointer's current position, exactly the fallback the canonical
+///     schema's own `x` description warns about.
+///   * `amount` is CLAMPED to 1..=10 onto `scrollCount`. Bytebot counts WHEEL TICKS
+///     and sleeps 150ms between them, so an `amount` a model intends as pixels (500)
+///     would wedge the desktop for over a minute. `count` gets no clamp: the
+///     canonical max is 3 and Bytebot has no upper bound, so it would narrow nothing.
+///   `computer__key` binds `type_keys` (nut.js `pressKey`-all then `releaseKey`-all =
+///   one chord), NOT the similarly-named `press_keys`, which is a half-action taking
+///   a required `press: up|down` and would leave modifiers physically held down.
+///   Only `bytebot__screenshot` sets `unwrap_body` (its `{image}` base64 payload is
+///   the result); the five action tools return an EMPTY body on success, which
+///   unwrapped reaches the caller as a bare empty string that reads like a failure —
+///   the same trap `mem0`'s 204 DELETE documents. Nothing is `fail_open`: for a tool
+///   that MOVES A POINTER, converting a dead daemon into `{available:false}` would
+///   report "nothing happened" in the one place a caller must be told it failed.
 const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("fixtures/spider.manifest.json"),
     include_str!("fixtures/agentbrowser.manifest.json"),
     include_str!("fixtures/exa.manifest.json"),
+    include_str!("fixtures/tavily.manifest.json"),
+    include_str!("fixtures/brave.manifest.json"),
+    include_str!("fixtures/serper.manifest.json"),
+    include_str!("fixtures/layers.manifest.json"),
     include_str!("fixtures/ghost.manifest.json"),
     include_str!("fixtures/shadow.manifest.json"),
     include_str!("fixtures/headroom.manifest.json"),
@@ -382,6 +544,23 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // its `node` server is never spawned unless a developer installs it. The
     // canonical copy under `plugins-store/` and this fixture are byte-identical.
     include_str!("fixtures/sample-widget.manifest.json"),
+    include_str!("fixtures/firecrawl.manifest.json"),
+    include_str!("fixtures/mem0.manifest.json"),
+    // `spidercloud` is the SECOND `web.crawl` provider, which is what finally makes
+    // that layer swappable rather than merely marked selectable: the local `spider`
+    // CLI stays the declared default, and this one runs the same engine hosted, so a
+    // node with no `spider` binary can still serve `web__crawl`. Bound only because
+    // Spider Cloud's crawl is SYNCHRONOUS (`run_in_background` defaults to false) —
+    // `firecrawl` is deliberately still not a crawl provider because its `/v2/crawl`
+    // hands back a job id, and a declarative http tool is one request with no polling
+    // loop, so the verb would return a UUID where it promises page content. The
+    // canonical `depth` argument is dropped rather than clamped: upstream documents
+    // `depth: 0` as "no limit will be applied", the inverse of the canonical "0 = the
+    // start page only", and a clamp would hide a semantic inversion instead of
+    // declaring the argument unsupported.
+    include_str!("fixtures/spidercloud.manifest.json"),
+    include_str!("fixtures/honcho.manifest.json"),
+    include_str!("fixtures/bytebot.manifest.json"),
 ];
 
 /// The Canvas app's plugin id (its Space documents are `kind = app:<this>`). Shared
@@ -908,8 +1087,8 @@ mod tests {
         // "mirror tree", and this guard passes having compared nothing.
         if repo_root.join("apps-store").is_dir() {
             assert_eq!(
-                checked, 25,
-                "apps-store/ is present, so all twenty-five manifests must have been \
+                checked, 26,
+                "apps-store/ is present, so all twenty-six manifests must have been \
                  compared; found {checked}. A lower count means the table's file names \
                  no longer match what is on disk — this guard was silently checking nothing."
             );

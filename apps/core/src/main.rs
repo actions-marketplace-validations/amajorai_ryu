@@ -38,6 +38,8 @@ mod image_host;
 mod inference;
 mod learning;
 mod memory_host;
+mod memory_policy;
+mod memory_provider;
 mod sandbox_host;
 /// Re-export shim: the MCP server catalog primitive now lives in the
 /// `ryu-mcp-catalog` crate. Consumers reference
@@ -76,6 +78,7 @@ mod paths;
 mod pi_config;
 mod plugin_host;
 mod plugin_manifest;
+mod plugin_secrets;
 mod plugin_storage;
 mod plugins;
 mod policy_alerts;
@@ -1296,6 +1299,16 @@ async fn main() {
     match crate::plugin_storage::open_default() {
         Ok(store) => crate::plugin_storage::set_global(store),
         Err(e) => tracing::warn!("plugin storage unavailable: {e:#}"),
+    }
+    // Per-plugin BYOK secrets (the `env:` secret-header fallback + the `secret`
+    // settings field). Published as a process-global for the same reason as the KV
+    // store above: `tool_exec::resolve_secret_token` is a free fn with no
+    // ServerState handle. Best-effort — if the at-rest master key can't be resolved
+    // the store simply stays unpublished and `env:` resolves from process env only,
+    // exactly as it did before this store existed.
+    match crate::plugin_secrets::open_default() {
+        Ok(store) => crate::plugin_secrets::set_global(store),
+        Err(e) => tracing::warn!("plugin secret store unavailable: {e:#}"),
     }
     // Composio event-trigger store: registers trigger instances with Composio and
     // fires the bound agent when the webhook arrives. Published as a process-global

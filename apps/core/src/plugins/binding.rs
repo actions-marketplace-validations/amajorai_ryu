@@ -17,8 +17,17 @@
 //!    provider explicitly — it must be among the candidates, else
 //!    [`BindingError::OverrideNotProvider`].
 //! 4. Exactly **one** provider ⇒ that one (the zero-config happy path).
-//! 5. **Two or more** with no override ⇒ [`BindingError::Ambiguous`], an *explicit
-//!    refusal* surfaced to the user — never a silent first-match pick.
+//! 5. **Two or more** with no override: the capability's *flavour* decides.
+//!    * **Strict** (the default, used by `rag`/`engines`) ⇒ [`BindingError::Ambiguous`],
+//!      an *explicit refusal* surfaced to the user — never a silent first-match pick.
+//!    * **Selectable** (every provider declares `provides[].selectable`, used by the
+//!      swappable layers `web.search`/`web.extract`/`browser.control`/`computer.control`/
+//!      `memory`) ⇒ the deterministic pick in [`pick_selectable`]: the provider
+//!      declaring `default`, else the lexicographically-lowest id. This is the
+//!      engine UX — many installed, one picked — and it stays a pure function of the
+//!      candidate set, so the disable-safety reconstruction argument below is
+//!      unchanged. Selectability needs **unanimity** among the providers, so one
+//!      third-party manifest cannot loosen a strict capability.
 //! 6. The chosen provider's [`ProvidesEntry::version`] must satisfy the consumer's
 //!    [`CapabilityReq::min_version`] floor, else [`BindingError::VersionUnsatisfied`].
 //!    The floor is checked against the *capability* version, not the provider app's
@@ -92,6 +101,10 @@ pub fn set_active_config(cfg: BindingConfig) {
     if let Ok(mut c) = cell().write() {
         *c = cfg;
     }
+    // The capability tool facade caches which provider serves each verb. Changing the
+    // selection here is exactly the event that cache must not miss — otherwise the
+    // user picks a new provider and calls keep going to the old one.
+    crate::sidecar::mcp::capability_tools::invalidate();
 }
 
 /// The preferences key under which the user's capability→provider overrides are
@@ -209,6 +222,217 @@ impl std::fmt::Display for BindingError {
 
 impl std::error::Error for BindingError {}
 
+/// One provider candidate of a capability, paired with the entry that declares it.
+/// `pub` because [`BindingRegistry::resolve_provider`] returns it — the capability
+/// tool facade lives outside this module and needs the provider's `ProvidesEntry` to
+/// read its verb→tool bindings.
+pub type Candidate<'a> = (&'a PluginManifest, &'a crate::plugin_manifest::ProvidesEntry);
+
+/// The deterministic pick among 2+ providers of a **selectable** capability, or
+/// `None` when the capability is not selectable (⇒ the caller raises `Ambiguous`,
+/// preserving the original strict behaviour verbatim).
+///
+/// Selectability is a property of the capability, so it is only honoured when
+/// **every** candidate declares [`ProvidesEntry::selectable`]. Unanimity is the
+/// fail-closed reading: a single third-party manifest cannot loosen a strict
+/// capability (`rag`, `engines`) by unilaterally declaring itself selectable.
+///
+/// Among selectable providers the pick is: the one declaring
+/// [`ProvidesEntry::default_provider`], else the lexicographically-lowest plugin id.
+/// Both are pure functions of the candidate set — the property the disable-safety
+/// argument in the module docs relies on. Ties on `default` (two manifests both
+/// claiming it) degrade to the same lexicographic rule rather than erroring, so a
+/// bad third-party manifest can never brick an enable.
+fn pick_selectable<'a>(providers: &[Candidate<'a>]) -> Option<Candidate<'a>> {
+    if !providers.iter().all(|(_, p)| p.selectable) {
+        return None;
+    }
+    let lowest = |set: &[Candidate<'a>]| -> Option<Candidate<'a>> {
+        set.iter().min_by(|(a, _), (b, _)| a.id.cmp(&b.id)).copied()
+    };
+    let defaults: Vec<Candidate<'a>> = providers
+        .iter()
+        .filter(|(_, p)| p.default_provider)
+        .copied()
+        .collect();
+    if defaults.is_empty() {
+        lowest(providers)
+    } else {
+        lowest(&defaults)
+    }
+}
+
+/// Whether a capability is **selectable** over `candidates` — many providers may be
+/// enabled at once and the user picks one. Reported to the UI so a layer picker can
+/// render a radio list instead of an ambiguity error. A capability with fewer than
+/// two providers is still selectable if its providers say so; the flag describes the
+/// contract, not the current install state.
+pub fn is_selectable(candidates: &[PluginManifest], capability: &str) -> bool {
+    let mut any = false;
+    for m in candidates {
+        for p in m.provided_capabilities() {
+            if p.capability == capability {
+                if !p.selectable {
+                    return false;
+                }
+                any = true;
+            }
+        }
+    }
+    any
+}
+
+/// One provider row in a [`CapabilityInfo`] — what a layer picker renders.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CapabilityProvider {
+    /// The provider plugin's app id.
+    pub id: String,
+    /// Its display name.
+    pub name: String,
+    /// The capability version it serves.
+    pub version: String,
+    /// Whether it declares itself the default pick.
+    pub is_default: bool,
+    /// The capability verbs it can serve (keys of [`ProvidesEntry::tools`]).
+    pub verbs: Vec<String>,
+    /// Whether this provider actually serves anything. A provider may legitimately
+    /// declare a capability with no verb bindings yet — `agentbrowser` does, because
+    /// its tool names live in an npm package and cannot be known from the repo — but
+    /// SELECTING such a provider makes every verb of that layer disappear with no
+    /// error. Surfaced so a picker can mark it unselectable instead of offering a
+    /// choice that silently turns the layer off.
+    pub serves_verbs: bool,
+    /// What this provider acts on, when the capability controls a machine or an
+    /// environment ([`crate::plugin_manifest::ProvidesEntry::target`]). `None` =
+    /// not applicable or undeclared.
+    ///
+    /// Load-bearing for honesty, not decoration: within one capability, providers
+    /// that differ here are NOT interchangeable in the way the word "swap"
+    /// implies — `computer.control`'s two providers type on two different
+    /// computers. A picker must render that difference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::plugin_manifest::ProviderTarget>,
+}
+
+/// One capability and everything a picker needs to render + change it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CapabilityInfo {
+    /// The capability name (`"web.search"`, `"rag"`, …).
+    pub capability: String,
+    /// Whether many providers may be enabled at once and one is picked.
+    pub selectable: bool,
+    /// Every ENABLED candidate provider, sorted by id.
+    pub providers: Vec<CapabilityProvider>,
+    /// Providers that serve this capability but are NOT enabled, sorted by id.
+    ///
+    /// Empty for a fully-enabled capability. Non-empty (with an empty
+    /// [`Self::providers`]) is the "nothing serves this yet, but something could"
+    /// state, which a picker must render rather than hide: every `web.search`
+    /// provider ships opt-in, so that toolkit was invisible on a fresh install and
+    /// nothing told the user the Store had five candidates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available: Vec<CapabilityProvider>,
+    /// The provider currently bound, or `None` when the capability does not resolve
+    /// (unprovided, or ambiguous and not selectable).
+    pub bound: Option<String>,
+    /// Set when the current binding comes from an explicit user override rather than
+    /// the automatic pick.
+    pub overridden: bool,
+}
+
+/// Describe every capability provided anywhere in `candidates`, with its providers
+/// and current binding. The read model behind `GET /api/capabilities` and the
+/// desktop layer picker. Pure — no I/O.
+pub fn describe_capabilities(
+    candidates: &[PluginManifest],
+    known: &[PluginManifest],
+    config: &BindingConfig,
+) -> Vec<CapabilityInfo> {
+    let registry = BindingRegistry::new(config, candidates);
+    // Names come from the KNOWN set, not just the enabled one. Deriving them from
+    // enabled providers alone made a capability whose providers are all disabled
+    // disappear from the read model entirely - no row, not even an empty one - so a
+    // picker could not tell "nothing provides this" apart from "this does not
+    // exist". `web.search` hit exactly that: every one of its five providers ships
+    // opt-in, so on a fresh install the toolkit was invisible and nothing pointed
+    // at the Store. `web.extract` / `web.crawl` only escaped it because `spider`
+    // happens to be default-on.
+    let mut names: Vec<String> = known
+        .iter()
+        .flat_map(|m| m.provided_capabilities().iter().map(|p| p.capability.clone()))
+        .collect();
+    names.sort();
+    names.dedup();
+
+    names
+        .into_iter()
+        .map(|capability| {
+            let mut providers: Vec<CapabilityProvider> = candidates
+                .iter()
+                .filter_map(|m| {
+                    m.provided_capabilities()
+                        .iter()
+                        .find(|p| p.capability == capability)
+                        .map(|p| CapabilityProvider {
+                            id: m.id.clone(),
+                            name: m.name.clone(),
+                            version: p.version.clone(),
+                            is_default: p.default_provider,
+                            serves_verbs: !p.tools.is_empty(),
+                            target: p.target,
+                            verbs: p.tools.keys().cloned().collect(),
+                        })
+                })
+                .collect();
+            providers.sort_by(|a, b| a.id.cmp(&b.id));
+            // Providers that could serve this capability but are not enabled. This
+            // is what lets a picker say "install or enable one" instead of hiding
+            // the capability, and it is the only place a user learns that a toolkit
+            // they cannot see has candidates waiting in the Store.
+            let enabled_ids: std::collections::HashSet<&str> =
+                candidates.iter().map(|m| m.id.as_str()).collect();
+            let mut available: Vec<CapabilityProvider> = known
+                .iter()
+                .filter(|m| !enabled_ids.contains(m.id.as_str()))
+                .filter_map(|m| {
+                    m.provided_capabilities()
+                        .iter()
+                        .find(|p| p.capability == capability)
+                        .map(|p| CapabilityProvider {
+                            id: m.id.clone(),
+                            name: m.name.clone(),
+                            version: p.version.clone(),
+                            is_default: p.default_provider,
+                            serves_verbs: !p.tools.is_empty(),
+                            target: p.target,
+                            verbs: p.tools.keys().cloned().collect(),
+                        })
+                })
+                .collect();
+            available.sort_by(|a, b| a.id.cmp(&b.id));
+            let bound = registry
+                .resolve(&CapabilityReq {
+                    capability: capability.clone(),
+                    min_version: None,
+                })
+                .ok()
+                .map(|b| b.provider_id);
+            CapabilityInfo {
+                // Selectability is read off the KNOWN set: a capability whose
+                // providers are all disabled still has a true answer, and reading it
+                // from the enabled set would report `false` for every such
+                // capability and hide it from the picker a second time.
+                selectable: is_selectable(known, &capability),
+                overridden: config.overrides.contains_key(&capability),
+                providers,
+                available,
+                bound,
+                capability,
+            }
+        })
+        .collect()
+}
+
 /// The binding registry — a thin resolver over a candidate manifest set plus the
 /// user override config. Borrows both; constructing it is free.
 pub struct BindingRegistry<'a> {
@@ -246,7 +470,8 @@ impl<'a> BindingRegistry<'a> {
             });
         }
 
-        // 2. Pick: override > single provider > ambiguous.
+        // 2. Pick: override > single provider > (selectable: declared default >
+        //    lowest id) > ambiguous.
         let (provider, entry) = if let Some(chosen) = self.config.overrides.get(&req.capability) {
             *providers
                 .iter()
@@ -257,6 +482,8 @@ impl<'a> BindingRegistry<'a> {
                 })?
         } else if providers.len() == 1 {
             providers[0]
+        } else if let Some(pick) = pick_selectable(&providers) {
+            pick
         } else {
             let mut ids: Vec<String> = providers.iter().map(|(m, _)| m.id.clone()).collect();
             ids.sort();
@@ -296,6 +523,38 @@ impl<'a> BindingRegistry<'a> {
             provider_id: provider.id.clone(),
             provided_version: entry.version.clone(),
         })
+    }
+
+    /// Resolve a capability named directly, with no version floor — the entry point
+    /// for *call-time* consumers (the capability tool facade) as opposed to the
+    /// enable-time graph, which always comes in through a [`CapabilityReq`].
+    pub fn resolve_by_name(&self, capability: &str) -> Result<Binding, BindingError> {
+        self.resolve(&CapabilityReq {
+            capability: capability.to_owned(),
+            min_version: None,
+        })
+    }
+
+    /// The bound provider's manifest plus the [`ProvidesEntry`] that declares the
+    /// capability — what the facade needs to read the verb→tool bindings. `Err`
+    /// carries the same explicit refusal [`Self::resolve`] would give.
+    pub fn resolve_provider(
+        &self,
+        capability: &str,
+    ) -> Result<Candidate<'a>, BindingError> {
+        let binding = self.resolve_by_name(capability)?;
+        self.candidates
+            .iter()
+            .find(|m| m.id == binding.provider_id)
+            .and_then(|m| {
+                m.provided_capabilities()
+                    .iter()
+                    .find(|p| p.capability == capability)
+                    .map(|p| (m, p))
+            })
+            .ok_or_else(|| BindingError::Unprovided {
+                capability: capability.to_owned(),
+            })
     }
 
     /// Resolve every required capability of one plugin. Returns the successful
@@ -392,12 +651,19 @@ mod tests {
             provides: vec![ProvidesEntry {
                 capability: cap.to_owned(),
                 version: version.to_owned(),
-                sidecar: None,
-                route: None,
-                grant: None,
+                ..Default::default()
             }],
             ..Default::default()
         }
+    }
+
+    /// A provider of a **selectable** capability (the engine-style flavour: many
+    /// enabled, one picked).
+    fn selectable_provider(id: &str, cap: &str, is_default: bool) -> PluginManifest {
+        let mut m = provider(id, cap, "1.0.0");
+        m.provides[0].selectable = true;
+        m.provides[0].default_provider = is_default;
+        m
     }
 
     fn consumer(id: &str, cap: &str, min: Option<&str>) -> PluginManifest {
@@ -479,6 +745,155 @@ mod tests {
             }
             other => panic!("expected Ambiguous, got {other:?}"),
         }
+    }
+
+    // ── Selectable capabilities (the engine-style flavour) ───────────────────
+
+    #[test]
+    fn selectable_two_providers_picks_the_declared_default() {
+        let set = vec![
+            selectable_provider("tavily", "web.search", false),
+            selectable_provider("exa", "web.search", true),
+        ];
+        let cfg = BindingConfig::default();
+        let reg = BindingRegistry::new(&cfg, &set);
+        assert_eq!(
+            reg.resolve_by_name("web.search").unwrap().provider_id,
+            "exa"
+        );
+    }
+
+    #[test]
+    fn selectable_without_a_default_picks_lowest_id_deterministically() {
+        let set = vec![
+            selectable_provider("tavily", "web.search", false),
+            selectable_provider("brave", "web.search", false),
+        ];
+        let cfg = BindingConfig::default();
+        let reg = BindingRegistry::new(&cfg, &set);
+        // Deterministic, and stable across candidate ordering — the property the
+        // disable-safety reconstruction argument depends on.
+        assert_eq!(
+            reg.resolve_by_name("web.search").unwrap().provider_id,
+            "brave"
+        );
+        let reversed = vec![set[1].clone(), set[0].clone()];
+        let reg2 = BindingRegistry::new(&cfg, &reversed);
+        assert_eq!(
+            reg2.resolve_by_name("web.search").unwrap().provider_id,
+            "brave"
+        );
+    }
+
+    #[test]
+    fn override_still_beats_the_selectable_default() {
+        let set = vec![
+            selectable_provider("tavily", "web.search", false),
+            selectable_provider("exa", "web.search", true),
+        ];
+        let mut cfg = BindingConfig::default();
+        cfg.overrides
+            .insert("web.search".to_owned(), "tavily".to_owned());
+        let reg = BindingRegistry::new(&cfg, &set);
+        assert_eq!(
+            reg.resolve_by_name("web.search").unwrap().provider_id,
+            "tavily"
+        );
+    }
+
+    #[test]
+    fn selectability_requires_unanimity_so_one_manifest_cannot_loosen_rag() {
+        // A rogue third-party provider declaring itself selectable must NOT relax the
+        // strict capability: the ambiguity refusal still stands.
+        let mut rogue = provider("rogue-rag", "rag", "1.0.0");
+        rogue.provides[0].selectable = true;
+        let set = vec![provider("vecrag", "rag", "1.0.0"), rogue];
+        let cfg = BindingConfig::default();
+        let reg = BindingRegistry::new(&cfg, &set);
+        assert!(matches!(
+            reg.resolve_by_name("rag").unwrap_err(),
+            BindingError::Ambiguous { .. }
+        ));
+        assert!(!is_selectable(&set, "rag"));
+    }
+
+    #[test]
+    fn enable_gate_no_longer_refuses_a_second_selectable_provider() {
+        // The engine UX: install five search backends, pick one. With the strict
+        // flavour this consumer set would be refused at enable time.
+        let mut set = vec![
+            selectable_provider("exa", "web.search", true),
+            selectable_provider("tavily", "web.search", false),
+            selectable_provider("brave", "web.search", false),
+        ];
+        set.push(consumer("agent-tools", "web.search", None));
+        let cfg = BindingConfig::default();
+        assert!(first_binding_error(&set, &cfg).is_none());
+    }
+
+    #[test]
+    fn describe_capabilities_reports_providers_and_the_current_pick() {
+        let set = vec![
+            selectable_provider("exa", "web.search", true),
+            selectable_provider("tavily", "web.search", false),
+            provider("vecrag", "rag", "1.0.0"),
+        ];
+        let mut cfg = BindingConfig::default();
+        cfg.overrides
+            .insert("web.search".to_owned(), "tavily".to_owned());
+        let described = describe_capabilities(&set, &set, &cfg);
+
+        let search = described
+            .iter()
+            .find(|c| c.capability == "web.search")
+            .expect("web.search described");
+        assert!(search.selectable);
+        assert!(search.overridden);
+        assert_eq!(search.bound.as_deref(), Some("tavily"));
+        assert_eq!(
+            search.providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["exa", "tavily"]
+        );
+        // Everything known is enabled here, so nothing is merely available.
+        assert!(search.available.is_empty());
+
+        let rag = described
+            .iter()
+            .find(|c| c.capability == "rag")
+            .expect("rag described");
+        assert!(!rag.selectable);
+        assert!(!rag.overridden);
+        assert_eq!(rag.bound.as_deref(), Some("vecrag"));
+    }
+
+    #[test]
+    fn a_capability_whose_providers_are_all_disabled_is_still_described() {
+        // The bug this closes: names used to come from the ENABLED set, so a
+        // capability with candidates but none enabled vanished from the read model
+        // entirely. A picker could not distinguish "nothing serves this" from "this
+        // does not exist", and `web.search` - whose five providers all ship opt-in -
+        // was therefore invisible on a fresh install with no pointer to the Store.
+        let known = vec![
+            selectable_provider("exa", "web.search", true),
+            selectable_provider("tavily", "web.search", false),
+        ];
+        let enabled: Vec<PluginManifest> = Vec::new();
+        let described = describe_capabilities(&enabled, &known, &BindingConfig::default());
+
+        let search = described
+            .iter()
+            .find(|c| c.capability == "web.search")
+            .expect("web.search must still be described when no provider is enabled");
+        assert!(search.providers.is_empty(), "nothing is enabled");
+        assert_eq!(
+            search.available.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["exa", "tavily"],
+            "both candidates must be offered so the user can enable one"
+        );
+        assert_eq!(search.bound, None, "nothing can be bound");
+        // Selectability is read off the KNOWN set; reading it from the empty enabled
+        // set would report false and hide the row from the picker a second time.
+        assert!(search.selectable);
     }
 
     #[test]

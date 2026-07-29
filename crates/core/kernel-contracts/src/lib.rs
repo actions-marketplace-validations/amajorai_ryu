@@ -23,9 +23,10 @@ pub mod tenancy;
 
 pub use host_api::HOST_API_VERSION;
 pub use manifest::{
-    parse_min_version, validate_cli_command_path, validate_plugin_id, AppDependency,
-    CompanionSurface, Contributes, ContributionId, EnginesReq, HookMatch, PluginManifest,
-    PluginTier, Requires, Surface, TurnHookContribution, WidgetContribution, MAX_PLUGIN_ID_LEN,
+    is_env_var_name, parse_min_version, validate_cli_command_path, validate_plugin_id,
+    AppDependency, CompanionSurface, Contributes, ContributionId, EnginesReq, HookMatch,
+    PluginManifest, PluginTier, Requires, Surface, TurnHookContribution, WidgetContribution,
+    MAX_PLUGIN_ID_LEN, MAX_SECRET_KEY_LEN,
 };
 pub use runnable::{RunnableKind, RunnableMeta};
 pub use schema::{

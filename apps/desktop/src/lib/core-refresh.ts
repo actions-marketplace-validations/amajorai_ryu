@@ -19,6 +19,9 @@ import { queryClient } from "@/src/lib/query-client.ts";
 /** Window event that manual `reload()` hooks listen for via {@link useCoreRefresh}. */
 export const CORE_REFRESH_EVENT = "ryu:core-refresh";
 
+/** Window event the agent-roster hooks listen for via {@link useAgentsRefresh}. */
+export const AGENTS_REFRESH_EVENT = "ryu:agents-refresh";
+
 /**
  * Refetch every data source in the app: all TanStack Query keys plus every manual
  * `reload()` hook subscribed via {@link useCoreRefresh}. Safe to call at any time —
@@ -44,5 +47,25 @@ export function useCoreRefresh(reload: () => void): void {
 		const handler = () => reload();
 		window.addEventListener(CORE_REFRESH_EVENT, handler);
 		return () => window.removeEventListener(CORE_REFRESH_EVENT, handler);
+	}, [reload]);
+}
+
+/**
+ * Refetch just the agent roster (`GET /api/agents`). Adding or removing an agent
+ * from the Store only flips Core's `installed` flag, so the always-mounted
+ * surfaces that read the roster — the sidebar, the composer picker, the Library —
+ * would otherwise keep showing the pre-install list until a full refresh. Scoped
+ * on purpose: a Store click must not refetch the whole app.
+ */
+export function triggerAgentsRefresh(): void {
+	window.dispatchEvent(new CustomEvent(AGENTS_REFRESH_EVENT));
+}
+
+/** Agent-roster twin of {@link useCoreRefresh}; see {@link triggerAgentsRefresh}. */
+export function useAgentsRefresh(reload: () => void): void {
+	useEffect(() => {
+		const handler = () => reload();
+		window.addEventListener(AGENTS_REFRESH_EVENT, handler);
+		return () => window.removeEventListener(AGENTS_REFRESH_EVENT, handler);
 	}, [reload]);
 }

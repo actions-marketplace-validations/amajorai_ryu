@@ -33,6 +33,15 @@ export type SettingsFieldOption =
 			value: string;
 	  };
 /**
+ * What a capability provider acts on — see [`ProvidesEntry::target`].
+ *
+ * Deliberately two coarse values rather than a taxonomy. The only question a user
+ * needs answered before swapping is "will this act on the machine in front of me,
+ * or somewhere else?", and a finer vocabulary (container / VM / cloud / another
+ * host) would be guesswork the manifests cannot honestly support.
+ */
+export type ProviderTarget = "local-machine" | "remote-desktop";
+/**
  * A host surface a plugin can declare support for via `targets`.
  *
  * `core` is the headless node (a Core running with no UI at all).
@@ -755,9 +764,20 @@ export interface SettingsFieldContribution {
 	 */
 	required?: boolean;
 	/**
+	 * Granularity for a [`SettingsFieldType::Number`] — the increment its stepper
+	 * moves by, and the grid a typed value must land on.
+	 *
+	 * Distinct from [`Self::min`]/[`Self::max`], which bound the range: a value can
+	 * sit inside the range and still be meaningless at this field's resolution
+	 * (`0.5` where the setting counts whole pages). The renderer enforces it, so a
+	 * field that declares it rejects an off-grid value rather than persisting one
+	 * the plugin cannot use.
+	 */
+	step?: number | null;
+	/**
 	 * The control to render. Absent or unrecognised = a plain text input.
 	 */
-	type?: "text" | "textarea" | "number" | "toggle" | "select" | "model_picker" | "agent_picker";
+	type?: "text" | "textarea" | "number" | "toggle" | "select" | "model_picker" | "agent_picker" | "secret";
 }
 /**
  * One app-registered **sidebar button** — a single nav row (the button-shaped
@@ -1103,6 +1123,12 @@ export interface ProvidesEntry {
 	 */
 	capability: string;
 	/**
+	 * Preferred pick among the providers of a [`Self::selectable`] capability when
+	 * the user has set no override. At most one provider per capability may declare
+	 * it. Meaningless (and ignored) on a non-selectable capability.
+	 */
+	default?: boolean;
+	/**
 	 * The grant a consumer must hold (Gateway-approved) to invoke this capability
 	 * via the broker. Absent = no extra grant beyond declaring the edge.
 	 */
@@ -1114,17 +1140,249 @@ export interface ProvidesEntry {
 	 */
 	route?: string | null;
 	/**
+	 * Opt in to the **selectable** flavour: many providers of this capability may
+	 * be enabled at once and the user *picks* one, exactly like a local engine.
+	 *
+	 * A non-selectable capability (the original, strict flavour used by `rag` /
+	 * `engines`) treats a second enabled provider as an explicit
+	 * `BindingError::Ambiguous` refusal. A selectable one resolves deterministically
+	 * instead: user override > sole provider > the provider declaring
+	 * [`Self::default_provider`] > lexicographically-lowest provider id. The pick is
+	 * a pure function of the candidate set, so the disable-safety reconstruction
+	 * argument in Core's binding registry is unchanged.
+	 *
+	 * Selectability is a property of the *capability*, so every provider of a given
+	 * capability must agree on the flag; the loader rejects a mixed declaration.
+	 */
+	selectable?: boolean;
+	/**
 	 * The local `name` of one of this manifest's declared `sidecars` that serves
 	 * the capability. The loader cross-validates it exists. Absent = an in-process
 	 * capability with no dedicated sidecar (the broker declines to proxy it).
 	 */
 	sidecar?: string | null;
 	/**
+	 * WHAT this provider acts on, when the capability controls a machine or an
+	 * environment rather than answering a query.
+	 *
+	 * Exists because "swap the provider" quietly means two different things.
+	 * Swapping `web.search` from exa to tavily changes who answers; the question is
+	 * the same. Swapping `computer.control` from ghost to bytebot changes **which
+	 * computer gets typed on** — ghost drives the machine Ryu runs on, bytebot
+	 * drives the desktop `bytebotd` runs on (a containerized Linux desktop in the
+	 * shipped product). A picker that renders those two swaps identically is
+	 * telling the user something false, and until this field existed the
+	 * distinction lived only in a prose `description` that nothing structured
+	 * could read.
+	 *
+	 * Absent = not applicable or unspecified. That is the honest default for the
+	 * capabilities where locality is meaningless (`web.search`, `memory`, `rag`),
+	 * and it is deliberately NOT [`ProviderTarget::LocalMachine`]: defaulting to
+	 * "this machine" would silently mislabel every future hosted provider that
+	 * forgets to declare it.
+	 */
+	target?: ProviderTarget | null;
+	/**
+	 * Capability **verb → this provider's tool** bindings, the seam that keeps the
+	 * model-visible tool surface stable across a swap.
+	 *
+	 * The key is a canonical verb from the host's capability verb table (e.g.
+	 * `"web__search"`); the value names the provider's own registered tool plus the
+	 * argument/response mapping into the canonical shape. A provider that omits a
+	 * verb simply does not serve it — the facade reports the verb unavailable
+	 * rather than guessing.
+	 */
+	tools?: {
+		[k: string]: CapabilityToolBinding;
+	};
+	/**
 	 * The capability's own semver version (independent of the plugin version), so
 	 * a consumer's [`CapabilityReq::min_version`] floor can be checked against the
 	 * capability contract rather than the app release.
 	 */
 	version: string;
+}
+/**
+ * How one capability **verb** maps onto a concrete provider tool.
+ *
+ * The facade tool (`web__search`, `browser__navigate`, …) is registered by the host
+ * from its canonical verb table; at call time it resolves the capability's bound
+ * provider, reads this binding, renames the arguments, re-enters tool dispatch on
+ * [`Self::tool`], and maps the response back. Swapping the provider therefore
+ * changes neither the tool id nor its schema.
+ */
+export interface CapabilityToolBinding {
+	/**
+	 * Optional provider-shipped ADAPTER: JavaScript that maps this verb onto the
+	 * provider's tool when the shapes are too far apart for the declarative fields
+	 * above to bridge.
+	 *
+	 * The declarative path ([`Self::args`] … [`Self::response`]) stays the default
+	 * and covers the ~80% of providers that are a rename plus a field map: no code
+	 * review, no sandbox, no supply-chain surface, and a third party ships one file.
+	 * But some provider shapes no amount of JSON can express — an async job API that
+	 * must be polled (`POST /crawl` → job id → `GET /crawl/{id}`), a token vocabulary
+	 * that needs per-provider normalization, a body that must read a `pref:` value.
+	 * Growing the grammar one vendor quirk at a time pushed provider-specific logic
+	 * into shared kernel code; an adapter puts it back in the provider's own manifest.
+	 *
+	 * Present = the adapter REPLACES the declarative mapping for this verb: it
+	 * receives the canonical arguments and returns the canonical result, and
+	 * [`Self::args`] / [`Self::arg_template`] / [`Self::arg_clamp`] / [`Self::response`]
+	 * are not applied (the adapter is doing that job). [`Self::tool`] still names the
+	 * target and is still the ONLY tool the adapter can reach.
+	 */
+	adapter?: CapabilityAdapter | null;
+	/**
+	 * Per-argument numeric limits this provider can actually honour, keyed by the
+	 * **canonical** argument name (before any rename).
+	 *
+	 * Exists because canonical schemas describe what agents may ask for, while
+	 * providers differ in what they accept: `web__search.limit` allows up to 100,
+	 * but Brave's `count` maxes at 20. Without this, selecting Brave turns a
+	 * perfectly valid `limit: 50` into an upstream 4xx — the swap stops being
+	 * transparent, which is the entire point of the facade. Clamping is the right
+	 * resolution rather than erroring: the caller asked for "up to N", and fewer
+	 * results is a normal outcome, whereas a failed search is not.
+	 */
+	arg_clamp?: {
+		[k: string]: ArgBounds;
+	};
+	/**
+	 * Constant arguments merged into every call (provider-specific knobs the
+	 * canonical schema does not expose, e.g. `{"search_depth": "advanced"}`).
+	 */
+	arg_defaults?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * A request-body TEMPLATE this provider needs, with `{canonical_arg}`
+	 * placeholders substituted from the call.
+	 *
+	 * `args` renames flat keys and `[]` wraps a scalar in an array; neither can build
+	 * a NESTED shape. Real APIs need them: Mem0's write endpoint takes
+	 * `messages: [{role, content}]`, so without a template the whole write half of
+	 * that provider is unbindable — which is precisely the gap that made Ryu's
+	 * memory bridges inert while Hermes, which writes per-provider adapter CODE, had
+	 * none. This closes it declaratively instead of admitting code per provider.
+	 *
+	 * A string that is EXACTLY `"{arg}"` is replaced by that argument's value with
+	 * its JSON type preserved (`5` stays a number); a string merely CONTAINING
+	 * `{arg}` interpolates as text. An argument consumed by the template is not also
+	 * passed through, so it cannot appear twice under two names.
+	 */
+	arg_template?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Canonical argument name → this provider's argument name. A canonical argument
+	 * with no entry is passed through under its own name; map it to the empty string
+	 * to drop it (the provider cannot express it).
+	 */
+	args?: {
+		[k: string]: string;
+	};
+	/**
+	 * Optional response normalization into the canonical result shape. Absent = the
+	 * provider's output is returned verbatim under `{ provider, raw }`.
+	 */
+	response?: CapabilityResponseMap | null;
+	/**
+	 * The provider's own fully-qualified tool id (e.g. `"exa__search"`,
+	 * `"app__firecrawl_scrape"`) that implements this verb.
+	 */
+	tool: string;
+}
+/**
+ * Provider-shipped JavaScript that maps one capability verb onto one provider tool.
+ *
+ * Runs in the SAME Deno sandbox as an `inline_deno` plugin tool, under the same
+ * [`crate`-level] grant model: the providing plugin must hold `tool:execute`, so
+ * shipping code is a visible, approvable act rather than a silent one.
+ *
+ * The program is handed:
+ * - `input` — the canonical verb arguments, after layer defaults are applied.
+ * - `defaults` — the provider's resolved `arg_defaults`, including any `pref:`
+ *   tokens already looked up. This is what lets an adapter read per-install
+ *   configuration a template could not (`arg_template` expands from the CALLER's
+ *   arguments, so it can never see a resolved preference).
+ * - `callTool(args)` — invokes the provider's own [`CapabilityToolBinding::tool`]
+ *   and resolves to its raw response. It takes NO tool id: the target is fixed by
+ *   the manifest, so sandboxed code cannot redirect the call at another tool. An
+ *   adapter therefore grants no authority the declarative path did not already
+ *   grant — it is strictly the same single re-entry, expressed as code.
+ *
+ * It returns the canonical result shape, which the facade passes through unchanged.
+ *
+ * **Bounded by the sandbox wall-clock.** A run gets `DEFAULT_DEADLINE_SECS` of
+ * active compute, and time spent awaiting a tool call counts against it. An
+ * adapter that polls an async job must therefore treat "still running" as a normal
+ * outcome to report, not something to wait out.
+ */
+export interface CapabilityAdapter {
+	/**
+	 * The adapter body. Evaluated as the tail of a sandbox program that has already
+	 * bound `input`, `defaults`, `callTool` and `callNamed`; it `return`s the
+	 * canonical result.
+	 */
+	code: string;
+	/**
+	 * ADDITIONAL provider tool ids this adapter may call, beyond
+	 * [`CapabilityToolBinding::tool`], reachable from the body as
+	 * `callNamed(id, args)`.
+	 *
+	 * Exists because a whole class of real APIs is two calls, not one: an async job
+	 * API starts work at one endpoint and reads the result from another
+	 * (`POST /crawl` → job id → `GET /crawl/{id}`). A single-tool adapter cannot
+	 * express that, so those providers would stay unbindable — the gap that
+	 * excluded every async API from every layer.
+	 *
+	 * This is an ALLOWLIST fixed by the manifest and checked host-side: a name not
+	 * listed here (and not [`CapabilityToolBinding::tool`]) is refused. Sandboxed
+	 * code chooses only *among* tools the provider declared, never a tool of its
+	 * own — which is what keeps the id-taking form from becoming an escalation seam.
+	 */
+	tools?: string[];
+}
+/**
+ * Inclusive numeric bounds a provider can honour for one canonical argument.
+ * Integers, not floats. Every clampable canonical argument is a COUNT — result
+ * limits, crawl depth, page caps — so `i64` is the honest type, and it keeps the
+ * whole manifest tree `Eq` (a float would force `PartialEq`-only all the way up
+ * through `ProvidesEntry` and `PluginManifest`) while avoiding float comparison.
+ */
+export interface ArgBounds {
+	/**
+	 * Largest value the provider accepts. Absent = no upper bound.
+	 */
+	max?: number | null;
+	/**
+	 * Smallest value the provider accepts. Absent = no lower bound.
+	 */
+	min?: number | null;
+}
+/**
+ * Normalizes one provider's response into the capability's canonical shape.
+ *
+ * Deliberately a flat rename table rather than a general transform language: the
+ * canonical shapes are small and list-of-records shaped, and a manifest that can
+ * run arbitrary extraction logic is a much larger trust surface.
+ */
+export interface CapabilityResponseMap {
+	/**
+	 * Canonical per-item field name → the provider's field name (dotted paths
+	 * allowed). Fields with no entry are dropped from the canonical item but remain
+	 * available under the item's `raw` key.
+	 */
+	fields?: {
+		[k: string]: string;
+	};
+	/**
+	 * Dotted path to the provider's result array within its response (e.g.
+	 * `"results"`, `"data.items"`). Absent = the response itself is the array, or —
+	 * when it is not an array — a single record.
+	 */
+	results?: string | null;
 }
 /**
  * `requires` block — the plugin's **plugin-to-plugin** dependencies.

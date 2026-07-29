@@ -41,6 +41,7 @@ export const CHANNEL_TYPES = [
 	"slack",
 	"whatsapp",
 	"discord",
+	"bluebubbles",
 ] as const;
 export type ChannelType = (typeof CHANNEL_TYPES)[number];
 
@@ -48,11 +49,51 @@ export type ChannelType = (typeof CHANNEL_TYPES)[number];
 // Mirrors GROUP_REPLY_MODES in packages/db/src/models/channel.model.ts.
 export const GROUP_REPLY_MODES = ["mentions", "all"] as const;
 export type GroupReplyMode = (typeof GROUP_REPLY_MODES)[number];
-const DEFAULT_GROUP_REPLY_MODE: GroupReplyMode = "mentions";
+export const DEFAULT_GROUP_REPLY_MODE: GroupReplyMode = "mentions";
 
-const GROUP_REPLY_LABELS: Record<GroupReplyMode, string> = {
+export const GROUP_REPLY_LABELS: Record<GroupReplyMode, string> = {
 	mentions: "Only when mentioned",
 	all: "Every message",
+};
+
+// Who may DM the bot, and how a stranger enrols. Mirrors DM_POLICIES in
+// packages/db/src/models/channel.model.ts and the gateway's pairing gate
+// (crates/gateway/channels/src/pairing.rs).
+export const DM_POLICIES = [
+	"pairing",
+	"allowlist",
+	"open",
+	"disabled",
+] as const;
+export type DmPolicy = (typeof DM_POLICIES)[number];
+export const DEFAULT_DM_POLICY: DmPolicy = "pairing";
+
+export const DM_POLICY_LABELS: Record<DmPolicy, string> = {
+	pairing: "Ask me to approve new people",
+	allowlist: "Only people on my list",
+	open: "Anyone (billed to you)",
+	disabled: "Nobody — groups only",
+};
+
+export const GROUP_POLICIES = ["allowlist", "open", "disabled"] as const;
+export type GroupPolicy = (typeof GROUP_POLICIES)[number];
+export const DEFAULT_GROUP_POLICY: GroupPolicy = "allowlist";
+
+export const GROUP_POLICY_LABELS: Record<GroupPolicy, string> = {
+	allowlist: "Only groups on my list",
+	open: "Any group it's added to",
+	disabled: "Never reply in groups",
+};
+
+// When the bot answers with synthesized speech as well as text.
+export const VOICE_REPLY_MODES = ["never", "mirror", "always"] as const;
+export type VoiceReplyMode = (typeof VOICE_REPLY_MODES)[number];
+export const DEFAULT_VOICE_REPLY_MODE: VoiceReplyMode = "never";
+
+export const VOICE_REPLY_LABELS: Record<VoiceReplyMode, string> = {
+	never: "Text only",
+	mirror: "Speak back to voice messages",
+	always: "Speak every reply",
 };
 
 // Every platform below has a real, registered gateway adapter
@@ -75,6 +116,9 @@ export const REQUIRED_SECRETS: Record<ChannelType, string[]> = {
 	slack: ["app_token", "bot_token"],
 	whatsapp: ["access_token", "phone_number_id", "verify_token", "app_secret"],
 	discord: ["bot_token", "channel_ids"],
+	//   bluebubbles → bluebubbles.rs (server_url, password — the adapter bails on
+	//              either being blank, since both are needed for every call)
+	bluebubbles: ["server_url", "password"],
 };
 
 export const SECRET_LABELS: Record<string, string> = {
@@ -85,6 +129,8 @@ export const SECRET_LABELS: Record<string, string> = {
 	verify_token: "Verify token",
 	app_secret: "App secret",
 	channel_ids: "Channel IDs (comma-separated)",
+	server_url: "BlueBubbles server URL",
+	password: "BlueBubbles password",
 };
 
 export const CHANNEL_LABELS: Record<ChannelType, string> = {
@@ -92,6 +138,7 @@ export const CHANNEL_LABELS: Record<ChannelType, string> = {
 	slack: "Slack",
 	whatsapp: "WhatsApp",
 	discord: "Discord",
+	bluebubbles: "iMessage (BlueBubbles)",
 };
 
 /** Per-platform setup guidance shown in the credentials card. */
@@ -151,10 +198,111 @@ export const CHANNEL_SETUP: Record<ChannelType, ChannelSetup> = {
 				"The channels the bot listens in, comma-separated. Enable Developer Mode in Discord, then right-click a channel → Copy Channel ID. At least one is required — the adapter refuses to start without it.",
 		},
 	},
+	bluebubbles: {
+		note: "iMessage is bridged by BlueBubbles Server running on a Mac you keep awake and signed into Messages.app. Ryu talks to it over HTTP on your network — there is no Apple API involved, so everything depends on that Mac staying up.",
+		secretHelp: {
+			server_url:
+				"Where BlueBubbles Server is listening, e.g. http://192.168.1.10:1234. It must be reachable from wherever the Ryu gateway runs.",
+			password:
+				"The server password set in BlueBubbles Server → Settings. Sent on every request, so treat it like a token.",
+		},
+		warning:
+			"Inbound iMessages arrive by webhook, so BlueBubbles Server must be pointed at the gateway's BlueBubbles webhook URL (BlueBubbles Server → Settings → Webhooks). Typing indicators, read receipts and tapback reactions additionally need the BlueBubbles Private API helper installed on the Mac — without it the bot can still send and receive plain messages, it just cannot show that it is typing.",
+	},
 };
 
+/**
+ * Everything a bot does beyond "which agent, which model" — who may talk to it,
+ * how it behaves while working, and what its profile says.
+ *
+ * Shared by the view and the save payload so the two can never drift: a field
+ * the form can edit is a field the server is sent. Platforms that cannot honour
+ * a setting simply ignore it (WhatsApp has no command menu, iMessage has no
+ * threads), which keeps this one flat shape for every channel type.
+ */
+export interface ChannelBehaviorSettings {
+	/** Sender ids admitted without pairing. */
+	dmAllowlist: string[];
+	/** Who may DM the bot, and how a stranger enrols. */
+	dmPolicy: DmPolicy;
+	/** Group/chat ids the bot will answer in. */
+	groupAllowlist: string[];
+	/** Whether the bot answers in groups at all. */
+	groupPolicy: GroupPolicy;
+	/** Longer description shown in an empty chat (Telegram caps at 512). */
+	profileDescription: string | null;
+	/** Display name pushed to the platform. */
+	profileName: string | null;
+	/** Short bio on the profile page (Telegram caps at 120). */
+	profileShortBio: string | null;
+	/** Publish Ryu's command menu where the platform has one. */
+	publishCommands: boolean;
+	/** Render replies as platform rich text where supported. */
+	richText: boolean;
+	/** Mark inbound messages read (WhatsApp / iMessage). */
+	sendReadReceipts: boolean;
+	/** Stream partial output where the platform supports drafts. */
+	streaming: boolean;
+	/** Answer inside a thread on the triggering message (Discord). */
+	threadReplies: boolean;
+	/** Show a typing indicator while the agent is working. */
+	typingIndicator: boolean;
+	/** When to answer with synthesized speech as well as text. */
+	voiceReply: VoiceReplyMode;
+}
+
+/** The settings a freshly-created bot starts with. */
+export function defaultBehaviorSettings(): ChannelBehaviorSettings {
+	return {
+		dmPolicy: DEFAULT_DM_POLICY,
+		groupPolicy: DEFAULT_GROUP_POLICY,
+		dmAllowlist: [],
+		groupAllowlist: [],
+		typingIndicator: true,
+		publishCommands: true,
+		richText: true,
+		streaming: false,
+		voiceReply: DEFAULT_VOICE_REPLY_MODE,
+		threadReplies: false,
+		sendReadReceipts: true,
+		profileName: null,
+		profileShortBio: null,
+		profileDescription: null,
+	};
+}
+
+/**
+ * Which behaviour settings are worth showing for a platform.
+ *
+ * A control the platform cannot honour is worse than a missing one — it reads
+ * as a promise. Telegram is the only platform with a native command menu or
+ * rich text; only Discord opens a thread per message; only WhatsApp and
+ * iMessage have read receipts.
+ */
+export function supportedSettings(channelType: ChannelType): {
+	commandMenu: boolean;
+	profile: boolean;
+	readReceipts: boolean;
+	richText: boolean;
+	streaming: boolean;
+	threadReplies: boolean;
+	typing: boolean;
+} {
+	return {
+		commandMenu: channelType === "telegram",
+		richText: channelType === "telegram" || channelType === "slack",
+		streaming: channelType === "telegram",
+		threadReplies: channelType === "discord",
+		readReceipts: channelType === "whatsapp" || channelType === "bluebubbles",
+		// Slack cannot send a true typing indicator and Telegram's expires in 5s,
+		// but both have SOMETHING; iMessage needs the Private API helper.
+		typing: true,
+		profile: channelType === "telegram" || channelType === "discord",
+	};
+}
+
 /** A channel config as the view needs it. */
-export interface ChannelConfigView {
+export interface ChannelConfigView extends ChannelBehaviorSettings {
 	agentId: string | null;
 	channelType: ChannelType;
 	enabled: boolean;
@@ -172,7 +320,7 @@ export interface ChannelConfigView {
 }
 
 /** Payload the container persists on save (create or update). */
-export interface ChannelSavePayload {
+export interface ChannelSavePayload extends ChannelBehaviorSettings {
 	agentId: string | null;
 	channelType: ChannelType;
 	enabled: boolean;
@@ -218,7 +366,7 @@ export interface ChannelsViewProps {
 	teams?: AgentOption[];
 }
 
-interface FormState {
+interface FormState extends ChannelBehaviorSettings {
 	agentId: string;
 	channelType: ChannelType;
 	enabled: boolean;
@@ -246,6 +394,31 @@ function emptyForm(): FormState {
 		enabled: false,
 		secrets: {},
 		existingSecretKeys: [],
+		...defaultBehaviorSettings(),
+	};
+}
+
+/** Pull the behaviour settings off a stored config, defaulting any the server
+ *  did not send (a bot saved before the field existed). */
+function behaviorFromConfig(
+	c: Partial<ChannelBehaviorSettings>
+): ChannelBehaviorSettings {
+	const defaults = defaultBehaviorSettings();
+	return {
+		dmPolicy: c.dmPolicy ?? defaults.dmPolicy,
+		groupPolicy: c.groupPolicy ?? defaults.groupPolicy,
+		dmAllowlist: c.dmAllowlist ?? defaults.dmAllowlist,
+		groupAllowlist: c.groupAllowlist ?? defaults.groupAllowlist,
+		typingIndicator: c.typingIndicator ?? defaults.typingIndicator,
+		publishCommands: c.publishCommands ?? defaults.publishCommands,
+		richText: c.richText ?? defaults.richText,
+		streaming: c.streaming ?? defaults.streaming,
+		voiceReply: c.voiceReply ?? defaults.voiceReply,
+		threadReplies: c.threadReplies ?? defaults.threadReplies,
+		sendReadReceipts: c.sendReadReceipts ?? defaults.sendReadReceipts,
+		profileName: c.profileName ?? defaults.profileName,
+		profileShortBio: c.profileShortBio ?? defaults.profileShortBio,
+		profileDescription: c.profileDescription ?? defaults.profileDescription,
 	};
 }
 
@@ -268,6 +441,7 @@ function formFromConfig(c: ChannelConfigView): FormState {
 		enabled: c.enabled,
 		secrets: {},
 		existingSecretKeys: Object.keys(c.secrets ?? {}),
+		...behaviorFromConfig(c),
 	};
 }
 
@@ -317,6 +491,9 @@ export function ChannelsView({
 	}, []);
 
 	const requiredKeys = REQUIRED_SECRETS[form.channelType];
+	// Only render a toggle the selected platform can actually honour — a control
+	// that does nothing reads as a promise the bot won't keep.
+	const supported = supportedSettings(form.channelType);
 	const setup = CHANNEL_SETUP[form.channelType];
 
 	const handleSave = useCallback(async () => {
@@ -364,6 +541,7 @@ export function ChannelsView({
 				model: form.model.trim() || null,
 				systemPrompt: form.systemPrompt.trim() || null,
 				enabled: form.enabled,
+				...behaviorFromConfig(form),
 			},
 			{ isNew, id: selected?.id ?? null }
 		);
@@ -636,6 +814,276 @@ export function ChannelsView({
 							every message. Direct messages always get a reply.
 						</p>
 					</div>
+
+					<div className="space-y-3 rounded-lg border bg-card p-4">
+						<div>
+							<p className="font-medium text-sm">Who can talk to it</p>
+							<p className="text-muted-foreground text-xs">
+								A bot token lets anyone who finds the bot spend your
+								completions, so inbound is closed to strangers by default.
+							</p>
+						</div>
+
+						<div className="space-y-1.5">
+							<Label htmlFor="channel-dm-policy">Direct messages</Label>
+							<NativeSelect
+								id="channel-dm-policy"
+								onChange={(e) =>
+									setForm((f) => ({
+										...f,
+										dmPolicy: e.target.value as DmPolicy,
+									}))
+								}
+								value={form.dmPolicy}
+							>
+								{DM_POLICIES.map((policy) => (
+									<NativeSelectOption key={policy} value={policy}>
+										{DM_POLICY_LABELS[policy]}
+									</NativeSelectOption>
+								))}
+							</NativeSelect>
+							{form.dmPolicy === "pairing" ? (
+								<p className="text-muted-foreground text-xs">
+									A new person gets a one-time code and is held until you
+									approve it, so they can ask for access themselves instead of
+									you hunting for their id.
+								</p>
+							) : null}
+							{form.dmPolicy === "open" ? (
+								<p className="text-destructive text-xs">
+									Every direct message will be answered and billed to you.
+								</p>
+							) : null}
+						</div>
+
+						<div className="space-y-1.5">
+							<Label htmlFor="channel-group-policy">Groups</Label>
+							<NativeSelect
+								id="channel-group-policy"
+								onChange={(e) =>
+									setForm((f) => ({
+										...f,
+										groupPolicy: e.target.value as GroupPolicy,
+									}))
+								}
+								value={form.groupPolicy}
+							>
+								{GROUP_POLICIES.map((policy) => (
+									<NativeSelectOption key={policy} value={policy}>
+										{GROUP_POLICY_LABELS[policy]}
+									</NativeSelectOption>
+								))}
+							</NativeSelect>
+							<p className="text-muted-foreground text-xs">
+								There is no pairing flow for a group — one member typing at the
+								bot is not consent from the whole room.
+							</p>
+						</div>
+					</div>
+
+					<div className="space-y-3 rounded-lg border bg-card p-4">
+						<p className="font-medium text-sm">Behaviour</p>
+
+						{supported.typing ? (
+							<div className="flex items-center justify-between gap-4">
+								<div>
+									<p className="text-sm">Typing indicator</p>
+									<p className="text-muted-foreground text-xs">
+										Show that the bot is working while the agent runs.
+									</p>
+								</div>
+								<Switch
+									aria-label="Typing indicator"
+									checked={form.typingIndicator}
+									onCheckedChange={(v) =>
+										setForm((f) => ({ ...f, typingIndicator: v }))
+									}
+								/>
+							</div>
+						) : null}
+
+						{supported.commandMenu ? (
+							<div className="flex items-center justify-between gap-4">
+								<div>
+									<p className="text-sm">Publish command menu</p>
+									<p className="text-muted-foreground text-xs">
+										Offer the same slash commands and skills the desktop chat
+										does, in the platform's own command menu.
+									</p>
+								</div>
+								<Switch
+									aria-label="Publish command menu"
+									checked={form.publishCommands}
+									onCheckedChange={(v) =>
+										setForm((f) => ({ ...f, publishCommands: v }))
+									}
+								/>
+							</div>
+						) : null}
+
+						{supported.richText ? (
+							<div className="flex items-center justify-between gap-4">
+								<div>
+									<p className="text-sm">Rich text replies</p>
+									<p className="text-muted-foreground text-xs">
+										Send headings, lists and tables natively instead of raw
+										markdown.
+									</p>
+								</div>
+								<Switch
+									aria-label="Rich text replies"
+									checked={form.richText}
+									onCheckedChange={(v) =>
+										setForm((f) => ({ ...f, richText: v }))
+									}
+								/>
+							</div>
+						) : null}
+
+						{supported.streaming ? (
+							<div className="flex items-center justify-between gap-4">
+								<div>
+									<p className="text-sm">Streaming drafts</p>
+									<p className="text-muted-foreground text-xs">
+										Show a draft while the reply is generated. Direct messages
+										only — the platform rejects drafts in groups.
+									</p>
+								</div>
+								<Switch
+									aria-label="Streaming drafts"
+									checked={form.streaming}
+									onCheckedChange={(v) =>
+										setForm((f) => ({ ...f, streaming: v }))
+									}
+								/>
+							</div>
+						) : null}
+
+						{supported.threadReplies ? (
+							<div className="flex items-center justify-between gap-4">
+								<div>
+									<p className="text-sm">Reply in a thread</p>
+									<p className="text-muted-foreground text-xs">
+										Open a thread on each message so a busy channel stays
+										readable and each thread keeps its own history.
+									</p>
+								</div>
+								<Switch
+									aria-label="Reply in a thread"
+									checked={form.threadReplies}
+									onCheckedChange={(v) =>
+										setForm((f) => ({ ...f, threadReplies: v }))
+									}
+								/>
+							</div>
+						) : null}
+
+						{supported.readReceipts ? (
+							<div className="flex items-center justify-between gap-4">
+								<div>
+									<p className="text-sm">Read receipts</p>
+									<p className="text-muted-foreground text-xs">
+										Mark messages read when the bot picks them up.
+									</p>
+								</div>
+								<Switch
+									aria-label="Read receipts"
+									checked={form.sendReadReceipts}
+									onCheckedChange={(v) =>
+										setForm((f) => ({ ...f, sendReadReceipts: v }))
+									}
+								/>
+							</div>
+						) : null}
+
+						<div className="space-y-1.5">
+							<Label htmlFor="channel-voice-reply">Voice replies</Label>
+							<NativeSelect
+								id="channel-voice-reply"
+								onChange={(e) =>
+									setForm((f) => ({
+										...f,
+										voiceReply: e.target.value as VoiceReplyMode,
+									}))
+								}
+								value={form.voiceReply}
+							>
+								{VOICE_REPLY_MODES.map((mode) => (
+									<NativeSelectOption key={mode} value={mode}>
+										{VOICE_REPLY_LABELS[mode]}
+									</NativeSelectOption>
+								))}
+							</NativeSelect>
+							<p className="text-muted-foreground text-xs">
+								Voice messages you send are transcribed either way. A spoken
+								reply is sent alongside the text, never instead of it.
+								{form.channelType === "whatsapp" && form.voiceReply !== "never"
+									? " WhatsApp cannot carry Ryu's generated audio, so replies there stay text-only."
+									: ""}
+							</p>
+						</div>
+					</div>
+
+					{supported.profile ? (
+						<div className="space-y-3 rounded-lg border bg-card p-4">
+							<div>
+								<p className="font-medium text-sm">Profile</p>
+								<p className="text-muted-foreground text-xs">
+									Pushed to the platform when the gateway starts. Leave a field
+									blank to keep whatever the bot already has.
+								</p>
+							</div>
+							<div className="space-y-1.5">
+								<Label htmlFor="channel-profile-name">Display name</Label>
+								<Input
+									id="channel-profile-name"
+									onChange={(e) =>
+										setForm((f) => ({
+											...f,
+											profileName: e.target.value || null,
+										}))
+									}
+									placeholder="Leave blank to keep the current name"
+									value={form.profileName ?? ""}
+								/>
+							</div>
+							<div className="space-y-1.5">
+								<Label htmlFor="channel-profile-bio">
+									Short bio ({(form.profileShortBio ?? "").length}/120)
+								</Label>
+								<Input
+									id="channel-profile-bio"
+									maxLength={120}
+									onChange={(e) =>
+										setForm((f) => ({
+											...f,
+											profileShortBio: e.target.value || null,
+										}))
+									}
+									placeholder="Shown on the bot's profile page"
+									value={form.profileShortBio ?? ""}
+								/>
+							</div>
+							<div className="space-y-1.5">
+								<Label htmlFor="channel-profile-description">
+									Description ({(form.profileDescription ?? "").length}/512)
+								</Label>
+								<Textarea
+									id="channel-profile-description"
+									maxLength={512}
+									onChange={(e) =>
+										setForm((f) => ({
+											...f,
+											profileDescription: e.target.value || null,
+										}))
+									}
+									placeholder="Shown in an empty chat, before the first message"
+									rows={3}
+									value={form.profileDescription ?? ""}
+								/>
+							</div>
+						</div>
+					) : null}
 
 					<div className="flex items-center justify-between rounded-lg border bg-card p-4">
 						<div>

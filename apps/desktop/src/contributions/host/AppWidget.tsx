@@ -17,8 +17,7 @@
 //
 // The frame NEVER holds the Core token and NEVER reaches the network (CSP
 // `connect-src 'none'`); every privileged action is a capability-gated RPC the
-// host performs. Rendering is gated behind `PLUGIN_RUNTIME_FLAG` (defense in depth;
-// ChatPage also withholds the context value when the flag is off).
+// host performs.
 
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
@@ -39,10 +38,6 @@ import { useWidgetHost } from "@ryu/blocks/desktop/agent-elements/widget-host-co
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { openExternal as openExternalShell } from "@/lib/tauri-bridge.ts";
-import {
-	PLUGIN_RUNTIME_FLAG,
-	useExperimentalFlag,
-} from "@/src/lib/experimental.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 /** A widget CSP (mirrors the blocks `WidgetCsp`); `resource_domains` is ignored
@@ -113,7 +108,6 @@ function detectTheme(): "light" | "dark" {
 const DEFAULT_INLINE_HEIGHT = 360;
 
 export function AppWidget({ part }: { part: WidgetPartLike }) {
-	const { enabled: runtimeEnabled } = useExperimentalFlag(PLUGIN_RUNTIME_FLAG);
 	const host = useWidgetHost();
 	const data = widgetData(part);
 	const stateStore = useWidgetStateStore();
@@ -371,14 +365,7 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 	const widgetHtml = data?.widget.html;
 	const widgetServer = data?.serverId;
 	const srcdoc = useMemo(() => {
-		if (
-			!(
-				runtimeEnabled &&
-				widgetHtml &&
-				widgetServer &&
-				initialGlobalsRef.current
-			)
-		) {
+		if (!(widgetHtml && widgetServer && initialGlobalsRef.current)) {
 			return null;
 		}
 		return widgetBootstrapSrcdoc(
@@ -390,11 +377,11 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 			// the iframe (matching the srcdoc's stable-inputs contract above).
 			assetProxyRef.current ?? undefined
 		);
-	}, [runtimeEnabled, nonce, widgetHtml, widgetServer]);
+	}, [nonce, widgetHtml, widgetServer]);
 
-	// Flag off, the host context is missing, the part is malformed, or the widget
-	// asked to close: render a benign inert placeholder — never fetch or run widget code.
-	if (!(runtimeEnabled && host && data && srcdoc) || closed) {
+	// The host context is missing, the part is malformed, or the widget asked to
+	// close: render a benign inert placeholder — never fetch or run widget code.
+	if (!(host && data && srcdoc) || closed) {
 		return (
 			<div className="rounded-md border bg-muted/30 p-3 text-muted-foreground text-xs">
 				{data?.invoked ?? "App widget"}

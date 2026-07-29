@@ -560,6 +560,106 @@ const host = {{
     )
 }
 
+/// The sandbox path bound to a capability adapter's PRIMARY tool — the binding's
+/// own `tool`, fixed before the sandbox starts. Takes arguments only, never a tool
+/// id, so this path cannot be redirected.
+pub const CAPABILITY_ADAPTER_CALL_PATH: &str = "provider.call";
+
+/// The sandbox path an adapter uses to reach one of the ADDITIONAL tool ids its
+/// manifest declared (`adapter.tools`) — the second endpoint an async job API
+/// needs. The id travels in the arguments and is checked host-side against that
+/// declared allowlist, so the choice is only ever *among* manifest-declared tools.
+pub const CAPABILITY_ADAPTER_NAMED_PATH: &str = "provider.named";
+
+/// Wrap a capability adapter's body into a sandbox program.
+///
+/// Same substrate as [`build_inline_tool_program`], different facade. An adapter
+/// maps ONE canonical verb onto ONE provider tool, so it gets no `host.*`
+/// capabilities at all — only:
+///
+/// - `input` — the canonical verb arguments (layer defaults already applied).
+/// - `defaults` — the provider's resolved `arg_defaults`, `pref:` tokens already
+///   looked up. The declarative `arg_template` expands from the CALLER's
+///   arguments and therefore can never see a resolved preference; an adapter can,
+///   which is what makes a per-install id usable inside a request body.
+/// - `callTool(args)` — the provider's own bound tool. Deliberately takes NO tool
+///   id: the target is fixed by the manifest before the sandbox starts, so
+///   sandboxed code cannot redirect the call. The adapter is exactly the single
+///   re-entry the declarative path already performs, expressed as code.
+/// - `callNamed(id, args)` — one of the ADDITIONAL tools the manifest declared in
+///   `adapter.tools` (the second endpoint of an async job API). The id is checked
+///   host-side against that declared allowlist, so the choice is only ever among
+///   tools the provider itself listed.
+///
+/// `code` is evaluated as the tail of the program's async IIFE and `return`s the
+/// canonical result.
+pub fn build_capability_adapter_program(input: &Value, defaults: &Value, code: &str) -> String {
+    let input_json = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    let defaults_json = serde_json::to_string(defaults).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        r#"const input = {input};
+const defaults = {defaults};
+const callTool = (a) => tools.{path}(a ?? {{}});
+const callNamed = (id, a) => tools.{named}({{ tool: String(id), args: a ?? {{}} }});
+{code}
+"#,
+        input = input_json,
+        defaults = defaults_json,
+        path = CAPABILITY_ADAPTER_CALL_PATH,
+        named = CAPABILITY_ADAPTER_NAMED_PATH,
+        code = code,
+    )
+}
+
+#[cfg(test)]
+mod capability_adapter_program_tests {
+    use super::{build_capability_adapter_program, CAPABILITY_ADAPTER_CALL_PATH};
+    use serde_json::json;
+
+    // The adapter facade must bind exactly three names and NOTHING else. In
+    // particular it must not expose `host`, which is what an `inline_deno` tool
+    // gets: an adapter normalizes one provider's shapes, so reaching the side
+    // model / storage / runAgent would be authority the declarative path it
+    // replaces never had.
+    #[test]
+    fn binds_input_defaults_and_call_tool_but_not_host() {
+        let program = build_capability_adapter_program(
+            &json!({ "query": "rust" }),
+            &json!({ "workspace_id": "ws_1" }),
+            "return await callTool({ q: input.query });",
+        );
+        assert!(program.contains(r#"const input = {"query":"rust"}"#));
+        assert!(program.contains(r#"const defaults = {"workspace_id":"ws_1"}"#));
+        assert!(program.contains("const callTool ="));
+        assert!(
+            !program.contains("const host ="),
+            "an adapter must not receive the plugin-hook `host` facade"
+        );
+    }
+
+    // `callTool` must close over the fixed bridge path with no id parameter, so
+    // there is no seam through which sandboxed JS could name a different tool.
+    #[test]
+    fn call_tool_takes_no_tool_id() {
+        let program = build_capability_adapter_program(&json!({}), &json!({}), "return null;");
+        assert!(program.contains(&format!("tools.{CAPABILITY_ADAPTER_CALL_PATH}(a ?? {{}})")));
+        assert!(
+            !program.contains("callTool = (id"),
+            "callTool must not accept a caller-chosen tool id"
+        );
+    }
+
+    // The bound names must survive an adapter body that shadows nothing and an
+    // empty argument set — the degenerate case a verb with no arguments hits.
+    #[test]
+    fn empty_input_and_defaults_still_bind() {
+        let program = build_capability_adapter_program(&json!({}), &json!({}), "return null;");
+        assert!(program.contains("const input = {}"));
+        assert!(program.contains("const defaults = {}"));
+        assert!(program.trim_end().ends_with("return null;"));
+    }
+}
+
 #[cfg(test)]
 mod default_scrub_tests {
     use super::{default_scrub_env, default_scrub_templates};

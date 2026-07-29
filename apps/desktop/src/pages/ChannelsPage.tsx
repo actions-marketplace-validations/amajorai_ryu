@@ -29,6 +29,50 @@ function toView(c: ChannelConfig): ChannelConfigView {
 		model: c.model,
 		systemPrompt: c.systemPrompt,
 		secrets: c.secrets ?? {},
+		// Behaviour settings round-trip unmasked (they are configuration, not
+		// credentials). Each falls back to the server's own default so a bot saved
+		// before the field existed still opens with a coherent form.
+		dmPolicy: c.dmPolicy ?? "pairing",
+		groupPolicy: c.groupPolicy ?? "allowlist",
+		dmAllowlist: c.dmAllowlist ?? [],
+		groupAllowlist: c.groupAllowlist ?? [],
+		typingIndicator: c.typingIndicator ?? true,
+		publishCommands: c.publishCommands ?? true,
+		richText: c.richText ?? true,
+		streaming: c.streaming ?? false,
+		voiceReply: c.voiceReply ?? "never",
+		threadReplies: c.threadReplies ?? false,
+		sendReadReceipts: c.sendReadReceipts ?? true,
+		profileName: c.profileName ?? null,
+		profileShortBio: c.profileShortBio ?? null,
+		profileDescription: c.profileDescription ?? null,
+	};
+}
+
+/**
+ * The behaviour settings the form edits, lifted off the save payload.
+ *
+ * Listed explicitly rather than spread wholesale: the payload also carries
+ * `secrets`, which the update path deliberately omits when nothing changed, so a
+ * blanket spread would put an empty secrets map back on the wire and look like
+ * an intentional clear.
+ */
+function behaviorFields(payload: ChannelSavePayload) {
+	return {
+		dmPolicy: payload.dmPolicy,
+		groupPolicy: payload.groupPolicy,
+		dmAllowlist: payload.dmAllowlist,
+		groupAllowlist: payload.groupAllowlist,
+		typingIndicator: payload.typingIndicator,
+		publishCommands: payload.publishCommands,
+		richText: payload.richText,
+		streaming: payload.streaming,
+		voiceReply: payload.voiceReply,
+		threadReplies: payload.threadReplies,
+		sendReadReceipts: payload.sendReadReceipts,
+		profileName: payload.profileName,
+		profileShortBio: payload.profileShortBio,
+		profileDescription: payload.profileDescription,
 	};
 }
 
@@ -67,6 +111,7 @@ export default function ChannelsPage({
 					model: payload.model,
 					systemPrompt: payload.systemPrompt,
 					enabled: payload.enabled,
+					...behaviorFields(payload),
 				});
 			} else if (ctx.id) {
 				await update(ctx.id, {
@@ -78,6 +123,7 @@ export default function ChannelsPage({
 					model: payload.model,
 					systemPrompt: payload.systemPrompt,
 					enabled: payload.enabled,
+					...behaviorFields(payload),
 				});
 			}
 			return true;

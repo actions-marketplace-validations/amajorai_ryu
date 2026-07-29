@@ -61,7 +61,9 @@ import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
-import StoreItemAction from "./chrome/store-item-action.tsx";
+import StoreItemAction, {
+	StoreItemContextMenuContent,
+} from "./chrome/store-item-action.tsx";
 import { skillOrg, titleCase } from "./friendly.ts";
 import {
 	type CatalogHost,
@@ -643,6 +645,15 @@ function SkillList({
 								onInstall={() => cardInstall(s.id)}
 								toggleBusy={togglingSkill === s.id}
 							/>
+						}
+						contextMenu={
+							s.installed ? undefined : (
+								<StoreItemContextMenuContent
+									canReport={false}
+									onInstall={() => cardInstall(s.id)}
+									onReport={() => undefined}
+								/>
+							)
 						}
 						description={
 							s.installs > 0

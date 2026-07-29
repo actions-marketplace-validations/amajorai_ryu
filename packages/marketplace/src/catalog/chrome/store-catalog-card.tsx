@@ -8,6 +8,11 @@
 // The row is NOT a single <button> (that would nest the action button inside it):
 // the icon+text is one button that opens the preview, the action sits beside it.
 
+import {
+	ContextMenu,
+	ContextMenuContent,
+	ContextMenuTrigger,
+} from "@ryu/ui/components/context-menu.tsx";
 import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import {
 	DitherGradient,
@@ -92,6 +97,7 @@ export default function StoreCatalogCard({
 	selected = false,
 	onClick,
 	action,
+	contextMenu,
 }: {
 	/** Fallback glyph — rendered inside the rounded square when no `iconId`/`iconUrl`. */
 	icon: ReactNode;
@@ -119,6 +125,8 @@ export default function StoreCatalogCard({
 	onClick: () => void;
 	/** The right-hand lifecycle control (see {@link StoreItemAction}). */
 	action?: ReactNode;
+	/** Optional right-click context menu content for the card. */
+	contextMenu?: ReactNode;
 }) {
 	const safeDither = normalizeDither(dither);
 	// Resolve the two icon fields: a raster logo from `icon_url` (any https host),
@@ -156,7 +164,7 @@ export default function StoreCatalogCard({
 	const flatBackground =
 		!safeDither && iconBackground ? { background: iconBackground } : undefined;
 
-	return (
+	const card = (
 		<div
 			className={cn(
 				"group flex items-center gap-3 rounded-xl pr-2 transition-colors",
@@ -206,5 +214,16 @@ export default function StoreCatalogCard({
 			</button>
 			{action ? <div className="shrink-0">{action}</div> : null}
 		</div>
+	);
+
+	if (!contextMenu) {
+		return card;
+	}
+
+	return (
+		<ContextMenu>
+			<ContextMenuTrigger render={<>{card}</>} />
+			<ContextMenuContent align="end">{contextMenu}</ContextMenuContent>
+		</ContextMenu>
 	);
 }

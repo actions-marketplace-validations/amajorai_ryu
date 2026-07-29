@@ -3,13 +3,11 @@
 // surfaced by Core via `GET /api/plugins/contributions`; this page is where an
 // enabled plugin's companion becomes a navigable, visible panel in the shell.
 //
-// Third-party code-execution gate: with the experimental flag OFF (the default),
-// this renders a benign, data-driven summary of the declared companion and runs
-// NO plugin code (exactly WF2's behavior). With the flag ON AND the plugin
-// carrying a UI bundle, it mounts the plugin's own sandboxed UI through
-// `PluginHostPanel` → `ExtensionHost` (a null-origin iframe, capability-gated
-// against the plugin's Gateway-approved grants). The flag gate is
-// `shouldLoadThirdPartyUi`, kept pure so the `flag_off_no_code` test asserts it.
+// Third-party code-execution gate: a companion that carries a UI bundle
+// (`hasUi`) mounts the plugin's own sandboxed UI through `PluginHostPanel` →
+// `ExtensionHost` (a null-origin iframe, capability-gated against the plugin's
+// Gateway-approved grants). A companion WITHOUT a bundle renders the benign,
+// data-driven summary below and runs no plugin code at all.
 
 import { PuzzleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -24,11 +22,6 @@ import {
 import { useMemo } from "react";
 import { PluginHostPanel } from "@/src/contributions/host/PluginHostPanel.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
-import {
-	PLUGIN_RUNTIME_FLAG,
-	shouldLoadThirdPartyUi,
-	useExperimentalFlag,
-} from "@/src/lib/experimental.ts";
 
 /**
  * The shared "this app isn't here" state for every route that resolves to a companion.
@@ -75,7 +68,6 @@ export default function PluginCompanionPage({
 	mountContext?: unknown;
 }) {
 	const { companions } = usePluginContributions();
-	const { enabled: runtimeFlagOn } = useExperimentalFlag(PLUGIN_RUNTIME_FLAG);
 	const companion = companions.find((c) => c.id === companionId);
 
 	// Stabilise the context by serialized content so an inline `{ workflowId }`
@@ -86,9 +78,9 @@ export default function PluginCompanionPage({
 	// biome-ignore lint/correctness/useExhaustiveDependencies: contextKey is the content hash of mountContext.
 	const stableContext = useMemo(() => mountContext, [contextKey]);
 
-	// The single decision gate for running third-party code. OFF (default) or a
-	// plugin with no bundle → the benign summary below; never a fetch, never code.
-	if (companion && shouldLoadThirdPartyUi(runtimeFlagOn, companion.hasUi)) {
+	// The single decision gate for running third-party code: no bundle → the benign
+	// summary below; never a fetch, never code.
+	if (companion?.hasUi) {
 		return (
 			<PluginHostPanel companion={companion} mountContext={stableContext} />
 		);
@@ -131,8 +123,9 @@ export default function PluginCompanionPage({
 				<div className="rounded-lg border bg-card p-4 text-card-foreground text-sm leading-relaxed">
 					<p>
 						<span className="font-medium">{companion.name}</span> is provided by
-						an enabled plugin and is available here. Its interactive panel loads
-						once the plugin runtime host is connected.
+						an enabled plugin and is available here. This plugin ships no
+						interface of its own, so there is nothing more to show — it works
+						through the rest of the app.
 					</p>
 				</div>
 			</div>

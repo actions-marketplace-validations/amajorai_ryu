@@ -4,12 +4,14 @@
 // ship as one release train (a single `vX.Y.Z` tag bundles every binary), so a
 // single query against the node drives both the version badge on the Core and
 // Gateway rows and the shared app-wide "Update available" action. Core owns the
-// verdict (`/api/update/check`); the install itself is the native tauri updater.
+// verdict (`/api/update/check`); the install is the native tauri updater for a
+// local node, and the node's own `POST /api/update/apply` for a remote one.
 // Gated on `enabled` so it never fires at an unreachable node.
 
 import { useQuery } from "@tanstack/react-query";
 
-import { installUpdate } from "@/src/components/updater/AutoUpdater.tsx";
+import { sileo } from "sileo";
+import { applyReleaseUpdate } from "@/src/components/updater/AutoUpdater.tsx";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { checkForUpdate, getVersionInfo } from "@/src/lib/api/update.ts";
 
@@ -49,8 +51,26 @@ export function useNodeVersion(
 		version: data?.info?.ryu_version ?? null,
 		updateAvailable: check?.update_available ?? false,
 		update: async () => {
-			if (check?.update_available) {
-				await installUpdate(check);
+			if (!check?.update_available) {
+				return;
+			}
+			// A remote node updates ITSELF; only a local one is the app this
+			// updater ships inside. `applyReleaseUpdate` owns that choice.
+			try {
+				const message = await applyReleaseUpdate(
+					target,
+					{ url: target.url },
+					check
+				);
+				if (message) {
+					sileo.success({ title: "Update started", description: message });
+				}
+			} catch (err) {
+				sileo.error({
+					title: "Update failed",
+					description: err instanceof Error ? err.message : String(err),
+					duration: null,
+				});
 			}
 		},
 	};

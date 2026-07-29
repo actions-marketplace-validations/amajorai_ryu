@@ -1,7 +1,7 @@
 {
   "name": "desktop",
   "private": true,
-  "version": "0.0.11",
+  "version": "0.0.13",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -14,6 +14,7 @@
     "test": "bun test src",
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list",
+    "test:e2e:live": "RYU_E2E_LIVE=1 playwright test available-updates-story.live",
     "test:wiring": "bun test e2e/wiring/",
     "build:harness": "vite build --config e2e/harness/vite.harness.config.ts",
     "clean": "rm -rf src-tauri/target dist build"

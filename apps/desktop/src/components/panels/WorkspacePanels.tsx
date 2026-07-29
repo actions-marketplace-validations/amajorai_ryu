@@ -49,6 +49,7 @@ import { cn } from "@ryu/ui/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "next-themes";
 import type {
+	CSSProperties,
 	KeyboardEvent,
 	MouseEvent as ReactMouseEvent,
 	ReactNode,
@@ -95,6 +96,7 @@ import {
 	setFileTreePrefs,
 	useFileTreePrefs,
 } from "@/src/hooks/useFileTreePrefs.ts";
+import { useFileTreeThemeStyles } from "@/src/hooks/useFileTreeThemeStyles.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import {
 	sidebarFloatingChrome,
@@ -1004,6 +1006,7 @@ function FileTreePanel({ folder }: { folder?: string | null }) {
 
 	const prefs = useFileTreePrefs();
 	const options = useMemo(() => fileTreePrefsToOptions(prefs), [prefs]);
+	const themeStyles = useFileTreeThemeStyles(prefs);
 
 	if (!folder) {
 		return (
@@ -1084,13 +1087,16 @@ function FileTreePanel({ folder }: { folder?: string | null }) {
 				</Tooltip>
 			</div>
 			{/* @pierre/trees virtualizes at height:100% with a flex-1/min-h-0 inner
-			    scroller, so every ancestor needs a definite height. Keyed on the prefs
-			    so display options (constructor-time in `useFileTree`) take effect. */}
+			    scroller, so every ancestor needs a definite height. Keyed on the
+			    constructor-time OPTIONS (not the whole prefs blob) so display options
+			    take effect — theme is applied as host CSS variables instead, and
+			    keying on it would throw away expansion/scroll state on every switch. */}
 			<div className="min-h-0 flex-1 overflow-hidden p-1">
 				<FileTreeView
-					key={JSON.stringify(prefs)}
+					key={JSON.stringify(options)}
 					options={options}
 					paths={paths}
+					style={themeStyles}
 				/>
 			</div>
 		</div>
@@ -1105,15 +1111,17 @@ function FileTreePanel({ folder }: { folder?: string | null }) {
 function FileTreeView({
 	paths,
 	options,
+	style,
 }: {
 	options: ReturnType<typeof fileTreePrefsToOptions>;
 	paths: readonly string[];
+	style?: CSSProperties;
 }) {
 	const { model } = useFileTree(options);
 	useEffect(() => {
 		model.resetPaths(paths);
 	}, [paths, model]);
-	return <FileTree className="h-full w-full" model={model} />;
+	return <FileTree className="h-full w-full" model={model} style={style} />;
 }
 
 // ── Code review panel (@pierre/diffs) ────────────────────────────────────────

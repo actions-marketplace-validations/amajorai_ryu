@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { cn } from "@/lib/utils.ts";
 
 const COLOR_THEMES = [
-	{ value: "default", label: "Blue", color: "oklch(0.6321 0.2018 254.09)" },
+	{ value: "default", label: "Blue", color: "oklch(0.6690 0.1837 248.81)" },
 	{ value: "red", label: "Red", color: "hsl(0 84.2% 60.2%)" },
 	{ value: "orange", label: "Orange", color: "hsl(20.5 90.2% 48.2%)" },
 	{ value: "yellow", label: "Yellow", color: "hsl(47.9 95.8% 31.2%)" },

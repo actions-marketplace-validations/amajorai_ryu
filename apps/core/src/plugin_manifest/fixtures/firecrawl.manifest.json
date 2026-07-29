@@ -1,0 +1,204 @@
+{
+  "id": "firecrawl",
+  "name": "Firecrawl",
+  "version": "1.0.0",
+  "description": "Web search and page scraping via the Firecrawl v2 API (https://firecrawl.dev), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Firecrawl without changing what agents call. Requires a BYOK Firecrawl API key.",
+  "tagline": "Search and scrape the web for agents",
+  "keywords": ["search", "web", "extract", "scrape"],
+  "category": "Search",
+  "engines": {
+    "ryu": ">=0.0.1"
+  },
+  "runnables": [
+    {
+      "id": "tool-firecrawl-search",
+      "name": "Firecrawl Search",
+      "kind": "tool",
+      "config": {
+        "slug": "firecrawl__search",
+        "backend": "http",
+        "method": "POST",
+        "url": "https://api.firecrawl.dev/v2/search",
+        "secret_headers": {
+          "Authorization": "Bearer env:RYU_FIRECRAWL_API_KEY"
+        },
+        "fail_open": true,
+        "unwrap_body": true,
+        "description": "Web search via Firecrawl. Returns ranked web results with titles, URLs, and descriptions. Requires RYU_FIRECRAWL_API_KEY.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The search query."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Number of results to return (default 10).",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "id": "tool-firecrawl-scrape",
+      "name": "Firecrawl Scrape",
+      "kind": "tool",
+      "config": {
+        "slug": "firecrawl__scrape",
+        "backend": "http",
+        "method": "POST",
+        "url": "https://api.firecrawl.dev/v2/scrape",
+        "secret_headers": {
+          "Authorization": "Bearer env:RYU_FIRECRAWL_API_KEY"
+        },
+        "fail_open": true,
+        "unwrap_body": true,
+        "description": "Scrape a single web page with Firecrawl and return its main content as markdown. Requires RYU_FIRECRAWL_API_KEY.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "The URL of the page to scrape."
+            }
+          },
+          "required": ["url"]
+        }
+      }
+    },
+    {
+      "id": "tool-firecrawl-crawl-start",
+      "name": "Firecrawl Crawl (start)",
+      "kind": "tool",
+      "config": {
+        "slug": "firecrawl__crawl_start",
+        "backend": "http",
+        "method": "POST",
+        "url": "https://api.firecrawl.dev/v2/crawl",
+        "secret_headers": {
+          "Authorization": "Bearer env:RYU_FIRECRAWL_API_KEY"
+        },
+        "fail_open": true,
+        "unwrap_body": true,
+        "description": "Start a Firecrawl crawl job and return its id. Asynchronous: poll firecrawl__crawl_status with the returned id. Requires RYU_FIRECRAWL_API_KEY.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "The start URL to crawl from."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum pages to fetch.",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "maxDiscoveryDepth": {
+              "type": "integer",
+              "description": "Link-discovery hops to follow from the start URL."
+            }
+          },
+          "required": ["url"]
+        }
+      }
+    },
+    {
+      "id": "tool-firecrawl-crawl-status",
+      "name": "Firecrawl Crawl (status)",
+      "kind": "tool",
+      "config": {
+        "slug": "firecrawl__crawl_status",
+        "backend": "http",
+        "method": "GET",
+        "url": "https://api.firecrawl.dev/v2/crawl/{id}",
+        "secret_headers": {
+          "Authorization": "Bearer env:RYU_FIRECRAWL_API_KEY"
+        },
+        "fail_open": true,
+        "unwrap_body": true,
+        "description": "Read the status and accumulated pages of a Firecrawl crawl job started by firecrawl__crawl_start. Requires RYU_FIRECRAWL_API_KEY.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The crawl job id returned by firecrawl__crawl_start."
+            }
+          },
+          "required": ["id"]
+        }
+      }
+    }
+  ],
+  "provides": [
+    {
+      "capability": "web.search",
+      "version": "1.0.0",
+      "selectable": true,
+      "tools": {
+        "web__search": {
+          "tool": "firecrawl__search",
+          "args": { "limit": "limit" },
+          "response": {
+            "results": "data.web",
+            "fields": {
+              "title": "title",
+              "url": "url",
+              "snippet": "description"
+            }
+          }
+        }
+      }
+    },
+    {
+      "capability": "web.extract",
+      "version": "1.0.0",
+      "selectable": true,
+      "tools": {
+        "web__extract": {
+          "tool": "firecrawl__scrape",
+          "adapter": {
+            "code": "const res = await callTool({ url: input.url });\n// NOT a result set: these tools are fail_open, so a bad or missing API key comes\n// back as {available,reason,hint} and any other non-2xx as {status,body}. Shaping\n// either into `results` would report a broken key as an empty page — an invisible,\n// plausible-looking lie. Pass it through under `raw`, exactly as the declarative\n// response mapper does when its results path is absent.\nif (!res || res.data === undefined) {\n  return { raw: res };\n}\nconst items = Array.isArray(res.data) ? res.data : [res.data];\n// Firecrawl types `metadata.title` as string | string[] (a page carrying both a\n// <title> and an og:title yields an array). The canonical shape promises a\n// scalar, so collapse a single-element array here — in the ONE provider whose\n// quirk it is, rather than in shared kernel code every provider flows through.\nconst one = (v) => (Array.isArray(v) && v.length === 1 ? v[0] : v);\nreturn {\n  results: items.map((item) => ({\n    url: one(item && item.metadata && item.metadata.sourceURL),\n    title: one(item && item.metadata && item.metadata.title),\n    content: item && item.markdown,\n    raw: item,\n  })),\n};"
+          }
+        }
+      }
+    },
+    {
+      "capability": "web.crawl",
+      "version": "1.0.0",
+      "selectable": true,
+      "tools": {
+        "web__crawl": {
+          "tool": "firecrawl__crawl_start",
+          "adapter": {
+            "tools": ["firecrawl__crawl_status"],
+            "code": "// Firecrawl's crawl is a JOB API: one call starts it and returns an id, a\n// second reads the accumulated pages. A declarative binding is one request\n// with no loop, so binding it that way would hand the model a UUID where the\n// verb promises page content — which is why this verb was previously left\n// unbound for Firecrawl entirely.\nconst start = await callTool({\n  url: input.url,\n  limit: input.limit,\n  maxDiscoveryDepth: input.depth,\n});\n// No job id means this is not a started crawl at all: fail_open turns a bad or\n// missing API key into {available,reason,hint}, and any other non-2xx into\n// {status,body}. Calling that a FAILED CRAWL would misreport a config problem as\n// a site problem, so pass the envelope through the way the declarative mapper\n// does and let the caller see what actually happened.\nconst id = start && start.id;\nif (!id) {\n  return { raw: start };\n}\nconst one = (v) => (Array.isArray(v) && v.length === 1 ? v[0] : v);\nconst shape = (st, complete) => ({\n  status: (st && st.status) || \"unknown\",\n  complete,\n  total: st && st.total,\n  results: ((st && st.data) || []).map((item) => ({\n    url: one(item && item.metadata && item.metadata.sourceURL),\n    title: one(item && item.metadata && item.metadata.title),\n    content: item && item.markdown,\n    raw: item,\n  })),\n});\n// The sandbox bounds ACTIVE COMPUTE, and awaiting a tool call spends that\n// budget, so a crawl larger than the budget cannot be waited out. Poll with\n// backoff inside a deliberately smaller window and then RETURN what completed,\n// flagged `complete:false` — a partial page set the model can use beats being\n// killed at the wall clock with nothing.\nconst BUDGET_MS = 20000;\nconst started = Date.now();\nlet delay = 750;\nfor (;;) {\n  const st = await callNamed(\"firecrawl__crawl_status\", { id });\n  const status = st && st.status;\n  if (status === \"completed\") return shape(st, true);\n  if (status === \"failed\" || status === \"cancelled\") return shape(st, false);\n  if (Date.now() - started > BUDGET_MS) return shape(st, false);\n  await new Promise((r) => setTimeout(r, delay));\n  delay = Math.min(delay * 2, 4000);\n}"
+          }
+        }
+      }
+    }
+  ],
+  "permission_grants": ["tool:http-egress:api.firecrawl.dev", "tool:execute"],
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "firecrawl.settings",
+        "title": "Firecrawl",
+        "scope": "node",
+        "fields": [
+          {
+            "type": "secret",
+            "pref_key": "RYU_FIRECRAWL_API_KEY",
+            "label": "Firecrawl API key",
+            "description": "Create a key at https://www.firecrawl.dev/app/api-keys and paste it here. Stored encrypted on this node and never shown again — re-paste to change it. Without a key the Firecrawl tools stay installed but return nothing, so `web.search` / `web.extract` fall back to whichever other provider you select."
+          }
+        ]
+      }
+    ]
+  }
+}

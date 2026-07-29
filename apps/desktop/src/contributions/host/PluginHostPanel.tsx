@@ -13,8 +13,8 @@
 //   - wraps the sandboxed frame in a visible "Plugin" attribution header so it is
 //     never mistaken for system chrome (invariant #6).
 //
-// It renders NOTHING until the flag-gated caller (PluginCompanionPage) decides the
-// plugin actually carries a UI bundle and the experimental flag is on.
+// It renders NOTHING until the caller (PluginCompanionPage) decides the plugin
+// actually carries a UI bundle.
 
 import { PuzzleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";

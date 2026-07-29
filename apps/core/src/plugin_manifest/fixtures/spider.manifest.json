@@ -60,5 +60,31 @@
       }
     }
   ],
+  "provides": [
+    {
+      "capability": "web.extract",
+      "version": "1.0.0",
+      "selectable": true,
+      "default": true,
+      "tools": {
+        "web__extract": {
+          "tool": "spider__crawl",
+          "args": { "format": "" },
+          "arg_defaults": { "depth": 0, "limit": 1 }
+        }
+      }
+    },
+    {
+      "capability": "web.crawl",
+      "version": "1.0.0",
+      "selectable": true,
+      "default": true,
+      "tools": {
+        "web__crawl": {
+          "tool": "spider__crawl"
+        }
+      }
+    }
+  ],
   "permission_grants": ["tool:command:spider"]
 }

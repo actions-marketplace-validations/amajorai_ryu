@@ -12,7 +12,7 @@
         "slug": "advisor__consult",
         "backend": "http",
         "method": "POST",
-        "url": "http://127.0.0.1:7980/api/advisor/consult",
+        "url": "core:/api/advisor/consult",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },

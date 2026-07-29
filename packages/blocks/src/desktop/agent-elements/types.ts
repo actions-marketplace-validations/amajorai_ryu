@@ -159,6 +159,11 @@ export interface AgentChatProps {
 	 * context-usage ring in each completed assistant turn's stats footer.
 	 */
 	contextSize?: number;
+	/** Current signed-in user info for displaying avatar/name on own messages. */
+	currentUser?: {
+		avatar?: string;
+		name?: string;
+	};
 	/** Rendered below the composer in the centered empty state (e.g. a recent
 	 * chats list, Codex-style). Ignored once the thread has messages. */
 	emptyStateFooter?: React.ReactNode;

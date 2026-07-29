@@ -27,7 +27,13 @@ fn bin_path() -> PathBuf {
 // speculative decoding — `--spec-type draft-mtp` (PR #22673) plus Gemma-4 E2B/E4B
 // MTP assist support (PR #24282). NOTE: b9xxx removed `--draft-max`/`--draft-min`
 // in favour of `--spec-draft-n-max`/`--spec-draft-n-min` (see `inference::LaunchConfig`).
-const TARGET_VERSION: &str = "b9670";
+/// The release tag this build installs. Pinned at compile time: `archive_url()`
+/// is derived from it, so this is the ONLY version `ensure_installed` can
+/// deliver — upstream's newer tags are unreachable without a code change.
+/// `catalog::registry::installer_pin` reads it so the catalog advertises the
+/// deliverable version instead of GitHub's latest (which produced a permanent
+/// "update available" row whose Update button could never do anything).
+pub const TARGET_VERSION: &str = "b9670";
 
 fn archive_url() -> String {
     let tag = TARGET_VERSION;

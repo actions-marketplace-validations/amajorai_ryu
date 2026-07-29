@@ -9,7 +9,9 @@ import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
-import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreItemAction, {
+	StoreItemContextMenuContent,
+} from "@ryu/marketplace/catalog/chrome/store-item-action";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -269,6 +271,15 @@ function McpServerList({
 								card={s}
 								onInstall={() => onInstall(s.id)}
 							/>
+						}
+						contextMenu={
+							s.installed ? undefined : (
+								<StoreItemContextMenuContent
+									canReport={false}
+									onInstall={() => onInstall(s.id)}
+									onReport={() => undefined}
+								/>
+							)
 						}
 						description={s.description}
 						icon={<HugeiconsIcon className="size-5" icon={ServerStack01Icon} />}

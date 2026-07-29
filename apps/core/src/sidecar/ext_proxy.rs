@@ -1580,6 +1580,7 @@ mod tests {
                 sidecar: Some("rag".to_owned()),
                 route: Some("/query".to_owned()),
                 grant: Some("cap:rag".to_owned()),
+                ..Default::default()
             }],
             ..Default::default()
         }
@@ -1857,9 +1858,7 @@ mod tests {
         let in_proc = ProvidesEntry {
             capability: "rag".to_owned(),
             version: "1.0.0".to_owned(),
-            sidecar: None,
-            route: None,
-            grant: None,
+            ..Default::default()
         };
         let resp = resolve_provider_route(&m, &in_proc, "com.ryu.rag").unwrap_err();
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);

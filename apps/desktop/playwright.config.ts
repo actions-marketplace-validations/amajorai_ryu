@@ -20,6 +20,12 @@ const HARNESS_URL = "http://localhost:5177/";
 export default defineConfig({
 	testDir: "./e2e",
 	testMatch: /\.spec\.ts$/,
+	// `*.live.spec.ts` needs a running Core and is opt-in (`bun run test:e2e:live`,
+	// which sets RYU_E2E_LIVE). Excluded from the default run for a mechanical
+	// reason, not a policy one: its story imports the whole download-center graph,
+	// and vite compiling that on demand starves the other specs sharing this dev
+	// server past their 30s timeout. CI has no Core either way.
+	testIgnore: process.env.RYU_E2E_LIVE ? undefined : /\.live\.spec\.ts$/,
 	fullyParallel: true,
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? 1 : 0,

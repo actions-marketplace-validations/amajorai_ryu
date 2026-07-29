@@ -274,6 +274,13 @@ pub const MEDIA_PLUGIN_ID: &str = "com.ryu.media";
 /// path is kernel and never HTTP-loops back through `/api/memory`.
 pub const MEMORY_PLUGIN_ID: &str = "com.ryu.memory";
 
+/// The Layers app's plugin id — a settings-only governance shell for the swappable
+/// capability layers. It contributes no runnables and gates no route; it exists so the
+/// `layer.<capability>.default.<arg>` preferences have a home that is not tied to any
+/// one provider (hanging them off `exa` would lose them on a swap to `tavily`).
+/// Default-on, because a settings surface the user cannot reach is not a setting.
+pub const LAYERS_PLUGIN_ID: &str = "com.ryu.layers";
+
 /// The Webhooks app's plugin id — the inbound webhook endpoint registry surfaced by
 /// the sandboxed `apps-store/webhooks/ui` companion (W7 frontend extraction). Unlike
 /// the other leaf shells this is NOT a route gate: `/api/webhooks` +
@@ -343,9 +350,13 @@ pub const SKILL_EDITOR_PLUGIN_ID: &str = "com.ryu.skill-editor";
 ///   tool apps. They are Core-tier AND default-on: on a fresh install their app
 ///   record is auto-seeded enabled (so they appear installed exactly like the
 ///   auto-downloaded default models), while the tool process still runs through
-///   its own sidecar/MCP lifecycle. Their fixtures declare no runnables (the
-///   tools come from the dedicated MCP provider); the record is the governance
-///   shell (see `crate::plugin_manifest` `BUILTIN_MANIFESTS` doc).
+///   its own sidecar/MCP lifecycle. `ghost` and `agentbrowser` declare no runnables
+///   (their tools come from the dedicated MCP provider); the record is the
+///   governance shell (see `crate::plugin_manifest` `BUILTIN_MANIFESTS` doc).
+///   `com.ryu.browser` is the exception among the sidecar-backed apps: it now also
+///   carries declarative `http` tool runnables that reach its own sidecar through
+///   the ext-proxy, because the swappable `browser.control` layer binds its verbs
+///   to registry tool ids and a sidecar route is not one.
 /// - `firewall`/`routing`/`sandbox` are Core-tier but **opt-in** (they change
 ///   gateway/sandbox behaviour), so they are NOT in [`CORE_DEFAULT_ON`].
 /// - `headroom` (egress compression) is deliberately **Community-tier**: the
@@ -358,6 +369,12 @@ pub const CORE_PLUGINS: &[&str] = &[
     "shadow",
     "spider",
     "agentbrowser",
+    // The default `web.search` provider. Core-tier for the same reason `spider` is:
+    // it is a default TOOL app that must exist out of the box, and default-on
+    // requires Core-tier. The other four search providers (tavily, brave, serper,
+    // firecrawl) stay Community + opt-in, because each is BYOK-only and would ship
+    // a tool that can do nothing until the user pastes a key.
+    "exa",
     // Workspace real-Chromium browser sidecar — core built-in, default-on.
     BROWSER_PLUGIN_ID,
     "firewall",
@@ -421,11 +438,10 @@ pub const CORE_PLUGINS: &[&str] = &[
     CLIPS_PLUGIN_ID,
     RECIPES_PLUGIN_ID,
     // Wave-2 leaf-feature governance shells (quests/approvals/skills/learning/
-    // healing). Core-tier AND default-on: their `/api/<feature>/*` routes were
-    // always-on before the gate, so a default-on seed keeps them reachable on every
-    // existing install (same reasoning as the wave-1 five). `learning`→`skills` and
-    // `healing`→`approvals` are real `requires` edges; both deps are default-on, so
-    // the fail-closed seeder never skips them.
+    // healing). All Core-tier; `skills` and `learning` are ALSO default-on (see
+    // CORE_DEFAULT_ON), quests/approvals/healing ship opt-in. `learning`→`skills` and
+    // `healing`→`approvals` are real `requires` edges; `learning`'s dep is default-on,
+    // so the fail-closed seeder never skips it.
     QUESTS_PLUGIN_ID,
     APPROVALS_PLUGIN_ID,
     SKILLS_PLUGIN_ID,
@@ -450,6 +466,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     VOICE_PLUGIN_ID,
     MEDIA_PLUGIN_ID,
     MEMORY_PLUGIN_ID,
+    LAYERS_PLUGIN_ID,
     // W7 frontend extraction: the webhooks page became a sandboxed companion app.
     // Not a route gate (the `/api/webhooks*` reads stay ungated) — Core-tier + default-on
     // so the companion is present on every fresh install. No `requires` edge.
@@ -502,16 +519,34 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // process runs through its own sidecar/MCP lifecycle; enabling the record just
     // makes it a first-class, governed, disable-able App. The pure sidecar-backed
     // ones (ghost/agentbrowser) declare no runnables, so seeding never double-lists
-    // their tools. `spider` and `shadow` are the declarative exceptions: their
-    // native `sidecar/mcp` providers were deleted, so their fixtures now CARRY the
-    // tool runnables as the sole owner (spider a `command` crawl tool; shadow four
-    // `http` tools reaching the Shadow sidecar through Core's `/api/shadow/*`
-    // proxy). Seeding the record enabled is exactly what surfaces those tools — no
-    // double-listing, since nothing else owns them.
+    // their tools. `spider`, `shadow` and `com.ryu.browser` are the declarative
+    // exceptions whose fixtures CARRY tool runnables as the sole owner: spider a
+    // `command` crawl tool; shadow four `http` tools reaching the Shadow sidecar
+    // through Core's `/api/shadow/*` proxy (its native `sidecar/mcp` providers were
+    // deleted); and browser seven `http` tools reaching its Electron sidecar through
+    // the generic ext-proxy, which is what gives the swappable `browser.control`
+    // layer registry tool ids to bind its verbs to. Seeding the record enabled is
+    // exactly what surfaces those tools — no double-listing, since nothing else
+    // owns them.
     "ghost",
     "shadow",
     "spider",
     "agentbrowser",
+    // `exa` is default-ON so the `web.search` toolkit has a provider out of the
+    // box. Without this the capability had ZERO enabled providers on a fresh
+    // install, and because the read model derives its capability list from the
+    // ENABLED set, the whole toolkit vanished: no `web__search` tool for agents
+    // and no row in the node selector, so nothing pointed at the Store either.
+    // `web.extract` / `web.crawl` only escaped that because `spider` happens to be
+    // default-on. Declaring `"default": true` in exa's manifest does NOT fix it —
+    // that only breaks ties among ALREADY-ENABLED providers, it never installs
+    // anything.
+    //
+    // Safe to ship on because exa is the one search provider that needs no
+    // credential: its binding falls back to Exa's public MCP endpoint when no
+    // `RYU_EXA_API_KEY` is set (see fixtures/exa.manifest.json). Every other
+    // search provider is BYOK-only and stays opt-in.
+    "exa",
     // Workspace browser sidecar — default-on so the "Browser" workspace tab uses
     // the real-Chromium sidecar out of the box (not the fallback iframe). Being
     // default-on also makes it uninstall-protected (`is_uninstall_protected`).
@@ -532,7 +567,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // the toggle is off and no `/expand` is used (no sandbox spawn on idle turns).
     "com.ryuhq.auto-expand",
     // NOTE (default-off apps): whiteboard / canvas / finetune / meetings / quests /
-    // approvals / learning / healing / monitors / workflows / activity / timeline /
+    // approvals / healing / monitors / workflows / activity / timeline /
     // skill-editor are intentionally NOT default-on — they stay installable +
     // enable-able from the Store (still in CORE_PLUGINS), but a fresh install ships
     // them OFF so the sidebar/App surface isn't pre-loaded with every feature.
@@ -550,11 +585,34 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     TEAMS_PLUGIN_ID,
     CLIPS_PLUGIN_ID,
     RECIPES_PLUGIN_ID,
-    // `skills` stays default-on (a shared capability). `quests`/`approvals`/
-    // `learning`/`healing` are default-OFF (see the note above) — `learning` requires
-    // `skills` and `healing` requires `approvals`, so both leave the default set with
-    // their dep, never orphaned.
+    // `skills` stays default-on (a shared capability). `quests`/`approvals`/`healing`
+    // are default-OFF (see the note above) — `healing` requires `approvals`, so it
+    // leaves the default set with its dep, never orphaned.
     SKILLS_PLUGIN_ID,
+    // `learning` is default-on because its manifest is the SOLE home of the two
+    // consent switches (`learning.skills-enabled` / `learning.enabled`), registered
+    // via `contributes.settings_tabs` — a default-OFF record would hide the control
+    // while the thing it governs kept running. The path that makes that concrete is
+    // the scheduler's `JobTarget::LearningCycle`: it calls `run_skills_pass` BEFORE
+    // any training check, and that pass is gated only on `learning.skills-enabled`
+    // (default ON) — so on a stock install it synthesizes skills from real
+    // conversations, record or no record, since only the HTTP surface is AppGated
+    // (see `server::learning_routes`). The `ExperienceStore` write is the weaker
+    // half of the argument: it is record-independent too, but gated on
+    // `learning.enabled` (default OFF) and reached only from the explicit
+    // thumbs-up/down feedback path.
+    // An ungated kernel path is NOT on its own a reason to be default-on — `memory`
+    // has the same asymmetry and stays opt-in (see the note below); the difference is
+    // that memory's auto-recall has no consent switch that would disappear with the
+    // record. Seeded after `skills` (its `requires` dep, right above); `seed_order`
+    // topologically enforces that anyway.
+    // CONSEQUENCE, deliberate: default-on ⇒ `is_uninstall_protected`, so Learning can
+    // no longer be uninstalled by anyone, and a user who HAD uninstalled it gets it
+    // back once — installed and enabled — on the next boot after upgrading, because
+    // uninstall removes the record and the seeder only skips ids that still have one.
+    // That lands them in the posture this list intends (consent switch present), and
+    // a "stay uninstalled" tombstone does not exist in the store to honor instead.
+    LEARNING_PLUGIN_ID,
     // `monitors` is default-OFF (see the note above). `hardware` stays default-on.
     HARDWARE_PLUGIN_ID,
     // `workflows` is default-OFF (see the note above). `agents` stays default-on and
@@ -591,6 +649,10 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // (the page it replaced was always-on). No `requires` edge; not a route gate.
     CALENDAR_PLUGIN_ID,
     // `activity` / `timeline` / `skill-editor` are default-OFF (see the note above).
+    // Settings-only shell for the swappable layers. Default-on because a settings
+    // surface the user cannot reach is not a setting; it contributes no runnables,
+    // gates no route, and spawns no process, so enabling it costs nothing.
+    LAYERS_PLUGIN_ID,
 ];
 
 /// The [`crate::plugin_manifest::PluginTier`] of a plugin, derived from

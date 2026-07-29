@@ -29,7 +29,6 @@ export type SettingsSectionValue =
 	| "voice"
 	| "goals"
 	| "double-check"
-	| "experimental"
 	| "developer";
 
 interface SettingsDialogState {

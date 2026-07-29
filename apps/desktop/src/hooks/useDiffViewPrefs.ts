@@ -8,6 +8,10 @@
 // `storage` event) but holds a whole options object instead of one boolean.
 
 import { useCallback, useSyncExternalStore } from "react";
+import {
+	DEFAULT_DIFF_DARK_THEME,
+	DEFAULT_DIFF_LIGHT_THEME,
+} from "@/src/lib/pierre-themes.ts";
 
 const STORAGE_KEY = "ryu:diff-view-prefs";
 
@@ -16,6 +20,8 @@ const STORAGE_KEY = "ryu:diff-view-prefs";
 // (disableBackground, overflow, …) at the render site, so the settings UI reads
 // naturally and the mapping lives in one place.
 export interface DiffViewPrefs {
+	/** Syntax theme used while the viewer is in dark mode. See `pierre-themes.ts`. */
+	darkTheme: string;
 	/** Change markers in the gutter. Library default: bars. */
 	diffIndicators: "bars" | "classic" | "none";
 	/** Side-by-side ("split") or stacked/inline ("unified"). Library default: split. */
@@ -24,6 +30,8 @@ export interface DiffViewPrefs {
 	expandUnchanged: boolean;
 	/** Style of the collapsed-context "…" separators between hunks. */
 	hunkSeparators: "simple" | "metadata" | "line-info" | "line-info-basic";
+	/** Syntax theme used while the viewer is in light mode. See `pierre-themes.ts`. */
+	lightTheme: string;
 	/** Inline (intra-line) change highlighting granularity. */
 	lineDiffType: "word-alt" | "word" | "char" | "none";
 	/** Full-width red/green line backgrounds. */
@@ -48,6 +56,8 @@ export const DEFAULT_DIFF_VIEW_PREFS: DiffViewPrefs = {
 	hunkSeparators: "simple",
 	expandUnchanged: false,
 	themeMode: "system",
+	lightTheme: DEFAULT_DIFF_LIGHT_THEME,
+	darkTheme: DEFAULT_DIFF_DARK_THEME,
 };
 
 const listeners = new Set<() => void>();
@@ -126,6 +136,12 @@ export function diffViewPrefsToOptions(
 		overflow: prefs.wrapLines ? ("wrap" as const) : ("scroll" as const),
 		hunkSeparators: prefs.hunkSeparators,
 		expandUnchanged: prefs.expandUnchanged,
+		// A light/dark PAIR: the library emits both sets of CSS variables and
+		// `light-dark()` picks per `color-scheme`, which `themeType` sets on the
+		// host ("system" inherits the app's, since next-themes writes
+		// `color-scheme` on <html>). Never a single name — that would pin one
+		// theme across both modes.
+		theme: { light: prefs.lightTheme, dark: prefs.darkTheme },
 		themeType: prefs.themeMode,
 		tokenizeMaxLineLength: TOKENIZE_MAX_LINE_LENGTH,
 		...extra,

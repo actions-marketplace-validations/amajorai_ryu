@@ -14,7 +14,7 @@ import { type ApiTarget, request } from "./client.ts";
  * `node` = this machine only; `project` = a specific project/folder (paired with
  * a `scopeId`).
  */
-export type MemoryScope = "user" | "node" | "project";
+export type MemoryScope = "user" | "node" | "project" | "org";
 
 /** The classification of a memory, driving how/when it's recalled. */
 export type MemoryCategory =
@@ -30,7 +30,7 @@ export type MemoryCategory =
 	| "other";
 
 /** Selectable scope levels, in display order. */
-export const MEMORY_SCOPES: MemoryScope[] = ["user", "node", "project"];
+export const MEMORY_SCOPES: MemoryScope[] = ["user", "node", "project", "org"];
 
 /** Selectable categories, in display order. */
 export const MEMORY_CATEGORIES: MemoryCategory[] = [
@@ -51,6 +51,7 @@ export const MEMORY_SCOPE_LABELS: Record<MemoryScope, string> = {
 	user: "User",
 	node: "Node",
 	project: "Project",
+	org: "Organization",
 };
 
 /** Human labels for the categories. */
@@ -141,8 +142,24 @@ interface MemoryWire {
 	when_to_use?: string | null;
 }
 
+/**
+ * Decode a wire scope string.
+ *
+ * Derived from {@link MEMORY_SCOPES} rather than an inline literal list: the
+ * previous hard-coded check silently coerced ANY unrecognized scope to `"user"`,
+ * and because {@link MemoryEditor} seeds its form state from the decoded value and
+ * writes it straight back on save, merely opening and saving a broader-scoped
+ * memory would DOWNGRADE it to private user scope. Widening the union is now
+ * enough to keep that from happening again.
+ *
+ * An unknown scope still falls back to `"user"` — the narrowest, most private
+ * level — so a value from a newer node fails closed rather than being displayed
+ * as more widely shared than it is.
+ */
 function toScope(value: string | undefined): MemoryScope {
-	return value === "node" || value === "project" ? value : "user";
+	return MEMORY_SCOPES.includes(value as MemoryScope)
+		? (value as MemoryScope)
+		: "user";
 }
 
 function toCategory(value: string | undefined): MemoryCategory {

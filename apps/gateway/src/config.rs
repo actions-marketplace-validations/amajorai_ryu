@@ -2135,34 +2135,12 @@ impl GatewayConfig {
         if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
             if !token.trim().is_empty() {
                 let existing = config.channels.telegram.take();
-                let model = std::env::var("TELEGRAM_MODEL")
-                    .ok()
-                    .or_else(|| existing.as_ref().map(|c| c.model.clone()))
-                    .unwrap_or_else(default_channel_model);
-                let system_prompt = std::env::var("TELEGRAM_SYSTEM_PROMPT")
-                    .ok()
-                    .or_else(|| existing.as_ref().and_then(|c| c.system_prompt.clone()));
-                let agent_id = std::env::var("TELEGRAM_AGENT_ID")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().and_then(|c| c.agent_id.clone()));
-                let team_id = std::env::var("TELEGRAM_TEAM_ID")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().and_then(|c| c.team_id.clone()));
-                let core_url = std::env::var("RYU_CORE_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().map(|c| c.core_url.clone()))
-                    .unwrap_or_else(default_core_url);
                 config.channels.telegram = Some(TelegramChannelConfig {
                     token,
-                    model,
-                    system_prompt,
-                    agent_id,
-                    team_id,
-                    group_reply_mode: group_reply_mode_from_env("TELEGRAM"),
-                    core_url,
+                    common: common_channel_from_env(
+                        "TELEGRAM",
+                        existing.as_ref().map(|c| &c.common),
+                    ),
                 });
             }
         }
@@ -2185,35 +2163,10 @@ impl GatewayConfig {
             let bot_token = std::env::var("SLACK_BOT_TOKEN").unwrap_or_default();
             if !app_token.trim().is_empty() && !bot_token.trim().is_empty() {
                 let existing = config.channels.slack.take();
-                let model = std::env::var("SLACK_MODEL")
-                    .ok()
-                    .or_else(|| existing.as_ref().map(|c| c.model.clone()))
-                    .unwrap_or_else(default_channel_model);
-                let system_prompt = std::env::var("SLACK_SYSTEM_PROMPT")
-                    .ok()
-                    .or_else(|| existing.as_ref().and_then(|c| c.system_prompt.clone()));
-                let agent_id = std::env::var("SLACK_AGENT_ID")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| existing.as_ref().and_then(|c| c.agent_id.clone()));
-                let team_id = std::env::var("SLACK_TEAM_ID")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| existing.as_ref().and_then(|c| c.team_id.clone()));
-                let core_url = std::env::var("RYU_CORE_URL")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| existing.as_ref().map(|c| c.core_url.clone()))
-                    .unwrap_or_else(default_core_url);
                 config.channels.slack = Some(SlackChannelConfig {
                     app_token,
                     bot_token,
-                    model,
-                    system_prompt,
-                    agent_id,
-                    team_id,
-                    group_reply_mode: group_reply_mode_from_env("SLACK"),
-                    core_url,
+                    common: common_channel_from_env("SLACK", existing.as_ref().map(|c| &c.common)),
                 });
             }
         }
@@ -2222,46 +2175,20 @@ impl GatewayConfig {
         if let Ok(token) = std::env::var("DISCORD_BOT_TOKEN") {
             if !token.trim().is_empty() {
                 let existing = config.channels.discord.take();
-                let channel_ids = std::env::var("DISCORD_CHANNEL_IDS")
-                    .ok()
-                    .map(|v| {
-                        v.split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                            .collect::<Vec<_>>()
-                    })
+                let channel_ids = channel_env_list("DISCORD", "CHANNEL_IDS")
                     .or_else(|| existing.as_ref().map(|c| c.channel_ids.clone()))
                     .unwrap_or_default();
-                let model = std::env::var("DISCORD_MODEL")
-                    .ok()
-                    .or_else(|| existing.as_ref().map(|c| c.model.clone()))
-                    .unwrap_or_else(default_channel_model);
-                let system_prompt = std::env::var("DISCORD_SYSTEM_PROMPT")
-                    .ok()
-                    .or_else(|| existing.as_ref().and_then(|c| c.system_prompt.clone()));
-                let agent_id = std::env::var("DISCORD_AGENT_ID")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().and_then(|c| c.agent_id.clone()));
-                let team_id = std::env::var("DISCORD_TEAM_ID")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().and_then(|c| c.team_id.clone()));
-                let core_url = std::env::var("RYU_CORE_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().map(|c| c.core_url.clone()))
-                    .unwrap_or_else(default_core_url);
+                let thread_replies = channel_env_bool("DISCORD", "THREAD_REPLIES")
+                    .or_else(|| existing.as_ref().map(|c| c.thread_replies))
+                    .unwrap_or(false);
                 config.channels.discord = Some(DiscordChannelConfig {
                     token,
                     channel_ids,
-                    model,
-                    system_prompt,
-                    agent_id,
-                    team_id,
-                    group_reply_mode: group_reply_mode_from_env("DISCORD"),
-                    core_url,
+                    thread_replies,
+                    common: common_channel_from_env(
+                        "DISCORD",
+                        existing.as_ref().map(|c| &c.common),
+                    ),
                 });
             }
         }
@@ -2294,26 +2221,9 @@ impl GatewayConfig {
                     .ok()
                     .or_else(|| existing.as_ref().map(|c| c.graph_version.clone()))
                     .unwrap_or_else(default_whatsapp_graph_version);
-                let model = std::env::var("WHATSAPP_MODEL")
-                    .ok()
-                    .or_else(|| existing.as_ref().map(|c| c.model.clone()))
-                    .unwrap_or_else(default_channel_model);
-                let system_prompt = std::env::var("WHATSAPP_SYSTEM_PROMPT")
-                    .ok()
-                    .or_else(|| existing.as_ref().and_then(|c| c.system_prompt.clone()));
-                let agent_id = std::env::var("WHATSAPP_AGENT_ID")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().and_then(|c| c.agent_id.clone()));
-                let team_id = std::env::var("WHATSAPP_TEAM_ID")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().and_then(|c| c.team_id.clone()));
-                let core_url = std::env::var("RYU_CORE_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| existing.as_ref().map(|c| c.core_url.clone()))
-                    .unwrap_or_else(default_core_url);
+                let send_read_receipts = channel_env_bool("WHATSAPP", "SEND_READ_RECEIPTS")
+                    .or_else(|| existing.as_ref().map(|c| c.send_read_receipts))
+                    .unwrap_or(true);
                 config.channels.whatsapp = Some(WhatsAppChannelConfig {
                     access_token,
                     phone_number_id,
@@ -2322,12 +2232,48 @@ impl GatewayConfig {
                     webhook_bind,
                     webhook_path,
                     graph_version,
-                    model,
-                    system_prompt,
-                    agent_id,
-                    team_id,
-                    group_reply_mode: group_reply_mode_from_env("WHATSAPP"),
-                    core_url,
+                    send_read_receipts,
+                    common: common_channel_from_env(
+                        "WHATSAPP",
+                        existing.as_ref().map(|c| &c.common),
+                    ),
+                });
+            }
+        }
+
+        // BlueBubbles (iMessage) channel — the bridge's URL + password register
+        // the adapter at startup. Unlike the other channels there is no vendor
+        // cloud: `server_url` points at a Mac the operator runs, and the webhook
+        // receiver below is what that Mac POSTs into.
+        if let Ok(server_url) = std::env::var("BLUEBUBBLES_SERVER_URL") {
+            if !server_url.trim().is_empty() {
+                let existing = config.channels.bluebubbles.take();
+                let password = channel_env("BLUEBUBBLES", "PASSWORD")
+                    .or_else(|| existing.as_ref().map(|c| c.password.clone()))
+                    .unwrap_or_default();
+                let webhook_bind = channel_env("BLUEBUBBLES", "WEBHOOK_BIND")
+                    .or_else(|| existing.as_ref().map(|c| c.webhook_bind.clone()))
+                    .unwrap_or_else(default_bluebubbles_bind);
+                let webhook_path = channel_env("BLUEBUBBLES", "WEBHOOK_PATH")
+                    .or_else(|| existing.as_ref().map(|c| c.webhook_path.clone()))
+                    .unwrap_or_else(default_bluebubbles_path);
+                let private_api = channel_env_bool("BLUEBUBBLES", "PRIVATE_API")
+                    .or_else(|| existing.as_ref().map(|c| c.private_api))
+                    .unwrap_or(false);
+                let send_read_receipts = channel_env_bool("BLUEBUBBLES", "SEND_READ_RECEIPTS")
+                    .or_else(|| existing.as_ref().map(|c| c.send_read_receipts))
+                    .unwrap_or(false);
+                config.channels.bluebubbles = Some(BlueBubblesChannelConfig {
+                    server_url,
+                    password,
+                    webhook_bind,
+                    webhook_path,
+                    private_api,
+                    send_read_receipts,
+                    common: common_channel_from_env(
+                        "BLUEBUBBLES",
+                        existing.as_ref().map(|c| &c.common),
+                    ),
                 });
             }
         }
@@ -2579,49 +2525,178 @@ pub struct ChannelsConfig {
     /// `WHATSAPP_*` env vars) to enable.
     #[serde(default)]
     pub whatsapp: Option<WhatsAppChannelConfig>,
+
+    /// BlueBubbles (iMessage bridge running on a Mac) adapter. Set `server_url`
+    /// + `password` (or the `BLUEBUBBLES_*` env vars) to enable.
+    #[serde(default)]
+    pub bluebubbles: Option<BlueBubblesChannelConfig>,
 }
 
-// `GroupReplyMode` is the shared channel-domain type, owned by the
-// `ryu-gw-channels` crate. Re-exported here so `config::GroupReplyMode` stays a
-// valid path and the channel config structs below keep using it as a field type.
+// `GroupReplyMode`, `DmPolicy` and `GroupPolicy` are shared channel-domain types
+// owned by the `ryu-gw-channels` crate. Re-exported here so `config::<T>` stays a
+// valid path and the channel config structs below keep using them as field types.
+// (They all derive serde with lowercase variants, so a config file spells them
+// exactly as the crate documents them.)
+pub use ryu_gw_channels::pairing::{DmPolicy, GroupPolicy};
 pub use ryu_gw_channels::GroupReplyMode;
 
+/// When the bot answers with synthesized speech as well as text.
+///
+/// A config-FILE mirror of `ryu_gw_channels::media::VoiceReplyMode`, which is a
+/// plain domain enum with no serde derives — the same split as every other
+/// channel type here (config shapes are serde-aware, the crate's are not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceReplyMode {
+    /// Never synthesize. The default — TTS costs time and most chats want text.
+    #[default]
+    Never,
+    /// Speak only when the user's own message was a voice note.
+    Mirror,
+    /// Speak every reply.
+    Always,
+}
+
+/// The behaviour every channel config shares, independent of transport.
+///
+/// `#[serde(flatten)]`-ed into each per-channel table, so the keys sit exactly
+/// where they always did (`[channels.telegram] model = "..."`) and an existing
+/// `gateway.toml` parses byte-identically — while a new knob is added once, here,
+/// instead of five times across five near-identical structs. Mirrors
+/// [`ryu_gw_channels::CommonChannelConfig`], which `channels_host.rs` maps this
+/// into at the spawn boundary.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TelegramChannelConfig {
-    /// Bot token issued by @BotFather.
-    pub token: String,
+pub struct CommonChannelFileConfig {
     /// Model to route inbound messages to. Defaults to `gpt-4o`.
-    /// Ignored when `core_url` is set (the Core agent binding takes precedence).
+    /// Ignored when `agent_id`/`team_id` is set (the Core binding takes precedence).
     #[serde(default = "default_channel_model")]
     pub model: String,
     /// Optional system prompt prepended to every inbound conversation.
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// Core agent id to route inbound messages to (M11 / #226).
+    /// Core agent id to route inbound messages to (M11).
     ///
-    /// When set, inbound Telegram messages are routed through Core's
+    /// When set, inbound messages are routed through Core's
     /// `POST /api/channels/run` endpoint using this agent binding instead of
     /// going directly through the gateway pipeline. The agent binding is swappable
     /// via config; omit to keep the legacy gateway-pipeline path.
     #[serde(default)]
     pub agent_id: Option<String>,
-    /// Base URL of the Core sidecar (M11 / #226). Defaults to the standard Core
-    /// bind address (`http://127.0.0.1:7980`). Used when `agent_id` is set to
-    /// call `POST <core_url>/api/channels/run` for the Core session seam.
     /// Core team id to route inbound messages to. When set, the bot targets a
     /// team (a lead agent orchestrating its members) instead of a single agent
-    /// and takes precedence over `agent_id`. Routed through `/api/channels/run`.
+    /// and takes precedence over `agent_id`. Also routed through
+    /// `/api/channels/run`.
     #[serde(default)]
     pub team_id: Option<String>,
     /// When the bot replies inside a group chat (DMs always reply). Mirrors the
     /// control-plane `groupReplyMode`; defaults to mentions-only.
     #[serde(default)]
     pub group_reply_mode: GroupReplyMode,
+    /// Base URL of the Core sidecar. Defaults to the profile-aware Core bind
+    /// address (`http://127.0.0.1:7980` on release). Used when `agent_id` or
+    /// `team_id` is set, and for the voice/command round trips.
     #[serde(default = "default_core_url")]
     pub core_url: String,
+
+    // ── Access ──────────────────────────────────────────────────────────────
+    //
+    // `None` means "not configured here", which is NOT the same as the policy
+    // default: it hands the decision to the legacy env allowlist
+    // (`RYU_CHANNEL_ALLOWED_USERS[_<PLATFORM>]`, `RYU_CHANNEL_ALLOW_ALL`) that
+    // deployments already depend on. Setting either key here overrides that env
+    // for this channel; leaving it unset keeps today's behaviour exactly.
+    /// How a DM from an unknown sender is treated: `pairing` (default — issue a
+    /// one-time code an operator approves), `allowlist`, `open`, or `disabled`.
+    #[serde(default)]
+    pub dm_policy: Option<DmPolicy>,
+    /// How a group/multi-user chat is treated: `allowlist` (default), `open`, or
+    /// `disabled`. There is no pairing flow for groups — a room is admitted by
+    /// the operator or not at all.
+    #[serde(default)]
+    pub group_policy: Option<GroupPolicy>,
+    /// Sender ids admitted without pairing. Non-empty replaces whatever the
+    /// legacy env allowlist supplied.
+    #[serde(default)]
+    pub dm_allowlist: Vec<String>,
+    /// Group/chat ids admitted under `group_policy = "allowlist"`. Non-empty
+    /// replaces whatever the legacy env allowlist supplied.
+    #[serde(default)]
+    pub group_allowlist: Vec<String>,
+
+    // ── Presentation ────────────────────────────────────────────────────────
+    /// Show a platform typing indicator (and mark inbound read) while the agent
+    /// is working. On by default: a silent bot looks broken.
+    #[serde(default = "default_true")]
+    pub typing_indicator: bool,
+    /// Publish the Ryu command menu to the platform where one exists, so `/proof`
+    /// autocompletes in Telegram the way it does in the desktop composer.
+    #[serde(default = "default_true")]
+    pub publish_commands: bool,
+    /// Render replies as platform rich text where supported, instead of plain.
+    #[serde(default = "default_true")]
+    pub rich_text: bool,
+    /// Stream partial output where the platform supports editable drafts. Off by
+    /// default — it multiplies outbound API calls and every platform rate-limits
+    /// edits.
+    #[serde(default)]
+    pub streaming: bool,
+    /// When to answer with synthesized speech alongside the text reply.
+    #[serde(default)]
+    pub voice_reply: VoiceReplyMode,
+
+    // ── Bot profile ─────────────────────────────────────────────────────────
+    //
+    // Kept as three flat keys rather than a `[profile]` sub-table: the whole
+    // struct is flattened into the channel table, and a nested table inside a
+    // flattened struct is exactly the shape TOML cannot serialise after values.
+    /// Display name pushed to the platform at startup. Unset leaves the
+    /// platform's current name alone rather than clearing it.
+    #[serde(default)]
+    pub profile_name: Option<String>,
+    /// Short bio shown on the bot's profile page (clipped to 120 chars).
+    #[serde(default)]
+    pub profile_short_bio: Option<String>,
+    /// Longer description shown in an empty chat (clipped to 512 chars).
+    #[serde(default)]
+    pub profile_description: Option<String>,
 }
 
-fn default_core_url() -> String {
+impl Default for CommonChannelFileConfig {
+    fn default() -> Self {
+        Self {
+            model: default_channel_model(),
+            system_prompt: None,
+            agent_id: None,
+            team_id: None,
+            group_reply_mode: GroupReplyMode::default(),
+            core_url: default_core_url(),
+            dm_policy: None,
+            group_policy: None,
+            dm_allowlist: Vec::new(),
+            group_allowlist: Vec::new(),
+            typing_indicator: true,
+            publish_commands: true,
+            rich_text: true,
+            streaming: false,
+            voice_reply: VoiceReplyMode::default(),
+            profile_name: None,
+            profile_short_bio: None,
+            profile_description: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TelegramChannelConfig {
+    /// Bot token issued by @BotFather.
+    pub token: String,
+    /// Model, agent binding, access policy and presentation knobs. Flattened, so
+    /// these keys sit directly under `[channels.telegram]`.
+    #[serde(flatten)]
+    pub common: CommonChannelFileConfig,
+}
+
+pub(crate) fn default_core_url() -> String {
     // The channels callback URL to Core. Profile-aware (release 7980, dev 8980, …)
     // so a standalone dev gateway's channel adapters reach the dev Core, not the
     // release one. `RYU_CORE_URL` (set explicitly) still wins.
@@ -2639,44 +2714,146 @@ pub struct SlackChannelConfig {
     /// Bot user OAuth token (`xoxb-...`) used to post replies via
     /// `chat.postMessage`.
     pub bot_token: String,
-    /// Model to route inbound messages to. Defaults to `gpt-4o`.
-    #[serde(default = "default_channel_model")]
-    pub model: String,
-    /// Optional system prompt prepended to every inbound conversation.
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    /// When set, inbound messages are routed through Core's `/api/channels/run`
-    /// endpoint using this agent id so conversation history is persisted in the
-    /// Core session store. `None` falls back to the legacy gateway-pipeline path.
-    #[serde(default)]
-    pub agent_id: Option<String>,
-    /// Base URL of the Core sidecar. Used when `agent_id` is set to call
-    /// `POST <core_url>/api/channels/run` for the Core session seam.
-    /// Defaults to the Core bind address (`http://127.0.0.1:7980`).
-    /// Core team id to route inbound messages to. When set, the bot targets a
-    /// team (a lead agent orchestrating its members) instead of a single agent
-    /// and takes precedence over `agent_id`. Routed through `/api/channels/run`.
-    #[serde(default)]
-    pub team_id: Option<String>,
-    /// When the bot replies inside a group chat (DMs always reply). Mirrors the
-    /// control-plane `groupReplyMode`; defaults to mentions-only.
-    #[serde(default)]
-    pub group_reply_mode: GroupReplyMode,
-    #[serde(default = "default_core_url")]
-    pub core_url: String,
+    /// Model, agent binding, access policy and presentation knobs. Flattened, so
+    /// these keys sit directly under `[channels.slack]`.
+    #[serde(flatten)]
+    pub common: CommonChannelFileConfig,
 }
 
-fn default_channel_model() -> String {
+pub(crate) fn default_channel_model() -> String {
     "gpt-4o".to_string()
 }
 
 /// Read a channel's group-reply mode from `<PLATFORM>_GROUP_REPLY_MODE`
-/// (e.g. `TELEGRAM_GROUP_REPLY_MODE=all`). Unset or unrecognised → the default
-/// (mentions-only), so env bots keep the safe group behavior unless opted out.
-fn group_reply_mode_from_env(platform: &str) -> GroupReplyMode {
+/// (e.g. `TELEGRAM_GROUP_REPLY_MODE=all`). `None` when unset or unrecognised, so
+/// the caller falls back to the config file and ultimately to the safe default
+/// (mentions-only) — an env bot never gets talkative in groups by accident.
+fn group_reply_mode_from_env(platform: &str) -> Option<GroupReplyMode> {
     match std::env::var(format!("{platform}_GROUP_REPLY_MODE")) {
-        Ok(v) if v.trim().eq_ignore_ascii_case("all") => GroupReplyMode::All,
-        _ => GroupReplyMode::Mentions,
+        Ok(v) if v.trim().eq_ignore_ascii_case("all") => Some(GroupReplyMode::All),
+        Ok(v) if v.trim().eq_ignore_ascii_case("mentions") => Some(GroupReplyMode::Mentions),
+        _ => None,
+    }
+}
+
+// ─── Channel env loading ─────────────────────────────────────────────────────
+//
+// Every channel reads the same shared knobs from `<PLATFORM>_<KNOB>`, so the
+// reading is written once here and each transport block below only handles its
+// own secrets. Precedence is env → the value already loaded from `gateway.toml`
+// → the documented default, which is the precedence the per-channel blocks
+// already implemented by hand.
+
+/// A `<PLATFORM>_<SUFFIX>` env var, or `None` when unset or blank.
+///
+/// Blank is treated as unset throughout: an exported-but-empty variable is how a
+/// shell script says "I have no value for this", and letting `MODEL=""` through
+/// would route the bot at a model named "".
+fn channel_env(platform: &str, suffix: &str) -> Option<String> {
+    std::env::var(format!("{platform}_{suffix}"))
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// A boolean `<PLATFORM>_<SUFFIX>` knob. Unrecognised values are ignored (→
+/// `None`) rather than guessed at, so a typo falls back to the configured value
+/// instead of silently flipping behaviour.
+fn channel_env_bool(platform: &str, suffix: &str) -> Option<bool> {
+    channel_env(platform, suffix).and_then(|v| parse_bool_env(&v))
+}
+
+/// `<PLATFORM>_DM_POLICY` → [`DmPolicy`]. `None` when unset or unrecognised,
+/// which leaves the legacy env allowlist in charge.
+fn dm_policy_from_env(platform: &str) -> Option<DmPolicy> {
+    match channel_env(platform, "DM_POLICY")?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pairing" => Some(DmPolicy::Pairing),
+        "allowlist" => Some(DmPolicy::Allowlist),
+        "open" => Some(DmPolicy::Open),
+        "disabled" | "off" => Some(DmPolicy::Disabled),
+        _ => None,
+    }
+}
+
+/// `<PLATFORM>_GROUP_POLICY` → [`GroupPolicy`]. There is deliberately no
+/// `pairing` variant: a room is admitted by the operator or not at all.
+fn group_policy_from_env(platform: &str) -> Option<GroupPolicy> {
+    match channel_env(platform, "GROUP_POLICY")?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "allowlist" => Some(GroupPolicy::Allowlist),
+        "open" => Some(GroupPolicy::Open),
+        "disabled" | "off" => Some(GroupPolicy::Disabled),
+        _ => None,
+    }
+}
+
+/// `<PLATFORM>_VOICE_REPLY` → [`VoiceReplyMode`].
+fn voice_reply_from_env(platform: &str) -> Option<VoiceReplyMode> {
+    match channel_env(platform, "VOICE_REPLY")?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "never" | "off" => Some(VoiceReplyMode::Never),
+        "mirror" => Some(VoiceReplyMode::Mirror),
+        "always" => Some(VoiceReplyMode::Always),
+        _ => None,
+    }
+}
+
+/// A comma-separated `<PLATFORM>_<SUFFIX>` id list (allowlists, channel ids).
+fn channel_env_list(platform: &str, suffix: &str) -> Option<Vec<String>> {
+    let list: Vec<String> = channel_env(platform, suffix)?
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!list.is_empty()).then_some(list)
+}
+
+/// Build the shared per-channel config from `<PLATFORM>_*` env vars, layered over
+/// whatever `gateway.toml` already supplied for this channel (`existing`).
+///
+/// `core_url` is the one knob read from a GLOBAL var (`RYU_CORE_URL`): every
+/// channel on a node talks to the same Core, and that is how the existing
+/// deployments spell it.
+fn common_channel_from_env(
+    platform: &str,
+    existing: Option<&CommonChannelFileConfig>,
+) -> CommonChannelFileConfig {
+    let base = existing.cloned().unwrap_or_default();
+    CommonChannelFileConfig {
+        model: channel_env(platform, "MODEL").unwrap_or(base.model),
+        system_prompt: channel_env(platform, "SYSTEM_PROMPT").or(base.system_prompt),
+        agent_id: channel_env(platform, "AGENT_ID").or(base.agent_id),
+        team_id: channel_env(platform, "TEAM_ID").or(base.team_id),
+        group_reply_mode: group_reply_mode_from_env(platform).unwrap_or(base.group_reply_mode),
+        core_url: std::env::var("RYU_CORE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(base.core_url),
+        dm_policy: dm_policy_from_env(platform).or(base.dm_policy),
+        group_policy: group_policy_from_env(platform).or(base.group_policy),
+        dm_allowlist: channel_env_list(platform, "DM_ALLOWLIST").unwrap_or(base.dm_allowlist),
+        group_allowlist: channel_env_list(platform, "GROUP_ALLOWLIST")
+            .unwrap_or(base.group_allowlist),
+        typing_indicator: channel_env_bool(platform, "TYPING_INDICATOR")
+            .unwrap_or(base.typing_indicator),
+        publish_commands: channel_env_bool(platform, "PUBLISH_COMMANDS")
+            .unwrap_or(base.publish_commands),
+        rich_text: channel_env_bool(platform, "RICH_TEXT").unwrap_or(base.rich_text),
+        streaming: channel_env_bool(platform, "STREAMING").unwrap_or(base.streaming),
+        voice_reply: voice_reply_from_env(platform).unwrap_or(base.voice_reply),
+        profile_name: channel_env(platform, "BOT_NAME").or(base.profile_name),
+        profile_short_bio: channel_env(platform, "BOT_SHORT_BIO").or(base.profile_short_bio),
+        profile_description: channel_env(platform, "BOT_DESCRIPTION").or(base.profile_description),
     }
 }
 
@@ -2687,35 +2864,15 @@ pub struct DiscordChannelConfig {
     /// Channel IDs the bot watches for inbound messages. At least one required.
     #[serde(default)]
     pub channel_ids: Vec<String>,
-    /// Model to route inbound messages to. Defaults to `gpt-4o`.
-    /// Ignored when `agent_id` is set (the Core agent binding takes precedence).
-    #[serde(default = "default_channel_model")]
-    pub model: String,
-    /// Optional system prompt prepended to every inbound conversation.
+    /// Answer inside a thread opened on the triggering message instead of in the
+    /// channel itself, which keeps a busy channel readable. Off by default so an
+    /// existing deployment's replies stay where its users expect them.
     #[serde(default)]
-    pub system_prompt: Option<String>,
-    /// Core agent id to route inbound messages to (M11 / #229).
-    ///
-    /// When set, inbound Discord messages are routed through Core's
-    /// `POST /api/channels/run` endpoint using this agent binding instead of
-    /// going directly through the gateway pipeline. The agent binding is swappable
-    /// via config; omit to keep the legacy gateway-pipeline path.
-    #[serde(default)]
-    pub agent_id: Option<String>,
-    /// Base URL of the Core sidecar (M11 / #229). Defaults to the standard Core
-    /// bind address (`http://127.0.0.1:7980`). Used when `agent_id` is set to
-    /// call `POST <core_url>/api/channels/run` for the Core session seam.
-    /// Core team id to route inbound messages to. When set, the bot targets a
-    /// team (a lead agent orchestrating its members) instead of a single agent
-    /// and takes precedence over `agent_id`. Routed through `/api/channels/run`.
-    #[serde(default)]
-    pub team_id: Option<String>,
-    /// When the bot replies inside a group chat (DMs always reply). Mirrors the
-    /// control-plane `groupReplyMode`; defaults to mentions-only.
-    #[serde(default)]
-    pub group_reply_mode: GroupReplyMode,
-    #[serde(default = "default_core_url")]
-    pub core_url: String,
+    pub thread_replies: bool,
+    /// Model, agent binding, access policy and presentation knobs. Flattened, so
+    /// these keys sit directly under `[channels.discord]`.
+    #[serde(flatten)]
+    pub common: CommonChannelFileConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2741,47 +2898,70 @@ pub struct WhatsAppChannelConfig {
     /// Graph API version segment, e.g. `v21.0`.
     #[serde(default = "default_whatsapp_graph_version")]
     pub graph_version: String,
-    /// Model to route inbound messages to. Defaults to `gpt-4o`.
-    #[serde(default = "default_channel_model")]
-    pub model: String,
-    /// Optional system prompt prepended to every inbound conversation.
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    /// Core agent id to route inbound webhook messages to (M11 / #228).
-    ///
-    /// When set, inbound WhatsApp messages are routed through Core's
-    /// `POST /api/channels/run` endpoint using this agent binding so
-    /// conversation history is persisted in Core and model calls flow
-    /// Core → Gateway (moat stays on path). Omit to keep the legacy
-    /// gateway-pipeline path.
-    #[serde(default)]
-    pub agent_id: Option<String>,
-    /// Base URL of the Core sidecar (M11 / #228). Defaults to the standard
-    /// Core bind address (`http://127.0.0.1:7980`). Used when `agent_id` is
-    /// set to call `POST <core_url>/api/channels/run` for the Core session seam.
-    /// Core team id to route inbound messages to. When set, the bot targets a
-    /// team (a lead agent orchestrating its members) instead of a single agent
-    /// and takes precedence over `agent_id`. Routed through `/api/channels/run`.
-    #[serde(default)]
-    pub team_id: Option<String>,
-    /// When the bot replies inside a group chat (DMs always reply). Mirrors the
-    /// control-plane `groupReplyMode`; defaults to mentions-only.
-    #[serde(default)]
-    pub group_reply_mode: GroupReplyMode,
-    #[serde(default = "default_core_url")]
-    pub core_url: String,
+    /// Mark inbound messages read (blue ticks) when the bot picks them up. On by
+    /// default: the bot is about to answer anyway, so withholding the receipt
+    /// only makes it look unresponsive while it thinks.
+    #[serde(default = "default_true")]
+    pub send_read_receipts: bool,
+    /// Model, agent binding, access policy and presentation knobs. Flattened, so
+    /// these keys sit directly under `[channels.whatsapp]`.
+    #[serde(flatten)]
+    pub common: CommonChannelFileConfig,
 }
 
-fn default_whatsapp_bind() -> String {
+pub(crate) fn default_whatsapp_bind() -> String {
     "0.0.0.0:8443".to_string()
 }
 
-fn default_whatsapp_path() -> String {
+pub(crate) fn default_whatsapp_path() -> String {
     "/webhooks/whatsapp".to_string()
 }
 
-fn default_whatsapp_graph_version() -> String {
+pub(crate) fn default_whatsapp_graph_version() -> String {
     "v21.0".to_string()
+}
+
+/// BlueBubbles (iMessage) channel config.
+///
+/// BlueBubbles is a bridge the operator runs on a Mac: it talks to Messages.app
+/// locally and exposes an HTTP API plus an outbound webhook. So unlike the other
+/// channels there is no vendor cloud in the middle — the "credentials" are the
+/// bridge's own URL and password, and the gateway must be reachable *from* that
+/// Mac for the webhook to land.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BlueBubblesChannelConfig {
+    /// Base URL of the BlueBubbles Server, e.g. `http://192.168.1.10:1234`.
+    pub server_url: String,
+    /// The server password, sent as the `password` query parameter on every call.
+    pub password: String,
+    /// Local address the webhook receiver binds to. BlueBubbles POSTs new
+    /// messages here.
+    #[serde(default = "default_bluebubbles_bind")]
+    pub webhook_bind: String,
+    /// Path BlueBubbles is configured to POST to.
+    #[serde(default = "default_bluebubbles_path")]
+    pub webhook_path: String,
+    /// Use the Private API helper for typing indicators, read receipts and
+    /// tapbacks. Off by default because it requires the operator to have
+    /// installed the helper on the Mac; enabling it without that just produces
+    /// failing calls.
+    #[serde(default)]
+    pub private_api: bool,
+    /// Mark chats read when the bot picks a message up. Requires `private_api`.
+    #[serde(default)]
+    pub send_read_receipts: bool,
+    /// Model, agent binding, access policy and presentation knobs. Flattened, so
+    /// these keys sit directly under `[channels.bluebubbles]`.
+    #[serde(flatten)]
+    pub common: CommonChannelFileConfig,
+}
+
+pub(crate) fn default_bluebubbles_bind() -> String {
+    "0.0.0.0:8446".to_string()
+}
+
+pub(crate) fn default_bluebubbles_path() -> String {
+    "/webhooks/bluebubbles".to_string()
 }
 
 // ─── Phase-2 config structs ───────────────────────────────────────────────────
@@ -3401,7 +3581,10 @@ mod pure_helper_tests {
 
     #[test]
     fn firewall_policy_from_env_accepts_aliases_and_rejects_junk() {
-        assert_eq!(FirewallPolicy::from_env("block"), Some(FirewallPolicy::Block));
+        assert_eq!(
+            FirewallPolicy::from_env("block"),
+            Some(FirewallPolicy::Block)
+        );
         assert_eq!(
             FirewallPolicy::from_env(" WARN "),
             Some(FirewallPolicy::WarnAndContinue)
@@ -3426,6 +3609,235 @@ mod pure_helper_tests {
             assert_eq!(parse_bool_env(f), Some(false), "{f}");
         }
         assert_eq!(parse_bool_env("maybe"), None);
+    }
+}
+
+#[cfg(test)]
+mod channel_config_tests {
+    use super::*;
+
+    /// The shared knobs are `#[serde(flatten)]`-ed, so an EXISTING `gateway.toml`
+    /// — which spells `model`/`agent_id`/`core_url` directly under the channel
+    /// table — must still parse, and every key it does not mention must land on
+    /// the documented default. This is the whole backwards-compatibility contract
+    /// for the config file.
+    #[test]
+    fn legacy_channel_table_still_parses_with_defaults() {
+        let cfg: TelegramChannelConfig = toml::from_str(
+            r#"
+            token = "123:ABC"
+            model = "gpt-4o-mini"
+            agent_id = "acp:pi"
+            core_url = "http://127.0.0.1:9999"
+            group_reply_mode = "all"
+            "#,
+        )
+        .expect("a pre-existing telegram table must still parse");
+
+        assert_eq!(cfg.token, "123:ABC");
+        assert_eq!(cfg.common.model, "gpt-4o-mini");
+        assert_eq!(cfg.common.agent_id.as_deref(), Some("acp:pi"));
+        assert_eq!(cfg.common.core_url, "http://127.0.0.1:9999");
+        assert_eq!(cfg.common.group_reply_mode, GroupReplyMode::All);
+
+        // Unmentioned knobs default: nothing is silently switched off, and the
+        // access policy stays unset so the legacy env allowlist keeps deciding.
+        assert!(cfg.common.typing_indicator);
+        assert!(cfg.common.publish_commands);
+        assert!(cfg.common.rich_text);
+        assert!(!cfg.common.streaming);
+        assert_eq!(cfg.common.voice_reply, VoiceReplyMode::Never);
+        assert!(cfg.common.dm_policy.is_none());
+        assert!(cfg.common.group_policy.is_none());
+        assert!(cfg.common.dm_allowlist.is_empty());
+        assert!(cfg.common.profile_name.is_none());
+    }
+
+    /// The new knobs are read from the same flat namespace as the old ones.
+    #[test]
+    fn new_channel_knobs_parse_from_the_channel_table() {
+        let cfg: DiscordChannelConfig = toml::from_str(
+            r#"
+            token = "bot-token"
+            channel_ids = ["c1", "c2"]
+            thread_replies = true
+            dm_policy = "open"
+            group_policy = "disabled"
+            dm_allowlist = ["u1"]
+            typing_indicator = false
+            publish_commands = false
+            rich_text = false
+            streaming = true
+            voice_reply = "always"
+            profile_name = "Ryu"
+            profile_short_bio = "your agent"
+            "#,
+        )
+        .expect("the new knobs must parse");
+
+        assert!(cfg.thread_replies);
+        assert_eq!(cfg.common.dm_policy, Some(DmPolicy::Open));
+        assert_eq!(cfg.common.group_policy, Some(GroupPolicy::Disabled));
+        assert_eq!(cfg.common.dm_allowlist, vec!["u1".to_string()]);
+        assert!(!cfg.common.typing_indicator);
+        assert!(!cfg.common.publish_commands);
+        assert!(!cfg.common.rich_text);
+        assert!(cfg.common.streaming);
+        assert_eq!(cfg.common.voice_reply, VoiceReplyMode::Always);
+        assert_eq!(cfg.common.profile_name.as_deref(), Some("Ryu"));
+    }
+
+    /// BlueBubbles needs only the bridge's URL + password; the rest defaults, and
+    /// the Private-API-only verbs stay off until the operator says the helper is
+    /// installed.
+    #[test]
+    fn bluebubbles_defaults_are_conservative() {
+        let cfg: BlueBubblesChannelConfig = toml::from_str(
+            r#"
+            server_url = "http://192.168.1.10:1234"
+            password = "hunter2"
+            "#,
+        )
+        .expect("minimal bluebubbles table must parse");
+
+        assert_eq!(cfg.webhook_bind, default_bluebubbles_bind());
+        assert_eq!(cfg.webhook_path, "/webhooks/bluebubbles");
+        assert!(!cfg.private_api);
+        assert!(!cfg.send_read_receipts);
+        assert_eq!(cfg.common.model, default_channel_model());
+    }
+
+    /// WhatsApp's own read receipts default ON — the bot is about to reply, so
+    /// withholding the blue tick only makes it look unresponsive.
+    #[test]
+    fn whatsapp_read_receipts_default_on() {
+        let cfg: WhatsAppChannelConfig = toml::from_str(
+            r#"
+            access_token = "tok"
+            phone_number_id = "123"
+            verify_token = "verify"
+            "#,
+        )
+        .expect("minimal whatsapp table must parse");
+        assert!(cfg.send_read_receipts);
+        assert_eq!(cfg.graph_version, default_whatsapp_graph_version());
+    }
+
+    /// A populated channel table must survive `save()` → `load()`. Flattened
+    /// structs are the shape TOML is fussiest about (a nested table after a
+    /// value is a hard error), so this is the guard that the flatten is safe.
+    #[test]
+    fn populated_channels_survive_a_toml_roundtrip() {
+        let mut cfg = GatewayConfig::default();
+        cfg.channels.telegram = Some(TelegramChannelConfig {
+            token: "123:ABC".to_string(),
+            common: CommonChannelFileConfig {
+                agent_id: Some("acp:pi".to_string()),
+                system_prompt: Some("be terse".to_string()),
+                dm_policy: Some(DmPolicy::Allowlist),
+                dm_allowlist: vec!["u1".to_string()],
+                streaming: true,
+                voice_reply: VoiceReplyMode::Mirror,
+                profile_name: Some("Ryu".to_string()),
+                ..CommonChannelFileConfig::default()
+            },
+        });
+        cfg.channels.bluebubbles = Some(BlueBubblesChannelConfig {
+            server_url: "http://mac:1234".to_string(),
+            password: "pw".to_string(),
+            webhook_bind: default_bluebubbles_bind(),
+            webhook_path: default_bluebubbles_path(),
+            private_api: true,
+            send_read_receipts: true,
+            common: CommonChannelFileConfig::default(),
+        });
+
+        let text = toml::to_string_pretty(&cfg).expect("serialize channels");
+        let back: GatewayConfig = toml::from_str(&text).expect("re-parse channels");
+
+        let telegram = back.channels.telegram.expect("telegram survives");
+        assert_eq!(telegram.token, "123:ABC");
+        assert_eq!(telegram.common.agent_id.as_deref(), Some("acp:pi"));
+        assert_eq!(telegram.common.dm_policy, Some(DmPolicy::Allowlist));
+        assert_eq!(telegram.common.dm_allowlist, vec!["u1".to_string()]);
+        assert!(telegram.common.streaming);
+        assert_eq!(telegram.common.voice_reply, VoiceReplyMode::Mirror);
+        assert_eq!(telegram.common.profile_name.as_deref(), Some("Ryu"));
+
+        let bb = back.channels.bluebubbles.expect("bluebubbles survives");
+        assert_eq!(bb.server_url, "http://mac:1234");
+        assert!(bb.private_api);
+    }
+
+    /// Env parsing of the new knobs. One sequential test because it mutates
+    /// process-global env; parallel sub-tests would race.
+    #[test]
+    fn channel_env_reads_the_new_knobs() {
+        for key in [
+            "TESTCHAN_DM_POLICY",
+            "TESTCHAN_GROUP_POLICY",
+            "TESTCHAN_VOICE_REPLY",
+            "TESTCHAN_TYPING_INDICATOR",
+            "TESTCHAN_STREAMING",
+            "TESTCHAN_DM_ALLOWLIST",
+            "TESTCHAN_BOT_NAME",
+            "TESTCHAN_MODEL",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        // Nothing set ⇒ the config-file values (here, the defaults) survive.
+        let bare = common_channel_from_env("TESTCHAN", None);
+        assert_eq!(bare.model, default_channel_model());
+        assert!(bare.dm_policy.is_none());
+        assert!(bare.typing_indicator);
+        assert_eq!(bare.voice_reply, VoiceReplyMode::Never);
+
+        std::env::set_var("TESTCHAN_DM_POLICY", "OPEN");
+        std::env::set_var("TESTCHAN_GROUP_POLICY", "open");
+        std::env::set_var("TESTCHAN_VOICE_REPLY", "mirror");
+        std::env::set_var("TESTCHAN_TYPING_INDICATOR", "false");
+        std::env::set_var("TESTCHAN_STREAMING", "1");
+        std::env::set_var("TESTCHAN_DM_ALLOWLIST", "u1, u2 ,");
+        std::env::set_var("TESTCHAN_BOT_NAME", "Ryu");
+        // Blank is treated as unset, not as an empty model.
+        std::env::set_var("TESTCHAN_MODEL", "   ");
+
+        let loaded = common_channel_from_env("TESTCHAN", None);
+        assert_eq!(loaded.dm_policy, Some(DmPolicy::Open));
+        assert_eq!(loaded.group_policy, Some(GroupPolicy::Open));
+        assert_eq!(loaded.voice_reply, VoiceReplyMode::Mirror);
+        assert!(!loaded.typing_indicator);
+        assert!(loaded.streaming);
+        assert_eq!(
+            loaded.dm_allowlist,
+            vec!["u1".to_string(), "u2".to_string()]
+        );
+        assert_eq!(loaded.profile_name.as_deref(), Some("Ryu"));
+        assert_eq!(loaded.model, default_channel_model());
+
+        // An unrecognised value is ignored rather than guessed at, so the
+        // config-file value keeps winning.
+        std::env::set_var("TESTCHAN_DM_POLICY", "sometimes");
+        let existing = CommonChannelFileConfig {
+            dm_policy: Some(DmPolicy::Disabled),
+            ..CommonChannelFileConfig::default()
+        };
+        let layered = common_channel_from_env("TESTCHAN", Some(&existing));
+        assert_eq!(layered.dm_policy, Some(DmPolicy::Disabled));
+
+        for key in [
+            "TESTCHAN_DM_POLICY",
+            "TESTCHAN_GROUP_POLICY",
+            "TESTCHAN_VOICE_REPLY",
+            "TESTCHAN_TYPING_INDICATOR",
+            "TESTCHAN_STREAMING",
+            "TESTCHAN_DM_ALLOWLIST",
+            "TESTCHAN_BOT_NAME",
+            "TESTCHAN_MODEL",
+        ] {
+            std::env::remove_var(key);
+        }
     }
 }
 
@@ -3456,7 +3868,10 @@ mod toml_roundtrip_tests {
             back.control_plane.cost_per_1k_micro_usd,
             cfg.control_plane.cost_per_1k_micro_usd
         );
-        assert_eq!(back.credits.sandbox_markup_bps, cfg.credits.sandbox_markup_bps);
+        assert_eq!(
+            back.credits.sandbox_markup_bps,
+            cfg.credits.sandbox_markup_bps
+        );
         assert_eq!(back.fleet, cfg.fleet);
     }
 
@@ -3499,7 +3914,9 @@ mod toml_roundtrip_tests {
         assert_eq!(back.routing.default_provider, ProviderId::from("primary"));
         assert_eq!(back.routing.fallback_chain.len(), 2);
         assert_eq!(
-            back.routing.provider_tiers.get(&ProviderId::from("secondary")),
+            back.routing
+                .provider_tiers
+                .get(&ProviderId::from("secondary")),
             Some(&2)
         );
         assert_eq!(back.firewall.policy, FirewallPolicy::Sanitize);
@@ -3507,7 +3924,10 @@ mod toml_roundtrip_tests {
         assert_eq!(back.control_plane.gateway_key.as_deref(), Some("gw-key"));
         assert_eq!(back.control_plane.cost_per_1k_micro_usd, 4321);
         // The per-model price table survived and still resolves via longest-prefix.
-        assert_eq!(back.control_plane.cost_for("claude-sonnet-4-5", 1000, 1000), 18000);
+        assert_eq!(
+            back.control_plane.cost_for("claude-sonnet-4-5", 1000, 1000),
+            18000
+        );
         assert_eq!(back.credits.markup_bps, 700);
     }
 }

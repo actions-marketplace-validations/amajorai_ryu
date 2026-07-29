@@ -45,9 +45,14 @@ pub const GRANT_SIDECAR_PROCESS: &str = "sidecar:process";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The Core preference key that gates the experimental extension-host runtime
-/// (`kind: "node"` sidecars). Mirrors the desktop `ryu:experimental-plugin-runtime`
-/// flag so a single toggle governs both surfaces; **default OFF**. Also satisfiable
-/// via the `RYU_EXPERIMENTAL_PLUGIN_RUNTIME` env (the headless/test seam).
+/// (`kind: "node"` sidecars) — i.e. spawning a plugin's own BACKEND process.
+/// **Default OFF**, and Core-only: the desktop once had a same-named localStorage
+/// flag in front of the sandboxed plugin/widget UI, but that was a separate store
+/// governing a separate surface and it has since been removed (the UI path is
+/// unconditional). Nothing in the desktop writes this pref; set it through the
+/// preferences store or the `RYU_EXPERIMENTAL_PLUGIN_RUNTIME` env (the
+/// headless/test seam). The key string is persisted state — renaming it would
+/// silently reset any operator who opted in.
 pub const EXPERIMENTAL_PLUGIN_RUNTIME_PREF: &str = "ryu:experimental-plugin-runtime";
 
 /// Env override for [`EXPERIMENTAL_PLUGIN_RUNTIME_PREF`] — truthy (`1`/`true`/`on`)
@@ -73,7 +78,7 @@ fn is_truthy(v: &str) -> bool {
 
 /// Whether the experimental plugin runtime is enabled: the `RYU_EXPERIMENTAL_PLUGIN_RUNTIME`
 /// env override first (the headless/test seam), else the Core preference
-/// [`EXPERIMENTAL_PLUGIN_RUNTIME_PREF`] (the desktop toggle). **Default OFF** — a
+/// [`EXPERIMENTAL_PLUGIN_RUNTIME_PREF`]. **Default OFF** — a
 /// `kind: "node"` sidecar refuses to spawn until this is on.
 async fn experimental_plugin_runtime_enabled() -> bool {
     if let Ok(v) = std::env::var(EXPERIMENTAL_PLUGIN_RUNTIME_ENV) {

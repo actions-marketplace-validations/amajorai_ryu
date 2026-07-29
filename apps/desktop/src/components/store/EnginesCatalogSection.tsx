@@ -115,19 +115,18 @@ function unsupportedReason(platforms: string[]): string {
 	return `Requires ${labels} — the connected node can't run it`;
 }
 
-function hasEngineUpdate(engine: {
-	installState: string;
-	installedVersion: string | null;
-	latestVersion: string | null;
-	deprecated: boolean;
-}): boolean {
-	return (
-		engine.installState === "installed" &&
-		engine.installedVersion != null &&
-		engine.latestVersion != null &&
-		engine.latestVersion !== engine.installedVersion &&
-		!engine.deprecated
-	);
+/**
+ * Whether to offer an update for this engine — the NODE's verdict, not a version
+ * comparison made here.
+ *
+ * Comparing `installedVersion` to `latestVersion` client-side is what made this
+ * button a lie: engines whose downloader pins its tag at compile time can never
+ * reach the upstream version the catalog used to advertise, so the row showed an
+ * update forever and pressing it hit an already-installed fast path in Core that
+ * did nothing at all.
+ */
+function hasEngineUpdate(engine: { updateAvailable: boolean }): boolean {
+	return engine.updateAvailable;
 }
 
 function sandboxDescription(backend: SandboxBackendEntry): string {
@@ -282,10 +281,10 @@ function EngineDetailPanel({
 	textError: string | null;
 	voiceError: string | null;
 	sandboxError: string | null;
-	installText: (name: string) => Promise<void>;
+	installText: (name: string, force?: boolean) => Promise<void>;
 	uninstallText: (name: string) => Promise<void>;
 	activateText: (name: string) => Promise<{ gatewayRefreshed: boolean }>;
-	installVoice: (name: string) => Promise<void>;
+	installVoice: (name: string, force?: boolean) => Promise<void>;
 	uninstallVoice: (name: string) => Promise<void>;
 	setVoiceRunning: (name: string, running: boolean) => Promise<void>;
 	selectSandbox: (name: string) => Promise<void>;
@@ -351,9 +350,12 @@ function EngineDetailPanel({
 								engineName={engine.name}
 								hasUpdate={hasEngineUpdate(engine)}
 								installState={engine.installState}
+								// Same button installs or updates: force only when the node
+								// says a newer build is actually reachable, so a first
+								// install keeps its cheap idempotent path.
 								onInstall={() =>
 									runAction(engine.name, "install", () =>
-										installText(engine.name)
+										installText(engine.name, hasEngineUpdate(engine))
 									)
 								}
 								onUninstall={() =>
@@ -451,7 +453,7 @@ function EngineDetailPanel({
 								installState={engine.installState}
 								onInstall={() =>
 									runAction(engine.name, "install", () =>
-										installVoice(engine.name)
+										installVoice(engine.name, hasEngineUpdate(engine))
 									)
 								}
 								onUninstall={() =>

@@ -28,7 +28,7 @@ import {
 	BouncyAccordion,
 	type BouncyAccordionItem,
 } from "@/src/components/ui/bouncy-accordion.tsx";
-import { installUpdate } from "@/src/components/updater/AutoUpdater.tsx";
+import { applyReleaseUpdate } from "@/src/components/updater/AutoUpdater.tsx";
 import { useEngines } from "@/src/hooks/useEngines.ts";
 import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -313,7 +313,19 @@ export function PreflightPage({
 							<ActionButton
 								busyLabel="Updating…"
 								label="Update Core"
-								onRun={() => installUpdate(health.coreUpdate as UpdateCheck)}
+								onRun={async () => {
+									// Routes to the node's OWN updater when this Core is
+									// remote — the bundled desktop updater would otherwise
+									// replace this machine's app and leave that node behind.
+									const message = await applyReleaseUpdate(
+										target,
+										useNodeStore.getState().getActiveNode(),
+										health.coreUpdate as UpdateCheck
+									);
+									if (message) {
+										toast.info(message);
+									}
+								}}
 								variant="default"
 							/>
 						) : null}

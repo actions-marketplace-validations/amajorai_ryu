@@ -36,6 +36,7 @@ export function AgentChat({
 	enableImagePreview,
 	assistantAvatar,
 	assistantName,
+	currentUser,
 	seedDraft,
 	suggestions,
 	followUps,
@@ -210,9 +211,9 @@ export function AgentChat({
 					className={classNames?.messageList}
 					classNames={classNames}
 					contextSize={contextSize}
+					currentUser={currentUser}
 					enableImagePreview={enableImagePreview}
 					feedback={feedback}
-					historyNotice={historyNotice}
 					initialScrollBehavior={initialScrollBehavior}
 					messages={
 						error

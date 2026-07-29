@@ -50,6 +50,21 @@ describe("diffViewPrefsToOptions", () => {
 		expect(opts.hunkSeparators).toBe("simple");
 		expect(opts.expandUnchanged).toBe(false);
 		expect(opts.themeType).toBe("system");
+		// Always a light/dark PAIR — a single name would pin one theme across
+		// both modes, so the object shape here is load-bearing.
+		expect(opts.theme).toEqual({ light: "pierre-light", dark: "pierre-dark" });
+	});
+
+	test("carries each mode's theme into the pair independently", () => {
+		const opts = diffViewPrefsToOptions({
+			...DEFAULT_DIFF_VIEW_PREFS,
+			lightTheme: "github-light",
+			darkTheme: "tokyo-night",
+		});
+		expect(opts.theme).toEqual({
+			light: "github-light",
+			dark: "tokyo-night",
+		});
 	});
 
 	test("inverts the boolean toggles when the user turns them off", () => {

@@ -19,6 +19,7 @@ import {
 	uninstallAgent,
 } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
+import { triggerAgentsRefresh } from "@/src/lib/core-refresh.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
 export interface UseAgentsCatalogResult {
@@ -45,10 +46,14 @@ export function useAgentsCatalog(): UseAgentsCatalogResult {
 		queryFn: () => fetchAgentCatalog({ url, token }),
 	});
 
-	const revalidate = useCallback(
-		() => qc.invalidateQueries({ queryKey: ["agents", "catalog", url] }),
-		[qc, url]
-	);
+	// Install/uninstall changes two things: the catalog's `added` flag (this
+	// query) and the node's agent roster (`GET /api/agents`, read by the
+	// always-mounted sidebar/picker/Library through `useAgents`). Refresh both,
+	// or an agent added from the Store only shows up after a full app refresh.
+	const revalidate = useCallback(async () => {
+		await qc.invalidateQueries({ queryKey: ["agents", "catalog", url] });
+		triggerAgentsRefresh();
+	}, [qc, url]);
 
 	const installMutation = useMutation({
 		mutationFn: (id: string) => installAgent({ url, token }, id),

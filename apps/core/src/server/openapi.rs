@@ -173,6 +173,7 @@ use utoipa::OpenApi;
         super::chat_stream,
         super::chat_cancel,
         super::channel_run,
+        super::channel_commands,
         super::index_retrieval_chunk,
         super::search_retrieval,
         super::list_conversations,
@@ -411,6 +412,9 @@ use utoipa::OpenApi;
         super::plugin_contributions,
         super::plugin_ui_bundle,
         super::set_app_grants_handler,
+        super::list_plugin_secrets_handler,
+        super::put_plugin_secret_handler,
+        super::delete_plugin_secret_handler,
         // Predict → sub-doc from the extracted `ryu_predict` crate, merged in
         // `api_doc()` (the crate owns its own `#[utoipa::path]` annotations).
         // Quests → served OUT-OF-PROCESS by the `ryu-quests` sidecar (manifest

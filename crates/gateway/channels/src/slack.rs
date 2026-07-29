@@ -4,18 +4,41 @@
 //! WebSocket through `apps.connections.open` — no public webhook URL required,
 //! mirroring the Telegram adapter's long-poll design.
 //!
-//! Inbound message events are routed through the Core session seam
-//! (`POST <core_url>/api/channels/run`) when `agent_id` is configured in
-//! [`SlackChannelConfig`], making the bot a first-class Session client:
-//! conversation history is persisted in Core (stable per Slack channel+thread),
-//! and model calls still flow Core → Gateway so the moat (firewall, DLP,
-//! budgets, audit) governs every outbound call. When `agent_id` is absent the
-//! adapter falls back to the legacy `handle_message` → gateway pipeline path.
+//! The adapter owns exactly two things (see [`crate`]): the **transport** — this
+//! socket, its ack envelopes and its reconnect budget — and Slack's **verbs**:
+//! `chat.postMessage`, `reactions.add`, the external-upload flow, and the
+//! assistant thread status that stands in for a typing indicator. Everything
+//! between them (the access gate, media ingest, the Core call, reply delivery)
+//! is [`handle_turn`]'s job, so this file no longer re-derives any of it.
 //!
-//! The [`Channel`] trait carries a single opaque `chat_id`, so we pack the Slack
-//! channel id and the thread timestamp into it as `"<channel>:<thread_ts>"`. This
-//! keeps the shared inbound path in [`super`] unchanged while still letting
-//! replies land in the right channel and thread.
+//! # Threads
+//!
+//! Slack is a threaded platform, and a busy channel is only readable if the bot
+//! answers *in* the thread of the message that triggered it. Two ids are needed
+//! for that (the channel and the `thread_ts`) but [`InboundMessage::chat_id`]
+//! carries one. The kernel's [`pack_thread`] / [`unpack_thread`] convention is
+//! what resolves it, and this adapter uses it twice:
+//!
+//! - `chat_id` stays the **bare channel id**. It is what the group allowlist is
+//!   configured with, so packing a thread into it would silently stop matching.
+//! - `message_id` carries the triggering `ts` and — only when the message was
+//!   already inside a thread — its parent anchor, packed the same way. A Slack
+//!   timestamp is `<seconds>.<micros>`, digits and a dot, so the `:` separator is
+//!   unambiguous and a bare ts round-trips to `(ts, None)`.
+//!
+//! That keeps the adapter stateless: [`Channel::open_thread`] needs the parent
+//! anchor and [`Channel::react`] needs the triggering ts, and both read the value
+//! they need out of the same field rather than out of a side map that would leak
+//! an entry every time the access gate refused a message.
+//!
+//! # mrkdwn
+//!
+//! Slack does not render CommonMark. Its "mrkdwn" flavour uses `*bold*`,
+//! `_italic_`, `~strike~` and `<url|label>`, and has no headings and no tables —
+//! so a reply posted raw shows literal asterisks where the agent meant emphasis.
+//! [`to_mrkdwn`] does that translation for [`Channel::send_rich`]; it is a small
+//! single-pass converter rather than a Markdown parser, because the alternative
+//! (a full parser dependency) buys nothing for a surface with this few marks.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -29,9 +52,13 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
 use crate::{
-    handle_message,
+    handle_turn,
+    media::{self, Attachment, AttachmentKind, VoiceDelivery},
+    pack_thread,
+    pairing::PairingStore,
     status::{StatusReporter, HEARTBEAT_INTERVAL},
-    Channel, ChannelHost, GroupReplyMode, InboundMessage, SlackChannelConfig,
+    unpack_thread, Channel, ChannelCaps, ChannelHost, ChannelRuntime, GroupReplyMode,
+    InboundMessage, SlackChannelConfig,
 };
 
 /// Slack Web API base. Socket Mode is opened from here; replies post here too.
@@ -51,41 +78,44 @@ const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// bot's dot in the UI shows the real reason) and returns `Err` from `run`.
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
+/// Text shown in the assistant thread status while the agent is working. Slack
+/// renders it italicised under the conversation header, in the same place a
+/// human's "is typing…" would appear.
+const THINKING_STATUS: &str = "is thinking…";
+
+/// Message `subtype`s that still represent a person addressing the bot.
+///
+/// The gate used to be "any subtype at all ⇒ ignore", which was right for joins
+/// and edits but silently discarded every file upload: Slack tags a message
+/// carrying an attachment `file_share`. Listing what is allowed (rather than
+/// what is denied) keeps the original conservatism — an unrecognised system
+/// subtype is still ignored — while letting media through.
+const ALLOWED_SUBTYPES: &[&str] = &["file_share", "me_message", "thread_broadcast"];
+
 pub struct SlackChannel {
-    model: String,
-    system_prompt: Option<String>,
-    http: reqwest::Client,
+    /// Core route, access policy, pairing store, command cache — everything the
+    /// shared path needs, owned once instead of copied field-by-field.
+    runtime: ChannelRuntime,
     app_token: String,
     bot_token: String,
-    /// When set, inbound messages are routed through Core's `/api/channels/run`
-    /// endpoint using this agent id so conversation history is persisted in the
-    /// Core session store. `None` falls back to the legacy gateway-pipeline path.
-    agent_id: Option<String>,
-    /// When set, inbound messages route to this Core team (a lead agent
-    /// orchestrating its members) instead of a single agent. Takes precedence
-    /// over `agent_id`; also uses Core's `/api/channels/run` seam.
-    team_id: Option<String>,
-    /// Base URL of the Core sidecar, used when `agent_id` or `team_id` is set.
-    core_url: String,
-    /// When the bot answers in a CHANNEL (DMs always answer). `Mentions` — the
-    /// admin's default — means it only speaks when @mentioned or when the message
-    /// lands in a thread it is already running.
-    group_reply_mode: GroupReplyMode,
     /// This bot's own Slack user id, learned once at startup via `auth.test`.
     /// It is what a channel mention (`<@U…>`) is matched against. Empty when
     /// `auth.test` failed — the mention gate then fails OPEN (see [`decide_reply`]).
     bot_user_id: OnceLock<String>,
     /// Threads the bot is already answering in, so a follow-up in the same thread
-    /// does not need to re-@mention it. Keyed by the packed `chat_id`.
+    /// does not need to re-@mention it. Keyed by the packed conversation key.
     active_threads: Mutex<HashSet<String>>,
-    /// Reports this bot's live connection status to the control plane. `None`
-    /// for env-configured bots (no store id), which then show as `unknown`.
-    status: Option<StatusReporter>,
 }
 
 impl SlackChannel {
-    pub fn new(cfg: SlackChannelConfig, http: reqwest::Client) -> anyhow::Result<Self> {
-        Self::new_with_status(cfg, http, None)
+    /// Build a Slack adapter. `pairing` is the node-wide store, shared with every
+    /// other channel so an approval granted once holds everywhere.
+    pub fn new(
+        cfg: SlackChannelConfig,
+        http: reqwest::Client,
+        pairing: PairingStore,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_status(cfg, http, pairing, None)
     }
 
     /// Like [`Self::new`] but attaches a liveness reporter so the bot heartbeats
@@ -93,6 +123,7 @@ impl SlackChannel {
     pub fn new_with_status(
         cfg: SlackChannelConfig,
         http: reqwest::Client,
+        pairing: PairingStore,
         status: Option<StatusReporter>,
     ) -> anyhow::Result<Self> {
         if cfg.app_token.trim().is_empty() {
@@ -102,19 +133,17 @@ impl SlackChannel {
             anyhow::bail!("slack channel bot_token is empty");
         }
         Ok(Self {
-            model: cfg.model,
-            system_prompt: cfg.system_prompt,
-            http,
+            runtime: ChannelRuntime::new(http, cfg.common, pairing, status),
             app_token: cfg.app_token,
             bot_token: cfg.bot_token,
-            agent_id: cfg.agent_id,
-            team_id: cfg.team_id,
-            core_url: cfg.core_url,
-            group_reply_mode: cfg.group_reply_mode,
             bot_user_id: OnceLock::new(),
             active_threads: Mutex::new(HashSet::new()),
-            status,
         })
+    }
+
+    /// Shorthand for the shared HTTP client.
+    fn http(&self) -> &reqwest::Client {
+        &self.runtime.http
     }
 
     /// Learn this bot's own Slack user id (`auth.test`). Needed to tell "someone
@@ -122,7 +151,7 @@ impl SlackChannel {
     async fn auth_test(&self) -> anyhow::Result<String> {
         let url = format!("{SLACK_API_BASE}/auth.test");
         let resp = self
-            .http
+            .http()
             .post(&url)
             .bearer_auth(&self.bot_token)
             .send()
@@ -144,45 +173,11 @@ impl SlackChannel {
         self.bot_user_id.get().map_or("", String::as_str)
     }
 
-    /// True when this bot routes through Core's session seam (a single agent or
-    /// a team) rather than the legacy gateway-pipeline path.
-    fn routes_via_core(&self) -> bool {
-        self.agent_id.is_some() || self.team_id.is_some()
-    }
-
-    /// Route an inbound message through Core's session seam and return the reply.
-    ///
-    /// Calls `POST <core_url>/api/channels/run` with the `conversation_id` set to
-    /// the packed Slack `chat_id` (`"<channel>:<thread_ts>"`) so multi-turn
-    /// exchanges in the same channel/thread share conversation history.
-    /// Model calls still flow Core → Gateway — the moat remains on path.
-    ///
-    /// # Errors
-    /// Returns `Err` on HTTP transport failure or when Core returns a non-2xx status.
-    async fn run_via_core(&self, chat_id: &str, text: &str) -> anyhow::Result<String> {
-        let url = format!("{}/api/channels/run", self.core_url.trim_end_matches('/'));
-        let resp = self
-            .http
-            .post(&url)
-            .json(&json!({
-                "conversation_id": chat_id,
-                "agent_id": self.agent_id,
-                "team_id": self.team_id,
-                "text": text,
-            }))
-            .send()
-            .await?
-            .error_for_status()?;
-        let body: serde_json::Value = resp.json().await?;
-        let reply = body["reply"].as_str().unwrap_or("").to_owned();
-        Ok(reply)
-    }
-
     /// Open a Socket Mode connection and return the single-use WebSocket URL.
     async fn open_connection(&self) -> anyhow::Result<String> {
         let url = format!("{SLACK_API_BASE}/apps.connections.open");
         let resp = self
-            .http
+            .http()
             .post(&url)
             .bearer_auth(&self.app_token)
             .send()
@@ -199,24 +194,13 @@ impl SlackChannel {
         body.url
             .ok_or_else(|| anyhow::anyhow!("slack apps.connections.open returned no url"))
     }
-}
 
-#[async_trait]
-impl Channel for SlackChannel {
-    fn name(&self) -> &'static str {
-        "slack"
-    }
-
-    fn model(&self) -> &str {
-        &self.model
-    }
-
-    fn system_prompt(&self) -> Option<&str> {
-        self.system_prompt.as_deref()
-    }
-
-    async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
-        let (channel, thread_ts) = split_chat_id(chat_id);
+    /// Post one message, threaded when `chat_id` carries a `thread_ts`.
+    ///
+    /// `mrkdwn` is Slack's default for `text`, so both the plain and the rich
+    /// path land here; only what they put in `text` differs.
+    async fn post_text(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
+        let (channel, thread_ts) = unpack_thread(chat_id);
         let url = format!("{SLACK_API_BASE}/chat.postMessage");
 
         let mut payload = json!({
@@ -228,28 +212,327 @@ impl Channel for SlackChannel {
             payload["thread_ts"] = json!(ts);
         }
 
-        let resp = self
-            .http
+        let body: ApiAck = self
+            .http()
             .post(&url)
             .bearer_auth(&self.bot_token)
             .json(&payload)
             .send()
             .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        body.into_result("chat.postMessage")
+    }
+
+    /// Upload a file to a channel (and thread) with Slack's modern external
+    /// upload flow: reserve a URL, PUT the bytes at it, then complete the upload
+    /// so the file is shared into the conversation.
+    ///
+    /// The legacy `files.upload` fallback is deliberately not implemented — it is
+    /// retired, and every failure mode here (missing `files:write`, a workspace
+    /// that refuses the upload) is reported to the caller, which already has a
+    /// text reply in the conversation to fall back on.
+    ///
+    /// # Errors
+    /// Returns `Err` on transport failure or an `ok:false` from any of the three
+    /// steps, carrying Slack's own error string so the operator can act on it.
+    async fn upload_file(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        filename: &str,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        // 1. Reserve an upload URL. This method takes FORM parameters, not a JSON
+        //    body (a JSON body is rejected with `invalid_arguments`), and `length`
+        //    must be the exact byte count.
+        let length = bytes.len().to_string();
+        let reserved: UploadUrlResponse = self
+            .http()
+            .post(format!("{SLACK_API_BASE}/files.getUploadURLExternal"))
+            .bearer_auth(&self.bot_token)
+            .form(&[("filename", filename), ("length", length.as_str())])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if !reserved.ok {
+            anyhow::bail!(
+                "slack files.getUploadURLExternal returned ok=false: {}",
+                reserved.error.unwrap_or_default()
+            );
+        }
+        let (upload_url, file_id) = match (reserved.upload_url, reserved.file_id) {
+            (Some(url), Some(id)) => (url, id),
+            _ => anyhow::bail!("slack files.getUploadURLExternal returned no upload url"),
+        };
+
+        // 2. POST the bytes to the reserved URL. This one is a plain multipart
+        //    upload and answers with text, not JSON.
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(filename.to_string());
+        let form = reqwest::multipart::Form::new().part("file", part);
+        self.http()
+            .post(&upload_url)
+            .multipart(form)
+            .send()
+            .await?
             .error_for_status()?;
 
-        let body: PostMessageResponse = resp.json().await?;
-        if !body.ok {
-            anyhow::bail!(
-                "slack chat.postMessage returned ok=false: {}",
-                body.error.unwrap_or_default()
-            );
+        // 3. Share it into the conversation. `channel_id` is singular here — the
+        //    legacy `channels` list belongs to the retired `files.upload`.
+        let mut payload = json!({
+            "files": [{ "id": file_id, "title": filename }],
+            "channel_id": channel,
+        });
+        if let Some(ts) = thread_ts {
+            payload["thread_ts"] = json!(ts);
+        }
+        let body: ApiAck = self
+            .http()
+            .post(format!("{SLACK_API_BASE}/files.completeUploadExternal"))
+            .bearer_auth(&self.bot_token)
+            .json(&payload)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        body.into_result("files.completeUploadExternal")
+    }
+
+    /// Fetch the bytes of every attachment that needs transcribing and fold the
+    /// transcripts into the turn text.
+    ///
+    /// Slack file URLs are private: they answer only to the bot token presented
+    /// as a bearer header (an unauthenticated GET quietly returns a login page,
+    /// not a 401), which is why the download lives here and not in the kernel.
+    /// Non-speech media is not downloaded at all — [`handle_turn`] annotates it
+    /// from the filename, and pulling a 20 MB video the agent cannot read would
+    /// buy nothing.
+    async fn ingest_attachments(&self, message: &mut InboundMessage) {
+        if message.attachments.is_empty() {
+            return;
+        }
+        // Downloading and transcribing is the expensive part of a turn, and it runs
+        // ahead of the access gate inside `handle_turn` — so an unadmitted sender
+        // could otherwise spend the operator's STT budget just by attaching audio.
+        // `already_admitted` is that gate's read-only twin; the kernel still
+        // answers an unknown sender with a pairing prompt.
+        if !self.runtime.already_admitted(self.name(), message).await {
+            return;
+        }
+        let auth = format!("Bearer {}", self.bot_token);
+        let mut downloaded = Vec::new();
+        for (index, attachment) in message.attachments.iter().enumerate() {
+            if !attachment.resolved_kind().is_speech() {
+                continue;
+            }
+            let Some(url) = attachment.url.as_deref() else {
+                continue;
+            };
+            // Refuse an oversized file on its declared size, before spending the
+            // bandwidth; `media::download` re-checks what actually arrives.
+            if attachment
+                .size
+                .is_some_and(|size| size as usize > media::MAX_ATTACHMENT_BYTES)
+            {
+                warn!(
+                    size = attachment.size,
+                    "slack: skipping an attachment over the size cap"
+                );
+                continue;
+            }
+            match media::download(self.http(), url, &[("Authorization", auth.as_str())]).await {
+                Ok(bytes) => downloaded.push((index, bytes)),
+                Err(err) => warn!(%err, "slack: attachment download failed"),
+            }
+        }
+        self.runtime.ingest_media(message, downloaded).await;
+    }
+
+    /// Terminal state: the reconnect budget is spent. Report a real, actionable
+    /// error to the control plane (the bot's status dot) and stop, instead of
+    /// hammering Slack forever on a failure that will never clear by itself.
+    async fn give_up(&self, attempts: u32, err: &anyhow::Error) -> anyhow::Result<()> {
+        let message = format!(
+            "slack: giving up after {attempts} failed connection attempts ({err}). Check that \
+             the app token starts with xapp-, carries the connections:write scope, and that \
+             Socket Mode is enabled for the app."
+        );
+        warn!("{message}");
+        if let Some(reporter) = &self.runtime.status {
+            reporter.error(&message).await;
+        }
+        Err(anyhow::anyhow!(message))
+    }
+}
+
+#[async_trait]
+impl Channel for SlackChannel {
+    fn name(&self) -> &'static str {
+        "slack"
+    }
+
+    fn runtime(&self) -> &ChannelRuntime {
+        &self.runtime
+    }
+
+    /// What Slack actually does.
+    ///
+    /// `command_menu` is FALSE on purpose: a Slack slash command only exists if
+    /// it is declared in the app's manifest and re-installed by the operator —
+    /// there is no runtime "register these commands" API the way Telegram has
+    /// `setMyCommands`. Publishing a menu from here is impossible, so claiming
+    /// the capability would only produce a call that always fails.
+    ///
+    /// `streaming` is FALSE because Slack has no draft/partial surface; a stream
+    /// would have to be faked by editing a posted message, which reads worse than
+    /// one complete answer.
+    fn caps(&self) -> ChannelCaps {
+        ChannelCaps {
+            // Best-effort: a real typing indicator needs the (retired) RTM API, so
+            // this is the assistant thread status — see `send_typing`.
+            typing: true,
+            rich_text: true,
+            streaming: false,
+            threads: true,
+            command_menu: false,
+            voice: true,
+            attachments: true,
+            reactions: true,
+        }
+    }
+
+    /// The assistant status is sticky rather than expiring after a few seconds
+    /// like Telegram's, so it only needs re-asserting rarely — often enough to
+    /// recover from a dropped call, not often enough to be a poll loop.
+    fn typing_interval(&self) -> Duration {
+        Duration::from_secs(20)
+    }
+
+    async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
+        self.post_text(chat_id, text).await
+    }
+
+    /// Post the reply as mrkdwn. Without the conversion Slack renders the agent's
+    /// CommonMark literally: `**bold**` shows its asterisks and `[a](b)` shows its
+    /// brackets.
+    async fn send_rich(&self, chat_id: &str, markdown: &str) -> anyhow::Result<()> {
+        self.post_text(chat_id, &to_mrkdwn(markdown)).await
+    }
+
+    /// Show that the agent is working.
+    ///
+    /// A bot **cannot** send a real typing indicator over the Web API — that was
+    /// an RTM feature and RTM is retired. The supported modern equivalent is
+    /// `assistant.threads.setStatus`, which needs the assistant scopes; for a
+    /// plain bot it simply fails, and that is fine.
+    ///
+    /// Returning `Err` on that failure is deliberate: [`crate::keep_typing`]
+    /// treats one error as "this platform will not show an indicator this turn"
+    /// and stops re-asserting, so a bot without the assistant scopes makes
+    /// exactly one wasted call per turn instead of one every interval. The error
+    /// never reaches the message loop.
+    ///
+    /// The status is not cleared explicitly when the turn ends: the shared path
+    /// drops the typing guard after the reply is sent and offers no post-send
+    /// hook, so the last status set is the last one asserted.
+    async fn send_typing(&self, chat_id: &str) -> anyhow::Result<()> {
+        // Slack scopes the status to a thread; with no thread there is nothing to
+        // set, which is not a failure.
+        let (channel, thread_ts) = unpack_thread(chat_id);
+        let Some(thread_ts) = thread_ts else {
+            return Ok(());
+        };
+        let body: ApiAck = self
+            .http()
+            .post(format!("{SLACK_API_BASE}/assistant.threads.setStatus"))
+            .bearer_auth(&self.bot_token)
+            .json(&json!({
+                "channel_id": channel,
+                "thread_ts": thread_ts,
+                "status": THINKING_STATUS,
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        body.into_result("assistant.threads.setStatus")
+    }
+
+    /// Send synthesized speech as a file. Slack has no voice-note bubble, so
+    /// [`media::wav_delivery`] classifies it as an audio file; anything else
+    /// means the caller and this adapter disagree and is refused loudly.
+    async fn send_voice(
+        &self,
+        chat_id: &str,
+        wav: Vec<u8>,
+        delivery: VoiceDelivery,
+    ) -> anyhow::Result<()> {
+        if delivery == VoiceDelivery::Unsupported {
+            anyhow::bail!("slack cannot deliver this audio");
+        }
+        let (channel, thread_ts) = unpack_thread(chat_id);
+        self.upload_file(channel, thread_ts, "reply.wav", wav).await
+    }
+
+    /// Place an emoji reaction on the triggering message.
+    ///
+    /// Best-effort by contract: a duplicate reaction, a missing `reactions:write`
+    /// scope or a deleted message are all logged and swallowed, because a failed
+    /// acknowledgement must never affect the turn that follows it.
+    async fn react(&self, chat_id: &str, message_id: &str, emoji: &str) -> anyhow::Result<()> {
+        let (channel, _) = unpack_thread(chat_id);
+        // The packed message id carries the thread anchor too; a reaction belongs
+        // on the message that triggered the turn, which is the first component.
+        let (timestamp, _) = unpack_thread(message_id);
+        let name = emoji.trim_matches(':');
+        let result: anyhow::Result<ApiAck> = async {
+            let ack = self
+                .http()
+                .post(format!("{SLACK_API_BASE}/reactions.add"))
+                .bearer_auth(&self.bot_token)
+                .json(&json!({ "channel": channel, "timestamp": timestamp, "name": name }))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            Ok(ack)
+        }
+        .await;
+        match result {
+            Ok(ack) if ack.ok => {}
+            Ok(ack) => warn!(
+                error = %ack.error.unwrap_or_default(),
+                "slack reactions.add returned ok=false"
+            ),
+            Err(err) => warn!(%err, "slack reactions.add failed"),
         }
         Ok(())
     }
 
+    /// No-op. Slack's `conversations.mark` moves a *user's* read cursor and needs
+    /// a user token with `conversations.write`; a bot has no unread state of its
+    /// own to clear, so there is nothing honest to call here.
+    async fn mark_read(&self, _chat_id: &str, _message_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Answer inside the triggering message's thread: its own thread when it
+    /// already had one, otherwise a new thread rooted at the message — which is
+    /// what keeps a busy channel readable. No API call is needed; on Slack a
+    /// thread comes into existence when the first reply carries `thread_ts`.
+    async fn open_thread(&self, chat_id: &str, message: &InboundMessage) -> String {
+        conversation_key(chat_id, message.message_id.as_deref())
+    }
+
     async fn run(self: Arc<Self>, host: Arc<dyn ChannelHost>) -> anyhow::Result<()> {
         debug!("slack channel socket-mode loop started");
-        if let Some(reporter) = &self.status {
+        if let Some(reporter) = &self.runtime.status {
             reporter.connecting().await;
         }
 
@@ -291,7 +574,7 @@ impl Channel for SlackChannel {
                         backoff_ms = delay.as_millis() as u64,
                         "slack apps.connections.open failed, backing off"
                     );
-                    if let Some(reporter) = &self.status {
+                    if let Some(reporter) = &self.runtime.status {
                         reporter.error(&err.to_string()).await;
                     }
                     tokio::time::sleep(delay).await;
@@ -307,7 +590,7 @@ impl Channel for SlackChannel {
                     attempts = 0;
                     // The socket is open — the bot is live. Re-asserted below on
                     // each idle timeout so a quiet channel stays fresh.
-                    if let Some(reporter) = &self.status {
+                    if let Some(reporter) = &self.runtime.status {
                         reporter.online().await;
                     }
                     // Read frames, but wake every HEARTBEAT_INTERVAL even when idle
@@ -318,7 +601,7 @@ impl Channel for SlackChannel {
                             Ok(Some(frame)) => frame,
                             Ok(None) => break,
                             Err(_) => {
-                                if let Some(reporter) = &self.status {
+                                if let Some(reporter) = &self.runtime.status {
                                     reporter.online().await;
                                 }
                                 continue;
@@ -349,21 +632,39 @@ impl Channel for SlackChannel {
                             continue;
                         };
 
+                        // Second loop guard, on the bot's own USER id rather than
+                        // on `bot_id`. It matters now that the adapter uploads
+                        // files: a file the bot shares comes back as an inbound
+                        // `file_share`, and one that slipped through would be
+                        // downloaded and transcribed before any gate saw it —
+                        // the bot answering its own voice note, forever.
+                        if is_self_authored(parsed.sender_id.as_deref(), self.bot_user_id()) {
+                            debug!("slack: ignoring the bot's own message");
+                            continue;
+                        }
+
+                        // The conversation key the reply will land in. Computed
+                        // here as well as in `open_thread` (same function, so the
+                        // two cannot drift) because the active-thread memory is
+                        // keyed by it.
+                        let conversation =
+                            conversation_key(&parsed.channel, Some(&parsed.message_id));
+
                         // Honour the admin's group-reply choice. A channel message
                         // that doesn't address the bot is dropped here, before any
                         // model call is made.
                         let in_active_thread = self
                             .active_threads
                             .lock()
-                            .is_ok_and(|threads| threads.contains(&parsed.chat_id));
+                            .is_ok_and(|threads| threads.contains(&conversation));
                         let Some(text) = decide_reply(
                             &parsed,
-                            self.group_reply_mode,
+                            self.runtime.cfg.group_reply_mode,
                             self.bot_user_id(),
                             in_active_thread,
                         ) else {
                             debug!(
-                                chat_id = %parsed.chat_id,
+                                channel = %parsed.channel,
                                 "slack: message not addressed to the bot, ignoring"
                             );
                             continue;
@@ -372,12 +673,24 @@ impl Channel for SlackChannel {
                         // without a re-@mention (matches the hosted connector).
                         if !parsed.is_dm {
                             if let Ok(mut threads) = self.active_threads.lock() {
-                                threads.insert(parsed.chat_id.clone());
+                                threads.insert(conversation);
                             }
                         }
+
                         let inbound = InboundMessage {
-                            chat_id: parsed.chat_id,
+                            // The BARE channel id: the group allowlist is written
+                            // in channel ids, and `open_thread` adds the thread.
+                            chat_id: parsed.channel,
                             text,
+                            // Slack events carry a user id, not a display name;
+                            // resolving it needs `users:read` and a call per
+                            // message, so the id is left to the pairing gate and
+                            // no name is claimed.
+                            author_name: None,
+                            sender_id: parsed.sender_id,
+                            message_id: Some(parsed.message_id),
+                            is_group: !parsed.is_dm,
+                            attachments: parsed.attachments,
                         };
 
                         // Handle each message on its own task so a slow agent
@@ -385,49 +698,10 @@ impl Channel for SlackChannel {
                         let channel = Arc::clone(&self);
                         let host = Arc::clone(&host);
                         tokio::spawn(async move {
-                            if channel.routes_via_core() {
-                                // M11 / #227: route through Core session seam so
-                                // conversation history is persisted and model calls
-                                // flow Core → Gateway (moat stays on path).
-                                // conversation_id is the packed chat_id so history
-                                // is stable per Slack channel/thread. Target is a
-                                // single agent or a team (Core picks).
-                                info!(
-                                    chat_id = %inbound.chat_id,
-                                    agent_id = ?channel.agent_id,
-                                    team_id = ?channel.team_id,
-                                    "slack: routing via Core session seam"
-                                );
-                                let reply = match channel
-                                    .run_via_core(&inbound.chat_id, &inbound.text)
-                                    .await
-                                {
-                                    Ok(r) if !r.is_empty() => r,
-                                    Ok(_) => "(no response)".to_string(),
-                                    Err(err) => {
-                                        warn!(
-                                            chat_id = %inbound.chat_id,
-                                            error = %err,
-                                            "slack: Core session run failed"
-                                        );
-                                        format!("Sorry, something went wrong: {err}")
-                                    }
-                                };
-                                if let Err(err) =
-                                    channel.send_message(&inbound.chat_id, &reply).await
-                                {
-                                    warn!(
-                                        chat_id = %inbound.chat_id,
-                                        error = %err,
-                                        "slack: failed to deliver reply"
-                                    );
-                                }
-                            } else {
-                                // Legacy path: handle_message → gateway pipeline.
-                                // Deprecated for slack; set agent_id to opt in
-                                // to the Core session seam.
-                                handle_message(channel.as_ref(), host, inbound).await;
-                            }
+                            let mut inbound = inbound;
+                            // Voice notes become text before the gate sees them.
+                            channel.ingest_attachments(&mut inbound).await;
+                            handle_turn(channel, host, inbound).await;
                         });
                     }
                     debug!("slack socket-mode websocket closed, reconnecting");
@@ -443,7 +717,7 @@ impl Channel for SlackChannel {
                         max_attempts = MAX_RECONNECT_ATTEMPTS,
                         "slack websocket connect failed, backing off"
                     );
-                    if let Some(reporter) = &self.status {
+                    if let Some(reporter) = &self.runtime.status {
                         reporter.error(&err.to_string()).await;
                     }
                 }
@@ -451,24 +725,6 @@ impl Channel for SlackChannel {
 
             tokio::time::sleep(reconnect_delay(attempts)).await;
         }
-    }
-}
-
-impl SlackChannel {
-    /// Terminal state: the reconnect budget is spent. Report a real, actionable
-    /// error to the control plane (the bot's status dot) and stop, instead of
-    /// hammering Slack forever on a failure that will never clear by itself.
-    async fn give_up(&self, attempts: u32, err: &anyhow::Error) -> anyhow::Result<()> {
-        let message = format!(
-            "slack: giving up after {attempts} failed connection attempts ({err}). Check that \
-             the app token starts with xapp-, carries the connections:write scope, and that \
-             Socket Mode is enabled for the app."
-        );
-        warn!("{message}");
-        if let Some(reporter) = &self.status {
-            reporter.error(&message).await;
-        }
-        Err(anyhow::anyhow!(message))
     }
 }
 
@@ -498,20 +754,37 @@ fn backoff_for(attempt: u32) -> Duration {
     Duration::from_millis(millis.min(RECONNECT_MAX_BACKOFF.as_millis() as u64))
 }
 
-// ─── Chat-id packing ───────────────────────────────────────────────────────────
+// ─── Thread keys ───────────────────────────────────────────────────────────────
+//
+// Both directions of the packing convention described in the module docs. They
+// are the only place a Slack `ts` is turned into a conversation key, so the read
+// loop and `open_thread` cannot disagree about which thread a turn belongs to.
 
-/// Pack a Slack channel id and thread timestamp into the trait's opaque chat id.
-fn make_chat_id(channel: &str, thread_ts: &str) -> String {
-    format!("{channel}:{thread_ts}")
+/// Pack a triggering message's `ts` together with the thread it arrived in.
+///
+/// The parent anchor is only carried when it differs from `ts` — a top-level
+/// message is its own anchor, and packing it twice would be noise.
+fn pack_message_id(ts: &str, thread_ts: Option<&str>) -> String {
+    pack_thread(ts, thread_ts.filter(|parent| *parent != ts))
 }
 
-/// Split a packed chat id back into `(channel, Some(thread_ts))`. If no `:` is
-/// present the whole value is treated as the channel with no thread.
-fn split_chat_id(chat_id: &str) -> (&str, Option<&str>) {
-    match chat_id.split_once(':') {
-        Some((channel, thread_ts)) if !thread_ts.is_empty() => (channel, Some(thread_ts)),
-        _ => (chat_id, None),
-    }
+/// The `thread_ts` to reply under, read back out of a packed message id: the
+/// parent anchor when the message already sat in a thread, else the message's
+/// own ts (replying under which starts the thread).
+fn thread_anchor(message_id: &str) -> &str {
+    let (ts, parent) = unpack_thread(message_id);
+    parent.unwrap_or(ts)
+}
+
+/// The Core `conversation_id` for a turn — the channel plus the thread the reply
+/// belongs in — so every thread keeps its own history.
+///
+/// Idempotent on an already-packed `chat_id`: an existing thread wins over the
+/// message's anchor, so re-running it never re-roots a conversation.
+fn conversation_key(chat_id: &str, message_id: Option<&str>) -> String {
+    let (channel, existing) = unpack_thread(chat_id);
+    let anchor = existing.or_else(|| message_id.map(thread_anchor));
+    pack_thread(channel, anchor)
 }
 
 // ─── Envelope / event parsing ──────────────────────────────────────────────────
@@ -523,23 +796,39 @@ fn parse_envelope_id(raw: &str) -> Option<String> {
 }
 
 /// A user-authored Slack message, before the group-reply gate runs on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct SlackInbound {
-    /// The packed `"<channel>:<thread_ts>"` conversation key.
-    chat_id: String,
+    /// The bare Slack channel id (`C…`, `D…`, `G…`).
+    channel: String,
     /// The message text exactly as Slack sent it — mentions NOT stripped, because
     /// the mention gate has to see them.
     text: String,
     /// True for a 1:1 DM (`channel_type == "im"`), which always gets a reply.
     is_dm: bool,
+    /// The author's Slack user id, which is what pairing is keyed on. `None` on
+    /// the rare event that omits it; the gate then falls back to the channel.
+    sender_id: Option<String>,
+    /// The triggering `ts`, packed with its parent thread anchor when there is
+    /// one. See [`pack_message_id`].
+    message_id: String,
+    /// Files shared with the message.
+    attachments: Vec<Attachment>,
+}
+
+impl SlackInbound {
+    /// A message with media is a real prompt even with no text at all.
+    fn has_media(&self) -> bool {
+        !self.attachments.is_empty()
+    }
 }
 
 /// Parse a Socket Mode frame into a [`SlackInbound`], or `None` if it is not
 /// a user-authored message event we should respond to.
 ///
-/// We skip non-`events_api` frames (hello/disconnect), non-`message` events, and
-/// any message that carries a `bot_id` or `subtype` (edits, joins, our own
-/// replies) to avoid loops and noise.
+/// We skip non-`events_api` frames (hello/disconnect), non-`message` events, any
+/// subtype outside [`ALLOWED_SUBTYPES`] (edits, joins, topic changes), and
+/// anything carrying a `bot_id` — including our own replies, which is the loop
+/// guard.
 fn parse_inbound(raw: &str) -> Option<SlackInbound> {
     let value: Value = serde_json::from_str(raw).ok()?;
 
@@ -551,37 +840,95 @@ fn parse_inbound(raw: &str) -> Option<SlackInbound> {
     if event["type"].as_str() != Some("message") {
         return None;
     }
-    // Ignore message subtypes (edits, deletions, channel joins, etc.).
-    if event.get("subtype").and_then(Value::as_str).is_some() {
-        return None;
+    if let Some(subtype) = event.get("subtype").and_then(Value::as_str) {
+        if !ALLOWED_SUBTYPES.contains(&subtype) {
+            return None;
+        }
     }
     // Ignore anything posted by a bot, including our own replies (loop guard).
     if event.get("bot_id").and_then(Value::as_str).is_some() {
         return None;
     }
 
-    let text = event["text"].as_str()?.trim();
-    if text.is_empty() {
+    let channel = event["channel"].as_str()?;
+    let text = event["text"].as_str().unwrap_or_default().trim();
+    let attachments = parse_files(event);
+    // A caption-less photo or a voice memo carries no text, so "empty" is only a
+    // reason to drop the event when nothing was attached either.
+    if text.is_empty() && attachments.is_empty() {
         return None;
     }
-    let channel = event["channel"].as_str()?;
 
-    // Reply in the message's existing thread if any, otherwise start one rooted
-    // at the message timestamp so the conversation stays grouped.
-    let thread_ts = event
-        .get("thread_ts")
-        .and_then(Value::as_str)
-        .or_else(|| event["ts"].as_str())
-        .unwrap_or_default();
+    let ts = event["ts"].as_str()?;
+    let thread_ts = event.get("thread_ts").and_then(Value::as_str);
 
     Some(SlackInbound {
-        chat_id: make_chat_id(channel, thread_ts),
+        channel: channel.to_string(),
         text: text.to_string(),
+        // A missing `channel_type` is treated as a GROUP: the failure direction
+        // matters, because mistaking a public channel for a DM would post a
+        // pairing code where everyone can read it.
         is_dm: event.get("channel_type").and_then(Value::as_str) == Some("im"),
+        sender_id: event
+            .get("user")
+            .and_then(Value::as_str)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string),
+        message_id: pack_message_id(ts, thread_ts),
+        attachments,
     })
 }
 
+/// Map the event's `files[]` onto kernel [`Attachment`]s.
+///
+/// `url_private_download` is preferred over `url_private`: both need the bot
+/// token, but the former serves the raw bytes rather than Slack's viewer page.
+/// A Slack voice memo is tagged `subtype: "slack_audio"`, which is the one
+/// reliable way to tell "the user spoke" from "the user attached a song" — both
+/// are transcribed, but only the former reads as a voice message.
+fn parse_files(event: &Value) -> Vec<Attachment> {
+    let Some(files) = event.get("files").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .filter_map(|file| {
+            let url = file
+                .get("url_private_download")
+                .and_then(Value::as_str)
+                .or_else(|| file.get("url_private").and_then(Value::as_str))?;
+            let kind = match file.get("subtype").and_then(Value::as_str) {
+                Some("slack_audio") => Some(AttachmentKind::Voice),
+                // Everything else is classified from its MIME type by
+                // `Attachment::resolved_kind`.
+                _ => None,
+            };
+            Some(Attachment {
+                kind,
+                url: Some(url.to_string()),
+                file_id: file.get("id").and_then(Value::as_str).map(str::to_string),
+                mime: file
+                    .get("mimetype")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                filename: file.get("name").and_then(Value::as_str).map(str::to_string),
+                size: file.get("size").and_then(Value::as_u64),
+            })
+        })
+        .collect()
+}
+
 // ─── Group-reply gate ──────────────────────────────────────────────────────────
+
+/// Did the bot write this itself?
+///
+/// An empty `bot_user_id` (`auth.test` failed) is never a match — the same
+/// fail-open direction as [`mentions_bot`]. Matching on empty would drop every
+/// event whose author is unknown, which is the "silent dead bot" outcome the
+/// identity lookup is explicitly allowed to fail into.
+fn is_self_authored(sender_id: Option<&str>, bot_user_id: &str) -> bool {
+    !bot_user_id.is_empty() && sender_id == Some(bot_user_id)
+}
 
 /// `<@U123>` / `<@U123|name>` — the raw form a Slack mention takes in `text`.
 /// True when `text` @mentions `bot_user_id`.
@@ -623,20 +970,25 @@ fn strip_mentions(text: &str) -> String {
 /// gate cannot be evaluated, so the bot behaves as it did before the gate existed
 /// rather than going silent.
 ///
-/// Returns the text to route, or `None` to ignore the message.
+/// Returns the text to route, or `None` to ignore the message. An EMPTY string is
+/// a legitimate answer when media was attached — [`handle_turn`] turns the
+/// attachment into the prompt (a transcript, or a bracketed note).
 fn decide_reply(
     inbound: &SlackInbound,
     mode: GroupReplyMode,
     bot_user_id: &str,
     in_active_thread: bool,
 ) -> Option<String> {
+    let stripped = strip_mentions(&inbound.text);
+
     if inbound.is_dm {
-        let text = strip_mentions(&inbound.text);
-        return Some(if text.is_empty() {
-            inbound.text.clone()
-        } else {
-            text
-        });
+        if !stripped.is_empty() {
+            return Some(stripped);
+        }
+        if !inbound.text.is_empty() {
+            return Some(inbound.text.clone());
+        }
+        return inbound.has_media().then(String::new);
     }
 
     let gate_evaluable = !bot_user_id.is_empty();
@@ -645,14 +997,311 @@ fn decide_reply(
         return None;
     }
 
-    let text = strip_mentions(&inbound.text);
-    if text.is_empty() {
+    if stripped.is_empty() {
+        // A bare `@ryu` with a photo attached is a real prompt; a bare `@ryu`
+        // with nothing at all is not.
+        return inbound.has_media().then(String::new);
+    }
+    Some(stripped)
+}
+
+// ─── CommonMark → Slack mrkdwn ─────────────────────────────────────────────────
+
+/// How deeply emphasis may nest before the converter stops interpreting it.
+/// Pathological input ("`*`" a thousand times) should degrade to literal text,
+/// not to unbounded work.
+const MAX_EMPHASIS_NESTING: usize = 8;
+
+/// Convert CommonMark to Slack's mrkdwn.
+///
+/// The mapping, and what it deliberately cannot do:
+///
+/// | CommonMark        | mrkdwn        | note                                  |
+/// |-------------------|---------------|---------------------------------------|
+/// | `**b**` / `__b__` | `*b*`         | Slack's bold is a SINGLE asterisk      |
+/// | `*i*`             | `_i_`         | …which is why italics have to move     |
+/// | `~~s~~`           | `~s~`         |                                        |
+/// | `[t](u)`          | `<u\|t>`      |                                        |
+/// | `# H`             | `*H*`         | no headings exist; emphasis stands in  |
+/// | `- x`             | `• x`         | indentation preserved                  |
+/// | table rows        | verbatim      | no table syntax exists; pipes stay     |
+///
+/// Fenced blocks and inline code spans pass through untouched (their content is
+/// not markup), and `&`, `<`, `>` are escaped everywhere else because Slack
+/// otherwise reads them as its own control syntax — the escaping happens as text
+/// is emitted, so the `<url|label>` links this function *generates* survive it.
+pub fn to_mrkdwn(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let mut in_fence = false;
+
+    for (index, line) in markdown.lines().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            // Drop the info string: Slack has no syntax highlighting and would
+            // render "rust" as the block's first line.
+            out.push_str("```");
+            continue;
+        }
+        if in_fence {
+            out.push_str(&escape(line));
+            continue;
+        }
+
+        // A heading has no mrkdwn equivalent, so it becomes bold. Emphasis INSIDE
+        // it is dropped rather than nested — Slack does not render `*a *b* c*`.
+        // CommonMark requires whitespace after the `#` run, and so do we: without
+        // that rule a message about `#general` would come out emboldened.
+        if let Some(heading) = heading_body(trimmed) {
+            let text = heading.trim();
+            if !text.is_empty() {
+                out.push('*');
+                out.push_str(&convert_inline(text).replace('*', ""));
+                out.push('*');
+                continue;
+            }
+        }
+
+        // Bullets: keep the indentation (Slack nests on it) and use a real
+        // bullet, which is what `-`/`*` would have rendered as.
+        let indent = &line[..line.len() - trimmed.len()];
+        if let Some(item) = bullet_body(trimmed) {
+            out.push_str(indent);
+            out.push_str("• ");
+            out.push_str(&convert_inline(item));
+            continue;
+        }
+
+        // Block quotes use the same `>` in mrkdwn, so the marker is passed
+        // through literally instead of being escaped into `&gt;`.
+        if let Some(quoted) = trimmed.strip_prefix('>') {
+            out.push_str(indent);
+            out.push('>');
+            out.push_str(&convert_inline(quoted));
+            continue;
+        }
+
+        out.push_str(&convert_inline(line));
+    }
+
+    // `lines()` drops a trailing newline; keep it so a reply's spacing survives.
+    if markdown.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// The text of an ATX heading (`## Results`), or `None` when the line is not
+/// one. The whitespace after the `#` run is required, which is what keeps a
+/// channel reference (`#general`) from being read as a heading.
+fn heading_body(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.trim_start_matches('#');
+    if rest.len() == trimmed.len() {
         return None;
     }
-    Some(text)
+    rest.starts_with([' ', '\t']).then(|| rest.trim_start())
+}
+
+/// The text of a `-`/`*`/`+` bullet, or `None` when the line is not one. The
+/// space is required, so "3 * 4" and "**bold**" are not mistaken for bullets.
+fn bullet_body(trimmed: &str) -> Option<&str> {
+    let mut chars = trimmed.chars();
+    match (chars.next(), chars.next()) {
+        (Some('-' | '*' | '+'), Some(' ')) => Some(trimmed[2..].trim_start()),
+        _ => None,
+    }
+}
+
+/// Escape the three characters Slack reads as control syntax in message text.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Convert one line's inline markup.
+///
+/// A SINGLE left-to-right pass, which is the whole point: converting `**b**` to
+/// `*b*` and then converting single asterisks to `_` in a second pass would undo
+/// the first one. Openers record where their closer sits, so the scan emits the
+/// right replacement when it arrives there without ever re-reading its own output.
+fn convert_inline(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    // (index of the closing marker, what to emit for it, marker length).
+    let mut closers: Vec<(usize, &str, usize)> = Vec::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if let Some(&(index, replacement, len)) = closers.last() {
+            if i == index {
+                out.push_str(replacement);
+                i += len;
+                closers.pop();
+                continue;
+            }
+        }
+
+        let ch = chars[i];
+        match ch {
+            // Code spans are not markup: copy through (escaped) to the closer.
+            '`' => match find_marker(&chars, i + 1, "`") {
+                Some(end) => {
+                    out.push('`');
+                    out.push_str(&escape(&slice(&chars, i + 1, end)));
+                    out.push('`');
+                    i = end + 1;
+                }
+                None => {
+                    out.push('`');
+                    i += 1;
+                }
+            },
+            '[' => match parse_link(&chars, i) {
+                Some((label, url, next)) => {
+                    // Escaping happens on the pieces, BEFORE the link syntax is
+                    // written, so this generated `<…|…>` is not escaped away.
+                    out.push('<');
+                    out.push_str(&escape(&url));
+                    if !label.is_empty() {
+                        out.push('|');
+                        out.push_str(&escape(&label));
+                    }
+                    out.push('>');
+                    i = next;
+                }
+                None => {
+                    out.push('[');
+                    i += 1;
+                }
+            },
+            '*' | '_' | '~' => match open_emphasis(&chars, i, closers.len()) {
+                Some((replacement, len, close_at)) => {
+                    out.push_str(replacement);
+                    closers.push((close_at, replacement, len));
+                    i += len;
+                }
+                None => {
+                    out.push(ch);
+                    i += 1;
+                }
+            },
+            '&' => {
+                out.push_str("&amp;");
+                i += 1;
+            }
+            '<' => {
+                out.push_str("&lt;");
+                i += 1;
+            }
+            '>' => {
+                out.push_str("&gt;");
+                i += 1;
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Classify an emphasis marker at `start`, returning what to emit for it, how
+/// many characters it spans, and where its closer sits — or `None` when it has
+/// no closer (a lone `*` in prose is text, not markup).
+fn open_emphasis(
+    chars: &[char],
+    start: usize,
+    depth: usize,
+) -> Option<(&'static str, usize, usize)> {
+    if depth >= MAX_EMPHASIS_NESTING {
+        return None;
+    }
+    let doubled = chars.get(start + 1) == Some(&chars[start]);
+    let (marker, len, replacement) = match (chars[start], doubled) {
+        // Bold in CommonMark is doubled; in mrkdwn it is a single asterisk.
+        ('*', true) => ("**", 2, "*"),
+        ('_', true) => ("__", 2, "*"),
+        ('~', true) => ("~~", 2, "~"),
+        // A single asterisk is CommonMark's italic, which mrkdwn spells `_`.
+        ('*', false) => ("*", 1, "_"),
+        // A single underscore already means italic to Slack; leave it alone.
+        ('_', false) => ("_", 1, "_"),
+        // A single tilde already means strikethrough to Slack.
+        ('~', false) => ("~", 1, "~"),
+        _ => return None,
+    };
+    // Emphasis cannot open on whitespace ("2 * 3" is arithmetic) and must close.
+    if matches!(chars.get(start + len), None | Some(' ') | Some('\t')) {
+        return None;
+    }
+    let close_at = find_marker(chars, start + len, marker)?;
+    Some((replacement, len, close_at))
+}
+
+/// Index of the next occurrence of `marker` at or after `from`.
+fn find_marker(chars: &[char], from: usize, marker: &str) -> Option<usize> {
+    let needle: Vec<char> = marker.chars().collect();
+    (from..chars.len().saturating_sub(needle.len() - 1))
+        .find(|&i| chars[i..i + needle.len()] == needle[..])
+}
+
+/// Parse `[label](url)` starting at `start`, returning `(label, url, index after
+/// the link)`. An image (`![alt](url)`) parses the same way — Slack unfurls the
+/// URL, which is the closest thing it has to an inline image.
+fn parse_link(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    let label_end = (start + 1..chars.len()).find(|&i| chars[i] == ']')?;
+    if chars.get(label_end + 1) != Some(&'(') {
+        return None;
+    }
+    let url_end = (label_end + 2..chars.len()).find(|&i| chars[i] == ')')?;
+    let url = slice(chars, label_end + 2, url_end);
+    if url.trim().is_empty() {
+        return None;
+    }
+    Some((slice(chars, start + 1, label_end), url, url_end + 1))
+}
+
+/// `chars[a..b]` as a `String`.
+fn slice(chars: &[char], a: usize, b: usize) -> String {
+    chars[a..b].iter().collect()
 }
 
 // ─── Slack Web API response types (only the fields we use) ─────────────────────
+
+/// The `{ok, error}` envelope every Slack Web API method answers with.
+#[derive(Debug, Deserialize)]
+struct ApiAck {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+impl ApiAck {
+    /// Turn `ok:false` into an error naming the method, which is what an operator
+    /// needs to see (`missing_scope`, `channel_not_found`, …).
+    fn into_result(self, method: &str) -> anyhow::Result<()> {
+        if self.ok {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "slack {method} returned ok=false: {}",
+            self.error.unwrap_or_default()
+        )
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct ConnectionsOpenResponse {
@@ -673,8 +1322,12 @@ struct AuthTestResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct PostMessageResponse {
+struct UploadUrlResponse {
     ok: bool,
+    #[serde(default)]
+    upload_url: Option<String>,
+    #[serde(default)]
+    file_id: Option<String>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -682,45 +1335,38 @@ struct PostMessageResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CommonChannelConfig, GroupReplyMode};
 
     fn make_cfg(app_token: &str, bot_token: &str) -> SlackChannelConfig {
         SlackChannelConfig {
             app_token: app_token.to_string(),
             bot_token: bot_token.to_string(),
-            model: "gpt-4o".to_string(),
-            system_prompt: None,
-            agent_id: None,
-            team_id: None,
-            group_reply_mode: crate::GroupReplyMode::default(),
-            core_url: "http://127.0.0.1:7980".to_string(),
+            common: CommonChannelConfig {
+                model: "gpt-4o".to_string(),
+                ..Default::default()
+            },
         }
+    }
+
+    fn build(cfg: SlackChannelConfig) -> anyhow::Result<SlackChannel> {
+        SlackChannel::new(cfg, reqwest::Client::new(), PairingStore::ephemeral())
     }
 
     #[test]
     fn new_rejects_empty_app_token() {
-        let cfg = make_cfg("   ", "xoxb-1");
-        assert!(SlackChannel::new(cfg, reqwest::Client::new()).is_err());
+        assert!(build(make_cfg("   ", "xoxb-1")).is_err());
     }
 
     #[test]
     fn new_rejects_empty_bot_token() {
-        let cfg = make_cfg("xapp-1", "");
-        assert!(SlackChannel::new(cfg, reqwest::Client::new()).is_err());
+        assert!(build(make_cfg("xapp-1", "")).is_err());
     }
 
     #[test]
     fn new_accepts_valid_tokens() {
-        let cfg = SlackChannelConfig {
-            app_token: "xapp-1".to_string(),
-            bot_token: "xoxb-1".to_string(),
-            model: "gpt-4o".to_string(),
-            system_prompt: Some("be terse".to_string()),
-            agent_id: None,
-            team_id: None,
-            group_reply_mode: crate::GroupReplyMode::default(),
-            core_url: "http://127.0.0.1:7980".to_string(),
-        };
-        let channel = SlackChannel::new(cfg, reqwest::Client::new()).unwrap();
+        let mut cfg = make_cfg("xapp-1", "xoxb-1");
+        cfg.common.system_prompt = Some("be terse".to_string());
+        let channel = build(cfg).unwrap();
         assert_eq!(channel.name(), "slack");
         assert_eq!(channel.model(), "gpt-4o");
         assert_eq!(channel.system_prompt(), Some("be terse"));
@@ -728,31 +1374,79 @@ mod tests {
 
     #[test]
     fn new_stores_agent_id_and_core_url() {
-        let cfg = SlackChannelConfig {
-            app_token: "xapp-1".to_string(),
-            bot_token: "xoxb-1".to_string(),
-            model: "gpt-4o".to_string(),
-            system_prompt: None,
-            agent_id: Some("acp:pi".to_string()),
-            team_id: None,
-            group_reply_mode: crate::GroupReplyMode::default(),
-            core_url: "http://127.0.0.1:7980".to_string(),
-        };
-        let channel = SlackChannel::new(cfg, reqwest::Client::new()).unwrap();
-        assert_eq!(channel.agent_id.as_deref(), Some("acp:pi"));
-        assert_eq!(channel.core_url, "http://127.0.0.1:7980");
+        let mut cfg = make_cfg("xapp-1", "xoxb-1");
+        cfg.common.agent_id = Some("acp:pi".to_string());
+        cfg.common.core_url = "http://127.0.0.1:7980".to_string();
+        let channel = build(cfg).unwrap();
+        assert_eq!(channel.runtime().cfg.agent_id.as_deref(), Some("acp:pi"));
+        assert_eq!(channel.runtime().cfg.core_url, "http://127.0.0.1:7980");
+        // An agent id is what routes the bot through Core's session seam.
+        assert!(channel.runtime().routes_via_core());
     }
+
+    /// Slack declares the platform's real surface: threads, files, reactions and
+    /// mrkdwn, but NOT a command menu (only the app manifest can register a slash
+    /// command) and not streaming.
+    #[test]
+    fn caps_declare_what_slack_can_do() {
+        let channel = build(make_cfg("xapp-1", "xoxb-1")).unwrap();
+        let caps = channel.caps();
+        assert!(caps.threads && caps.rich_text && caps.attachments && caps.reactions);
+        assert!(caps.voice && caps.typing);
+        assert!(!caps.command_menu, "slash commands are manifest-only");
+        assert!(!caps.streaming, "slack has no draft surface");
+    }
+
+    // ─── Thread keys (previously `make_chat_id` / `split_chat_id`, now the
+    // kernel's one shared convention) ──────────────────────────────────────────
 
     #[test]
     fn chat_id_round_trips_channel_and_thread() {
-        let packed = make_chat_id("C123", "169.45");
+        let packed = pack_thread("C123", Some("169.45"));
         assert_eq!(packed, "C123:169.45");
-        assert_eq!(split_chat_id(&packed), ("C123", Some("169.45")));
+        assert_eq!(unpack_thread(&packed), ("C123", Some("169.45")));
     }
 
     #[test]
     fn split_chat_id_without_thread() {
-        assert_eq!(split_chat_id("C123"), ("C123", None));
+        assert_eq!(unpack_thread("C123"), ("C123", None));
+    }
+
+    /// A top-level message anchors its own thread; a message already in a thread
+    /// answers in the PARENT's, never in a thread of a thread.
+    #[test]
+    fn thread_anchor_prefers_the_parent() {
+        let top_level = pack_message_id("111.222", None);
+        assert_eq!(top_level, "111.222");
+        assert_eq!(thread_anchor(&top_level), "111.222");
+
+        let in_thread = pack_message_id("333.444", Some("111.222"));
+        assert_eq!(thread_anchor(&in_thread), "111.222");
+
+        // Slack repeats `thread_ts` on the parent message itself; the anchor is
+        // then the ts, packed only once.
+        let parent = pack_message_id("111.222", Some("111.222"));
+        assert_eq!(parent, "111.222");
+        assert_eq!(thread_anchor(&parent), "111.222");
+    }
+
+    #[test]
+    fn conversation_key_packs_channel_and_thread() {
+        assert_eq!(
+            conversation_key("C999", Some(&pack_message_id("111.222", None))),
+            "C999:111.222"
+        );
+        assert_eq!(
+            conversation_key("C999", Some(&pack_message_id("333.444", Some("111.222")))),
+            "C999:111.222"
+        );
+        // Idempotent: an already-packed key is not re-rooted.
+        assert_eq!(
+            conversation_key("C999:111.222", Some("999.999")),
+            "C999:111.222"
+        );
+        // With nothing to anchor on, the channel itself is the conversation.
+        assert_eq!(conversation_key("C999", None), "C999");
     }
 
     #[test]
@@ -779,7 +1473,14 @@ mod tests {
         .to_string();
         let inbound = parse_inbound(&raw).unwrap();
         assert_eq!(inbound.text, "hello bot");
-        assert_eq!(inbound.chat_id, "C999:111.222");
+        // The chat id is the BARE channel — the group allowlist is keyed on it —
+        // and the thread only appears in the conversation key.
+        assert_eq!(inbound.channel, "C999");
+        assert_eq!(inbound.sender_id.as_deref(), Some("U1"));
+        assert_eq!(
+            conversation_key(&inbound.channel, Some(&inbound.message_id)),
+            "C999:111.222"
+        );
     }
 
     #[test]
@@ -798,7 +1499,10 @@ mod tests {
         })
         .to_string();
         let inbound = parse_inbound(&raw).unwrap();
-        assert_eq!(inbound.chat_id, "C999:111.222");
+        assert_eq!(
+            conversation_key(&inbound.channel, Some(&inbound.message_id)),
+            "C999:111.222"
+        );
     }
 
     #[test]
@@ -843,7 +1547,7 @@ mod tests {
         assert!(parse_inbound(&hello).is_none());
     }
 
-    /// Verify that the chat_id produced by `parse_inbound` is stable per
+    /// Verify that the conversation key derived from `parse_inbound` is stable per
     /// channel/thread — the same raw frame always yields the same conversation_id
     /// so multi-turn context is preserved across messages in the same thread.
     #[test]
@@ -863,68 +1567,151 @@ mod tests {
             }
         })
         .to_string();
-        let first = parse_inbound(&frame).unwrap();
-        let second = parse_inbound(&frame).unwrap();
-        // conversation_id must be deterministic for the same channel+thread.
-        assert_eq!(first.chat_id, second.chat_id);
-        // conversation_id encodes both the channel and thread timestamp so Core
-        // can key separate conversations per thread.
-        assert_eq!(first.chat_id, "C999:111.222");
+        let key = |raw: &str| {
+            let parsed = parse_inbound(raw).unwrap();
+            conversation_key(&parsed.channel, Some(&parsed.message_id))
+        };
+        // conversation_id must be deterministic for the same channel+thread…
+        assert_eq!(key(&frame), key(&frame));
+        // …and encode both the channel and the thread timestamp so Core can key
+        // separate conversations per thread.
+        assert_eq!(key(&frame), "C999:111.222");
     }
 
-    /// Verify that two messages in different threads produce different chat_ids
-    /// so their Core conversations are kept separate.
+    /// Verify that two messages in different threads produce different
+    /// conversation keys so their Core conversations are kept separate.
     #[test]
     fn parse_inbound_different_threads_get_different_chat_ids() {
-        let thread_a = json!({
+        let frame = |ts: &str, thread: &str| {
+            json!({
+                "type": "events_api",
+                "payload": {
+                    "event": {
+                        "type": "message",
+                        "channel": "C999",
+                        "text": "hello",
+                        "ts": ts,
+                        "thread_ts": thread
+                    }
+                }
+            })
+            .to_string()
+        };
+        let key = |raw: String| {
+            let parsed = parse_inbound(&raw).unwrap();
+            conversation_key(&parsed.channel, Some(&parsed.message_id))
+        };
+        assert_ne!(key(frame("1.1", "1.0")), key(frame("2.1", "2.0")));
+    }
+
+    // ─── Media (a file upload arrives as subtype `file_share`, which the old
+    // "any subtype ⇒ ignore" rule dropped on the floor) ─────────────────────────
+
+    #[test]
+    fn parse_inbound_accepts_a_caption_less_file_share() {
+        let raw = json!({
             "type": "events_api",
             "payload": {
                 "event": {
                     "type": "message",
+                    "subtype": "file_share",
                     "channel": "C999",
-                    "text": "hello",
-                    "ts": "1.1",
-                    "thread_ts": "1.0"
+                    "user": "U1",
+                    "text": "",
+                    "ts": "1.2",
+                    "files": [{
+                        "id": "F1",
+                        "name": "diagram.png",
+                        "mimetype": "image/png",
+                        "size": 4096,
+                        "url_private": "https://files.slack.com/private",
+                        "url_private_download": "https://files.slack.com/download"
+                    }]
                 }
             }
         })
         .to_string();
-        let thread_b = json!({
+        let inbound = parse_inbound(&raw).unwrap();
+        assert!(inbound.text.is_empty());
+        let file = &inbound.attachments[0];
+        // The download URL is preferred: it serves bytes, not the viewer page.
+        assert_eq!(
+            file.url.as_deref(),
+            Some("https://files.slack.com/download")
+        );
+        assert_eq!(file.filename.as_deref(), Some("diagram.png"));
+        assert_eq!(file.size, Some(4096));
+        assert_eq!(file.resolved_kind(), AttachmentKind::Image);
+    }
+
+    #[test]
+    fn parse_inbound_marks_a_voice_memo_as_speech() {
+        let raw = json!({
             "type": "events_api",
             "payload": {
                 "event": {
                     "type": "message",
-                    "channel": "C999",
-                    "text": "world",
-                    "ts": "2.1",
-                    "thread_ts": "2.0"
+                    "subtype": "file_share",
+                    "channel": "D1",
+                    "channel_type": "im",
+                    "user": "U1",
+                    "ts": "1.2",
+                    "files": [{
+                        "id": "F2",
+                        "name": "audio_message.webm",
+                        "mimetype": "audio/webm",
+                        "subtype": "slack_audio",
+                        "url_private": "https://files.slack.com/private"
+                    }]
                 }
             }
         })
         .to_string();
-        let id_a = parse_inbound(&thread_a).unwrap().chat_id;
-        let id_b = parse_inbound(&thread_b).unwrap().chat_id;
-        assert_ne!(id_a, id_b);
+        let inbound = parse_inbound(&raw).unwrap();
+        assert_eq!(
+            inbound.attachments[0].resolved_kind(),
+            AttachmentKind::Voice
+        );
+        // A media-only DM still routes: the transcript becomes the prompt.
+        assert_eq!(
+            decide_reply(&inbound, GroupReplyMode::Mentions, "UBOT", false).as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn parse_inbound_drops_an_empty_message_with_no_media() {
+        let raw = json!({
+            "type": "events_api",
+            "payload": {
+                "event": { "type": "message", "channel": "C999", "text": "   ", "ts": "1.2" }
+            }
+        })
+        .to_string();
+        assert!(parse_inbound(&raw).is_none());
     }
 
     // ─── Group-reply gate (group_reply_mode was previously dropped on the floor:
     // the adapter answered EVERY channel message regardless of the admin's
     // choice in the setup form) ────────────────────────────────────────────────
 
-    fn channel_msg(text: &str) -> SlackInbound {
+    fn inbound(text: &str, is_dm: bool) -> SlackInbound {
         SlackInbound {
-            chat_id: "C1:1.0".to_string(),
+            channel: if is_dm { "D1".into() } else { "C1".into() },
             text: text.to_string(),
-            is_dm: false,
+            is_dm,
+            sender_id: Some("U1".to_string()),
+            message_id: "1.0".to_string(),
+            attachments: Vec::new(),
         }
     }
 
+    fn channel_msg(text: &str) -> SlackInbound {
+        inbound(text, false)
+    }
+
     fn dm(text: &str) -> SlackInbound {
-        SlackInbound {
-            chat_id: "D1:1.0".to_string(),
-            text: text.to_string(),
-            is_dm: true,
-        }
+        inbound(text, true)
     }
 
     #[test]
@@ -936,6 +1723,7 @@ mod tests {
                     "type": "message",
                     "channel_type": "im",
                     "channel": "D1",
+                    "user": "U1",
                     "text": "hi",
                     "ts": "1.1"
                 }
@@ -943,6 +1731,40 @@ mod tests {
         })
         .to_string();
         assert!(parse_inbound(&raw).unwrap().is_dm);
+    }
+
+    /// The failure direction matters: an event with NO `channel_type` must be
+    /// treated as a group, or a pairing code could be posted in public.
+    #[test]
+    fn parse_inbound_treats_an_unlabelled_channel_as_a_group() {
+        let raw = json!({
+            "type": "events_api",
+            "payload": {
+                "event": {
+                    "type": "message",
+                    "channel": "C999",
+                    "user": "U1",
+                    "text": "hi",
+                    "ts": "1.1"
+                }
+            }
+        })
+        .to_string();
+        assert!(!parse_inbound(&raw).unwrap().is_dm);
+    }
+
+    /// The loop guard the file-upload path made necessary: a file the bot itself
+    /// shared arrives back as an inbound `file_share`, and answering it would
+    /// transcribe the bot's own voice note and reply to it forever.
+    #[test]
+    fn a_message_the_bot_wrote_is_never_answered() {
+        assert!(is_self_authored(Some("UBOT"), "UBOT"));
+        assert!(!is_self_authored(Some("U1"), "UBOT"));
+        assert!(!is_self_authored(None, "UBOT"));
+        // Fail-open: with no known identity nothing is dropped as "our own",
+        // exactly as the mention gate degrades.
+        assert!(!is_self_authored(Some("UBOT"), ""));
+        assert!(!is_self_authored(None, ""));
     }
 
     /// THE BITE: in `Mentions` mode an un-addressed channel message is now
@@ -1020,6 +1842,21 @@ mod tests {
         assert!(decide_reply(&msg, GroupReplyMode::Mentions, "UBOT", false).is_none());
     }
 
+    /// …unless it carries media, which IS the prompt.
+    #[test]
+    fn mention_with_media_and_no_text_is_routed() {
+        let mut msg = channel_msg("<@UBOT>");
+        msg.attachments.push(Attachment {
+            kind: Some(AttachmentKind::Image),
+            filename: Some("chart.png".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            decide_reply(&msg, GroupReplyMode::Mentions, "UBOT", false).as_deref(),
+            Some("")
+        );
+    }
+
     // ─── Reconnect backoff (was a fixed 3s with no cap, no jitter and no attempt
     // counter: a permanently-failing apps.connections.open hot-looped forever) ──
 
@@ -1074,5 +1911,86 @@ mod tests {
         assert_eq!(strip_mentions("no mentions"), "no mentions");
         // An unterminated mention is left alone rather than eating the message.
         assert_eq!(strip_mentions("<@U1 unterminated"), "<@U1 unterminated");
+    }
+
+    // ─── mrkdwn conversion ─────────────────────────────────────────────────────
+
+    /// The conversion that a sequential two-pass implementation gets wrong:
+    /// `**bold**` becomes `*bold*`, and the `*bold*` it just produced must NOT
+    /// then be re-read as an italic.
+    #[test]
+    fn mrkdwn_converts_bold_without_re_reading_its_own_output() {
+        assert_eq!(to_mrkdwn("**bold**"), "*bold*");
+        assert_eq!(to_mrkdwn("__bold__"), "*bold*");
+        assert_eq!(to_mrkdwn("*italic*"), "_italic_");
+        assert_eq!(to_mrkdwn("**bold** and *italic*"), "*bold* and _italic_");
+        // Already-mrkdwn emphasis survives untouched.
+        assert_eq!(to_mrkdwn("_italic_"), "_italic_");
+        assert_eq!(to_mrkdwn("~~gone~~"), "~gone~");
+    }
+
+    /// A lone asterisk is arithmetic or a footnote, not markup.
+    #[test]
+    fn mrkdwn_leaves_unmatched_emphasis_alone() {
+        assert_eq!(to_mrkdwn("2 * 3 = 6"), "2 * 3 = 6");
+        assert_eq!(to_mrkdwn("a *dangling marker"), "a *dangling marker");
+    }
+
+    #[test]
+    fn mrkdwn_rewrites_links_and_escapes_around_them() {
+        assert_eq!(
+            to_mrkdwn("see [the docs](https://example.com/a?b=1&c=2)"),
+            "see <https://example.com/a?b=1&amp;c=2|the docs>"
+        );
+        // A bare `<` in prose is escaped, or Slack reads it as its own syntax.
+        assert_eq!(to_mrkdwn("a < b && c > d"), "a &lt; b &amp;&amp; c &gt; d");
+    }
+
+    #[test]
+    fn mrkdwn_passes_code_through_untouched() {
+        assert_eq!(to_mrkdwn("call `a ** b` now"), "call `a ** b` now");
+        let fenced = "before\n```rust\nlet x = **y;\n```\nafter";
+        // The info string goes (Slack has no highlighting) and the body is verbatim.
+        assert_eq!(to_mrkdwn(fenced), "before\n```\nlet x = **y;\n```\nafter");
+    }
+
+    /// A `#` without whitespace after it is a channel reference, not a heading.
+    #[test]
+    fn mrkdwn_leaves_a_channel_reference_alone() {
+        assert_eq!(to_mrkdwn("ask in #general"), "ask in #general");
+        assert_eq!(to_mrkdwn("#general is quiet"), "#general is quiet");
+    }
+
+    #[test]
+    fn mrkdwn_maps_block_constructs_slack_lacks() {
+        assert_eq!(to_mrkdwn("## Results"), "*Results*");
+        // Emphasis inside a heading is dropped, not nested — Slack cannot render
+        // nested asterisks.
+        assert_eq!(to_mrkdwn("# A **bold** title"), "*A bold title*");
+        assert_eq!(to_mrkdwn("- one\n  - two"), "• one\n  • two");
+        assert_eq!(to_mrkdwn("* starred item"), "• starred item");
+        assert_eq!(to_mrkdwn("> quoted **thing**"), "> quoted *thing*");
+        // Tables have no equivalent at all, so the rows are left as written.
+        assert_eq!(to_mrkdwn("| a | b |"), "| a | b |");
+    }
+
+    #[test]
+    fn mrkdwn_preserves_line_structure() {
+        assert_eq!(to_mrkdwn("one\n\ntwo\n"), "one\n\ntwo\n");
+        assert_eq!(to_mrkdwn(""), "");
+    }
+
+    /// A wall of markers must not recurse, hang, or grow the output. The scan is
+    /// linear and the nesting ceiling bounds the closer stack, so asterisk soup
+    /// simply collapses to the mrkdwn spelling of the same (meaningless) emphasis.
+    #[test]
+    fn mrkdwn_survives_pathological_emphasis() {
+        let noisy = "*".repeat(200);
+        assert!(to_mrkdwn(&noisy).chars().count() <= noisy.chars().count());
+        // Whatever the markers do, the words between them must survive.
+        let mixed = format!("{m}a{m}b{m}c{m}", m = "*_~");
+        assert!(["a", "b", "c"]
+            .iter()
+            .all(|word| to_mrkdwn(&mixed).contains(word)));
     }
 }

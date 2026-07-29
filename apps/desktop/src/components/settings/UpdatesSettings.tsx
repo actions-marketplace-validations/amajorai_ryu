@@ -21,6 +21,7 @@ import {
 	getAutoUpdateEnabled,
 	getVersionInfo,
 	setAutoUpdateEnabled,
+	updateCheckFailed,
 } from "@/src/lib/api/update.ts";
 import {
 	RELEASE_CHANNELS,
@@ -71,15 +72,13 @@ export function UpdatesSettings() {
 		setChecking(true);
 		try {
 			const verdict = await checkForUpdate(toTarget(getNode()));
-			// checkForUpdate fails soft to a "no update" verdict with empty
-			// version strings (see update.ts). Treat that sentinel as a failed
-			// check so we never reassure the user they're up to date when the
-			// check never actually completed.
-			const checkFailed = !(verdict.update_available || verdict.latest);
-			if (checkFailed) {
+			// A failed check surfaces as either the fail-soft sentinel (empty
+			// version strings, see update.ts) or Core's fail-open verdict with an
+			// `error` field. Both must never read as "you're up to date".
+			if (updateCheckFailed(verdict)) {
 				sileo.error({
 					title: "Couldn't check for updates",
-					description: "Check your connection and try again.",
+					description: verdict.error ?? "Check your connection and try again.",
 				});
 			} else if (verdict.update_available) {
 				sileo.info({

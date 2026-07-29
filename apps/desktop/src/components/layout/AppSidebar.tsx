@@ -130,12 +130,14 @@ import {
 	useState,
 } from "react";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
+import { AddChannelDialog } from "@/src/components/channels/AddChannelDialog.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
 import { NodeFolderBrowser } from "@/src/components/chat/NodeFolderBrowser.tsx";
 import {
 	CreateFolderDialog,
 	ProjectPickerContent,
 } from "@/src/components/chat/ProjectPicker.tsx";
+import { AddIdentityDialog } from "@/src/components/identities/AddIdentityDialog.tsx";
 import { EntityIconDialog } from "@/src/components/layout/EntityIconDialog.tsx";
 import {
 	ProjectGlyph,
@@ -188,6 +190,7 @@ import {
 	engineForAgent,
 	personaToGlyph,
 } from "@/src/lib/agent-logos.tsx";
+import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { BtwEntry } from "@/src/lib/api/btw.ts";
 import { listBtw } from "@/src/lib/api/btw.ts";
 import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
@@ -952,6 +955,7 @@ function ShowLessButton({
 /** Shared callbacks/state threaded into every chat row, regardless of group. */
 interface ChatRowHandlers {
 	activeConversationId: string | null;
+	agents: AgentSummary[];
 	archivedIds: Set<string>;
 	loadMessages: (id: string) => Promise<Message[]>;
 	onDeleteConversation: (id: string) => void;
@@ -1083,6 +1087,7 @@ function ChatRow({
 }) {
 	const {
 		activeConversationId,
+		agents,
 		archivedIds,
 		pinnedIds,
 		unreadIds,
@@ -1171,12 +1176,33 @@ function ChatRow({
 				<SidebarPreviewMeta label="Worktree" value={worktreeLeaf} />
 			) : null}
 			{(conv.participants?.length || conv.agentId) && (
-				<SidebarPreviewMeta
-					label="Agents"
-					value={(conv.participants ?? (conv.agentId ? [conv.agentId] : []))
-						.map((id) => id.split("/").pop() ?? id)
-						.join(", ")}
-				/>
+				<div className="flex min-w-0 items-baseline gap-2 text-xs">
+					<span className="shrink-0 text-muted-foreground">Agents</span>
+					<span className="flex min-w-0 flex-wrap items-center gap-1.5">
+						{(conv.participants ?? (conv.agentId ? [conv.agentId] : [])).map(
+							(id) => {
+								const agent = agents.find((a) => a.id === id);
+								return (
+									<span className="flex items-center gap-1" key={id}>
+										<AgentAvatar
+											avatarUrl={agent?.avatarUrl}
+											className="size-3.5 shrink-0 rounded-[2px] object-contain"
+											engine={engineForAgent({
+												id,
+												engine: agent?.engine ?? null,
+												builtIn: null,
+											})}
+											size="14px"
+										/>
+										<span className="truncate text-foreground/90">
+											{agent?.name ?? id.split("/").pop() ?? id}
+										</span>
+									</span>
+								);
+							}
+						)}
+					</span>
+				</div>
 			)}
 			{conv.runStatus ? (
 				<SidebarPreviewMeta
@@ -1513,6 +1539,7 @@ function ChatRow({
 						onToggle={() => setMessagesExpanded((v) => !v)}
 					>
 						<SidebarChatMessages
+							agentId={conv.agentId}
 							conversationId={conv.id}
 							loadMessages={loadMessages}
 							onJump={(messageId) => onJumpToMessage(conv.id, messageId)}
@@ -3415,8 +3442,11 @@ function ChannelsSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { channels, loading, authed } = useChannels();
+	const { channels, loading, authed, create } = useChannels();
+	const { agents } = useAgents();
+	const { teams } = useTeams();
 	const { openTab } = useTabsContext();
+	const [addDialogOpen, setAddDialogOpen] = useState(false);
 	const paged = usePaged(
 		sortItems(channels, sort, NAMED_SORT_ACCESSORS),
 		pageSize
@@ -3424,8 +3454,6 @@ function ChannelsSection({
 
 	const openChannel = (id: string, name: string, forceNew = false) =>
 		openTab(`/channels/${id}`, { title: name, forceNew });
-	const openNewChannel = () =>
-		openTab("/channels/new", { title: "New channel" });
 
 	let emptyMessage = "No channels yet";
 	if (loading) {
@@ -3491,7 +3519,12 @@ function ChannelsSection({
 
 	return (
 		<SidebarSection
-			action={<SectionAddButton onClick={openNewChannel} title="Add channel" />}
+			action={
+				<SectionAddButton
+					onClick={() => setAddDialogOpen(true)}
+					title="Add channel"
+				/>
+			}
 			collapsed={collapsed}
 			dnd={dnd}
 			label="Channels"
@@ -3525,6 +3558,25 @@ function ChannelsSection({
 					/>
 				</>
 			)}
+			<AddChannelDialog
+				agents={agents.map((a) => ({ id: a.id, name: a.name }))}
+				onCreate={async (input) => {
+					try {
+						await create(input);
+						toast.success({ title: `Channel "${input.name}" created` });
+						return true;
+					} catch (e) {
+						toast.error({
+							title:
+								e instanceof Error ? e.message : "Could not create channel",
+						});
+						return false;
+					}
+				}}
+				onOpenChange={setAddDialogOpen}
+				open={addDialogOpen}
+				teams={teams.map((t) => ({ id: t.id, name: t.name }))}
+			/>
 		</SidebarSection>
 	);
 }
@@ -3711,8 +3763,9 @@ function IdentitiesSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { profiles, loading, error, refetch } = useIdentities();
+	const { profiles, loading, error, refetch, create } = useIdentities();
 	const { openTab } = useTabsContext();
+	const [addDialogOpen, setAddDialogOpen] = useState(false);
 	const rows = useMemo(
 		() =>
 			profiles.map((profile) => ({
@@ -3729,8 +3782,6 @@ function IdentitiesSection({
 			title: profileId,
 			forceNew,
 		});
-	const openNewIdentity = () =>
-		openTab("/identities/new", { title: "New identity" });
 
 	const emptyMessage = loading ? "Loading…" : "No identities yet";
 
@@ -3786,7 +3837,10 @@ function IdentitiesSection({
 	return (
 		<SidebarSection
 			action={
-				<SectionAddButton onClick={openNewIdentity} title="Add identity" />
+				<SectionAddButton
+					onClick={() => setAddDialogOpen(true)}
+					title="Add identity"
+				/>
 			}
 			collapsed={collapsed}
 			dnd={dnd}
@@ -3828,6 +3882,24 @@ function IdentitiesSection({
 					/>
 				</>
 			)}
+			<AddIdentityDialog
+				existingProfileIds={profiles.map((p) => p.profile_id)}
+				onCreate={async (input) => {
+					try {
+						await create(input);
+						toast.success({
+							title: `Connection for ${input.domain} created`,
+						});
+					} catch (e) {
+						toast.error({
+							title:
+								e instanceof Error ? e.message : "Could not create connection",
+						});
+					}
+				}}
+				onOpenChange={setAddDialogOpen}
+				open={addDialogOpen}
+			/>
 		</SidebarSection>
 	);
 }
@@ -6869,6 +6941,7 @@ export function SidebarPanelContent({
 
 	const chatRowHandlers: ChatRowHandlers = {
 		activeConversationId,
+		agents,
 		archivedIds,
 		pinnedIds,
 		unreadIds,

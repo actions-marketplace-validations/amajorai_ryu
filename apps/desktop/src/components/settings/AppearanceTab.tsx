@@ -36,6 +36,7 @@ import { Switch } from "@ryu/ui/components/switch";
 import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
 import { cn } from "@ryu/ui/lib/utils";
 import { useTheme } from "next-themes";
+import type { CSSProperties } from "react";
 import { useCallback, useEffect, useState } from "react";
 import { useChatDateGrouping } from "@/src/hooks/useChatDateGrouping.ts";
 import {
@@ -58,6 +59,7 @@ import {
 	setFileTreePrefs,
 	useFileTreePrefs,
 } from "@/src/hooks/useFileTreePrefs.ts";
+import { useFileTreeThemeStyles } from "@/src/hooks/useFileTreeThemeStyles.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import {
 	setInvertedBackgrounds,
@@ -105,6 +107,12 @@ import {
 	bindAppearanceThemeMode,
 	resetAppearanceSettings,
 } from "@/src/lib/appearance-settings.ts";
+import {
+	PIERRE_DARK_THEMES,
+	PIERRE_LIGHT_THEMES,
+	TREE_DARK_THEMES,
+	TREE_LIGHT_THEMES,
+} from "@/src/lib/pierre-themes.ts";
 import {
 	type CustomTokens,
 	customTokensToVariant,
@@ -162,7 +170,7 @@ const PRIMARY_PRESETS: Array<{
 	light: string;
 	dark: string;
 }> = [
-	{ name: "ryu", label: "Ryu Blue", light: "#0088ff", dark: "#0088ff" },
+	{ name: "ryu", label: "Ryu Blue", light: "#0099ff", dark: "#0099ff" },
 	{ name: "blue", label: "Blue", light: "#2563eb", dark: "#60a5fa" },
 	{ name: "violet", label: "Violet", light: "#7c3aed", dark: "#a78bfa" },
 	{ name: "green", label: "Green", light: "#16a34a", dark: "#4ade80" },
@@ -718,12 +726,18 @@ const FILE_TREE_PREVIEW_PATHS = [
 
 // The preview builds its model from static paths, so no `resetPaths` is needed;
 // remounting it (via a `key` on the prefs) applies the constructor-time options.
-function FileTreePreview({ prefs }: { prefs: FileTreePrefs }) {
+function FileTreePreview({
+	prefs,
+	style,
+}: {
+	prefs: FileTreePrefs;
+	style?: CSSProperties;
+}) {
 	const { model } = useFileTree({
 		...fileTreePrefsToOptions(prefs),
 		paths: FILE_TREE_PREVIEW_PATHS as unknown as string[],
 	});
-	return <FileTree className="h-full w-full" model={model} />;
+	return <FileTree className="h-full w-full" model={model} style={style} />;
 }
 
 export function AppearanceTab() {
@@ -773,6 +787,7 @@ export function AppearanceTab() {
 	);
 	const diffPrefs = useDiffViewPrefs();
 	const fileTreePrefs = useFileTreePrefs();
+	const fileTreeThemeStyles = useFileTreeThemeStyles(fileTreePrefs);
 
 	const toolDetailPreset = deriveToolDetailPreset(
 		groupToolUses,
@@ -1715,8 +1730,60 @@ export function AppearanceTab() {
 								</SelectContent>
 							</Select>
 						}
-						description="Syntax-highlight theme for diffs. Auto follows the app's light/dark mode."
-						title="Theme"
+						description="Which of the two themes below applies. Auto follows the app's light/dark mode."
+						title="Theme mode"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								items={PIERRE_LIGHT_THEMES}
+								onValueChange={(v) => {
+									if (v != null) {
+										setDiffViewPrefs({ lightTheme: v });
+									}
+								}}
+								value={diffPrefs.lightTheme}
+							>
+								<SelectTrigger className="h-8 w-56 text-sm">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{PIERRE_LIGHT_THEMES.map((o) => (
+										<SelectItem key={o.value} value={o.value}>
+											{o.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Syntax-highlight theme used while diffs render in light mode."
+						title="Light theme"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								items={PIERRE_DARK_THEMES}
+								onValueChange={(v) => {
+									if (v != null) {
+										setDiffViewPrefs({ darkTheme: v });
+									}
+								}}
+								value={diffPrefs.darkTheme}
+							>
+								<SelectTrigger className="h-8 w-56 text-sm">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{PIERRE_DARK_THEMES.map((o) => (
+										<SelectItem key={o.value} value={o.value}>
+											{o.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Syntax-highlight theme used while diffs render in dark mode."
+						title="Dark theme"
 					/>
 					<SettingsItem
 						actions={
@@ -1859,9 +1926,12 @@ export function AppearanceTab() {
 						Live preview
 					</div>
 					<div className="h-52 overflow-hidden text-xs">
+						{/* Keyed on the constructor-time options only — theme rides in as
+						    host CSS variables and must not force a remount. */}
 						<FileTreePreview
-							key={JSON.stringify(fileTreePrefs)}
+							key={JSON.stringify(fileTreePrefsToOptions(fileTreePrefs))}
 							prefs={fileTreePrefs}
+							style={fileTreeThemeStyles}
 						/>
 					</div>
 				</SettingsCard>
@@ -1892,6 +1962,58 @@ export function AppearanceTab() {
 						}
 						description="Row height and spacing of tree items."
 						title="Density"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								items={TREE_LIGHT_THEMES}
+								onValueChange={(v) => {
+									if (v != null) {
+										setFileTreePrefs({ lightTheme: v });
+									}
+								}}
+								value={fileTreePrefs.lightTheme}
+							>
+								<SelectTrigger className="h-8 w-56 text-sm">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{TREE_LIGHT_THEMES.map((o) => (
+										<SelectItem key={o.value} value={o.value}>
+											{o.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Colors used while the app is in light mode. Match app theme keeps the tree on the app's own surface colors."
+						title="Light theme"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								items={TREE_DARK_THEMES}
+								onValueChange={(v) => {
+									if (v != null) {
+										setFileTreePrefs({ darkTheme: v });
+									}
+								}}
+								value={fileTreePrefs.darkTheme}
+							>
+								<SelectTrigger className="h-8 w-56 text-sm">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{TREE_DARK_THEMES.map((o) => (
+										<SelectItem key={o.value} value={o.value}>
+											{o.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Colors used while the app is in dark mode. The same theme list as the diff viewer, set independently."
+						title="Dark theme"
 					/>
 					<SettingsItem
 						actions={

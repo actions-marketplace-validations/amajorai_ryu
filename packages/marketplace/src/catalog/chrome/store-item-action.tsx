@@ -4,10 +4,11 @@
 // affordance is identical across Apps, Plugins, Models, Skills, MCP, and Agents.
 // It is the generalization of the models page's morph button:
 //
-//   • not installed          → an Install button (with live download %).
-//   • installed, no enable    → "Installed" at rest, morphs to "Uninstall" on hover.
-//   • installed + enabled     → "Enabled"   at rest, morphs to "Disable"   on hover.
-//   • installed + disabled    → "Disabled"  at rest, morphs to "Uninstall" on hover.
+//   • not installed          → an Install button (with live download %), wrapped
+//                              in a right-click ContextMenu.
+//   • installed, no enable    → 3-dot menu with Uninstall (+ Report).
+//   • installed + enabled     → 3-dot menu with Disable, Report, Uninstall.
+//   • installed + disabled    → 3-dot menu with Enable, Report, Uninstall.
 //
 // Sections without an enable/disable concept (Models per-file, Agents, MCP) pass
 // `enabled={undefined}`; sections that have one (Apps, Skills) pass a boolean.
@@ -16,6 +17,7 @@ import {
 	Alert02Icon,
 	CheckmarkCircle02Icon,
 	Delete01Icon,
+	Download04Icon,
 	MoreHorizontalIcon,
 	PauseIcon,
 	PlayIcon,
@@ -23,6 +25,13 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
+import {
+	ContextMenu,
+	ContextMenuContent,
+	ContextMenuItem,
+	ContextMenuSeparator,
+	ContextMenuTrigger,
+} from "@ryu/ui/components/context-menu.tsx";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -93,47 +102,43 @@ export default function StoreItemAction({
 		return (
 			<div className="flex items-center gap-0.5">
 				{affordance}
-				<ReportMenuItem
-					className={className}
-					onReport={handleReport}
-					standalone
-				/>
+				<ReportButton className={className} onReport={handleReport} />
 			</div>
 		);
 	}
 
 	if (!installed) {
-		if (!canReport) {
-			return (
-				<InstallProgressButton
-					className={className}
-					idleVariant="ghost"
-					installing={busy}
-					onClick={onInstall}
-					percent={percent}
-				>
-					Install
-				</InstallProgressButton>
-			);
-		}
 		return (
-			<div className="flex items-center gap-0.5">
-				<InstallProgressButton
-					idleVariant="ghost"
-					installing={busy}
-					onClick={onInstall}
-					percent={percent}
+			<ContextMenu>
+				<ContextMenuTrigger
+					className={className}
+					render={<div className="flex items-center" />}
 				>
-					Install
-				</InstallProgressButton>
-				{busy ? null : (
-					<ReportMenuItem
-						className={className}
-						onReport={handleReport}
-						standalone
-					/>
-				)}
-			</div>
+					<InstallProgressButton
+						idleVariant="default"
+						installing={busy}
+						onClick={onInstall}
+						percent={percent}
+					>
+						Install
+					</InstallProgressButton>
+				</ContextMenuTrigger>
+				<ContextMenuContent align="end">
+					<ContextMenuItem onClick={onInstall}>
+						<HugeiconsIcon className="size-4" icon={Download04Icon} />
+						Install
+					</ContextMenuItem>
+					{canReport ? (
+						<>
+							<ContextMenuSeparator />
+							<ContextMenuItem onClick={handleReport}>
+								<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+								Report
+							</ContextMenuItem>
+						</>
+					) : null}
+				</ContextMenuContent>
+			</ContextMenu>
 		);
 	}
 
@@ -158,11 +163,7 @@ export default function StoreItemAction({
 					/>
 					{lockedLabel}
 				</Button>
-				<ReportMenuItem
-					className={className}
-					onReport={handleReport}
-					standalone
-				/>
+				<ReportButton className={className} onReport={handleReport} />
 			</div>
 		);
 	}
@@ -206,56 +207,118 @@ export default function StoreItemAction({
 				}
 			/>
 			<DropdownMenuContent align="end">
-				{hasEnableConcept &&
-					(isEnabled ? (
-						<DropdownMenuItem onClick={onDisable}>
-							<HugeiconsIcon className="size-4" icon={PauseIcon} />
-							Disable
-						</DropdownMenuItem>
-					) : (
-						<DropdownMenuItem onClick={onEnable}>
-							<HugeiconsIcon className="size-4" icon={PlayIcon} />
-							Enable
-						</DropdownMenuItem>
-					))}
-				{canReport ? (
-					<DropdownMenuItem onClick={handleReport}>
-						<HugeiconsIcon className="size-4" icon={Alert02Icon} />
-						Report
-					</DropdownMenuItem>
-				) : null}
-				{onUninstall ? (
-					<>
-						{canReport || hasEnableConcept ? <DropdownMenuSeparator /> : null}
-						<DropdownMenuItem onClick={onUninstall} variant="destructive">
-							<HugeiconsIcon className="size-4" icon={Delete01Icon} />
-							Uninstall
-						</DropdownMenuItem>
-					</>
-				) : null}
+				<StoreItemMenuItems
+					canReport={canReport}
+					hasEnableConcept={hasEnableConcept}
+					isEnabled={isEnabled}
+					onDisable={onDisable}
+					onEnable={onEnable}
+					onReport={handleReport}
+					onUninstall={onUninstall}
+				/>
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
 }
 
-/** Compact overflow used next to Install / locked / web affordance. */
-function ReportMenuItem({
+/**
+ * Shared menu items used by both the installed DropdownMenu and the
+ * not-installed ContextMenu. Renders Enable/Disable toggle, Report,
+ * and Uninstall — each conditionally.
+ */
+function StoreItemMenuItems({
+	hasEnableConcept,
+	isEnabled,
+	canReport,
+	onEnable,
+	onDisable,
+	onReport,
+	onUninstall,
+}: {
+	canReport: boolean;
+	hasEnableConcept: boolean;
+	isEnabled: boolean;
+	onDisable?: () => void;
+	onEnable?: () => void;
+	onReport: () => void;
+	onUninstall?: () => void;
+}) {
+	return (
+		<>
+			{hasEnableConcept &&
+				(isEnabled ? (
+					<DropdownMenuItem onClick={onDisable}>
+						<HugeiconsIcon className="size-4" icon={PauseIcon} />
+						Disable
+					</DropdownMenuItem>
+				) : (
+					<DropdownMenuItem onClick={onEnable}>
+						<HugeiconsIcon className="size-4" icon={PlayIcon} />
+						Enable
+					</DropdownMenuItem>
+				))}
+			{canReport ? (
+				<DropdownMenuItem onClick={onReport}>
+					<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+					Report
+				</DropdownMenuItem>
+			) : null}
+			{onUninstall ? (
+				<>
+					{hasEnableConcept || canReport ? <DropdownMenuSeparator /> : null}
+					<DropdownMenuItem onClick={onUninstall} variant="destructive">
+						<HugeiconsIcon className="size-4" icon={Delete01Icon} />
+						Uninstall
+					</DropdownMenuItem>
+				</>
+			) : null}
+		</>
+	);
+}
+
+/**
+ * Reusable context menu content for not-installed store items.
+ * Catalog sections use this as the `contextMenu` prop on StoreCatalogCard
+ * so right-clicking the card shows Install + Report (when available).
+ */
+export function StoreItemContextMenuContent({
+	onInstall,
+	onReport,
+	canReport,
+}: {
+	canReport: boolean;
+	onInstall?: () => void;
+	onReport: () => void;
+}) {
+	return (
+		<>
+			{onInstall ? (
+				<ContextMenuItem onClick={onInstall}>
+					<HugeiconsIcon className="size-4" icon={Download04Icon} />
+					Install
+				</ContextMenuItem>
+			) : null}
+			{canReport ? (
+				<>
+					{onInstall ? <ContextMenuSeparator /> : null}
+					<ContextMenuItem onClick={onReport}>
+						<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+						Report
+					</ContextMenuItem>
+				</>
+			) : null}
+		</>
+	);
+}
+
+/** Standalone 3-dot report overflow used next to locked / web affordance. */
+function ReportButton({
 	onReport,
 	className,
-	standalone,
 }: {
 	className?: string;
 	onReport: () => void;
-	standalone?: boolean;
 }) {
-	if (!standalone) {
-		return (
-			<DropdownMenuItem onClick={onReport}>
-				<HugeiconsIcon className="size-4" icon={Alert02Icon} />
-				Report
-			</DropdownMenuItem>
-		);
-	}
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger

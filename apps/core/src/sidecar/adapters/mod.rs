@@ -1862,15 +1862,13 @@ async fn assemble_long_term_system_message(
     memory: &MemoryStore,
     enabled: bool,
     agent_id: Option<&str>,
+    limit: usize,
 ) -> Option<String> {
     if !enabled {
         return None;
     }
     let scope = long_term_agent_scope(agent_id);
-    let entries = match memory
-        .recall(LOCAL_USER, &scope, DEFAULT_LONG_TERM_LIMIT)
-        .await
-    {
+    let entries = match memory.recall(LOCAL_USER, &scope, limit).await {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!("failed to recall long-term memory: {e:#}");
@@ -3606,16 +3604,62 @@ pub async fn route_chat_stream(
     // dispatching — prepended to long_term_system for both adapters.
     let persona_prefix = persona_tone_prefix(persona.as_ref());
 
+    // The node's memory policy (recall mode / budget / write frequency), resolved
+    // ONCE for the whole turn. Memory touches this function in three places and
+    // "recall is off" has to mean all of them, so every downstream decision reads
+    // this one value rather than re-reading preferences. Defaults reproduce the
+    // pre-policy behaviour exactly, and an unreadable store yields those defaults.
+    let memory_policy = match crate::learning::global_state() {
+        Some(state) => crate::memory_policy::MemoryPolicy::load(&state.preferences).await,
+        None => crate::memory_policy::MemoryPolicy::default(),
+    };
+    // The per-REQUEST opt-in AND the per-NODE policy. The policy can only narrow
+    // what the request asked for — it can never turn memory on for a caller that
+    // did not request it, which is what keeps privacy-by-default intact.
+    let auto_recall_allowed = memory_policy.should_auto_recall(req.enable_long_term);
+
     // Recall long-term (cross-session) memory BEFORE recording the current turn,
     // so the just-sent message does not echo back to the model as a remembered
     // "fact". This keeps long-term context strictly cross-session.
     // Use effective_agent_id so multi-agent turns scope memory correctly.
     let long_term_system = assemble_long_term_system_message(
         &memory,
-        req.enable_long_term,
+        auto_recall_allowed,
         effective_agent_id.as_deref(),
+        memory_policy.recall_budget.long_term_limit(),
     )
     .await;
+
+    // External memory provider PREFETCH hook. Inert unless the user selected a
+    // provider other than the built-in store — the kernel already reads the built-in
+    // directly, and far more precisely (scoped recall, read levels, project filter).
+    //
+    // Placed here, after the recency block and before the persona merge, so it obeys
+    // the same recall-BEFORE-record ordering: the turn just sent must not echo back
+    // as a remembered fact. Bounded and fail-open inside `memory_provider`, so a slow
+    // or broken provider costs the turn time and nothing else.
+    let long_term_system = if auto_recall_allowed {
+        // Both READ-side hooks under ONE timeout budget, run concurrently: the
+        // provider's standing summary (opt-in) and the facts matching this turn.
+        // Sequentially they would spend two budgets on a turn that needs one.
+        let mut blocks = crate::memory_provider::read_hooks(
+            &user_text,
+            memory_policy.recall_budget.long_term_limit(),
+            memory_policy.provider_context,
+        )
+        .await;
+
+        match long_term_system {
+            Some(existing) if !existing.is_empty() => {
+                blocks.insert(0, existing);
+                Some(blocks.join("\n\n"))
+            }
+            _ if blocks.is_empty() => long_term_system,
+            _ => Some(blocks.join("\n\n")),
+        }
+    } else {
+        long_term_system
+    };
 
     // Merge the persona prefix into the system prompt. Both the persona instructions
     // and the long-term memory block are injected as a leading system message.
@@ -3632,9 +3676,13 @@ pub async fn route_chat_stream(
     // is true — recency injects NOTHING when it's off (`assemble_long_term_system_message`
     // returns `None`), so dropping these ids then would surface them NOWHERE.
     // This is a cheap SELECT (same `DEFAULT_LONG_TERM_LIMIT` recency used), no embed.
-    let recency_fact_ids: std::collections::HashSet<String> = if req.enable_long_term {
+    let recency_fact_ids: std::collections::HashSet<String> = if auto_recall_allowed {
         match memory
-            .recall(LOCAL_USER, &memory_scope, DEFAULT_LONG_TERM_LIMIT)
+            .recall(
+                LOCAL_USER,
+                &memory_scope,
+                memory_policy.recall_budget.long_term_limit(),
+            )
             .await
         {
             Ok(entries) => entries.into_iter().map(|e| e.id).collect(),
@@ -3698,7 +3746,7 @@ pub async fn route_chat_stream(
     // future sessions. No-op (and nothing is stored) when disabled. Metadata is
     // auto-classified from the text + active project (`cwd`); users can edit any
     // field later in the desktop Memory Library.
-    if req.enable_long_term && !user_text.is_empty() {
+    if memory_policy.should_write(req.enable_long_term) && !user_text.is_empty() {
         let scope = long_term_agent_scope(effective_agent_id.as_deref());
         // Sanitize at WRITE time too: the raw turn is stored verbatim and will
         // re-enter a future session's system context, so template tokens are
@@ -3714,9 +3762,28 @@ pub async fn route_chat_stream(
         // path) so the captured fact is recallable by its owner; LOCAL_USER on an
         // unbound node keeps the single-user path byte-identical.
         let owner = crate::server::background_memory_user_id();
+        let mirrored = new.content.clone();
+        let mirrored_scope = new.scope.as_str();
         if let Err(e) = memory.record_full(&owner, &scope, new).await {
             tracing::warn!("failed to record long-term memory: {e:#}");
+        } else if memory_policy.mirror_builtin {
+            // MIRROR hook: echo the just-recorded fact to the external provider so
+            // the two stores do not drift. Only on success — mirroring a write that
+            // failed locally would put a fact in the remote store that this node has
+            // no record of. Fire-and-forget: the built-in write is the source of
+            // truth and already succeeded, so a mirror failure surfaces nowhere.
+            crate::memory_provider::mirror(&mirrored, mirrored_scope);
         }
+    }
+
+    // SYNC hook: hand the RAW turn to the external provider and let it extract.
+    // Gated on its own setting rather than on `write_frequency`, because the two are
+    // genuinely different acts: `write_frequency = never` means this NODE stores
+    // nothing, while sync is about what a provider the user deliberately chose is
+    // allowed to see. Off by default — raw turns leaving the node is not something to
+    // start doing without being asked.
+    if memory_policy.sync_turns && !user_text.is_empty() {
+        crate::memory_provider::sync_turn(&user_text, "user");
     }
 
     let route = match agent_route(
@@ -7518,7 +7585,7 @@ mod tests {
         let memory = MemoryStore::open_in_memory().unwrap();
 
         // First opted-in turn of a fresh conversation: nothing prior exists.
-        let before_first = assemble_long_term_system_message(&memory, true, None).await;
+        let before_first = assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT).await;
         assert!(
             before_first.is_none(),
             "first turn has no cross-session memory"
@@ -7529,7 +7596,7 @@ mod tests {
             .unwrap();
 
         // Second turn: recall now surfaces turn one, but not the current turn.
-        let before_second = assemble_long_term_system_message(&memory, true, None)
+        let before_second = assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT)
             .await
             .expect("turn one should be recalled");
         assert!(before_second.contains("turn one"));
@@ -7548,10 +7615,10 @@ mod tests {
             .await
             .unwrap();
         // Disabled: nothing recalled even though an entry exists.
-        let disabled = assemble_long_term_system_message(&memory, false, None).await;
+        let disabled = assemble_long_term_system_message(&memory, false, None, DEFAULT_LONG_TERM_LIMIT).await;
         assert!(disabled.is_none());
         // Enabled: the fact is surfaced.
-        let enabled = assemble_long_term_system_message(&memory, true, None)
+        let enabled = assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT)
             .await
             .expect("memory enabled");
         assert!(enabled.contains("a fact"));

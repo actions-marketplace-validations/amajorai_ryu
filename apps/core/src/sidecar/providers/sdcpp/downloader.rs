@@ -23,7 +23,9 @@ use crate::sidecar::download_manager::{
 };
 
 /// Pinned stable-diffusion.cpp release that ships the Windows server asset.
-const TARGET_VERSION: &str = "master-700-c2df4e1";
+/// The release tag this build installs — pinned; see
+/// `catalog::registry::installer_pin`.
+pub const TARGET_VERSION: &str = "master-700-c2df4e1";
 
 /// Prebuilt sd-server release asset within [`TARGET_VERSION`], per platform. The
 /// asset names embed the commit (`master-c2df4e1`), not the full tag, so they are

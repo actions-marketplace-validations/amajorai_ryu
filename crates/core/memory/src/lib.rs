@@ -27,6 +27,10 @@
 //! * `User`    — facts about the user, visible everywhere (broadest).
 //! * `Node`    — facts scoped to this Core node / machine.
 //! * `Project` — facts scoped to one working folder (`scope_id` = the folder path).
+//! * `Org`     — facts shared across an organization (`scope_id` = the org id).
+//!   Unlike the other three, an org fact is gated on the CALLER's org, so it is the
+//!   one level whose visibility depends on who is asking. It is deliberately NOT in
+//!   the default read set (see `effective_levels`): an agent must opt in.
 //!
 //! Which levels a given agent may read is governed by its `MemorySlot`
 //! (`crate::agents::MemorySlot.read_levels`); the retrieval layer
@@ -95,10 +99,19 @@ pub fn memory_user_from_key(key: &ResourceKey) -> &str {
 ///     brain" — visible to every member. A `user`-scope row whose `user_id` is the
 ///     legacy `'local'` sentinel matches no real caller (fail closed) until the
 ///     bind-time backfill re-stamps it to the real owner.
+///   - ORG scope: visible only to a caller in THAT org. Memory has no `org_id`
+///     column, so the owning org id lives in `scope_id` — the same "the id that
+///     qualifies this scope" contract `scope_id` already serves for `project` (a
+///     folder path) and `node` (a node id). The comparison is against the caller's
+///     org, so a NULL `scope_id`, a NULL caller org, or a mismatch all fail CLOSED.
+///     Note the write path (`record_full`) refuses to store an org-scope fact
+///     without a `scope_id`, so a row that would be invisible to everyone can never
+///     be created in the first place.
 const MEMORY_VISIBLE_PREDICATE: &str = "(
         :bound = 0
         OR scope IN ('node', 'project')
         OR (:uid IS NOT NULL AND scope = 'user' AND user_id = :uid)
+        OR (:org IS NOT NULL AND scope = 'org' AND scope_id = :org)
      )";
 
 /// The caller context a tenancy-filtered memory query is evaluated against.
@@ -108,6 +121,9 @@ pub struct MemoryVisibility<'a> {
     pub node_bound: bool,
     /// The verified caller's user id, or `None` for an anonymous caller.
     pub caller_user_id: Option<&'a str>,
+    /// The caller's org id, or `None` when the caller has no org. `None` makes
+    /// every `org`-scope fact invisible — the fail-closed direction.
+    pub caller_org_id: Option<&'a str>,
 }
 
 impl<'a> MemoryVisibility<'a> {
@@ -116,14 +132,28 @@ impl<'a> MemoryVisibility<'a> {
         Self {
             node_bound: false,
             caller_user_id: None,
+            caller_org_id: None,
         }
     }
 
     /// The filter for an HTTP caller on a possibly-bound node.
     pub fn for_caller(caller_user_id: Option<&'a str>, node_bound: bool) -> Self {
+        Self::for_caller_in_org(caller_user_id, None, node_bound)
+    }
+
+    /// The filter for an HTTP caller on a possibly-bound node, including the
+    /// caller's org so `org`-scope facts resolve. Prefer this over
+    /// [`Self::for_caller`] on any path that can see org-scoped memory;
+    /// `for_caller` passes `None` and therefore hides every org fact.
+    pub fn for_caller_in_org(
+        caller_user_id: Option<&'a str>,
+        caller_org_id: Option<&'a str>,
+        node_bound: bool,
+    ) -> Self {
         Self {
             node_bound,
             caller_user_id,
+            caller_org_id,
         }
     }
 
@@ -133,7 +163,7 @@ impl<'a> MemoryVisibility<'a> {
     /// = false` collapses to [`Self::unrestricted`] regardless of the key — the
     /// UNBOUND-node no-op that keeps a personal node from ever filtering itself out.
     pub fn from_resource_key(key: &'a ResourceKey, node_bound: bool) -> Self {
-        Self::for_caller(key.user.as_deref(), node_bound)
+        Self::for_caller_in_org(key.user.as_deref(), key.org.as_deref(), node_bound)
     }
 }
 
@@ -148,6 +178,9 @@ pub enum MemoryScope {
     Node,
     /// Scoped to one working folder; `scope_id` holds the folder path.
     Project,
+    /// Shared across an organization; `scope_id` holds the org id, and only a
+    /// caller in that org may read it.
+    Org,
 }
 
 impl MemoryScope {
@@ -156,6 +189,7 @@ impl MemoryScope {
             Self::User => "user",
             Self::Node => "node",
             Self::Project => "project",
+            Self::Org => "org",
         }
     }
 
@@ -163,6 +197,10 @@ impl MemoryScope {
         match s {
             "node" => Self::Node,
             "project" => Self::Project,
+            "org" => Self::Org,
+            // An unrecognized scope decodes to the NARROWEST level, never a broader
+            // one: a row written by a newer node must not become more widely visible
+            // just because this binary does not understand its scope.
             _ => Self::User,
         }
     }
@@ -569,6 +607,23 @@ impl MemoryStore {
         if trimmed.is_empty() {
             return Ok(None);
         }
+        // An org-scope fact is read back by matching `scope_id` against the caller's
+        // org, so one written without a `scope_id` would be visible to nobody — a
+        // silent black hole rather than an error. Refuse it at the write instead, so
+        // the caller learns immediately that no org is resolvable.
+        if mem.scope == MemoryScope::Org
+            && mem
+                .scope_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+        {
+            anyhow::bail!(
+                "an org-scope memory requires a scope_id (the owning org id); \
+                 without one the fact would be readable by nobody"
+            );
+        }
         let when = mem
             .when_to_use
             .as_deref()
@@ -694,7 +749,8 @@ impl MemoryStore {
     /// On an UNBOUND node this is byte-identical to [`list`](Self::list) (`:bound = 0`
     /// disables the owner filter). On a BOUND node a `user`-scope fact is returned
     /// only to its owner; `node`/`project`-scope facts stay visible to every member
-    /// (the shared "company brain").
+    /// (the shared "company brain"); an `org`-scope fact is visible only to a caller
+    /// whose org matches the fact's `scope_id`.
     pub async fn list_visible(
         &self,
         filter: &MemoryFilter,
@@ -723,6 +779,7 @@ impl MemoryStore {
                     ":category": filter.category.map(|c| c.as_str()),
                     ":bound": i64::from(vis.node_bound),
                     ":uid": vis.caller_user_id,
+                    ":org": vis.caller_org_id,
                     ":limit": limit,
                 },
             )?
@@ -837,7 +894,13 @@ impl MemoryStore {
         Ok(removed as u64)
     }
 
-    /// Empty `read_levels` means "all three levels" (unconfigured agent).
+    /// Empty `read_levels` means the three PERSONAL levels (unconfigured agent).
+    ///
+    /// [`MemoryScope::Org`] is deliberately excluded from this default. Every agent
+    /// created before org scope existed has an empty slot, so including it would
+    /// silently hand every one of them read access to organization-wide memory the
+    /// moment the variant shipped — a privacy default change disguised as a schema
+    /// addition. An agent must name `org` in its `read_levels` to see org facts.
     fn effective_levels(read_levels: &[MemoryScope]) -> Vec<MemoryScope> {
         if read_levels.is_empty() {
             vec![MemoryScope::User, MemoryScope::Node, MemoryScope::Project]
@@ -1166,6 +1229,120 @@ mod tests {
     /// `user`-scope fact is private to its owner while `node`/`project` facts stay
     /// shared. Driven with `MemoryVisibility::for_caller(node_bound = true)` so no
     /// org registration is needed (the caller tenancy is passed IN).
+    /// Build an org-scope fact belonging to org `org`.
+    fn org_fact(org: &str, content: &str) -> NewMemory {
+        let mut m = NewMemory::user_fact(content);
+        m.scope = MemoryScope::Org;
+        m.scope_id = Some(org.to_owned());
+        m
+    }
+
+    #[tokio::test]
+    async fn org_memory_is_visible_only_inside_its_own_org() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .record_full("alice", "a", org_fact("acme", "acme roadmap"))
+            .await
+            .unwrap();
+        store
+            .record_full("zoe", "a", org_fact("initech", "initech roadmap"))
+            .await
+            .unwrap();
+        let filter = MemoryFilter::default();
+
+        // A member of acme sees acme's fact and NOT initech's — even though the
+        // initech fact is owned by a different user entirely, the gate is the org.
+        let acme = store
+            .list_visible(
+                &filter,
+                MemoryVisibility::for_caller_in_org(Some("bob"), Some("acme"), true),
+            )
+            .await
+            .unwrap();
+        let contents: Vec<&str> = acme.iter().map(|e| e.content.as_str()).collect();
+        assert!(contents.contains(&"acme roadmap"));
+        assert!(
+            !contents.contains(&"initech roadmap"),
+            "org memory must not leak across orgs"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_memory_fails_closed_without_a_caller_org() {
+        // The regression that matters: a caller with no org on a BOUND node must see
+        // no org facts at all, rather than falling through to a permissive branch.
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .record_full("alice", "a", org_fact("acme", "acme roadmap"))
+            .await
+            .unwrap();
+
+        let orgless = store
+            .list_visible(
+                &MemoryFilter::default(),
+                MemoryVisibility::for_caller(Some("bob"), true),
+            )
+            .await
+            .unwrap();
+        assert!(
+            orgless.iter().all(|e| e.content != "acme roadmap"),
+            "a caller with no org must not read org memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_memory_is_visible_on_an_unbound_personal_node() {
+        // On an unbound node there is exactly one principal and the node token is the
+        // boundary, so nothing is filtered — including org rows. Without this the
+        // owner of a personal node could be locked out of their own data.
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .record_full("alice", "a", org_fact("acme", "acme roadmap"))
+            .await
+            .unwrap();
+        let all = store
+            .list_visible(&MemoryFilter::default(), MemoryVisibility::unrestricted())
+            .await
+            .unwrap();
+        assert!(all.iter().any(|e| e.content == "acme roadmap"));
+    }
+
+    #[tokio::test]
+    async fn an_org_fact_without_a_scope_id_is_refused_at_write() {
+        // Such a row would match no caller in the predicate, i.e. be readable by
+        // nobody. Better to fail loudly at the write than to store a black hole.
+        let store = MemoryStore::open_in_memory().unwrap();
+        let mut m = NewMemory::user_fact("orphan org fact");
+        m.scope = MemoryScope::Org;
+        let err = store.record_full("alice", "a", m).await.unwrap_err();
+        assert!(
+            err.to_string().contains("scope_id"),
+            "error should name the missing scope_id, got: {err}"
+        );
+    }
+
+    #[test]
+    fn org_is_not_in_the_default_read_levels() {
+        // An unconfigured agent must NOT silently gain organization-wide reads.
+        let levels = MemoryStore::effective_levels(&[]);
+        assert!(!levels.contains(&MemoryScope::Org));
+        assert_eq!(
+            levels,
+            vec![MemoryScope::User, MemoryScope::Node, MemoryScope::Project]
+        );
+        // But an agent that explicitly asks for it gets it.
+        assert!(MemoryStore::effective_levels(&[MemoryScope::Org]).contains(&MemoryScope::Org));
+    }
+
+    #[test]
+    fn org_scope_round_trips_and_unknown_scopes_decode_to_the_narrowest() {
+        assert_eq!(MemoryScope::from_str("org"), MemoryScope::Org);
+        assert_eq!(MemoryScope::Org.as_str(), "org");
+        // A scope written by a newer node must not decode to something broader.
+        assert_eq!(MemoryScope::from_str("team"), MemoryScope::User);
+        assert_eq!(MemoryScope::from_str("galaxy"), MemoryScope::User);
+    }
+
     #[tokio::test]
     async fn list_visible_scopes_user_facts_per_owner_on_bound_node() {
         let store = MemoryStore::open_in_memory().unwrap();

@@ -91,7 +91,9 @@ export const ChatToc = memo(function ChatToc({
 					<HoverCard key={item.id}>
 						<HoverCardTrigger
 							aria-current={isActive ? "true" : undefined}
-							className="group/toc-item relative flex h-4 cursor-pointer items-center gap-2 text-left"
+							className="group/toc-item relative flex h-6 cursor-pointer items-center gap-2 py-1 text-left"
+							closeDelay={0}
+							delay={0}
 							onClick={() => scrollToMessage(item.id, { align: "start" })}
 						>
 							<motion.span

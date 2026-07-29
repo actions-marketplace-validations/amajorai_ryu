@@ -13,5 +13,34 @@
       "args": ["mcp"],
       "description": "Ghost — desktop automation (29 tools: screen perception + input control). Windows-first; install the `ghost` sidecar to enable. Unavailable until installed."
     }
-  }
+  },
+  "provides": [
+    {
+      "capability": "computer.control",
+      "version": "1.0.0",
+      "selectable": true,
+      "default": true,
+      "target": "local-machine",
+      "tools": {
+        "computer__capture": {
+          "tool": "ghost__ghost_annotate"
+        },
+        "computer__click": {
+          "tool": "ghost__ghost_click"
+        },
+        "computer__type": {
+          "tool": "ghost__ghost_type"
+        },
+        "computer__key": {
+          "tool": "ghost__ghost_hotkey"
+        },
+        "computer__scroll": {
+          "tool": "ghost__ghost_scroll"
+        },
+        "computer__focus_app": {
+          "tool": "ghost__ghost_focus"
+        }
+      }
+    }
+  ]
 }

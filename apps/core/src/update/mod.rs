@@ -71,6 +71,10 @@ pub struct UpdateCheck {
     pub current: String,
     /// Latest published release tag (normalised, leading `v` stripped).
     pub latest: String,
+    /// The release channel this verdict was computed on (`stable` / `beta` /
+    /// `nightly` / `canary`). Defaults to the channel the running build is on,
+    /// derived from its own version. Comparisons are scoped WITHIN this channel.
+    pub channel: String,
     /// `true` when `latest` is strictly newer than `current` by semver.
     pub update_available: bool,
     /// Release notes (the GitHub release body), if any.
@@ -114,22 +118,93 @@ fn normalise_tag(tag: &str) -> &str {
     tag.trim().trim_start_matches(['v', 'V'])
 }
 
-/// Parse a `major.minor.patch` prefix, ignoring any `-pre`/`+build` suffix.
-/// Returns `(0, 0, 0)` for unparseable input so a malformed tag never claims to
-/// be newer than a real version.
-fn parse_semver(version: &str) -> (u64, u64, u64) {
-    let core = version.split(['-', '+']).next().unwrap_or(version);
-    let mut parts = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-    (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-    )
+/// Parse a version with FULL semver 2.0 precedence, including the prerelease
+/// suffix. `None` for anything unparseable.
+///
+/// WHY THE PRERELEASE MUST BE KEPT: this function used to return only the
+/// `(major, minor, patch)` triple, discarding `-beta.1` / `-nightly.20260728.932`
+/// entirely. That silently disabled the entire rolling-channel train in two ways:
+///
+///   * two nightlies (`0.0.13-nightly.20260728.932` and `…20260729.940`) both
+///     parsed to `(0,0,13)`, compared EQUAL, so the updater could never move a
+///     user from one nightly to the next; and
+///   * a nightly compared EQUAL to its own stable `0.0.13`, so a prerelease user
+///     was never offered the finished release.
+///
+/// `semver::Version` implements §11 precedence (numeric identifiers compare
+/// numerically, numeric ranks below alphanumeric, a shorter identifier list ranks
+/// lower, and any prerelease ranks below its stable). Build metadata is ignored
+/// for ordering per §10, which is why the release version carries the commit in
+/// its title rather than as `+sha`.
+///
+/// Leniency: a two-component version (`1.2`) is padded to `1.2.0` so this stays
+/// compatible with the looser parser it replaces.
+fn parse_version(version: &str) -> Option<semver::Version> {
+    let raw = normalise_tag(version);
+    if let Ok(v) = semver::Version::parse(raw) {
+        return Some(v);
+    }
+    // Lenient pad: `1` → `1.0.0`, `1.2` → `1.2.0`. Only the numeric core is
+    // padded; anything with a suffix that strict parsing rejected stays rejected.
+    let core_len = raw.split(['-', '+']).next().unwrap_or(raw).split('.').count();
+    if (1..3).contains(&core_len) {
+        let padded = match core_len {
+            1 => format!("{raw}.0.0"),
+            _ => format!("{raw}.0"),
+        };
+        return semver::Version::parse(&padded).ok();
+    }
+    None
 }
 
-/// `true` when `latest` is strictly newer than `current`.
+/// The release channel a version belongs to: its first prerelease identifier, or
+/// `"stable"` when it has none.
+///
+/// This makes a build SELF-DESCRIBING — a Core running `0.0.13-nightly.20260728.932`
+/// knows it is on the nightly channel without any stored preference. That is what
+/// lets `/api/update/check` return the right verdict by default; the desktop's
+/// user-chosen channel is an explicit override on top (`?channel=`).
+pub fn channel_of(version: &str) -> String {
+    match parse_version(version) {
+        Some(v) if !v.pre.is_empty() => v
+            .pre
+            .as_str()
+            .split('.')
+            .next()
+            .unwrap_or(STABLE_CHANNEL)
+            .to_string(),
+        _ => STABLE_CHANNEL.to_string(),
+    }
+}
+
+/// The channel name for a build with no prerelease suffix.
+pub const STABLE_CHANNEL: &str = "stable";
+
+/// `true` when `latest` is strictly newer than `current` by semver precedence.
+///
+/// Fail-safe preserved from the original: an unparseable `latest` NEVER claims to
+/// be newer, so a malformed or hand-edited tag cannot trigger an update. The
+/// converse is allowed — a real release IS newer than an unparseable installed
+/// version, so a corrupt install can still recover onto a good build.
 pub fn is_newer(current: &str, latest: &str) -> bool {
-    parse_semver(normalise_tag(latest)) > parse_semver(normalise_tag(current))
+    // Build metadata MUST NOT affect precedence (semver §10), but the `semver`
+    // crate's `Ord` compares it anyway — so two builds differing only by a `+sha`
+    // would falsely read as an update. Clear it before comparing. (Parsing keeps
+    // it, so the version can still be DISPLAYED in full.)
+    let strip_build = |mut v: semver::Version| {
+        v.build = semver::BuildMetadata::EMPTY;
+        v
+    };
+    match (
+        parse_version(current).map(strip_build),
+        parse_version(latest).map(strip_build),
+    ) {
+        (Some(current), Some(latest)) => latest > current,
+        // Malformed `latest` never wins.
+        (_, None) => false,
+        // Malformed `current` — any real release is an upgrade.
+        (None, Some(_)) => true,
+    }
 }
 
 /// Infer an installer kind from an asset filename.
@@ -196,7 +271,7 @@ fn platform_match_score(name: &str) -> Option<u32> {
 }
 
 /// A single GitHub release asset as returned by the releases API.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct GhAsset {
     name: String,
     browser_download_url: String,
@@ -205,9 +280,11 @@ struct GhAsset {
 }
 
 /// The subset of the GitHub release payload we consume.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct GhRelease {
     tag_name: String,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
@@ -216,21 +293,196 @@ struct GhRelease {
     assets: Vec<GhAsset>,
 }
 
-/// Query the latest GitHub release and produce an [`UpdateCheck`] verdict.
+/// The version a release advertises.
+///
+/// Two shapes exist, because the channels are tagged differently ON PURPOSE:
+///
+///   * **Versioned tags** (`v0.0.13`, `v0.0.13-beta.1`) — the tag IS the version.
+///   * **Rolling tags** (`nightly`, `canary`) — the tag is a fixed pointer that
+///     rolls forward each run, so users can always fetch `/releases/tag/nightly`
+///     without a year's worth of dead tags accumulating. The real version lives in
+///     the release TITLE, which the workflow writes as
+///     `Nightly 0.0.13-nightly.20260728.932 (f1a68ac9b05c)`.
+///
+/// So: try the tag, then scan the title for the first semver-shaped token. Both
+/// sources are workflow-controlled. `None` when neither yields a version.
+fn release_version(release: &GhRelease) -> Option<String> {
+    if let Some(v) = parse_version(&release.tag_name) {
+        return Some(v.to_string());
+    }
+    // STRICT parse for the title scan — deliberately not the lenient `parse_version`.
+    // Lenient parsing pads short versions (`2` -> `2.0.0`), so a human-edited title
+    // like "Nightly build 2 — 0.0.13-nightly.20260728.932" would match the bare `2`
+    // first and report the version as `2.0.0`. Requiring a full major.minor.patch
+    // means only a real version token can win.
+    release.name.as_deref()?.split_whitespace().find_map(|token| {
+        semver::Version::parse(normalise_tag(token.trim_matches(['(', ')', ',', ';'])))
+            .ok()
+            .map(|v| v.to_string())
+    })
+}
+
+/// An optional GitHub token used only to raise the release-API rate limit.
+///
+/// Read from the usual env names so a CI runner or a self-hosted node picks one
+/// up without extra configuration. Never required: the update check works
+/// unauthenticated, it just shares the 60/hr per-IP budget with everything else
+/// on that address.
+fn github_token() -> Option<String> {
+    ["RYU_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"]
+        .iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+}
+
+/// How long a fetched release stays fresh.
+///
+/// Without this every `/api/update/check` was a live GitHub call, so N surfaces
+/// × M launches burned the unauthenticated budget and then failed open to "no
+/// update" for the rest of the hour. Releases change on the order of days;
+/// minutes of staleness costs nothing.
+const RELEASE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Per-channel cache of the last successfully fetched release.
+static RELEASE_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, GhRelease)>>,
+> = std::sync::OnceLock::new();
+
+fn cached_release(channel: &str, allow_stale: bool) -> Option<GhRelease> {
+    let cache = RELEASE_CACHE.get()?;
+    let guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (fetched_at, release) = guard.get(channel)?;
+    (allow_stale || fetched_at.elapsed() < RELEASE_CACHE_TTL).then(|| release.clone())
+}
+
+fn cache_release(channel: &str, release: &GhRelease) {
+    let cache = RELEASE_CACHE.get_or_init(Default::default);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.insert(
+        channel.to_string(),
+        (std::time::Instant::now(), release.clone()),
+    );
+}
+
+/// Fetch the release that represents the newest build on `channel`.
+///
+/// Stable uses `/releases/latest`, which GitHub defines to EXCLUDE prereleases —
+/// exactly the semantics stable wants, and the reason a stable node can never
+/// auto-update onto a nightly.
+///
+/// Every other channel MUST NOT use that endpoint, for the same reason: a nightly
+/// or beta release is a prerelease and is therefore invisible there. This was the
+/// second half of why the channel picker was inert. Instead, list releases and pick
+/// the highest-precedence one whose version belongs to `channel`.
+async fn fetch_channel_release(
+    client: &reqwest::Client,
+    channel: &str,
+) -> anyhow::Result<GhRelease> {
+    if let Some(release) = cached_release(channel, false) {
+        return Ok(release);
+    }
+    match fetch_channel_release_remote(client, channel).await {
+        Ok(release) => {
+            cache_release(channel, &release);
+            Ok(release)
+        }
+        // A release we saw earlier beats failing open to "no update" for the
+        // rest of the hour — GitHub's unauthenticated budget is 60/hr per IP,
+        // and every surface checks on launch.
+        Err(err) => cached_release(channel, true).ok_or(err),
+    }
+}
+
+async fn fetch_channel_release_remote(
+    client: &reqwest::Client,
+    channel: &str,
+) -> anyhow::Result<GhRelease> {
+    let get = |url: String| {
+        let mut req = client
+            .get(url)
+            .header("User-Agent", "ryu-core/1.0")
+            .header("Accept", "application/vnd.github+json");
+        // GitHub allows 60 unauthenticated calls per hour PER IP. Every surface
+        // checks on launch, so a shared IP (or a dev machine running the stack a
+        // few times) exhausts that and every check fails open to "no update" —
+        // the app-update row then silently never appears. A token, when the host
+        // has one, raises the ceiling to 5000/hr. Optional by design: no token
+        // still works, it is just rate-limited.
+        if let Some(token) = github_token() {
+            req = req.bearer_auth(token);
+        }
+        req.send()
+    };
+
+    if channel == STABLE_CHANNEL {
+        let url = format!("https://api.github.com/repos/{RYU_REPO}/releases/latest");
+        return Ok(get(url).await?.error_for_status()?.json().await?);
+    }
+
+    // One page is ample: rolling channels keep a single release, and betas are
+    // few. Sorted newest-first by GitHub, but we order by semver precedence
+    // ourselves rather than trusting publish order.
+    let url = format!("https://api.github.com/repos/{RYU_REPO}/releases?per_page=100");
+    let releases: Vec<GhRelease> = get(url).await?.error_for_status()?.json().await?;
+
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            let version = release_version(&release)?;
+            (channel_of(&version) == channel).then_some((parse_version(&version)?, release))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, release)| release)
+        .ok_or_else(|| anyhow::anyhow!("no release found on the '{channel}' channel"))
+}
+
+/// Query the latest release on the channel this build belongs to and produce an
+/// [`UpdateCheck`] verdict.
 ///
 /// Fails open at the call site: callers treat a network/API error as "no update
 /// known" rather than blocking launch.
 pub async fn check_for_update(client: &reqwest::Client) -> anyhow::Result<UpdateCheck> {
+    check_for_update_on_channel(client, None).await
+}
+
+/// As [`check_for_update`], for an explicit channel.
+///
+/// `None` means "the channel this build is already on", derived from the running
+/// version itself ([`channel_of`]) — a nightly build checks the nightly channel
+/// without any stored preference. The desktop passes its user-chosen channel
+/// explicitly so the picker can move a user between channels.
+///
+/// NOTE ON CROSS-CHANNEL COMPARISON: verdicts are scoped WITHIN a channel by
+/// design. Semver orders prerelease identifiers alphabetically, which would rank
+/// `beta < canary < nightly` — not a risk ordering, and meaningless as an update
+/// path. Moving between channels is a channel switch, not an update.
+pub async fn check_for_update_on_channel(
+    client: &reqwest::Client,
+    channel: Option<&str>,
+) -> anyhow::Result<UpdateCheck> {
+    let current = current_version();
+    let channel = channel
+        .map(str::to_string)
+        .unwrap_or_else(|| channel_of(&current));
+
     // Verification / dev hook: force a "latest" version without a published
     // release. Lets the desktop/cli update flow be exercised end-to-end before
     // the release CI has produced real assets. Never set in production.
     if let Ok(fake) = std::env::var("RYU_UPDATE_FAKE_LATEST") {
-        let current = current_version();
         let latest = normalise_tag(&fake).to_string();
         return Ok(UpdateCheck {
             update_available: is_newer(&current, &latest),
             current,
             latest: latest.clone(),
+            channel,
             notes: Some(format!(
                 "Simulated release {latest} (RYU_UPDATE_FAKE_LATEST)."
             )),
@@ -238,20 +490,10 @@ pub async fn check_for_update(client: &reqwest::Client) -> anyhow::Result<Update
             asset: None,
         });
     }
+    let release = fetch_channel_release(client, &channel).await?;
 
-    let url = format!("https://api.github.com/repos/{RYU_REPO}/releases/latest");
-    let release: GhRelease = client
-        .get(&url)
-        .header("User-Agent", "ryu-core/1.0")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    let current = current_version();
-    let latest = normalise_tag(&release.tag_name).to_string();
+    let latest = release_version(&release)
+        .unwrap_or_else(|| normalise_tag(&release.tag_name).to_string());
     let update_available = is_newer(&current, &latest);
 
     // Pick the best-matching asset for this platform.
@@ -270,6 +512,7 @@ pub async fn check_for_update(client: &reqwest::Client) -> anyhow::Result<Update
     Ok(UpdateCheck {
         current,
         latest,
+        channel,
         update_available,
         notes: release.body,
         html_url: release.html_url,
@@ -290,11 +533,33 @@ mod tests {
 
     #[test]
     fn parses_semver_with_suffixes() {
-        assert_eq!(parse_semver("1.2.3"), (1, 2, 3));
-        assert_eq!(parse_semver("1.2.3-beta.1"), (1, 2, 3));
-        assert_eq!(parse_semver("1.2.3+build5"), (1, 2, 3));
-        assert_eq!(parse_semver("garbage"), (0, 0, 0));
-        assert_eq!(parse_semver("1.2"), (1, 2, 0));
+        let v = parse_version("1.2.3").expect("plain semver parses");
+        assert_eq!((v.major, v.minor, v.patch), (1, 2, 3));
+        assert!(v.pre.is_empty());
+
+        // The prerelease is now RETAINED (it used to be discarded).
+        let pre = parse_version("1.2.3-beta.1").expect("prerelease parses");
+        assert_eq!(pre.pre.as_str(), "beta.1");
+
+        // Build metadata parses and is kept out of ordering.
+        assert!(parse_version("1.2.3+build5").is_some());
+
+        // Lenient padding for short versions, strict rejection of junk.
+        let short = parse_version("1.2").expect("two-component version pads");
+        assert_eq!((short.major, short.minor, short.patch), (1, 2, 0));
+        assert!(parse_version("garbage").is_none());
+    }
+
+    #[test]
+    fn channel_of_reads_the_first_prerelease_identifier() {
+        // A build is self-describing: its own version names its channel.
+        assert_eq!(channel_of("0.0.13"), "stable");
+        assert_eq!(channel_of("v0.0.13"), "stable");
+        assert_eq!(channel_of("0.0.13-beta.1"), "beta");
+        assert_eq!(channel_of("0.0.13-nightly.20260728.932"), "nightly");
+        assert_eq!(channel_of("0.0.13-canary.20260728.932"), "canary");
+        // Unparseable falls back to stable rather than inventing a channel.
+        assert_eq!(channel_of("garbage"), "stable");
     }
 
     #[test]
@@ -306,6 +571,139 @@ mod tests {
         assert!(!is_newer("1.0.0", "1.0.0"));
         // Malformed latest never claims to be newer.
         assert!(!is_newer("0.1.0", "garbage"));
+        // ...but a real release still rescues a corrupt installed version.
+        assert!(is_newer("garbage", "0.1.0"));
+    }
+
+    // ── Prerelease precedence ────────────────────────────────────────────────
+    //
+    // These mirror `scripts/release/next-version.test.mjs`. The generator and this
+    // comparator MUST agree: the script decides what version a build carries, this
+    // decides whether that build is an update. A divergence ships a wrong verdict.
+
+    #[test]
+    fn prerelease_ranks_below_its_own_stable() {
+        // The bug this replaced: the suffix was discarded, so these compared EQUAL
+        // and a nightly user was never offered the finished 0.0.13.
+        assert!(is_newer("0.0.13-nightly.20260728.932", "0.0.13"));
+        assert!(is_newer("0.0.13-beta.1", "0.0.13"));
+        assert!(!is_newer("0.0.13", "0.0.13-nightly.20260728.932"));
+    }
+
+    #[test]
+    fn nightlies_order_by_date_then_build_number() {
+        // The other half of the bug: every nightly parsed identically, so the
+        // channel could never advance.
+        assert!(is_newer(
+            "0.0.13-nightly.20260728.932",
+            "0.0.13-nightly.20260729.940"
+        ));
+        assert!(!is_newer(
+            "0.0.13-nightly.20260729.940",
+            "0.0.13-nightly.20260728.932"
+        ));
+        // Same day, later run number.
+        assert!(is_newer(
+            "0.0.13-nightly.20260728.932",
+            "0.0.13-nightly.20260728.933"
+        ));
+    }
+
+    #[test]
+    fn numeric_identifiers_compare_numerically_not_lexically() {
+        // Lexically "10" < "9"; numerically 10 > 9. Getting this wrong stalls the
+        // beta channel at beta.9.
+        assert!(is_newer("0.0.13-beta.9", "0.0.13-beta.10"));
+        assert!(is_newer(
+            "0.0.13-nightly.20260728.99",
+            "0.0.13-nightly.20260728.100"
+        ));
+    }
+
+    #[test]
+    fn canonical_semver_precedence_chain_holds() {
+        let ascending = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        ];
+        for pair in ascending.windows(2) {
+            assert!(
+                is_newer(pair[0], pair[1]),
+                "{} should precede {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn build_metadata_is_ignored_for_precedence() {
+        assert!(!is_newer("1.0.0+aaa", "1.0.0+zzz"));
+        assert!(!is_newer("1.0.0+zzz", "1.0.0+aaa"));
+    }
+
+    #[test]
+    fn core_triple_dominates_the_prerelease() {
+        assert!(is_newer("0.0.12", "0.0.13-nightly.20260728.1"));
+        assert!(!is_newer("0.2.0-beta.1", "0.1.0"));
+    }
+
+    #[test]
+    fn release_version_prefers_the_tag_then_the_title() {
+        // Versioned tag: the tag IS the version.
+        let tagged = GhRelease {
+            tag_name: "v0.0.13-beta.1".to_string(),
+            name: Some("Ryu v0.0.13-beta.1".to_string()),
+            body: None,
+            html_url: None,
+            assets: vec![],
+        };
+        assert_eq!(release_version(&tagged).as_deref(), Some("0.0.13-beta.1"));
+
+        // Rolling tag: the tag is a pointer, so the version comes from the title
+        // the workflow writes. The trailing `(sha)` must not be mistaken for it.
+        let rolling = GhRelease {
+            tag_name: "nightly".to_string(),
+            name: Some("Nightly 0.0.13-nightly.20260728.932 (f1a68ac9b05c)".to_string()),
+            body: None,
+            html_url: None,
+            assets: vec![],
+        };
+        assert_eq!(
+            release_version(&rolling).as_deref(),
+            Some("0.0.13-nightly.20260728.932")
+        );
+
+        // Neither source carries a version.
+        let bare = GhRelease {
+            tag_name: "nightly".to_string(),
+            name: Some("Nightly build".to_string()),
+            body: None,
+            html_url: None,
+            assets: vec![],
+        };
+        assert_eq!(release_version(&bare), None);
+
+        // A bare number earlier in a human-edited title must NOT be mistaken for the
+        // version. The lenient parser pads `2` to `2.0.0`; the title scan is strict
+        // precisely so that cannot happen.
+        let edited = GhRelease {
+            tag_name: "nightly".to_string(),
+            name: Some("Nightly build 2 — 0.0.13-nightly.20260728.932".to_string()),
+            body: None,
+            html_url: None,
+            assets: vec![],
+        };
+        assert_eq!(
+            release_version(&edited).as_deref(),
+            Some("0.0.13-nightly.20260728.932")
+        );
     }
 
     #[test]

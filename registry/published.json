@@ -1,5 +1,19 @@
 {
   "$comment": "The curated publication set for registry/registry.json — which built-in plugins appear in the free git-PR-index catalog feed. This file is the ONLY hand-maintained half: the entry BODIES (name/version/description/kinds/grants/tags/requires/targets) are projected from each plugin's manifest by tools/generate-registry.mjs, so a manifest change can never drift from the published catalog again. Adding a plugin to the feed = add its id here and regenerate; it is a data edit, never a code edit.",
   "version": "1",
-  "ids": ["ghost", "shadow", "spider", "exa", "headroom"]
+  "ids": [
+    "ghost",
+    "shadow",
+    "spider",
+    "exa",
+    "tavily",
+    "brave",
+    "headroom",
+    "firecrawl",
+    "serper",
+    "mem0",
+    "spidercloud",
+    "honcho",
+    "bytebot"
+  ]
 }

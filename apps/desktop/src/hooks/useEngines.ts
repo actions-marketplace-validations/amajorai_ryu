@@ -45,6 +45,8 @@ export interface EngineEntry {
 	platforms: string[];
 	/** Whether the Core node can run this engine (false → disable install/swap). */
 	supported: boolean;
+	/** The node's verdict that a reinstall would deliver a newer build. */
+	updateAvailable: boolean;
 }
 
 export interface UseEnginesResult {
@@ -54,7 +56,7 @@ export interface UseEnginesResult {
 	activeEngine: ActiveEngine | null;
 	engines: EngineEntry[];
 	error: string | null;
-	install: (name: string) => Promise<void>;
+	install: (name: string, force?: boolean) => Promise<void>;
 	loading: boolean;
 	reload: () => Promise<void>;
 	uninstall: (name: string) => Promise<void>;
@@ -97,6 +99,7 @@ export function useEngines(): UseEnginesResult {
 					active: item.name === activeName,
 					platforms: item.platforms,
 					supported: item.supported,
+					updateAvailable: item.updateAvailable,
 				}))
 			);
 			setActiveEngine(active);
@@ -114,9 +117,12 @@ export function useEngines(): UseEnginesResult {
 	// Auto-recover when Core reconnects or the user hits "Refresh all".
 	useCoreRefresh(reload);
 
+	// `force` turns an install into an UPDATE: Core's installers are idempotent by
+	// design, so without it a press on an already-installed engine returns success
+	// having re-downloaded nothing.
 	const install = useCallback(
-		async (name: string) => {
-			await installSidecar(url, token, name);
+		async (name: string, force = false) => {
+			await installSidecar(url, token, name, force);
 			await reload();
 		},
 		[url, token, reload]

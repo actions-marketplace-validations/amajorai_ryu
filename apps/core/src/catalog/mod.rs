@@ -32,6 +32,15 @@ pub struct CatalogItem {
     /// and CPU arch. Authoritative: a client (which may be a remote desktop) must
     /// disable install/enable when this is `false`, regardless of its own OS.
     pub supported: bool,
+    /// Whether a reinstall would actually move this entry to a newer build.
+    ///
+    /// Computed HERE rather than client-side (`installed != latest`) because only
+    /// the node knows what its installers can deliver: a pinned downloader can
+    /// never reach upstream's newest tag, and several installers record a
+    /// sentinel ("latest", "adopted") that is not a version at all. Both cases
+    /// used to render an Update button that could not work. Clients render this
+    /// flag; they do not re-derive it.
+    pub update_available: bool,
 }
 
 pub struct CatalogManager {
@@ -55,7 +64,11 @@ impl CatalogManager {
         static_registry()
             .into_iter()
             .map(|entry| {
-                let latest_version = versions.get(entry.name).cloned();
+                // A pinned installer can only ever deliver its pin, so that — not
+                // upstream's newest tag — is this entry's latest version.
+                let latest_version = registry::installer_pin(entry.name)
+                    .map(str::to_string)
+                    .or_else(|| versions.get(entry.name).cloned());
                 let raw_state = install_states
                     .get(entry.name)
                     .cloned()
@@ -65,7 +78,18 @@ impl CatalogManager {
                     InstallState::Installing { .. } => ("installing".to_string(), None),
                     InstallState::Failed { .. } => ("failed".to_string(), None),
                     InstallState::Installed { version, .. } => {
-                        ("installed".to_string(), Some(version.clone()))
+                        // Several install arms have no version to report and hand
+                        // back a marker like "installed". Taking that literally made
+                        // the row read `installed → b9670` and claim an update
+                        // forever after a same-session install. `versions.json` is
+                        // the durable record and holds the real tag, so prefer it
+                        // whenever the in-session value isn't a version.
+                        let resolved = if registry::is_comparable_version(version) {
+                            Some(version.clone())
+                        } else {
+                            version_store.versions.get(entry.name).cloned()
+                        };
+                        ("installed".to_string(), resolved)
                     }
                     InstallState::NotInstalled => {
                         // Installed in a previous core session — check versions.json
@@ -76,6 +100,23 @@ impl CatalogManager {
                         }
                     }
                 };
+
+                let supported = supported_on_node(entry.name);
+                // Only claim an update when a reinstall could actually deliver a
+                // different build: both versions must be real (not a sentinel a
+                // PATH-adopting installer wrote), the entry must be installed on a
+                // node that can install it, and it must not be deprecated.
+                let update_available = install_state == "installed"
+                    && !entry.deprecated
+                    && supported
+                    && match (installed_version.as_deref(), latest_version.as_deref()) {
+                        (Some(installed), Some(latest)) => {
+                            registry::is_comparable_version(installed)
+                                && registry::is_comparable_version(latest)
+                                && installed != latest
+                        }
+                        _ => false,
+                    };
 
                 CatalogItem {
                     name: entry.name.to_string(),
@@ -91,7 +132,8 @@ impl CatalogManager {
                         .iter()
                         .map(|p| (*p).to_string())
                         .collect(),
-                    supported: supported_on_node(entry.name),
+                    supported,
+                    update_available,
                 }
             })
             .collect()
@@ -200,6 +242,97 @@ mod tests {
         let items = manager.get_catalog(&store).await;
         let ghost = items.iter().find(|i| i.name == "ghost").unwrap();
         assert_eq!(ghost.install_state, "installing");
+    }
+
+    #[tokio::test]
+    async fn pinned_engines_report_the_version_they_can_deliver() {
+        let manager = CatalogManager::new();
+        let store = InstallStatusStore::new();
+        let items = manager.get_catalog(&store).await;
+        // llama.cpp's download URL is built from the compile-time pin, so the
+        // catalog must advertise the pin — never GitHub's newest tag, which the
+        // installer cannot reach. Advertising upstream produced a permanent
+        // "update available" row whose Update button was a no-op.
+        let llamacpp = items.iter().find(|i| i.name == "llamacpp").unwrap();
+        assert_eq!(
+            llamacpp.latest_version.as_deref(),
+            Some(crate::sidecar::providers::llamacpp::downloader::TARGET_VERSION)
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_engine_at_its_pin_has_no_update() {
+        let manager = CatalogManager::new();
+        let store = InstallStatusStore::new();
+        store
+            .set_installed(
+                "llamacpp",
+                crate::sidecar::providers::llamacpp::downloader::TARGET_VERSION.to_string(),
+            )
+            .await;
+        let items = manager.get_catalog(&store).await;
+        let llamacpp = items.iter().find(|i| i.name == "llamacpp").unwrap();
+        assert_eq!(llamacpp.install_state, "installed");
+        assert!(
+            !llamacpp.update_available,
+            "an engine already at the only version its installer can deliver must not \
+             advertise an update"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_engine_behind_its_pin_has_an_update() {
+        let manager = CatalogManager::new();
+        let store = InstallStatusStore::new();
+        // An older pin from a previous Ryu build: a reinstall genuinely moves it.
+        store
+            .set_installed("llamacpp", "b0001".to_string())
+            .await;
+        let items = manager.get_catalog(&store).await;
+        let llamacpp = items.iter().find(|i| i.name == "llamacpp").unwrap();
+        assert!(llamacpp.update_available);
+    }
+
+    #[tokio::test]
+    async fn sentinel_installed_version_never_advertises_an_update() {
+        let manager = CatalogManager::new();
+        let store = InstallStatusStore::new();
+        // Installers that PATH-adopt or brew-install record a sentinel rather than
+        // a version. Comparing it to anything always "differs", which used to
+        // advertise an update that no reinstall could clear.
+        store.set_installed("ghost", "latest".to_string()).await;
+        let items = manager.get_catalog(&store).await;
+        let ghost = items.iter().find(|i| i.name == "ghost").unwrap();
+        // The sentinel is never presented as a version — it resolves to the
+        // durable record, or to nothing when there isn't one.
+        assert_ne!(ghost.installed_version.as_deref(), Some("latest"));
+        assert!(!ghost.update_available);
+    }
+
+    #[tokio::test]
+    async fn a_marker_install_status_falls_back_to_the_durable_version() {
+        let manager = CatalogManager::new();
+        let store = InstallStatusStore::new();
+        // What a same-session llama.cpp install actually records: its downloader
+        // returns no version, so the status carries the marker "installed". Taken
+        // literally that reads as a version and permanently claims an update.
+        store
+            .set_installed("llamacpp", "installed".to_string())
+            .await;
+        let items = manager.get_catalog(&store).await;
+        let llamacpp = items.iter().find(|i| i.name == "llamacpp").unwrap();
+        assert_ne!(llamacpp.installed_version.as_deref(), Some("installed"));
+        assert!(!llamacpp.update_available);
+    }
+
+    #[test]
+    fn sentinels_are_not_comparable_versions() {
+        for sentinel in ["latest", "adopted", "brew", "pip-git", "unknown", ""] {
+            assert!(!super::registry::is_comparable_version(sentinel));
+        }
+        for version in ["b9670", "v1.8.6", "0.0.5"] {
+            assert!(super::registry::is_comparable_version(version));
+        }
     }
 
     #[tokio::test]

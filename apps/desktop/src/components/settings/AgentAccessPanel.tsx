@@ -20,6 +20,11 @@ import {
 } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { fetchMcpTools, type McpTool } from "@/src/lib/api/mcp.ts";
+import {
+	MEMORY_SCOPE_LABELS,
+	MEMORY_SCOPES,
+	type MemoryScope,
+} from "@/src/lib/api/memory.ts";
 import { fetchSpaces, type Space } from "@/src/lib/api/spaces.ts";
 import {
 	SettingsCard,
@@ -84,6 +89,14 @@ function toInput(agent: Agent, patch: Partial<AgentInput>): AgentInput {
 }
 
 /**
+ * The levels Core falls back to when an agent stores an empty `read_levels`.
+ * Mirrors `MemoryStore::effective_levels` — deliberately WITHOUT `org`, so an
+ * agent configured before organization memory existed never silently gains
+ * organization-wide recall.
+ */
+const DEFAULT_MEMORY_LEVELS: MemoryScope[] = ["user", "node", "project"];
+
+/**
  * Compact cross-app access editor for a selected agent: Readable Spaces +
  * per-app MCP tool groups. Saves onto the agent record (same allowlists Agent
  * edit uses), so dictation/ask and chat share one source of truth.
@@ -108,7 +121,8 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 			setTools(nextTools);
 		} catch {
 			setAgent(null);
-			toast.error("Couldn't load agent access", {
+			toast.error({
+				title: "Couldn't load agent access",
 				description: "Check your connection and try again.",
 			});
 		} finally {
@@ -135,6 +149,22 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 		() => new Set(agent?.tools ?? []),
 		[agent?.tools]
 	);
+	/**
+	 * The levels to show as checked. An empty stored list means Core's default —
+	 * the three personal levels — so render that rather than an all-unchecked row
+	 * that would wrongly read as "this agent recalls nothing".
+	 */
+	const effectiveLevels = useMemo<Set<MemoryScope>>(() => {
+		const stored = agent?.memory.read_levels ?? [];
+		const levels =
+			stored.length > 0
+				? stored.filter((l): l is MemoryScope =>
+						MEMORY_SCOPES.includes(l as MemoryScope)
+					)
+				: DEFAULT_MEMORY_LEVELS;
+		return new Set(levels);
+	}, [agent?.memory.read_levels]);
+
 	const selectedSpaces = useMemo(
 		() => new Set(agent?.memory.space_ids ?? []),
 		[agent?.memory.space_ids]
@@ -164,7 +194,8 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 			setAgent(saved);
 		} catch {
 			setAgent(previous);
-			toast.error("Couldn't save agent access", {
+			toast.error({
+				title: "Couldn't save agent access",
 				description: "Your change wasn't saved. Please try again.",
 			});
 		} finally {
@@ -187,6 +218,34 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 				space_ids: [...next],
 				read_levels: agent.memory.read_levels,
 				write_enabled: agent.memory.write_enabled,
+			},
+		});
+	};
+
+	/**
+	 * Toggle one memory scope level for this agent.
+	 *
+	 * An EMPTY list is not "none" — Core reads it as the three personal levels
+	 * (user/node/project), the back-compat default for agents configured before
+	 * levels existed. So unchecking everything restores that default rather than
+	 * cutting the agent off from memory, and `org` is the one level that only ever
+	 * applies when explicitly checked.
+	 */
+	const toggleLevel = (level: MemoryScope) => {
+		const next = new Set(effectiveLevels);
+		if (next.has(level)) {
+			next.delete(level);
+		} else {
+			next.add(level);
+		}
+		// Persist in the canonical order rather than Set insertion order, so the
+		// stored value does not churn just because of the click sequence.
+		const ordered = MEMORY_SCOPES.filter((s) => next.has(s));
+		void persist({
+			memory: {
+				space_ids: agent?.memory.space_ids ?? [],
+				read_levels: ordered,
+				write_enabled: agent?.memory.write_enabled ?? false,
 			},
 		});
 	};
@@ -281,6 +340,37 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 							})}
 						</div>
 					)}
+				</div>
+
+				<div className="space-y-2">
+					<span className="font-medium text-sm">Memory levels</span>
+					<p className="text-muted-foreground text-xs">
+						Which scopes of long-term memory this agent may recall from. Leave
+						all unchecked for the default (user, node and project). Organization
+						memory is shared with everyone in your org, so it is only ever
+						recalled when you check it here.
+					</p>
+					<div className="flex flex-col gap-2">
+						{MEMORY_SCOPES.map((level) => {
+							const checkId = `agent-access-memory-level-${level}`;
+							return (
+								<div className="flex items-center gap-3" key={level}>
+									<Checkbox
+										checked={effectiveLevels.has(level)}
+										disabled={saving}
+										id={checkId}
+										onCheckedChange={() => toggleLevel(level)}
+									/>
+									<Label
+										className="cursor-pointer font-normal text-sm"
+										htmlFor={checkId}
+									>
+										{MEMORY_SCOPE_LABELS[level]}
+									</Label>
+								</div>
+							);
+						})}
+					</div>
 				</div>
 			</SettingsCard>
 

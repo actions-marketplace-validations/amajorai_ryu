@@ -15,7 +15,7 @@ import {
 	fetchActiveEngine,
 	fetchEngines,
 } from "@/src/lib/api/engines.ts";
-import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
+import { useAgentsRefresh, useCoreRefresh } from "@/src/lib/core-refresh.ts";
 import { PlanCapError } from "@/src/lib/gating/planCapBridge.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
 import { useActiveNode } from "./useActiveNode.ts";
@@ -102,6 +102,10 @@ export function useAgents(): UseAgentsResult {
 
 	// Auto-recover when Core reconnects or the user hits "Refresh all".
 	useCoreRefresh(reload);
+	// Pick up roster changes made elsewhere — installing or removing an agent in
+	// the Store flips Core's `installed` flag, and this hook's consumers (sidebar,
+	// composer picker, Library) stay mounted, so they need the nudge to refetch.
+	useAgentsRefresh(reload);
 
 	const create = useCallback(
 		async (input: AgentInput) => {

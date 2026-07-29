@@ -229,14 +229,60 @@ fn default_grant_allowlist() -> Vec<String> {
         // declares an egress grant, not an `mcp:<name>` server grant — its enable
         // path validates this exact scope instead.
         "tool:http-egress:api.exa.ai",
+        // Exa's PUBLIC MCP endpoint, which needs no API key. `exa` is the one search
+        // provider shipped default-ON, so it must work with zero setup; its binding
+        // falls back here when RYU_EXA_API_KEY is unset. A separate host from
+        // api.exa.ai, so it needs its own exact entry.
+        "tool:http-egress:mcp.exa.ai",
+        // The other BYOK providers of the swappable web layers, same shape as `exa`:
+        // declarative `http` plugins whose only grant is egress to one vendor host.
+        // Each needs its OWN exact entry — `tool:http-egress:<host>` names a remote
+        // host, not the plugin's own namespace, so the owner-scoped rule never
+        // covers it. Omitting one does not fail at install; it fails later, on the
+        // disable→re-enable path that re-validates the full declared grant set, with
+        // a GrantsDenied that reads like an unrelated permissions problem.
+        "tool:http-egress:api.tavily.com",
+        "tool:http-egress:api.search.brave.com",
+        "tool:http-egress:api.firecrawl.dev",
+        "tool:http-egress:google.serper.dev",
+        "tool:http-egress:scrape.serper.dev",
+        // `spidercloud` is the hosted half of the same engine the `spider` CLI plugin
+        // shells out to, and the second `web.crawl` provider. It is a declarative
+        // `http` plugin, so it needs an egress entry here even though its CLI sibling
+        // is covered by `tool:command:spider` below — the two grants name different
+        // things and neither implies the other.
+        "tool:http-egress:api.spider.cloud",
+        // `mem0` is the same shape, for the swappable `memory` layer rather than a
+        // web one: a declarative `http` plugin whose only grant is egress to Mem0's
+        // single API host (`https://api.mem0.ai/` — the `servers` entry in Mem0's own
+        // OpenAPI, covering both `/v3/memories/search/` and `/v1/memories/{id}/`).
+        "tool:http-egress:api.mem0.ai",
+        // `honcho` is the same shape again, and the first `memory` provider that
+        // serves `memory__context`. One host covers both its tools: the `servers`
+        // entry in Honcho's own OpenAPI is `https://api.honcho.dev` (Production SaaS
+        // Platform), carrying `/v3/workspaces/{ws}/peers/{peer}/chat` and
+        // `/v3/workspaces/{ws}/peers/{peer}/search`.
+        "tool:http-egress:api.honcho.dev",
         // `spider` and `rtk` were decoupled from Core into declarative `command`
         // tool plugins, so each declares a `tool:command:<bin>` grant instead of
         // its old in-Core provider. Same re-enable rationale as the scopes above.
         "tool:command:spider",
         "tool:command:rtk",
+        // Ship-code-in-a-manifest, for BOTH an `inline_deno` tool and a capability
+        // ADAPTER (the JS a layer provider ships when its shape — an async job API,
+        // a token vocabulary — is beyond what the declarative binding fields can
+        // express). Deliberately allowlisted rather than owner-scoped: an adapter is
+        // grant-gated precisely so shipping code stays a visible, approvable act,
+        // and a plugin self-approving it would defeat that.
+        "tool:execute",
         // `advisor` and `shadow` were decoupled into declarative `http` tools that
         // call Core-local bridges (/api/advisor/consult and the shadow proxy), so
-        // both declare loopback egress rather than an `mcp:<name>` grant.
+        // both declare loopback egress rather than an `mcp:<name>` grant. `bytebot`
+        // (the second `computer.control` provider) shares this ONE entry: it reaches
+        // Bytebot's `bytebotd` daemon at 127.0.0.1:9990 — a third-party process, not
+        // a Core bridge — so do not delete this line as "advisor/shadow only". The
+        // grant names a HOST, not a port, so loopback egress is granted wholesale
+        // here and the URL in the manifest is what pins the port.
         "tool:http-egress:127.0.0.1",
         "mcp:ghost",
         "mcp:shadow",
@@ -280,6 +326,21 @@ fn default_grant_allowlist() -> Vec<String> {
         "core:list_agents",
         "media:generate",
         "media:transcribe",
+        // The two host primitives the seeded `chat-title` plugin needs to do its
+        // one job: rename the conversation it just summarised, and read the
+        // preferences that say whether (and how often) it should. They gate
+        // `host.setConversationTitle` and `host.getPreference` respectively — see
+        // `GRANT_SET_TITLE` / `GRANT_PREFERENCES_READ` in
+        // `apps/core/src/plugin_host/bridge.rs`.
+        //
+        // Both are cross-namespace by construction: the declaring app's namespace
+        // is `chat-title`, while a conversation and the preference store are
+        // Core-owned, so the owner-scoped rule cannot reach them however the app is
+        // named — which is the point. `preferences:read` is READ-only and
+        // `conversation:set-title` can only rewrite a title on a conversation the
+        // caller is already in, so neither widens reach beyond the app's own chat.
+        "conversation:set-title",
+        "preferences:read",
         "hook:run-agent",
         "hook:side-model",
         // Ghost record→replay: the `com.ryu.workflows` RecordToWorkflow flow captures

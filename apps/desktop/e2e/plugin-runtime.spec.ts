@@ -15,8 +15,9 @@
 //
 // ⚠️ EXECUTION: headless Chromium cannot launch in the authoring sandbox, so this
 // spec is authored + typechecked here (`bunx playwright test --list`) and RUN GREEN
-// in CI by the `plugin-runtime-cert` job. It gates flipping the runtime flag on
-// (see `src/lib/experimental.ts`).
+// in CI by the `plugin-runtime-cert` job. The runtime it certifies is now
+// unconditional — there is no opt-in flag left in front of it — so this job is the
+// only thing standing between a boundary regression and every user.
 
 import { expect, test } from "@playwright/test";
 

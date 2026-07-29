@@ -40,6 +40,8 @@ export interface VoiceEngineEntry {
 	name: string;
 	/** True when this engine's sidecar process is currently running. */
 	running: boolean;
+	/** The node's verdict that a reinstall would deliver a newer build. */
+	updateAvailable: boolean;
 }
 
 /** Catalog categories whose engines run alongside the chat engine (start/stop). */
@@ -48,7 +50,7 @@ const DEFAULT_RUN_ALONGSIDE_CATEGORIES = ["voice"] as const;
 export interface UseVoiceEnginesResult {
 	engines: VoiceEngineEntry[];
 	error: string | null;
-	install: (name: string) => Promise<void>;
+	install: (name: string, force?: boolean) => Promise<void>;
 	loading: boolean;
 	reload: () => Promise<void>;
 	/** Start or stop the engine's sidecar process. */
@@ -92,6 +94,7 @@ export function useVoiceEngines(
 					latestVersion: item.latestVersion,
 					deprecated: item.deprecated,
 					running: status[item.name] ?? false,
+					updateAvailable: item.updateAvailable,
 				}))
 			);
 		} catch (e) {
@@ -108,9 +111,10 @@ export function useVoiceEngines(
 	// Auto-recover when Core reconnects or the user hits "Refresh all".
 	useCoreRefresh(reload);
 
+	// `force` turns an install into an UPDATE — see the note in useEngines.
 	const install = useCallback(
-		async (name: string) => {
-			await installSidecar(url, token, name);
+		async (name: string, force = false) => {
+			await installSidecar(url, token, name, force);
 			await reload();
 		},
 		[url, token, reload]

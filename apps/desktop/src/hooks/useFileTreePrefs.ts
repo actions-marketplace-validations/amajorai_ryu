@@ -7,6 +7,7 @@
 // value (within and across windows).
 
 import { useCallback, useSyncExternalStore } from "react";
+import { TREE_THEME_INHERIT } from "@/src/lib/pierre-themes.ts";
 
 const STORAGE_KEY = "ryu:file-tree-prefs";
 
@@ -15,6 +16,13 @@ const STORAGE_KEY = "ryu:file-tree-prefs";
 export interface FileTreePrefs {
 	/** Semantic per-file-type icon colors. */
 	coloredIcons: boolean;
+	/**
+	 * Theme applied while the app is in dark mode, or `TREE_THEME_INHERIT` to
+	 * keep the app's own surface colors. Not a `@pierre/trees` constructor
+	 * option — it becomes `--trees-theme-*` CSS variables on the host, see
+	 * `useFileTreeThemeStyles`.
+	 */
+	darkTheme: string;
 	/** Row height/spacing preset. */
 	density: "compact" | "default" | "relaxed";
 	/** Allow drag-and-drop reordering/moving. */
@@ -25,6 +33,8 @@ export interface FileTreePrefs {
 	iconSet: "minimal" | "standard" | "complete" | "none";
 	/** Whether folders start expanded or collapsed. */
 	initialExpansion: "closed" | "open";
+	/** Theme applied while the app is in light mode. See `darkTheme`. */
+	lightTheme: string;
 	/** Allow inline rename (F2 / double-click). */
 	renaming: boolean;
 	/** How a search query reshapes the tree. */
@@ -46,6 +56,8 @@ export const DEFAULT_FILE_TREE_PREFS: FileTreePrefs = {
 	renaming: false,
 	flattenEmptyDirectories: false,
 	initialExpansion: "closed",
+	lightTheme: TREE_THEME_INHERIT,
+	darkTheme: TREE_THEME_INHERIT,
 };
 
 const listeners = new Set<() => void>();
@@ -100,6 +112,11 @@ function write(next: FileTreePrefs) {
 /**
  * Translate the plain-English prefs into `@pierre/trees` `FileTreeOptions`. One
  * mapping, shared by the Files tab and the settings live preview.
+ *
+ * `lightTheme`/`darkTheme` are deliberately NOT here: they are host CSS
+ * variables, not constructor options. Call sites remount the tree (keyed on
+ * these options) when a constructor-time option changes — keying on the raw
+ * prefs instead would throw away expansion/scroll state on every theme change.
  */
 export function fileTreePrefsToOptions(prefs: FileTreePrefs) {
 	return {

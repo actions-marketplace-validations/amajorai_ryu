@@ -1,6 +1,7 @@
 // apps/desktop/src/lib/api/channels.ts
 //
-// Typed client for channel-bot configuration (Telegram/Slack/WhatsApp/Discord).
+// Typed client for channel-bot configuration (Telegram/Slack/WhatsApp/Discord,
+// and iMessage via a BlueBubbles Server on the operator's Mac).
 //
 // Unlike every other desktop client module, this targets the identity/control
 // plane server (:3000, BACKEND_URL) rather than a Core node — channel configs are
@@ -20,12 +21,55 @@ export const CHANNEL_TYPES = [
 	"slack",
 	"whatsapp",
 	"discord",
+	"bluebubbles",
 ] as const;
 export type ChannelType = (typeof CHANNEL_TYPES)[number];
 
 /** When the bot replies inside a group chat (DMs always reply). */
 export const GROUP_REPLY_MODES = ["mentions", "all"] as const;
 export type GroupReplyMode = (typeof GROUP_REPLY_MODES)[number];
+
+/** Who may DM the bot, and how a stranger enrols. See DM_POLICIES in
+ *  packages/db/src/models/channel.model.ts — that is the enforcing copy. */
+export const DM_POLICIES = [
+	"pairing",
+	"allowlist",
+	"open",
+	"disabled",
+] as const;
+export type DmPolicy = (typeof DM_POLICIES)[number];
+
+/** Whether the bot answers in groups at all. */
+export const GROUP_POLICIES = ["allowlist", "open", "disabled"] as const;
+export type GroupPolicy = (typeof GROUP_POLICIES)[number];
+
+/** When the bot answers with synthesized speech as well as text. */
+export const VOICE_REPLY_MODES = ["never", "mirror", "always"] as const;
+export type VoiceReplyMode = (typeof VOICE_REPLY_MODES)[number];
+
+/**
+ * Per-bot behaviour settings: who may talk to it, how it behaves while working,
+ * and what its profile says. Flat across every platform — a channel that cannot
+ * honour a setting ignores it (WhatsApp has no command menu, iMessage has no
+ * threads), which is why the form gates which controls it renders rather than
+ * the wire shape varying by type.
+ */
+export interface ChannelBehavior {
+	dmAllowlist: string[];
+	dmPolicy: DmPolicy;
+	groupAllowlist: string[];
+	groupPolicy: GroupPolicy;
+	profileDescription: string | null;
+	profileName: string | null;
+	profileShortBio: string | null;
+	publishCommands: boolean;
+	richText: boolean;
+	sendReadReceipts: boolean;
+	streaming: boolean;
+	threadReplies: boolean;
+	typingIndicator: boolean;
+	voiceReply: VoiceReplyMode;
+}
 
 // The per-channel required-credential map and its field labels deliberately do
 // NOT live here. This module once carried its own copy, which silently drifted
@@ -41,10 +85,11 @@ export const CHANNEL_LABELS: Record<ChannelType, string> = {
 	slack: "Slack",
 	whatsapp: "WhatsApp",
 	discord: "Discord",
+	bluebubbles: "iMessage (BlueBubbles)",
 };
 
 /** A channel config as returned by the server (secrets masked to "***"). */
-export interface ChannelConfig {
+export interface ChannelConfig extends ChannelBehavior {
 	agentId: string | null;
 	channelType: ChannelType;
 	createdAt: string;
@@ -64,7 +109,7 @@ export interface ChannelConfig {
 	updatedAt: string;
 }
 
-export interface ChannelInput {
+export interface ChannelInput extends Partial<ChannelBehavior> {
 	agentId?: string | null;
 	channelType: ChannelType;
 	enabled?: boolean;
