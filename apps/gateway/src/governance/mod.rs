@@ -214,7 +214,7 @@ fn default_grant_allowlist() -> Vec<String> {
         "tools.invoke",
         // Per-server MCP tool grants that the seeded system MCP-tool plugins
         // declare in their `permission_grants` (`spider`, `agentbrowser`,
-        // `ghost`, `shadow`). `mcp` is a RESERVED namespace (the MCP tool plane
+        // `scrapling`, `ghost`, `shadow`). `mcp` is a RESERVED namespace (the MCP tool plane
         // is a host primitive, and `mcp:<name>` names someone else's server), so
         // the owner-scoped rule never covers these even for a plugin whose id IS
         // the server name — each needs its own exact entry here. Without them a
@@ -225,6 +225,7 @@ fn default_grant_allowlist() -> Vec<String> {
         // `mcp:web_search`/`mcp:file_read` are intentionally NOT here.)
         "mcp:spider",
         "mcp:agentbrowser",
+        "mcp:scrapling",
         // `exa` is a declarative `http` plugin (fixtures/exa.manifest.json), so it
         // declares an egress grant, not an `mcp:<name>` server grant — its enable
         // path validates this exact scope instead.
@@ -738,6 +739,7 @@ mod tests {
             // per-server MCP tool grants from the seeded system MCP-tool plugins
             ("spider", "mcp:spider"),
             ("agentbrowser", "mcp:agentbrowser"),
+            ("scrapling", "mcp:scrapling"),
             ("ghost", "mcp:ghost"),
             ("shadow", "mcp:shadow"),
             // declarative `http` / `command` tool plugins

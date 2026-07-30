@@ -2940,6 +2940,10 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							updateAvailable={appUpdateAvailable}
 							version={appVersion}
 						/>
+						{/* # 0.1.0: Shadow disabled for the alpha — uncomment when re-enabling
+						    Shadow. The sidecar and its status plumbing (useSystemStatus's
+						    `shadowReachable`) stay wired, so restoring the row is the only edit
+						    needed; nothing below it depends on the row existing.
 						<ServiceRow
 							label="Shadow"
 							onChanged={refresh}
@@ -2947,6 +2951,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							sidecarKey="shadow"
 							target={target}
 						/>
+						*/}
 						{/* # 0.1.0: Island disabled — uncomment when re-enabling Island
 						    Island is a device-local Electron companion (loopback :7989), not
 						    a Core sidecar — Core can't start/stop it, so the row is
