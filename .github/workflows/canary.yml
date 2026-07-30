@@ -107,7 +107,12 @@ jobs:
           - platform: ubuntu-22.04
             args: ""
           - platform: windows-latest
-            args: ""
+            # NSIS only. The MSI target refuses a version whose pre-release
+            # identifier is not numeric-only and <= 65535, and every rolling build
+            # stamps one (`0.0.14-canary.20260730.26`), so bundling MSI here has
+            # never once succeeded. Stable releases stamp a bare `X.Y.Z` and keep
+            # building both, so this narrowing is confined to the rolling channels.
+            args: "--bundles nsis"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Stamp THIS build's version across the tree (Cargo.toml/lock, package.json,
