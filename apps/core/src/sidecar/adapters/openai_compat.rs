@@ -284,6 +284,9 @@ mod tests {
                 },
             )
             .await;
-        assert!(result.is_err(), "unreachable endpoint must surface an error");
+        assert!(
+            result.is_err(),
+            "unreachable endpoint must surface an error"
+        );
     }
 }

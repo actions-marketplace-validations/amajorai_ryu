@@ -261,6 +261,9 @@ mod tests {
         let _lock = lock_env();
         let _g = EnvGuard::set("");
         let url = archive_url();
-        assert!(url.contains(&format!("/download/v{RESTATE_VERSION}/")), "got: {url}");
+        assert!(
+            url.contains(&format!("/download/v{RESTATE_VERSION}/")),
+            "got: {url}"
+        );
     }
 }

@@ -2695,8 +2695,9 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // `/api/media/*`). Chat / editor / `ui.uploadFile` all land here.
         .route(
             "/api/uploads",
-            post(uploads::upload_file)
-                .layer(axum::extract::DefaultBodyLimit::max(uploads::MAX_UPLOAD_BYTES)),
+            post(uploads::upload_file).layer(axum::extract::DefaultBodyLimit::max(
+                uploads::MAX_UPLOAD_BYTES,
+            )),
         )
         .route("/api/uploads/:id", get(uploads::serve_upload))
         // ── Autoresearch data path (`/api/research/*`) is served out-of-process by
@@ -3535,6 +3536,50 @@ struct UpdateCheckQuery {
     /// preference. The desktop passes its user-chosen channel explicitly so the
     /// channel picker can move a user between channels.
     channel: Option<String>,
+    /// RFC-3339 instant limiting the verdict to releases published at or before
+    /// it — the caller's lifetime updates window. Omitted (the normal case, and
+    /// every non-lifetime caller) means unclamped, byte-identical to the
+    /// historical behaviour.
+    ///
+    /// ADVISORY ONLY. This route is on the UNAUTHENTICATED public router, so the
+    /// value is caller-supplied and trivially omitted. Core declines to OFFER a
+    /// build; it cannot prevent one. The perpetual desktop licence is an honour
+    /// system by design.
+    ///
+    /// PRIVACY NOTE: this is a per-user, purchase-derived timestamp travelling in
+    /// a URL query string. Core has no TraceLayer so it does not access-log URIs,
+    /// but a node reached over the network sits behind a proxy that does.
+    updates_until: Option<String>,
+}
+
+/// The 200 body [`update_check`] answers with when the check itself failed.
+///
+/// A SECOND, hand-built copy of the [`crate::update::UpdateCheck`] wire shape —
+/// the `error` key exists only here, so the struct cannot be reused — which makes
+/// it the one place the two definitions can silently drift. It is a named
+/// function purely so `update_check_fail_open_matches_the_verdict_shape` can hold
+/// the two key sets against each other.
+///
+/// `restricted_by_cutoff` and `cutoff_unresolved` are deliberately FALSE: this
+/// arm means "GitHub is unreachable", and a client must never read a network
+/// failure as an expired updates window.
+fn update_check_fail_open_body(current: &str, channel: &str, error: &str) -> serde_json::Value {
+    json!({
+        "current": current,
+        "latest": current,
+        "channel": channel,
+        "update_available": false,
+        "notes": serde_json::Value::Null,
+        "html_url": serde_json::Value::Null,
+        "asset": serde_json::Value::Null,
+        "tag": serde_json::Value::Null,
+        "published_at": serde_json::Value::Null,
+        "latest_unrestricted": current,
+        "restricted_by_cutoff": false,
+        "cutoff_waived_for_security": false,
+        "cutoff_unresolved": false,
+        "error": error,
+    })
 }
 
 /// `GET /api/update/check` — compares the installed version against the latest
@@ -3545,15 +3590,39 @@ struct UpdateCheckQuery {
     path = "/api/update/check",
     tag = "Health",
     summary = "Compare installed version against the latest release on its channel",
-    params(("channel" = Option<String>, Query, description = "stable | beta | nightly | canary")),
+    params(
+        ("channel" = Option<String>, Query, description = "stable | beta | nightly | canary"),
+        (
+            "updates_until" = Option<String>,
+            Query,
+            description = "RFC-3339 cutoff; clamp to releases published at or before it (lifetime updates window)"
+        )
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn update_check(
     State(state): State<ServerState>,
     Query(query): Query<UpdateCheckQuery>,
 ) -> axum::response::Response {
-    let requested = query.channel.as_deref().map(str::trim).filter(|c| !c.is_empty());
-    match crate::update::check_for_update_on_channel(&state.client, requested).await {
+    let requested = query
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    let requested_cutoff = query
+        .updates_until
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    match crate::update::check_for_update_with(
+        &state.client,
+        crate::update::UpdateCheckOptions {
+            channel: requested,
+            updates_until: requested_cutoff,
+        },
+    )
+    .await
+    {
         Ok(verdict) => (StatusCode::OK, Json(json!(verdict))).into_response(),
         Err(e) => {
             tracing::warn!("update check failed (treating as up-to-date): {e}");
@@ -3563,19 +3632,72 @@ async fn update_check(
                 .unwrap_or_else(|| crate::update::channel_of(&current));
             (
                 StatusCode::OK,
-                Json(json!({
-                    "current": current,
-                    "latest": current,
-                    "channel": channel,
-                    "update_available": false,
-                    "notes": serde_json::Value::Null,
-                    "html_url": serde_json::Value::Null,
-                    "asset": serde_json::Value::Null,
-                    "error": e.to_string(),
-                })),
+                Json(update_check_fail_open_body(
+                    &current,
+                    &channel,
+                    &e.to_string(),
+                )),
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod update_check_wire_shape_tests {
+    use super::update_check_fail_open_body;
+
+    /// The fail-open arm must answer with the SAME keys a successful verdict does,
+    /// plus `error`. A client that reads a new field would otherwise see it simply
+    /// missing when GitHub is unreachable — and for `restricted_by_cutoff` that
+    /// silence is indistinguishable from "your updates window lapsed".
+    #[test]
+    fn update_check_fail_open_matches_the_verdict_shape() {
+        let verdict = crate::update::UpdateCheck {
+            current: "1.0.0".to_string(),
+            latest: "1.0.0".to_string(),
+            channel: "stable".to_string(),
+            update_available: false,
+            notes: None,
+            html_url: None,
+            asset: None,
+            tag: None,
+            published_at: None,
+            latest_unrestricted: "1.0.0".to_string(),
+            restricted_by_cutoff: false,
+            cutoff_waived_for_security: false,
+            cutoff_unresolved: false,
+        };
+        let mut expected: Vec<String> = serde_json::to_value(&verdict)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        expected.push("error".to_string());
+        expected.sort();
+
+        let body = update_check_fail_open_body("1.0.0", "stable", "boom");
+        let mut actual: Vec<String> = body.as_object().unwrap().keys().cloned().collect();
+        actual.sort();
+
+        assert_eq!(actual, expected);
+    }
+
+    /// A network failure is NOT a lapsed updates window: both cutoff flags stay
+    /// false here so the desktop never shows an "updates expired" state because
+    /// GitHub was down.
+    #[test]
+    fn update_check_fail_open_never_reports_a_cutoff() {
+        let body = update_check_fail_open_body("1.0.0", "stable", "boom");
+        assert_eq!(body["restricted_by_cutoff"], serde_json::Value::Bool(false));
+        assert_eq!(body["cutoff_unresolved"], serde_json::Value::Bool(false));
+        assert_eq!(
+            body["cutoff_waived_for_security"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(body["latest_unrestricted"], body["current"]);
     }
 }
 
@@ -3828,8 +3950,7 @@ async fn list_capabilities(State(state): State<ServerState>) -> axum::response::
         .flatten()
         .unwrap_or_else(|| "{}".to_owned());
     let cfg = crate::plugins::binding::config_from_overrides_json(&json);
-    let capabilities =
-        crate::plugins::binding::describe_capabilities(&enabled, &known, &cfg);
+    let capabilities = crate::plugins::binding::describe_capabilities(&enabled, &known, &cfg);
 
     // The stable verb ids the facade currently serves, so a picker can show what a
     // layer actually exposes rather than only which app is selected.
@@ -7018,8 +7139,7 @@ async fn create_memory(
             None => {
                 return json_error(
                     StatusCode::BAD_REQUEST,
-                    "org-scope memory requires a caller with a verified organization"
-                        .to_string(),
+                    "org-scope memory requires a caller with a verified organization".to_string(),
                 )
             }
         }
@@ -7370,6 +7490,78 @@ async fn community_plugin_source(state: &ServerState) -> Option<crate::catalog_s
     Some(with_github_token(state, source).await)
 }
 
+/// The plugin catalog source ids that render as ONE "Ryu Marketplace" view.
+///
+/// `ryu-catalog` is the open git catalog (browse + free installs); `ryu-marketplace`
+/// is the hosted Mongo server that owns commerce (Stripe checkout, entitlements,
+/// signed download grants). They are two BACKENDS of a single product surface, and
+/// splitting them across two picker rows made the store read as two competing
+/// marketplaces where a listing's presence depended on which row you happened to be
+/// on. Either id therefore resolves to [`merged_plugin_catalog_entries`], which
+/// folds both (plus the loaded built-ins and the legacy registry) into one deduped
+/// list. See [`PLUGIN_MERGED_VIEW_ID`] for the id the client selects.
+const PLUGIN_MERGED_SOURCE_IDS: [&str; 2] = ["ryu-catalog", "ryu-marketplace"];
+
+/// The canonical id for the unified first-party view — the git catalog's id, which
+/// is `builtin_primary` for the Plugin kind, so an unset preference already lands
+/// here.
+const PLUGIN_MERGED_VIEW_ID: &str = "ryu-catalog";
+
+/// True when `id` addresses the unified first-party marketplace view.
+fn is_merged_plugin_view(id: &str) -> bool {
+    PLUGIN_MERGED_SOURCE_IDS.contains(&id)
+}
+
+/// Resolve which plugin catalog source a browse/detail request addresses.
+///
+/// Precedence: an explicit `?source=<id>` (validated against the registry) → the
+/// node's active-source preference → the built-in primary.
+///
+/// The explicit selector exists because the active source is ONE node-global
+/// preference, while the store renders many independent tabs: picking
+/// integrations.sh in one tab used to reassign every other open store tab (and
+/// every other client on the node) to a catalog it never asked for. Per-request
+/// selection makes the choice belong to the view that made it. An unknown or empty
+/// id falls through to the preference rather than erroring, so a stale client that
+/// names a removed custom source degrades to the default view.
+async fn resolve_plugin_source_id(
+    state: &ServerState,
+    params: &std::collections::HashMap<String, String>,
+) -> String {
+    if let Some(requested) = params.get("source").map(String::as_str) {
+        let trimmed = requested.trim();
+        if !trimmed.is_empty()
+            && (is_merged_plugin_view(trimmed)
+                || state
+                    .catalog_sources
+                    .source_by_id(crate::catalog_source::CatalogKind::Plugin, trimmed)
+                    .is_some())
+        {
+            return trimmed.to_string();
+        }
+    }
+    state
+        .catalog_sources
+        .active_id(
+            crate::catalog_source::CatalogKind::Plugin,
+            &state.preferences,
+        )
+        .await
+        .unwrap_or_else(|| PLUGIN_MERGED_VIEW_ID.to_string())
+}
+
+/// A specific Plugin source by id, with the BYOK GitHub token injected — the
+/// per-request counterpart to [`active_plugin_source`].
+async fn plugin_source_by_id(
+    state: &ServerState,
+    id: &str,
+) -> Option<crate::catalog_source::Source> {
+    let source = state
+        .catalog_sources
+        .source_by_id(crate::catalog_source::CatalogKind::Plugin, id)?;
+    Some(with_github_token(state, source).await)
+}
+
 /// Inject the BYOK GitHub personal access token from preferences into a
 /// [`crate::catalog_source::Source::GithubTopic`]. Mirrors the Smithery key
 /// injection in [`active_mcp_source`]: the token is read at the route (never
@@ -7577,22 +7769,20 @@ async fn plugin_catalog_browse(
             }
             Err(e) => (
                 StatusCode::OK,
-                Json(json!({ "entries": [], "next_cursor": serde_json::Value::Null, "note": e.to_string() })),
+                Json(
+                    json!({ "entries": [], "next_cursor": serde_json::Value::Null, "note": e.to_string() }),
+                ),
             ),
         };
     }
 
-    let active_id = state
-        .catalog_sources
-        .active_id(
-            crate::catalog_source::CatalogKind::Plugin,
-            &state.preferences,
-        )
-        .await
-        .unwrap_or_else(|| "ryu-marketplace".to_string());
+    let active_id = resolve_plugin_source_id(&state, &params).await;
 
-    // Default marketplace view: merged offline-safe catalog.
-    if active_id == "ryu-marketplace" {
+    // The unified first-party view: the merged offline-safe catalog. Reached by
+    // EITHER first-party id (see `PLUGIN_MERGED_SOURCE_IDS`) so the open git
+    // catalog and the hosted commerce backend render as one marketplace instead of
+    // whichever one the active-source preference happened to name.
+    if is_merged_plugin_view(&active_id) {
         let needle = query.trim().to_ascii_lowercase();
         let entries: Vec<serde_json::Value> = merged_plugin_catalog_entries(&state)
             .await
@@ -7613,7 +7803,7 @@ async fn plugin_catalog_browse(
     };
     q.extra.clear();
 
-    match active_plugin_source(&state).await {
+    match plugin_source_by_id(&state, &active_id).await {
         Some(source) => match source.search(&state.client, &q).await {
             Ok(val) => {
                 let entries: Vec<serde_json::Value> = val
@@ -7666,36 +7856,163 @@ async fn plugin_catalog_detail(
             Json(json!({ "error": "missing required `id` query parameter" })),
         );
     };
-    // Mirror the browse route's per-request community selector, so opening a
-    // community listing's detail doesn't require flipping the active source.
-    let selected = if params.get("origin").map(String::as_str)
+    // Mirror the browse route's per-request selectors, so opening a listing's
+    // detail resolves against the SAME source the list was browsed from — without
+    // flipping the node-global active-source preference. `?origin=community` keeps
+    // its dedicated shortcut; `?source=<id>` covers every other view.
+    //
+    // The unified first-party view is the one case with no single backing source: a
+    // listing in it may have come from the git catalog OR the hosted commerce
+    // server, so it gets an ordered candidate list rather than one source.
+    let candidates: Vec<crate::catalog_source::Source> = if params.get("origin").map(String::as_str)
         == Some(crate::catalog_source::COMMUNITY_ORIGIN)
     {
-        community_plugin_source(&state).await
+        community_plugin_source(&state).await.into_iter().collect()
     } else {
-        active_plugin_source(&state).await
+        let source_id = resolve_plugin_source_id(&state, &params).await;
+        if is_merged_plugin_view(&source_id) {
+            let mut list = Vec::new();
+            // Git catalog first: it carries every free/open listing, and it answers
+            // from a cached manifest rather than a network round-trip per item.
+            for id in PLUGIN_MERGED_SOURCE_IDS {
+                if let Some(source) = plugin_source_by_id(&state, id).await {
+                    list.push(source);
+                }
+            }
+            list
+        } else {
+            plugin_source_by_id(&state, &source_id)
+                .await
+                .into_iter()
+                .collect()
+        }
     };
     // A locally loaded plugin (built-in or installed) answers from its own
     // manifest — no source round-trip, and no dependence on whether the active
     // remote source happens to carry it. This is what gives a first-party app the
     // same README / API-reference / dependency tabs a community listing gets.
     if let Some(local) = local_plugin_detail(id) {
-        return (StatusCode::OK, Json(local));
+        return (
+            StatusCode::OK,
+            Json(enrich_plugin_detail(&state, local).await),
+        );
     }
 
-    match selected {
-        Some(source) => match source.detail(&state.client, id).await {
-            Ok(value) => (StatusCode::OK, Json(value)),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": e.to_string() })),
-            ),
-        },
-        None => (
+    if candidates.is_empty() {
+        return (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": "no active plugin catalog source" })),
-        ),
+        );
     }
+    // Walk the candidates, keeping the FIRST error to report if none can answer:
+    // "not found in the git catalog" names the primary source the user was
+    // browsing, which is the more useful message than the last fallback's.
+    let mut first_error: Option<String> = None;
+    for source in candidates {
+        match source.detail(&state.client, id).await {
+            Ok(value) => {
+                return (
+                    StatusCode::OK,
+                    Json(enrich_plugin_detail(&state, value).await),
+                );
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e.to_string());
+                }
+            }
+        }
+    }
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(
+            json!({ "error": first_error.unwrap_or_else(|| "plugin detail unavailable".to_string()) }),
+        ),
+    )
+}
+
+/// The detail keys a listing needs before the store's README / Versions / Health
+/// tabs can render. A payload missing all of them collapses to a single Overview
+/// tab — which is exactly what the first-party catalogs used to produce.
+const PLUGIN_DETAIL_ENRICHABLE_KEYS: [&str; 2] = ["readme", "versions"];
+
+/// Keys the repo enrichment may contribute. Restricted deliberately: enrichment is
+/// a display supplement, so it must never be able to overwrite identity, trust, or
+/// install-relevant fields (`id`, `origin`, `reviewed`, `license`, `url`, …) that
+/// the manifest or the source already decided.
+const PLUGIN_ENRICHMENT_KEYS: [&str; 8] = [
+    "readme",
+    "readmeUrl",
+    "versions",
+    "downloads",
+    "stars",
+    "openIssues",
+    "createdAt",
+    "pushedAt",
+];
+
+/// Fill a plugin detail payload's missing README / version history from its GitHub
+/// repository, so a first-party listing gets the same tab set as a Community one.
+///
+/// Three properties make this safe to run on every detail open:
+/// - **Opt-out by presence.** A payload that already carries a README or version
+///   list is returned untouched, so a source that knows better always wins.
+/// - **Additive only.** Only [`PLUGIN_ENRICHMENT_KEYS`] are copied, and only into
+///   absent/null slots — enrichment can add a tab, never rewrite a claim.
+/// - **Best-effort.** A rate-limited or offline GitHub yields fewer tabs, not an
+///   error (see [`crate::catalog_source::enrich_github_repo`], which also caches).
+async fn enrich_plugin_detail(
+    state: &ServerState,
+    mut detail: serde_json::Value,
+) -> serde_json::Value {
+    let Some(obj) = detail.as_object() else {
+        return detail;
+    };
+    let already_rich = PLUGIN_DETAIL_ENRICHABLE_KEYS
+        .iter()
+        .any(|k| obj.get(*k).is_some_and(|v| !v.is_null()));
+    if already_rich {
+        return detail;
+    }
+    // The repo to enrich from, in descending order of authority: an explicit
+    // repository/repo url, the homepage/website, then the install source (a git
+    // marketplace's `url` is the repo path the plugin was read from).
+    let reference = ["repositoryUrl", "repo_url", "website", "url"]
+        .iter()
+        .filter_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+        .find(|s| crate::catalog_source::split_github_repo(s).is_some())
+        .map(str::to_string);
+    let Some(reference) = reference else {
+        return detail;
+    };
+    let cache_id = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(reference.as_str())
+        .to_string();
+    let token = state
+        .preferences
+        .get(crate::catalog_source::GITHUB_TOKEN_PREF)
+        .await
+        .ok()
+        .flatten();
+    let enrichment =
+        crate::catalog_source::enrich_github_repo(&cache_id, &reference, token.as_deref()).await;
+    let Some(fields) = enrichment.as_object() else {
+        return detail;
+    };
+    if let Some(target) = detail.as_object_mut() {
+        for key in PLUGIN_ENRICHMENT_KEYS {
+            let Some(value) = fields.get(key).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            let absent = target.get(key).is_none_or(serde_json::Value::is_null);
+            if absent {
+                target.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    detail
 }
 
 /// README file names tried inside an installed plugin's directory, in order.
@@ -8120,6 +8437,28 @@ fn plugin_marketplace_item_to_entry(
         }
         if let Some(stars) = it.get("stars").and_then(serde_json::Value::as_u64) {
             obj.insert("stars".to_owned(), json!(stars));
+        }
+        // Commerce + social proof. Load-bearing for the UNIFIED first-party view:
+        // the hosted (paid) and git (free) catalogs are merged into one list, so a
+        // paid listing that dropped its `pricing` here would render identically to
+        // a free one and only reveal its price at checkout. `rating_average` /
+        // `rating_count` back the star summary on the card and the Reviews tab
+        // header; `first_party` orders first-party above third-party.
+        if let Some(pricing) = it.get("pricing").filter(|v| v.is_object()) {
+            obj.insert("pricing".to_owned(), pricing.clone());
+        }
+        if let Some(avg) = it.get("rating_average").and_then(serde_json::Value::as_f64) {
+            if avg > 0.0 {
+                obj.insert("rating_average".to_owned(), json!(avg));
+            }
+        }
+        if let Some(count) = it.get("rating_count").and_then(serde_json::Value::as_u64) {
+            if count > 0 {
+                obj.insert("rating_count".to_owned(), json!(count));
+            }
+        }
+        if it.get("first_party").and_then(|v| v.as_bool()) == Some(true) {
+            obj.insert("first_party".to_owned(), json!(true));
         }
         if let Some(dither) = it.get("icon_dither").filter(|v| v.is_object()) {
             obj.insert("icon_dither".to_owned(), dither.clone());
@@ -8750,13 +9089,13 @@ async fn write_plugin_manifest_to_disk(
         plugin_dir.join(crate::plugin_manifest::MANIFEST_FILE_NAME),
         &manifest_json,
     )
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to write manifest: {e}"),
-            )
-        })?;
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write manifest: {e}"),
+        )
+    })?;
     Ok(())
 }
 
@@ -13773,11 +14112,7 @@ async fn set_conversation_icon_handler(
     ) {
         return resp;
     }
-    match state
-        .conversations
-        .set_icon(&id, body.icon.as_ref())
-        .await
-    {
+    match state.conversations.set_icon(&id, body.icon.as_ref()).await {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
         Ok(false) => json_error(
             StatusCode::NOT_FOUND,
@@ -17285,11 +17620,7 @@ async fn set_space_icon(
     ) {
         return resp;
     }
-    match state
-        .spaces
-        .set_space_icon(&id, body.icon.as_ref())
-        .await
-    {
+    match state.spaces.set_space_icon(&id, body.icon.as_ref()).await {
         Ok(true) => Json(json!({ "success": true })).into_response(),
         Ok(false) => json_error(StatusCode::NOT_FOUND, "space not found".to_owned()),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -21376,7 +21707,9 @@ async fn install_sidecar(
     // intact rather than a hole where the engine used to be.
     if query.force {
         if let Err(e) = crate::sidecar::download_manager::VersionStore::remove_persisted(&name) {
-            tracing::warn!("could not clear the version record for '{name}' before a forced reinstall: {e}");
+            tracing::warn!(
+                "could not clear the version record for '{name}' before a forced reinstall: {e}"
+            );
         } else {
             tracing::info!("forced reinstall of '{name}' — cleared its version record");
         }
@@ -25626,15 +25959,13 @@ mod plugin_catalog_tests {
             false
         );
         assert_eq!(
-            plugin_marketplace_item_to_entry(&plain, "integrations-sh").unwrap()
-                ["descriptor_only"],
+            plugin_marketplace_item_to_entry(&plain, "integrations-sh").unwrap()["descriptor_only"],
             true,
             "the legacy integrations.sh source predates the card field"
         );
         let declared = json!({ "id": "gh:a/b", "descriptor_only": true });
         assert_eq!(
-            plugin_marketplace_item_to_entry(&declared, "github-topic").unwrap()
-                ["descriptor_only"],
+            plugin_marketplace_item_to_entry(&declared, "github-topic").unwrap()["descriptor_only"],
             true
         );
     }
@@ -25711,12 +26042,10 @@ mod app_tool_filter_tests {
         m.contributes = Some(ryu_kernel_contracts::manifest::Contributes {
             tool_filters: patterns
                 .iter()
-                .map(
-                    |p| ryu_kernel_contracts::manifest::ToolFilterContribution {
-                        tool: (*p).to_owned(),
-                        reason: None,
-                    },
-                )
+                .map(|p| ryu_kernel_contracts::manifest::ToolFilterContribution {
+                    tool: (*p).to_owned(),
+                    reason: None,
+                })
                 .collect(),
             ..Default::default()
         });
@@ -26474,7 +26803,10 @@ mod require_auth_tests {
         // Loopback dev: no `RYU_TOKEN` ⇒ the extension flattens to `None` ⇒ every
         // request passes without a header. This is the local-first default.
         assert_eq!(get_status(None, "/x", None).await, StatusCode::OK);
-        assert_eq!(get_status(None, "/x", Some("anything")).await, StatusCode::OK);
+        assert_eq!(
+            get_status(None, "/x", Some("anything")).await,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -26730,15 +27062,9 @@ mod pure_helper_tests {
             .collect();
         assert_eq!(
             fields,
-            [
-                "key",
-                "set",
-                "updated_at",
-                "shadowed_by_env",
-                "readable",
-            ]
-            .into_iter()
-            .collect(),
+            ["key", "set", "updated_at", "shadowed_by_env", "readable",]
+                .into_iter()
+                .collect(),
             "an entry must carry NOTHING beyond the name, the set flag, the timestamp, and \
              the two USABILITY facts (whether an env var shadows it, whether the plugin may \
              read it) — all metadata, never any part of the value. Widening this list is a \
@@ -26786,9 +27112,7 @@ mod pure_helper_tests {
         let text = String::from_utf8(frame).expect("utf8");
         assert!(text.starts_with("data: "));
         assert!(text.ends_with("\n\n"));
-        let payload = text
-            .trim_start_matches("data: ")
-            .trim_end_matches("\n\n");
+        let payload = text.trim_start_matches("data: ").trim_end_matches("\n\n");
         let value: serde_json::Value = serde_json::from_str(payload).expect("frame carries JSON");
         assert_eq!(value["type"], "data-plugin_note");
         assert_eq!(value["data"]["text"], "double-check: looks good");
@@ -26860,7 +27184,10 @@ mod pure_helper_tests {
     // ── normalize_key / slugify_domain ───────────────────────────────────────
     #[test]
     fn normalize_key_collapses_and_trims_non_alphanumerics() {
-        assert_eq!(normalize_key("1password.com:events"), "1password-com-events");
+        assert_eq!(
+            normalize_key("1password.com:events"),
+            "1password-com-events"
+        );
         assert_eq!(normalize_key("--Foo!!Bar--"), "foo-bar");
         assert_eq!(normalize_key("Already-normal"), "already-normal");
         assert_eq!(normalize_key("!!!"), "");
@@ -26870,7 +27197,10 @@ mod pure_helper_tests {
     fn slugify_domain_lowercases_and_dashes_separators() {
         assert_eq!(slugify_domain("api.example.com"), "api-example-com");
         assert_eq!(slugify_domain("API.Example.COM"), "api-example-com");
-        assert_eq!(slugify_domain(".leading.and.trailing."), "leading-and-trailing");
+        assert_eq!(
+            slugify_domain(".leading.and.trailing."),
+            "leading-and-trailing"
+        );
     }
 
     // ── apis_guru_swagger_url ────────────────────────────────────────────────
@@ -26929,7 +27259,10 @@ mod pure_helper_tests {
         assert_eq!(agent_version_status(None, Some("1.0.0")), Some("unknown"));
         assert_eq!(agent_version_status(None, None), None);
         // Unparseable version ⇒ None (never a bogus comparison).
-        assert_eq!(agent_version_status(Some("not-semver"), Some("1.0.0")), None);
+        assert_eq!(
+            agent_version_status(Some("not-semver"), Some("1.0.0")),
+            None
+        );
     }
 
     // ── npx_package_of ───────────────────────────────────────────────────────
@@ -26982,7 +27315,10 @@ mod pure_helper_tests {
             ("x-ryu-buyer-token", "  buyer-tok  "),
             ("authorization", "Bearer auth-tok"),
         ]);
-        assert_eq!(buyer_bearer_from_headers(&both).as_deref(), Some("buyer-tok"));
+        assert_eq!(
+            buyer_bearer_from_headers(&both).as_deref(),
+            Some("buyer-tok")
+        );
 
         // Only Authorization ⇒ strip the Bearer prefix.
         let auth_only = headers(&[("authorization", "Bearer auth-tok")]);
@@ -27016,9 +27352,15 @@ mod pure_helper_tests {
         assert_eq!(parse_catalog_kind(Some("model")), Ok(CatalogKind::Model));
         // FromStr lowercases, so an upper-case token still resolves.
         assert_eq!(parse_catalog_kind(Some("PLUGIN")), Ok(CatalogKind::Plugin));
-        assert_eq!(parse_catalog_kind(Some("knowledge")), Ok(CatalogKind::Knowledge));
+        assert_eq!(
+            parse_catalog_kind(Some("knowledge")),
+            Ok(CatalogKind::Knowledge)
+        );
         // Unknown ⇒ 400; absent ⇒ 400.
-        assert_eq!(parse_catalog_kind(Some("bogus")), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            parse_catalog_kind(Some("bogus")),
+            Err(StatusCode::BAD_REQUEST)
+        );
         assert_eq!(parse_catalog_kind(None), Err(StatusCode::BAD_REQUEST));
     }
 
@@ -27099,7 +27441,10 @@ mod pure_helper_tests {
         }))
         .expect("entry deserializes");
         assert!(memory_access_ok(&None, &entry));
-        assert!(memory_access_ok(&Some(caller("alice", Some("org1"))), &entry));
+        assert!(memory_access_ok(
+            &Some(caller("alice", Some("org1"))),
+            &entry
+        ));
     }
 
     #[test]

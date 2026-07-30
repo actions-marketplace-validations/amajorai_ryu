@@ -30,8 +30,8 @@ pub use ryu_tool_exec::{
     run_sandboxed, schema, tool_path_to_id, CodeExecutor, Elicitation, ExecOutcome, InvokeOutcome,
     RegistryToolInvoker, ResumeDecision, SandboxBridge, SandboxToolInvoker, ToolCaller,
     ToolInvocation, ToolInvokeResult, BACKEND_DENO, CAPABILITY_ADAPTER_CALL_PATH,
-    CAPABILITY_ADAPTER_NAMED_PATH, DEFAULT_DEADLINE_SECS, DEFAULT_MEMORY_MB, GRANT_TOOL_EXECUTE, MAX_PARKED, MAX_PREVIEW_CHARS,
-    PARKED_TTL,
+    CAPABILITY_ADAPTER_NAMED_PATH, DEFAULT_DEADLINE_SECS, DEFAULT_MEMORY_MB, GRANT_TOOL_EXECUTE,
+    MAX_PARKED, MAX_PREVIEW_CHARS, PARKED_TTL,
 };
 
 #[cfg(feature = "tool-exec-securexec")]
@@ -506,7 +506,11 @@ fn finalize_http_result(
                     Some(err),
                 )
             } else {
-                (Err(format!("http tool request failed: {err}")), 1, Some(err))
+                (
+                    Err(format!("http tool request failed: {err}")),
+                    1,
+                    Some(err),
+                )
             }
         }
         // Neither a status nor an error should not happen; treat as a transport
@@ -629,13 +633,11 @@ pub(crate) fn may_read_env_secret(plugin_id: &str, var: &str) -> bool {
     if var.starts_with(&plugin_env_prefix(plugin_id)) {
         return true;
     }
-    std::env::var(ENV_SECRET_ALLOWLIST)
-        .ok()
-        .is_some_and(|raw| {
-            raw.split([',', ' ', '\t', '\n', ';'])
-                .map(str::trim)
-                .any(|entry| !entry.is_empty() && entry == var)
-        })
+    std::env::var(ENV_SECRET_ALLOWLIST).ok().is_some_and(|raw| {
+        raw.split([',', ' ', '\t', '\n', ';'])
+            .map(str::trim)
+            .any(|entry| !entry.is_empty() && entry == var)
+    })
 }
 
 /// Resolve an `env:VARNAME` token to its value, from the process environment or —
@@ -736,8 +738,12 @@ async fn resolve_secret_token(
             if let Ok(Some(conn)) = store.find(profile_id, &domain).await {
                 // A SECOND governed read/audit for this credential (the consult
                 // already read+dropped it): this one actually injects it.
-                match crate::identity::read_credential(store, &conn.id, session_id.map(str::to_owned))
-                    .await
+                match crate::identity::read_credential(
+                    store,
+                    &conn.id,
+                    session_id.map(str::to_owned),
+                )
+                .await
                 {
                     Ok(Some(state)) => return SecretToken::Value(state.expose().to_owned()),
                     // Bound but no sealed state, or a denied read → omit the header
@@ -816,7 +822,6 @@ async fn resolve_secret_header_source(
     }
     Ok(Some(out))
 }
-
 
 /// The URL scheme a manifest uses to reach **this node's own Core** over loopback.
 ///
@@ -941,8 +946,13 @@ pub async fn run_http_tool(
     // Expand `core:` to this profile's loopback origin BEFORE the egress/SSRF
     // guards, so they screen the URL that is actually dialled.
     let url = resolve_core_url(url);
-    let (final_url, query_pairs, mut body, headers) =
-        build_rest_request(&url, &args, bodyless, header_params, &resolved_secret_headers)?;
+    let (final_url, query_pairs, mut body, headers) = build_rest_request(
+        &url,
+        &args,
+        bodyless,
+        header_params,
+        &resolved_secret_headers,
+    )?;
 
     // 0c. Apply the manifest's static `body_defaults` UNDER the model-provided body
     //     (model args win; nested objects merge key-by-key). This is a declarative,
@@ -1010,8 +1020,7 @@ pub async fn run_http_tool(
     // re-issue the request to the `Location` host WITHOUT re-running the egress-grant
     // + SSRF checks above — the classic allowlist bypass (granted public domain →
     // 302 → 127.0.0.1 / 169.254.169.254). The guarded first hop is the only hop.
-    let mut client_builder =
-        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    let mut client_builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
     // Pin the connection to the addresses the SSRF guard validated. Without this,
     // reqwest re-resolves the host at send() and an attacker who controls the
     // granted domain's DNS could answer with an internal address the guard never
@@ -1044,9 +1053,13 @@ pub async fn run_http_tool(
             let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
             finalize_http_result(fail_open, unwrap_body, Some(status), body, None)
         }
-        Err(e) => {
-            finalize_http_result(fail_open, unwrap_body, None, Value::Null, Some(e.to_string()))
-        }
+        Err(e) => finalize_http_result(
+            fail_open,
+            unwrap_body,
+            None,
+            Value::Null,
+            Some(e.to_string()),
+        ),
     };
     report_exec_audit(
         backend,
@@ -1883,7 +1896,10 @@ mod tests {
         let map = parse_command_allowlist(
             "echo=/bin/echo, sleep = /bin/sleep ; bad=relative/path, =/bin/x, noeq, dd=/bin/dd",
         );
-        assert_eq!(map.get("echo"), Some(&std::path::PathBuf::from("/bin/echo")));
+        assert_eq!(
+            map.get("echo"),
+            Some(&std::path::PathBuf::from("/bin/echo"))
+        );
         assert_eq!(
             map.get("sleep"),
             Some(&std::path::PathBuf::from("/bin/sleep"))
@@ -1934,7 +1950,11 @@ mod tests {
         let specs = rtk_specs();
         // mode "wrap" contributes ZERO tokens; command shell-splits into variadic.
         assert_eq!(
-            expand_arg_specs(&specs, &serde_json::json!({ "command": "git status", "mode": "wrap" })).unwrap(),
+            expand_arg_specs(
+                &specs,
+                &serde_json::json!({ "command": "git status", "mode": "wrap" })
+            )
+            .unwrap(),
             vec!["git", "status"]
         );
         // Absent mode defaults to "wrap" → still zero mode tokens.
@@ -1944,7 +1964,11 @@ mod tests {
         );
         // A non-wrap mode prepends its subcommand token.
         assert_eq!(
-            expand_arg_specs(&specs, &serde_json::json!({ "command": "ls -la", "mode": "proxy" })).unwrap(),
+            expand_arg_specs(
+                &specs,
+                &serde_json::json!({ "command": "ls -la", "mode": "proxy" })
+            )
+            .unwrap(),
             vec!["proxy", "ls", "-la"]
         );
         // Split tokens carrying leading dashes are NOT option-injection-guarded
@@ -1959,13 +1983,19 @@ mod tests {
     fn expand_arg_specs_error_paths() {
         let specs = rtk_specs();
         // Unknown mode → error (mirrors the old mode_prefix rejection).
-        assert!(expand_arg_specs(&specs, &serde_json::json!({ "command": "ls", "mode": "bogus" })).is_err());
+        assert!(expand_arg_specs(
+            &specs,
+            &serde_json::json!({ "command": "ls", "mode": "bogus" })
+        )
+        .is_err());
         // Blank required command → error.
         assert!(expand_arg_specs(&specs, &serde_json::json!({ "command": "   " })).is_err());
         // Missing required command → error.
         assert!(expand_arg_specs(&specs, &serde_json::json!({})).is_err());
         // Unbalanced quotes → parse error, nothing spawned.
-        assert!(expand_arg_specs(&specs, &serde_json::json!({ "command": "git \"status" })).is_err());
+        assert!(
+            expand_arg_specs(&specs, &serde_json::json!({ "command": "git \"status" })).is_err()
+        );
     }
 
     #[tokio::test]
@@ -1988,7 +2018,10 @@ mod tests {
         )
         .await
         .expect_err("missing grant must be refused");
-        assert!(err.contains("not granted") && err.contains("tool:command:echo"), "{err}");
+        assert!(
+            err.contains("not granted") && err.contains("tool:command:echo"),
+            "{err}"
+        );
     }
 
     /// Run a granted command tool with an `egress_url_arg` pointed at `url` and
@@ -2060,8 +2093,14 @@ mod tests {
 
     #[tokio::test]
     async fn command_tool_egress_rejects_non_http_scheme() {
-        assert_blocked_by_screen(&crawl_url("file:///etc/passwd").await, "file:// must be rejected");
-        assert_blocked_by_screen(&crawl_url("ftp://example.com").await, "ftp:// must be rejected");
+        assert_blocked_by_screen(
+            &crawl_url("file:///etc/passwd").await,
+            "file:// must be rejected",
+        );
+        assert_blocked_by_screen(
+            &crawl_url("ftp://example.com").await,
+            "ftp:// must be rejected",
+        );
     }
 
     #[tokio::test]
@@ -2084,7 +2123,11 @@ mod tests {
 
     #[tokio::test]
     async fn command_tool_egress_blocks_private_ip() {
-        for url in ["http://10.0.0.1/", "http://127.0.0.1/", "https://192.168.1.1/"] {
+        for url in [
+            "http://10.0.0.1/",
+            "http://127.0.0.1/",
+            "https://192.168.1.1/",
+        ] {
             assert_blocked_by_screen(
                 &crawl_url(url).await,
                 &format!("private/loopback IP {url} must be blocked"),
@@ -2163,8 +2206,14 @@ mod tests {
         )
         .await
         .expect("echo runs");
-        let stdout = out.get("stdout").and_then(|v| v.as_str()).unwrap_or_default();
-        assert!(stdout.contains(payload), "metachars must be literal, got: {stdout:?}");
+        let stdout = out
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            stdout.contains(payload),
+            "metachars must be literal, got: {stdout:?}"
+        );
         assert_eq!(out.get("exit_code").and_then(|v| v.as_i64()), Some(0));
     }
 
@@ -2236,13 +2285,20 @@ mod tests {
         // The `stdout` field now carries the bounded stdout PLUS the merged (also
         // bounded) stderr, so each stream is capped at MAX and the field stays
         // bounded by 2×MAX — the child never deadlocks and memory stays bounded.
-        let len = out.get("stdout").and_then(|v| v.as_str()).map(str::len).unwrap_or(0);
+        let len = out
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .map(str::len)
+            .unwrap_or(0);
         assert!(
             len <= 2 * MAX_COMMAND_OUTPUT_BYTES,
             "merged output must stay bounded, was {len}"
         );
         // dd reports its transfer stats on stderr — proof the merge fired.
-        let stdout = out.get("stdout").and_then(|v| v.as_str()).unwrap_or_default();
+        let stdout = out
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         assert!(
             stdout.contains("records"),
             "dd's stderr stats must be merged into the output"
@@ -2338,7 +2394,10 @@ mod tests {
         )
         .await
         .expect("env runs");
-        let stdout = out.get("stdout").and_then(|v| v.as_str()).unwrap_or_default();
+        let stdout = out
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         assert!(
             stdout.contains("RYU_CMD_TEST_DEST=injected-value"),
             "declared env var must be injected, got: {stdout}"
@@ -2419,7 +2478,10 @@ mod tests {
     #[test]
     fn merge_command_allowlist_env_wins_and_is_additive() {
         let mut seed = BTreeMap::new();
-        seed.insert("spider".to_owned(), std::path::PathBuf::from("/seed/spider"));
+        seed.insert(
+            "spider".to_owned(),
+            std::path::PathBuf::from("/seed/spider"),
+        );
         seed.insert("rtk".to_owned(), std::path::PathBuf::from("/seed/rtk"));
         let env = parse_command_allowlist("spider=/env/spider, extra=/env/extra");
         let merged = merge_command_allowlist(&seed, env);
@@ -2473,7 +2535,10 @@ mod tests {
         )
         .await
         .expect("echo runs");
-        let stdout = out.get("stdout").and_then(Value::as_str).unwrap_or_default();
+        let stdout = out
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         assert_eq!(stdout.trim(), "10 1", "clamped integers, got: {stdout:?}");
 
         // Absent depth falls back to its schema default (1).
@@ -2495,7 +2560,10 @@ mod tests {
         .await
         .expect("echo runs");
         assert_eq!(
-            out2.get("stdout").and_then(Value::as_str).unwrap_or_default().trim(),
+            out2.get("stdout")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim(),
             "1",
             "absent depth must use the schema default"
         );
@@ -2550,8 +2618,13 @@ mod tests {
         let (r, exit, err) =
             finalize_http_result(false, false, None, Value::Null, Some("boom".to_owned()));
         assert!(r.is_err() && exit == 1 && err.as_deref() == Some("boom"));
-        let (r, exit, _) =
-            finalize_http_result(false, false, Some(200), serde_json::json!({ "ok": 1 }), None);
+        let (r, exit, _) = finalize_http_result(
+            false,
+            false,
+            Some(200),
+            serde_json::json!({ "ok": 1 }),
+            None,
+        );
         assert_eq!(r.unwrap()["status"], 200);
         assert_eq!(exit, 0);
 
@@ -2568,10 +2641,12 @@ mod tests {
         let (r, _, _) = finalize_http_result(true, false, Some(403), Value::Null, None);
         assert_eq!(r.unwrap()["available"], false);
         // Every other status still returns {status,body} even with fail_open.
-        let (r, exit, _) = finalize_http_result(true, false, Some(404), serde_json::json!("x"), None);
+        let (r, exit, _) =
+            finalize_http_result(true, false, Some(404), serde_json::json!("x"), None);
         assert_eq!(r.unwrap()["status"], 404);
         assert_eq!(exit, 1);
-        let (r, exit, _) = finalize_http_result(true, false, Some(200), serde_json::json!("y"), None);
+        let (r, exit, _) =
+            finalize_http_result(true, false, Some(200), serde_json::json!("y"), None);
         assert_eq!(r.unwrap()["status"], 200);
         assert_eq!(exit, 0);
     }
@@ -2714,8 +2789,8 @@ mod tests {
             &[],
             None,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert!(none.is_none());
         // An unsupported prefix is a hard error (never a silent skip).
         assert!(
@@ -3040,8 +3115,8 @@ mod tests {
             &[],
             None,
         )
-            .await
-            .expect("whole-value template resolves");
+        .await
+        .expect("whole-value template resolves");
         assert_eq!(out.as_deref(), Some("bare-value"));
         std::env::remove_var("RYU_HDR_TEST_WHOLE");
     }
@@ -3074,8 +3149,8 @@ mod tests {
             &[],
             None,
         )
-            .await
-            .expect_err("a token-less value must be rejected");
+        .await
+        .expect_err("a token-less value must be rejected");
         assert!(err.contains("unsupported secret source"), "got: {err}");
     }
 
@@ -3210,10 +3285,7 @@ mod tests {
         // re-introduction path rather than re-proving what the scrubber already does.
         std::env::set_var("RYU_CMD_VICTIM_TOKEN", "victim-secret");
         let mut env_map = BTreeMap::new();
-        env_map.insert(
-            "STOLEN".to_string(),
-            "env:RYU_CMD_VICTIM_TOKEN".to_string(),
-        );
+        env_map.insert("STOLEN".to_string(), "env:RYU_CMD_VICTIM_TOKEN".to_string());
 
         let out = run_command_tool(
             "env",
@@ -3232,7 +3304,10 @@ mod tests {
         )
         .await
         .expect("env runs");
-        let stdout = out.get("stdout").and_then(|v| v.as_str()).unwrap_or_default();
+        let stdout = out
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         assert!(
             !stdout.contains("victim-secret") && !stdout.contains("STOLEN="),
             "an out-of-namespace env source must never reach the child, got: {stdout}"
@@ -3276,10 +3351,15 @@ mod tests {
         std::env::remove_var(ENV_SECRET_ALLOWLIST);
 
         for plugin_id in ["shadow", "com.ryuhq.advisor"] {
-            let out =
-                resolve_secret_header_source("Authorization", "Bearer env:RYU_TOKEN", plugin_id, &[], None)
-                    .await
-                    .expect("core-tier read resolves");
+            let out = resolve_secret_header_source(
+                "Authorization",
+                "Bearer env:RYU_TOKEN",
+                plugin_id,
+                &[],
+                None,
+            )
+            .await
+            .expect("core-tier read resolves");
             assert_eq!(
                 out.as_deref(),
                 Some("Bearer core-token"),
@@ -3422,12 +3502,20 @@ mod tests {
 
         let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
         store
-            .set("com.acme.weather", "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY", "k")
+            .set(
+                "com.acme.weather",
+                "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY",
+                "k",
+            )
             .await
             .unwrap();
         // Clearing it through the same API used by `PUT` with a blank body.
         store
-            .set("com.acme.weather", "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY", "  ")
+            .set(
+                "com.acme.weather",
+                "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY",
+                "  ",
+            )
             .await
             .unwrap();
 
@@ -3454,7 +3542,8 @@ mod tests {
     fn rtk_builtin_bin_never_resolves_through_path() {
         let _lock = lock_env_secret();
 
-        let planted_dir = std::env::temp_dir().join(format!("ryu-rtk-shadow-{}", std::process::id()));
+        let planted_dir =
+            std::env::temp_dir().join(format!("ryu-rtk-shadow-{}", std::process::id()));
         std::fs::create_dir_all(&planted_dir).expect("temp dir");
         let exe = if cfg!(windows) { "rtk.exe" } else { "rtk" };
         let planted = planted_dir.join(exe);
@@ -3536,7 +3625,10 @@ mod tests {
         .await
         .expect("sh runs");
         assert_eq!(out.get("exit_code").and_then(Value::as_i64), Some(0));
-        let stdout = out.get("stdout").and_then(Value::as_str).unwrap_or_default();
+        let stdout = out
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         assert!(
             stdout.contains("the-stdout"),
             "stdout must be present, got: {stdout:?}"
@@ -3561,7 +3653,10 @@ mod tests {
         assert!(may_read_env_secret("exa", "RYU_EXA_API_KEY"));
         // And the gate still holds sideways: one plugin cannot read another's key by
         // simply naming it.
-        assert!(!may_read_env_secret("acme-thirdparty", "RYU_TAVILY_API_KEY"));
+        assert!(!may_read_env_secret(
+            "acme-thirdparty",
+            "RYU_TAVILY_API_KEY"
+        ));
     }
 
     /// `core:` must resolve to the ACTIVE profile's Core port, never a hardcoded

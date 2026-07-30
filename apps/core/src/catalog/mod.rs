@@ -285,9 +285,7 @@ mod tests {
         let manager = CatalogManager::new();
         let store = InstallStatusStore::new();
         // An older pin from a previous Ryu build: a reinstall genuinely moves it.
-        store
-            .set_installed("llamacpp", "b0001".to_string())
-            .await;
+        store.set_installed("llamacpp", "b0001".to_string()).await;
         let items = manager.get_catalog(&store).await;
         let llamacpp = items.iter().find(|i| i.name == "llamacpp").unwrap();
         assert!(llamacpp.update_available);

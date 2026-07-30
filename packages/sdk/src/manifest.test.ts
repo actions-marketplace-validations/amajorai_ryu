@@ -608,3 +608,81 @@ describe("requires / targets", () => {
 		expect(plain.targets).toEqual([]);
 	});
 });
+
+// ── contributes.lsp_servers (Claude Code language-server parity) ──────────────
+//
+// Same load-bearing property as the block above: `ryu pack` / `ryu publish`
+// persist `PluginManifestSchema.safeParse(...).data`, so a contribution family
+// missing from `ContributesSchema` is silently DELETED before the manifest is
+// signed. These assert the declaration SURVIVES the parse — byte-for-byte, since
+// the entry body is Claude Code's own camelCase vocabulary and Ryu is only its
+// courier.
+
+describe("contributes.lsp_servers", () => {
+	/** The `.lsp.json` example from Claude Code's plugins reference, verbatim. */
+	const claudeCodeGoServer = {
+		command: "gopls",
+		args: ["serve"],
+		extensionToLanguage: { ".go": "go" },
+	};
+
+	it("keeps a Claude Code language server through the pack-path parse", () => {
+		const parsed = PluginManifestSchema.safeParse({
+			id: "com.example.go-lsp",
+			name: "Go LSP",
+			version: "1.0.0",
+			runnables: [],
+			contributes: { lsp_servers: { go: claudeCodeGoServer } },
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) {
+			return;
+		}
+		expect(parsed.data.contributes?.lsp_servers.go).toEqual(claudeCodeGoServer);
+	});
+
+	it("keeps an unknown entry key too (Claude Code owns the vocabulary)", () => {
+		// The entry is a loose record on purpose: typing the 13 documented fields
+		// here would strip a field from a newer Claude release on its way through
+		// `ryu pack` — the same silent deletion, one level down.
+		const parsed = PluginManifestSchema.safeParse({
+			id: "com.example.future-lsp",
+			name: "Future LSP",
+			version: "1.0.0",
+			runnables: [],
+			contributes: {
+				lsp_servers: {
+					go: { ...claudeCodeGoServer, someFutureClaudeField: { deep: true } },
+				},
+			},
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) {
+			return;
+		}
+		expect(parsed.data.contributes?.lsp_servers.go).toMatchObject({
+			someFutureClaudeField: { deep: true },
+		});
+	});
+
+	it("yields an empty map, never undefined, when none is declared", () => {
+		const parsed = PluginManifestSchema.safeParse({
+			id: "com.example.legacy",
+			name: "Legacy",
+			version: "1.0.0",
+			runnables: [],
+			contributes: {},
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) {
+			return;
+		}
+		// Core's field is `#[serde(default, skip_serializing_if = "…is_empty")]`, so
+		// an empty map here round-trips to a manifest with no `lsp_servers` key at
+		// all — every plugin predating this surface keeps parsing on both sides.
+		expect(parsed.data.contributes?.lsp_servers).toEqual({});
+	});
+});

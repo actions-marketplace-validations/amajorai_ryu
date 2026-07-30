@@ -282,6 +282,21 @@ export const ContributesSchema = z.object({
 	 *  Rust-side `Contributes.dock_panels`; without it the CLI's zod parse would
 	 *  strip the dock panel an app declares here. */
 	dock_panels: z.array(z.record(z.string(), z.unknown())).default([]),
+	/** Language servers the plugin declares, keyed by server name — the mirror of
+	 *  Claude Code's `.lsp.json` / `lspServers`, so a config written for either host
+	 *  loads in the other. Mirrors the Rust-side `Contributes.lsp_servers`; without
+	 *  it the CLI's zod parse would strip every language server a plugin declares,
+	 *  before the manifest is signed.
+	 *
+	 *  The ENTRY is deliberately a loose record and not a 13-field `z.object()`
+	 *  mirroring `LspServerContribution`. Claude Code owns this field vocabulary,
+	 *  not Ryu: a typed object here would strip a field from a newer Claude release
+	 *  on its way through `ryu pack` — the same silent-deletion bug this field
+	 *  exists to fix, one level down. Core is the layer that types it, because Core
+	 *  is the layer that acts on it. */
+	lsp_servers: z
+		.record(z.string(), z.record(z.string(), z.unknown()))
+		.default({}),
 });
 
 export type Contributes = z.infer<typeof ContributesSchema>;

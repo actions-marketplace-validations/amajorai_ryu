@@ -1219,13 +1219,17 @@ mod asset_proxy_tests {
     #[test]
     fn ip_guard_blocks_mapped_and_ula_passes_public() {
         // IPv4-mapped cloud metadata address (the DNS-rebinding residual closer).
-        assert!(ip_is_blocked(&"::ffff:169.254.169.254".parse::<IpAddr>().unwrap()));
+        assert!(ip_is_blocked(
+            &"::ffff:169.254.169.254".parse::<IpAddr>().unwrap()
+        ));
         // CGNAT / carrier range is public-routable-but... 100.64/10 is NOT private per
         // std, so it is NOT blocked — pin that we don't over-block.
         assert!(!ip_is_blocked(&"100.64.0.1".parse::<IpAddr>().unwrap()));
         // A real public v4 + v6 pass.
         assert!(!ip_is_blocked(&"1.1.1.1".parse::<IpAddr>().unwrap()));
-        assert!(!ip_is_blocked(&"2606:4700:4700::1111".parse::<IpAddr>().unwrap()));
+        assert!(!ip_is_blocked(
+            &"2606:4700:4700::1111".parse::<IpAddr>().unwrap()
+        ));
     }
 
     /// The gateway-fallback escape hatch is OFF unless explicitly opted in with a

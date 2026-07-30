@@ -90,7 +90,14 @@ pub fn installer_pin(name: &str) -> Option<&'static str> {
 /// against an upstream version always "differs", which would advertise an update
 /// on every poll that no reinstall could ever clear.
 const SENTINEL_VERSIONS: &[&str] = &[
-    "latest", "adopted", "brew", "pip-git", "unknown", "installed", "skipped", "",
+    "latest",
+    "adopted",
+    "brew",
+    "pip-git",
+    "unknown",
+    "installed",
+    "skipped",
+    "",
 ];
 
 /// Whether `version` is a real version that may be compared against another.

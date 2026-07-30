@@ -397,17 +397,40 @@ export interface CompanionSurface {
 /**
  * VS-Code-style **contribution points** (`contributes` in `package.json`).
  *
- * Each field is a list of [`ContributionId`] references into the manifest's
- * `runnables`: the plugin *declares* that runnable `X` contributes to the
- * `commands`/`tools`/`agents`/… surface. This is declare-by-id, not a second
- * copy of the runnable — the loader cross-validates that every referenced id
- * exists in `runnables`, so a typo is caught at load.
+ * The original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)
+ * are lists of [`ContributionId`] references into the manifest's `runnables`: the
+ * plugin *declares* that runnable `X` contributes to that surface. This is
+ * declare-by-id, not a second copy of the runnable — the loader cross-validates
+ * that every referenced id exists in `runnables`, so a typo is caught at load.
+ *
+ * Most surfaces added since are **self-contained**: they carry their own payload
+ * and reference no runnable at all (`widgets`, `views`, `dock_panels`,
+ * `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
+ * `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`).
  *
  * # Extending
  *
- * Add a new surface = add a new `#[serde(default)] pub <surface>: Vec<ContributionId>`
- * field here. The cross-validation in [`Contributes::referenced_ids`] picks it
- * up automatically.
+ * Adding a surface is two decisions, and getting either wrong is silent:
+ *
+ * 1. **Id-reference or self-contained?** An id-reference surface is a
+ *    `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]
+ *    so the loader can catch a typo. A self-contained surface must be left OUT of
+ *    it — every id in it names something other than a runnable (a PATH binary, a
+ *    route, a tool namespace), so including it would reject every valid manifest.
+ *    `referenced_ids` therefore covers exactly the five original surfaces and
+ *    nothing else; that omission is deliberate, not an oversight to be tidied up.
+ * 2. **Core-interpreted or client-rendered?** If Core acts on the payload
+ *    (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed
+ *    struct, because a key Core does not know is by construction a key Core cannot
+ *    act on. If a client shell renders it (`views`, `dock_panels`,
+ *    `sidebar_sections`, `settings_tabs`, `composer_controls`) it stays opaque
+ *    JSON, because deserializing into a struct here would DROP any key this Core
+ *    build does not know about and a newer desktop would lose exactly the fields it
+ *    was shipped to render.
+ *
+ * Client-rendered surfaces are then served, tagged with the owning plugin id, from
+ * `GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —
+ * they are gathered at their own consumption site instead.
  */
 export interface Contributes {
 	/**
@@ -475,6 +498,53 @@ export interface Contributes {
 	 * `plugin` id at `GET /api/plugins/contributions`.
 	 */
 	dock_panels?: DockPanelContribution[];
+	/**
+	 * **Language servers** the plugin declares, keyed by server name — the
+	 * agent-neutral mirror of Claude Code's `.lsp.json` / `lspServers`, so a config
+	 * written for either host loads in the other:
+	 *
+	 * ```json
+	 * "lsp_servers": {
+	 *   "go": { "command": "gopls", "args": ["serve"], "extensionToLanguage": { ".go": "go" } }
+	 * }
+	 * ```
+	 *
+	 * Only the container key is Ryu's (`lsp_servers`, snake_case like every sibling
+	 * here); every key INSIDE a server entry is Claude's own camelCase spelling
+	 * verbatim, because that body is what actually travels between the two hosts.
+	 * No `lspServers` alias is accepted on purpose. `lsp_servers` — this exact
+	 * spelling — is registered in the SDK's zod mirror (`ContributesSchema` in
+	 * `packages/sdk/src/manifest.ts`), and that mirror STRIPS every key it does not
+	 * list. An alias would therefore parse here and be silently deleted at
+	 * `ryu pack` time, before the manifest is signed, which is a worse failure than
+	 * a key that never parsed at all. One spelling, registered in both places.
+	 *
+	 * The plugin ships CONFIG ONLY, never the server binary — `command` is resolved
+	 * from `PATH` at spawn time and a missing binary is a visible skip, not a load
+	 * error. Core spawns and supervises these processes itself, so unlike the
+	 * client-rendered surfaces above this one is fully typed
+	 * ([`LspServerContribution`]) and is NOT served from
+	 * `GET /api/plugins/contributions`; it is gathered at the spawn site, the same
+	 * disposition as [`Contributes::tool_filters`].
+	 *
+	 * # Ordering is part of the contract
+	 *
+	 * Registration is **first-registration-wins per file extension**: if two enabled
+	 * servers both claim `.go`, the first one registered owns it, the others never
+	 * start for that extension, and the spawn site warns naming the owner. That rule
+	 * is only reproducible if iteration order is, so this is a [`BTreeMap`] — it
+	 * iterates lexicographically by server key, never in hash order and never in
+	 * JSON authoring order. The full resolved invariant across a node is
+	 * **(plugin enable order, then server key ascending)**.
+	 *
+	 * Note this makes the tie-break deterministic, not byte-identical to Claude
+	 * Code's, which falls out of JS object insertion order. Two servers fighting
+	 * over one extension is a misconfiguration in either host; what matters is that
+	 * the same node always resolves it the same way and says who won.
+	 */
+	lsp_servers?: {
+		[k: string]: LspServerContribution;
+	};
 	/**
 	 * Gateway policies the plugin contributes (referenced by runnable id).
 	 */
@@ -657,6 +727,146 @@ export interface DockPanelContribution {
 	 * Tab label shown on the dock tab strip and in the "new tab" menu.
 	 */
 	title: string;
+}
+/**
+ * One **language server** a plugin declares (see [`Contributes::lsp_servers`]).
+ *
+ * Field-for-field Claude Code's language-server config, camelCase on the wire, so
+ * the same JSON body loads in either host. Required by Claude's spec: `command`
+ * and `extensionToLanguage`. Everything else is optional and defaulted here to
+ * Claude's documented default.
+ *
+ * # Why `command` and `extensionToLanguage` are `#[serde(default)]` anyway
+ *
+ * They are required by the SPEC, not by serde, and that is deliberate. Claude Code
+ * **skips** a server whose config is invalid and starts the rest; making either
+ * field a non-defaulted serde field would instead turn a missing one into a parse
+ * error on the entire [`PluginManifest`], costing the plugin every runnable,
+ * sidecar and tool it ships over one broken language-server entry. Defaulting them
+ * is what makes the per-server skip reachable at all: the manifest parses, and
+ * [`LspServerContribution::validate`] reports the reason at the spawn site.
+ *
+ * Unknown keys are dropped rather than rejected (no `deny_unknown_fields`
+ * anywhere in this file), so a field from a newer Claude release costs a plugin
+ * nothing.
+ */
+export interface LspServerContribution {
+	/**
+	 * Arguments passed to [`command`](LspServerContribution::command)
+	 * (e.g. `["serve"]` for `gopls`).
+	 */
+	args?: string[];
+	/**
+	 * The server executable, resolved from `PATH` at spawn time (`gopls`,
+	 * `rust-analyzer`, `typescript-language-server`, …).
+	 *
+	 * The plugin ships the CONFIG, never the binary. A `command` that is not on
+	 * `PATH` is a graceful skip with a visible reason — the user is told which
+	 * server did not start and why, and the rest of the node is unaffected.
+	 * Defaulted to `""` so a missing one is a skipped server, not a dead manifest
+	 * (see the type doc).
+	 */
+	command?: string;
+	/**
+	 * Push this server's diagnostics into the model's context after edits. Defaults
+	 * to **true** (Claude Code parity); same `default` caveat as
+	 * [`restart_on_crash`](LspServerContribution::restart_on_crash).
+	 */
+	diagnostics?: boolean;
+	/**
+	 * Extra environment variables for the server process, merged over the inherited
+	 * environment.
+	 */
+	env?: {
+		[k: string]: string;
+	};
+	/**
+	 * File extension → LSP language id (`{ ".go": "go" }`) — the map that decides
+	 * which files this server handles, and the thing two servers can collide on.
+	 *
+	 * Claude Code authors keys with a leading dot and in lowercase; a hand-written
+	 * manifest will not always. Compare through
+	 * [`normalize_lsp_extension_key`] (or read
+	 * [`normalized_extensions`](LspServerContribution::normalized_extensions))
+	 * rather than indexing this map directly, so `go`, `.go` and `.GO` all resolve
+	 * to the same entry. Empty ⇒ the server claims nothing and is skipped.
+	 */
+	extensionToLanguage?: {
+		[k: string]: string;
+	};
+	/**
+	 * Sent verbatim as `initializationOptions` in the LSP `initialize` request.
+	 * Opaque JSON on purpose: the shape is the individual language server's, and
+	 * Ryu is a courier for it, not an interpreter. Absent = send none.
+	 */
+	initializationOptions?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Cap on automatic restarts before the server is left down. Absent = the spawn
+	 * site's own default; meaningless when
+	 * [`restart_on_crash`](LspServerContribution::restart_on_crash) is false.
+	 */
+	maxRestarts?: number | null;
+	/**
+	 * Restart the server when it exits unexpectedly. Defaults to **true** (Claude
+	 * Code parity).
+	 *
+	 * Note this needs an explicit default fn: a bare `#[serde(default)]` on a
+	 * `bool` yields `false` and would silently invert the documented behaviour.
+	 * Like [`McpServerDecl::enabled`] it carries no `skip_serializing_if`, so the
+	 * value always ships and a reader never has to know the default.
+	 */
+	restartOnCrash?: boolean;
+	/**
+	 * Sent verbatim as the payload of `workspace/didChangeConfiguration` once the
+	 * server is initialized. Opaque for the same reason as
+	 * [`initialization_options`](LspServerContribution::initialization_options).
+	 * Absent = send nothing.
+	 */
+	settings?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Milliseconds to wait for a clean `shutdown`/`exit` before killing the
+	 * process. Absent = the spawn site's own default.
+	 *
+	 * That default is the one place this type knowingly parts company with Claude
+	 * Code, whose reference says an unset `shutdownTimeout` means **no timeout
+	 * applies** — it waits on a wedged server indefinitely. Ryu's spawn sites
+	 * impose a finite one (5s in `assets/pi-extensions/ryu-lsp.ts`, documented at
+	 * the constant), because Pi is spawned per session and an unbounded wait would
+	 * hold every teardown open behind one unresponsive server. An explicitly
+	 * declared value is honoured verbatim, so a config written for either host
+	 * still behaves identically; only the *unset* case differs.
+	 */
+	shutdownTimeout?: number | null;
+	/**
+	 * Milliseconds to wait for `initialize` to come back before giving up on the
+	 * server. Absent = the spawn site's own default.
+	 */
+	startupTimeout?: number | null;
+	/**
+	 * How the host talks to the server: `"stdio"` (the default, and the only
+	 * transport Core implements today) or `"socket"`.
+	 *
+	 * A plain `String` and not an enum, matching this file's other discriminants
+	 * ([`ViewContribution::view`], [`DockPanelContribution::panel`]). The reason is
+	 * sharper here than for those: [`DockPanelPlacement`] can afford to coerce an
+	 * unrecognised value to its default because a panel opening in the wrong dock is
+	 * cosmetic, whereas coercing an unrecognised transport to `stdio` would spawn a
+	 * process and then speak a protocol it does not understand. The verbatim string
+	 * survives instead, and the spawn site refuses what it cannot drive — see
+	 * [`LspTransport`] and [`LspServerContribution::transport_kind`].
+	 */
+	transport?: string;
+	/**
+	 * Root directory the server is rooted at. Absent (the common case) = the
+	 * session's workspace root, which is why this is an `Option` rather than a
+	 * defaulted `String`: "unset, inherit the workspace" and "explicitly rooted
+	 * somewhere" are different instructions.
+	 */
+	workspaceFolder?: string | null;
 }
 /**
  * One **settings tab** a plugin contributes (see [`Contributes::settings_tabs`]).

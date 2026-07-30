@@ -454,7 +454,11 @@ mod tests {
     fn uniq() -> String {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
-        format!("{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed))
+        format!(
+            "{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     #[test]

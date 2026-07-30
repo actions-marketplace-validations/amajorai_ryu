@@ -245,10 +245,7 @@ impl Sidecar for RyuTtsManager {
                 ("RYU_TTS_PORT".into(), TTS_PORT.to_string()),
                 // Shared-secret the sidecar fail-closed-checks on every non-/health
                 // route; Core presents the same value via `bearer()`.
-                (
-                    crate::sidecar::ext_proxy::ENV_EXT_TOKEN.into(),
-                    bearer(),
-                ),
+                (crate::sidecar::ext_proxy::ENV_EXT_TOKEN.into(), bearer()),
                 ("HF_HOME".into(), hf_home.to_string_lossy().to_string()),
                 // Point the default `kokoro` backend at the model artifacts Core
                 // downloads during onboarding (the engine only serves them).

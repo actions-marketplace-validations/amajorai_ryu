@@ -8,12 +8,12 @@
 // Better-Auth session bearer token in localStorage. Billing/entitlement is a
 // "what is allowed / paid for" concern and lives in the control plane.
 //
-// Why a desktop-native client (not @ryu/settings useSubscription): the settings
-// api-client authenticates with COOKIES (`credentials: "include"`), which the
-// Tauri webview does not carry for :3000 unless `configureSettingsApi` is wired
-// (it is not). A gate that silently fails to `false` would falsely lock out a
-// real Pro user, so the gate reads its own bearer-authed endpoints and consumes
-// the server's richer `entitlement` field directly.
+// Why a desktop-native client (not @ryu/settings useSubscription): the gate has
+// to tell "un-entitled" apart from "could not check". A hook that resolves an
+// outage to `false` would falsely lock out a real Pro user, so every function
+// here returns null on a FAILED check and lets the caller ride the offline
+// cache instead. They also consume the server's richer `entitlement` object
+// directly rather than re-deriving a plan from the subscription row.
 //
 //   GET  /api/billing/subscription-status -> { entitlement, plan, ... }
 //   GET  /api/billing/trial               -> { firstLaunchAt }  (idempotent anchor)
@@ -49,9 +49,22 @@ function authHeaders(): Record<string, string> {
 
 const BASE = `${BACKEND_URL.replace(/\/$/, "")}/api/billing`;
 
+/**
+ * The lifetime (desktop-license) order and its updates window. Mirrors the
+ * server's `LifetimeOrderData` (packages/api/src/lib/billing-scope.ts).
+ * `expired` means only that the UPDATES window lapsed — a desktop licence is
+ * perpetual and is never revoked by it.
+ */
+export interface LifetimeUpdatesWindow {
+	expired: boolean;
+	purchasedAt: string;
+	updatesExpiresAt: string;
+}
+
 /** The subscription-status payload's entitlement-bearing fields (Unit B1). */
 export interface SubscriptionStatus {
 	entitlement?: Entitlement | null;
+	lifetime?: LifetimeUpdatesWindow | null;
 	plan?: PlanId | null;
 	scope?: "org" | "user";
 	seats?: number;
@@ -63,12 +76,21 @@ export interface SubscriptionStatus {
 }
 
 /**
- * Fetch the caller's resolved entitlement from the control plane. Returns the
- * server's `entitlement` object, or null when the check FAILED (offline / 5xx /
- * not signed in) so the gate can distinguish "no entitlement" (a successful
- * un-entitled result) from "could not check" (ride the offline cache).
+ * Both facts the desktop needs, from ONE request. `null` means the check
+ * FAILED or the user is not signed in — distinct from a successful
+ * un-entitled result, which returns a non-null object with `entitlement: null`.
  */
-export async function fetchEntitlement(): Promise<Entitlement | null> {
+export interface EntitlementSnapshot {
+	entitlement: Entitlement | null;
+	lifetime: LifetimeUpdatesWindow | null;
+}
+
+/**
+ * Fetch the caller's resolved entitlement (the paywall gate) and their lifetime
+ * updates window (the updater) in a single round-trip — the endpoint has always
+ * carried both, so reading the window costs no extra request.
+ */
+export async function fetchEntitlementSnapshot(): Promise<EntitlementSnapshot | null> {
 	if (!hasBillingAuth()) {
 		return null;
 	}
@@ -80,10 +102,23 @@ export async function fetchEntitlement(): Promise<Entitlement | null> {
 			return null;
 		}
 		const json = (await resp.json()) as SubscriptionStatus;
-		return json.entitlement ?? null;
+		return {
+			entitlement: json.entitlement ?? null,
+			lifetime: json.lifetime ?? null,
+		};
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Fetch the caller's resolved entitlement from the control plane. Returns the
+ * server's `entitlement` object, or null when the check FAILED (offline / 5xx /
+ * not signed in) so the gate can distinguish "no entitlement" (a successful
+ * un-entitled result) from "could not check" (ride the offline cache).
+ */
+export async function fetchEntitlement(): Promise<Entitlement | null> {
+	return (await fetchEntitlementSnapshot())?.entitlement ?? null;
 }
 
 /** Fetch the full billing status when a surface needs plan metadata. */

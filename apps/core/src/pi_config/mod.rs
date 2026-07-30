@@ -529,7 +529,8 @@ pub fn ensure_managed_defaults() -> Result<()> {
         write_settings(&settings)?;
     }
     ensure_gateway_models_json()?;
-    ensure_pi_mcp_extension()
+    ensure_pi_mcp_extension()?;
+    ensure_pi_lsp_extension()
 }
 
 /// The Ryu-MCP Pi extension source, embedded into the Core binary so it ships
@@ -557,15 +558,70 @@ fn pi_mcp_extension_path() -> PathBuf {
 /// absolute path is appended to `settings.json`'s `extensions` array only when
 /// missing.
 fn ensure_pi_mcp_extension() -> Result<()> {
-    let ext_path = pi_mcp_extension_path();
+    ship_pi_extension(&pi_mcp_extension_path(), PI_MCP_EXTENSION_SRC)
+}
+
+/// The Ryu-LSP Pi extension source, embedded for the same reason as
+/// [`PI_MCP_EXTENSION_SRC`]. This is the flagship agent's **binding** for the
+/// agent-neutral `contributes.lsp_servers` declaration ([`crate::lsp`]): Pi has no
+/// language-server support of its own, so the extension spawns the servers Core
+/// resolved, speaks LSP over their stdio, and pushes diagnostics back into the
+/// model's context after edits.
+///
+/// Shipped unconditionally, exactly like the MCP bridge — an extension with no
+/// resolved config is a silent no-op (it reads [`pi_lsp_servers_path`], finds
+/// nothing, and registers no handlers), so gating the file on "does any plugin
+/// declare a server today" would only add a way for the two to disagree.
+const PI_LSP_EXTENSION_SRC: &str = include_str!("../../assets/pi-extensions/ryu-lsp.ts");
+
+/// Absolute path to the managed Pi's Ryu-LSP extension file. Same folder and same
+/// registration rules as [`pi_mcp_extension_path`].
+fn pi_lsp_extension_path() -> PathBuf {
+    config_dir().join("extensions").join("ryu-lsp.ts")
+}
+
+/// Absolute path to the resolved language-server table the Ryu-LSP extension
+/// reads, written by [`write_lsp_servers_file`].
+///
+/// **This path is a contract with `assets/pi-extensions/ryu-lsp.ts`**, which
+/// resolves it as `<PI_CODING_AGENT_DIR>/extensions/ryu-lsp.json` (Core sets that
+/// env var on the Pi spawn command; `RYU_PI_AGENT_DIR` is Core's own knob and is
+/// NOT in the child's environment). A mismatch is a SILENT no-op by design — the
+/// extension treats an absent file as "no language servers configured" — so the
+/// two spellings must be changed together.
+///
+/// It lives beside the extension rather than inside `settings.json` on purpose:
+/// `settings.json` is rewritten on every composer model pick and sits in a 0700
+/// dir next to credentials, whereas this file is regenerated wholesale, is
+/// independently inspectable, and can be deleted when nothing declares a server.
+fn pi_lsp_servers_path() -> PathBuf {
+    config_dir().join("extensions").join("ryu-lsp.json")
+}
+
+/// Ship + register the Ryu-LSP Pi extension into the MANAGED Pi config, with the
+/// same idempotency guarantees as [`ensure_pi_mcp_extension`].
+fn ensure_pi_lsp_extension() -> Result<()> {
+    ship_pi_extension(&pi_lsp_extension_path(), PI_LSP_EXTENSION_SRC)
+}
+
+/// Write `src` to `ext_path` and register that absolute path in the managed
+/// `settings.json`'s `extensions` array — the shared body of every Ryu-owned Pi
+/// extension.
+///
+/// Idempotent on both halves: the source is (re)written only when its bytes
+/// differ (so an engine update ships the current code without churning the disk
+/// on every spawn), and the path is appended only when missing. Unrelated entries
+/// a user or another Ryu write put in the array are preserved; a non-array value
+/// there is replaced, because Pi would reject it anyway.
+fn ship_pi_extension(ext_path: &std::path::Path, src: &str) -> Result<()> {
     if let Some(dir) = ext_path.parent() {
         fs::create_dir_all(dir).context("create Pi extensions dir")?;
     }
-    let needs_write = fs::read_to_string(&ext_path)
-        .map(|existing| existing != PI_MCP_EXTENSION_SRC)
+    let needs_write = fs::read_to_string(ext_path)
+        .map(|existing| existing != src)
         .unwrap_or(true);
     if needs_write {
-        fs::write(&ext_path, PI_MCP_EXTENSION_SRC).context("write ryu-mcp.ts")?;
+        fs::write(ext_path, src).with_context(|| format!("write {}", ext_path.display()))?;
     }
 
     let abs = ext_path.to_string_lossy().into_owned();
@@ -588,6 +644,43 @@ fn ensure_pi_mcp_extension() -> Result<()> {
         write_settings(&settings)?;
     }
     Ok(())
+}
+
+/// Materialise the node's resolved language-server table where the Ryu-LSP
+/// extension reads it — the flagship `ryu` agent's binding for
+/// [`crate::lsp::LspResolution`].
+///
+/// **An empty resolution DELETES the file rather than writing `{}`.** Disabling
+/// the last LSP-contributing plugin has to actually stop the servers, and a stale
+/// table left on disk would keep spawning `gopls` on every Pi start with nothing
+/// in the UI explaining why. Absent is also the extension's documented no-op
+/// state, so "nothing declared" and "never configured" look identical to it.
+///
+/// Idempotent by content compare, matching [`ship_pi_extension`]: pi-acp spawns a
+/// fresh Pi per session, so an unconditional write would touch this file on every
+/// chat. That is also why the document carries no generation timestamp.
+///
+/// Never touches the user's `~/.pi` — [`config_dir`] is Ryu's isolated dir.
+pub fn write_lsp_servers_file(resolution: &crate::lsp::LspResolution) -> Result<()> {
+    let path = pi_lsp_servers_path();
+    if resolution.is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).context("remove stale ryu-lsp.json"),
+        }
+    } else {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).context("create Pi extensions dir")?;
+        }
+        let body = serde_json::to_string_pretty(&resolution.to_wire_document())
+            .context("serialize ryu-lsp.json")?;
+        let unchanged = fs::read_to_string(&path).is_ok_and(|existing| existing == body);
+        if !unchanged {
+            fs::write(&path, &body).context("write ryu-lsp.json")?;
+        }
+        Ok(())
+    }
 }
 
 /// Persist a composer-picked model for the managed Pi (QA finding B2).
@@ -2317,6 +2410,115 @@ mod tests {
             let abs = pi_mcp_extension_path().to_string_lossy().into_owned();
             assert!(exts.iter().any(|v| v.as_str() == Some("/tmp/other-ext.ts")));
             assert!(exts.iter().any(|v| v.as_str() == Some(abs.as_str())));
+        });
+    }
+
+    #[test]
+    fn pi_lsp_extension_is_shipped_and_registered_idempotently() {
+        with_temp_dir(|| {
+            ensure_pi_lsp_extension().expect("first ensure");
+            let ext_path = pi_lsp_extension_path();
+            let shipped = fs::read_to_string(&ext_path).expect("extension file is shipped");
+            assert_eq!(
+                shipped, PI_LSP_EXTENSION_SRC,
+                "shipped source matches the embed"
+            );
+
+            // A second ensure must neither rewrite the source nor double-register.
+            let mtime = fs::metadata(&ext_path).unwrap().modified().unwrap();
+            ensure_pi_lsp_extension().expect("second ensure");
+            assert_eq!(
+                fs::metadata(&ext_path).unwrap().modified().unwrap(),
+                mtime,
+                "identical source is not rewritten"
+            );
+
+            let abs = ext_path.to_string_lossy().into_owned();
+            let exts = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array present");
+            assert_eq!(
+                exts.iter()
+                    .filter(|v| v.as_str() == Some(abs.as_str()))
+                    .count(),
+                1,
+                "registered exactly once"
+            );
+        });
+    }
+
+    #[test]
+    fn managed_defaults_ship_both_ryu_extensions() {
+        with_temp_dir(|| {
+            ensure_managed_defaults().expect("managed defaults");
+            assert!(pi_mcp_extension_path().exists());
+            assert!(
+                pi_lsp_extension_path().exists(),
+                "the LSP binding rides the same spawn-time invariant pass as the MCP bridge"
+            );
+        });
+    }
+
+    /// One resolved stdio server, built through serde so the Claude Code defaults
+    /// (`restartOnCrash` / `diagnostics` = true) come from the contract itself.
+    fn resolved_go_server() -> crate::lsp::LspResolution {
+        let config = serde_json::from_value(json!({
+            "command": "gopls",
+            "extensionToLanguage": { ".go": "go" },
+        }))
+        .expect("valid declaration");
+        crate::lsp::LspResolution {
+            servers: vec![crate::lsp::ResolvedLspServer {
+                plugin_id: "com.example.go".to_owned(),
+                server_name: "go".to_owned(),
+                config,
+            }],
+            skipped: vec![],
+        }
+    }
+
+    #[test]
+    fn lsp_servers_file_lands_where_the_extension_reads_it() {
+        with_temp_dir(|| {
+            write_lsp_servers_file(&resolved_go_server()).expect("write");
+
+            // The path is a contract with assets/pi-extensions/ryu-lsp.ts, which
+            // reads `<PI_CODING_AGENT_DIR>/extensions/ryu-lsp.json`.
+            let path = config_dir().join("extensions").join("ryu-lsp.json");
+            let doc: Value =
+                serde_json::from_str(&fs::read_to_string(&path).expect("file written"))
+                    .expect("valid JSON");
+            let entry = &doc["servers"]["com.example.go/go"];
+            assert_eq!(entry["command"], "gopls");
+            assert_eq!(entry["extensionToLanguage"][".go"], "go");
+            assert_eq!(entry["restartOnCrash"], true);
+        });
+    }
+
+    #[test]
+    fn lsp_servers_file_is_written_once_and_removed_when_nothing_is_declared() {
+        with_temp_dir(|| {
+            let path = config_dir().join("extensions").join("ryu-lsp.json");
+            write_lsp_servers_file(&resolved_go_server()).expect("write");
+            let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+            write_lsp_servers_file(&resolved_go_server()).expect("second write");
+            assert_eq!(
+                fs::metadata(&path).unwrap().modified().unwrap(),
+                mtime,
+                "an unchanged table is not rewritten on every Pi spawn"
+            );
+
+            // Disabling the last contributing plugin must actually stop the
+            // servers, so the stale table is removed rather than left behind.
+            write_lsp_servers_file(&crate::lsp::LspResolution::default()).expect("empty write");
+            assert!(!path.exists(), "an empty resolution deletes the file");
+
+            // ...and removing an already-absent file is not an error.
+            write_lsp_servers_file(&crate::lsp::LspResolution::default()).expect("idempotent");
         });
     }
 

@@ -253,12 +253,18 @@ mod tests {
     #[test]
     fn images_pass_through() {
         assert_eq!(safe_inline_mime("image/png"), "image/png");
-        assert_eq!(safe_inline_mime("image/jpeg; charset=binary"), "image/jpeg; charset=binary");
+        assert_eq!(
+            safe_inline_mime("image/jpeg; charset=binary"),
+            "image/jpeg; charset=binary"
+        );
     }
 
     #[test]
     fn html_and_svg_are_neutralized() {
         assert_eq!(safe_inline_mime("text/html"), "application/octet-stream");
-        assert_eq!(safe_inline_mime("image/svg+xml"), "application/octet-stream");
+        assert_eq!(
+            safe_inline_mime("image/svg+xml"),
+            "application/octet-stream"
+        );
     }
 }

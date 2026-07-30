@@ -702,17 +702,40 @@ pub struct CompanionSurface {
 
 /// VS-Code-style **contribution points** (`contributes` in `package.json`).
 ///
-/// Each field is a list of [`ContributionId`] references into the manifest's
-/// `runnables`: the plugin *declares* that runnable `X` contributes to the
-/// `commands`/`tools`/`agents`/… surface. This is declare-by-id, not a second
-/// copy of the runnable — the loader cross-validates that every referenced id
-/// exists in `runnables`, so a typo is caught at load.
+/// The original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)
+/// are lists of [`ContributionId`] references into the manifest's `runnables`: the
+/// plugin *declares* that runnable `X` contributes to that surface. This is
+/// declare-by-id, not a second copy of the runnable — the loader cross-validates
+/// that every referenced id exists in `runnables`, so a typo is caught at load.
+///
+/// Most surfaces added since are **self-contained**: they carry their own payload
+/// and reference no runnable at all (`widgets`, `views`, `dock_panels`,
+/// `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
+/// `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`).
 ///
 /// # Extending
 ///
-/// Add a new surface = add a new `#[serde(default)] pub <surface>: Vec<ContributionId>`
-/// field here. The cross-validation in [`Contributes::referenced_ids`] picks it
-/// up automatically.
+/// Adding a surface is two decisions, and getting either wrong is silent:
+///
+/// 1. **Id-reference or self-contained?** An id-reference surface is a
+///    `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]
+///    so the loader can catch a typo. A self-contained surface must be left OUT of
+///    it — every id in it names something other than a runnable (a PATH binary, a
+///    route, a tool namespace), so including it would reject every valid manifest.
+///    `referenced_ids` therefore covers exactly the five original surfaces and
+///    nothing else; that omission is deliberate, not an oversight to be tidied up.
+/// 2. **Core-interpreted or client-rendered?** If Core acts on the payload
+///    (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed
+///    struct, because a key Core does not know is by construction a key Core cannot
+///    act on. If a client shell renders it (`views`, `dock_panels`,
+///    `sidebar_sections`, `settings_tabs`, `composer_controls`) it stays opaque
+///    JSON, because deserializing into a struct here would DROP any key this Core
+///    build does not know about and a newer desktop would lose exactly the fields it
+///    was shipped to render.
+///
+/// Client-rendered surfaces are then served, tagged with the owning plugin id, from
+/// `GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —
+/// they are gathered at their own consumption site instead.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Contributes {
     /// Command-palette commands the plugin contributes (referenced by runnable id).
@@ -873,6 +896,51 @@ pub struct Contributes {
     /// `plugin` id at `GET /api/plugins/contributions`.
     #[serde(default)]
     pub dock_panels: Vec<DockPanelContribution>,
+
+    /// **Language servers** the plugin declares, keyed by server name — the
+    /// agent-neutral mirror of Claude Code's `.lsp.json` / `lspServers`, so a config
+    /// written for either host loads in the other:
+    ///
+    /// ```json
+    /// "lsp_servers": {
+    ///   "go": { "command": "gopls", "args": ["serve"], "extensionToLanguage": { ".go": "go" } }
+    /// }
+    /// ```
+    ///
+    /// Only the container key is Ryu's (`lsp_servers`, snake_case like every sibling
+    /// here); every key INSIDE a server entry is Claude's own camelCase spelling
+    /// verbatim, because that body is what actually travels between the two hosts.
+    /// No `lspServers` alias is accepted on purpose. `lsp_servers` — this exact
+    /// spelling — is registered in the SDK's zod mirror (`ContributesSchema` in
+    /// `packages/sdk/src/manifest.ts`), and that mirror STRIPS every key it does not
+    /// list. An alias would therefore parse here and be silently deleted at
+    /// `ryu pack` time, before the manifest is signed, which is a worse failure than
+    /// a key that never parsed at all. One spelling, registered in both places.
+    ///
+    /// The plugin ships CONFIG ONLY, never the server binary — `command` is resolved
+    /// from `PATH` at spawn time and a missing binary is a visible skip, not a load
+    /// error. Core spawns and supervises these processes itself, so unlike the
+    /// client-rendered surfaces above this one is fully typed
+    /// ([`LspServerContribution`]) and is NOT served from
+    /// `GET /api/plugins/contributions`; it is gathered at the spawn site, the same
+    /// disposition as [`Contributes::tool_filters`].
+    ///
+    /// # Ordering is part of the contract
+    ///
+    /// Registration is **first-registration-wins per file extension**: if two enabled
+    /// servers both claim `.go`, the first one registered owns it, the others never
+    /// start for that extension, and the spawn site warns naming the owner. That rule
+    /// is only reproducible if iteration order is, so this is a [`BTreeMap`] — it
+    /// iterates lexicographically by server key, never in hash order and never in
+    /// JSON authoring order. The full resolved invariant across a node is
+    /// **(plugin enable order, then server key ascending)**.
+    ///
+    /// Note this makes the tie-break deterministic, not byte-identical to Claude
+    /// Code's, which falls out of JS object insertion order. Two servers fighting
+    /// over one extension is a misconfiguration in either host; what matters is that
+    /// the same node always resolves it the same way and says who won.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lsp_servers: BTreeMap<String, LspServerContribution>,
 }
 
 /// One **declarative view** contribution (the Raycast tier — see [`Contributes::views`]).
@@ -1038,6 +1106,279 @@ pub struct DockPanelContribution {
     /// it per `panel`. Absent = the mode needs no payload (the `"native"` case).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<serde_json::Value>,
+}
+
+/// One **language server** a plugin declares (see [`Contributes::lsp_servers`]).
+///
+/// Field-for-field Claude Code's language-server config, camelCase on the wire, so
+/// the same JSON body loads in either host. Required by Claude's spec: `command`
+/// and `extensionToLanguage`. Everything else is optional and defaulted here to
+/// Claude's documented default.
+///
+/// # Why `command` and `extensionToLanguage` are `#[serde(default)]` anyway
+///
+/// They are required by the SPEC, not by serde, and that is deliberate. Claude Code
+/// **skips** a server whose config is invalid and starts the rest; making either
+/// field a non-defaulted serde field would instead turn a missing one into a parse
+/// error on the entire [`PluginManifest`], costing the plugin every runnable,
+/// sidecar and tool it ships over one broken language-server entry. Defaulting them
+/// is what makes the per-server skip reachable at all: the manifest parses, and
+/// [`LspServerContribution::validate`] reports the reason at the spawn site.
+///
+/// Unknown keys are dropped rather than rejected (no `deny_unknown_fields`
+/// anywhere in this file), so a field from a newer Claude release costs a plugin
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LspServerContribution {
+    /// The server executable, resolved from `PATH` at spawn time (`gopls`,
+    /// `rust-analyzer`, `typescript-language-server`, …).
+    ///
+    /// The plugin ships the CONFIG, never the binary. A `command` that is not on
+    /// `PATH` is a graceful skip with a visible reason — the user is told which
+    /// server did not start and why, and the rest of the node is unaffected.
+    /// Defaulted to `""` so a missing one is a skipped server, not a dead manifest
+    /// (see the type doc).
+    #[serde(default)]
+    pub command: String,
+
+    /// Arguments passed to [`command`](LspServerContribution::command)
+    /// (e.g. `["serve"]` for `gopls`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+
+    /// File extension → LSP language id (`{ ".go": "go" }`) — the map that decides
+    /// which files this server handles, and the thing two servers can collide on.
+    ///
+    /// Claude Code authors keys with a leading dot and in lowercase; a hand-written
+    /// manifest will not always. Compare through
+    /// [`normalize_lsp_extension_key`] (or read
+    /// [`normalized_extensions`](LspServerContribution::normalized_extensions))
+    /// rather than indexing this map directly, so `go`, `.go` and `.GO` all resolve
+    /// to the same entry. Empty ⇒ the server claims nothing and is skipped.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extension_to_language: BTreeMap<String, String>,
+
+    /// How the host talks to the server: `"stdio"` (the default, and the only
+    /// transport Core implements today) or `"socket"`.
+    ///
+    /// A plain `String` and not an enum, matching this file's other discriminants
+    /// ([`ViewContribution::view`], [`DockPanelContribution::panel`]). The reason is
+    /// sharper here than for those: [`DockPanelPlacement`] can afford to coerce an
+    /// unrecognised value to its default because a panel opening in the wrong dock is
+    /// cosmetic, whereas coercing an unrecognised transport to `stdio` would spawn a
+    /// process and then speak a protocol it does not understand. The verbatim string
+    /// survives instead, and the spawn site refuses what it cannot drive — see
+    /// [`LspTransport`] and [`LspServerContribution::transport_kind`].
+    #[serde(default = "default_lsp_transport")]
+    pub transport: String,
+
+    /// Extra environment variables for the server process, merged over the inherited
+    /// environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+
+    /// Sent verbatim as `initializationOptions` in the LSP `initialize` request.
+    /// Opaque JSON on purpose: the shape is the individual language server's, and
+    /// Ryu is a courier for it, not an interpreter. Absent = send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initialization_options: Option<serde_json::Value>,
+
+    /// Sent verbatim as the payload of `workspace/didChangeConfiguration` once the
+    /// server is initialized. Opaque for the same reason as
+    /// [`initialization_options`](LspServerContribution::initialization_options).
+    /// Absent = send nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
+
+    /// Root directory the server is rooted at. Absent (the common case) = the
+    /// session's workspace root, which is why this is an `Option` rather than a
+    /// defaulted `String`: "unset, inherit the workspace" and "explicitly rooted
+    /// somewhere" are different instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_folder: Option<String>,
+
+    /// Milliseconds to wait for `initialize` to come back before giving up on the
+    /// server. Absent = the spawn site's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout: Option<u64>,
+
+    /// Milliseconds to wait for a clean `shutdown`/`exit` before killing the
+    /// process. Absent = the spawn site's own default.
+    ///
+    /// That default is the one place this type knowingly parts company with Claude
+    /// Code, whose reference says an unset `shutdownTimeout` means **no timeout
+    /// applies** — it waits on a wedged server indefinitely. Ryu's spawn sites
+    /// impose a finite one (5s in `assets/pi-extensions/ryu-lsp.ts`, documented at
+    /// the constant), because Pi is spawned per session and an unbounded wait would
+    /// hold every teardown open behind one unresponsive server. An explicitly
+    /// declared value is honoured verbatim, so a config written for either host
+    /// still behaves identically; only the *unset* case differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_timeout: Option<u64>,
+
+    /// Restart the server when it exits unexpectedly. Defaults to **true** (Claude
+    /// Code parity).
+    ///
+    /// Note this needs an explicit default fn: a bare `#[serde(default)]` on a
+    /// `bool` yields `false` and would silently invert the documented behaviour.
+    /// Like [`McpServerDecl::enabled`] it carries no `skip_serializing_if`, so the
+    /// value always ships and a reader never has to know the default.
+    #[serde(default = "default_lsp_restart_on_crash")]
+    pub restart_on_crash: bool,
+
+    /// Cap on automatic restarts before the server is left down. Absent = the spawn
+    /// site's own default; meaningless when
+    /// [`restart_on_crash`](LspServerContribution::restart_on_crash) is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_restarts: Option<u32>,
+
+    /// Push this server's diagnostics into the model's context after edits. Defaults
+    /// to **true** (Claude Code parity); same `default` caveat as
+    /// [`restart_on_crash`](LspServerContribution::restart_on_crash).
+    #[serde(default = "default_lsp_diagnostics")]
+    pub diagnostics: bool,
+}
+
+fn default_lsp_transport() -> String {
+    LspTransport::STDIO.to_owned()
+}
+
+const fn default_lsp_restart_on_crash() -> bool {
+    true
+}
+
+const fn default_lsp_diagnostics() -> bool {
+    true
+}
+
+/// The transports a [`LspServerContribution::transport`] string can resolve to.
+///
+/// A classification of the wire string, NOT the serialized form of it — the
+/// manifest keeps the author's verbatim value (see the field doc). `Unsupported`
+/// exists so the spawn site has a name for "parsed fine, cannot be driven", which
+/// is the honest status of `"socket"` today: nothing in Claude Code's documented
+/// field set carries a host or a port, so a socket server would validate and then
+/// have nowhere to connect. Until that gap is resolved upstream, a socket server is
+/// skipped with a visible reason — the same treatment as a `command` that is not on
+/// `PATH`, and strictly better than a config that looks live and silently is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspTransport {
+    /// Spawn the server as a child process and speak LSP over its stdin/stdout.
+    Stdio,
+    /// Connect to an already-listening server over a socket. Parsed, not implemented.
+    Socket,
+    /// A transport this build does not know. Never guessed at.
+    Unsupported,
+}
+
+impl LspTransport {
+    /// The wire spelling of [`LspTransport::Stdio`], and the value a manifest that
+    /// omits `transport` is given.
+    pub const STDIO: &'static str = "stdio";
+
+    /// The wire spelling of [`LspTransport::Socket`].
+    pub const SOCKET: &'static str = "socket";
+}
+
+/// Normalise a file-extension key to the form used for server lookup: trimmed,
+/// lowercased, with exactly one leading dot. `go`, `.go`, `.GO` and ` .Go ` all
+/// become `.go`.
+///
+/// Claude Code writes `".go"`, but a hand-written manifest reasonably writes `"go"`,
+/// and a file on disk is `main.GO` on a case-insensitive volume. Routing on the raw
+/// key would make those three different languages.
+///
+/// Takes an EXTENSION, not a filename: `"main.go"` normalises to `".main.go"` and
+/// matches nothing. A caller holding a path must split the extension off first.
+pub fn normalize_lsp_extension_key(raw: &str) -> String {
+    let trimmed = raw.trim().to_lowercase();
+    if trimmed.is_empty() || trimmed.starts_with('.') {
+        trimmed
+    } else {
+        format!(".{trimmed}")
+    }
+}
+
+impl LspServerContribution {
+    /// Can this server be started as declared? `Ok(())`, or a human-facing reason
+    /// naming `server_name`.
+    ///
+    /// The two conditions are Claude Code's: an empty `command`, or an empty
+    /// `extensionToLanguage`. A server that fails either is **skipped** — the other
+    /// servers still start and it does NOT claim its extensions, so a sibling server
+    /// declaring the same extension gets it.
+    ///
+    /// Deliberately NOT wired into [`Contributes::validate_settings_contributions`],
+    /// even though [`validate_tool_filter`] is called from there and this looks like
+    /// the same shape. The loader `?`s that function, so one `Err` skips the WHOLE
+    /// manifest with a warning — the precise outcome Claude's "skip the server, start
+    /// the others" rule exists to avoid. This stays a pure helper the spawn site
+    /// calls per server, turning `Err` into a skip plus a visible warning.
+    ///
+    /// Transport support is a SEPARATE gate: a `"socket"` server is valid config and
+    /// passes here, but cannot be driven today. The spawn site must check
+    /// [`transport_kind`](LspServerContribution::transport_kind) as well.
+    pub fn validate(&self, server_name: &str) -> Result<(), String> {
+        if self.command.trim().is_empty() {
+            return Err(format!(
+                "lsp server '{server_name}' declares no 'command' and cannot be started"
+            ));
+        }
+        if self.extension_to_language.is_empty() {
+            return Err(format!(
+                "lsp server '{server_name}' declares an empty 'extensionToLanguage' and would handle no files"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Classify [`transport`](LspServerContribution::transport). Absent/empty and any
+    /// casing of `"stdio"` are [`LspTransport::Stdio`]; `"socket"` is
+    /// [`LspTransport::Socket`]; anything else is [`LspTransport::Unsupported`] and
+    /// is never guessed into a transport that would spawn a process.
+    pub fn transport_kind(&self) -> LspTransport {
+        let t = self.transport.trim().to_lowercase();
+        match t.as_str() {
+            "" | LspTransport::STDIO => LspTransport::Stdio,
+            LspTransport::SOCKET => LspTransport::Socket,
+            _ => LspTransport::Unsupported,
+        }
+    }
+
+    /// This server's `extensionToLanguage` map with every key run through
+    /// [`normalize_lsp_extension_key`] — the form an extension→server registry
+    /// should index on.
+    ///
+    /// Two raw keys that normalise to the same extension (`"go"` and `".GO"`) keep
+    /// the FIRST by the source map's ascending key order, mirroring the
+    /// first-registration-wins rule that resolves the same collision between two
+    /// servers.
+    pub fn normalized_extensions(&self) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for (ext, language) in &self.extension_to_language {
+            let key = normalize_lsp_extension_key(ext);
+            if key.is_empty() {
+                continue;
+            }
+            out.entry(key).or_insert_with(|| language.clone());
+        }
+        out
+    }
+
+    /// The LSP language id this server declares for `extension`, comparing through
+    /// [`normalize_lsp_extension_key`] on both sides so the author's spelling and the
+    /// caller's need not match. Takes an extension, not a filename.
+    pub fn language_for_extension(&self, extension: &str) -> Option<String> {
+        let wanted = normalize_lsp_extension_key(extension);
+        if wanted.is_empty() {
+            return None;
+        }
+        self.extension_to_language
+            .iter()
+            .find(|(ext, _)| normalize_lsp_extension_key(ext) == wanted)
+            .map(|(_, language)| language.clone())
+    }
 }
 
 /// One app-registered **sidebar section** — a header plus a live list of rows the
@@ -1837,6 +2178,11 @@ impl Contributes {
     /// answer depending on which door they came through.
     ///
     /// Errors are unprefixed; each caller wraps them in its own house style.
+    ///
+    /// [`Contributes::lsp_servers`] is intentionally NOT checked here. An `Err` from
+    /// this function skips the whole manifest, but an invalid language server must
+    /// cost only itself — see [`LspServerContribution::validate`], which the spawn
+    /// site calls per server instead.
     pub fn validate_settings_contributions(&self) -> Result<(), String> {
         let mut seen_tab_ids: BTreeSet<&str> = BTreeSet::new();
         let mut tabs: Vec<SettingsTabContribution> = Vec::with_capacity(self.settings_tabs.len());
@@ -3061,6 +3407,356 @@ mod tests {
             .expect("an unrecognised dock must not fail the manifest");
         let panels = &m.contributes.as_ref().unwrap().dock_panels;
         assert_eq!(panels[0].placement, DockPanelPlacement::Bottom);
+    }
+
+    // ── language servers ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn lsp_server_parses_claude_code_config_verbatim() {
+        // The interop claim, tested literally: a Claude Code language-server body
+        // pasted under `lsp_servers` must parse with every field landing where it
+        // belongs. Only the container key is Ryu's; the entry is Claude's camelCase.
+        let raw = r#"{
+            "id": "com.example.lsp",
+            "name": "LSP",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "lsp_servers": {
+                    "go": {
+                        "command": "gopls",
+                        "args": ["serve"],
+                        "extensionToLanguage": { ".go": "go" },
+                        "transport": "stdio",
+                        "env": { "GOFLAGS": "-mod=mod" },
+                        "initializationOptions": { "usePlaceholders": true },
+                        "settings": { "gopls": { "staticcheck": true } },
+                        "workspaceFolder": "/srv/project",
+                        "startupTimeout": 15000,
+                        "shutdownTimeout": 2000,
+                        "restartOnCrash": false,
+                        "maxRestarts": 3,
+                        "diagnostics": false
+                    }
+                }
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw).expect("lsp manifest validates");
+        let servers = &m.contributes.as_ref().unwrap().lsp_servers;
+        assert_eq!(servers.len(), 1);
+        let go = &servers["go"];
+        assert_eq!(go.command, "gopls");
+        assert_eq!(go.args, vec!["serve".to_string()]);
+        assert_eq!(go.extension_to_language[".go"], "go");
+        assert_eq!(go.transport, "stdio");
+        assert_eq!(go.transport_kind(), LspTransport::Stdio);
+        assert_eq!(go.env["GOFLAGS"], "-mod=mod");
+        assert_eq!(
+            go.initialization_options,
+            Some(serde_json::json!({ "usePlaceholders": true }))
+        );
+        assert_eq!(
+            go.settings,
+            Some(serde_json::json!({ "gopls": { "staticcheck": true } }))
+        );
+        assert_eq!(go.workspace_folder.as_deref(), Some("/srv/project"));
+        assert_eq!(go.startup_timeout, Some(15000));
+        assert_eq!(go.shutdown_timeout, Some(2000));
+        assert!(!go.restart_on_crash, "explicit false is honoured");
+        assert_eq!(go.max_restarts, Some(3));
+        assert!(!go.diagnostics, "explicit false is honoured");
+        // A server name is not a runnable id — it names a PATH binary — so it must
+        // never reach the loader's cross-validation.
+        assert!(
+            m.contributes.as_ref().unwrap().referenced_ids().is_empty(),
+            "lsp servers must not be cross-validated as runnable references"
+        );
+        let round =
+            PluginManifest::parse_and_validate(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(m, round);
+    }
+
+    #[test]
+    fn lsp_server_accepts_the_documented_claude_code_example_byte_for_byte() {
+        // The `.lsp.json` example from Claude Code's plugins reference, pasted
+        // verbatim — a whole `.lsp.json` file IS the value of `lsp_servers`, which is
+        // the interop claim stated as an equation rather than reasoned about. The
+        // test above exercises every field; this one pins the exact bytes a user
+        // copies out of the docs, and the defaults they get for the twelve fields
+        // that example omits.
+        const CLAUDE_CODE_LSP_JSON: &str = r#"{
+  "go": {
+    "command": "gopls",
+    "args": ["serve"],
+    "extensionToLanguage": {
+      ".go": "go"
+    }
+  }
+}"#;
+        let servers: BTreeMap<String, LspServerContribution> =
+            serde_json::from_str(CLAUDE_CODE_LSP_JSON).expect("a real .lsp.json parses as-is");
+        let go = &servers["go"];
+        assert_eq!(go.command, "gopls");
+        assert_eq!(go.args, vec!["serve".to_string()]);
+        assert_eq!(go.extension_to_language[".go"], "go");
+        // The defaults this example leans on, from THIS input rather than a
+        // hand-built struct: stdio transport, restart on crash, diagnostics pushed.
+        assert_eq!(go.transport, LspTransport::STDIO);
+        assert_eq!(go.transport_kind(), LspTransport::Stdio);
+        assert!(go.restart_on_crash, "restartOnCrash defaults to true");
+        assert!(go.diagnostics, "diagnostics defaults to true");
+        go.validate("go").expect("the documented example is startable");
+
+        // Round-trip: what we serialize back is what Claude Code reads, so the same
+        // bytes survive a trip through Ryu and land in the other host unchanged.
+        let round: BTreeMap<String, LspServerContribution> =
+            serde_json::from_str(&serde_json::to_string(&servers).unwrap()).unwrap();
+        assert_eq!(servers, round);
+
+        // And the whole file drops into `contributes.lsp_servers` unedited.
+        let manifest = format!(
+            r#"{{"id":"com.example.lsp","name":"LSP","version":"1.0.0","runnables":[],
+                "contributes": {{ "lsp_servers": {CLAUDE_CODE_LSP_JSON} }} }}"#
+        );
+        let m = PluginManifest::parse_and_validate(&manifest).expect("manifest validates");
+        assert_eq!(m.contributes.as_ref().unwrap().lsp_servers, servers);
+    }
+
+    #[test]
+    fn lsp_server_defaults_match_claude_code() {
+        // `restartOnCrash` and `diagnostics` default TRUE in Claude Code. A bare
+        // `#[serde(default)]` on a bool would yield false and silently invert both,
+        // and nothing else in the suite would notice — this is that guard.
+        let raw = r#"{
+            "id": "com.example.lsp",
+            "name": "LSP",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "lsp_servers": {
+                    "rust": { "command": "rust-analyzer", "extensionToLanguage": { ".rs": "rust" } }
+                }
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw).expect("minimal lsp manifest validates");
+        let rust = &m.contributes.as_ref().unwrap().lsp_servers["rust"];
+        assert!(rust.restart_on_crash, "restartOnCrash defaults to true");
+        assert!(rust.diagnostics, "diagnostics defaults to true");
+        assert_eq!(rust.transport, LspTransport::STDIO);
+        assert_eq!(rust.transport_kind(), LspTransport::Stdio);
+        assert!(rust.args.is_empty());
+        assert!(rust.env.is_empty());
+        assert_eq!(rust.workspace_folder, None);
+        assert_eq!(rust.startup_timeout, None);
+        assert_eq!(rust.shutdown_timeout, None);
+        assert_eq!(rust.max_restarts, None);
+    }
+
+    #[test]
+    fn lsp_server_serializes_claude_camel_case_keys() {
+        // `extensionToLanguage` IS the interop contract with Claude Code; a rename to
+        // snake_case would be invisible in Rust and fatal on the wire. The defaulted
+        // bools carry no skip_serializing_if, so they always ship.
+        let server = LspServerContribution {
+            command: "gopls".to_string(),
+            args: Vec::new(),
+            extension_to_language: BTreeMap::from([(".go".to_string(), "go".to_string())]),
+            transport: LspTransport::STDIO.to_string(),
+            env: BTreeMap::new(),
+            initialization_options: None,
+            settings: None,
+            workspace_folder: None,
+            startup_timeout: None,
+            shutdown_timeout: None,
+            restart_on_crash: true,
+            max_restarts: None,
+            diagnostics: true,
+        };
+        let value = serde_json::to_value(&server).unwrap();
+        assert_eq!(value["extensionToLanguage"][".go"], serde_json::json!("go"));
+        assert!(
+            value.get("extension_to_language").is_none(),
+            "the Rust field name must never reach the wire"
+        );
+        assert_eq!(value["restartOnCrash"], serde_json::json!(true));
+        assert_eq!(value["diagnostics"], serde_json::json!(true));
+        assert_eq!(value["transport"], serde_json::json!("stdio"));
+        assert!(value.get("args").is_none(), "absent args omitted");
+        assert!(value.get("env").is_none(), "absent env omitted");
+        assert!(
+            value.get("workspaceFolder").is_none(),
+            "absent workspaceFolder omitted"
+        );
+        assert!(
+            value.get("startupTimeout").is_none(),
+            "absent startupTimeout omitted"
+        );
+        assert!(
+            value.get("maxRestarts").is_none(),
+            "absent maxRestarts omitted"
+        );
+    }
+
+    #[test]
+    fn invalid_lsp_server_skips_itself_not_the_manifest() {
+        // Claude Code skips a server with invalid config and starts the rest. That is
+        // only reachable because `command`/`extensionToLanguage` are serde-defaulted:
+        // the manifest PARSES, and validate() supplies the per-server reason.
+        let raw = r#"{
+            "id": "com.example.lsp",
+            "name": "LSP",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "lsp_servers": {
+                    "broken": { "extensionToLanguage": { ".go": "go" } },
+                    "claimless": { "command": "gopls" },
+                    "fine": { "command": "rust-analyzer", "extensionToLanguage": { ".rs": "rust" } }
+                }
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw)
+            .expect("a broken lsp server must not fail the whole manifest");
+        let servers = &m.contributes.as_ref().unwrap().lsp_servers;
+
+        let missing_command = servers["broken"].validate("broken").unwrap_err();
+        assert!(
+            missing_command.contains("broken") && missing_command.contains("command"),
+            "reason names the server and the missing field: {missing_command}"
+        );
+        let no_extensions = servers["claimless"].validate("claimless").unwrap_err();
+        assert!(
+            no_extensions.contains("claimless") && no_extensions.contains("extensionToLanguage"),
+            "reason names the server and the empty map: {no_extensions}"
+        );
+        // A whitespace-only command is as unstartable as an absent one.
+        let blank = LspServerContribution {
+            command: "   ".to_string(),
+            ..servers["fine"].clone()
+        };
+        assert!(blank.validate("blank").is_err());
+        // The valid sibling is untouched by either.
+        servers["fine"].validate("fine").expect("valid server passes");
+    }
+
+    #[test]
+    fn unknown_lsp_transport_parses_but_is_not_guessed_at() {
+        // An unrecognised transport must not fail the manifest (the plugin's runnables
+        // and sidecars are unaffected) and must not be coerced to stdio either, which
+        // would spawn a process that cannot speak the protocol. It stays verbatim and
+        // classifies as Unsupported so the spawn site skips it with a reason.
+        let raw = r#"{
+            "id": "com.example.lsp",
+            "name": "LSP",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "lsp_servers": {
+                    "future": { "command": "x", "extensionToLanguage": { ".x": "x" }, "transport": "quic" },
+                    "sock": { "command": "y", "extensionToLanguage": { ".y": "y" }, "transport": "Socket" }
+                }
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw)
+            .expect("an unrecognised transport must not fail the manifest");
+        let servers = &m.contributes.as_ref().unwrap().lsp_servers;
+        assert_eq!(servers["future"].transport, "quic", "value kept verbatim");
+        assert_eq!(servers["future"].transport_kind(), LspTransport::Unsupported);
+        // Socket is valid config Core cannot drive yet, so it passes validate() and is
+        // gated by the separate transport check instead.
+        assert_eq!(servers["sock"].transport_kind(), LspTransport::Socket);
+        servers["sock"]
+            .validate("sock")
+            .expect("socket config is valid, just unimplemented");
+    }
+
+    #[test]
+    fn lsp_extension_keys_normalise_for_lookup() {
+        // `.GO`, `go` and `.go` are one extension. Routing on the raw key would make
+        // them three, so lookup normalises both sides.
+        assert_eq!(normalize_lsp_extension_key("go"), ".go");
+        assert_eq!(normalize_lsp_extension_key(".GO"), ".go");
+        assert_eq!(normalize_lsp_extension_key("  .Go "), ".go");
+        assert_eq!(normalize_lsp_extension_key(""), "");
+        // It takes an EXTENSION, not a filename — documented, and asserted so the
+        // contract is not discovered by a caller passing a path.
+        assert_eq!(normalize_lsp_extension_key("main.go"), ".main.go");
+
+        let server = LspServerContribution {
+            command: "gopls".to_string(),
+            args: Vec::new(),
+            extension_to_language: BTreeMap::from([
+                ("GO".to_string(), "go".to_string()),
+                (".tmpl".to_string(), "gotmpl".to_string()),
+            ]),
+            transport: LspTransport::STDIO.to_string(),
+            env: BTreeMap::new(),
+            initialization_options: None,
+            settings: None,
+            workspace_folder: None,
+            startup_timeout: None,
+            shutdown_timeout: None,
+            restart_on_crash: true,
+            max_restarts: None,
+            diagnostics: true,
+        };
+        assert_eq!(server.language_for_extension(".go").as_deref(), Some("go"));
+        assert_eq!(server.language_for_extension("go").as_deref(), Some("go"));
+        assert_eq!(server.language_for_extension(".GO").as_deref(), Some("go"));
+        assert_eq!(server.language_for_extension(".rs"), None);
+        assert_eq!(server.language_for_extension(""), None);
+
+        let normalized = server.normalized_extensions();
+        assert_eq!(normalized[".go"], "go");
+        assert_eq!(normalized[".tmpl"], "gotmpl");
+
+        // Two raw keys in ONE server that normalise to the same extension resolve
+        // first-wins by ascending source-key order — the per-server twin of the
+        // first-registration-wins rule between servers. `.` (0x2E) sorts before `G`
+        // (0x47), so the dotted spelling is the one that survives. Without this the
+        // helper could quietly become last-wins and nothing would notice.
+        let colliding = LspServerContribution {
+            extension_to_language: BTreeMap::from([
+                (".go".to_string(), "go-dotted".to_string()),
+                ("GO".to_string(), "go-bare".to_string()),
+            ]),
+            ..server
+        };
+        assert_eq!(colliding.normalized_extensions()[".go"], "go-dotted");
+        assert_eq!(
+            colliding.language_for_extension("go").as_deref(),
+            Some("go-dotted")
+        );
+    }
+
+    #[test]
+    fn lsp_servers_iterate_in_deterministic_key_order() {
+        // First-registration-wins per extension is only reproducible if iteration is.
+        // BTreeMap fixes it to ascending key order — NOT the JSON authoring order the
+        // raw below deliberately scrambles, and never hash order.
+        let raw = r#"{
+            "id": "com.example.lsp",
+            "name": "LSP",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "lsp_servers": {
+                    "zed": { "command": "z", "extensionToLanguage": { ".go": "go" } },
+                    "alpha": { "command": "a", "extensionToLanguage": { ".go": "go" } },
+                    "mid": { "command": "m", "extensionToLanguage": { ".go": "go" } }
+                }
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw).unwrap();
+        let names: Vec<&str> = m
+            .contributes
+            .as_ref()
+            .unwrap()
+            .lsp_servers
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(names, vec!["alpha", "mid", "zed"]);
     }
 
     // ── unified permission grammar ───────────────────────────────────────────────

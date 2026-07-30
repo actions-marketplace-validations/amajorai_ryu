@@ -1,17 +1,33 @@
-// The Store's "Tools" section — the MCP servers registered on the active node and
-// the tools they expose. Reshaped onto the shared App Store layout
-// (StoreCatalogLayout): a centered 2-column card grid of servers + tools on the
-// left, a preview aside on the right that carries the server details or the tool's
-// test-call form. The agent allowlist filter and "Add server" live in the toolbar
-// filter popover.
+// The Tools section of the unified Library (`/tools`, `/library/tools`) — the MCP
+// servers registered on the active node and the tools they expose.
+//
+// It used to live in the Store, which was the wrong shelf: the Store is where you
+// FIND things to add, and this surface manages and invokes what is already
+// installed (browse the catalog under Store → MCP). Alongside Agents, Workflows and
+// Spaces in the Library, "the tools my agents can call" reads as another collection
+// you own.
+//
+// Organisation is by SERVER, not one flat list. Previously the page rendered two
+// undifferentiated lumps — every server, then every tool from every server mixed
+// together — so with a handful of servers registered there was no way to see which
+// tools came from where, or that a group of tools was dark because its server was
+// disabled. A tool's server is the fact that decides whether it can run at all, so
+// it is the axis worth grouping on: each server is a collapsible group carrying its
+// own status and tool count, and its tools sit under it.
+//
+// Searching flattens the view on purpose: a query means "find me this tool", and
+// matches must not hide inside a group the user has to guess at. The flat A–Z view
+// stays available for the same reason.
 //
 // This is the desktop presentation. The @ryu/blocks `ToolsView` (used by the
 // storyboard) is intentionally NOT reused here: store-catalog-layout imports from
 // @ryu/blocks, so a blocks→marketplace dependency would be circular. The trade-off
-// is that this desktop view no longer shares its markup with the storyboard block.
+// is that this view no longer shares its markup with the storyboard block.
 
 import {
 	Add01Icon,
+	AlertCircleIcon,
+	ArrowDown01Icon,
 	ComputerTerminal01Icon,
 	ServerStack01Icon,
 	Wrench01Icon,
@@ -23,6 +39,11 @@ import StoreCatalogLayout, {
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
+import {
+	Collapsible,
+	CollapsibleContent,
+	CollapsibleTrigger,
+} from "@ryu/ui/components/collapsible";
 import {
 	Dialog,
 	DialogContent,
@@ -51,6 +72,7 @@ import {
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
 import { type ChangeEvent, useMemo, useState } from "react";
 import { useMcp } from "@/src/hooks/useMcp.ts";
 import type {
@@ -63,7 +85,27 @@ import type {
 
 const ALL_AGENTS = "__all__";
 
-export default function ToolsPage() {
+/** How the tool list is arranged. "server" groups every tool under the server that
+ *  advertises it (the default, since the server decides whether the tool can run);
+ *  "flat" is one A–Z list across all servers, for when you know the tool's name. */
+type ToolsView = "server" | "flat";
+
+/** A server together with the tools it advertises, after search filtering. */
+interface ServerGroup {
+	server: McpServer;
+	tools: McpTool[];
+}
+
+/** Tools whose `server` matches no registered server.
+ *
+ *  This is not a theoretical case: a server can be removed from `mcp.json` while
+ *  its tools are still in the live snapshot, and Core also exposes some tools that
+ *  are not backed by a user-registered entry. Those tools used to vanish from the
+ *  page the moment grouping was introduced — they belong to no group — so they get
+ *  an explicit one instead of being silently dropped. */
+const UNGROUPED_LABEL = "Other tools";
+
+export default function ToolsLibrary() {
 	const {
 		servers,
 		tools,
@@ -78,6 +120,7 @@ export default function ToolsPage() {
 	} = useMcp();
 
 	const [query, setQuery] = useState("");
+	const [view, setView] = useState<ToolsView>("server");
 	// Selection id is namespaced: `server:<name>` or `tool:<id>`.
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -97,6 +140,64 @@ export default function ToolsPage() {
 			tools: tools.filter(matchTool),
 		};
 	}, [servers, tools, query]);
+
+	// Group the filtered tools by server. A server matched by the query keeps its
+	// group even when none of its own tools matched (searching "github" should show
+	// the github server), and a server whose tools matched is kept even if its name
+	// did not — so a match on either side of the relation surfaces the pair.
+	const groups = useMemo<ServerGroup[]>(() => {
+		const byServer = new Map<string, McpTool[]>();
+		for (const tool of filtered.tools) {
+			const list = byServer.get(tool.server);
+			if (list) {
+				list.push(tool);
+			} else {
+				byServer.set(tool.server, [tool]);
+			}
+		}
+		const matchedServerNames = new Set(filtered.servers.map((s) => s.name));
+		return (
+			servers
+				.filter((s) => matchedServerNames.has(s.name) || byServer.has(s.name))
+				// Enabled first, then unavailable last, then by name — the order the
+				// user cares about when scanning for "what can actually run".
+				.sort((a, b) => {
+					if (a.enabled !== b.enabled) {
+						return a.enabled ? -1 : 1;
+					}
+					const aOff = a.available === false;
+					const bOff = b.available === false;
+					if (aOff !== bOff) {
+						return aOff ? 1 : -1;
+					}
+					return a.name.localeCompare(b.name);
+				})
+				.map((server) => ({
+					server,
+					tools: (byServer.get(server.name) ?? []).sort((a, b) =>
+						a.name.localeCompare(b.name)
+					),
+				}))
+		);
+	}, [servers, filtered]);
+
+	// Tools with no registered server — see UNGROUPED_LABEL.
+	const ungrouped = useMemo(() => {
+		const known = new Set(servers.map((s) => s.name));
+		return filtered.tools
+			.filter((t) => !known.has(t.server))
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}, [servers, filtered.tools]);
+
+	const flatTools = useMemo(
+		() => [...filtered.tools].sort((a, b) => a.name.localeCompare(b.name)),
+		[filtered.tools]
+	);
+
+	// A query means "find this tool" — grouping would hide matches behind headers,
+	// so searching always flattens regardless of the chosen view.
+	const searching = query.trim().length > 0;
+	const effectiveView: ToolsView = searching ? "flat" : view;
 
 	const selectedServer =
 		selectedId?.startsWith("server:") === true
@@ -141,11 +242,16 @@ export default function ToolsPage() {
 		);
 	}
 
+	const hasNothing = servers.length === 0 && tools.length === 0;
+
 	return (
 		<StoreCatalogLayout
 			detail={
 				selectedServer ? (
-					<ServerDetail server={selectedServer} />
+					<ServerDetail
+						server={selectedServer}
+						tools={tools.filter((t) => t.server === selectedServer.name)}
+					/>
 				) : selectedTool ? (
 					<ToolDetail
 						agents={agents}
@@ -156,9 +262,37 @@ export default function ToolsPage() {
 			}
 			detailTitle={selectedServer?.name ?? selectedTool?.name ?? "Tool"}
 			filter={{
+				// The allowlist is a real filter on what is shown, so it gets the
+				// active-count badge — an agent filter left on is otherwise invisible
+				// and reads as "this agent has no tools".
+				activeCount: agentFilter ? 1 : 0,
 				label: "Filter & add",
 				panel: (
 					<div className="flex flex-col gap-4 p-4">
+						<div className="flex flex-col gap-1.5">
+							<Label className="font-medium text-muted-foreground text-xs">
+								Arrange
+							</Label>
+							<ToggleGroup
+								onValueChange={(value: string[]) => {
+									const next = value[0];
+									if (next === "server" || next === "flat") {
+										setView(next);
+									}
+								}}
+								size="sm"
+								value={[view]}
+								variant="outline"
+							>
+								<ToggleGroupItem value="server">By server</ToggleGroupItem>
+								<ToggleGroupItem value="flat">All tools A–Z</ToggleGroupItem>
+							</ToggleGroup>
+							{searching ? (
+								<p className="text-muted-foreground text-xs">
+									Search results are always shown as one flat list.
+								</p>
+							) : null}
+						</div>
 						<div className="flex flex-col gap-1.5">
 							<Label
 								className="font-medium text-muted-foreground text-xs"
@@ -188,6 +322,9 @@ export default function ToolsPage() {
 									))}
 								</SelectContent>
 							</Select>
+							<p className="text-muted-foreground text-xs">
+								Show only the tools one agent is allowed to call.
+							</p>
 						</div>
 						<AddServerDialog onCreateServer={createServer} />
 					</div>
@@ -195,92 +332,55 @@ export default function ToolsPage() {
 			}}
 			hasSelection={selectedServer != null || selectedTool != null}
 			list={
-				<div className="flex flex-col gap-6 pt-2">
-					<section>
-						<h3 className="mb-2 flex items-center gap-2 px-1 font-medium text-muted-foreground text-xs uppercase tracking-widest">
-							<HugeiconsIcon className="size-3.5" icon={ServerStack01Icon} />
-							Servers
-							<Badge variant="secondary">{filtered.servers.length}</Badge>
-						</h3>
-						{filtered.servers.length === 0 ? (
-							<p className="px-1 text-muted-foreground text-sm">
-								No servers registered. Use “Add server” to expose tools to your
-								agents.
-							</p>
-						) : (
-							<StoreCardGrid>
-								{filtered.servers.map((server) => (
-									<StoreCatalogCard
-										action={
-											<div className="flex items-center gap-1">
-												<Badge
-													variant={server.enabled ? "default" : "secondary"}
-												>
-													{server.enabled ? "Enabled" : "Disabled"}
-												</Badge>
-												{server.available === false ? (
-													<Badge variant="secondary">Off</Badge>
-												) : null}
-											</div>
-										}
-										description={server.description ?? "No description"}
-										icon={
-											<HugeiconsIcon
-												className="size-5"
-												icon={ServerStack01Icon}
-											/>
-										}
-										key={server.name}
-										name={server.name}
-										onClick={() => setSelectedId(`server:${server.name}`)}
-										seedId={server.name}
-										selected={selectedId === `server:${server.name}`}
-									/>
-								))}
-							</StoreCardGrid>
-						)}
-					</section>
-
-					<section>
-						<h3 className="mb-2 flex items-center gap-2 px-1 font-medium text-muted-foreground text-xs uppercase tracking-widest">
-							<HugeiconsIcon className="size-3.5" icon={Wrench01Icon} />
-							Tools
-							<Badge variant="secondary">{filtered.tools.length}</Badge>
-							{agentFilter ? (
-								<span className="normal-case tracking-normal">
-									filtered by allowlist
-								</span>
-							) : null}
-						</h3>
-						{filtered.tools.length === 0 ? (
-							<p className="px-1 text-muted-foreground text-sm">
-								{agentFilter
-									? "This agent's allowlist exposes no tools."
-									: "No MCP tools are registered yet."}
-							</p>
-						) : (
-							<StoreCardGrid>
-								{filtered.tools.map((tool) => (
-									<StoreCatalogCard
-										action={<Badge variant="secondary">{tool.server}</Badge>}
-										description={tool.description ?? "No description"}
-										icon={
-											<HugeiconsIcon
-												className="size-5"
-												icon={ComputerTerminal01Icon}
-											/>
-										}
-										key={tool.id}
-										name={tool.name}
-										onClick={() => setSelectedId(`tool:${tool.id}`)}
-										seedId={tool.id}
-										selected={selectedId === `tool:${tool.id}`}
-									/>
-								))}
-							</StoreCardGrid>
-						)}
-					</section>
-				</div>
+				hasNothing ? (
+					<Empty className="p-8">
+						<EmptyHeader>
+							<EmptyMedia variant="icon">
+								<HugeiconsIcon icon={ServerStack01Icon} />
+							</EmptyMedia>
+							<EmptyTitle>No MCP servers registered</EmptyTitle>
+							<EmptyDescription>
+								Add a server to give your agents new tools, or browse the MCP
+								catalog in the Store.
+							</EmptyDescription>
+						</EmptyHeader>
+						<EmptyContent>
+							<AddServerDialog onCreateServer={createServer} />
+						</EmptyContent>
+					</Empty>
+				) : effectiveView === "flat" ? (
+					<FlatToolList
+						agentFilter={agentFilter}
+						onSelect={setSelectedId}
+						selectedId={selectedId}
+						tools={flatTools}
+					/>
+				) : (
+					<div className="flex flex-col gap-4 pt-2">
+						{groups.map((group) => (
+							<ServerToolGroup
+								allowlisted={agentFilter !== null}
+								group={group}
+								key={group.server.name}
+								onSelect={setSelectedId}
+								selectedId={selectedId}
+							/>
+						))}
+						{ungrouped.length > 0 ? (
+							<ToolGroupShell
+								count={ungrouped.length}
+								label={UNGROUPED_LABEL}
+								note="Advertised by a server that is no longer registered."
+							>
+								<ToolCards
+									onSelect={setSelectedId}
+									selectedId={selectedId}
+									tools={ungrouped}
+								/>
+							</ToolGroupShell>
+						) : null}
+					</div>
+				)
 			}
 			onCloseDetail={() => setSelectedId(null)}
 			search={{
@@ -292,7 +392,186 @@ export default function ToolsPage() {
 	);
 }
 
-function ServerDetail({ server }: { server: McpServer }) {
+/** One server and its tools: a clickable header row (opens the server detail) over
+ *  the server's tool cards, collapsible so a node with many servers stays scannable. */
+function ServerToolGroup({
+	group,
+	onSelect,
+	selectedId,
+	allowlisted,
+}: {
+	group: ServerGroup;
+	onSelect: (id: string) => void;
+	selectedId: string | null;
+	/** An agent allowlist filter is active, so an empty group means "none of this
+	 *  server's tools are allowed for that agent" — NOT "this server has no tools".
+	 *  Without this the page would assert something false about the server. */
+	allowlisted: boolean;
+}) {
+	const { server, tools } = group;
+	const unavailable = server.available === false;
+	// Controlled rather than `defaultOpen` so the chevron rotation can be driven
+	// off the same state — the pattern the settings accordions already use.
+	const [open, setOpen] = useState(true);
+	return (
+		<Collapsible onOpenChange={setOpen} open={open}>
+			<div className="flex items-center gap-2 px-1">
+				<CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-2 rounded py-1 text-left hover:bg-muted/40">
+					<HugeiconsIcon
+						className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${open ? "" : "-rotate-90"}`}
+						icon={ArrowDown01Icon}
+					/>
+					<HugeiconsIcon
+						className="size-3.5 shrink-0 text-muted-foreground"
+						icon={ServerStack01Icon}
+					/>
+					<span className="min-w-0 truncate font-medium text-sm">
+						{server.name}
+					</span>
+					<Badge variant="secondary">{tools.length}</Badge>
+					{server.enabled ? null : <Badge variant="outline">Disabled</Badge>}
+					{unavailable ? (
+						<Badge className="gap-1" variant="outline">
+							<HugeiconsIcon className="size-3" icon={AlertCircleIcon} />
+							Not installed
+						</Badge>
+					) : null}
+				</CollapsibleTrigger>
+				<Button
+					className="shrink-0"
+					onClick={() => onSelect(`server:${server.name}`)}
+					size="sm"
+					variant="ghost"
+				>
+					Details
+				</Button>
+			</div>
+			<CollapsibleContent>
+				<div className="pt-1">
+					{tools.length === 0 ? (
+						<p className="px-1 pb-1 text-muted-foreground text-sm">
+							{allowlisted
+								? "None of this server's tools are on the selected agent's allowlist."
+								: server.enabled
+									? "This server advertises no tools."
+									: "Enable this server to see the tools it advertises."}
+						</p>
+					) : (
+						<ToolCards
+							onSelect={onSelect}
+							selectedId={selectedId}
+							tools={tools}
+						/>
+					)}
+				</div>
+			</CollapsibleContent>
+		</Collapsible>
+	);
+}
+
+/** A titled group shell for tool cards that are not owned by a live server. */
+function ToolGroupShell({
+	label,
+	count,
+	note,
+	children,
+}: {
+	label: string;
+	count: number;
+	note?: string;
+	children: React.ReactNode;
+}) {
+	return (
+		<section>
+			<h3 className="mb-2 flex items-center gap-2 px-1 font-medium text-muted-foreground text-xs uppercase tracking-widest">
+				<HugeiconsIcon className="size-3.5" icon={Wrench01Icon} />
+				{label}
+				<Badge variant="secondary">{count}</Badge>
+			</h3>
+			{note ? (
+				<p className="mb-2 px-1 text-muted-foreground text-xs normal-case">
+					{note}
+				</p>
+			) : null}
+			{children}
+		</section>
+	);
+}
+
+/** The flat A–Z list (also the search-results view). Each card keeps its server
+ *  badge, which is the only place the grouping information can live here. */
+function FlatToolList({
+	tools,
+	selectedId,
+	onSelect,
+	agentFilter,
+}: {
+	tools: McpTool[];
+	selectedId: string | null;
+	onSelect: (id: string) => void;
+	agentFilter: string | null;
+}) {
+	if (tools.length === 0) {
+		return (
+			<Empty className="p-8">
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={Wrench01Icon} />
+					</EmptyMedia>
+					<EmptyTitle>No tools found</EmptyTitle>
+					<EmptyDescription>
+						{agentFilter
+							? "This agent's allowlist exposes no matching tools."
+							: "Try a different search."}
+					</EmptyDescription>
+				</EmptyHeader>
+			</Empty>
+		);
+	}
+	return (
+		<div className="pt-2">
+			<ToolCards onSelect={onSelect} selectedId={selectedId} tools={tools} />
+		</div>
+	);
+}
+
+/** The card grid for a set of tools. */
+function ToolCards({
+	tools,
+	selectedId,
+	onSelect,
+}: {
+	tools: McpTool[];
+	selectedId: string | null;
+	onSelect: (id: string) => void;
+}) {
+	return (
+		<StoreCardGrid>
+			{tools.map((tool) => (
+				<StoreCatalogCard
+					action={<Badge variant="secondary">{tool.server}</Badge>}
+					description={tool.description ?? "No description"}
+					icon={
+						<HugeiconsIcon className="size-5" icon={ComputerTerminal01Icon} />
+					}
+					key={tool.id}
+					name={tool.name}
+					onClick={() => onSelect(`tool:${tool.id}`)}
+					seedId={tool.id}
+					selected={selectedId === `tool:${tool.id}`}
+				/>
+			))}
+		</StoreCardGrid>
+	);
+}
+
+function ServerDetail({
+	server,
+	tools,
+}: {
+	server: McpServer;
+	tools: McpTool[];
+}) {
 	return (
 		<div className="flex flex-col gap-6 p-4">
 			<header className="flex flex-col gap-3">
@@ -307,6 +586,9 @@ function ServerDetail({ server }: { server: McpServer }) {
 					{server.available === false ? (
 						<Badge variant="secondary">Not installed</Badge>
 					) : null}
+					<Badge variant="outline">
+						{tools.length} {tools.length === 1 ? "tool" : "tools"}
+					</Badge>
 				</div>
 			</header>
 
@@ -323,6 +605,24 @@ function ServerDetail({ server }: { server: McpServer }) {
 					{[server.command, ...server.args].join(" ")}
 				</code>
 			</section>
+
+			{tools.length > 0 ? (
+				<section className="flex flex-col gap-2">
+					<h3 className="font-medium text-sm">Tools</h3>
+					<ul className="flex flex-col divide-y rounded-lg border px-3">
+						{tools.map((tool) => (
+							<li className="py-2 text-sm" key={tool.id}>
+								<div className="truncate font-medium">{tool.name}</div>
+								{tool.description ? (
+									<div className="truncate text-muted-foreground text-xs">
+										{tool.description}
+									</div>
+								) : null}
+							</li>
+						))}
+					</ul>
+				</section>
+			) : null}
 		</div>
 	);
 }

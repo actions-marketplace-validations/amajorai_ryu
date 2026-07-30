@@ -17,7 +17,6 @@ import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	checkForUpdate,
-	FORCE_AUTO_UPDATE,
 	getAutoUpdateEnabled,
 	getVersionInfo,
 	setAutoUpdateEnabled,
@@ -71,6 +70,10 @@ export function UpdatesSettings() {
 	const onCheck = async () => {
 		setChecking(true);
 		try {
+			// Deliberately UNCLAMPED: this tab governs the NODE's Core/Gateway
+			// binaries, and a self-hosted or shared node has no lifetime owner to
+			// withhold builds from. So no verdict here is ever restricted, and there
+			// is no window notice or restricted branch to add below.
 			const verdict = await checkForUpdate(toTarget(getNode()));
 			// A failed check surfaces as either the fail-soft sentinel (empty
 			// version strings, see update.ts) or Core's fail-open verdict with an
@@ -98,7 +101,6 @@ export function UpdatesSettings() {
 			<UpdatesView
 				autoUpdate={autoUpdate}
 				checking={checking}
-				forceAutoUpdate={FORCE_AUTO_UPDATE}
 				onCheck={() => {
 					onCheck().catch(() => undefined);
 				}}

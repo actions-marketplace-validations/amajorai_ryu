@@ -510,5 +510,4 @@ mod tests {
         assert!(vault.accounts.is_empty());
         assert!(vault.active_user_id.is_none());
     }
-
 }

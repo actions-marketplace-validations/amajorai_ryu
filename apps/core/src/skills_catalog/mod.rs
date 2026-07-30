@@ -1272,7 +1272,10 @@ mod tests {
         let js = r#"Repository <a href="javascript:alert('github.com')">x</a>"#;
         assert_eq!(repository_url(js), None);
         // No "Repository" label → None.
-        assert_eq!(repository_url("<a href=\"https://github.com/o/r\">x</a>"), None);
+        assert_eq!(
+            repository_url("<a href=\"https://github.com/o/r\">x</a>"),
+            None
+        );
     }
 
     #[test]
@@ -1301,7 +1304,11 @@ mod tests {
         assert_eq!(audits.len(), 2);
         assert_eq!(audits[0].name, "Socket");
         assert_eq!(audits[0].status, "Passed");
-        assert!(audits[0].url.as_deref().unwrap().ends_with("/audits/socket"));
+        assert!(audits[0]
+            .url
+            .as_deref()
+            .unwrap()
+            .ends_with("/audits/socket"));
         assert_eq!(audits[1].name, "Snyk");
         assert_eq!(audits[1].url.as_deref(), Some("https://snyk.io/x"));
 

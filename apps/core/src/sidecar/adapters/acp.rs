@@ -369,11 +369,9 @@ async fn terminal_create(
                 "terminal command denied by gateway policy: {reason}"
             ))
         }
-        ExecScanOutcome::ApprovalRequired(reason) => {
-            return Err(anyhow::anyhow!(
-                "terminal command requires approval and terminal/create has no prompt seam: {reason}"
-            ))
-        }
+        ExecScanOutcome::ApprovalRequired(reason) => return Err(anyhow::anyhow!(
+            "terminal command requires approval and terminal/create has no prompt seam: {reason}"
+        )),
     }
 
     let mut cmd = tokio::process::Command::new(&req.command);
@@ -631,7 +629,10 @@ fn read_text_file_scoped(req: &ReadTextFileRequest, root: &std::path::Path) -> S
 /// Serve `fs/write_text_file`, creating parent directories as needed. Confined
 /// to the session workspace root — an out-of-root path is refused (no directory
 /// is created, nothing is written).
-fn write_text_file_scoped(req: &WriteTextFileRequest, root: &std::path::Path) -> anyhow::Result<()> {
+fn write_text_file_scoped(
+    req: &WriteTextFileRequest,
+    root: &std::path::Path,
+) -> anyhow::Result<()> {
     if !path_within_root(root, &req.path) {
         return Err(anyhow::anyhow!(
             "refusing write outside the session workspace: {} (root {})",
@@ -1651,6 +1652,23 @@ pub async fn run_acp_instance(
     // `~/.pi`) or any other engine. Both platforms carry the `PI_CODING_AGENT_DIR`
     // substring (POSIX inline `VAR=…`, Windows `set VAR=…`), see `ryu_pi_acp_cmd`.
     let is_managed_pi = spawn_cmd.contains("pi-acp") && spawn_cmd.contains("PI_CODING_AGENT_DIR");
+
+    if is_managed_pi {
+        // Resolve every enabled plugin's `contributes.lsp_servers` and drop the
+        // arbitrated table into the managed Pi config dir, where the Ryu-LSP
+        // extension picks it up. It MUST happen here and not in `ryu_pi_acp_cmd`:
+        // that function is sync and state-free by design, and the enabled-plugin
+        // set only exists behind the published `ServerState`.
+        //
+        // Cadence: once per pooled instance, i.e. once per Pi process, which is
+        // exactly when Pi reads its extensions. A live Pi cannot be told about a
+        // new language server, so enabling an LSP-contributing plugin mid-chat
+        // lands on the NEXT spawn for that chat — matching Claude Code, where
+        // servers are likewise read at startup. Do not move this into the per-turn
+        // loop below to "fix" that; there is nothing to send that would make a
+        // running Pi re-read, so it would be pure disk churn.
+        crate::lsp::ensure_lsp_servers_materialized().await;
+    }
 
     let agent = AcpAgent::from_str(&spawn_cmd)
         .map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?
@@ -3943,7 +3961,10 @@ mod tests {
     fn fs_confinement_rejects_escapes_lexically() {
         let root = std::path::Path::new("/ws/project");
         // In-root, `.`/`..` that stay inside, and relative paths all pass.
-        assert!(path_within_root(root, std::path::Path::new("/ws/project/a.txt")));
+        assert!(path_within_root(
+            root,
+            std::path::Path::new("/ws/project/a.txt")
+        ));
         assert!(path_within_root(
             root,
             std::path::Path::new("/ws/project/sub/../a.txt")
@@ -4729,7 +4750,10 @@ mod tests {
         let json = agent_caps_json(&caps);
         assert_eq!(json["loadSession"], serde_json::json!(true));
         assert_eq!(json["promptCapabilities"]["image"], serde_json::json!(true));
-        assert_eq!(json["promptCapabilities"]["audio"], serde_json::json!(false));
+        assert_eq!(
+            json["promptCapabilities"]["audio"],
+            serde_json::json!(false)
+        );
         assert_eq!(json["mcpCapabilities"]["http"], serde_json::json!(true));
         assert_eq!(json["mcpCapabilities"]["sse"], serde_json::json!(false));
     }
@@ -4750,7 +4774,10 @@ mod tests {
     #[test]
     fn parse_cli_version_extracts_semver_forms() {
         assert_eq!(parse_cli_version("v1.2.3"), Some("1.2.3".to_owned()));
-        assert_eq!(parse_cli_version("mytool 0.10.4"), Some("0.10.4".to_owned()));
+        assert_eq!(
+            parse_cli_version("mytool 0.10.4"),
+            Some("0.10.4".to_owned())
+        );
         assert_eq!(
             parse_cli_version("codex-acp version 2.0.0-beta.1"),
             Some("2.0.0-beta.1".to_owned())

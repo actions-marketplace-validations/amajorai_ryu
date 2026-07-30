@@ -898,17 +898,123 @@ pub async fn fetch_feature_list(
         .collect())
 }
 
-/// Install a model by catalog id (`POST /api/models/catalog/install`).
+/// One GGUF file of a model repo, as `GET /api/models/catalog/detail` serializes
+/// it. Only the fields the quant picker needs are decoded.
+#[derive(serde::Deserialize)]
+struct GgufFileWire {
+    filename: String,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+    #[serde(default)]
+    installed: bool,
+    #[serde(default)]
+    fit: String,
+}
+
+/// Device-fit ordering, lower is better. Core emits `great`/`ok`/`tight`/
+/// `too_big`/`unknown`; `partial`/`cpu` are accepted too so a newer Core that
+/// widens the vocabulary still ranks sensibly instead of collapsing to "unknown".
+fn fit_rank(fit: &str) -> u8 {
+    match fit {
+        "great" => 0,
+        "ok" => 1,
+        "tight" | "partial" => 2,
+        "cpu" => 3,
+        "too_big" => 5,
+        _ => 4,
+    }
+}
+
+/// Pick which quantization to install: an already-installed one (so re-running
+/// the command is a no-op), else the best device fit, breaking ties toward the
+/// SMALLER file — the one more likely to actually run. Mirrors the desktop's
+/// `pickRecommendedQuant`, which makes the same choice for a `ryu://` link.
+fn pick_recommended_quant(files: Vec<GgufFileWire>) -> Option<GgufFileWire> {
+    files.into_iter().reduce(|best, f| {
+        if best.installed {
+            return best;
+        }
+        if f.installed {
+            return f;
+        }
+        let by_fit = fit_rank(&f.fit).cmp(&fit_rank(&best.fit));
+        if by_fit != std::cmp::Ordering::Equal {
+            return if by_fit == std::cmp::Ordering::Less { f } else { best };
+        }
+        if f.size_bytes.unwrap_or(u64::MAX) < best.size_bytes.unwrap_or(u64::MAX) {
+            f
+        } else {
+            best
+        }
+    })
+}
+
+/// Resolve the GGUF filename to install for a repo id via
+/// `GET /api/models/catalog/detail?id=…`. A GGUF install is per-FILE — Core's
+/// install endpoint defaults `file` to the empty string, so a caller that omits
+/// it asks Core to download nothing. Every model install therefore goes through
+/// this resolve step first.
+pub async fn recommended_model_file(
+    api_url: &str,
+    token: Option<&str>,
+    id: &str,
+) -> anyhow::Result<String> {
+    let client = authed_client(token);
+    let detail: serde_json::Value = client
+        .get(format!("{api_url}/api/models/catalog/detail"))
+        .query(&[("id", id)])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let files: Vec<GgufFileWire> = detail
+        .get("files")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    let picked = pick_recommended_quant(files)
+        .ok_or_else(|| anyhow::anyhow!("'{id}' has no downloadable GGUF file"))?;
+    Ok(picked.filename)
+}
+
+/// Install a model by catalog id (`POST /api/models/catalog/install`), resolving
+/// the quantization first (see [`recommended_model_file`]).
 pub async fn install_model_by_id(
     api_url: &str,
     token: Option<&str>,
     id: &str,
 ) -> anyhow::Result<()> {
-    let client = authed_client(token);
+    let file = recommended_model_file(api_url, token, id).await?;
+    install_model_file(api_url, token, id, &file).await
+}
+
+/// Install one specific GGUF file of a repo (`POST /api/models/catalog/install`).
+pub async fn install_model_file(
+    api_url: &str,
+    token: Option<&str>,
+    id: &str,
+    file: &str,
+) -> anyhow::Result<()> {
+    // A model download is minutes-long; the shared 10s client would time out
+    // mid-transfer even though Core completes the install.
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(3600));
+    if let Some(t) = token {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", t)) {
+            headers.insert(reqwest::header::AUTHORIZATION, val);
+        }
+        builder = builder.default_headers(headers);
+    }
+    let client = builder.build().unwrap_or_else(|_| reqwest::Client::new());
     client
         .post(format!("{api_url}/api/models/catalog/install"))
         .header("Content-Type", "application/json")
-        .body(serde_json::json!({ "id": id }).to_string())
+        .body(
+            serde_json::json!({ "id": id, "file": file, "format": "gguf" })
+                .to_string(),
+        )
         .send()
         .await?
         .error_for_status()?;
@@ -1324,4 +1430,60 @@ pub async fn install_selected(app: &mut App) -> anyhow::Result<()> {
     app.install_results = results;
     let _ = fetch_installed(app).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(filename: &str, fit: &str, size: u64, installed: bool) -> GgufFileWire {
+        GgufFileWire {
+            filename: filename.to_string(),
+            size_bytes: Some(size),
+            installed,
+            fit: fit.to_string(),
+        }
+    }
+
+    #[test]
+    fn picks_the_best_device_fit() {
+        let picked = pick_recommended_quant(vec![
+            file("big.gguf", "too_big", 40, false),
+            file("good.gguf", "great", 5, false),
+            file("ok.gguf", "ok", 3, false),
+        ]);
+        assert_eq!(picked.unwrap().filename, "good.gguf");
+    }
+
+    #[test]
+    fn breaks_a_fit_tie_toward_the_smaller_file() {
+        let picked = pick_recommended_quant(vec![
+            file("q8.gguf", "great", 9, false),
+            file("q4.gguf", "great", 4, false),
+        ]);
+        assert_eq!(picked.unwrap().filename, "q4.gguf");
+    }
+
+    #[test]
+    fn prefers_an_already_installed_quant_so_reruns_are_no_ops() {
+        let picked = pick_recommended_quant(vec![
+            file("great.gguf", "great", 5, false),
+            file("have-it.gguf", "cpu", 20, true),
+        ]);
+        assert_eq!(picked.unwrap().filename, "have-it.gguf");
+    }
+
+    #[test]
+    fn an_unknown_fit_loses_to_a_known_good_one_but_beats_too_big() {
+        let picked = pick_recommended_quant(vec![
+            file("mystery.gguf", "brand-new-verdict", 1, false),
+            file("huge.gguf", "too_big", 1, false),
+        ]);
+        assert_eq!(picked.unwrap().filename, "mystery.gguf");
+    }
+
+    #[test]
+    fn no_files_means_no_pick() {
+        assert!(pick_recommended_quant(vec![]).is_none());
+    }
 }

@@ -2137,6 +2137,20 @@ struct MarketplaceCard {
     rating_average: Option<f64>,
     #[serde(default, rename = "ratingCount")]
     rating_count: Option<u64>,
+    /// Monetization view (`{ amountMinor, currency, kind }`), present only for PAID
+    /// items — the hosted server emits `null` for free ones. Carried onto the card
+    /// so a paid listing still reads as paid once it is folded into the unified
+    /// first-party view alongside the free git catalog; without it the merged list
+    /// showed every paid item as if it were free, and the price only reappeared
+    /// after the user reached checkout. Display only: entitlement is decided by the
+    /// server at purchase/install, never by this field.
+    #[serde(default)]
+    pricing: Option<Value>,
+    /// True when the hosted server vouches for the item as first-party. Used to
+    /// order the unified view (first-party above third-party) rather than to grant
+    /// any trust — trust comes from the signed manifest.
+    #[serde(default, rename = "firstParty")]
+    first_party: bool,
     /// The plugin's declared dependency closure + host surfaces, when the
     /// marketplace server exposes them on the card. Raw JSON, and `Option` so an
     /// older server that omits the columns still parses (the fields survive inside
@@ -2467,6 +2481,13 @@ impl RyuMarketplaceSource {
                     }
                     if card.has_companion {
                         obj.insert("has_companion".to_owned(), serde_json::json!(true));
+                    }
+                    // Commerce disclosure — see the `pricing` note on `MarketplaceCard`.
+                    if let Some(pricing) = card.pricing.clone().filter(|v| !v.is_null()) {
+                        obj.insert("pricing".to_owned(), pricing);
+                    }
+                    if card.first_party {
+                        obj.insert("first_party".to_owned(), serde_json::json!(true));
                     }
                 }
                 value
@@ -4872,7 +4893,10 @@ mod tests {
         );
         // Empty string / whitespace object name / non-string-object → None.
         assert_eq!(author_developer_string(&serde_json::json!("   ")), None);
-        assert_eq!(author_developer_string(&serde_json::json!({"name": ""})), None);
+        assert_eq!(
+            author_developer_string(&serde_json::json!({"name": ""})),
+            None
+        );
         assert_eq!(author_developer_string(&serde_json::json!(42)), None);
         assert_eq!(author_developer_string(&serde_json::json!(null)), None);
     }

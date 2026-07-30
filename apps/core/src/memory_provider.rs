@@ -95,9 +95,8 @@ pub async fn is_external() -> bool {
 /// rustc then reports "cycle detected when verify auto trait bounds for coroutine
 /// interior type". Naming a concrete `Pin<Box<dyn Future>>` means there is no opaque
 /// type to compute, so the cycle terminates at this signature.
-type VerbCall = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send>,
->;
+type VerbCall =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send>>;
 
 fn call_verb(verb: &str, arguments: serde_json::Value) -> VerbCall {
     let verb = verb.to_owned();
@@ -148,11 +147,7 @@ pub async fn prefetch(query: &str, limit: usize) -> Vec<String> {
         return Vec::new();
     }
     let limit = limit.clamp(1, MAX_INJECTED_FACTS);
-    let Some(raw) = call_verb(
-        "memory__search",
-        json!({ "query": query, "limit": limit }),
-    )
-    .await
+    let Some(raw) = call_verb("memory__search", json!({ "query": query, "limit": limit })).await
     else {
         return Vec::new();
     };
@@ -191,7 +186,11 @@ pub async fn context(query: &str) -> Option<String> {
 /// server-side-extraction providers are designed to be fed. A user may reasonably
 /// want either, both, or neither, so they are two settings rather than one.
 pub fn sync_turn(content: &str, role: &str) {
-    detach("memory__sync", json!({ "content": content.trim(), "role": role }), content);
+    detach(
+        "memory__sync",
+        json!({ "content": content.trim(), "role": role }),
+        content,
+    );
 }
 
 /// Run a WRITE-side hook without blocking the turn.
@@ -230,15 +229,13 @@ fn summary_text(value: &serde_json::Value) -> Option<String> {
         }
     }
     // Un-normalized passthrough (`{provider, raw}`) — look one level in.
-    value
-        .get("raw")
-        .and_then(|raw| {
-            raw.as_str().map(str::to_owned).or_else(|| {
-                ["context", "summary", "content", "text"]
-                    .iter()
-                    .find_map(|k| raw.get(k).and_then(|v| v.as_str()).map(str::to_owned))
-            })
+    value.get("raw").and_then(|raw| {
+        raw.as_str().map(str::to_owned).or_else(|| {
+            ["context", "summary", "content", "text"]
+                .iter()
+                .find_map(|k| raw.get(k).and_then(|v| v.as_str()).map(str::to_owned))
         })
+    })
 }
 
 /// Run BOTH read-side hooks under ONE budget, concurrently.
@@ -287,7 +284,11 @@ pub fn render_context_block(summary: &str) -> Option<String> {
 /// Fire-and-forget by design: the built-in write has already succeeded and is the
 /// source of truth, so a mirror failure must not surface anywhere.
 pub fn mirror(content: &str, scope: &str) {
-    detach("memory__store", json!({ "content": content.trim(), "scope": scope }), content);
+    detach(
+        "memory__store",
+        json!({ "content": content.trim(), "scope": scope }),
+        content,
+    );
 }
 
 /// Pull displayable fact strings out of a provider response.
@@ -305,13 +306,11 @@ fn extract_facts(value: &serde_json::Value, limit: usize) -> Vec<String> {
         .or_else(|| {
             // Un-normalized passthrough: `{provider, raw}` where raw may itself be
             // an array or carry one.
-            value
-                .get("raw")
-                .and_then(|raw| {
-                    raw.as_array().cloned().or_else(|| {
-                        raw.get("results").and_then(|v| v.as_array()).cloned()
-                    })
-                })
+            value.get("raw").and_then(|raw| {
+                raw.as_array()
+                    .cloned()
+                    .or_else(|| raw.get("results").and_then(|v| v.as_array()).cloned())
+            })
         })
         .unwrap_or_default();
 
@@ -362,9 +361,8 @@ pub fn render_block(facts: &[String]) -> Option<String> {
     if facts.is_empty() {
         return None;
     }
-    let mut out = String::from(
-        "Relevant memories from your external memory provider (reference only):\n",
-    );
+    let mut out =
+        String::from("Relevant memories from your external memory provider (reference only):\n");
     for fact in facts {
         out.push_str("- ");
         out.push_str(fact.trim());
@@ -426,7 +424,11 @@ mod tests {
             .map(|_| json!({ "content": long.clone() }))
             .collect();
         let facts = extract_facts(&json!({ "results": items }), 8);
-        assert_eq!(facts.len(), 8, "a provider must not crowd out the conversation");
+        assert_eq!(
+            facts.len(),
+            8,
+            "a provider must not crowd out the conversation"
+        );
         for fact in &facts {
             // The clip applies to the provider's text; neutralization then adds its
             // fixed boundary markers on top, so allow for those.

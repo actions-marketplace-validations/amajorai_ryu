@@ -1790,8 +1790,7 @@ mod download_tests {
     fn binary_with_libs_missing_binary_errors() {
         let data = make_tar_gz(&[("build/libggml.dylib", b"lib")]);
         let tmp = tempfile::tempdir().unwrap();
-        let err =
-            extract_binary_with_libs(&data, "llama-server", tmp.path(), false).unwrap_err();
+        let err = extract_binary_with_libs(&data, "llama-server", tmp.path(), false).unwrap_err();
         assert!(err.to_string().contains("llama-server"));
     }
 
@@ -1909,7 +1908,8 @@ mod download_tests {
     fn write_symlink_flattened_creates_link_to_basename() {
         let tmp = tempfile::tempdir().unwrap();
         // Target given with a path prefix — must be flattened to a bare basename.
-        let dest = write_symlink_flattened(tmp.path(), "libfoo.dylib", "sub/libfoo.1.dylib").unwrap();
+        let dest =
+            write_symlink_flattened(tmp.path(), "libfoo.dylib", "sub/libfoo.1.dylib").unwrap();
         let meta = std::fs::symlink_metadata(&dest).unwrap();
         assert!(meta.file_type().is_symlink());
         assert_eq!(
@@ -1935,7 +1935,13 @@ mod download_tests {
     fn platform_tag_is_known() {
         let t = platform_tag();
         assert!(
-            ["macos-arm64", "macos-x86_64", "linux-x86_64", "windows-x86_64"].contains(&t),
+            [
+                "macos-arm64",
+                "macos-x86_64",
+                "linux-x86_64",
+                "windows-x86_64"
+            ]
+            .contains(&t),
             "unexpected platform tag: {t}"
         );
     }

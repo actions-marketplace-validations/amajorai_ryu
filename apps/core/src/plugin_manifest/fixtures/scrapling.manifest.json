@@ -1,0 +1,36 @@
+{
+  "id": "scrapling",
+  "name": "Scrapling",
+  "version": "1.0.0",
+  "description": "Adaptive web-page extraction via the Scrapling MCP server (https://scrapling.readthedocs.io), a BYO local install. Provides the swappable `web.extract` layer as a THIRD provider alongside the local `spider` CLI and the hosted BYOK services, so selecting it re-points the stable `web__extract` tool at a fetcher that impersonates a real browser TLS fingerprint. No API key. Requires `pip install \"scrapling[ai]\"` and the `scrapling` binary on PATH; until then the MCP server does not start and the layer falls back to whichever other provider you select. Deliberately provides NO `web.crawl`: neither the MCP server nor the CLI follows links — only Scrapling's Python `Spider` class crawls, and it is not reachable over MCP.",
+  "tagline": "Anti-bot page extraction, no API key",
+  "keywords": ["web", "scraping", "extract"],
+  "category": "Search",
+  "engines": {
+    "ryu": ">=0.0.1"
+  },
+  "runnables": [],
+  "provides": [
+    {
+      "capability": "web.extract",
+      "version": "1.0.0",
+      "selectable": true,
+      "tools": {
+        "web__extract": {
+          "tool": "scrapling__get",
+          "adapter": {
+            "code": "const res = await callTool({\n  url: input.url,\n  // The canonical `format` enum (markdown | text | html) is EXACTLY Scrapling's\n  // `extraction_type` enum, so this is the one shipped extract provider that can\n  // honour the argument instead of dropping it. Scrapling's own default is\n  // markdown, which is also what the canonical `content` field promises.\n  extraction_type: input.format || \"markdown\",\n});\n// An MCP `tools/call` answer is the TRANSPORT envelope, not the tool's value:\n// `{content: [{type, text}], structuredContent, isError}`. Only\n// `structuredContent` carries the typed ResponseModel. Shaping a missing one into\n// an empty page would report a broken install as \"this URL has no content\" — an\n// invisible, plausible-looking lie — so pass it through under `raw` instead. This\n// path is genuinely reachable: `scrapling mcp` fails on import against `mcp` 2.x\n// (see README), and a server that never starts answers nothing typed at all.\nconst page = res && res.structuredContent;\nif (!page || res.isError) {\n  return { raw: res };\n}\n// `content` is an ARRAY of extracted chunks, and Scrapling emits empty strings for\n// regions it found nothing in. The canonical `content` field is a STRING, and the\n// declarative response mapper copies a located value verbatim — it has no join. So\n// the flattening lives here, in the ONE provider whose shape this is, rather than\n// in shared kernel code every provider flows through.\nconst chunks = Array.isArray(page.content) ? page.content : [page.content];\nconst content = chunks\n  .filter((chunk) => typeof chunk === \"string\" && chunk.length > 0)\n  .join(\"\\n\\n\");\n// `url` is the RESOLVED url (redirects already followed), which is what a canonical\n// record should report. No `title` is mapped: ResponseModel has no such field, and\n// emitting an empty one would read as a page whose title is blank rather than as a\n// field this provider cannot supply. `status` is kept under `raw` for the same\n// reason the declarative mapper keeps the provider's original item there.\nreturn { results: [{ url: page.url || input.url, content, raw: page }] };"
+          }
+        }
+      }
+    }
+  ],
+  "permission_grants": ["mcp:scrapling", "tool:execute"],
+  "mcp_servers": {
+    "scrapling": {
+      "command": "scrapling",
+      "args": ["mcp"],
+      "description": "Scrapling — adaptive web scraping over MCP (get, bulk_get, fetch, stealthy_fetch, screenshot, browser sessions). Launched via `scrapling mcp`; unavailable until `pip install \"scrapling[ai]\"` has been run and `scrapling` is on PATH. The browser-backed tools additionally need `scrapling install` to download Chromium and Camoufox."
+    }
+  }
+}

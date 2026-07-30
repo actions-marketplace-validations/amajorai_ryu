@@ -419,7 +419,7 @@ pub const GRANT_MCP_SERVER: &str = "mcp:server";
 
 /// Whether a plugin may register its manifest-declared `mcp_servers`.
 ///
-/// **Core**-tier (compiled-in fixtures — `ghost`, `agentbrowser`) is auto-allowed:
+/// **Core**-tier (compiled-in fixtures — `ghost`, `agentbrowser`, `scrapling`) is auto-allowed:
 /// its manifests ship inside the binary and cannot be edited on disk (the loader
 /// parses built-ins FIRST and first-occurrence-wins, so a disk manifest can never
 /// take a Core id). **Community**-tier — anything loaded from
@@ -481,7 +481,11 @@ pub fn register_manifest_mcp_servers(
     }
     let mut names = Vec::new();
     for (name, decl) in &manifest.mcp_servers {
-        if registry.register_server(&manifest.id, name.clone(), mcp_server_config_from_decl(decl)) {
+        if registry.register_server(
+            &manifest.id,
+            name.clone(),
+            mcp_server_config_from_decl(decl),
+        ) {
             names.push(name.clone());
         }
     }
@@ -849,9 +853,7 @@ fn effective_tool_grants(
         crate::plugin_manifest::PluginTier::Core => {
             manifest.permission_grants.iter().cloned().collect()
         }
-        crate::plugin_manifest::PluginTier::Community => {
-            approved_grants.iter().cloned().collect()
-        }
+        crate::plugin_manifest::PluginTier::Community => approved_grants.iter().cloned().collect(),
     }
 }
 
@@ -2279,10 +2281,14 @@ impl McpRegistry {
                 // `tool_result` hooks: AWAITED, and may rewrite the result before the
                 // model ever sees it (redaction / narrowing). Fail-open — on timeout,
                 // error, or no subscriber the original output is used unchanged.
-                let output =
-                    run_tool_result_hooks(tool_id, &tool_input, &output, hook_session_id.as_deref())
-                        .await
-                        .unwrap_or(output);
+                let output = run_tool_result_hooks(
+                    tool_id,
+                    &tool_input,
+                    &output,
+                    hook_session_id.as_deref(),
+                )
+                .await
+                .unwrap_or(output);
                 // PostToolUse hooks: observe-only, fired detached so they add no
                 // latency and cannot fail the call. They observe the FINAL output —
                 // the same bytes the model got. Deliberate: a `tool_result` hook that
@@ -2887,9 +2893,7 @@ impl McpRegistry {
             // — per-install configuration that is not a canonical verb argument
             // (Mem0's entity id, for instance). Without this a manifest could only
             // hard-code such a value, giving every install the same fixed bucket.
-            let provider_defaults = self
-                .resolve_provider_defaults(&resolved.binding)
-                .await;
+            let provider_defaults = self.resolve_provider_defaults(&resolved.binding).await;
             // A provider whose shape the declarative fields cannot bridge ships an
             // ADAPTER instead: JS that receives the canonical arguments and returns
             // the canonical result, calling its own bound tool through `callTool`.
@@ -3334,18 +3338,16 @@ impl McpRegistry {
     /// grants, so every grant check over it fails closed.
     async fn provider_grants(&self, plugin_id: &str) -> std::collections::HashSet<String> {
         let empty = std::collections::HashSet::new();
-        let (Some(manifests), Some(store)) =
-            (self.self_build_manifests.as_ref(), self.self_build_app_store.as_ref())
-        else {
+        let (Some(manifests), Some(store)) = (
+            self.self_build_manifests.as_ref(),
+            self.self_build_app_store.as_ref(),
+        ) else {
             return empty;
         };
         let Ok(records) = store.list().await else {
             return empty;
         };
-        let Some(record) = records
-            .into_iter()
-            .find(|r| r.enabled && r.id == plugin_id)
-        else {
+        let Some(record) = records.into_iter().find(|r| r.enabled && r.id == plugin_id) else {
             return empty;
         };
         let guard = manifests.read().await;
@@ -3729,8 +3731,7 @@ mod tests {
         assert_eq!(stamped["provider"], serde_json::json!("firecrawl"));
 
         // An adapter that reported its own provider is trusted over the stamp.
-        let explicit =
-            stamp_provider(serde_json::json!({ "provider": "proxied" }), "firecrawl");
+        let explicit = stamp_provider(serde_json::json!({ "provider": "proxied" }), "firecrawl");
         assert_eq!(explicit["provider"], serde_json::json!("proxied"));
 
         // A non-object result is wrapped, never dropped.
@@ -3891,7 +3892,10 @@ mod tests {
 
         let servers = reg.servers.read().expect("lock");
         assert_eq!(
-            servers.get("shared-name").expect("still registered").command,
+            servers
+                .get("shared-name")
+                .expect("still registered")
+                .command,
             "npx",
             "the original owner's command must survive the takeover attempt"
         );
@@ -4081,7 +4085,11 @@ mod tests {
         assert_eq!(ab.command, "npx");
         assert_eq!(
             ab.args,
-            vec!["-y".to_owned(), "agent-browser".to_owned(), "mcp".to_owned()]
+            vec![
+                "-y".to_owned(),
+                "agent-browser".to_owned(),
+                "mcp".to_owned()
+            ]
         );
         assert!(ab.enabled);
     }
@@ -4784,11 +4792,21 @@ mod tests {
         });
         // No egress/exec grant → deterministic refusal, but ONLY reachable if the
         // native id routed to the command backend (not the generic MCP lookup).
-        let reg = registry_with_plugin("com.test.spider", vec![], vec![tool_entry("tool-spider-crawl", cfg.clone())]).await;
+        let reg = registry_with_plugin(
+            "com.test.spider",
+            vec![],
+            vec![tool_entry("tool-spider-crawl", cfg.clone())],
+        )
+        .await;
         // The id the handler mints for this config is the NATIVE id.
         let id = app_tool_registered_id(&tool_cfg(cfg));
         assert_eq!(id, "spider__crawl");
-        reg.register_app_tool_tagged(id.clone(), "spider__crawl".into(), None, Some(AppToolBackendTag::Command));
+        reg.register_app_tool_tagged(
+            id.clone(),
+            "spider__crawl".into(),
+            None,
+            Some(AppToolBackendTag::Command),
+        );
 
         // Listed under the native id, NOT the app__ form.
         let all = reg.list_all_tools().await;
@@ -4808,7 +4826,11 @@ mod tests {
         // Dispatch reaches the command backend (grant refusal), never "unknown MCP
         // server: spider" — the failure the routing change prevents.
         let err = reg
-            .call_tool("spider__crawl", serde_json::json!({ "url": "http://93.184.216.34/" }), None)
+            .call_tool(
+                "spider__crawl",
+                serde_json::json!({ "url": "http://93.184.216.34/" }),
+                None,
+            )
             .await
             .expect_err("ungranted command exec must be refused");
         let msg = err.to_string();
@@ -4816,7 +4838,10 @@ mod tests {
             msg.contains("not granted") && msg.contains("tool:command:spider"),
             "expected a deterministic grant refusal, got: {msg}"
         );
-        assert!(!msg.contains("unknown MCP server"), "native id must route to the app arm, got: {msg}");
+        assert!(
+            !msg.contains("unknown MCP server"),
+            "native id must route to the app arm, got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -4826,22 +4851,44 @@ mod tests {
             "backend": "http",
             "url": "https://api.exa.ai/search",
         });
-        let reg = registry_with_plugin("com.test.exa", vec![], vec![tool_entry("tool-exa-search", cfg.clone())]).await;
+        let reg = registry_with_plugin(
+            "com.test.exa",
+            vec![],
+            vec![tool_entry("tool-exa-search", cfg.clone())],
+        )
+        .await;
         assert_eq!(app_tool_registered_id(&tool_cfg(cfg)), "exa__search");
-        reg.register_app_tool_tagged("exa__search".into(), "exa__search".into(), None, Some(AppToolBackendTag::Http));
+        reg.register_app_tool_tagged(
+            "exa__search".into(),
+            "exa__search".into(),
+            None,
+            Some(AppToolBackendTag::Http),
+        );
 
         let all = reg.list_all_tools().await;
         assert!(all.iter().any(|t| t.id == "exa__search"));
-        let resolved = reg.resolve_app_tool_backend("exa__search").await.expect("owns exa__search");
-        assert!(matches!(resolved.backend, crate::plugin_manifest::schema::ToolBackend::Http { .. }));
+        let resolved = reg
+            .resolve_app_tool_backend("exa__search")
+            .await
+            .expect("owns exa__search");
+        assert!(matches!(
+            resolved.backend,
+            crate::plugin_manifest::schema::ToolBackend::Http { .. }
+        ));
 
         let err = reg
             .call_tool("exa__search", serde_json::json!({ "q": "hi" }), None)
             .await
             .expect_err("ungranted http egress must be refused");
         let msg = err.to_string();
-        assert!(msg.contains("not granted") && msg.contains("api.exa.ai"), "got: {msg}");
-        assert!(!msg.contains("unknown MCP server"), "native id must route to the app arm, got: {msg}");
+        assert!(
+            msg.contains("not granted") && msg.contains("api.exa.ai"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("unknown MCP server"),
+            "native id must route to the app arm, got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -4856,9 +4903,22 @@ mod tests {
             ]
         });
         assert_eq!(app_tool_registered_id(&tool_cfg(cfg.clone())), "rtk__run");
-        let reg = registry_with_plugin("com.test.rtk", vec!["tool:command:rtk"], vec![tool_entry("tool-rtk-run", cfg)]).await;
-        reg.register_app_tool_tagged("rtk__run".into(), "rtk__run".into(), None, Some(AppToolBackendTag::Command));
-        let resolved = reg.resolve_app_tool_backend("rtk__run").await.expect("owns rtk__run");
+        let reg = registry_with_plugin(
+            "com.test.rtk",
+            vec!["tool:command:rtk"],
+            vec![tool_entry("tool-rtk-run", cfg)],
+        )
+        .await;
+        reg.register_app_tool_tagged(
+            "rtk__run".into(),
+            "rtk__run".into(),
+            None,
+            Some(AppToolBackendTag::Command),
+        );
+        let resolved = reg
+            .resolve_app_tool_backend("rtk__run")
+            .await
+            .expect("owns rtk__run");
         match resolved.backend {
             crate::plugin_manifest::schema::ToolBackend::Command { arg_specs, .. } => {
                 assert!(arg_specs.is_some());
@@ -4871,7 +4931,10 @@ mod tests {
     async fn alias_and_bare_slug_tools_stay_app_namespaced() {
         // An Alias tool (other-apps re-expose path) keeps app__<slug>.
         let alias_cfg = serde_json::json!({ "slug": "web_search" });
-        assert_eq!(app_tool_registered_id(&tool_cfg(alias_cfg.clone())), "app__web_search");
+        assert_eq!(
+            app_tool_registered_id(&tool_cfg(alias_cfg.clone())),
+            "app__web_search"
+        );
         // A bare (non-namespaced) inline tool also stays app__<slug> — the `__`
         // discriminator: a native id must carry the separator to be routable.
         let bare_inline = serde_json::json!({
@@ -4879,11 +4942,22 @@ mod tests {
             "backend": "inline_deno",
             "code": "return await ((input, host) => ({ ok: true }))(input, host);",
         });
-        assert_eq!(app_tool_registered_id(&tool_cfg(bare_inline)), "app__weather");
+        assert_eq!(
+            app_tool_registered_id(&tool_cfg(bare_inline)),
+            "app__weather"
+        );
 
         // The alias still resolves under app__ and dispatch keeps the legacy re-enter.
-        let reg = registry_with_plugin("com.test.alias", vec![], vec![tool_entry("web_search", alias_cfg)]).await;
-        let resolved = reg.resolve_app_tool_backend("app__web_search").await.expect("owns app__web_search");
+        let reg = registry_with_plugin(
+            "com.test.alias",
+            vec![],
+            vec![tool_entry("web_search", alias_cfg)],
+        )
+        .await;
+        let resolved = reg
+            .resolve_app_tool_backend("app__web_search")
+            .await
+            .expect("owns app__web_search");
         assert!(matches!(
             resolved.backend,
             crate::plugin_manifest::schema::ToolBackend::Alias { target } if target == "web_search"

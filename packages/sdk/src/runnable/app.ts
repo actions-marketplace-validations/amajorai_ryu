@@ -197,6 +197,11 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		sidebar_sections: [],
 		sidebar_buttons: [],
 		dock_panels: [],
+		// Empty for the same reason as every sibling family above: this builder
+		// synthesises `widgets` from the app's own runnables and nothing else, and
+		// takes no `contributes` passthrough. An app that wants to declare language
+		// servers writes them in a hand-authored `manifest.json`.
+		lsp_servers: {},
 		widgets,
 	};
 

@@ -1413,6 +1413,23 @@ impl ConversationStore {
             .ok()
             .flatten()
             .unwrap_or(false);
+        // Is this the conversation's FIRST user turn? Drives the auto-rename
+        // signal fired after the lock is released. Counted over `messages` rather
+        // than inferred from `had_title`, because a conversation can be titled
+        // before it holds any message (a rename on an empty chat), which would
+        // otherwise suppress the signal for the real first turn.
+        let is_first_user_message = role == "user"
+            && conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND role = 'user'",
+                    params![conversation_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .unwrap_or(0)
+                == 0;
         upsert_conversation_row(
             &conn,
             conversation_id,
@@ -1471,14 +1488,27 @@ impl ConversationStore {
             .context("advancing active leaf on append")?;
         }
 
-        // Chat LLM auto-rename moved to the `chat-title` turn-hook plugin
-        // (`post_assistant_turn`). The first-message-derived title above still
-        // provides an instant placeholder; the plugin re-titles after every N
-        // completed assistant turns.
         // Release the conversation DB lock before fanning out — the publish is a
         // non-blocking broadcast send on a different mutex, but there is no reason
         // to hold the conn lock across it.
         drop(conn);
+
+        // Chat LLM auto-rename (ChatGPT/Claude-style): hand the conversation to
+        // the auto-title loop the FIRST time it receives a user turn. The
+        // derived title written above is only a placeholder cut from the raw
+        // message; the loop replaces it with a model-written one.
+        //
+        // Fired after the lock is released and only on the first user turn, which
+        // together are what make it a once-per-conversation signal rather than a
+        // rename on every message. `send` failing means the receiver is gone
+        // (Core shutting down, or a store built without `with_auto_title`, as in
+        // most tests) — a titled conversation is not worth an error path, so the
+        // result is deliberately discarded.
+        if is_first_user_message {
+            if let Some(tx) = &self.auto_title_tx {
+                let _ = tx.send(conversation_id.to_owned());
+            }
+        }
 
         // Room-keyed realtime fan-out (Phase 1): make this turn appear live for
         // every other viewer of the conversation. We publish the *plaintext*

@@ -726,7 +726,9 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_directive(Some(&json!({ "kind": "transform", "output": "plain string" }))),
+            parse_directive(Some(
+                &json!({ "kind": "transform", "output": "plain string" })
+            )),
             HookDirective::Transform {
                 output: json!("plain string")
             }
@@ -1482,7 +1484,8 @@ mod tests {
             return;
         }
         // subagent_stop reads ctx.output + ctx.event.
-        let code = fixture_hook_from_file("hook-observers.manifest.json", "observers.subagent-stop");
+        let code =
+            fixture_hook_from_file("hook-observers.manifest.json", "observers.subagent-stop");
         let ctx = HookContext {
             output: Some("did the thing".into()),
             event: Some(serde_json::json!({ "id": "task-7" })),

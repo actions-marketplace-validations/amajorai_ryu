@@ -68,11 +68,10 @@ fn job_id_for(monitor_id: &str) -> String {
 /// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
 /// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, MONITORS_PLUGIN_ID, MONITORS_SIDECAR)
-        .expect(
-            "built-in monitors.manifest.json must declare the ryu-monitors sidecar (see \
+    crate::sidecar::ext_proxy::sidecar_port(manifests, MONITORS_PLUGIN_ID, MONITORS_SIDECAR).expect(
+        "built-in monitors.manifest.json must declare the ryu-monitors sidecar (see \
              plugin_manifest::BUILTIN_MANIFESTS)",
-        )
+    )
 }
 
 /// Process-global monitors client, so the state-free scheduler (`JobTarget::Monitor`)

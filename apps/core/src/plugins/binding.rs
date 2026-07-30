@@ -226,7 +226,10 @@ impl std::error::Error for BindingError {}
 /// `pub` because [`BindingRegistry::resolve_provider`] returns it — the capability
 /// tool facade lives outside this module and needs the provider's `ProvidesEntry` to
 /// read its verb→tool bindings.
-pub type Candidate<'a> = (&'a PluginManifest, &'a crate::plugin_manifest::ProvidesEntry);
+pub type Candidate<'a> = (
+    &'a PluginManifest,
+    &'a crate::plugin_manifest::ProvidesEntry,
+);
 
 /// The deterministic pick among 2+ providers of a **selectable** capability, or
 /// `None` when the capability is not selectable (⇒ the caller raises `Ambiguous`,
@@ -359,7 +362,11 @@ pub fn describe_capabilities(
     // happens to be default-on.
     let mut names: Vec<String> = known
         .iter()
-        .flat_map(|m| m.provided_capabilities().iter().map(|p| p.capability.clone()))
+        .flat_map(|m| {
+            m.provided_capabilities()
+                .iter()
+                .map(|p| p.capability.clone())
+        })
         .collect();
     names.sort();
     names.dedup();
@@ -538,10 +545,7 @@ impl<'a> BindingRegistry<'a> {
     /// The bound provider's manifest plus the [`ProvidesEntry`] that declares the
     /// capability — what the facade needs to read the verb→tool bindings. `Err`
     /// carries the same explicit refusal [`Self::resolve`] would give.
-    pub fn resolve_provider(
-        &self,
-        capability: &str,
-    ) -> Result<Candidate<'a>, BindingError> {
+    pub fn resolve_provider(&self, capability: &str) -> Result<Candidate<'a>, BindingError> {
         let binding = self.resolve_by_name(capability)?;
         self.candidates
             .iter()
@@ -851,7 +855,11 @@ mod tests {
         assert!(search.overridden);
         assert_eq!(search.bound.as_deref(), Some("tavily"));
         assert_eq!(
-            search.providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            search
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["exa", "tavily"]
         );
         // Everything known is enabled here, so nothing is merely available.
@@ -886,7 +894,11 @@ mod tests {
             .expect("web.search must still be described when no provider is enabled");
         assert!(search.providers.is_empty(), "nothing is enabled");
         assert_eq!(
-            search.available.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            search
+                .available
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["exa", "tavily"],
             "both candidates must be offered so the user can enable one"
         );

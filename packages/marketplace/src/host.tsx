@@ -67,10 +67,61 @@ export interface SellerReportsState {
 	}) => Promise<void>;
 }
 
+/** One user-submitted review as the control plane returns it. */
+export interface MarketplaceReview {
+	body: string | null;
+	createdAt: string;
+	id: string;
+	/** True when the caller wrote this review — gates the edit/delete affordances. */
+	mine?: boolean;
+	rating: number;
+	title: string | null;
+	userName: string | null;
+	/** The control plane confirmed an active license — the "Verified purchase" badge. */
+	verifiedPurchase: boolean;
+}
+
+/** A page of reviews plus the item's denormalized aggregate. */
+export interface MarketplaceReviewsPage {
+	nextCursor: string | null;
+	ratingAverage: number;
+	ratingCount: number;
+	reviews: MarketplaceReview[];
+}
+
+/** The review read/write calls, injected because they live on the CONTROL PLANE
+ *  (api.ryuhq.com), not on the Core node the catalog itself is browsed from — the
+ *  shared components must not know either address. Omitted by a surface that has no
+ *  session at all, which collapses the Reviews tab to its read-only state. */
+export interface MarketplaceReviewsService {
+	/** Whether a review write can even be attempted (a signed-in session exists). */
+	canWrite: () => boolean;
+	/** A page of reviews for one item. */
+	list: (input: {
+		cursor?: string | null;
+		id: string;
+		kind: MarketplaceKind;
+		limit?: number;
+	}) => Promise<MarketplaceReviewsPage>;
+	/** Create or update the caller's review (upsert — one per user per item). */
+	post: (input: {
+		body?: string;
+		id: string;
+		kind: MarketplaceKind;
+		rating: number;
+		title?: string;
+	}) => Promise<{ ratingAverage: number; ratingCount: number }>;
+	/** Delete the caller's own review. */
+	remove: (input: { id: string; kind: MarketplaceKind }) => Promise<void>;
+}
+
 /** The full set of services the shared store UI needs from its host surface. */
 export interface MarketplaceHost {
 	/** Open an external URL (Tauri shell on desktop, navigation on web). */
 	openExternal: (url: string) => Promise<void> | void;
+	/** Ratings + user-submitted reviews. Optional: a surface without it renders no
+	 *  Reviews tab at all, rather than an empty one that can never be filled. */
+	reviews?: MarketplaceReviewsService;
 	/** Start a paid-item purchase; resolves to a Stripe URL or already-owned. */
 	startPurchase: (input: {
 		id: string;
@@ -109,6 +160,13 @@ export function useMarketplaceHost(): MarketplaceHost {
 		);
 	}
 	return host;
+}
+
+/** Non-throwing accessor for the catalog sections, which render on surfaces that
+ *  may not mount the money layer at all (the storyboard/test harnesses). Returns
+ *  `null` rather than throwing, so a missing provider simply means "no reviews". */
+export function useMarketplaceHostOptional(): MarketplaceHost | null {
+	return useContext(MarketplaceHostContext);
 }
 
 export type { MarketplaceDetailTarget };

@@ -511,7 +511,12 @@ mod tests {
         // The arg-injection guard: a URL that is not http(s) must bail BEFORE spawning
         // yt-dlp, so a `--exec=…`-style value can never be read as a flag.
         let dir = std::env::temp_dir().join(format!("ryu-ytdlp-guard-{}", uuid::Uuid::new_v4()));
-        for evil in ["--exec=rm -rf /", "file:///etc/passwd", "-o/tmp/x", "ftp://h/x"] {
+        for evil in [
+            "--exec=rm -rf /",
+            "file:///etc/passwd",
+            "-o/tmp/x",
+            "ftp://h/x",
+        ] {
             // `DownloadedVideo` is not `Debug`, so avoid `expect_err`; inspect the Err.
             let err = download_video(evil, &dir, None, None)
                 .await

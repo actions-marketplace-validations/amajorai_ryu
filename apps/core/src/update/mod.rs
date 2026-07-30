@@ -83,6 +83,42 @@ pub struct UpdateCheck {
     pub html_url: Option<String>,
     /// The asset matching the running platform, when one could be resolved.
     pub asset: Option<ReleaseAsset>,
+    /// The git tag of the release `latest` names. A tag is NOT derivable from
+    /// `latest`: rolling channels use a fixed pointer tag (`nightly`) while their
+    /// version lives in the release title (see `release_version`). A client that
+    /// wants to address a SPECIFIC release — e.g. to pin an install to it — must
+    /// use this, never `v{latest}`.
+    pub tag: Option<String>,
+    /// RFC-3339 publish timestamp of the release `latest` names, when GitHub
+    /// reported one. Lets a client reason about release DATES, which version
+    /// strings alone cannot express.
+    pub published_at: Option<String>,
+    /// The newest release on the channel IGNORING any `updates_until` cutoff.
+    /// Equal to `latest` when no cutoff applied.
+    ///
+    /// SOURCE NOTE: on the unclamped path this is GitHub's own `latest` pointer;
+    /// on the clamped path it is the semver maximum of the listing. Those can
+    /// disagree if a maintainer re-points `latest` by hand. It is advisory copy
+    /// only — it never decides which build is offered or installed.
+    pub latest_unrestricted: String,
+    /// True when an `updates_until` cutoff held `latest` back from
+    /// `latest_unrestricted`. DELIBERATELY distinct from `update_available:
+    /// false`, which the handler's fail-open arm also returns for a network error
+    /// — a client must be able to tell "your window lapsed" from "GitHub is down".
+    ///
+    /// Can be true AT THE SAME TIME as `cutoff_waived_for_security`: that pair
+    /// means "we handed you a security release published after your window, and
+    /// it is still older than the absolute latest".
+    pub restricted_by_cutoff: bool,
+    /// True when the offered release is a SECURITY release published after the
+    /// cutoff, deliberately handed over anyway.
+    pub cutoff_waived_for_security: bool,
+    /// True when a cutoff was supplied but NO eligible release could be resolved —
+    /// the single releases page did not reach back far enough. `latest` is then a
+    /// placeholder equal to `current` and asserts nothing about entitlement, so a
+    /// client must NOT tell the user "this is the newest build your window
+    /// covers". Not an error, and not a clamp: a third state.
+    pub cutoff_unresolved: bool,
 }
 
 /// The current Ryu version (single release train = Core's own crate version).
@@ -146,7 +182,12 @@ fn parse_version(version: &str) -> Option<semver::Version> {
     }
     // Lenient pad: `1` → `1.0.0`, `1.2` → `1.2.0`. Only the numeric core is
     // padded; anything with a suffix that strict parsing rejected stays rejected.
-    let core_len = raw.split(['-', '+']).next().unwrap_or(raw).split('.').count();
+    let core_len = raw
+        .split(['-', '+'])
+        .next()
+        .unwrap_or(raw)
+        .split('.')
+        .count();
     if (1..3).contains(&core_len) {
         let padded = match core_len {
             1 => format!("{raw}.0.0"),
@@ -280,7 +321,7 @@ struct GhAsset {
 }
 
 /// The subset of the GitHub release payload we consume.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 struct GhRelease {
     tag_name: String,
     #[serde(default)]
@@ -289,6 +330,18 @@ struct GhRelease {
     body: Option<String>,
     #[serde(default)]
     html_url: Option<String>,
+    /// RFC-3339 publish instant. GitHub sends it on both `/releases/latest` and
+    /// the listing, but omits it for a draft — hence `Option`, never a default
+    /// "now" that would silently place an undated release inside every window.
+    #[serde(default)]
+    published_at: Option<String>,
+    /// `/releases/latest` excludes drafts and prereleases for free; the LISTING
+    /// endpoint does not, so these two are what let the listing path reproduce
+    /// that exclusion (see `release_is_on_channel`).
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
     #[serde(default)]
     assets: Vec<GhAsset>,
 }
@@ -315,11 +368,106 @@ fn release_version(release: &GhRelease) -> Option<String> {
     // like "Nightly build 2 — 0.0.13-nightly.20260728.932" would match the bare `2`
     // first and report the version as `2.0.0`. Requiring a full major.minor.patch
     // means only a real version token can win.
-    release.name.as_deref()?.split_whitespace().find_map(|token| {
-        semver::Version::parse(normalise_tag(token.trim_matches(['(', ')', ',', ';'])))
-            .ok()
-            .map(|v| v.to_string())
-    })
+    release
+        .name
+        .as_deref()?
+        .split_whitespace()
+        .find_map(|token| {
+            semver::Version::parse(normalise_tag(token.trim_matches(['(', ')', ',', ';'])))
+                .ok()
+                .map(|v| v.to_string())
+        })
+}
+
+/// A release's publish instant, when GitHub gave us a parseable one.
+///
+/// `None` for a draft (GitHub omits the field) and for anything unparseable. Both
+/// are treated as "we do not know when this shipped", never as "now" — see
+/// [`select_release`] for what the callers do with that.
+fn release_published_at(release: &GhRelease) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(release.published_at.as_deref()?).ok()
+}
+
+/// Whether a release belongs on `channel` and is publicly published.
+///
+/// The draft/prerelease guards exist because the LISTING endpoint returns both,
+/// while `/releases/latest` filters them for free. A maintainer host that happens
+/// to hold a `GITHUB_TOKEN` sees unpublished drafts in the listing, and without
+/// this would be offered one as an update.
+fn release_is_on_channel(release: &GhRelease, channel: &str) -> bool {
+    if release.draft {
+        return false;
+    }
+    // Only stable rejects prereleases: every build on beta/nightly/canary IS one.
+    if channel == STABLE_CHANNEL && release.prerelease {
+        return false;
+    }
+    release_version(release).is_some_and(|version| channel_of(&version) == channel)
+}
+
+/// The newest release on `channel`, optionally clamped to those published at or
+/// before `published_at_or_before` (the caller's updates window).
+///
+/// ORDER IS LOAD-BEARING: filter by channel, then by the cutoff, THEN take the
+/// semver maximum. Taking the maximum first would pick a release the cutoff
+/// excludes and then resolve to nothing at all.
+///
+/// A release with no parseable publish date PASSES the cutoff filter. That is the
+/// module's fail-open posture: a missing fact about our own release metadata must
+/// not withhold a build from someone entitled to it.
+fn select_release<'a>(
+    releases: &'a [GhRelease],
+    channel: &str,
+    published_at_or_before: Option<chrono::DateTime<chrono::FixedOffset>>,
+) -> Option<&'a GhRelease> {
+    releases
+        .iter()
+        .filter(|release| release_is_on_channel(release, channel))
+        .filter(|release| {
+            match (published_at_or_before, release_published_at(release)) {
+                (Some(cutoff), Some(published)) => published <= cutoff,
+                // No cutoff, or no known date: keep it.
+                _ => true,
+            }
+        })
+        .filter_map(|release| Some((parse_version(&release_version(release)?)?, release)))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, release)| release)
+}
+
+/// The newest SECURITY-marked release on `channel` published strictly after
+/// `published_after` — the escape hatch that lets a fix reach an owner whose
+/// updates window has already lapsed.
+///
+/// WHY THE MAXIMUM OF *MARKED* RELEASES AND NOT SIMPLY THE ABSOLUTE LATEST: a
+/// marked release stays in the listing forever, so waiving to the absolute latest
+/// would mean one security fix in March permanently hands every later feature
+/// release to every lapsed owner. Resolving to the marked release delivers the fix
+/// and self-limits — once the owner is on it, `is_newer` is false.
+///
+/// Unlike [`select_release`] this REQUIRES a parseable publish date: the waiver is
+/// an override of the paid boundary, so it only fires on a positively dated,
+/// positively marked release.
+fn newest_security_release<'a>(
+    releases: &'a [GhRelease],
+    channel: &str,
+    published_after: chrono::DateTime<chrono::FixedOffset>,
+) -> Option<&'a GhRelease> {
+    releases
+        .iter()
+        .filter(|release| release_is_on_channel(release, channel))
+        .filter(|release| {
+            release
+                .body
+                .as_deref()
+                .is_some_and(|body| body.contains(SECURITY_CRITICAL_MARKER))
+        })
+        .filter(|release| {
+            release_published_at(release).is_some_and(|published| published > published_after)
+        })
+        .filter_map(|release| Some((parse_version(&release_version(release)?)?, release)))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, release)| release)
 }
 
 /// An optional GitHub token used only to raise the release-API rate limit.
@@ -346,6 +494,23 @@ fn github_token() -> Option<String> {
 /// update" for the rest of the hour. Releases change on the order of days;
 /// minutes of staleness costs nothing.
 const RELEASE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Marker a release body carries to opt OUT of updates-window clamping. A
+/// security fix must reach every installed build, including one whose owner's
+/// updates window has lapsed — withholding it is worse than giving away a
+/// feature release. Emitted by `.github/workflows/mirror-releases.yml`.
+const SECURITY_CRITICAL_MARKER: &str = "<!-- ryu:security-critical -->";
+
+/// Releases requested per listing call. There is no pagination: once versioned
+/// releases exceed this, a deep-past cutoff can find nothing eligible and the
+/// verdict reports `cutoff_unresolved` rather than guessing.
+const PER_PAGE: u32 = 100;
+
+/// Deadline for a GitHub call. `ServerState.client` is a bare `reqwest::Client`
+/// with no timeout of its own, and an update check must never be able to hang a
+/// launch — least of all on the listing endpoint, whose payload is two orders of
+/// magnitude larger than a single release.
+const GITHUB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Per-channel cache of the last successfully fetched release.
 static RELEASE_CACHE: std::sync::OnceLock<
@@ -401,37 +566,52 @@ async fn fetch_channel_release(
     }
 }
 
+/// One GitHub GET, with the headers, the optional token and the deadline every
+/// release call needs.
+///
+/// GitHub allows 60 unauthenticated calls per hour PER IP. Every surface checks on
+/// launch, so a shared IP (or a dev machine running the stack a few times)
+/// exhausts that and every check fails open to "no update" — the app-update row
+/// then silently never appears. A token, when the host has one, raises the ceiling
+/// to 5000/hr. Optional by design: no token still works, it is just rate-limited.
+async fn github_get(client: &reqwest::Client, url: String) -> reqwest::Result<reqwest::Response> {
+    let mut req = client
+        .get(url)
+        .header("User-Agent", "ryu-core/1.0")
+        .header("Accept", "application/vnd.github+json")
+        .timeout(GITHUB_TIMEOUT);
+    if let Some(token) = github_token() {
+        req = req.bearer_auth(token);
+    }
+    req.send().await
+}
+
 async fn fetch_channel_release_remote(
     client: &reqwest::Client,
     channel: &str,
 ) -> anyhow::Result<GhRelease> {
-    let get = |url: String| {
-        let mut req = client
-            .get(url)
-            .header("User-Agent", "ryu-core/1.0")
-            .header("Accept", "application/vnd.github+json");
-        // GitHub allows 60 unauthenticated calls per hour PER IP. Every surface
-        // checks on launch, so a shared IP (or a dev machine running the stack a
-        // few times) exhausts that and every check fails open to "no update" —
-        // the app-update row then silently never appears. A token, when the host
-        // has one, raises the ceiling to 5000/hr. Optional by design: no token
-        // still works, it is just rate-limited.
-        if let Some(token) = github_token() {
-            req = req.bearer_auth(token);
-        }
-        req.send()
-    };
-
     if channel == STABLE_CHANNEL {
         let url = format!("https://api.github.com/repos/{RYU_REPO}/releases/latest");
-        return Ok(get(url).await?.error_for_status()?.json().await?);
+        return Ok(github_get(client, url)
+            .await?
+            .error_for_status()?
+            .json()
+            .await?);
     }
 
     // One page is ample: rolling channels keep a single release, and betas are
     // few. Sorted newest-first by GitHub, but we order by semver precedence
     // ourselves rather than trusting publish order.
-    let url = format!("https://api.github.com/repos/{RYU_REPO}/releases?per_page=100");
-    let releases: Vec<GhRelease> = get(url).await?.error_for_status()?.json().await?;
+    //
+    // Deliberately NOT routed through `select_release`: that adds draft/prerelease
+    // filtering, and every build on a rolling channel IS a prerelease. This is the
+    // historical unclamped path and stays byte-identical.
+    let url = format!("https://api.github.com/repos/{RYU_REPO}/releases?per_page={PER_PAGE}");
+    let releases: Vec<GhRelease> = github_get(client, url)
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
 
     releases
         .into_iter()
@@ -444,79 +624,298 @@ async fn fetch_channel_release_remote(
         .ok_or_else(|| anyhow::anyhow!("no release found on the '{channel}' channel"))
 }
 
+/// Cache of the last successfully fetched release LISTING.
+///
+/// Separate from [`RELEASE_CACHE`] and deliberately NOT keyed by channel: the
+/// listing URL carries no channel, so one fetch serves every channel and every
+/// cutoff. Only the clamped path needs it — an unclamped check never pays for it.
+static RELEASE_LIST_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedReleaseList>>> =
+    std::sync::OnceLock::new();
+
+/// `(fetched_at, releases)` as held by [`RELEASE_LIST_CACHE`]. The `Arc` is what
+/// lets a cache hit hand the whole page to a caller without cloning it.
+type CachedReleaseList = (std::time::Instant, std::sync::Arc<Vec<GhRelease>>);
+
+fn cached_release_list(allow_stale: bool) -> Option<std::sync::Arc<Vec<GhRelease>>> {
+    let cache = RELEASE_LIST_CACHE.get()?;
+    let guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (fetched_at, releases) = guard.as_ref()?;
+    (allow_stale || fetched_at.elapsed() < RELEASE_CACHE_TTL).then(|| releases.clone())
+}
+
+fn cache_release_list(releases: &std::sync::Arc<Vec<GhRelease>>) {
+    let cache = RELEASE_LIST_CACHE.get_or_init(Default::default);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = Some((std::time::Instant::now(), releases.clone()));
+}
+
+/// Fetch one page of releases across all channels.
+///
+/// Same TTL, same poison tolerance and same stale-on-error fallback as
+/// [`fetch_channel_release`]: an old listing beats failing open to "no update" for
+/// the rest of the hour.
+async fn fetch_all_releases(
+    client: &reqwest::Client,
+) -> anyhow::Result<std::sync::Arc<Vec<GhRelease>>> {
+    if let Some(releases) = cached_release_list(false) {
+        return Ok(releases);
+    }
+    let url = format!("https://api.github.com/repos/{RYU_REPO}/releases?per_page={PER_PAGE}");
+    let fetched: anyhow::Result<Vec<GhRelease>> = async {
+        Ok(github_get(client, url)
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+    .await;
+    match fetched {
+        Ok(releases) => {
+            let releases = std::sync::Arc::new(releases);
+            cache_release_list(&releases);
+            Ok(releases)
+        }
+        Err(err) => cached_release_list(true).ok_or(err),
+    }
+}
+
+/// The release asset best matching the running platform, when one exists.
+fn best_asset(release: &GhRelease) -> Option<ReleaseAsset> {
+    release
+        .assets
+        .iter()
+        .filter_map(|a| platform_match_score(&a.name).map(|score| (score, a)))
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, a)| ReleaseAsset {
+            kind: asset_kind(&a.name).to_string(),
+            name: a.name.clone(),
+            url: a.browser_download_url.clone(),
+            size: a.size,
+        })
+}
+
+/// Optional constraints on which release a check may resolve to.
+#[derive(Clone, Copy, Default)]
+pub struct UpdateCheckOptions<'a> {
+    pub channel: Option<&'a str>,
+    /// RFC-3339 instant. Clamp the verdict to the newest release published at
+    /// or before it. `None` (the default) is the historical unclamped path and
+    /// stays byte-identical. ADVISORY ONLY: this endpoint is unauthenticated,
+    /// so the value is caller-supplied and trivially omitted.
+    pub updates_until: Option<&'a str>,
+}
+
 /// Query the latest release on the channel this build belongs to and produce an
 /// [`UpdateCheck`] verdict.
 ///
 /// Fails open at the call site: callers treat a network/API error as "no update
 /// known" rather than blocking launch.
 pub async fn check_for_update(client: &reqwest::Client) -> anyhow::Result<UpdateCheck> {
-    check_for_update_on_channel(client, None).await
+    check_for_update_with(client, UpdateCheckOptions::default()).await
 }
 
-/// As [`check_for_update`], for an explicit channel.
+/// The full check: an explicit channel, optionally clamped to a caller's updates
+/// window.
 ///
-/// `None` means "the channel this build is already on", derived from the running
-/// version itself ([`channel_of`]) — a nightly build checks the nightly channel
-/// without any stored preference. The desktop passes its user-chosen channel
-/// explicitly so the picker can move a user between channels.
+/// `channel: None` means "the channel this build is already on", derived from the
+/// running version itself ([`channel_of`]) — a nightly build checks the nightly
+/// channel without any stored preference. The desktop passes its user-chosen
+/// channel explicitly so the picker can move a user between channels.
 ///
 /// NOTE ON CROSS-CHANNEL COMPARISON: verdicts are scoped WITHIN a channel by
 /// design. Semver orders prerelease identifiers alphabetically, which would rank
 /// `beta < canary < nightly` — not a risk ordering, and meaningless as an update
 /// path. Moving between channels is a channel switch, not an update.
-pub async fn check_for_update_on_channel(
+///
+/// With no `updates_until` this is the historical path, unchanged down to the
+/// endpoint it calls. With one, it switches to the releases LISTING so it can
+/// reason about publish dates, and reports which of the four outcomes applied via
+/// `restricted_by_cutoff` / `cutoff_waived_for_security` / `cutoff_unresolved` —
+/// a clamp, a security waiver, an exhausted page and a network failure must stay
+/// distinguishable from each other.
+pub async fn check_for_update_with(
     client: &reqwest::Client,
-    channel: Option<&str>,
+    opts: UpdateCheckOptions<'_>,
 ) -> anyhow::Result<UpdateCheck> {
     let current = current_version();
-    let channel = channel
+    let channel = opts
+        .channel
         .map(str::to_string)
         .unwrap_or_else(|| channel_of(&current));
 
-    // Verification / dev hook: force a "latest" version without a published
-    // release. Lets the desktop/cli update flow be exercised end-to-end before
-    // the release CI has produced real assets. Never set in production.
-    if let Ok(fake) = std::env::var("RYU_UPDATE_FAKE_LATEST") {
-        let latest = normalise_tag(&fake).to_string();
+    let cutoff = opts.updates_until.and_then(|raw| {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .inspect_err(|_| {
+                // A FIXED message that does not echo the caller-supplied value:
+                // this route is public, so echoing it would let a LAN caller forge
+                // log lines with newlines/ANSI. The parsed value is not logged
+                // either — it is the user's licence-window fact.
+                tracing::warn!("update check: unparseable updates_until, ignoring");
+            })
+            .ok()
+    });
+
+    if let Some(check) = fake_update_check(&current, &channel, cutoff) {
+        return Ok(check);
+    }
+
+    let Some(cutoff) = cutoff else {
+        // Unclamped: the historical path, byte-identical for every caller that
+        // sends no cutoff — including GitHub's own draft/prerelease exclusion on
+        // `/releases/latest`.
+        let release = fetch_channel_release(client, &channel).await?;
+        let latest = release_version(&release)
+            .unwrap_or_else(|| normalise_tag(&release.tag_name).to_string());
         return Ok(UpdateCheck {
             update_available: is_newer(&current, &latest),
             current,
-            latest: latest.clone(),
+            latest_unrestricted: latest.clone(),
+            latest,
             channel,
-            notes: Some(format!(
-                "Simulated release {latest} (RYU_UPDATE_FAKE_LATEST)."
-            )),
-            html_url: Some(format!("https://github.com/{RYU_REPO}/releases")),
+            notes: release.body.clone(),
+            html_url: release.html_url.clone(),
+            asset: best_asset(&release),
+            tag: Some(release.tag_name.clone()),
+            published_at: release.published_at.clone(),
+            restricted_by_cutoff: false,
+            cutoff_waived_for_security: false,
+            cutoff_unresolved: false,
+        });
+    };
+
+    let releases = fetch_all_releases(client).await?;
+    let unrestricted = select_release(&releases, &channel, None)
+        .ok_or_else(|| anyhow::anyhow!("no release found on the '{channel}' channel"))?;
+    let unrestricted_version = release_version(unrestricted)
+        .unwrap_or_else(|| normalise_tag(&unrestricted.tag_name).to_string());
+
+    let clamped = select_release(&releases, &channel, Some(cutoff));
+    let security = newest_security_release(&releases, &channel, cutoff);
+    // The waiver resolves to the SECURITY release, not to the absolute latest, and
+    // only when it actually outranks what the window already covers.
+    //
+    // Compared with `parse_version` directly rather than `is_newer`: this ranks two
+    // RELEASES against each other, not a release against the installed build, and
+    // `is_newer`'s build-metadata stripping is irrelevant because a Ryu release
+    // version never carries `+sha` — the commit lives in the release title (see
+    // `release_version`). Do not "fix" this into `is_newer`.
+    let waived = match (
+        clamped
+            .and_then(release_version)
+            .as_deref()
+            .and_then(parse_version),
+        security
+            .and_then(release_version)
+            .as_deref()
+            .and_then(parse_version),
+    ) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(covered), Some(fix)) => fix > covered,
+    };
+    let offered = if waived { security } else { clamped };
+
+    let Some(offered) = offered else {
+        // The page did not reach back far enough. NOT an error and NOT a clamp: a
+        // third state. `latest` is a placeholder, so no surface may present it as
+        // "the newest build your window covers".
+        tracing::warn!(
+            "update check: no release on '{channel}' falls inside the supplied updates window (page size {PER_PAGE})"
+        );
+        return Ok(UpdateCheck {
+            latest: current.clone(),
+            current,
+            channel,
+            update_available: false,
+            notes: None,
+            html_url: unrestricted.html_url.clone(),
             asset: None,
+            tag: None,
+            published_at: None,
+            latest_unrestricted: unrestricted_version,
+            restricted_by_cutoff: true,
+            cutoff_waived_for_security: false,
+            cutoff_unresolved: true,
         });
-    }
-    let release = fetch_channel_release(client, &channel).await?;
+    };
 
-    let latest = release_version(&release)
-        .unwrap_or_else(|| normalise_tag(&release.tag_name).to_string());
-    let update_available = is_newer(&current, &latest);
-
-    // Pick the best-matching asset for this platform.
-    let asset = release
-        .assets
-        .into_iter()
-        .filter_map(|a| platform_match_score(&a.name).map(|score| (score, a)))
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, a)| ReleaseAsset {
-            kind: asset_kind(&a.name).to_string(),
-            name: a.name,
-            url: a.browser_download_url,
-            size: a.size,
-        });
-
+    let latest =
+        release_version(offered).unwrap_or_else(|| normalise_tag(&offered.tag_name).to_string());
     Ok(UpdateCheck {
+        update_available: is_newer(&current, &latest),
+        restricted_by_cutoff: latest != unrestricted_version,
         current,
         latest,
         channel,
-        update_available,
-        notes: release.body,
-        html_url: release.html_url,
-        asset,
+        notes: offered.body.clone(),
+        html_url: offered.html_url.clone(),
+        asset: best_asset(offered),
+        tag: Some(offered.tag_name.clone()),
+        published_at: offered.published_at.clone(),
+        latest_unrestricted: unrestricted_version,
+        cutoff_waived_for_security: waived,
+        cutoff_unresolved: false,
+    })
+}
+
+/// Verification / dev hook: force a "latest" version without a published release.
+/// Lets the desktop/cli update flow — including the LAPSED-WINDOW flow, which
+/// otherwise needs a year of real releases to exercise — be driven end-to-end
+/// before the release CI has produced real assets. Never set in production.
+///
+/// `RYU_UPDATE_FAKE_PUBLISHED_AT` dates the simulated release; when it falls after
+/// the cutoff the verdict is the clamped one. There is deliberately no env var for
+/// the OFFERED release's own date, so the hook exercises the clamp and the
+/// manual-download fallback, not the pinned install.
+fn fake_update_check(
+    current: &str,
+    channel: &str,
+    cutoff: Option<chrono::DateTime<chrono::FixedOffset>>,
+) -> Option<UpdateCheck> {
+    let fake = std::env::var("RYU_UPDATE_FAKE_LATEST").ok()?;
+    let latest = normalise_tag(&fake).to_string();
+    let published_at = std::env::var("RYU_UPDATE_FAKE_PUBLISHED_AT")
+        .ok()
+        .filter(|raw| !raw.trim().is_empty());
+    let published = published_at
+        .as_deref()
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok());
+    let restricted =
+        matches!((cutoff, published), (Some(cutoff), Some(published)) if published > cutoff);
+    let tag = std::env::var("RYU_UPDATE_FAKE_TAG")
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+        .or_else(|| {
+            Some(format!(
+                "v{}",
+                if restricted { current } else { latest.as_str() }
+            ))
+        });
+
+    Some(UpdateCheck {
+        update_available: !restricted && is_newer(current, &latest),
+        current: current.to_string(),
+        latest: if restricted {
+            current.to_string()
+        } else {
+            latest.clone()
+        },
+        channel: channel.to_string(),
+        notes: Some(format!(
+            "Simulated release {latest} (RYU_UPDATE_FAKE_LATEST)."
+        )),
+        html_url: Some(format!("https://github.com/{RYU_REPO}/releases")),
+        asset: None,
+        tag,
+        published_at: (!restricted).then_some(published_at).flatten(),
+        latest_unrestricted: latest,
+        restricted_by_cutoff: restricted,
+        cutoff_waived_for_security: false,
+        cutoff_unresolved: false,
     })
 }
 
@@ -660,9 +1059,7 @@ mod tests {
         let tagged = GhRelease {
             tag_name: "v0.0.13-beta.1".to_string(),
             name: Some("Ryu v0.0.13-beta.1".to_string()),
-            body: None,
-            html_url: None,
-            assets: vec![],
+            ..Default::default()
         };
         assert_eq!(release_version(&tagged).as_deref(), Some("0.0.13-beta.1"));
 
@@ -671,9 +1068,7 @@ mod tests {
         let rolling = GhRelease {
             tag_name: "nightly".to_string(),
             name: Some("Nightly 0.0.13-nightly.20260728.932 (f1a68ac9b05c)".to_string()),
-            body: None,
-            html_url: None,
-            assets: vec![],
+            ..Default::default()
         };
         assert_eq!(
             release_version(&rolling).as_deref(),
@@ -684,9 +1079,7 @@ mod tests {
         let bare = GhRelease {
             tag_name: "nightly".to_string(),
             name: Some("Nightly build".to_string()),
-            body: None,
-            html_url: None,
-            assets: vec![],
+            ..Default::default()
         };
         assert_eq!(release_version(&bare), None);
 
@@ -696,9 +1089,7 @@ mod tests {
         let edited = GhRelease {
             tag_name: "nightly".to_string(),
             name: Some("Nightly build 2 — 0.0.13-nightly.20260728.932".to_string()),
-            body: None,
-            html_url: None,
-            assets: vec![],
+            ..Default::default()
         };
         assert_eq!(
             release_version(&edited).as_deref(),
@@ -726,7 +1117,7 @@ mod tests {
 
     // ── extra coverage ───────────────────────────────────────────────────────
 
-    /// Serialize the RYU_UPDATE_FAKE_LATEST env mutation across tests here.
+    /// Serialize the `RYU_UPDATE_FAKE_*` env mutations across tests here.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -781,7 +1172,14 @@ mod tests {
         let check = check_for_update(&client).await.unwrap();
         assert_eq!(check.latest, "999.0.0");
         assert!(check.update_available);
-        assert!(check.notes.unwrap().contains("999.0.0"));
+        assert!(check.notes.as_deref().unwrap().contains("999.0.0"));
+        // With no cutoff in play, none of the clamp signals may fire.
+        assert_eq!(check.latest_unrestricted, "999.0.0");
+        assert_eq!(check.tag.as_deref(), Some("v999.0.0"));
+        assert!(check.published_at.is_none());
+        assert!(!check.restricted_by_cutoff);
+        assert!(!check.cutoff_waived_for_security);
+        assert!(!check.cutoff_unresolved);
         std::env::remove_var("RYU_UPDATE_FAKE_LATEST");
     }
 
@@ -793,6 +1191,244 @@ mod tests {
         let client = reqwest::Client::new();
         let check = check_for_update(&client).await.unwrap();
         assert!(!check.update_available);
+        assert_eq!(check.latest_unrestricted, current_version());
+        assert!(!check.restricted_by_cutoff);
+        assert!(!check.cutoff_unresolved);
+        std::env::remove_var("RYU_UPDATE_FAKE_LATEST");
+    }
+
+    // ── Cutoff-clamped release selection ─────────────────────────────────────
+    //
+    // The whole clamp is pure: fixtures in, a chosen release out. No env lock, no
+    // network, no runtime.
+
+    /// A published, non-draft release with a versioned tag and a publish date.
+    fn rel(tag: &str, published_at: &str) -> GhRelease {
+        GhRelease {
+            tag_name: tag.to_string(),
+            published_at: Some(published_at.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// As [`rel`], but its body carries the security marker among ordinary prose —
+    /// the marker must be found anywhere in the body, not only alone on a line.
+    fn sec(tag: &str, published_at: &str) -> GhRelease {
+        GhRelease {
+            body: Some(format!(
+                "## Fixes\n{SECURITY_CRITICAL_MARKER}\nPatches a sandbox escape."
+            )),
+            ..rel(tag, published_at)
+        }
+    }
+
+    fn at(rfc3339: &str) -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339).expect("test timestamp parses")
+    }
+
+    fn chosen(release: Option<&GhRelease>) -> Option<String> {
+        release.map(|r| r.tag_name.clone())
+    }
+
+    #[test]
+    fn select_release_takes_the_semver_maximum_in_channel() {
+        let releases = [
+            rel("v0.1.0", "2026-01-01T00:00:00Z"),
+            rel("v0.2.0", "2026-06-01T00:00:00Z"),
+            rel("v0.2.0-beta.1", "2026-05-01T00:00:00Z"),
+        ];
+        assert_eq!(
+            chosen(select_release(&releases, STABLE_CHANNEL, None)).as_deref(),
+            Some("v0.2.0")
+        );
+    }
+
+    #[test]
+    fn select_release_clamps_to_the_newest_release_at_or_before_the_cutoff() {
+        let releases = [
+            rel("v0.1.0", "2026-01-01T00:00:00Z"),
+            rel("v0.2.0", "2026-06-01T00:00:00Z"),
+            rel("v0.3.0", "2027-01-01T00:00:00Z"),
+        ];
+        let picked = select_release(&releases, STABLE_CHANNEL, Some(at("2026-12-31T00:00:00Z")));
+        assert_eq!(chosen(picked).as_deref(), Some("v0.2.0"));
+    }
+
+    #[test]
+    fn select_release_filters_the_cutoff_before_taking_the_maximum() {
+        // Guards the ORDER: taking the maximum first would pick v9.0.0 and then
+        // find it excluded, resolving to nothing.
+        let releases = [
+            rel("v1.0.0", "2026-01-01T00:00:00Z"),
+            rel("v9.0.0", "2027-06-01T00:00:00Z"),
+        ];
+        let picked = select_release(&releases, STABLE_CHANNEL, Some(at("2026-06-01T00:00:00Z")));
+        assert_eq!(chosen(picked).as_deref(), Some("v1.0.0"));
+    }
+
+    #[test]
+    fn select_release_treats_the_cutoff_boundary_as_inclusive() {
+        let releases = [rel("v1.0.0", "2026-06-01T12:00:00Z")];
+        let picked = select_release(&releases, STABLE_CHANNEL, Some(at("2026-06-01T12:00:00Z")));
+        assert_eq!(chosen(picked).as_deref(), Some("v1.0.0"));
+    }
+
+    #[test]
+    fn select_release_skips_drafts_and_stable_prereleases() {
+        // `/releases/latest` filters both for free; the listing does not, so the
+        // clamped path has to do it explicitly.
+        let releases = [
+            rel("v0.2.0", "2026-01-01T00:00:00Z"),
+            GhRelease {
+                draft: true,
+                ..rel("v0.9.0", "2026-02-01T00:00:00Z")
+            },
+            GhRelease {
+                prerelease: true,
+                ..rel("v0.8.0", "2026-03-01T00:00:00Z")
+            },
+        ];
+        assert_eq!(
+            chosen(select_release(&releases, STABLE_CHANNEL, None)).as_deref(),
+            Some("v0.2.0")
+        );
+    }
+
+    #[test]
+    fn select_release_keeps_a_release_with_no_publish_date_under_a_cutoff() {
+        // Fail open: a missing fact about our own release metadata must not
+        // withhold a build from someone entitled to it.
+        let releases = [GhRelease {
+            tag_name: "v1.0.0".to_string(),
+            ..Default::default()
+        }];
+        let picked = select_release(&releases, STABLE_CHANNEL, Some(at("2020-01-01T00:00:00Z")));
+        assert_eq!(chosen(picked).as_deref(), Some("v1.0.0"));
+    }
+
+    #[test]
+    fn select_release_returns_none_when_every_release_is_after_the_cutoff() {
+        let releases = [
+            rel("v1.0.0", "2027-01-01T00:00:00Z"),
+            rel("v2.0.0", "2027-06-01T00:00:00Z"),
+        ];
+        assert!(
+            select_release(&releases, STABLE_CHANNEL, Some(at("2026-01-01T00:00:00Z"))).is_none()
+        );
+    }
+
+    #[test]
+    fn select_release_scopes_to_the_requested_channel() {
+        let releases = [
+            rel("v0.2.0", "2026-01-01T00:00:00Z"),
+            GhRelease {
+                prerelease: true,
+                ..rel("v0.3.0-nightly.20260601.1", "2026-06-01T00:00:00Z")
+            },
+        ];
+        assert_eq!(
+            chosen(select_release(&releases, STABLE_CHANNEL, None)).as_deref(),
+            Some("v0.2.0")
+        );
+        assert_eq!(
+            chosen(select_release(&releases, "nightly", None)).as_deref(),
+            Some("v0.3.0-nightly.20260601.1")
+        );
+    }
+
+    #[test]
+    fn newest_security_release_finds_only_marked_releases_after_the_cutoff() {
+        // The UNMARKED v0.4.0 is newer, but the waiver resolves to the marked
+        // release so one fix cannot hand over every later feature release.
+        let releases = [
+            rel("v0.4.0", "2027-03-01T00:00:00Z"),
+            sec("v0.3.0", "2027-02-01T00:00:00Z"),
+        ];
+        let picked = newest_security_release(&releases, STABLE_CHANNEL, at("2027-01-01T00:00:00Z"));
+        assert_eq!(chosen(picked).as_deref(), Some("v0.3.0"));
+    }
+
+    #[test]
+    fn newest_security_release_ignores_a_marked_release_inside_the_cutoff() {
+        // Already covered by the window — the waiver has nothing to add.
+        let releases = [sec("v0.3.0", "2026-02-01T00:00:00Z")];
+        assert!(
+            newest_security_release(&releases, STABLE_CHANNEL, at("2027-01-01T00:00:00Z"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn newest_security_release_is_none_when_nothing_is_marked() {
+        let releases = [
+            rel("v0.3.0", "2027-02-01T00:00:00Z"),
+            rel("v0.4.0", "2027-03-01T00:00:00Z"),
+        ];
+        assert!(
+            newest_security_release(&releases, STABLE_CHANNEL, at("2027-01-01T00:00:00Z"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn release_published_at_parses_rfc3339_and_tolerates_garbage() {
+        assert!(release_published_at(&rel("v1.0.0", "2026-06-01T00:00:00Z")).is_some());
+        assert!(release_published_at(&rel("v1.0.0", "")).is_none());
+        assert!(release_published_at(&rel("v1.0.0", "not-a-date")).is_none());
+        assert!(release_published_at(&GhRelease {
+            tag_name: "v1.0.0".to_string(),
+            ..Default::default()
+        })
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn check_for_update_fake_latest_clamps_against_a_cutoff() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A simulated release published AFTER the window: the verdict must report
+        // the clamp rather than the bare "no update" a network failure returns.
+        std::env::set_var("RYU_UPDATE_FAKE_LATEST", "v999.0.0");
+        std::env::set_var("RYU_UPDATE_FAKE_PUBLISHED_AT", "2027-06-01T00:00:00Z");
+        let client = reqwest::Client::new();
+        let check = check_for_update_with(
+            &client,
+            UpdateCheckOptions {
+                channel: None,
+                updates_until: Some("2026-06-01T00:00:00Z"),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(check.latest, current_version());
+        assert!(!check.update_available);
+        assert_eq!(check.latest_unrestricted, "999.0.0");
+        assert!(check.restricted_by_cutoff);
+        assert!(!check.cutoff_unresolved);
+        assert!(!check.cutoff_waived_for_security);
+        std::env::remove_var("RYU_UPDATE_FAKE_PUBLISHED_AT");
+        std::env::remove_var("RYU_UPDATE_FAKE_LATEST");
+    }
+
+    #[tokio::test]
+    async fn check_for_update_ignores_an_unparseable_cutoff() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Fail open: junk in `updates_until` must behave exactly like no cutoff.
+        std::env::set_var("RYU_UPDATE_FAKE_LATEST", "v999.0.0");
+        std::env::set_var("RYU_UPDATE_FAKE_PUBLISHED_AT", "2027-06-01T00:00:00Z");
+        let client = reqwest::Client::new();
+        let check = check_for_update_with(
+            &client,
+            UpdateCheckOptions {
+                channel: None,
+                updates_until: Some("not-a-date"),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(check.latest, "999.0.0");
+        assert!(check.update_available);
+        assert!(!check.restricted_by_cutoff);
+        std::env::remove_var("RYU_UPDATE_FAKE_PUBLISHED_AT");
         std::env::remove_var("RYU_UPDATE_FAKE_LATEST");
     }
 }

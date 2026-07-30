@@ -9,6 +9,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@ryu/ui/components/card";
+import { Input } from "@ryu/ui/components/input";
 import { NumberTicker } from "@ryu/ui/components/number-ticker";
 import {
 	PlanBadge,
@@ -28,7 +29,9 @@ import {
 	Key,
 	Loader2,
 	Mail,
+	Minus,
 	Monitor,
+	Plus,
 	Server,
 	Shield,
 	Star,
@@ -82,32 +85,94 @@ const noop = () => {
 	// presentational default; the live page injects real handlers
 };
 
+/* -------------------------------------------------------------------------- *
+ * Advertised list prices, in whole USD per month.
+ *
+ * These MIRROR `PLAN_MONTHLY_PRICE_MICRO_USD` in `@ryu/auth/lib/plans` (the
+ * billing source of truth). They are duplicated here — not imported — because
+ * `@ryu/blocks` is presentational and must not take a dependency on the auth /
+ * control-plane package; the desktop paywall and the storyboard render these
+ * same cards without a billing client. Change a price in `plans.ts` and change
+ * it here in the same commit.
+ * -------------------------------------------------------------------------- */
+export const PRO_MONTHLY_USD = 39;
+export const MAX_MONTHLY_USD = 200;
+/** Teams is priced AT Pro per seat, deliberately — see `plans.ts`. */
+export const TEAMS_MONTHLY_PER_SEAT_USD = PRO_MONTHLY_USD;
+/**
+ * Seat minimums, mirroring `PLANS.<plan>.seatModel.minSeats`. Same duplication
+ * bargain as the prices above: presentational surfaces read these, and the one
+ * page that has the catalog on hand may override them via props.
+ */
+export const TEAMS_MIN_SEATS = 2;
+export const MAX_MIN_SEATS = 1;
+
 /** Annual billing gives two months free (pay for 10 of 12 months). */
 const FREE_MONTHS_ON_ANNUAL = 2;
 const MONTHS_PER_YEAR = 12;
+/** Paid months in an annual term, once the two free months are taken off. */
+const PAID_MONTHS_ON_ANNUAL = MONTHS_PER_YEAR - FREE_MONTHS_ON_ANNUAL;
+
+/**
+ * The billed monthly figure a recurring plan advertises. On the yearly toggle
+ * this is the per-month *equivalent* of the annual price (two months free, i.e.
+ * billed for 10 of 12 months); on monthly it is the list price. Anchoring on the
+ * smaller monthly number is the standard SaaS psychology play. With monthly
+ * $39/$200 this lands the annual totals on $390/$2000 (Pro/Max), matching the
+ * Polar yearly prices.
+ */
+export function effectiveMonthlyPrice(
+	monthly: number,
+	isYearly: boolean
+): number {
+	return isYearly
+		? Math.round((monthly * PAID_MONTHS_ON_ANNUAL) / MONTHS_PER_YEAR)
+		: monthly;
+}
+
+/** The true annual total for a plan billed yearly (two months free). */
+export function annualTotalPrice(monthly: number): number {
+	return monthly * PAID_MONTHS_ON_ANNUAL;
+}
+
+/** US-dollar formatter for whole-dollar totals ("$1,170"). */
+const usd = new Intl.NumberFormat("en-US", {
+	style: "currency",
+	currency: "USD",
+	maximumFractionDigits: 0,
+});
 
 /**
  * The price block for a recurring plan. Always shows the *monthly* figure with a
- * "/mo" suffix — on the yearly toggle it shows the per-month equivalent of the
- * annual price (two months free, i.e. billed for 10 of 12 months), with the true
- * annual total spelled out beneath. Anchoring on the smaller monthly number is
- * the standard SaaS psychology play. With monthly $39/$200 this lands the annual
- * totals on $390/$2000 (Pro/Max), matching the Polar yearly prices.
+ * "/mo" suffix (see {@link effectiveMonthlyPrice}), with the true annual total
+ * spelled out beneath.
+ *
+ * The headline is always the PER-PERSON price — the number the plan is
+ * advertised at — so the comparison across cards stays apples-to-apples; the
+ * multiplied total for the chosen seat count is spelled out underneath so the
+ * buyer still sees what they will actually pay. `perSeat` only controls the
+ * "/seat" suffix (Teams is advertised per seat; Max is advertised at a flat
+ * $200/mo even though it is seat-scalable), and is independent of `seats`.
  */
 function PriceBlock({
 	monthly,
 	isYearly,
 	perSeat = false,
+	seats = 1,
 }: {
 	monthly: number;
 	isYearly: boolean;
 	perSeat?: boolean;
+	seats?: number;
 }) {
-	const annualTotal = monthly * (MONTHS_PER_YEAR - FREE_MONTHS_ON_ANNUAL);
-	const perMonth = isYearly
-		? Math.round(annualTotal / MONTHS_PER_YEAR)
-		: monthly;
+	const annualTotal = annualTotalPrice(monthly);
+	const perMonth = effectiveMonthlyPrice(monthly, isYearly);
 	const seat = perSeat ? "/seat" : "";
+	// Only more than one seat has a total worth spelling out; at one seat the
+	// total IS the headline.
+	const showSeatTotal = seats > 1;
+	const seatTotal = perMonth * seats;
+	const seatAnnualTotal = annualTotal * seats;
 	return (
 		<>
 			<div className="mb-1 flex items-baseline">
@@ -118,12 +183,97 @@ function PriceBlock({
 				/>
 				<span className="ml-1 text-muted-foreground">{`${seat}/mo`}</span>
 			</div>
+			{showSeatTotal ? (
+				<p className="mb-1 font-medium text-sm">
+					{usd.format(seatTotal)}/mo for {seats} seats
+				</p>
+			) : null}
 			<p className="mb-6 text-muted-foreground text-xs">
 				{isYearly
-					? `Billed $${annualTotal}${seat}/year · 2 months free`
+					? `Billed ${usd.format(showSeatTotal ? seatAnnualTotal : annualTotal)}${showSeatTotal ? "" : seat}/year · 2 months free`
 					: `Billed monthly${perSeat ? " · per seat" : ""} · cancel anytime`}
 			</p>
 		</>
+	);
+}
+
+/**
+ * Seat count control for the per-seat plans (Teams, and Max — which is
+ * seat-scalable from one seat). A minus/plus stepper around a numeric input,
+ * clamped to `[minSeats, MAX_SEAT_SELECTOR]`; anything larger is an Enterprise
+ * conversation, so the copy points there rather than letting the field run away.
+ *
+ * Presentational and CONTROLLED: it renders only when the host passes an
+ * `onSeatsChange`, so surfaces that show the cards read-only (the desktop
+ * paywall, storyboard) are unaffected.
+ */
+const MAX_SEAT_SELECTOR = 500;
+
+function SeatSelector({
+	seats,
+	minSeats,
+	onSeatsChange,
+	inputId,
+}: {
+	seats: number;
+	minSeats: number;
+	onSeatsChange: (seats: number) => void;
+	inputId: string;
+}) {
+	const clamp = (next: number) =>
+		Math.min(MAX_SEAT_SELECTOR, Math.max(minSeats, Math.floor(next)));
+
+	return (
+		<div className="mb-6">
+			<label
+				className="mb-2 block font-medium text-muted-foreground text-xs"
+				htmlFor={inputId}
+			>
+				Seats
+			</label>
+			<div className="flex items-center gap-2">
+				<Button
+					aria-label="Remove a seat"
+					className="size-8 shrink-0"
+					disabled={seats <= minSeats}
+					onClick={() => onSeatsChange(clamp(seats - 1))}
+					size="icon"
+					type="button"
+					variant="outline"
+				>
+					<Minus className="size-4" />
+				</Button>
+				<Input
+					className="h-8 w-16 text-center tabular-nums"
+					id={inputId}
+					inputMode="numeric"
+					max={MAX_SEAT_SELECTOR}
+					min={minSeats}
+					onChange={(event) => {
+						const next = Number.parseInt(event.target.value, 10);
+						if (Number.isFinite(next)) {
+							onSeatsChange(clamp(next));
+						}
+					}}
+					type="number"
+					value={seats}
+				/>
+				<Button
+					aria-label="Add a seat"
+					className="size-8 shrink-0"
+					disabled={seats >= MAX_SEAT_SELECTOR}
+					onClick={() => onSeatsChange(clamp(seats + 1))}
+					size="icon"
+					type="button"
+					variant="outline"
+				>
+					<Plus className="size-4" />
+				</Button>
+				<span className="ml-1 text-muted-foreground text-xs">
+					{minSeats > 1 ? `minimum ${minSeats}` : "1 seat = 1 person"}
+				</span>
+			</div>
+		</div>
 	);
 }
 
@@ -327,6 +477,20 @@ interface PlanCardProps {
 	onCheckout?: (slug: PricingPlanSlug) => void;
 }
 
+/**
+ * Extra props a SEAT-BASED plan card accepts (Teams, Max). `minSeats` mirrors
+ * the plan catalog's `seatModel.minSeats` and is injected by the page — the
+ * blocks package is presentational and deliberately does not depend on
+ * `@ryu/auth`. The seat stepper renders only when `onSeatsChange` is supplied,
+ * so read-only surfaces keep their current single-seat rendering.
+ */
+interface SeatPlanCardProps extends PlanCardProps {
+	cloudTiers?: readonly CloudHostingTier[];
+	minSeats?: number;
+	onSeatsChange?: (seats: number) => void;
+	seats?: number;
+}
+
 /** The footer CTA shared by every plan card (current / processing / label). */
 function PlanCta({
 	isCurrent,
@@ -452,7 +616,7 @@ export function ProPlanCard({
 				<CardDescription>We run AI for you. Nothing to set up.</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
-				<PriceBlock isYearly={isYearly} monthly={39} />
+				<PriceBlock isYearly={isYearly} monthly={PRO_MONTHLY_USD} />
 				<ul className="space-y-3">
 					<li className="flex items-center">
 						<Download className="mr-2 size-4" />
@@ -506,17 +670,25 @@ export function ProPlanCard({
 	);
 }
 
-/** Max plan card — 24/7 managed agents, with the optional Cloud panel. */
+/**
+ * Max plan card — 24/7 managed agents, with the optional Cloud panel. Max is
+ * seat-scalable from ONE seat (unlike Teams' minimum of two), so the seat
+ * stepper is optional here and a solo buyer never sees a seat total.
+ */
 export function MaxPlanCard({
 	isYearly = false,
 	loadingPlan = null,
 	onCheckout = noop,
 	currentPlan = null,
 	cloudTiers = [],
-}: PlanCardProps & { cloudTiers?: readonly CloudHostingTier[] }) {
+	seats = 1,
+	minSeats = 1,
+	onSeatsChange,
+}: SeatPlanCardProps) {
 	const isCurrent = currentPlan === "max";
 	const isLoading =
 		loadingPlan === "max-monthly" || loadingPlan === "max-yearly";
+	const effectiveSeats = Math.max(seats, minSeats);
 	return (
 		<PricingCardBorder variant="max">
 			<CardHeader>
@@ -527,7 +699,19 @@ export function MaxPlanCard({
 				<CardDescription>We run AI for you, around the clock.</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
-				<PriceBlock isYearly={isYearly} monthly={200} />
+				<PriceBlock
+					isYearly={isYearly}
+					monthly={MAX_MONTHLY_USD}
+					seats={effectiveSeats}
+				/>
+				{onSeatsChange ? (
+					<SeatSelector
+						inputId="ryu-seats-max"
+						minSeats={minSeats}
+						onSeatsChange={onSeatsChange}
+						seats={effectiveSeats}
+					/>
+				) : null}
 				<ul className="space-y-3">
 					<li className="flex items-center">
 						<ArrowLeft className="mr-2 size-4" />
@@ -573,17 +757,24 @@ export function MaxPlanCard({
 	);
 }
 
-/** Teams plan card — per-seat org plan, with the optional Cloud panel. */
+/**
+ * Teams plan card — per-seat org plan, with the optional Cloud panel. Teams is
+ * priced AT Pro per seat, so the card leads with that rather than a premium.
+ */
 export function TeamsPlanCard({
 	isYearly = false,
 	loadingPlan = null,
 	onCheckout = noop,
 	currentPlan = null,
 	cloudTiers = [],
-}: PlanCardProps & { cloudTiers?: readonly CloudHostingTier[] }) {
+	seats = TEAMS_MIN_SEATS,
+	minSeats = TEAMS_MIN_SEATS,
+	onSeatsChange,
+}: SeatPlanCardProps) {
 	const isCurrent = currentPlan === "teams";
 	const isLoading =
 		loadingPlan === "teams-monthly" || loadingPlan === "teams-yearly";
+	const effectiveSeats = Math.max(seats, minSeats);
 	return (
 		<PricingCardBorder variant="teams">
 			<CardHeader>
@@ -594,11 +785,24 @@ export function TeamsPlanCard({
 				<CardDescription>We run AI for your whole team.</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
-				<PriceBlock isYearly={isYearly} monthly={49} perSeat />
+				<PriceBlock
+					isYearly={isYearly}
+					monthly={TEAMS_MONTHLY_PER_SEAT_USD}
+					perSeat
+					seats={effectiveSeats}
+				/>
+				{onSeatsChange ? (
+					<SeatSelector
+						inputId="ryu-seats-teams"
+						minSeats={minSeats}
+						onSeatsChange={onSeatsChange}
+						seats={effectiveSeats}
+					/>
+				) : null}
 				<ul className="space-y-3">
 					<li className="flex items-center">
 						<ArrowLeft className="mr-2 size-4" />
-						<span>Everything in Pro, plus:</span>
+						<span>Everything in Pro, at the same price per person:</span>
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
@@ -627,7 +831,9 @@ export function TeamsPlanCard({
 					planLabel="Teams"
 					tiers={cloudTiers}
 				/>
-				<p className="mt-4 text-muted-foreground text-xs">Minimum 2 seats</p>
+				<p className="mt-4 text-muted-foreground text-xs">
+					Minimum {minSeats} seats
+				</p>
 			</CardContent>
 			<CardFooter>
 				<PlanCta
@@ -711,11 +917,33 @@ export function PricingPlanGrid({
 	loadingPlan = null,
 	onCheckout = noop,
 	currentPlan = null,
+	seats,
+	onSeatsChange,
+	maxSeats,
+	onMaxSeatsChange,
+	teamsMinSeats = TEAMS_MIN_SEATS,
+	maxMinSeats = MAX_MIN_SEATS,
 }: {
 	isYearly?: boolean;
 	loadingPlan?: PricingPlanSlug | null;
+	/** Seat minimum for Max, from `PLANS.max.seatModel`. */
+	maxMinSeats?: number;
+	/**
+	 * Max's seat count, tracked SEPARATELY from `seats`. Max scales from one seat
+	 * and is advertised at a flat monthly price, so seeding it from the Teams
+	 * minimum would open the page showing the flagship plan at two seats.
+	 */
+	maxSeats?: number;
 	onCheckout?: (slug: PricingPlanSlug) => void;
+	/** Supply to turn on Max's seat stepper. */
+	onMaxSeatsChange?: (seats: number) => void;
+	/** Supply to turn on the Teams seat stepper. */
+	onSeatsChange?: (seats: number) => void;
 	currentPlan?: CurrentPricingPlan | null;
+	/** The Teams seat count; ignored when `onSeatsChange` is absent. */
+	seats?: number;
+	/** Seat minimum for Teams, from `PLANS.teams.seatModel`. */
+	teamsMinSeats?: number;
 }) {
 	return (
 		<>
@@ -736,13 +964,19 @@ export function PricingPlanGrid({
 					currentPlan={currentPlan}
 					isYearly={isYearly}
 					loadingPlan={loadingPlan}
+					minSeats={teamsMinSeats}
 					onCheckout={onCheckout}
+					onSeatsChange={onSeatsChange}
+					seats={seats ?? teamsMinSeats}
 				/>
 				<MaxPlanCard
 					currentPlan={currentPlan}
 					isYearly={isYearly}
 					loadingPlan={loadingPlan}
+					minSeats={maxMinSeats}
 					onCheckout={onCheckout}
+					onSeatsChange={onMaxSeatsChange}
+					seats={maxSeats ?? maxMinSeats}
 				/>
 			</div>
 			<EnterprisePlanCard />

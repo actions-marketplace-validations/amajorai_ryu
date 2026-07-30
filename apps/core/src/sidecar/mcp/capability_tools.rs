@@ -61,7 +61,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use super::RegistryTool;
-use crate::plugin_manifest::{CapabilityToolBinding, CapabilityResponseMap, PluginManifest};
+use crate::plugin_manifest::{CapabilityResponseMap, CapabilityToolBinding, PluginManifest};
 use crate::plugins::binding::{BindingConfig, BindingRegistry};
 
 /// Reserved server name for the web layers (search / extract / crawl).
@@ -792,8 +792,10 @@ pub struct ResolvedVerb {
 pub fn resolve_verbs(enabled: &[PluginManifest], config: &BindingConfig) -> Vec<ResolvedVerb> {
     let registry = BindingRegistry::new(config, enabled);
     // Resolve each capability once — the table has many verbs per capability.
-    let mut bound: BTreeMap<&'static str, Option<(String, &crate::plugin_manifest::ProvidesEntry)>> =
-        BTreeMap::new();
+    let mut bound: BTreeMap<
+        &'static str,
+        Option<(String, &crate::plugin_manifest::ProvidesEntry)>,
+    > = BTreeMap::new();
     let mut out = Vec::new();
     for verb in verbs() {
         let entry = bound.entry(verb.capability).or_insert_with(|| {
@@ -966,7 +968,10 @@ fn expand_arg_template(
                 }
             }
             Value::Array(items) => Some(Value::Array(
-                items.iter().filter_map(|v| subst(v, args, consumed)).collect(),
+                items
+                    .iter()
+                    .filter_map(|v| subst(v, args, consumed))
+                    .collect(),
             )),
             Value::Object(map) => {
                 let mut out = Map::new();
@@ -1102,7 +1107,9 @@ mod tests {
             tool: tool.to_owned(),
             ..Default::default()
         };
-        binding.args.insert("limit".to_owned(), "num_results".to_owned());
+        binding
+            .args
+            .insert("limit".to_owned(), "num_results".to_owned());
         binding.response = Some(CapabilityResponseMap {
             results: Some("results".to_owned()),
             fields: [
@@ -1448,11 +1455,7 @@ mod tests {
                     .cloned()
                     .unwrap_or_default()
             })
-            .filter_map(|f| {
-                f.get("pref_key")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
+            .filter_map(|f| f.get("pref_key").and_then(Value::as_str).map(str::to_owned))
             .collect();
         assert!(!fields.is_empty(), "layers must declare settings fields");
 
@@ -1480,9 +1483,9 @@ mod tests {
             let served = builtins.iter().any(|m| {
                 m.provided_capabilities().iter().any(|p| {
                     p.capability == capability
-                        && p.tools.values().any(|b| {
-                            b.args.get(&arg).map(String::as_str) != Some("")
-                        })
+                        && p.tools
+                            .values()
+                            .any(|b| b.args.get(&arg).map(String::as_str) != Some(""))
                 })
             });
             assert!(
@@ -1514,7 +1517,10 @@ mod tests {
             ..Default::default()
         };
         binding.arg_defaults.insert("limit".to_owned(), json!(10));
-        let mapped = map_args(&binding, apply_layer_defaults(&defaults, json!({ "query": "q" })));
+        let mapped = map_args(
+            &binding,
+            apply_layer_defaults(&defaults, json!({ "query": "q" })),
+        );
         assert_eq!(mapped["limit"], json!(25));
 
         // Sanity: the key the settings UI must write.
@@ -1528,7 +1534,10 @@ mod tests {
     fn a_stored_default_is_coerced_to_the_type_the_schema_declares() {
         let search = verb_by_id("web__search").unwrap();
         // `limit` is an integer in the canonical schema; preferences store strings.
-        assert_eq!(coerce_to_schema_type(search, "limit", "25"), Some(json!(25)));
+        assert_eq!(
+            coerce_to_schema_type(search, "limit", "25"),
+            Some(json!(25))
+        );
         // A string default stays a string.
         assert_eq!(
             coerce_to_schema_type(search, "query", "rust"),
@@ -1565,7 +1574,11 @@ mod tests {
     #[test]
     fn verb_ids_match_their_server_and_name() {
         for v in verbs() {
-            assert_eq!(v.id, format!("{}__{}", v.server, v.name), "verb id mismatch");
+            assert_eq!(
+                v.id,
+                format!("{}__{}", v.server, v.name),
+                "verb id mismatch"
+            );
             assert!(is_server(v.server), "verb {} has unreserved server", v.id);
         }
     }
@@ -1614,7 +1627,10 @@ mod tests {
         let after = resolve_verbs(&enabled, &cfg);
         assert_eq!(after[0].verb.id, before[0].verb.id);
         assert_eq!(after[0].binding.tool, "tavily__search");
-        assert_eq!(tools(&after)[0].input_schema, tools(&before)[0].input_schema);
+        assert_eq!(
+            tools(&after)[0].input_schema,
+            tools(&before)[0].input_schema
+        );
     }
 
     #[test]
@@ -1629,7 +1645,9 @@ mod tests {
             tool: "x".to_owned(),
             ..Default::default()
         };
-        binding.args.insert("limit".to_owned(), "num_results".to_owned());
+        binding
+            .args
+            .insert("limit".to_owned(), "num_results".to_owned());
         // This provider cannot express `format` at all.
         binding.args.insert("format".to_owned(), String::new());
         binding
@@ -1683,7 +1701,10 @@ mod tests {
 
         assert_eq!(binding.tool, "mem0__add");
         assert_eq!(binding.args.get("limit").map(String::as_str), Some("top_k"));
-        assert!(!binding.arg_template.is_empty(), "arg_template must round-trip");
+        assert!(
+            !binding.arg_template.is_empty(),
+            "arg_template must round-trip"
+        );
         assert_eq!(
             referenced_pref_keys(&binding),
             vec!["mem0.user-id".to_owned()],
@@ -1693,8 +1714,9 @@ mod tests {
 
         // And the parsed form behaves: template builds the nested body, the clamp
         // narrows, the drop drops.
-        let prefs: BTreeMap<String, String> =
-            [("mem0.user-id".to_owned(), "alice".to_owned())].into_iter().collect();
+        let prefs: BTreeMap<String, String> = [("mem0.user-id".to_owned(), "alice".to_owned())]
+            .into_iter()
+            .collect();
         let mapped = map_args_with_defaults(
             &binding,
             resolve_arg_defaults(&binding, &prefs),
@@ -1789,7 +1811,9 @@ mod tests {
             tool: "exa__search".to_owned(),
             ..Default::default()
         };
-        binding.args.insert("limit".to_owned(), "num_results".to_owned());
+        binding
+            .args
+            .insert("limit".to_owned(), "num_results".to_owned());
         let mapped = map_args(&binding, json!({ "query": "q", "limit": 3 }));
         assert_eq!(mapped, json!({ "query": "q", "num_results": 3 }));
     }
@@ -1815,8 +1839,9 @@ mod tests {
             "nested tokens must be discoverable so dispatch knows what to read"
         );
 
-        let prefs: BTreeMap<String, String> =
-            [("mem0.user-id".to_owned(), "alice".to_owned())].into_iter().collect();
+        let prefs: BTreeMap<String, String> = [("mem0.user-id".to_owned(), "alice".to_owned())]
+            .into_iter()
+            .collect();
         let resolved = resolve_arg_defaults(&binding, &prefs);
         assert_eq!(resolved["filters"]["user_id"], json!("alice"));
 
@@ -1846,8 +1871,9 @@ mod tests {
         assert_eq!(resolved["filters"]["app_id"], json!("fixed"));
 
         // An empty stored value counts as unset, not as an empty entity id.
-        let blank: BTreeMap<String, String> =
-            [("mem0.user-id".to_owned(), "   ".to_owned())].into_iter().collect();
+        let blank: BTreeMap<String, String> = [("mem0.user-id".to_owned(), "   ".to_owned())]
+            .into_iter()
+            .collect();
         assert!(resolve_arg_defaults(&binding, &blank)["filters"]
             .get("user_id")
             .is_none());
@@ -1859,7 +1885,9 @@ mod tests {
             tool: "exa__search".to_owned(),
             ..Default::default()
         };
-        binding.arg_defaults.insert("use_autoprompt".to_owned(), json!(true));
+        binding
+            .arg_defaults
+            .insert("use_autoprompt".to_owned(), json!(true));
         assert!(referenced_pref_keys(&binding).is_empty());
         assert_eq!(
             resolve_arg_defaults(&binding, &BTreeMap::new())["use_autoprompt"],
@@ -1888,7 +1916,10 @@ mod tests {
         // Over the ceiling → clamped, and renamed. Still an integer, not 20.0.
         let mapped = map_args(&binding, json!({ "query": "rust", "limit": 50 }));
         assert_eq!(mapped["count"], json!(20));
-        assert!(mapped["count"].is_i64(), "clamping must not float-ify an integer");
+        assert!(
+            mapped["count"].is_i64(),
+            "clamping must not float-ify an integer"
+        );
 
         // Inside the range → untouched.
         assert_eq!(
@@ -1910,7 +1941,10 @@ mod tests {
         };
         binding.arg_clamp.insert(
             "limit".to_owned(),
-            crate::plugin_manifest::ArgBounds { min: None, max: Some(20) },
+            crate::plugin_manifest::ArgBounds {
+                min: None,
+                max: Some(20),
+            },
         );
         // A non-numeric value under a clamped key is left for the provider to reject
         // rather than silently coerced.
@@ -1919,9 +1953,14 @@ mod tests {
             json!("lots")
         );
         // An absent argument is not invented.
-        assert!(map_args(&binding, json!({ "query": "q" })).get("limit").is_none());
+        assert!(map_args(&binding, json!({ "query": "q" }))
+            .get("limit")
+            .is_none());
         // A binding with no clamps is a pure pass-through.
-        let plain = CapabilityToolBinding { tool: "p__x".to_owned(), ..Default::default() };
+        let plain = CapabilityToolBinding {
+            tool: "p__x".to_owned(),
+            ..Default::default()
+        };
         assert_eq!(map_args(&plain, json!({ "limit": 99 }))["limit"], json!(99));
     }
 

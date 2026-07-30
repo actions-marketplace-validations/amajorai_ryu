@@ -420,6 +420,10 @@ async fn run_command(args: Vec<String>) -> anyhow::Result<()> {
             run_node_command(&args[1..]).await?;
         }
 
+        "models" => {
+            run_models_command(&api_url, token.as_deref(), &args[1..]).await?;
+        }
+
         "skills" => {
             run_skills_command(&api_url, token.as_deref(), &args[1..]).await?;
         }
@@ -622,6 +626,7 @@ fn print_usage() {
     eprintln!("  update                         check for a newer Ryu release");
     eprintln!();
     eprintln!("Marketplace:");
+    eprintln!("  models add <id>                install a model by catalog id");
     eprintln!("  skills list [query]            browse the skills catalog");
     eprintln!("  skills add <id|owner/repo|url> install a skill (id or source)");
     eprintln!("  mcp list [query]               browse the MCP server catalog");
@@ -629,6 +634,9 @@ fn print_usage() {
         "  mcp add <id>                   install an MCP server (written disabled; enable to use)"
     );
     eprintln!("  okf export <dir> [--bundle id] export indexed knowledge as an OKF bundle");
+    eprintln!();
+    eprintln!("  Any command above takes --node <name> to target a saved node");
+    eprintln!("  (see `ryu node list`); without it the active node is used.");
     eprintln!();
     eprintln!("Config-as-code (GitOps):");
     eprintln!("  apply -f <file> [--org id]     validate + apply a scope's gateway.yaml");
@@ -1257,6 +1265,61 @@ async fn run_node_command(args: &[String]) -> anyhow::Result<()> {
 /// back to install-from-source on failure (see `run_skills_command`).
 fn is_url_source(value: &str) -> bool {
     value.trim().contains("://")
+}
+
+/// `ryu models add <id> [--node <name>]` — install a model by catalog id onto the
+/// resolved node. Core owns the download (verified, source-pinned); the id is a
+/// catalog id such as `unsloth/gemma-4-12B-it-qat-GGUF`. There is deliberately no
+/// `list` here: model discovery is a browse-and-compare task the TUI (`ryu`) and
+/// the desktop/web Store already do far better than a flat terminal table.
+async fn run_models_command(
+    api_url: &str,
+    token: Option<&str>,
+    args: &[String],
+) -> anyhow::Result<()> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+
+    match sub {
+        "add" | "install" => {
+            let id = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!("usage: ryu models add <id> [--file <name>] [--node <name>]")
+            })?;
+            // A GGUF install is per-FILE, so resolve which quantization to fetch
+            // before asking Core to download: explicit `--file`, else the best
+            // device fit (the same pick a `ryu://models/…` deep link makes).
+            let explicit = args.windows(2).find_map(|w| {
+                if w[0] == "--file" {
+                    Some(w[1].clone())
+                } else {
+                    None
+                }
+            });
+            let file = match explicit {
+                Some(f) => f,
+                None => api::recommended_model_file(api_url, token, id).await?,
+            };
+            println!("Installing model '{id}' ({file})...");
+            api::install_model_file(api_url, token, id, &file).await?;
+            println!("Installed '{id}' ({file}).");
+        }
+
+        other => {
+            if other.is_empty() {
+                eprintln!("usage: ryu models <subcommand>");
+            } else {
+                eprintln!("unknown models subcommand: {other}");
+                eprintln!();
+                eprintln!("usage: ryu models <subcommand>");
+            }
+            eprintln!("  add <id> [--file <name>]");
+            eprintln!("                 install a model by catalog id (best-fit quant by");
+            eprintln!("                 default; --file picks an exact GGUF)");
+            eprintln!();
+            eprintln!("Browse models with `ryu` (the TUI) or the Store in the app.");
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_skills_command(

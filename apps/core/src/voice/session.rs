@@ -586,7 +586,10 @@ mod tests {
     fn build_chat_request_is_persisted_interactive_single_user_turn() {
         let req = build_chat_request(&cfg(), "hello there".into());
         assert!(req.persist, "voice turns persist to conversation history");
-        assert!(!req.background, "voice is interactive, not a background run");
+        assert!(
+            !req.background,
+            "voice is interactive, not a background run"
+        );
         assert_eq!(req.conversation_id.as_deref(), Some("conv-1"));
         assert_eq!(req.agent_id.as_deref(), Some("agent-x"));
         assert_eq!(req.messages.len(), 1);

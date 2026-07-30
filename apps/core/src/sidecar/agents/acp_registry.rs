@@ -646,7 +646,9 @@ mod tests {
         );
         assert!(direct_archive_for_agent(&none_agent).is_none());
         // No binary block at all → no direct archive.
-        assert!(direct_archive_for_agent(&agent_with("x", RegistryDistribution::default())).is_none());
+        assert!(
+            direct_archive_for_agent(&agent_with("x", RegistryDistribution::default())).is_none()
+        );
     }
 
     #[test]

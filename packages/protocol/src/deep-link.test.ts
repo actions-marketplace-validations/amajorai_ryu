@@ -15,6 +15,7 @@ describe("parseRyuDeepLink", () => {
 			kind: "model",
 			source: "huggingface",
 			id: "unsloth/gemma-4-12B-it-qat-GGUF",
+			node: null,
 		});
 	});
 
@@ -23,6 +24,7 @@ describe("parseRyuDeepLink", () => {
 			kind: "skill",
 			source: "skills.sh",
 			id: "acme/pack/fix",
+			node: null,
 		});
 	});
 
@@ -33,7 +35,38 @@ describe("parseRyuDeepLink", () => {
 			kind: "model",
 			source: "huggingface",
 			id: "unsloth/my model",
+			node: null,
 		});
+	});
+
+	it("parses the optional install-target node url, trimming a trailing slash", () => {
+		expect(
+			parseRyuDeepLink(
+				"ryu://skills/skills.sh/acme/pack/fix?node=https%3A%2F%2Fnode.example.com%3A7980%2F"
+			)
+		).toEqual({
+			kind: "skill",
+			source: "skills.sh",
+			id: "acme/pack/fix",
+			node: "https://node.example.com:7980",
+		});
+	});
+
+	it("ignores a node hint that is not an http(s) url", () => {
+		for (const bad of [
+			"javascript%3Aalert(1)",
+			"file%3A%2F%2F%2Fetc",
+			"local",
+		]) {
+			expect(
+				parseRyuDeepLink(`ryu://models/huggingface/unsloth/x?node=${bad}`)
+			).toEqual({
+				kind: "model",
+				source: "huggingface",
+				id: "unsloth/x",
+				node: null,
+			});
+		}
 	});
 
 	it("rejects unknown categories, schemes, and incomplete links", () => {
@@ -138,8 +171,21 @@ describe("buildRyuDeepLink round-trips with parseRyuDeepLink", () => {
 			kind: "model",
 			source: "huggingface",
 			id: "unsloth/gemma-4-12B-it-qat-GGUF",
+			node: null,
 		},
-		{ kind: "skill", source: "skills.sh", id: "acme/pack/fix" },
+		{
+			kind: "model",
+			source: "huggingface",
+			id: "unsloth/gemma-4-12B-it-qat-GGUF",
+			node: "https://node.example.com:7980",
+		},
+		{ kind: "skill", source: "skills.sh", id: "acme/pack/fix", node: null },
+		{
+			kind: "skill",
+			source: "skills.sh",
+			id: "acme/pack/fix",
+			node: "http://192.168.1.50:7980",
+		},
 		{
 			kind: "node",
 			name: "pi-home",

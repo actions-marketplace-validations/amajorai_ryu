@@ -2214,5 +2214,4 @@ mod tests {
         let err = uninstall_app(&s, "nope", &[], false).await.unwrap_err();
         assert!(matches!(err, UninstallError::NotInstalled { .. }));
     }
-
 }

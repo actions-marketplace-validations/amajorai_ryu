@@ -18,6 +18,14 @@
 // keeps its LOCAL autonomy running — Core autonomy is paused only on a genuine
 // hard lock (reason "locked"), not on trial-expiry; see `apps/core/src/entitlement.rs`.
 //
+// A FOURTH thing resolves here and feeds NONE of the above: the lifetime
+// "1 year of updates" window, mirrored into `src/lib/updates-window.ts` for the
+// UPDATER. It governs only which builds are OFFERED. A desktop licence is
+// perpetual, so the window never enters `decideDesktopAccess`, never reaches
+// `DesktopGateVerdict` or the cached entitlement, and never touches the Core
+// entitlement flag — see the perpetual-licence note above `licenseView` in
+// `packages/api/src/routers/billing.ts`.
+//
 // Local persistence (offline fallback) is the Tauri store (entitlement.bin):
 //   - firstLaunchAt   mirror of the server anchor (survives a /trial outage)
 //   - lastGoodEnt     the most recent successful entitlement + when it was cached
@@ -30,17 +38,19 @@ import {
 	decideDesktopAccess,
 	type Entitlement,
 	type GatedCapability,
+	updatesWindowApplies,
 } from "@ryu/auth/lib/plans";
 import { useCallback, useEffect, useState } from "react";
 import {
 	ensureTrialAnchorMs,
-	fetchEntitlement,
+	fetchEntitlementSnapshot,
 	hasBillingAuth,
 	type LicenseValidateResult,
 	validateLicenseKey,
 } from "@/src/lib/api/billing.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { setEntitlementActive } from "@/src/lib/api/preferences.ts";
+import { setUpdatesWindow } from "@/src/lib/updates-window.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 const STORE_FILE = "entitlement.bin";
@@ -146,7 +156,32 @@ export function useEntitlement(): UseEntitlement {
 		}
 
 		// 2) The live entitlement (null when the check failed → offline grace).
-		const liveEntitlement = await fetchEntitlement();
+		//    One request carries the lifetime updates window too (step 2b).
+		const snapshot = await fetchEntitlementSnapshot();
+		const liveEntitlement = snapshot?.entitlement ?? null;
+
+		// 2b) Publish the lifetime updates window for the UPDATER (never for the
+		//     gate). Written whenever the check SUCCEEDED — including while the
+		//     window is still OPEN — because deciding at write time would race the
+		//     launch-time updater on the first post-lapse launch. `getUpdatesCutoff`
+		//     applies the lapse test at READ time instead. Published BEFORE the
+		//     store round-trips below for the same reason: every await here widens
+		//     the window in which the updater finds no key. On a failed check the
+		//     stored value is left alone, so an offline launch keeps the last known
+		//     window; an owner never checked stays unrestricted, which is the
+		//     fail-open default.
+		//
+		//     `updatesWindowApplies` is what keeps an actively-paying subscriber out
+		//     of this: the server's `lifetime` block is built from lifetime ORDERS
+		//     alone and is independent of any subscription, so a 2025 lifetime buyer
+		//     who now pays for Pro still has an "expired" block. Pinning them to old
+		//     builds and upselling a licence they already own would be wrong.
+		if (snapshot) {
+			const { lifetime } = snapshot;
+			const applies = updatesWindowApplies(liveEntitlement?.plan ?? null);
+			setUpdatesWindow(applies && lifetime ? lifetime.updatesExpiresAt : null);
+		}
+
 		if (liveEntitlement) {
 			await writeStore(KEY_LAST_GOOD, toCached(liveEntitlement));
 		}
@@ -167,6 +202,11 @@ export function useEntitlement(): UseEntitlement {
 			}
 		}
 
+		// Exactly the inputs this decision has always taken. The updates window
+		// above is deliberately NOT one of them: a desktop licence is a perpetual
+		// one-time purchase, and a lapsed window means only that newer builds stop
+		// being offered — it must never revoke access. See the perpetual-licence
+		// note above `licenseView` in `packages/api/src/routers/billing.ts`.
 		const next = decideDesktopAccess({
 			firstLaunchMs: firstLaunchMs ?? null,
 			liveEntitlement,

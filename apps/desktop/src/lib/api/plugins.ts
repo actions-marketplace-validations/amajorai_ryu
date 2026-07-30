@@ -1134,10 +1134,31 @@ export interface CatalogEntry {
 	 *  read as undefined, i.e. an unreviewed listing rendered with no notice. */
 	origin?: "community" | "first_party" | null;
 	permission_grants: string[];
+	/** Commerce disclosure for a PAID listing; absent/null = free. Present on cards
+	 *  in the unified first-party view, where free (git catalog) and paid (hosted)
+	 *  listings sit in one list — without it a paid item is indistinguishable from a
+	 *  free one until checkout. Display only; entitlement is decided server-side. */
+	pricing?: {
+		amountMinor?: number;
+		currency?: string;
+		kind?: string;
+	} | null;
 	/** Which discovery source produced this listing (e.g. `"github-topic"`). */
 	provenance?: string | null;
+	/** Denormalized rating aggregate (0–5 mean + count), so a card and the detail
+	 *  header show stars without loading the review list. Absent = unrated. */
+	rating_average?: number | null;
+	rating_count?: number | null;
 	/** Repository a community listing was discovered from. */
 	repo_url?: string | null;
+	/** Plugin-to-plugin dependencies that must be enabled first (the manifest's
+	 *  `requires`). Emitted by Core's catalog source when non-empty; absent = none.
+	 *  Kept in sync with `@ryu/marketplace/catalog/types`' `CatalogEntry`, which is
+	 *  the shape the shared catalog sections consume. */
+	requires?: {
+		apps?: { id: string; min_version?: string | null }[];
+		grants?: string[];
+	} | null;
 	/** False when nobody at Ryu vetted this listing. Absent ≠ reviewed. */
 	reviewed?: boolean;
 	/** The bundled sub-items this item ships (the manifest runnables). */
@@ -1261,6 +1282,12 @@ export interface PluginSearchParams {
 	 *  Apps/Plugins instead of replacing them. */
 	origin?: "community";
 	query?: string;
+	/** Browse a specific catalog source WITHOUT writing the node's active-source
+	 *  preference. The preference is one global setting, so selecting a source used
+	 *  to reassign every other open store tab (and every other client on the node);
+	 *  passing the id per request keeps the choice local to the view that made it.
+	 *  Omitted ⇒ Core falls back to the stored preference. */
+	source?: string;
 }
 
 export interface PluginCatalogPage {
@@ -1286,6 +1313,9 @@ export async function searchPluginCatalog(
 	}
 	if (params.origin) {
 		q.set("origin", params.origin);
+	}
+	if (params.source) {
+		q.set("source", params.source);
 	}
 	const json = await request<{
 		entries?: CatalogEntry[];
@@ -1328,12 +1358,22 @@ export interface PluginCatalogDetail {
 export async function fetchPluginCatalogDetail(
 	target: ApiTarget,
 	id: string,
-	origin?: "community"
+	origin?: "community",
+	/** The source the list was browsed from — see {@link PluginSearchParams.source}.
+	 *  Must match the browse call, so a detail request resolves against the same
+	 *  catalog the card came from. */
+	source?: string
 ): Promise<PluginCatalogDetail> {
-	const suffix = origin ? `&origin=${encodeURIComponent(origin)}` : "";
+	const q = new URLSearchParams({ id });
+	if (origin) {
+		q.set("origin", origin);
+	}
+	if (source) {
+		q.set("source", source);
+	}
 	return request<PluginCatalogDetail>(
 		target,
-		`/api/plugins/catalog/detail?id=${encodeURIComponent(id)}${suffix}`
+		`/api/plugins/catalog/detail?${q.toString()}`
 	);
 }
 

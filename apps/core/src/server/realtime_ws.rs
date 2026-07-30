@@ -916,6 +916,8 @@ mod tests {
         assert!(matches!(doc.kind, RoomKind::Document));
 
         // An unknown kind is rejected (fail-closed on the handshake).
-        assert!(serde_json::from_value::<JoinFrame>(json!({"room_id": "x", "kind": "bogus"})).is_err());
+        assert!(
+            serde_json::from_value::<JoinFrame>(json!({"room_id": "x", "kind": "bogus"})).is_err()
+        );
     }
 }

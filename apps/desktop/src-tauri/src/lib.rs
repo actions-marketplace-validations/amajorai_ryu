@@ -351,6 +351,98 @@ async fn install_update_from_channel(
 	Ok(true)
 }
 
+/// Is `segment` safe to interpolate into a release-download URL path?
+///
+/// `install_update_at_tag`'s tag and channel both arrive from the webview, so a
+/// caller must not be able to escape the path we intend and point the updater at
+/// another host or another asset. Empty, over-long, `.`/`-`-leading and
+/// `..`-bearing values are refused on top of each segment's own alphabet.
+fn is_safe_url_segment(segment: &str, allowed: impl Fn(char) -> bool) -> bool {
+	const MAX_SEGMENT_LEN: usize = 64;
+	!segment.is_empty()
+		&& segment.len() <= MAX_SEGMENT_LEN
+		&& !segment.starts_with('.')
+		&& !segment.starts_with('-')
+		&& !segment.contains("..")
+		&& segment.chars().all(allowed)
+}
+
+/// Install a SPECIFIC published release, by tag, from that release's own updater feed.
+///
+/// The static endpoint baked into `tauri.conf.json` (line 56) always resolves to
+/// the ABSOLUTE newest release, so it cannot deliver "the newest build your
+/// lifetime updates window covers". Every signed release also carries its own
+/// feed asset — `latest.json` for stable, `latest-<channel>.json` otherwise
+/// (scripts/release/update-latest-json.mjs:33-35) — at
+/// `/releases/download/<tag>/<file>`, mirrored to the public hub with rewritten
+/// URLs by `.github/workflows/mirror-releases.yml`. So pinning is a feed swap:
+/// the same runtime-rebuilt-updater trick `install_update_from_channel` uses.
+///
+/// SIGNING IS UNAFFECTED: `updater_builder()` inherits `plugins.updater.pubkey`
+/// from tauri.conf.json and only `.endpoints(...)` is overridden, so the pinned
+/// artifact is verified against that release's own signature with the app's
+/// baked-in key.
+///
+/// Returns `Ok(false)` when that tag has no signed feed (an older release, or one
+/// cut without `TAURI_SIGNING_PRIVATE_KEY`), so the caller falls back to a manual
+/// download rather than trapping the user. NOTE: the Tauri updater refuses any
+/// version that is not NEWER than the running one, so this can pin FORWARD to an
+/// older-than-latest build but can never downgrade.
+#[tauri::command]
+async fn install_update_at_tag(
+	app: tauri::AppHandle,
+	tag: String,
+	channel: String,
+) -> Result<bool, String> {
+	use tauri_plugin_updater::UpdaterExt;
+
+	let tag_ok = is_safe_url_segment(&tag, |c| {
+		c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')
+	});
+	let channel_ok = is_safe_url_segment(&channel, |c| c.is_ascii_lowercase());
+	if !tag_ok || !channel_ok {
+		return Err("invalid release tag or channel".to_string());
+	}
+
+	// Must stay in step with `scripts/release/update-latest-json.mjs:33-35`, which
+	// NAMES these assets at publish time — if the two ever disagree the pin 404s.
+	let file = if channel == "stable" {
+		"latest.json".to_string()
+	} else {
+		format!("latest-{channel}.json")
+	};
+	let url = format!("https://github.com/amajorai/ryu/releases/download/{tag}/{file}");
+	let endpoint = url
+		.parse()
+		.map_err(|e| format!("bad pinned feed url: {e}"))?;
+
+	let updater = app
+		.updater_builder()
+		.endpoints(vec![endpoint])
+		.map_err(|e| e.to_string())?
+		.build()
+		.map_err(|e| e.to_string())?;
+
+	let found = match updater.check().await {
+		Ok(found) => found,
+		// With exactly one endpoint configured, `ReleaseNotFound` means that single
+		// URL did not answer 200 — i.e. this tag ships no signed feed asset. That is
+		// an expected state for older or unsigned releases, not a failure, so it
+		// reports "nothing to pin" and the caller offers a manual download instead.
+		Err(tauri_plugin_updater::Error::ReleaseNotFound) => return Ok(false),
+		Err(e) => return Err(e.to_string()),
+	};
+	let Some(update) = found else {
+		return Ok(false);
+	};
+
+	update
+		.download_and_install(|_, _| {}, || {})
+		.await
+		.map_err(|e| e.to_string())?;
+	Ok(true)
+}
+
 // ── Data folder relocation / import (offline, runs while Core is stopped) ─────────
 
 /// Stop the Core we manage, then wait until its HTTP server is actually down.
@@ -1318,6 +1410,7 @@ pub fn run() {
             get_ryu_core_url,
             get_build_profile,
             install_update_from_channel,
+            install_update_at_tag,
             migrate_data_folder,
             import_data_folder,
             open_external,

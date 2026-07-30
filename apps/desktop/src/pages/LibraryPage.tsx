@@ -24,6 +24,7 @@ import {
 	Target01Icon,
 	UserGroupIcon,
 	WorkflowCircle06Icon,
+	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import {
@@ -52,6 +53,7 @@ import {
 	TeamDialog,
 	type TeamDraft,
 } from "@/src/components/teams/TeamDialog.tsx";
+import ToolsLibrary from "@/src/components/tools/ToolsLibrary.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
@@ -73,7 +75,19 @@ import {
 } from "@/src/lib/library.ts";
 import { WorkflowFlowStrip } from "@/src/lib/workflow-triggers.tsx";
 
-type LibrarySection = "recents" | "favorites" | LibraryItemType; // agent | workflow | chat | space | team | meeting | channel | identity
+/** A Library tab.
+ *
+ *  Most tabs are collections of `LibraryItem`s rendered by the shared card/grid
+ *  machinery. `"tools"` is not: the MCP servers on the node and the tools they
+ *  advertise have their own hierarchy (a tool belongs to a server) and their own
+ *  actions (test-call a tool), so it renders a bespoke surface inside the Library
+ *  shell — the same escape hatch `"memory"` already uses. */
+type LibrarySection = "recents" | "favorites" | "tools" | LibraryItemType; // agent | workflow | chat | space | team | meeting | channel | identity
+
+/** Sections that render their OWN surface instead of the shared card grid, and so
+ *  bypass the collection pipeline (normalise → filter → sort → cards). They keep
+ *  the section nav so switching tabs still works. */
+const CUSTOM_SURFACE_SECTIONS = new Set<LibrarySection>(["tools"]);
 
 const SECTIONS: {
 	value: LibrarySection;
@@ -90,6 +104,9 @@ const SECTIONS: {
 	{ value: "meeting", label: "Meetings", icon: AudioWave01Icon },
 	{ value: "channel", label: "Channels", icon: BubbleChatIcon },
 	{ value: "identity", label: "Identities", icon: Key01Icon },
+	// Tools moved here from the Store: the Store is for FINDING things to add, this
+	// is for managing and invoking what is already installed.
+	{ value: "tools", label: "Tools", icon: Wrench01Icon },
 ];
 
 /** The app that owns each collection. A tab shows only when its owning app is
@@ -146,8 +163,16 @@ function isLibrarySection(value: string): value is LibrarySection {
 	return SECTIONS.some((s) => s.value === value);
 }
 
+/** True for the sections that ARE a `LibraryItemType` — i.e. the ones backed by the
+ *  shared collection pipeline. Excludes the synthetic mixed tabs and any
+ *  custom-surface section (which has no `LibraryItem` representation at all, so it
+ *  must never be offered as a type filter chip). */
 function isItemType(value: LibrarySection): value is LibraryItemType {
-	return value !== "recents" && value !== "favorites";
+	return (
+		value !== "recents" &&
+		value !== "favorites" &&
+		!CUSTOM_SURFACE_SECTIONS.has(value)
+	);
 }
 
 /**
@@ -506,8 +531,14 @@ function LibraryCollections({
 		baseItems = recentItems;
 	} else if (section === "favorites") {
 		baseItems = favoriteItems;
-	} else {
+	} else if (isItemType(section)) {
 		baseItems = itemsByType[section];
+	} else {
+		// A custom-surface section (Tools) has no LibraryItem representation — it
+		// renders its own surface and never reaches the card grid, so the collection
+		// pipeline below runs over an empty list rather than being skipped (keeping
+		// every hook below unconditional).
+		baseItems = [];
 	}
 
 	// Recents/Favorites resolve refs across every collection, so on launch (the
@@ -523,7 +554,8 @@ function LibraryCollections({
 		identitiesLoading;
 	const loading = isMixed
 		? anySourceLoading && baseItems.length === 0
-		: loadingByType[section];
+		: // A custom-surface section owns its own loading state.
+			isItemType(section) && loadingByType[section];
 
 	const visibleItems = useMemo(() => {
 		let list = baseItems;
@@ -658,6 +690,10 @@ function LibraryCollections({
 		meeting: "Record a meeting to get AI-written notes.",
 		channel: "Connect a Telegram, Slack, WhatsApp, or Discord bot.",
 		identity: "Save a login profile agents can reuse on the web.",
+		// Never rendered — the Tools tab owns its own empty states — but the record is
+		// exhaustive over LibrarySection so a new tab cannot be added without deciding
+		// what its empty state says.
+		tools: "Add an MCP server to give your agents new tools.",
 	};
 
 	const editingTeam = teams.find((t) => t.id === editingTeamId) ?? null;
@@ -669,6 +705,12 @@ function LibraryCollections({
 		}
 	};
 
+	// A custom-surface section (Tools) brings its own search, filters and empty
+	// states, so the shell's search box and collection toolbar are omitted rather
+	// than rendered dead beside them — two search fields on one screen is the exact
+	// kind of duplication that made this area feel bolted together.
+	const customSurface = CUSTOM_SURFACE_SECTIONS.has(section);
+
 	return (
 		<div className="relative flex h-full flex-col overflow-hidden">
 			<StoreSectionNav
@@ -679,91 +721,107 @@ function LibraryCollections({
 					}
 				}}
 				panel={
-					<LibraryToolbar
-						ctaIcon={cta ? Add01Icon : undefined}
-						ctaLabel={cta?.label}
-						filterSlot={
-							isMixed ? (
-								<div className="flex items-center gap-0.5">
-									<LibraryFilterChip
-										active={typeFilter === null}
-										label="All"
-										onClick={() => setTypeFilter(null)}
-									/>
-									{SECTIONS.filter(
-										(
-											s
-										): s is {
-											value: LibraryItemType;
-											label: string;
-											icon: IconSvgElement;
-										} => isItemType(s.value) && presentTypes.has(s.value)
-									).map((s) => (
+					customSurface ? undefined : (
+						<LibraryToolbar
+							ctaIcon={cta ? Add01Icon : undefined}
+							ctaLabel={cta?.label}
+							filterSlot={
+								isMixed ? (
+									<div className="flex items-center gap-0.5">
 										<LibraryFilterChip
-											active={typeFilter === s.value}
-											icon={TYPE_META[s.value].icon}
-											key={s.value}
-											label={s.label}
-											onClick={() => setTypeFilter(s.value)}
+											active={typeFilter === null}
+											label="All"
+											onClick={() => setTypeFilter(null)}
 										/>
-									))}
-								</div>
-							) : undefined
-						}
-						onCta={cta?.onCta}
-						onSortChange={setSort}
-						onViewChange={onViewChange}
-						showSearch={false}
-						sort={section === "recents" ? undefined : sort}
-						sortOptions={section === "recents" ? [] : SORT_OPTIONS}
-						view={view}
-					/>
+										{SECTIONS.filter(
+											(
+												s
+											): s is {
+												value: LibraryItemType;
+												label: string;
+												icon: IconSvgElement;
+											} => isItemType(s.value) && presentTypes.has(s.value)
+										).map((s) => (
+											<LibraryFilterChip
+												active={typeFilter === s.value}
+												icon={TYPE_META[s.value].icon}
+												key={s.value}
+												label={s.label}
+												onClick={() => setTypeFilter(s.value)}
+											/>
+										))}
+									</div>
+								) : undefined
+							}
+							onCta={cta?.onCta}
+							onSortChange={setSort}
+							onViewChange={onViewChange}
+							showSearch={false}
+							sort={section === "recents" ? undefined : sort}
+							sortOptions={section === "recents" ? [] : SORT_OPTIONS}
+							view={view}
+						/>
+					)
 				}
-				search={{
-					value: query,
-					onChange: setQuery,
-					placeholder: `Search ${sectionMeta?.label.toLowerCase() ?? "items"}…`,
-				}}
+				search={
+					customSurface
+						? undefined
+						: {
+								value: query,
+								onChange: setQuery,
+								placeholder: `Search ${sectionMeta?.label.toLowerCase() ?? "items"}…`,
+							}
+				}
 				sections={visibleSections}
 			/>
 
-			{/* Single scroll viewport → content scrolls UNDER the frosted, transparent
-			    titlebar (Layout no longer reserves its height for /library — see
-			    pathScrollsUnderTitlebar). `pt-12` clears the bar. */}
-			{/* Centered, capped-width column mirroring the Store/Customize catalog
-			    layout — the cards read as the same 2-column grid rather than a
-			    full-bleed wall. */}
-			<div className="min-h-0 flex-1 overflow-y-auto px-4 pt-12 pb-24">
-				<div className="mx-auto w-full max-w-4xl">
-					{loading ? (
-						<LibraryLoading />
-					) : visibleItems.length === 0 ? (
-						<LibraryEmpty
-							description={
-								query ? "Nothing matches your search." : emptyCopy[section]
-							}
-							icon={sectionMeta?.icon ?? LibraryIcon}
-							title={
-								query
-									? "No results"
-									: `No ${sectionMeta?.label.toLowerCase() ?? "items"} yet`
-							}
-						/>
-					) : (
-						<LibraryGrid columns={2} view={view}>
-							{visibleItems.map((item) => (
-								<LibraryCard
-									item={toCardData(item)}
-									key={refKey(item.type, item.id)}
-									onOpen={item.open}
-									onToggleFavorite={() => toggleFavorite(item.type, item.id)}
-									view={view}
-								/>
-							))}
-						</LibraryGrid>
-					)}
+			{/* A custom-surface section fills the shell itself: it is a full-height
+			    master/detail layout with its own scroll containers, so it must NOT be
+			    nested inside the centered, scrolling card column below. `pt-12` still
+			    clears the transparent titlebar. */}
+			{customSurface ? (
+				<div className="min-h-0 flex-1 overflow-hidden pt-12">
+					{section === "tools" ? <ToolsLibrary /> : null}
 				</div>
-			</div>
+			) : (
+				/* Single scroll viewport → content scrolls UNDER the frosted, transparent
+			    titlebar (Layout no longer reserves its height for /library — see
+			    pathScrollsUnderTitlebar). `pt-12` clears the bar. */
+				/* Centered, capped-width column mirroring the Store/Customize catalog
+			    layout — the cards read as the same 2-column grid rather than a
+			    full-bleed wall. */
+				<div className="min-h-0 flex-1 overflow-y-auto px-4 pt-12 pb-24">
+					<div className="mx-auto w-full max-w-4xl">
+						{loading ? (
+							<LibraryLoading />
+						) : visibleItems.length === 0 ? (
+							<LibraryEmpty
+								description={
+									query ? "Nothing matches your search." : emptyCopy[section]
+								}
+								icon={sectionMeta?.icon ?? LibraryIcon}
+								title={
+									query
+										? "No results"
+										: `No ${sectionMeta?.label.toLowerCase() ?? "items"} yet`
+								}
+							/>
+						) : (
+							<LibraryGrid columns={2} view={view}>
+								{visibleItems.map((item) => (
+									<LibraryCard
+										item={toCardData(item)}
+										key={refKey(item.type, item.id)}
+										onOpen={item.open}
+										onToggleFavorite={() => toggleFavorite(item.type, item.id)}
+										view={view}
+									/>
+								))}
+							</LibraryGrid>
+						)}
+					</div>
+				</div>
+			)}
 
 			<CreateSpaceDialog
 				onClose={() => setSpaceDialogOpen(false)}

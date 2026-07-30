@@ -1102,7 +1102,10 @@ mod tests {
     fn parse_change_frame_concatenates_multiline_data() {
         let payload = sample_payload("conv-sse");
         let pretty = serde_json::to_string_pretty(&payload).unwrap();
-        assert!(pretty.lines().count() > 1, "pretty JSON must span many lines");
+        assert!(
+            pretty.lines().count() > 1,
+            "pretty JSON must span many lines"
+        );
         let mut frame = String::from(": keepalive comment\r\nevent: change\r\n");
         for line in pretty.lines() {
             frame.push_str("data: ");
@@ -1149,7 +1152,10 @@ mod tests {
             assert!(!env_sync_enabled(), "'{falsy}' must NOT enable sync");
         }
         std::env::remove_var(SYNC_ENABLED_ENV);
-        assert!(!env_sync_enabled(), "unset must default to OFF (local-first)");
+        assert!(
+            !env_sync_enabled(),
+            "unset must default to OFF (local-first)"
+        );
 
         // Restore whatever the environment had before this test.
         match prior {

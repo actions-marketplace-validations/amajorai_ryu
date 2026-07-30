@@ -37,6 +37,7 @@ mod identity_verify;
 mod image_host;
 mod inference;
 mod learning;
+mod lsp;
 mod memory_host;
 mod memory_policy;
 mod memory_provider;
@@ -72,6 +73,7 @@ mod notify;
 /// `ryu-knowledge` crate. Consumers reference `crate::okf::{Bundle, Concept, …}`
 /// unchanged.
 pub use ryu_knowledge as okf;
+mod dictation;
 mod finetune_client;
 mod openrouter_auth;
 mod paths;
@@ -82,7 +84,6 @@ mod plugin_secrets;
 mod plugin_storage;
 mod plugins;
 mod policy_alerts;
-mod dictation;
 mod predict;
 mod predict_host;
 mod privacy;
@@ -1025,10 +1026,7 @@ async fn main() {
     // state. Default-on (see CORE_DEFAULT_ON): Island hosts the OS surface and
     // reads the synced `dictation` preference `enabled` field for live shortcut
     // rebinding when the plugin flips.
-    if let Ok(Some(rec)) = app_store
-        .get(crate::dictation::DICTATION_PLUGIN_ID)
-        .await
-    {
+    if let Ok(Some(rec)) = app_store.get(crate::dictation::DICTATION_PLUGIN_ID).await {
         crate::dictation::set_enabled(rec.enabled);
     }
     // Default-on plugin seeding (#444) — the ONE definition lives in
@@ -1058,10 +1056,7 @@ async fn main() {
     // Re-read dictation after default-on seed: a fresh install may have just
     // created the enabled record, and the pre-seed AtomicBool read above would
     // have missed it.
-    if let Ok(Some(rec)) = app_store
-        .get(crate::dictation::DICTATION_PLUGIN_ID)
-        .await
-    {
+    if let Ok(Some(rec)) = app_store.get(crate::dictation::DICTATION_PLUGIN_ID).await {
         crate::dictation::set_enabled(rec.enabled);
     }
     // Agent Skill registry (M3 / issue #145). Loads from the universal Agent
@@ -1692,8 +1687,7 @@ async fn main() {
                     }
                     Err(e) if attempt < MAX_ATTEMPTS => {
                         // 2,4,8,16,32s (capped) — ~1 min total across the boot window.
-                        let backoff =
-                            std::time::Duration::from_secs(2u64.pow(attempt.min(5)));
+                        let backoff = std::time::Duration::from_secs(2u64.pow(attempt.min(5)));
                         tracing::warn!(
                             "control-plane: managed-node registration attempt {attempt} failed ({e}); retrying in {backoff:?}"
                         );

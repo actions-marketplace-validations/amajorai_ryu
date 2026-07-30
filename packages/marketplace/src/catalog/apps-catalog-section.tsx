@@ -65,7 +65,10 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
 import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
+import { useMarketplaceHostOptional } from "../host.tsx";
 import { useOptionalReport } from "../report/report-provider.tsx";
+import { StarRating } from "../star-rating.tsx";
+import { formatPrice } from "../types.ts";
 import CommunityTrustNotice from "./chrome/community-trust-notice.tsx";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
@@ -86,6 +89,7 @@ import {
 	ReadmePanel,
 	VersionsPanel,
 } from "./detail/detail-panels.tsx";
+import ReviewsPanel from "./detail/reviews-panel.tsx";
 import { ScorecardBadge, ScorecardPanel } from "./detail/scorecard-panel.tsx";
 import { grantDescription, grantLabel } from "./grant-labels.ts";
 import {
@@ -276,20 +280,26 @@ export default function AppsCatalogSection({
 		select(id);
 	};
 
+	// The Community tab addresses its feed directly (`origin`), which OVERRIDES the
+	// catalog source — so offering a source picker there would be a control that
+	// visibly does nothing. It keeps install-from-URL, which still works.
+	const showSourcePicker = variant !== "community";
 	const filter = host.install
 		? {
-				label: "Source & install",
+				label: showSourcePicker ? "Source & install" : "Install",
 				icon: Link01Icon,
 				panel: (
 					<div className="flex flex-col gap-4 p-4">
-						<PluginSourcePicker
-							activeSource={activeSource}
-							addingMarketplace={addingMarketplace}
-							addMarketplace={addMarketplace}
-							selectingSource={selectingSource}
-							selectSource={selectSource}
-							sources={sources}
-						/>
+						{showSourcePicker ? (
+							<PluginSourcePicker
+								activeSource={activeSource}
+								addingMarketplace={addingMarketplace}
+								addMarketplace={addMarketplace}
+								selectingSource={selectingSource}
+								selectSource={selectSource}
+								sources={sources}
+							/>
+						) : null}
 						<InstallFromUrl install={installFromUrl} />
 					</div>
 				),
@@ -697,27 +707,64 @@ function AppCardAction({
 }) {
 	if (item.entry.descriptor_only || !canInstall) {
 		return (
-			<StoreItemAction
-				affordance={
-					<Button onClick={onOpen} size="sm" variant="outline">
-						Details
-					</Button>
-				}
-				installed={false}
-				reportTarget={reportTargetForApp(item)}
-			/>
+			<div className="flex items-center gap-1.5">
+				<PriceBadge entry={item.entry} />
+				<StoreItemAction
+					affordance={
+						<Button onClick={onOpen} size="sm" variant="outline">
+							Details
+						</Button>
+					}
+					installed={false}
+					reportTarget={reportTargetForApp(item)}
+				/>
+			</div>
 		);
 	}
 	return (
-		<StoreItemAction
-			busy={pending}
-			enabled={item.enabled}
-			installed={item.installed}
-			onDisable={onDisable}
-			onEnable={onOpen}
-			onInstall={onInstall}
-			reportTarget={reportTargetForApp(item)}
-		/>
+		<div className="flex items-center gap-1.5">
+			{/* Price sits beside the action, not inside it: a paid listing the user
+			    already owns still installs with the normal button, so the amount is
+			    disclosure rather than a call to action. */}
+			{item.installed ? null : <PriceBadge entry={item.entry} />}
+			<StoreItemAction
+				busy={pending}
+				enabled={item.enabled}
+				installed={item.installed}
+				onDisable={onDisable}
+				onEnable={onOpen}
+				onInstall={onInstall}
+				reportTarget={reportTargetForApp(item)}
+			/>
+		</div>
+	);
+}
+
+/** The listing's price as a short label, or `null` when it is free.
+ *
+ *  Exported for unit tests. Free is represented by an ABSENT `pricing` (that is what
+ *  the hosted catalog emits), so a zero amount is treated as free too rather than
+ *  rendering "$0.00" — a price badge that says nothing costs attention for nothing. */
+export function priceLabel(entry: CatalogEntry): string | null {
+	const amount = entry.pricing?.amountMinor;
+	if (typeof amount !== "number" || amount <= 0) {
+		return null;
+	}
+	return formatPrice(amount, entry.pricing?.currency ?? "usd");
+}
+
+/** Paid-listing badge. Rendered on the card and in the detail header, because the
+ *  unified first-party view interleaves the free git catalog with the hosted paid
+ *  listings — without it the two are indistinguishable until checkout. */
+function PriceBadge({ entry }: { entry: CatalogEntry }) {
+	const label = priceLabel(entry);
+	if (!label) {
+		return null;
+	}
+	return (
+		<Badge className="shrink-0 text-xs" variant="outline">
+			{label}
+		</Badge>
 	);
 }
 
@@ -1010,14 +1057,16 @@ function GrantList({ grants }: { grants: string[] }) {
 	);
 }
 
-/** The detail panel's tab set. Every tab except Overview is conditional on the
- *  listing actually having that content — see the `tabs` array below. */
+/** The detail panel's tab set. Overview, Reviews and Health are ALWAYS present
+ *  (see the `tabs` array below); the content tabs are conditional on the listing
+ *  actually carrying that content. */
 type DetailTabId =
 	| "overview"
 	| "readme"
 	| "api"
 	| "versions"
 	| "dependencies"
+	| "reviews"
 	| "health";
 
 function AppDetailPanel({
@@ -1050,6 +1099,17 @@ function AppDetailPanel({
 	renderAffordance: CatalogHost["renderAffordance"];
 }) {
 	const { Markdown } = useCatalogHost();
+	// Reviews live on the control plane, reached through the money-layer host. Read
+	// optionally: a surface that mounts the catalog without the money layer (test
+	// harnesses, the storyboard) simply gets no Reviews tab.
+	//
+	// Community listings are excluded even when the service IS present: they were
+	// discovered from a GitHub topic and have no record on the control plane, so a
+	// review could never be stored against one. The tab would be permanently empty
+	// and any attempt to post would fail with "item not found" — an affordance that
+	// cannot work should not be offered.
+	const reviewsHost = useMarketplaceHostOptional()?.reviews ?? null;
+	const reviewsService = item && isCommunityEntry(item) ? null : reviewsHost;
 	const [tab, setTab] = useState<DetailTabId>("overview");
 	// Reset to Overview when the selection changes, so opening a second listing
 	// never lands on a tab that listing does not have.
@@ -1100,6 +1160,15 @@ function AppDetailPanel({
 	);
 	const readme = detail?.readme?.trim() ?? "";
 	const versions = detail?.versions ?? [];
+	// Reviews and Health are UNCONDITIONAL (given a review service / a loaded
+	// detail). They used to be conditional on content, which made the tab row
+	// inconsistent between store sections that render this exact panel: a Community
+	// listing arrived with a README and a full signal set and showed every tab, while
+	// a first-party Apps/Plugins listing showed a lone Overview. The tab row is
+	// navigation — it should not appear and disappear per listing — and an unrated
+	// item or a thin scorecard is information the user asked for, not a reason to
+	// hide the tab. The content tabs stay conditional: an absent README has nothing
+	// to render at all, whereas "no reviews yet" and "not enough signals" do.
 	const tabs: { id: DetailTabId; label: string }[] = [
 		{ id: "overview", label: "Overview" },
 		...(readme ? [{ id: "readme" as const, label: "README" }] : []),
@@ -1112,9 +1181,8 @@ function AppDetailPanel({
 		...(hasDependencies(detail, entry)
 			? [{ id: "dependencies" as const, label: "Dependencies" }]
 			: []),
-		...(scorecard && scorecard.score !== null
-			? [{ id: "health" as const, label: "Health" }]
-			: []),
+		...(reviewsService ? [{ id: "reviews" as const, label: "Reviews" }] : []),
+		...(scorecard ? [{ id: "health" as const, label: "Health" }] : []),
 	];
 	// Guard against a tab that vanished while it was selected (the detail request
 	// resolving can remove tabs as well as add them).
@@ -1187,12 +1255,32 @@ function AppDetailPanel({
 						) : null}
 					</div>
 					<div className="flex shrink-0 items-center gap-2">
+						{/* Rating summary from the card's denormalized aggregate — no review
+						    fetch needed to show it, and clicking through opens the tab that
+						    does load them. */}
+						{reviewsService &&
+						typeof entry.rating_count === "number" &&
+						entry.rating_count > 0 ? (
+							<button
+								className="rounded transition-opacity hover:opacity-80"
+								onClick={() => setTab("reviews")}
+								type="button"
+							>
+								<StarRating
+									count={entry.rating_count}
+									showValue
+									size="size-3.5"
+									value={entry.rating_average ?? 0}
+								/>
+							</button>
+						) : null}
 						{scorecard ? (
 							<ScorecardBadge
 								onClick={() => setTab("health")}
 								scorecard={scorecard}
 							/>
 						) : null}
+						<PriceBadge entry={entry} />
 						{entry.descriptor_only ? (
 							<Badge variant="outline">
 								{entry.integration_kind?.toUpperCase() ?? "Descriptor"}
@@ -1301,7 +1389,18 @@ function AppDetailPanel({
 							<DependenciesPanel detail={detail} entry={entry} />
 						</TabsContent>
 					) : null}
-					{scorecard && scorecard.score !== null ? (
+					{reviewsService ? (
+						<TabsContent className="pt-2" value="reviews">
+							<ReviewsPanel
+								id={entry.id}
+								// Every listing in this section is a plugin/app on the control
+								// plane — apps ARE plugins that ship a companion surface.
+								kind="plugin"
+								service={reviewsService}
+							/>
+						</TabsContent>
+					) : null}
+					{scorecard ? (
 						<TabsContent className="pt-2" value="health">
 							<ScorecardPanel scorecard={scorecard} />
 						</TabsContent>

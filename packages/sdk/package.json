@@ -1,6 +1,6 @@
 {
   "name": "@ryuhq/sdk",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "type": "module",
   "description": "Ryu developer SDK: typed builders and CLI for authoring manifest.json Plugin bundles",
   "main": "./dist/index.cjs",

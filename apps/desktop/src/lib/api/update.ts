@@ -8,6 +8,7 @@
 // surface the toast, and whether to auto-install, is decided from Core's verdict
 // + this setting, so all surfaces stay consistent.
 
+import { getUpdatesCutoff } from "@/src/lib/updates-window.ts";
 import { getReleaseChannel } from "../release-channel.ts";
 import { type ApiTarget, request } from "./client.ts";
 import { getPreference, setPreference } from "./preferences.ts";
@@ -33,7 +34,15 @@ export interface ReleaseAsset {
 	url: string;
 }
 
-/** Matches Core's `update::UpdateCheck` (`GET /api/update/check`). */
+/**
+ * Matches Core's `update::UpdateCheck` (`GET /api/update/check`).
+ *
+ * The six updates-window fields are all OPTIONAL, and that is load-bearing: a NEW
+ * desktop talking to an OLD Core receives none of them, every guard downstream
+ * reads `undefined` as falsy, and the app behaves exactly as it does today. Never
+ * make one of them required to "tighten" the type — that would turn a version skew
+ * into a runtime surprise instead of the historical, unclamped path.
+ */
 export interface UpdateCheck {
 	asset: ReleaseAsset | null;
 	/**
@@ -45,6 +54,17 @@ export interface UpdateCheck {
 	channel: string;
 	current: string;
 	/**
+	 * True when a cutoff was sent but NO eligible release was resolved. `latest` is
+	 * then a placeholder and asserts nothing — never tell the user it is "the newest
+	 * build your window covers". Absent on an older Core.
+	 */
+	cutoff_unresolved?: boolean;
+	/**
+	 * True when the offered release is a security release handed over despite the
+	 * cutoff. Absent on an older Core.
+	 */
+	cutoff_waived_for_security?: boolean;
+	/**
 	 * Set when Core's check itself failed (network/API error, GitHub rate
 	 * limit). Core fails open — 200 with `update_available: false` and
 	 * `latest` echoing `current` — so without reading this field a failed
@@ -53,14 +73,40 @@ export interface UpdateCheck {
 	error?: string | null;
 	html_url: string | null;
 	latest: string;
+	/**
+	 * The newest release on the channel ignoring the cutoff. Absent on an older
+	 * Core; treat as equal to `latest`.
+	 */
+	latest_unrestricted?: string;
 	notes: string | null;
+	/** RFC-3339 publish time of the release `latest` names. Absent on an older Core. */
+	published_at?: string | null;
+	/**
+	 * True when the caller's updates window held `latest` back from
+	 * `latest_unrestricted`. Distinct from `update_available: false`, which also
+	 * means "the check failed" — see `updateCheckFailed`.
+	 */
+	restricted_by_cutoff?: boolean;
+	/**
+	 * The git tag of the release `latest` names. NOT derivable from `latest`:
+	 * rolling channels tag `nightly` while their version lives in the release title.
+	 * Anything addressing a specific release must use this. Absent on an older Core.
+	 */
+	tag?: string | null;
 	update_available: boolean;
 }
 
 /** True when the verdict reports a FAILED check rather than a real "no update". */
 export function updateCheckFailed(verdict: UpdateCheck): boolean {
 	return (
-		Boolean(verdict.error) || !(verdict.update_available || verdict.latest)
+		Boolean(verdict.error) ||
+		// `cutoff_unresolved` means Core searched back through the releases page and
+		// could not find any build the caller's window covers, so it echoed `latest`
+		// = `current` as a PLACEHOLDER. Without this arm every caller reads that as
+		// a clean "you're up to date" and presents the placeholder as a real
+		// ceiling — the one claim Core explicitly forbids any surface from making.
+		verdict.cutoff_unresolved === true ||
+		!(verdict.update_available || verdict.latest)
 	);
 }
 
@@ -69,22 +115,52 @@ export function getVersionInfo(target: ApiTarget): Promise<VersionInfo> {
 	return request<VersionInfo>(target, "/api/version");
 }
 
+export interface CheckForUpdateOptions {
+	/**
+	 * Send the signed-in owner's lapsed lifetime updates cutoff with the check.
+	 *
+	 * OFF by default, and deliberately opt-in per call site: three of the callers
+	 * here target a REMOTE node (the node selector, the download centre, Preflight)
+	 * and one targets the NODE's Core/Gateway binaries (the Gateway dialog's
+	 * Updates tab). A self-hosted or shared node has no lifetime owner, and
+	 * clamping it would withhold Core/Gateway updates — including security fixes —
+	 * from everyone on it because one desktop user's personal window lapsed.
+	 *
+	 * Only pass `true` for THIS app's own LOCAL node (`isLocalNode`).
+	 */
+	clamp?: boolean;
+}
+
 /**
  * Ask Core whether an update is available. Fails soft: on any error returns a
  * "no update" verdict so a flaky check never blocks the UI.
  */
-export async function checkForUpdate(target: ApiTarget): Promise<UpdateCheck> {
+export async function checkForUpdate(
+	target: ApiTarget,
+	options?: CheckForUpdateOptions
+): Promise<UpdateCheck> {
 	// Ask Core about the channel the USER picked, not just the one this build
 	// happens to be on — otherwise a user who switches to nightly keeps getting the
 	// stable verdict and the picker looks broken. Core defaults to the running
 	// build's own channel when the parameter is absent.
 	const channel = getReleaseChannel();
+	const params = new URLSearchParams({ channel });
+	// Null unless the caller opted in AND this account's window has actually
+	// lapsed, so free users, subscribers and in-window owners send the exact query
+	// string they send today.
+	const cutoff = options?.clamp === true ? getUpdatesCutoff() : null;
+	if (cutoff) {
+		params.set("updates_until", cutoff);
+	}
 	try {
 		return await request<UpdateCheck>(
 			target,
-			`/api/update/check?channel=${encodeURIComponent(channel)}`
+			`/api/update/check?${params.toString()}`
 		);
 	} catch {
+		// Deliberately leaves every updates-window field undefined. A transport
+		// failure must never read as "your window lapsed" — that is the distinction
+		// `restricted_by_cutoff` exists to preserve.
 		return {
 			current: "",
 			latest: "",
@@ -129,21 +205,6 @@ export function applyNodeUpdate(
 		body: asset,
 	});
 }
-
-// --- Forced updates (build-time policy) -------------------------------------
-//
-// While true, the desktop installs an available update on every launch,
-// IGNORING the user's auto-update toggle. This is deliberate: Ryu is free during
-// the beta (see `betaFree` in @ryu/auth/lib/plans), and when it becomes paid the
-// switch ships as a release — forced updates guarantee nobody can sit on an old,
-// still-free build past that point. The toggle below remains the source of truth
-// for *non-forced* behaviour, so flipping this back to false restores user
-// control without any other change.
-//
-// Forcing never hard-blocks the shell: if the signed updater feed is unreachable
-// (unsigned/dev builds), the installer degrades to a manual-download toast rather
-// than trapping the user — see AutoUpdater.installUpdate.
-export const FORCE_AUTO_UPDATE = true;
 
 // --- Auto-update toggle (shared cross-surface via Core preferences) ---------
 // Key matches Core's `update::AUTO_UPDATE_PREF_KEY`. Stored as `{ "enabled": bool }`.

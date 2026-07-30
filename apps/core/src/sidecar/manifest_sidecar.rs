@@ -911,7 +911,9 @@ async fn ensure_local_sidecar_present(
 /// at a user/dev-managed file Core did not install and must not delete. `Binary`-kind
 /// sidecars are skipped here: their bytes live under `<plugin_dir>/bin` and are
 /// removed when the plugin directory is torn down.
-pub(crate) async fn remove_local_sidecar_binaries(manifest: &crate::plugin_manifest::PluginManifest) {
+pub(crate) async fn remove_local_sidecar_binaries(
+    manifest: &crate::plugin_manifest::PluginManifest,
+) {
     let ext = if cfg!(windows) { ".exe" } else { "" };
     for spec in &manifest.sidecars {
         let SidecarProcess::Local(local) = &spec.process else {

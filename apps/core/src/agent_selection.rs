@@ -183,7 +183,9 @@ fn model_for_agent(agent_id: &str) -> Option<String> {
         return None;
     }
     let view = crate::pi_config::current();
-    view.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty())
+    view.model
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
 }
 
 /// How hard a model-consuming call should think: the explicit `effort`, else the
@@ -279,7 +281,8 @@ pub async fn resolve_agent(prefs: &PreferencesStore, feature_key: &str) -> Optio
 /// startup and refreshes it whenever [`GLOBAL_SELECTION_PREF`] is written —
 /// the same shape `agent_routing::set_auto_config_from_json` already uses.
 fn default_agent_cell() -> &'static std::sync::RwLock<Option<String>> {
-    static CELL: std::sync::OnceLock<std::sync::RwLock<Option<String>>> = std::sync::OnceLock::new();
+    static CELL: std::sync::OnceLock<std::sync::RwLock<Option<String>>> =
+        std::sync::OnceLock::new();
     CELL.get_or_init(|| std::sync::RwLock::new(None))
 }
 

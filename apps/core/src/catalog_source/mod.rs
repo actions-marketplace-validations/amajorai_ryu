@@ -22,6 +22,93 @@ mod sources;
 pub use github_topic::{
     GithubTopicSource, COMMUNITY_ORIGIN, GITHUB_TOKEN_PREF, GITHUB_TOPIC_SOURCE_ID,
 };
+
+/// Default GitHub REST base for repo enrichment. Fixed (not configurable) so a
+/// BYOK token can never be sent to a host the user did not intend — the same rule
+/// [`GithubTopicSource`] applies to its own token.
+const GITHUB_API_BASE: &str = "https://api.github.com";
+
+/// Split a GitHub repo reference into `(owner, repo)`.
+///
+/// Accepts the forms a marketplace listing actually carries: a bare `owner/repo`
+/// slug, an `https://github.com/owner/repo` URL (with or without a trailing
+/// `.git`/path), and the `git@github.com:owner/repo` SSH form. Returns `None` for
+/// anything else — including a non-GitHub host, because the enrichment below only
+/// speaks the GitHub REST API and pointing it at another host would leak the token.
+pub fn split_github_repo(reference: &str) -> Option<(String, String)> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Reduce every accepted form to a `owner/repo[/…]` path.
+    let path = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else {
+        let without_scheme = trimmed
+            .strip_prefix("https://")
+            .or_else(|| trimmed.strip_prefix("http://"))
+            .unwrap_or(trimmed);
+        match without_scheme.strip_prefix("github.com/") {
+            Some(rest) => rest,
+            None => {
+                // A scheme we did not recognize, or an absolute filesystem path —
+                // neither is a GitHub repo, and an absolute path would otherwise
+                // parse as a slug (`/local/path` → `local/path`).
+                if without_scheme.contains("://") || without_scheme.starts_with('/') {
+                    return None;
+                }
+                // A bare `owner/repo` slug. GitHub owner names are alphanumerics and
+                // hyphens only, so a dot in the FIRST segment means this is a
+                // hostname for another forge, not an owner. A dot in a LATER segment
+                // is a legitimate repo name (`vercel/next.js`), so the check must be
+                // first-segment-only rather than "contains a dot anywhere".
+                if without_scheme
+                    .split('/')
+                    .next()
+                    .is_some_and(|s| s.contains('.'))
+                {
+                    return None;
+                }
+                without_scheme
+            }
+        }
+    };
+    let mut parts = path.split('/').filter(|s| !s.is_empty());
+    let owner = parts.next()?;
+    let repo = parts.next()?.trim_end_matches(".git");
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+/// Repo enrichment (README, release/tag history, stars, timestamps) for any listing
+/// that names a GitHub repository — not just the Community feed.
+///
+/// The first-party catalogs ship the manifest's own fields and nothing else, so a
+/// listing there rendered a detail page with a single Overview tab while a Community
+/// listing (which goes through [`GithubTopicSource::detail`]) got README / Versions /
+/// Health. Same repositories, different depth of page, for no reason the user can
+/// see. This exposes the identical, cached, best-effort fetch to the first-party
+/// path so the tab set is a property of the LISTING, not of which feed found it.
+///
+/// `cache_id` keys the shared enrichment cache — pass the catalog entry id so two
+/// listings never share an entry. Returns an empty object when `repo_reference` is
+/// not a GitHub repo or GitHub is unreachable: never fatal, by contract.
+pub async fn enrich_github_repo(
+    cache_id: &str,
+    repo_reference: &str,
+    token: Option<&str>,
+) -> serde_json::Value {
+    let Some((owner, repo)) = split_github_repo(repo_reference) else {
+        return serde_json::Value::Object(serde_json::Map::new());
+    };
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) {
+        headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+    }
+    github_enrich::enrich_repo(cache_id, GITHUB_API_BASE, &headers, &owner, &repo).await
+}
 pub use registry::{CatalogSourceRegistry, CustomSourceSpec, SourceMeta};
 pub use sources::{
     integration_brand_slug, integrations_sh_brands, with_buyer_token, HfSource, IntegrationBrand,
@@ -177,7 +264,10 @@ mod tests {
 
     #[test]
     fn catalog_kind_from_str_is_trimmed_case_insensitive() {
-        assert_eq!("  MODEL ".parse::<CatalogKind>().unwrap(), CatalogKind::Model);
+        assert_eq!(
+            "  MODEL ".parse::<CatalogKind>().unwrap(),
+            CatalogKind::Model
+        );
         assert_eq!("Skill".parse::<CatalogKind>().unwrap(), CatalogKind::Skill);
         assert_eq!(
             "knowledge".parse::<CatalogKind>().unwrap(),
@@ -190,12 +280,71 @@ mod tests {
 
     #[test]
     fn catalog_kind_serde_is_lowercase() {
-        assert_eq!(
-            serde_json::to_string(&CatalogKind::Mcp).unwrap(),
-            "\"mcp\""
-        );
+        assert_eq!(serde_json::to_string(&CatalogKind::Mcp).unwrap(), "\"mcp\"");
         let k: CatalogKind = serde_json::from_str("\"plugin\"").unwrap();
         assert_eq!(k, CatalogKind::Plugin);
+    }
+
+    #[test]
+    fn split_github_repo_accepts_every_form_a_listing_carries() {
+        for reference in [
+            "amajorai/ryu-marketplace",
+            "https://github.com/amajorai/ryu-marketplace",
+            "http://github.com/amajorai/ryu-marketplace",
+            "https://github.com/amajorai/ryu-marketplace.git",
+            "git@github.com:amajorai/ryu-marketplace.git",
+            // A deep path (the install_source of a plugin inside the repo) still
+            // resolves to the repo it lives in — that is what gets enriched.
+            "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/browser",
+            "  amajorai/ryu-marketplace  ",
+        ] {
+            assert_eq!(
+                split_github_repo(reference),
+                Some(("amajorai".to_string(), "ryu-marketplace".to_string())),
+                "should resolve `{reference}`"
+            );
+        }
+    }
+
+    /// A dot is only a "this is another forge's hostname" signal in the FIRST
+    /// segment; plenty of real repositories have one in their name.
+    #[test]
+    fn split_github_repo_keeps_a_dotted_repo_name() {
+        assert_eq!(
+            split_github_repo("vercel/next.js"),
+            Some(("vercel".to_string(), "next.js".to_string()))
+        );
+    }
+
+    /// The enrichment call sends a BYOK GitHub token, so anything that is not a
+    /// github.com repo must resolve to `None` rather than being treated as a slug —
+    /// otherwise a listing could name another host and receive the token.
+    #[test]
+    fn split_github_repo_rejects_non_github_and_incomplete_references() {
+        for reference in [
+            "",
+            "   ",
+            "amajorai",
+            "https://gitlab.com/amajorai/ryu-marketplace",
+            "https://evil.example.com/amajorai/ryu-marketplace",
+            "git@gitlab.com:amajorai/ryu-marketplace.git",
+            "ssh://github.com.evil.test/a/b",
+            "/local/path",
+        ] {
+            assert_eq!(
+                split_github_repo(reference),
+                None,
+                "should reject `{reference}`"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enrich_github_repo_is_empty_for_a_non_github_reference() {
+        // No network call is made at all for a reference that cannot be split, so
+        // this stays a pure unit test while pinning the never-fatal contract.
+        let value = enrich_github_repo("cache-key", "https://gitlab.com/a/b", None).await;
+        assert_eq!(value, serde_json::json!({}));
     }
 
     #[test]

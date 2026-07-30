@@ -182,7 +182,9 @@ impl MemoryPolicy {
         Self {
             recall_mode: recall_mode.map(RecallMode::parse).unwrap_or_default(),
             recall_budget: recall_budget.map(RecallBudget::parse).unwrap_or_default(),
-            write_frequency: write_frequency.map(WriteFrequency::parse).unwrap_or_default(),
+            write_frequency: write_frequency
+                .map(WriteFrequency::parse)
+                .unwrap_or_default(),
             ..Self::default()
         }
     }
@@ -252,7 +254,10 @@ mod tests {
 
     #[test]
     fn absent_or_garbled_preferences_fall_back_to_the_defaults() {
-        assert_eq!(MemoryPolicy::from_raw(None, None, None), MemoryPolicy::default());
+        assert_eq!(
+            MemoryPolicy::from_raw(None, None, None),
+            MemoryPolicy::default()
+        );
         // A typo must not silently disable someone's memory.
         let p = MemoryPolicy::from_raw(Some("of"), Some("huge"), Some("newer"));
         assert_eq!(p, MemoryPolicy::default());

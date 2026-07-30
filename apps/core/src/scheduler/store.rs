@@ -266,10 +266,8 @@ mod tests {
             }
         );
         assert_eq!(
-            serde_json::from_value::<JobTarget>(
-                serde_json::json!({"type":"identity_health"})
-            )
-            .unwrap(),
+            serde_json::from_value::<JobTarget>(serde_json::json!({"type":"identity_health"}))
+                .unwrap(),
             JobTarget::IdentityHealth
         );
         assert_eq!(

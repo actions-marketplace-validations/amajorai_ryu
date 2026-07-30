@@ -357,6 +357,7 @@ const PATH_TITLES: Record<string, string> = {
 	"/library/channel": "Channels",
 	"/library/identity": "Identities",
 	"/library/memory": "Memory",
+	"/library/tools": "Tools",
 	"/channels": "Channels",
 	"/identities": "Identities",
 	"/identities/new": "New identity",

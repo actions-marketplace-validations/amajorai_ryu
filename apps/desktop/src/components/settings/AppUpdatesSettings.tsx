@@ -23,12 +23,17 @@ import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	checkForUpdate,
-	FORCE_AUTO_UPDATE,
 	getAutoUpdateEnabled,
 	getVersionInfo,
 	setAutoUpdateEnabled,
 	updateCheckFailed,
 } from "@/src/lib/api/update.ts";
+import {
+	formatUpdatesCutoff,
+	getUpdatesWindowEnd,
+} from "@/src/lib/updates-window.ts";
+import { isLocalNode } from "@/src/store/useNodeStore.ts";
+import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { ReleaseChannelPicker } from "./UpdatesSettings.tsx";
 
 export function AppUpdatesSettings() {
@@ -36,6 +41,7 @@ export function AppUpdatesSettings() {
 	const [version, setVersion] = useState<string | null>(null);
 	const [autoUpdate, setAutoUpdate] = useState<boolean>(true);
 	const [checking, setChecking] = useState(false);
+	const [restricted, setRestricted] = useState(false);
 
 	useEffect(() => {
 		const target = toTarget(getNode());
@@ -72,7 +78,14 @@ export function AppUpdatesSettings() {
 	const onCheck = async () => {
 		setChecking(true);
 		try {
-			const verdict = await checkForUpdate(toTarget(getNode()));
+			// Resolve the node ONCE: the clamp decision and the install must target
+			// the same node even if the active one changes mid-await.
+			const node = getNode();
+			// Clamp ONLY this app's own local node — a remote/cloud Core has no
+			// lifetime owner. See `CheckForUpdateOptions.clamp`.
+			const verdict = await checkForUpdate(toTarget(node), {
+				clamp: isLocalNode(node),
+			});
 			// A failed check surfaces as either the fail-soft sentinel (empty
 			// version strings, see update.ts) or Core's fail-open verdict with an
 			// `error` field. Both must never read as "you're up to date".
@@ -83,7 +96,27 @@ export function AppUpdatesSettings() {
 				});
 				return;
 			}
+			setRestricted(verdict.restricted_by_cutoff === true);
 			if (!verdict.update_available) {
+				// An explicit check asks a factual question and must get a factual
+				// answer — not a persistent purchase prompt. Finite duration, both
+				// versions named.
+				if (verdict.restricted_by_cutoff) {
+					sileo.info({
+						title: "Ryu is up to date for your updates window",
+						description: verdict.cutoff_unresolved
+							? `v${verdict.latest_unrestricted ?? verdict.latest} has been released, after your updates window ended.`
+							: `You're on v${verdict.current}. v${verdict.latest_unrestricted ?? verdict.latest} was released after your updates window ended.`,
+						duration: 8000,
+						button: {
+							title: "Extend updates",
+							onClick: () => {
+								useSettingsDialog.getState().openSettings("billing");
+							},
+						},
+					});
+					return;
+				}
 				sileo.success({ title: "Ryu is up to date" });
 				return;
 			}
@@ -98,7 +131,7 @@ export function AppUpdatesSettings() {
 				button: {
 					title: "Update now",
 					onClick: () => {
-						installUpdate(verdict).catch(() => undefined);
+						installUpdate(verdict, { node }).catch(() => undefined);
 					},
 				},
 			});
@@ -107,18 +140,40 @@ export function AppUpdatesSettings() {
 		}
 	};
 
+	// Read straight from storage on every render. The window is written outside
+	// React (the entitlement resolve, at launch), so there is nothing to subscribe
+	// to: the normal case is that the value is already there on mount, and the
+	// `setRestricted` re-render below is what refreshes it after a check. Caching
+	// it in state would freeze the row in whatever it read first.
+	const windowEnd = getUpdatesWindowEnd();
+	// Two different notices, deliberately. A lapsed window with nothing actually
+	// withheld is not a reason to sell: the owner is losing nothing until a release
+	// they cannot have exists. Only a verdict that came back genuinely clamped
+	// earns the buy-again copy and the button.
+	let updatesWindowNotice: string | undefined;
+	if (windowEnd) {
+		updatesWindowNotice = restricted
+			? `Your lifetime updates ended on ${formatUpdatesCutoff(windowEnd)}. Ryu stays on the newest build they cover. Buy lifetime access again at the current price for another year — or post about Ryu at ryu.com/redeem to earn a free year.`
+			: `Updates included through ${formatUpdatesCutoff(windowEnd)}.`;
+	}
+
 	return (
 		<div className="space-y-6">
 			<UpdatesView
 				autoUpdate={autoUpdate}
 				checking={checking}
-				forceAutoUpdate={FORCE_AUTO_UPDATE}
 				onCheck={() => {
 					onCheck().catch(() => undefined);
 				}}
+				onManageUpdates={
+					restricted
+						? () => useSettingsDialog.getState().openSettings("billing")
+						: undefined
+				}
 				onToggle={(next) => {
 					onToggle(next).catch(() => undefined);
 				}}
+				updatesWindowNotice={updatesWindowNotice}
 				version={version}
 			/>
 			<ReleaseChannelPicker />

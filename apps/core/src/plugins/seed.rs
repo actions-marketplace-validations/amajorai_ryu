@@ -786,7 +786,10 @@ mod migration_tests {
             "recipes must regain the grant its host callbacks now require, got {:?}",
             record.approved_grants
         );
-        assert!(record.enabled, "the backfill must not disturb enabled state");
+        assert!(
+            record.enabled,
+            "the backfill must not disturb enabled state"
+        );
     }
 
     /// The property that makes running this at boot safe: it happens ONCE. A user who

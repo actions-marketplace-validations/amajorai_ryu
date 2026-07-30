@@ -70,11 +70,10 @@ const MEETINGS_SPACE_NAME: &str = "Meetings";
 /// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
 /// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, MEETINGS_PLUGIN_ID, MEETINGS_SIDECAR)
-        .expect(
-            "built-in meetings.manifest.json must declare the ryu-meetings sidecar (see \
+    crate::sidecar::ext_proxy::sidecar_port(manifests, MEETINGS_PLUGIN_ID, MEETINGS_SIDECAR).expect(
+        "built-in meetings.manifest.json must declare the ryu-meetings sidecar (see \
              plugin_manifest::BUILTIN_MANIFESTS)",
-        )
+    )
 }
 
 /// Typed loopback client for the `ryu-meetings` sidecar. Cheap to clone (holds only

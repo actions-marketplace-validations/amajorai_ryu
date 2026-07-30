@@ -111,6 +111,39 @@ pub const MEETINGS_PLUGIN_ID: &str = "com.ryu.meetings";
 /// sidecar), compile-out-able behind the `research` cargo feature.
 pub const RESEARCH_PLUGIN_ID: &str = "com.ryu.research";
 
+/// The MarkItDown app's plugin id — the **shipped default** provider of the
+/// `document.parse` capability (`apps-store/markitdown/`, a Python sidecar wrapping
+/// Microsoft's MIT-licensed MarkItDown). The only one of the four parsing backends in
+/// [`CORE_DEFAULT_ON`], and the only one whose `provides` block carries
+/// `"default": true` — see the block comment on its entry there for why both halves
+/// are load-bearing and why the other three stay opt-in.
+pub const MARKITDOWN_PLUGIN_ID: &str = "com.ryu.markitdown";
+
+/// The Unstructured app's plugin id — a `document.parse` provider
+/// (`apps-store/unstructured/`, a Python sidecar wrapping the Apache-2.0 Unstructured
+/// library). Core-tier and governed, but **default-OFF**: it is absent from
+/// [`CORE_DEFAULT_ON`] because `unstructured[all-docs]` is a 1-2 GB pip install whose
+/// native helpers (poppler/tesseract/libreoffice/pandoc) are not pip-installable, so
+/// it is opt-in from the Store — the same shape as `finetune`.
+pub const UNSTRUCTURED_PLUGIN_ID: &str = "com.ryu.unstructured";
+
+/// The Docling app's plugin id — a `document.parse` provider (`apps-store/docling/`,
+/// a Python sidecar wrapping IBM's MIT-licensed Docling). Core-tier and governed but
+/// **default-OFF** (absent from [`CORE_DEFAULT_ON`]): it pulls a Torch stack and
+/// downloads layout/OCR models on first parse.
+///
+/// It is also the id the `document.parse` binding falls back to if `markitdown` ever
+/// loses its `"default": true` — `com.ryu.docling` sorts lexicographically lowest of
+/// the four, and the tiebreak is alphabetical. That fallback would be an accident,
+/// never an intent.
+pub const DOCLING_PLUGIN_ID: &str = "com.ryu.docling";
+
+/// The MinerU app's plugin id — a `document.parse` provider (`apps-store/mineru/`, a
+/// Python sidecar driving the AGPL-licensed MinerU CLI, PDF-focused). Core-tier and
+/// governed but **default-OFF** (absent from [`CORE_DEFAULT_ON`]): heaviest of the
+/// four (model downloads, GPU-oriented backends), so it is opt-in from the Store.
+pub const MINERU_PLUGIN_ID: &str = "com.ryu.mineru";
+
 /// The Dashboards app's plugin id — the `/api/dashboards/*` live widget-grid
 /// surface. Governance-shell leaf: default-on, no `requires` (soft HTTP loopback to
 /// monitors/etc). Gate-only (deep in-crate coupling to hardware displays +
@@ -369,6 +402,16 @@ pub const CORE_PLUGINS: &[&str] = &[
     "shadow",
     "spider",
     "agentbrowser",
+    // Third `web.extract` provider (Scrapling's MCP server). Core-tier is a
+    // REQUIREMENT here, not a promotion: `may_register_mcp_servers` auto-allows
+    // manifest-declared `mcp_servers` only for compiled-in fixtures, and the
+    // Community path needs the approved `mcp:server` grant — which is off the
+    // Gateway's default allowlist and in a reserved namespace, so operator-only.
+    // A Community-tier scrapling would register nothing and be dead on arrival.
+    // Deliberately NOT in `CORE_DEFAULT_ON`: it needs a `pip install "scrapling[ai]"`
+    // the user must perform, so shipping it on would put a permanently unavailable
+    // tool on every fresh install — the same reason the BYOK providers stay opt-in.
+    "scrapling",
     // The default `web.search` provider. Core-tier for the same reason `spider` is:
     // it is a default TOOL app that must exist out of the box, and default-on
     // requires Core-tier. The other four search providers (tavily, brave, serper,
@@ -418,6 +461,21 @@ pub const CORE_PLUGINS: &[&str] = &[
     // `plugins::seed` gives it its approved grants + `ui_code` HTML blob. Replaces the
     // built-in fine-tuning page.
     "com.ryu.finetune",
+    // The four document-parsing apps — the providers of the `document.parse`
+    // capability, each backed by a Python sidecar it owns (spawned on the Core-tier
+    // auto-run path, so like `finetune` each declares NO `sidecar:process` grant — the
+    // Gateway denies that grant at enable and the enable fails). All four are here so
+    // they are governed and enable-able from the Store; only `markitdown` is ALSO in
+    // CORE_DEFAULT_ON (see the block there). The other three are opt-in weight, not
+    // fresh-install weight: `unstructured[all-docs]` is a 1-2 GB pip install plus
+    // native helpers (poppler/tesseract/libreoffice/pandoc) that pip cannot supply,
+    // and `docling`/`mineru` each pull a Torch stack and download ML models on first
+    // parse. Enabling a second one is what makes the capability actually swappable —
+    // the read model derives the provider list from the ENABLED set.
+    MARKITDOWN_PLUGIN_ID,
+    UNSTRUCTURED_PLUGIN_ID,
+    DOCLING_PLUGIN_ID,
+    MINERU_PLUGIN_ID,
     // Spaces + Meetings — the first REAL plugin→plugin dependency edge. Both are
     // governance shells: the implementation stays in-crate and the record gates it
     // (Meetings' `/api/meetings/*` routes are refused when the app is disabled —
@@ -566,11 +624,43 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // available with zero setup; the flag/command `match` gate makes it free when
     // the toggle is off and no `/expand` is used (no sandbox spawn on idle turns).
     "com.ryuhq.auto-expand",
-    // NOTE (default-off apps): whiteboard / canvas / finetune / meetings / quests /
-    // approvals / healing / monitors / workflows / activity / timeline /
-    // skill-editor are intentionally NOT default-on — they stay installable +
-    // enable-able from the Store (still in CORE_PLUGINS), but a fresh install ships
-    // them OFF so the sidebar/App surface isn't pre-loaded with every feature.
+    // `markitdown` is default-ON so the `document.parse` capability has a provider out
+    // of the box — the same argument as `exa` above, and for the same mechanical
+    // reason: the read model derives the capability's provider list from the ENABLED
+    // set, so with every parsing backend default-OFF the capability has zero providers
+    // on a fresh install and `crate::document_parse` silently falls back to its
+    // built-in floor (plain-text/markdown only). Every PDF, DOCX and XLSX a user
+    // uploads would ingest as unreadable bytes, with nothing in the UI pointing at the
+    // Store. Declaring `"default": true` in markitdown's manifest does NOT fix that on
+    // its own — as the exa note says, the default flag only breaks ties among
+    // ALREADY-ENABLED providers, it never installs anything. This line is what
+    // installs it.
+    //
+    // markitdown specifically because it is the only one of the four that is cheap
+    // enough to seed: a small pure-Python install with no native toolchain and no model
+    // download. `unstructured` / `docling` / `mineru` stay default-OFF (see the note
+    // below) — a user who wants OCR or layout-aware PDF extraction enables one from the
+    // Store, and the `"default": true` flag then keeps markitdown bound unless the user
+    // explicitly rebinds via `/api/documents/backends`.
+    //
+    // CONSEQUENCE, deliberate (same shape as `learning` below): default-on ⇒
+    // `is_uninstall_protected`, so the default parser can be DISABLED but never
+    // uninstalled, and a user who had uninstalled it gets it back once on the next
+    // boot. That is the intended posture — the capability should always have a
+    // provider record to bind or rebind to.
+    //
+    // Its sidecar is `lazy: true`, so this seed only REGISTERS the sidecar (claims the
+    // port, `server::mod`'s register-only branch); the venv/pip provisioning runs on
+    // the first parse, not at boot. A fresh install therefore boots clean even before
+    // the sidecar's release tarball exists — the failure, if any, surfaces as a 503
+    // `provider_warming` on the first parse, never as a broken startup.
+    MARKITDOWN_PLUGIN_ID,
+    // NOTE (default-off apps): whiteboard / canvas / finetune / unstructured /
+    // docling / mineru / meetings / quests / approvals / healing / monitors /
+    // workflows / activity / timeline / skill-editor are intentionally NOT default-on —
+    // they stay installable + enable-able from the Store (still in CORE_PLUGINS), but a
+    // fresh install ships them OFF so the sidebar/App surface isn't pre-loaded with
+    // every feature.
     // Spaces stays default-on (it is a shared dependency, not a leaf feature).
     SPACES_PLUGIN_ID,
     // The five leaf-feature sidecar Apps (each serves `/api/<feature>/*` out-of-process
@@ -689,8 +779,7 @@ pub fn is_default_on(manifest_id: &str) -> bool {
 /// so a disk manifest can never take a compiled-in id. Computed once and cached —
 /// the parse walks every embedded fixture.
 pub fn is_compiled_in_manifest(manifest_id: &str) -> bool {
-    static IDS: std::sync::OnceLock<std::collections::HashSet<String>> =
-        std::sync::OnceLock::new();
+    static IDS: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
     IDS.get_or_init(|| {
         crate::plugin_manifest::PluginManifestLoader::load_builtins()
             .into_iter()
@@ -868,7 +957,11 @@ mod tests {
         // Spider is Core-tier + default-on (record seeded enabled so its
         // declarative tool works out of the box) but is NOT a system plugin — it
         // has no sidecar lifecycle.
-        assert_eq!(tier_for("spider"), PluginTier::Core, "spider must be Core-tier");
+        assert_eq!(
+            tier_for("spider"),
+            PluginTier::Core,
+            "spider must be Core-tier"
+        );
         assert!(is_default_on("spider"), "spider must be default-on");
         assert!(!is_builtin("spider"), "spider is not a system plugin");
     }
@@ -1325,6 +1418,179 @@ mod tests {
                  BUILTIN_MANIFESTS)"
             );
         }
+    }
+
+    /// `scrapling` is the first Core-tier provider that is BOTH `mcp_servers`-backed
+    /// and opt-in, and that combination is only correct because of a non-obvious
+    /// constraint: `sidecar::mcp::may_register_mcp_servers` auto-allows a manifest's
+    /// declared MCP servers for Core-tier ONLY. Demoting it to Community would need
+    /// the approved `mcp:server` grant, which is off the Gateway's default allowlist
+    /// and in a reserved namespace — so a Community-tier scrapling registers nothing
+    /// and is dead on arrival, with no error anywhere to say so.
+    ///
+    /// It must also stay OUT of `CORE_DEFAULT_ON`: the MCP server is a BYO
+    /// `pip install "scrapling[ai]"`, so seeding it enabled would put a permanently
+    /// unavailable tool on every fresh install.
+    #[test]
+    fn scrapling_is_core_tier_and_opt_in_with_a_loadable_mcp_manifest() {
+        assert_eq!(
+            tier_for("scrapling"),
+            crate::plugin_manifest::PluginTier::Core,
+            "scrapling must be Core-tier or its manifest-declared MCP server is never \
+             registered and it owns no tools at all"
+        );
+        assert!(
+            !is_default_on("scrapling"),
+            "scrapling must stay opt-in: its MCP server is a BYO pip install"
+        );
+
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let manifest = manifests
+            .iter()
+            .find(|m| m.id == "scrapling")
+            .expect("scrapling fixture did not load");
+
+        // The tools come from the MCP server, so empty `runnables` is correct here —
+        // re-adding them would double-list every tool as an `app__<slug>` alias.
+        assert!(manifest.runnables.is_empty());
+        assert!(
+            manifest.mcp_servers.contains_key("scrapling"),
+            "the MCP server key IS the tool-id prefix: `tool_id(server, tool)` builds \
+             `scrapling__get`, which is exactly what the capability binding names"
+        );
+
+        // Exactly one capability, and deliberately NOT `web.crawl`: only Scrapling's
+        // Python `Spider` class follows links and MCP does not expose it. A partial
+        // entry would join resolution for web.crawl and could win the pick away from
+        // `spider`, silently killing a layer that works.
+        let capabilities: Vec<&str> = manifest
+            .provides
+            .iter()
+            .map(|p| p.capability.as_str())
+            .collect();
+        assert_eq!(capabilities, vec!["web.extract"]);
+
+        let entry = &manifest.provides[0];
+        // Selectability needs unanimity across a capability's providers, and `spider`
+        // owns the `default` for web.extract — note `scrapling` sorts BEFORE `spider`,
+        // so if that default were ever dropped the lexicographic fallback would elect
+        // this provider instead.
+        assert!(entry.selectable);
+        assert!(!entry.default_provider);
+
+        let binding = entry
+            .tools
+            .get("web__extract")
+            .expect("no web__extract binding");
+        assert_eq!(binding.tool, "scrapling__get");
+        // An adapter, not a `response` map: `structuredContent.content` is an ARRAY of
+        // chunks and the canonical `content` is a string, which the declarative mapper
+        // cannot join. Running both would apply the mapping twice, so they are
+        // mutually exclusive by construction.
+        assert!(binding.adapter.is_some());
+        assert!(binding.response.is_none());
+        // The adapter path hard-errors without this grant.
+        assert!(
+            manifest
+                .permission_grants
+                .iter()
+                .any(|g| g == crate::tool_exec::GRANT_TOOL_EXECUTE),
+            "an adapter-mapped provider must hold tool:execute or every web__extract \
+             call through it fails"
+        );
+    }
+
+    /// The `document.parse` capability has FOUR providers, and the whole
+    /// "markitdown is the default parser" claim rests on two independent facts that
+    /// live in different files and are easy to break apart:
+    ///
+    /// 1. exactly one provider carries `"default": true` — and it is `markitdown`,
+    ///    not whichever id happens to sort first. `plugins::binding` resolves a
+    ///    selectable capability as user override > sole provider > declared default >
+    ///    **lexicographically-lowest provider id**, so zero defaults AND two defaults
+    ///    both silently elect `com.ryu.docling`. Nothing errors either way.
+    /// 2. `markitdown` is in [`CORE_DEFAULT_ON`] — the flag only breaks ties among
+    ///    ALREADY-ENABLED providers, it never installs anything, so without the seed
+    ///    the capability has zero providers on a fresh install.
+    ///
+    /// Asserted against the LOADED manifests (not the raw JSON) so it also covers the
+    /// serde mapping of the `default` key onto `ProvidesEntry::default_provider`.
+    /// `selectable` is checked on all four because it is a per-provider **veto**: one
+    /// provider omitting it makes `document.parse` non-swappable for everyone.
+    #[test]
+    fn exactly_one_document_parse_provider_is_default_and_it_is_markitdown() {
+        const CAP: &str = "document.parse";
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+
+        let mut providers: Vec<(&str, bool, bool)> = Vec::new();
+        for m in &manifests {
+            for p in &m.provides {
+                if p.capability == CAP {
+                    providers.push((m.id.as_str(), p.default_provider, p.selectable));
+                }
+            }
+        }
+        providers.sort_unstable();
+
+        let ids: Vec<&str> = providers.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                DOCLING_PLUGIN_ID,
+                MARKITDOWN_PLUGIN_ID,
+                MINERU_PLUGIN_ID,
+                UNSTRUCTURED_PLUGIN_ID,
+            ],
+            "all four parsing backends must be registered in BUILTIN_MANIFESTS"
+        );
+
+        let defaults: Vec<&str> = providers
+            .iter()
+            .filter(|(_, is_default, _)| *is_default)
+            .map(|(id, _, _)| *id)
+            .collect();
+        assert_eq!(
+            defaults,
+            vec![MARKITDOWN_PLUGIN_ID],
+            "EXACTLY ONE `document.parse` provider may declare `\"default\": true`, and it \
+             must be markitdown. Zero defaults and two defaults both silently elect \
+             '{DOCLING_PLUGIN_ID}' (lexicographically lowest) instead — a second \
+             `\"default\": true` does not make that provider win, it re-runs the tiebreak."
+        );
+
+        for (id, _, selectable) in &providers {
+            assert!(
+                *selectable,
+                "'{id}' must declare `selectable` — every provider of a capability has to \
+                 agree, so one omission makes `document.parse` non-swappable for everyone"
+            );
+        }
+
+        assert!(
+            is_default_on(MARKITDOWN_PLUGIN_ID),
+            "markitdown must be default-ON: `\"default\": true` only breaks ties among \
+             ENABLED providers, so without the seed `document.parse` has zero providers on \
+             a fresh install and document_parse falls back to its text-only builtin floor"
+        );
+        for id in [UNSTRUCTURED_PLUGIN_ID, DOCLING_PLUGIN_ID, MINERU_PLUGIN_ID] {
+            assert!(
+                CORE_PLUGINS.contains(&id),
+                "'{id}' must be Core-tier so it is governed and enable-able from the Store"
+            );
+            assert!(
+                !is_default_on(id),
+                "'{id}' is a heavy opt-in backend (GB-scale installs / model downloads) and \
+                 must stay default-OFF"
+            );
+            assert!(
+                !is_load_bearing(id),
+                "no parsing backend is load-bearing — the capability is swappable"
+            );
+        }
+        assert!(
+            !is_load_bearing(MARKITDOWN_PLUGIN_ID),
+            "the default parser is still swappable: default-on, never load-bearing"
+        );
     }
 
     #[test]

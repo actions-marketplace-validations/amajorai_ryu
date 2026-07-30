@@ -79,6 +79,38 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   tool, backed by a BYO `spider` CLI reached through the command-tool
 ///   allowlist. The native `sidecar/mcp/spider.rs` provider was deleted, so the
 ///   fixture is the SOLE owner of the tool (see the exception note below).
+/// - `scrapling.manifest.json` — Scrapling adaptive page extraction (BYO local
+///   install, no API key). The THIRD `web.extract` provider, `selectable` and
+///   claiming no `default` (`spider` keeps it). Three things about it are
+///   deliberate and each is silent if reverted:
+///   1. It is **MCP-backed with empty `runnables`** — its tools come from
+///      `scrapling mcp`, so the verb binds `web__extract` to `scrapling__get`
+///      exactly as `agentbrowser` binds `browser__*`. Capability providers are not
+///      required to be manifest runnables; nothing in `resolve_verbs` reads them.
+///   2. It is **Core-tier but NOT in `CORE_DEFAULT_ON`**. Core-tier is a
+///      requirement, not a promotion: `may_register_mcp_servers` auto-allows
+///      manifest `mcp_servers` only for compiled-in fixtures, while a Community-tier
+///      plugin needs the approved `mcp:server` grant — off the Gateway's default
+///      allowlist and in a reserved namespace, so operator-only. A Community-tier
+///      Scrapling would register nothing and be dead on arrival. It stays opt-in
+///      because it needs a `pip install "scrapling[ai]"` the user must perform,
+///      the same reason the BYOK search providers are opt-in.
+///   3. It maps the verb through an **adapter, not a `response` map**, for two
+///      shape facts verified against a live server rather than the docs: an MCP
+///      `tools/call` answer is the transport envelope (`{content, structuredContent,
+///      isError}`), and `ResponseModel.content` is an ARRAY of chunks with empty
+///      entries. The canonical `content` is a string and `map_item` copies a located
+///      value verbatim — it has no join — so the flattening lives in the one provider
+///      whose quirk it is, exactly as `firecrawl` collapses its `metadata.title`
+///      array. The adapter also passes an `isError`/untyped answer through under
+///      `raw`, which is what keeps a broken install visible: Scrapling declares
+///      `mcp>=1.27.0` unbounded and `mcp` 2.x renamed `mcp.server.fastmcp`, so
+///      `scrapling mcp` crashing on import is reachable, not hypothetical.
+///   It deliberately does NOT provide `web.crawl`: only Scrapling's Python `Spider`
+///   class follows links and MCP does not expose it (the `bulk_*` tools fetch a URL
+///   list you already have). Same reasoning as `firecrawl`'s absent crawl entry — a
+///   partial `tools` map would join resolution and could win the pick away from
+///   `spider`, silently killing a layer that works. Absent, not empty.
 /// - `agentbrowser.manifest.json` — Agent Browser web-browsing tool (system plugin, npx MCP-backed).
 /// - `exa.manifest.json` — Exa neural search tool plugin (U040, BYOK). Provides the
 ///   selectable `web.search` capability and is its declared default.
@@ -116,7 +148,10 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 /// `~/.ryu/bin/ghost mcp` binary; `agentbrowser` → `npx -y agentbrowser`),
 /// registered into the MCP registry on activation by
 /// `sidecar/mcp/register_manifest_mcp_servers` (they moved off the former
-/// hardcoded `sidecar/mcp/mod.rs::builtin_servers`). The plugin record is the
+/// hardcoded `sidecar/mcp/mod.rs::builtin_servers`). `scrapling` shares that
+/// empty-runnables shape for the same reason — its tools come from `scrapling mcp` —
+/// but it is NOT a system plugin: there is no sidecar and no Core-managed process,
+/// only a BYO binary Core launches on demand. The plugin record is the
 /// install/enable/tier **governance shell** around that provider; declaring the
 /// tools again here would double-list every one as an `app__<slug>` alias
 /// (`fire_activation_event` → the Tool handler in `server/mod.rs`). Do not
@@ -273,6 +308,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   report "nothing happened" in the one place a caller must be told it failed.
 const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("fixtures/spider.manifest.json"),
+    include_str!("fixtures/scrapling.manifest.json"),
     include_str!("fixtures/agentbrowser.manifest.json"),
     include_str!("fixtures/exa.manifest.json"),
     include_str!("fixtures/tavily.manifest.json"),
@@ -561,6 +597,43 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("fixtures/spidercloud.manifest.json"),
     include_str!("fixtures/honcho.manifest.json"),
     include_str!("fixtures/bytebot.manifest.json"),
+    // The four `document.parse` providers. Each is an apps-store satellite
+    // (`apps-store/{markitdown,unstructured,docling,mineru}/`) wrapping a different
+    // extraction library in its own Python sidecar, registered exactly like
+    // `finetune`: Core-tier so each is governed and disable-able, and each with an
+    // EMPTY `permission_grants` — a Core-tier built-in that asked for
+    // `sidecar:process` would be DENIED at enable and the enable itself would fail
+    // (`plugins::lifecycle`). The contract every provider copies — provides block,
+    // ports (8093-8096, dev-shifted to 9093-9096), wire format — is
+    // `docs/document-parsing.md` §3-§4.
+    //
+    // **Exactly one carries `"default": true`, and it is `markitdown`** (see its
+    // `provides` block). That is not decoration: with several providers ENABLED and
+    // no default, `plugins::binding` falls through to the lexicographically-lowest
+    // plugin id, which elects `com.ryu.docling` — an alphabetical accident, not a
+    // product decision. Adding a second `"default": true` does not make that provider
+    // win; it re-runs the same tiebreak and lands on docling again. So: never add a
+    // second default, and never drop markitdown's.
+    //
+    // The flag is dormant on a stock install. Only `markitdown` is in
+    // `plugins::builtins::CORE_DEFAULT_ON`, so it is the sole ENABLED provider and
+    // binding resolves it by "single provider" without ever consulting the flag; the
+    // default only decides anything once a user enables a second backend from the
+    // Store. The other three are deliberately default-OFF because they are heavy —
+    // `unstructured[all-docs]` is a 1-2 GB pip install whose native helpers
+    // (poppler/tesseract/libreoffice/pandoc) pip cannot supply, and `docling`/`mineru`
+    // download ML models on first parse. markitdown is the one small pure-Python
+    // install with no native toolchain, which is why it is the shipped default.
+    //
+    // The consumer is `crate::document_parse` — the single extraction facade behind
+    // `/api/documents/parse`. It names no plugin id: the provider is resolved through
+    // `plugins::binding` exactly like `web.search`, so a fifth backend stays pure
+    // manifest data. Do not add a second call site; route new surfaces through the
+    // facade.
+    include_str!("fixtures/unstructured.manifest.json"),
+    include_str!("fixtures/markitdown.manifest.json"),
+    include_str!("fixtures/docling.manifest.json"),
+    include_str!("fixtures/mineru.manifest.json"),
 ];
 
 /// The Canvas app's plugin id (its Space documents are `kind = app:<this>`). Shared
@@ -1052,11 +1125,12 @@ mod tests {
             ("research", "research.manifest.json"),
             ("teams", "teams.manifest.json"),
             ("voice", "voice.manifest.json"),
+            ("unstructured", "unstructured.manifest.json"),
+            ("markitdown", "markitdown.manifest.json"),
+            ("docling", "docling.manifest.json"),
+            ("mineru", "mineru.manifest.json"),
         ] {
-            let pkg_path = repo_root
-                .join("apps-store")
-                .join(app)
-                .join("manifest.json");
+            let pkg_path = repo_root.join("apps-store").join(app).join("manifest.json");
             let Ok(pkg_json) = std::fs::read_to_string(&pkg_path) else {
                 // OSS mirror (no `packages/`) — nothing to compare against.
                 continue;
@@ -1087,8 +1161,8 @@ mod tests {
         // "mirror tree", and this guard passes having compared nothing.
         if repo_root.join("apps-store").is_dir() {
             assert_eq!(
-                checked, 26,
-                "apps-store/ is present, so all twenty-six manifests must have been \
+                checked, 30,
+                "apps-store/ is present, so all thirty manifests must have been \
                  compared; found {checked}. A lower count means the table's file names \
                  no longer match what is on disk — this guard was silently checking nothing."
             );
@@ -1761,7 +1835,9 @@ mod tests {
         std::env::remove_var("RYU_PLUGINS_DIR");
 
         assert!(
-            manifests.iter().any(|m| m.id == "com.test.canonical-plugin"),
+            manifests
+                .iter()
+                .any(|m| m.id == "com.test.canonical-plugin"),
             "canonical manifest.json plugin should be loaded"
         );
         assert!(

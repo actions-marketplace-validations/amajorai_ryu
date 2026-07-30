@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "ghost-permissions"
-version = "0.0.13"
+version = "0.0.14"
 
 [[package]]
 name = "gio"

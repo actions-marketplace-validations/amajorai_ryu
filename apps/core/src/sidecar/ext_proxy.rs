@@ -1021,7 +1021,11 @@ async fn dispatch_kernel_capability(
     /// than letting a malformed body surface as a bare rejection.
     fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
         // An empty body is a valid `{}` for the arg-less verbs.
-        let raw = if body.is_empty() { b"{}".as_slice() } else { body };
+        let raw = if body.is_empty() {
+            b"{}".as_slice()
+        } else {
+            body
+        };
         serde_json::from_slice::<T>(raw).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
@@ -1421,7 +1425,7 @@ mod tests {
         assert!(has_dot_segment("/webhook/..")); // trailing
         assert!(has_dot_segment("/a/./b"));
         assert!(has_dot_segment("..")); // no leading slash
-        // Legitimate paths (including a dot INSIDE a segment) are untouched.
+                                        // Legitimate paths (including a dot INSIDE a segment) are untouched.
         assert!(!has_dot_segment("/webhook/abc"));
         assert!(!has_dot_segment("/files/a.b.c/d"));
         assert!(!has_dot_segment("/inboxes/:id"));
@@ -1847,7 +1851,10 @@ mod tests {
         assert!(dst.get("origin").is_none(), "Origin must be stripped");
         assert!(dst.get("referer").is_none(), "Referer must be stripped");
         assert!(dst.get("host").is_none(), "Host must be stripped");
-        assert!(dst.get("connection").is_none(), "Connection must be stripped");
+        assert!(
+            dst.get("connection").is_none(),
+            "Connection must be stripped"
+        );
     }
 
     #[test]
@@ -1877,7 +1884,10 @@ mod tests {
     fn every_loopback_driver_resolves_its_port_from_the_builtin_manifest() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let resolved = [
-            ("dashboards", crate::dashboards_client::sidecar_port(&manifests)),
+            (
+                "dashboards",
+                crate::dashboards_client::sidecar_port(&manifests),
+            ),
             ("finetune", crate::finetune_client::sidecar_port(&manifests)),
             ("healing", crate::healing_client::sidecar_port(&manifests)),
             ("meetings", crate::meetings_client::sidecar_port(&manifests)),
@@ -1998,7 +2008,11 @@ mod tests {
         let over_approved: HashSet<String> = ["ghost:record".to_owned(), "spaces:docs".to_owned()]
             .into_iter()
             .collect();
-        assert!(!host_api_grant_usable(&manifest, &over_approved, "spaces:docs"));
+        assert!(!host_api_grant_usable(
+            &manifest,
+            &over_approved,
+            "spaces:docs"
+        ));
 
         // Declared but NOT approved (revoked, or never validated) ⇒ denied.
         assert!(!host_api_grant_usable(

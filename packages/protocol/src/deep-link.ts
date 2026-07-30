@@ -13,21 +13,30 @@
 //     ryu://chat/<conversation-id>            open an existing conversation
 //
 //   ACTIONS (confirm-gated — they install/connect, i.e. have a side effect):
-//     ryu://models/<source>/<id…>             install/switch a model
-//     ryu://skills/<source>/<id…>             install a skill
+//     ryu://models/<source>/<id…>?node=…      install/switch a model
+//     ryu://skills/<source>/<id…>?node=…      install a skill
 //     ryu://nodes/connect?url=…&token=…&name=…  connect to a Core node
 //
 // For models/skills, `<source>` names the catalog (huggingface, skills.sh, …) and
 // everything after it is the verbatim catalog id (joined by "/", so a Hugging Face
 // `author/repo` — INCLUDING a trailing `-GGUF` — survives intact).
 //
+// The optional `node` on an install link names WHICH Core node to install onto,
+// by its base URL. The URL is the only node identity that means the same thing on
+// every surface: web sees a `GatewayCredential.reachableUrl`, desktop stores
+// `Node.url`, the CLI stores `nodes.json[].url` — while ids and names live in
+// three unrelated namespaces. Omitting `node` means "whichever node the app is
+// already on", which is what a signed-out visitor's link always says.
+//
 // SECURITY: a deep link is untrusted input (a malicious page can fire one). This
 // module only PARSES; it never installs, connects, or sends a message. Actions go
 // through each surface's confirm dialog (the security boundary) and installs are
 // pinned to the user's configured catalog source — `<source>` is advisory, not an
-// instruction to switch registries. Navigation has no side effect; a `chat`
-// prompt only PRE-SEEDS the composer — it is NEVER auto-sent, since the prompt is
-// attacker-controllable.
+// instruction to switch registries. `node` is advisory in exactly the same way:
+// a surface MUST resolve it against nodes the user ALREADY has and fall back to
+// the active node when it matches none — never auto-connect to a URL a link
+// supplied. Navigation has no side effect; a `chat` prompt only PRE-SEEDS the
+// composer — it is NEVER auto-sent, since the prompt is attacker-controllable.
 //
 // The parser is intentionally written with plain string operations (no `URL`,
 // `URLSearchParams`, or `expo-linking`) so it behaves IDENTICALLY across Node,
@@ -35,8 +44,8 @@
 // custom-scheme `URL` support historically differs.
 
 export type DeepLinkIntent =
-	| { kind: "model"; source: string; id: string }
-	| { kind: "skill"; source: string; id: string }
+	| { kind: "model"; source: string; id: string; node: string | null }
+	| { kind: "skill"; source: string; id: string; node: string | null }
 	| { kind: "node"; name: string; url: string; token: string | null }
 	| { kind: "page"; page: string }
 	| {
@@ -53,8 +62,8 @@ export type DeepLinkIntent =
  * always returns the strict {@link DeepLinkIntent} with every field present.
  */
 export type DeepLinkBuildInput =
-	| { kind: "model"; source: string; id: string }
-	| { kind: "skill"; source: string; id: string }
+	| { kind: "model"; source: string; id: string; node?: string | null }
+	| { kind: "skill"; source: string; id: string; node?: string | null }
 	| { kind: "node"; name: string; url: string; token?: string | null }
 	| { kind: "page"; page: string }
 	| {
@@ -100,6 +109,7 @@ export type DeepLinkPage = (typeof DEEP_LINK_PAGES)[number];
 const SCHEME_PREFIX = /^ryu:\/\//i;
 const HTTP_PREFIX = /^https?:\/\//;
 const NON_NAME_CHARS = /[^a-zA-Z0-9-]/g;
+const TRAILING_SLASHES = /\/+$/;
 const EDGE_HYPHENS = /^-+|-+$/g;
 const PLUS = /\+/g;
 
@@ -177,10 +187,25 @@ function parseChat(
 	};
 }
 
+/**
+ * Normalize an install link's `node` hint: a node base URL, or null when absent
+ * or not an http(s) URL. Rejecting every other scheme here means a surface can
+ * never be handed a `file:`/`javascript:` "node" to resolve. The trailing slash
+ * is dropped so the value compares equal to a stored node url.
+ */
+function parseNodeHint(params: Map<string, string>): string | null {
+	const raw = params.get("node")?.trim();
+	if (!(raw && HTTP_PREFIX.test(raw))) {
+		return null;
+	}
+	return raw.replace(TRAILING_SLASHES, "");
+}
+
 /** `ryu://models/<source>/<id…>` or `ryu://skills/<source>/<id…>`. */
 function parseCatalog(
 	category: "models" | "skills",
-	pathSegments: string[]
+	pathSegments: string[],
+	params: Map<string, string>
 ): DeepLinkIntent | null {
 	if (pathSegments.length < 2) {
 		return null;
@@ -190,9 +215,10 @@ function parseCatalog(
 	if (!(source && id)) {
 		return null;
 	}
+	const node = parseNodeHint(params);
 	return category === "models"
-		? { kind: "model", source, id }
-		: { kind: "skill", source, id };
+		? { kind: "model", source, id, node }
+		: { kind: "skill", source, id, node };
 }
 
 /** Split a trimmed `ryu://` link into its category (host), path, and query. */
@@ -247,7 +273,7 @@ export function parseRyuDeepLink(raw: string): DeepLinkIntent | null {
 		return parseChat(pathSegments, params);
 	}
 	if (category === "models" || category === "skills") {
-		return parseCatalog(category, pathSegments);
+		return parseCatalog(category, pathSegments, params);
 	}
 	return null;
 }
@@ -296,5 +322,11 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 		.split("/")
 		.map((s) => encodeURIComponent(s))
 		.join("/");
-	return `ryu://${category}/${encodeURIComponent(intent.source)}/${idPath}`;
+	const base = `ryu://${category}/${encodeURIComponent(intent.source)}/${idPath}`;
+	// Only an http(s) node url is emitted, matching what the parser will accept —
+	// a builder that emitted more than the parser reads would drift immediately.
+	const node = intent.node?.trim();
+	return node && HTTP_PREFIX.test(node)
+		? `${base}?node=${encodeQueryValue(node.replace(TRAILING_SLASHES, ""))}`
+		: base;
 }

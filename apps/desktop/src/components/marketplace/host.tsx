@@ -9,16 +9,62 @@
 import {
 	type MarketplaceHost,
 	MarketplaceHostProvider,
+	type MarketplaceReviewsService,
 } from "@ryu/marketplace/host";
 import type { ReactNode } from "react";
+import { getActiveUserId } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useMyLicenses } from "@/src/hooks/useMyLicenses.ts";
 import { useSellerReports } from "@/src/hooks/useSellerReports.ts";
 import { useSellerStatus } from "@/src/hooks/useSellerStatus.ts";
-import { startPurchase } from "@/src/lib/api/marketplace.ts";
+import {
+	deleteReview,
+	fetchReviews,
+	hasMarketplaceAuth,
+	postReview,
+	startPurchase,
+} from "@/src/lib/api/marketplace.ts";
+
+/** Ratings + reviews, backed by the control plane (:3000) with the Better-Auth
+ *  bearer. The wire has no "is this mine" flag — it returns each review's
+ *  `userId` — so ownership is derived here against the active account, which is
+ *  what gates the edit/delete affordances. */
+const desktopReviews: MarketplaceReviewsService = {
+	canWrite: hasMarketplaceAuth,
+	list: async ({ kind, id, cursor, limit }) => {
+		const page = await fetchReviews(kind, id, { cursor, limit });
+		const me = getActiveUserId();
+		return {
+			nextCursor: page.nextCursor,
+			ratingAverage: page.ratingAverage,
+			ratingCount: page.ratingCount,
+			reviews: page.reviews.map((r) => ({
+				body: r.body,
+				createdAt: r.createdAt,
+				id: r.id,
+				// Only claim ownership on a real match: a null `me` (signed out) must
+				// never mark a review editable.
+				mine: me !== null && r.userId === me,
+				rating: r.rating,
+				title: r.title,
+				userName: r.userName,
+				verifiedPurchase: r.verifiedPurchase,
+			})),
+		};
+	},
+	post: async (input) => {
+		const result = await postReview(input);
+		return {
+			ratingAverage: result.ratingAverage,
+			ratingCount: result.ratingCount,
+		};
+	},
+	remove: ({ kind, id }) => deleteReview(kind, id),
+};
 
 const desktopMarketplaceHost: MarketplaceHost = {
 	openExternal,
+	reviews: desktopReviews,
 	startPurchase,
 	useLicenses: useMyLicenses,
 	useSellerStatus,

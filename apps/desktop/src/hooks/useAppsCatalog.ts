@@ -8,9 +8,12 @@
 // state and the grants to confirm at enable time. Mutations (install / enable / disable /
 // install-from-URL) revalidate both queries so the buttons update in place.
 //
-// Catalog browsing is source-aware: Ryu Marketplace (default) shows the merged
-// built-in + marketplace + legacy list; federated sources (integrations.sh) use
-// server-side search + pagination via `/api/plugins/catalog/browse`.
+// Catalog browsing is source-aware: "Ryu Marketplace" (default) is one UNIFIED
+// view Core merges from the open git catalog, the hosted commerce server's paid
+// listings, the loaded built-ins and the legacy registry; federated sources
+// (integrations.sh) use server-side search + pagination. Both go through
+// `/api/plugins/catalog/browse`, and the source rides on the REQUEST (`?source=`)
+// rather than a node-global preference — see `sourceOverride` below.
 
 import {
 	keepPreviousData,
@@ -35,11 +38,9 @@ import {
 	installApp,
 	installAppFromUrl,
 	installPluginFromCatalog,
-	PLUGIN_MARKETPLACE_SOURCE_ID,
 	type PluginCatalogDetail,
 	type PluginCatalogSource,
 	searchPluginCatalog,
-	selectPluginSource,
 } from "@/src/lib/api/plugins.ts";
 import { useDebouncedValue } from "./use-debounced-value.ts";
 import { useActiveNode } from "./useActiveNode.ts";
@@ -101,8 +102,26 @@ export interface UseAppsCatalogResult {
 const SEARCH_DEBOUNCE_MS = 300;
 const PAGE_LIMIT = 40;
 
-/** Stub catalog source — no real feed behind it yet. */
-const HIDDEN_PLUGIN_SOURCES = new Set(["ryu-apps"]);
+/** Sources the picker must not offer.
+ *
+ *  - `ryu-apps` — a stub with no real feed behind it.
+ *  - `ryu-marketplace` — the HOSTED commerce backend. It is not a rival catalog to
+ *    browse: Core folds its paid listings into the `ryu-catalog` view, so the two
+ *    render as ONE "Ryu Marketplace". Offering it as a second row was the confusing
+ *    part — picking it showed only the paid subset and hid every free listing, which
+ *    read as the store losing most of its contents. It stays registered and
+ *    addressable in Core (it owns checkout, entitlement and signed downloads); it
+ *    just is not a destination.
+ *  - `github-topic` — the Community feed, which has its own store section. Picking
+ *    it from an Apps/Plugins picker would render an EMPTY page: those variants
+ *    filter unreviewed listings out by design, so every row the source returned
+ *    would be dropped. Community stays reachable the one way that works — its own
+ *    tab, which addresses the feed through `?origin=community`. */
+const HIDDEN_PLUGIN_SOURCES = new Set([
+	"ryu-apps",
+	"ryu-marketplace",
+	"github-topic",
+]);
 
 export function useAppsCatalog(
 	initialQuery = "",
@@ -130,7 +149,6 @@ export function useAppsCatalog(
 		queryKey: ["plugins", "sources", url],
 		queryFn: () => fetchPluginSources({ url, token }),
 	});
-	const activeSource = sourcesQuery.data?.active ?? "";
 	const sources = useMemo(
 		() =>
 			(sourcesQuery.data?.sources ?? []).filter(
@@ -139,24 +157,25 @@ export function useAppsCatalog(
 		[sourcesQuery.data?.sources]
 	);
 
-	const selectSourceMutation = useMutation({
-		mutationFn: (id: string) => selectPluginSource({ url, token }, id),
-		onSuccess: () => {
-			Promise.resolve(
-				qc.invalidateQueries({ queryKey: ["plugins", "sources", url] })
-			).catch(() => undefined);
-			Promise.resolve(
-				qc.invalidateQueries({ queryKey: ["plugins", "catalog", url] })
-			).catch(() => undefined);
-			Promise.resolve(
-				qc.invalidateQueries({ queryKey: ["plugins", "detail", url] })
-			).catch(() => undefined);
-		},
-	});
-	const selectSource = useCallback(
-		(id: string) => selectSourceMutation.mutate(id),
-		[selectSourceMutation]
-	);
+	// The catalog source is PER HOOK INSTANCE, not per node.
+	//
+	// It used to be a node-global preference written through
+	// `/api/catalog/sources/select`, which made source selection leak: picking
+	// integrations.sh in one store tab silently repointed every other open store tab
+	// — and every other client on the node — at a catalog it never asked for. Worse,
+	// the tabs do not all offer the same sources (Community is its own fetch), so the
+	// bleed could leave a tab on a source that cannot answer for it at all.
+	//
+	// So selection is local state, passed per request as `?source=`. The server
+	// preference is still read, but only as the INITIAL value — an explicit local
+	// pick wins from then on, and nothing is written back.
+	const [sourceOverride, setSourceOverride] = useState<string | null>(null);
+	const activeSource = sourceOverride ?? sourcesQuery.data?.active ?? "";
+	const selectSource = useCallback((id: string) => {
+		if (id) {
+			setSourceOverride(id);
+		}
+	}, []);
 
 	const addMarketplaceMutation = useMutation({
 		mutationFn: (params: AddMarketplaceParams) =>
@@ -188,7 +207,16 @@ export function useAppsCatalog(
 		queryFn: ({ pageParam }) =>
 			searchPluginCatalog(
 				{ url, token },
-				{ query: debouncedQuery, limit: PAGE_LIMIT, cursor: pageParam, origin }
+				{
+					query: debouncedQuery,
+					limit: PAGE_LIMIT,
+					cursor: pageParam,
+					origin,
+					// Community addresses its feed through `origin`; every other view
+					// names its source explicitly so no two tabs can fight over one
+					// server-side preference.
+					source: origin ? undefined : activeSource,
+				}
 			),
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (last) => last.nextCursor ?? undefined,
@@ -237,22 +265,22 @@ export function useAppsCatalog(
 		[items, selectedId]
 	);
 
-	const isDescriptorSource =
-		origin === "community" ||
-		(activeSource !== "" && activeSource !== PLUGIN_MARKETPLACE_SOURCE_ID);
-
-	// A built-in or installed plugin is answered by Core from its OWN loaded
-	// manifest (`local_plugin_detail`) — no catalog round-trip and no dependence
-	// on whether the active source carries it. That detail is what the README /
-	// API-reference / dependency / health tabs read, so fetch it for those too,
-	// not only for descriptor sources. Deliberately NOT broadened further: for a
-	// not-yet-installed item on the default marketplace source there is nothing to
-	// resolve locally, and asking the source would surface an error where the
-	// panel previously showed none.
-	const resolvesFromLocalManifest = Boolean(
-		selectedItem?.installed || selectedItem?.entry.built_in
-	);
-
+	// Detail is fetched for EVERY selected listing.
+	//
+	// It used to be gated on "descriptor source, or resolvable from a local
+	// manifest", which excluded the most common case in the store: a
+	// not-yet-installed listing on the first-party catalog. The detail payload is
+	// what the README / API / Versions / Dependencies / Health tabs read AND what
+	// the trust scorecard grades, so that gate is why Apps and Plugins rendered a
+	// bare Overview while Community — which always fetched — showed the full tab set
+	// and the health card. Same listings, different depth of page, for a reason no
+	// user could see.
+	//
+	// The gate was there because the marketplace source could not answer for an
+	// arbitrary id. Core now resolves detail against the merged first-party view
+	// (git catalog, then the hosted server, then the local manifest), so the request
+	// is answerable; a source that genuinely has nothing degrades to `detailError`,
+	// which the panel already renders inline without losing the Overview.
 	const detailQuery = useQuery({
 		queryKey: [
 			"plugins",
@@ -263,9 +291,13 @@ export function useAppsCatalog(
 			origin ?? null,
 		],
 		queryFn: () =>
-			fetchPluginCatalogDetail({ url, token }, selectedId as string, origin),
-		enabled:
-			selectedId !== null && (isDescriptorSource || resolvesFromLocalManifest),
+			fetchPluginCatalogDetail(
+				{ url, token },
+				selectedId as string,
+				origin,
+				origin ? undefined : activeSource
+			),
+		enabled: selectedId !== null,
 	});
 
 	const revalidate = useCallback(
@@ -382,7 +414,8 @@ export function useAppsCatalog(
 		sources,
 		activeSource,
 		selectSource,
-		selectingSource: selectSourceMutation.isPending,
+		// Selection is local state now, so it never has a request in flight.
+		selectingSource: false,
 		addMarketplace,
 		addingMarketplace: addMarketplaceMutation.isPending,
 	};

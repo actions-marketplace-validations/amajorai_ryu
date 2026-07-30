@@ -40,11 +40,10 @@ const FINETUNE_SIDECAR: &str = "ryu-finetune";
 /// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
 /// build-time invariant rather than a runtime fallback.
 pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, FINETUNE_PLUGIN_ID, FINETUNE_SIDECAR)
-        .expect(
-            "built-in finetune.manifest.json must declare the ryu-finetune sidecar (see \
+    crate::sidecar::ext_proxy::sidecar_port(manifests, FINETUNE_PLUGIN_ID, FINETUNE_SIDECAR).expect(
+        "built-in finetune.manifest.json must declare the ryu-finetune sidecar (see \
              plugin_manifest::BUILTIN_MANIFESTS)",
-        )
+    )
 }
 
 /// Typed loopback client for the `ryu-finetune` sidecar. Cheap to clone (holds only

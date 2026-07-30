@@ -176,8 +176,22 @@ export interface CatalogEntry {
 	 *  so a discovery source must opt in explicitly. Drives both the Community
 	 *  store section and its trust notice — see `isCommunityEntry`. */
 	origin?: "community" | "first_party" | null;
+	/** Commerce disclosure for a PAID listing, as the hosted marketplace reports it.
+	 *  Absent/null = free. Present on cards in the unified first-party view, where
+	 *  free (git catalog) and paid (hosted) listings sit side by side — without it a
+	 *  paid item would be indistinguishable from a free one until checkout. Display
+	 *  only: entitlement is decided server-side at purchase/install. */
+	pricing?: {
+		amountMinor?: number;
+		currency?: string;
+		kind?: string;
+	} | null;
 	/** Which discovery source produced the listing (e.g. `"github-topic"`). */
 	provenance?: string | null;
+	/** Denormalized rating aggregate (0–5 mean + count) so a card and the detail
+	 *  header can show stars without loading the review list. Absent = unrated. */
+	rating_average?: number | null;
+	rating_count?: number | null;
 	/** The repository this listing was discovered from (community listings). */
 	repo_url?: string | null;
 	/** Plugin-to-plugin dependencies this app needs enabled first (the manifest's

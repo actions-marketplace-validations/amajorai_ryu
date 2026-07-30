@@ -250,7 +250,6 @@ impl PluginSecretStore {
         .ok()
         .flatten()
     }
-
 }
 
 fn default_db_path() -> PathBuf {

@@ -149,12 +149,12 @@ const RESET_PRESERVE: &[&str] = &["master.key", "memory.key"];
 /// Filenames inside `bin/` that must survive a node reset so the desktop can
 /// still resolve and launch Core/gateway without a full reinstall.
 const BIN_PRESERVE: &[&str] = &[
-	"ryu-core",
-	"ryu-core.exe",
-	"ryu-core.version",
-	"ryu-gateway",
-	"ryu-gateway.exe",
-	"ryu-gateway.version",
+    "ryu-core",
+    "ryu-core.exe",
+    "ryu-core.version",
+    "ryu-gateway",
+    "ryu-gateway.exe",
+    "ryu-gateway.version",
 ];
 
 /// Path of the reset marker inside the active data dir.

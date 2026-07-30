@@ -6672,10 +6672,8 @@ mod tests {
                 let text = std::str::from_utf8(f).expect("utf8");
                 assert!(text.starts_with("data: "), "each frame is an SSE data line");
                 assert!(text.ends_with("\n\n"), "each frame is terminated");
-                serde_json::from_str(
-                    text.trim_start_matches("data: ").trim_end_matches("\n\n"),
-                )
-                .expect("frame carries JSON")
+                serde_json::from_str(text.trim_start_matches("data: ").trim_end_matches("\n\n"))
+                    .expect("frame carries JSON")
             })
             .collect();
 
@@ -7585,7 +7583,8 @@ mod tests {
         let memory = MemoryStore::open_in_memory().unwrap();
 
         // First opted-in turn of a fresh conversation: nothing prior exists.
-        let before_first = assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT).await;
+        let before_first =
+            assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT).await;
         assert!(
             before_first.is_none(),
             "first turn has no cross-session memory"
@@ -7596,9 +7595,10 @@ mod tests {
             .unwrap();
 
         // Second turn: recall now surfaces turn one, but not the current turn.
-        let before_second = assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT)
-            .await
-            .expect("turn one should be recalled");
+        let before_second =
+            assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT)
+                .await
+                .expect("turn one should be recalled");
         assert!(before_second.contains("turn one"));
         assert!(!before_second.contains("turn two"));
         memory
@@ -7615,12 +7615,14 @@ mod tests {
             .await
             .unwrap();
         // Disabled: nothing recalled even though an entry exists.
-        let disabled = assemble_long_term_system_message(&memory, false, None, DEFAULT_LONG_TERM_LIMIT).await;
+        let disabled =
+            assemble_long_term_system_message(&memory, false, None, DEFAULT_LONG_TERM_LIMIT).await;
         assert!(disabled.is_none());
         // Enabled: the fact is surfaced.
-        let enabled = assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT)
-            .await
-            .expect("memory enabled");
+        let enabled =
+            assemble_long_term_system_message(&memory, true, None, DEFAULT_LONG_TERM_LIMIT)
+                .await
+                .expect("memory enabled");
         assert!(enabled.contains("a fact"));
     }
 
@@ -8008,10 +8010,23 @@ mod tests {
         // Re-emitting the same id (plan/thinking snapshots) refreshes `input`
         // without appending a second part.
         let mut acc = PartsAccumulator::default();
-        acc.tool_input("plan", "TodoWrite", &serde_json::json!({ "todos": [1] }), false);
-        acc.tool_input("plan", "TodoWrite", &serde_json::json!({ "todos": [1, 2] }), false);
+        acc.tool_input(
+            "plan",
+            "TodoWrite",
+            &serde_json::json!({ "todos": [1] }),
+            false,
+        );
+        acc.tool_input(
+            "plan",
+            "TodoWrite",
+            &serde_json::json!({ "todos": [1, 2] }),
+            false,
+        );
         assert_eq!(acc.parts.len(), 1);
-        assert_eq!(acc.parts[0]["input"], serde_json::json!({ "todos": [1, 2] }));
+        assert_eq!(
+            acc.parts[0]["input"],
+            serde_json::json!({ "todos": [1, 2] })
+        );
     }
 
     #[test]
@@ -8050,7 +8065,10 @@ mod tests {
         let round: Vec<Value> = serde_json::from_str(&json).unwrap();
         assert_eq!(round.len(), 2);
         assert_eq!(round[0]["text"], serde_json::json!("see image"));
-        assert_eq!(round[1]["url"], serde_json::json!("data:image/png;base64,AAAA"));
+        assert_eq!(
+            round[1]["url"],
+            serde_json::json!("data:image/png;base64,AAAA")
+        );
     }
 
     #[test]

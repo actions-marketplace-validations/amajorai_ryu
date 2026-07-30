@@ -6,7 +6,6 @@ import {
 	Link01Icon,
 	UserGroupIcon,
 	Wallet01Icon,
-	Wrench01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { StoreComingSoon, StoreSectionNav } from "@ryu/blocks/desktop/store";
@@ -35,7 +34,6 @@ import {
 	type StoreSearchRealm,
 	useStoreSearch,
 } from "@/src/hooks/useStoreSearch.ts";
-import ToolsPage from "@/src/pages/ToolsPage.tsx";
 
 type StoreSection =
 	| "home"
@@ -49,7 +47,6 @@ type StoreSection =
 	| "workflows"
 	| "engines"
 	| "community"
-	| "tools"
 	| "installed"
 	| "account";
 
@@ -126,9 +123,12 @@ const SECTIONS: {
 		group: "community",
 	},
 	// Manage — what you already have installed, and the nodes running it.
-	// Tools = the MCP servers registered on this node and the tools they expose
-	// (browse the catalog under "MCP"; manage + invoke the registered ones here).
-	{ value: "tools", label: "Tools", icon: Wrench01Icon, group: "manage" },
+	//
+	// Tools is deliberately NOT here: the MCP servers registered on this node and
+	// the tools they expose now live in the Library (`/tools`), because the Store is
+	// where you FIND things to add and that surface manages what is already
+	// installed. Browse the MCP catalog under "MCP" above.
+	//
 	// Cross-node health + per-node sidecar controls live in the node selector
 	// (shell); this section covers everything installed on the active node.
 	{
@@ -201,10 +201,6 @@ const SECTION_HEADERS: Record<
 		subtitle:
 			"Third-party apps and plugins discovered from GitHub. Not reviewed by Ryu.",
 	},
-	tools: {
-		title: "Tools",
-		subtitle: "Manage and invoke the MCP tools registered on this node.",
-	},
 	installed: {
 		title: "Installed",
 		subtitle: "Everything installed on the active node, gathered in one place.",
@@ -244,7 +240,6 @@ const CATALOG_SECTIONS = new Set<StoreSection>([
 	// header lives inside the centered layout column too, so it must NOT also get
 	// the outer full-width StoreSectionHeader (that would render the title twice).
 	"engines",
-	"tools",
 	"installed",
 ]);
 
@@ -421,9 +416,6 @@ function StoreContent({
 	}
 	if (section === "engines") {
 		return <EnginesCatalogSection />;
-	}
-	if (section === "tools") {
-		return <ToolsPage />;
 	}
 	if (section === "installed") {
 		return <InstalledSection />;

@@ -10,6 +10,7 @@ import {
 	isCommunityEntry,
 	isCompanionApp,
 	prettyPluginId,
+	priceLabel,
 	runnableKindLabel,
 	safeHttpUrl,
 } from "./apps-catalog-section.tsx";
@@ -149,5 +150,40 @@ describe("isCommunityEntry", () => {
 		expect(isCommunityEntry(community)).toBe(true);
 		// The section filter excludes it from apps/plugins/all on the strength of
 		// isCommunityEntry alone — see `visibleItems` in apps-catalog-section.tsx.
+	});
+});
+
+// The unified first-party view interleaves the FREE git catalog with the PAID
+// hosted listings, so "is this paid, and how much" has to be readable off the card
+// itself. Free is encoded as an ABSENT `pricing` — the shape the hosted catalog
+// actually emits — which is why absence and zero must both read as free rather than
+// as a "$0.00" badge.
+describe("priceLabel", () => {
+	test("formats a paid listing's amount in its currency", () => {
+		expect(
+			priceLabel(
+				item({ pricing: { amountMinor: 1500, currency: "usd" } }).entry
+			)
+		).toBe("$15.00");
+	});
+
+	test("defaults to USD when the currency is omitted", () => {
+		expect(priceLabel(item({ pricing: { amountMinor: 999 } }).entry)).toBe(
+			"$9.99"
+		);
+	});
+
+	test("null for a free listing (absent, null, or zero pricing)", () => {
+		expect(priceLabel(item({}).entry)).toBeNull();
+		expect(priceLabel(item({ pricing: null }).entry)).toBeNull();
+		expect(priceLabel(item({ pricing: { amountMinor: 0 } }).entry)).toBeNull();
+	});
+
+	test("null when the amount is not a number (malformed upstream card)", () => {
+		const malformed = item({});
+		(malformed.entry as unknown as Record<string, unknown>).pricing = {
+			amountMinor: "1500",
+		};
+		expect(priceLabel(malformed.entry)).toBeNull();
 	});
 });

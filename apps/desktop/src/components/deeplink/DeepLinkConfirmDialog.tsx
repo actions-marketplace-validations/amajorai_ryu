@@ -131,6 +131,11 @@ function skillBody(
 const HTTP_PREFIX = /^https?:\/\//;
 const TRAILING_SLASH = /\/$/;
 
+/** Compare two node base URLs ignoring a trailing slash. */
+function sameUrl(a: string, b: string): boolean {
+	return a.replace(TRAILING_SLASH, "") === b.replace(TRAILING_SLASH, "");
+}
+
 /** The dialog content for a node-connect intent. */
 function nodeBody(
 	intent: { name: string; url: string; token: string | null },
@@ -163,8 +168,7 @@ export function DeepLinkConfirmDialog() {
 	const pending = useDeepLinkStore((s) => s.pending);
 	const clear = useDeepLinkStore((s) => s.clear);
 	const qc = useQueryClient();
-	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const activeNode = useActiveNode();
 	const nodes = useNodeStore((s) => s.nodes);
 	const addNode = useNodeStore((s) => s.addNode);
 	const setDefaultNode = useNodeStore((s) => s.setDefault);
@@ -172,6 +176,25 @@ export function DeepLinkConfirmDialog() {
 
 	const intent = pending?.intent ?? null;
 	const open = intent !== null;
+
+	// A `node=` hint on an install link is ADVISORY (see @ryuhq/protocol's security
+	// note): resolve it against nodes the user ALREADY has and fall back to the
+	// active node when it matches none. A link can aim an install at one of your
+	// nodes; it can never introduce a node, and it can never reach a host you have
+	// not already saved.
+	const hintedUrl =
+		intent?.kind === "model" || intent?.kind === "skill" ? intent.node : null;
+	const hintedNode = hintedUrl
+		? nodes.find((n) => sameUrl(n.url, hintedUrl))
+		: undefined;
+	const installNode = hintedNode ?? activeNode;
+	const target: ApiTarget = {
+		url: installNode.url,
+		token: installNode.token ?? null,
+	};
+	// True when the link named a node we do not have — say so rather than
+	// silently installing somewhere the user did not pick.
+	const hintUnresolved = Boolean(hintedUrl) && hintedNode === undefined;
 
 	const modelDetail = useQuery({
 		queryKey: ["deeplink", "model", target.url, pending?.nonce, intent?.id],
@@ -253,8 +276,6 @@ export function DeepLinkConfirmDialog() {
 		}
 	}
 
-	const sameUrl = (a: string, b: string) =>
-		a.replace(TRAILING_SLASH, "") === b.replace(TRAILING_SLASH, "");
 	const existingNode =
 		intent?.kind === "node"
 			? nodes.find((n) => sameUrl(n.url, intent.url))
@@ -310,6 +331,17 @@ export function DeepLinkConfirmDialog() {
 					<DialogTitle>{body.title}</DialogTitle>
 					<DialogDescription>{body.description}</DialogDescription>
 				</DialogHeader>
+				{intent.kind === "model" || intent.kind === "skill" ? (
+					<p className="text-muted-foreground text-xs">
+						Installing on{" "}
+						<span className="font-medium text-foreground">
+							{installNode.name}
+						</span>
+						{hintUnresolved
+							? " — the link named a node you have not added, so your active node is used."
+							: ""}
+					</p>
+				) : null}
 				<DialogFooter>
 					<Button disabled={busy} onClick={close} type="button" variant="ghost">
 						{body.confirm ? "Cancel" : "Close"}

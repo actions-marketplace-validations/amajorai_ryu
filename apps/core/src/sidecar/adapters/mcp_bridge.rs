@@ -1186,7 +1186,10 @@ mod tests {
         );
         let describe = describe_tool_def();
         assert_eq!(describe["function"]["name"], json!("describe"));
-        assert_eq!(describe["function"]["parameters"]["required"], json!(["id"]));
+        assert_eq!(
+            describe["function"]["parameters"]["required"],
+            json!(["id"])
+        );
     }
 
     #[test]

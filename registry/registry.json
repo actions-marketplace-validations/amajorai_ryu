@@ -65,7 +65,9 @@
         "tool"
       ],
       "permission_grants": [
-        "tool:http-egress:api.exa.ai"
+        "tool:http-egress:api.exa.ai",
+        "tool:http-egress:mcp.exa.ai",
+        "tool:execute"
       ],
       "built_in": true,
       "tags": [
@@ -136,7 +138,8 @@
         "tool"
       ],
       "permission_grants": [
-        "tool:http-egress:api.firecrawl.dev"
+        "tool:http-egress:api.firecrawl.dev",
+        "tool:execute"
       ],
       "built_in": true,
       "tags": [
@@ -207,16 +210,37 @@
       ]
     },
     {
-      "id": "honcho",
-      "name": "Honcho",
+      "id": "scrapling",
+      "name": "Scrapling",
       "version": "1.0.0",
-      "description": "Give the swappable `memory` layer a provider that MODELS the user instead of only storing rows, via Honcho (https://honcho.dev) — the Plastic Labs identity layer Hermes uses for exactly this. Honcho watches the messages you hand it and derives a per-peer REPRESENTATION; its Dialectic endpoint (`POST /v3/workspaces/{workspace_id}/peers/{peer_id}/chat`) then answers a natural-language question about that peer with its own synthesis. That is what the canonical `memory__context` verb has always promised and no shipped provider served, so this is the first plugin to make the kernel's `context` bridge (`memory.provider-context`) do anything at all. Honcho here serves TWO verbs: `memory__context` (the Dialectic synthesis) and `memory__search` (`POST .../peers/{peer_id}/search`, documented as \"Search a Peer's messages\" — conversation text, not the conclusions Honcho derives from it, which matters because the `prefetch` bridge is on by default and will start injecting message excerpts each turn). It deliberately binds NO write and NO delete verb: Honcho's only documented write is `POST /v3/workspaces/{workspace_id}/sessions/{session_id}/messages`, whose `messages[]` items each require a `peer_id`, and the binding grammar's `arg_template` substitutes only from CALLER arguments — `arg_defaults` and its `pref:` tokens cannot reach inside a template — so the per-install peer id could not be placed there without hardcoding one bucket for every install; and Honcho documents no message-delete endpoint at all. So while Honcho is selected the facade stops serving `memory__store`, `memory__forget` and `memory__sync`, and `memory.mirror-builtin` (default ON) is inert. The built-in store's own `memorystore__save` tool and this node's per-turn memory write are kernel and untouched. Every call is scoped to one workspace and one peer, both set per install in the settings tab — a hardcoded pair would put every install in one shared bucket. Requires a BYOK Honcho API key.",
+      "description": "Adaptive web-page extraction via the Scrapling MCP server (https://scrapling.readthedocs.io), a BYO local install. Provides the swappable `web.extract` layer as a THIRD provider alongside the local `spider` CLI and the hosted BYOK services, so selecting it re-points the stable `web__extract` tool at a fetcher that impersonates a real browser TLS fingerprint. No API key. Requires `pip install \"scrapling[ai]\"` and the `scrapling` binary on PATH; until then the MCP server does not start and the layer falls back to whichever other provider you select. Deliberately provides NO `web.crawl`: neither the MCP server nor the CLI follows links — only Scrapling's Python `Spider` class crawls, and it is not reachable over MCP.",
       "source": "builtin",
       "kinds": [
         "tool"
       ],
       "permission_grants": [
-        "tool:http-egress:api.honcho.dev"
+        "mcp:scrapling",
+        "tool:execute"
+      ],
+      "built_in": true,
+      "tags": [
+        "web",
+        "scraping",
+        "extract"
+      ]
+    },
+    {
+      "id": "honcho",
+      "name": "Honcho",
+      "version": "1.0.0",
+      "description": "Give the swappable `memory` layer a provider that MODELS the user instead of only storing rows, via Honcho (https://honcho.dev) — the Plastic Labs identity layer Hermes uses for exactly this. Honcho watches the messages you hand it and derives a per-peer REPRESENTATION; its Dialectic endpoint (`POST /v3/workspaces/{workspace_id}/peers/{peer_id}/chat`) then answers a natural-language question about that peer with its own synthesis. That is what the canonical `memory__context` verb has always promised and no shipped provider served, so this is the first plugin to make the kernel's `context` bridge (`memory.provider-context`) do anything at all. Honcho here serves TWO verbs: `memory__context` (the Dialectic synthesis) and `memory__search` (`POST .../peers/{peer_id}/search`, documented as \"Search a Peer's messages\" — conversation text, not the conclusions Honcho derives from it, which matters because the `prefetch` bridge is on by default and will start injecting message excerpts each turn). It also binds the two WRITE verbs, `memory__sync` and `memory__store`, through an adapter. Honcho's only documented write is `POST /v3/workspaces/{workspace_id}/sessions/{session_id}/messages`, whose `messages[]` items each require a `peer_id` — a NESTED position the declarative `arg_template` cannot reach, because a template substitutes only from CALLER arguments and never sees a resolved `pref:`. That is why both verbs went unbound and why `memory.mirror-builtin` (default ON) was inert. An adapter receives those `pref:` values already resolved, so the per-install peer lands inside `messages[]` without hardcoding one bucket for every install. The session and both peers are caller-named and created on first write, so nothing has to be set up by hand; Ryu's own replies are written as a SEPARATE peer, since attributing an assistant turn to your peer would poison the representation Honcho derives about you. `memory__forget` stays unbound: Honcho documents no message-delete endpoint, which no adapter can invent. The built-in store's own `memorystore__save` tool and this node's per-turn memory write are kernel and untouched. Every call is scoped to one workspace and one peer, both set per install in the settings tab — a hardcoded pair would put every install in one shared bucket. Requires a BYOK Honcho API key.",
+      "source": "builtin",
+      "kinds": [
+        "tool"
+      ],
+      "permission_grants": [
+        "tool:http-egress:api.honcho.dev",
+        "tool:execute"
       ],
       "built_in": true,
       "tags": [
@@ -231,7 +255,7 @@
       "id": "bytebot",
       "name": "Bytebot Desktop",
       "version": "1.0.0",
-      "description": "Drives a Bytebot desktop (https://github.com/bytebot-ai/bytebot) through `bytebotd`, its local HTTP daemon, as the SECOND provider of the swappable `computer.control` layer — the first thing that makes that layer actually swappable rather than merely marked selectable. READ THIS BEFORE SELECTING IT: bytebotd drives the desktop IT runs on, which in the shipped Bytebot product is a containerized Linux desktop, NOT the machine running Ryu. Selecting it re-points `computer__capture` / `computer__click` / `computer__type` / `computer__key` / `computer__scroll` away from your own screen (`ghost`, the declared default) and onto that desktop — the same remote-target relationship `browser.control` already has between the local Chromium sidecar and a hosted browser. It serves FIVE of the six canonical verbs: `computer__focus_app` is deliberately NOT bound, because bytebotd's `application` action takes a closed seven-value enum (firefox, 1password, thunderbird, vscode, terminal, desktop, directory) while the canonical verb takes a free-form app name, so any other name would be a schema-legal call that 400s. The app switch is still reachable natively as `bytebot__application`, whose own schema carries that enum so an illegal call cannot be composed. Requires no API key — bytebotd ships with no authentication at all, which is also why this plugin only ever addresses it over loopback.",
+      "description": "Drives a Bytebot desktop (https://github.com/bytebot-ai/bytebot) through `bytebotd`, its local HTTP daemon, as the SECOND provider of the swappable `computer.control` layer — the first thing that makes that layer actually swappable rather than merely marked selectable. READ THIS BEFORE SELECTING IT: bytebotd drives the desktop IT runs on, which in the shipped Bytebot product is a containerized Linux desktop, NOT the machine running Ryu. Selecting it re-points `computer__capture` / `computer__click` / `computer__type` / `computer__key` / `computer__scroll` away from your own screen (`ghost`, the declared default) and onto that desktop — the same remote-target relationship `browser.control` already has between the local Chromium sidecar and a hosted browser. It serves FIVE of the six canonical verbs: `computer__focus_app` is deliberately NOT bound, because bytebotd's `application` action takes a closed seven-value enum (firefox, 1password, thunderbird, vscode, terminal, desktop, directory) while the canonical verb takes a free-form app name, so any other name would be a schema-legal call that 400s. The app switch is still reachable natively as `bytebot__application`, whose own schema carries that enum so an illegal call cannot be composed. Requires no API key — bytebotd ships with no authentication at all, which is also why this plugin only ever addresses it over loopback. SECURITY, read before enabling: bytebotd ships with NO authentication — no auth middleware, permissive CORS — and this plugin reaches it at the fixed loopback port 9990. Its egress grant is `tool:http-egress:127.0.0.1`, which is HOST-scoped, not port-scoped: approving it grants reach to any service on loopback, not just bytebotd. Only enable this on a machine where you accept that an unauthenticated desktop-control daemon is running and reachable. TARGET: bytebotd drives the desktop IT runs on — in the shipped Bytebot product that is a containerized Linux desktop, NOT the machine running Ryu — so selecting this instead of `ghost` does not give you another way to drive your own computer.",
       "source": "builtin",
       "kinds": [
         "tool"

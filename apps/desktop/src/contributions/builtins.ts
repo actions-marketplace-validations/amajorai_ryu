@@ -255,7 +255,13 @@ export function seedBuiltinRoutes(): void {
 	exact("/spaces", () =>
 		createElement(LibraryPage, { initialSection: "space" })
 	);
-	exact("/tools", () => createElement(StorePage, { initialSection: "tools" }));
+	// Tools moved from the Store to the Library — same bare route, new home. Kept as
+	// `/tools` (not redirected to `/library/tools`) to match the other bare
+	// collection routes (`/spaces`, `/workflows`) and so every existing sidebar
+	// entry, palette command and deep link keeps working.
+	exact("/tools", () =>
+		createElement(LibraryPage, { initialSection: "tools" })
+	);
 	exact("/workflows", () =>
 		createElement(LibraryPage, { initialSection: "workflow" })
 	);

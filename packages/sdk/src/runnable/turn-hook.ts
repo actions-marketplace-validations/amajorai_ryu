@@ -114,6 +114,15 @@ export interface DefinePluginOptions {
 	grants?: string[];
 	/** Reverse-domain id (e.g. `"com.example.my-plugin"`). */
 	id: string;
+	/**
+	 * Language servers the plugin declares, keyed by server name — the same shape
+	 * as Claude Code's `lspServers` / `.lsp.json`, passed verbatim. Loose records
+	 * rather than a typed entry on purpose: Claude Code owns this field
+	 * vocabulary, so typing it here would strip a field from a newer Claude
+	 * release on its way through `ryu pack`. Core types it, because Core acts on
+	 * it.
+	 */
+	lspServers?: Record<string, Record<string, unknown>>;
 	/** Display name. */
 	name: string;
 	/**
@@ -154,6 +163,7 @@ export function definePlugin(options: DefinePluginOptions): PluginManifest {
 		composer_controls: options.composerControls ?? [],
 		settings_tabs: options.settingsTabs ?? [],
 		slash_commands: options.slashCommands ?? [],
+		lsp_servers: options.lspServers ?? {},
 		// A turn-hook plugin contributes no app widgets, sidebar entries or dock
 		// panels; the fields are required on the resolved `Contributes` type (zod
 		// defaults applied), so set them explicitly.
