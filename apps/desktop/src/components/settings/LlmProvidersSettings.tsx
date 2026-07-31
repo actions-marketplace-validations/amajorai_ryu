@@ -51,6 +51,7 @@ import type {
 	PiProvider,
 } from "@/src/lib/api/pi-config.ts";
 import { svglForProvider } from "@/src/lib/provider-brand.tsx";
+import { AgentModelsSettings } from "./AgentModelsSettings.tsx";
 import { SettingsCard, SettingsSection } from "./shared/settings-items.tsx";
 
 const GATEWAY = "gateway";
@@ -992,6 +993,11 @@ export function LlmProvidersSettings() {
 					))}
 				</div>
 			</SettingsSection>
+
+			<AgentModelsSettings
+				agentModelOverrides={cat.agentModelOverrides}
+				onToggleModel={toggleModelEnabled}
+			/>
 
 			<SettingsSection
 				caption="Point Ryu at any OpenAI-compatible endpoint — a local llama.cpp / Ollama / vLLM server or a hosted gateway. It joins the list above and can be activated like any built-in provider."

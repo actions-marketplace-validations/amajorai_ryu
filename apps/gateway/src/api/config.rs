@@ -1071,6 +1071,8 @@ mod tests {
             unrestricted_budget_micro_usd: None,
             pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
+            prompt_cache_mode: None,
+            prompt_cache_ttl: None,
         }
     }
 

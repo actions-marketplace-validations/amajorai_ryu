@@ -440,3 +440,27 @@ fn host_seam_install_and_read() {
     }));
     assert_eq!(host().unwrap().ryu_codex_home(), marker);
 }
+
+#[test]
+fn subscription_agents_cover_every_engine() {
+    // The exported candidate pool and the dispatch table must stay in lockstep:
+    // an engine reachable by `fetch_usage` but missing from the pool is an agent
+    // nothing can fail over to, and a pool entry with no reader would be offered
+    // as a fallback that can never report a window.
+    let mapped: Vec<&str> = AGENT_ENGINES.iter().map(|(id, _)| *id).collect();
+    let mut pool = SUBSCRIPTION_AGENTS.to_vec();
+    let mut mapped_sorted = mapped.clone();
+    pool.sort_unstable();
+    mapped_sorted.sort_unstable();
+    assert_eq!(
+        pool, mapped_sorted,
+        "SUBSCRIPTION_AGENTS must list exactly the ids AGENT_ENGINES maps"
+    );
+    // And every pooled id must actually resolve through the public mapping.
+    for id in SUBSCRIPTION_AGENTS {
+        assert!(
+            engine_for_agent(id).is_some(),
+            "pooled agent {id} does not resolve to an engine"
+        );
+    }
+}

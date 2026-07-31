@@ -1344,6 +1344,65 @@ export function setLearningSkillsEnabled(
 	);
 }
 
+// --- Provider prompt caching -----------------------------------------------
+// Asks the upstream provider to keep a prompt prefix warm so a repeated prefix
+// bills at a discount. Distinct from the Gateway's own response cache.
+//
+// Unset is meaningful and is the default: Core forwards nothing, so the node's
+// `[prompt_cache]` gateway config decides. Setting a value here forwards
+// `x-ryu-prompt-cache` and overrides that config for this node's chat traffic.
+//
+// Not enabled by default because a cache *write* bills above the normal input
+// rate — turning it on moves the user's bill, so it is theirs to turn on.
+
+export const PROMPT_CACHE_PREF_KEY = "gateway.prompt-cache";
+export const PROMPT_CACHE_TTL_PREF_KEY = "gateway.prompt-cache-ttl";
+
+/** `off` inject nothing · `auto` let the provider place the breakpoint · `explicit` place them here. */
+export type PromptCacheMode = "off" | "auto" | "explicit";
+
+/** TTLs the providers document. `5m` is the provider default; `1h` costs more to write. */
+export type PromptCacheTtl = "5m" | "1h";
+
+const PROMPT_CACHE_MODES: readonly PromptCacheMode[] = [
+	"off",
+	"auto",
+	"explicit",
+];
+const PROMPT_CACHE_TTLS: readonly PromptCacheTtl[] = ["5m", "1h"];
+
+/** The configured mode, or `null` when unset (gateway config decides). */
+export async function getPromptCacheMode(
+	target: ApiTarget
+): Promise<PromptCacheMode | null> {
+	const raw = await getPreference(target, PROMPT_CACHE_PREF_KEY);
+	const v = raw?.trim().toLowerCase() as PromptCacheMode | undefined;
+	return v && PROMPT_CACHE_MODES.includes(v) ? v : null;
+}
+
+export function setPromptCacheMode(
+	target: ApiTarget,
+	mode: PromptCacheMode
+): Promise<boolean> {
+	return setPreference(target, PROMPT_CACHE_PREF_KEY, mode);
+}
+
+/** The configured TTL, or `null` when unset (provider default, ~5 min). */
+export async function getPromptCacheTtl(
+	target: ApiTarget
+): Promise<PromptCacheTtl | null> {
+	const raw = await getPreference(target, PROMPT_CACHE_TTL_PREF_KEY);
+	const v = raw?.trim().toLowerCase() as PromptCacheTtl | undefined;
+	return v && PROMPT_CACHE_TTLS.includes(v) ? v : null;
+}
+
+export function setPromptCacheTtl(
+	target: ApiTarget,
+	ttl: PromptCacheTtl
+): Promise<boolean> {
+	return setPreference(target, PROMPT_CACHE_TTL_PREF_KEY, ttl);
+}
+
 // --- Skills disclosure mode (progressive vs full) ---------------------------
 // Progressive (default): only a skill's name+description is injected up front and
 // the model loads full instructions on demand via the `skills__load` tool — saves

@@ -173,6 +173,12 @@ pub struct RequestContext {
     /// locked guardrails) instead of the global startup policy; `None` ⇒ the
     /// global `state.policy` applies (single-org / static-key / master paths).
     pub resolved_policy: Option<crate::policy::EffectivePolicy>,
+    /// Per-request provider prompt-cache mode, from `x-ryu-prompt-cache`
+    /// (`off` | `auto` | `explicit`). Overrides `[prompt_cache].mode`; ignored
+    /// when the node sets `allow_request_override = false`. `None` ⇒ node default.
+    pub prompt_cache_mode: Option<ryu_gw_providers::PromptCacheMode>,
+    /// Per-request `cache_control.ttl`, from `x-ryu-prompt-cache-ttl` (e.g. `1h`).
+    pub prompt_cache_ttl: Option<String>,
 }
 
 /// Describes the degraded mode the pipeline entered, if any, for this request.
@@ -212,6 +218,15 @@ pub struct PipelineOutput {
     /// handler inserts it into `response.extensions_mut()`; the router's
     /// `map_response` layer writes it out as `x-ryu-policy-alert`.
     pub policy_alert: Option<PolicyAlert>,
+    /// What the prompt-cache stage did, surfaced as `x-ryu-prompt-cache`.
+    pub prompt_cache: ryu_gw_providers::PromptCacheOutcome,
+    /// Prompt tokens the provider served from its cache (`x-ryu-cache-read`) and
+    /// wrote into it (`x-ryu-cache-write`). Together with `prompt_cache` these
+    /// are what let a caller *prove* markers reached the provider and hit —
+    /// previously only an aggregate counter existed, so a single request could
+    /// not be checked.
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
 }
 
 #[allow(dead_code)]
@@ -227,6 +242,11 @@ pub struct PipelineStreamOutput {
     /// Stamped policy alert (budget-cap or firewall warn) for the Ok path (see
     /// [`PipelineOutput::policy_alert`]).
     pub policy_alert: Option<PolicyAlert>,
+    /// What the prompt-cache stage did, surfaced as `x-ryu-prompt-cache`. The
+    /// read/write token counts are not available here — they arrive in the
+    /// stream's terminal usage frame, so the observer records them into metrics
+    /// at stream end rather than into a header.
+    pub prompt_cache: ryu_gw_providers::PromptCacheOutcome,
 }
 
 // ─── Authentication ───────────────────────────────────────────────────────────
@@ -273,6 +293,10 @@ pub struct AuthInputs<'a> {
     /// Suppresses both managed tool loops so the caller's own tools/tool_calls
     /// pass through untouched.
     pub raw_tools: bool,
+    /// Per-request prompt-cache mode, from `x-ryu-prompt-cache`.
+    pub prompt_cache_mode: Option<ryu_gw_providers::PromptCacheMode>,
+    /// Per-request prompt-cache TTL, from `x-ryu-prompt-cache-ttl`.
+    pub prompt_cache_ttl: Option<String>,
 }
 
 impl<'a> AuthInputs<'a> {
@@ -311,6 +335,8 @@ pub async fn authenticate(
         priority,
         tool_profile,
         raw_tools,
+        prompt_cache_mode,
+        prompt_cache_ttl,
     } = inputs;
 
     // Shared builder so the anonymous / master / static / dynamic paths differ
@@ -359,6 +385,8 @@ pub async fn authenticate(
             unrestricted_budget_micro_usd,
             pool_budgets_micro_usd,
             resolved_policy,
+            prompt_cache_mode,
+            prompt_cache_ttl: prompt_cache_ttl.clone(),
         }
     };
 
@@ -1541,6 +1569,11 @@ pub async fn run(
             eval_score: None,
             degraded: None,
             policy_alert: pre_alert.clone(),
+            // Our own response cache answered; no provider was called, so there
+            // is no provider prompt-cache activity to report.
+            prompt_cache: ryu_gw_providers::PromptCacheOutcome::Disabled,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         });
     }
 
@@ -1587,6 +1620,9 @@ pub async fn run(
                     eval_score: None,
                     degraded: None,
                     policy_alert: pre_alert.clone(),
+                    prompt_cache: ryu_gw_providers::PromptCacheOutcome::Disabled,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
                 });
             }
             semantic_embedding = Some(emb);
@@ -1662,6 +1698,15 @@ pub async fn run(
     // can signal DegradedMode::Fallback when a later provider serves the request.
     let primary_provider = fallback_chain.first().cloned();
     let mut primary_skipped = false;
+
+    // Provider prompt-cache markers, stamped once for the whole fallback chain.
+    // Placed here because it is the last point where `messages` is final and the
+    // routed model — which selects the marker dialect — is already decided
+    // (smart routing, the budget downgrade, and the firewall have all run).
+    // Fallback swaps the *provider*, never the model, so one decision holds for
+    // every attempt; re-running it per attempt would only re-inspect markers it
+    // had just written.
+    let prompt_cache_outcome = apply_prompt_cache(&state, &ctx, &decision.model, &mut body);
 
     for provider_kind in &fallback_chain {
         // 7. Circuit breaker check
@@ -1825,9 +1870,13 @@ pub async fn run(
                 let input_tokens = response["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
                 let output_tokens = response["usage"]["completion_tokens"].as_u64().unwrap_or(0);
                 let cached_tokens = provider_cached_tokens(&response);
+                let cache_write_tokens = provider_cache_write_tokens(&response);
                 state.metrics.add_tokens(input_tokens, output_tokens);
                 if cached_tokens > 0 {
                     state.metrics.add_cached_tokens(cached_tokens);
+                }
+                if cache_write_tokens > 0 {
+                    state.metrics.add_cache_write_tokens(cache_write_tokens);
                 }
 
                 // 9. Outbound firewall
@@ -2041,6 +2090,9 @@ pub async fn run(
                     eval_score,
                     degraded,
                     policy_alert,
+                    prompt_cache: prompt_cache_outcome,
+                    cache_read_tokens: cached_tokens,
+                    cache_write_tokens,
                 });
             }
             Err(e) => {
@@ -2311,6 +2363,10 @@ pub async fn run_stream(
     let primary_provider_stream = fallback_chain.first().cloned();
     let mut primary_skipped_stream = false;
 
+    // Prompt-cache markers for the streaming path — same placement rationale as
+    // the non-streaming `run`: last point before dispatch, once for the chain.
+    let prompt_cache_outcome = apply_prompt_cache(&state, &ctx, &decision.model, &mut body);
+
     for provider_kind in &fallback_chain {
         if state.circuit_breaker.is_open(provider_kind.as_str()) {
             last_err = Some(GatewayError::CircuitOpen(
@@ -2489,6 +2545,7 @@ pub async fn run_stream(
                     budget,
                     degraded,
                     policy_alert,
+                    prompt_cache: prompt_cache_outcome,
                 });
             }
             Err(e) => {
@@ -2811,6 +2868,10 @@ pub async fn run_multimodal(
                     eval_score: None,
                     degraded,
                     policy_alert,
+                    // Media/multimodal path: prompt caching does not apply.
+                    prompt_cache: ryu_gw_providers::PromptCacheOutcome::Disabled,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
                 });
             }
             Err(e) => {
@@ -3905,6 +3966,104 @@ fn provider_cached_tokens(response: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// Counterpart of [`provider_cached_tokens`] for cache *writes* — prompt tokens
+/// the provider stored rather than served. Tracked separately because a write is
+/// billed above the normal input rate, so "cached_tokens went up" alone cannot
+/// tell an operator whether caching is saving money or costing it.
+fn provider_cache_write_tokens(response: &Value) -> u64 {
+    let usage = &response["usage"];
+    usage["prompt_tokens_details"]["cache_write_tokens"]
+        .as_u64()
+        .or_else(|| usage["cache_creation_input_tokens"].as_u64())
+        .unwrap_or(0)
+}
+
+/// Streaming counterpart of [`provider_cache_write_tokens`].
+fn sse_parse_cache_write_tokens(raw: &str) -> u64 {
+    sse_scan_usage(raw, provider_cache_write_tokens)
+}
+
+/// Scan an assembled SSE transcript, applying `pick` to every parseable frame
+/// and keeping the last non-zero result — the terminal usage frame in practice.
+fn sse_scan_usage(raw: &str, pick: fn(&Value) -> u64) -> u64 {
+    let mut best = 0u64;
+    for line in raw.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let n = pick(&json);
+        if n > 0 {
+            best = n;
+        }
+    }
+    best
+}
+
+/// Resolve the node's prompt-cache policy against this request and stamp the
+/// resulting markers onto the outgoing payload.
+///
+/// Called immediately before provider dispatch — after routing has picked the
+/// model (the marker dialect depends on it) and after any budget/firewall stage
+/// that could still rewrite `messages`, so the breakpoints land on the bytes
+/// that are actually sent.
+///
+/// The per-request headers are dropped when the node sets
+/// `allow_request_override = false`, which is the whole point of that switch:
+/// an operator running a fixed cost profile must be able to make config the only
+/// lever. See [`ryu_gw_providers::prompt_cache`] for precedence and wire formats.
+/// The per-request prompt-cache override this node is willing to honour.
+///
+/// Split out from [`apply_prompt_cache`] so the "operator can lock the node"
+/// rule is testable without standing up an `AppState`: with
+/// `allow_request_override = false` the client headers are dropped entirely and
+/// config becomes the only lever.
+fn resolve_prompt_cache_override(
+    cfg: &crate::config::PromptCacheConfig,
+    ctx: &RequestContext,
+) -> (Option<ryu_gw_providers::PromptCacheMode>, Option<String>) {
+    if cfg.allow_request_override {
+        (ctx.prompt_cache_mode, ctx.prompt_cache_ttl.clone())
+    } else {
+        (None, None)
+    }
+}
+
+fn apply_prompt_cache(
+    state: &AppState,
+    ctx: &RequestContext,
+    model: &str,
+    body: &mut Value,
+) -> ryu_gw_providers::PromptCacheOutcome {
+    let cfg = &state.config.prompt_cache;
+    let (override_mode, override_ttl) = resolve_prompt_cache_override(cfg, ctx);
+    let estimated = estimate_prompt_tokens(body);
+    let outcome = cfg.options().apply(
+        body,
+        &ryu_gw_providers::PromptCacheRequest {
+            model,
+            override_mode,
+            override_ttl,
+            estimated_input_tokens: Some(estimated),
+            session_id: ctx.session_id.as_deref(),
+        },
+    );
+    debug!(
+        request_id = %ctx.request_id,
+        model,
+        estimated_prompt_tokens = estimated,
+        outcome = outcome.as_str(),
+        "prompt cache"
+    );
+    outcome
+}
+
 /// Streaming counterpart of [`provider_cached_tokens`]: scan an assembled SSE
 /// transcript for the terminal usage frame's cached-token count. Mirrors
 /// [`sse_parse_usage`]; returns 0 when absent.
@@ -4019,10 +4178,15 @@ fn attach_stream_observer(
                         total_tokens.saturating_sub(s.estimated_input_tokens),
                         s.ctx.key_config.as_ref(),
                     );
-                    // Provider-side prompt-cache reads (OpenRouter cache path).
+                    // Provider-side prompt-cache reads and writes (OpenRouter
+                    // cache path). Both come off the terminal usage frame.
                     let cached_tokens = sse_parse_cached_tokens(&s.accumulated);
                     if cached_tokens > 0 {
                         s.state.metrics.add_cached_tokens(cached_tokens);
+                    }
+                    let cache_write_tokens = sse_parse_cache_write_tokens(&s.accumulated);
+                    if cache_write_tokens > 0 {
+                        s.state.metrics.add_cache_write_tokens(cache_write_tokens);
                     }
 
                     // Eval scoring at stream end: synthesise a minimal usage
@@ -4520,7 +4684,71 @@ mod tests {
             unrestricted_budget_micro_usd: None,
             pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
+            prompt_cache_mode: None,
+            prompt_cache_ttl: None,
         }
+    }
+
+    // ── prompt cache: request override + usage readback ──────────────────────
+
+    #[test]
+    fn request_override_is_honoured_when_the_node_allows_it() {
+        let mut ctx = signal_ctx(None, false, false);
+        ctx.prompt_cache_mode = Some(ryu_gw_providers::PromptCacheMode::Explicit);
+        ctx.prompt_cache_ttl = Some("1h".into());
+
+        let cfg = crate::config::PromptCacheConfig::default();
+        assert!(cfg.allow_request_override, "override is on by default");
+        let (mode, ttl) = resolve_prompt_cache_override(&cfg, &ctx);
+        assert_eq!(mode, Some(ryu_gw_providers::PromptCacheMode::Explicit));
+        assert_eq!(ttl.as_deref(), Some("1h"));
+    }
+
+    #[test]
+    fn a_locked_node_drops_the_request_headers_entirely() {
+        let mut ctx = signal_ctx(None, false, false);
+        ctx.prompt_cache_mode = Some(ryu_gw_providers::PromptCacheMode::Explicit);
+        ctx.prompt_cache_ttl = Some("1h".into());
+
+        let cfg = crate::config::PromptCacheConfig {
+            allow_request_override: false,
+            ..Default::default()
+        };
+        let (mode, ttl) = resolve_prompt_cache_override(&cfg, &ctx);
+        assert_eq!(mode, None, "a locked node must ignore x-ryu-prompt-cache");
+        assert_eq!(ttl, None);
+    }
+
+    #[test]
+    fn cache_usage_is_read_from_both_provider_vocabularies() {
+        // OpenAI / OpenRouter shape.
+        let oai = json!({ "usage": { "prompt_tokens_details": {
+            "cached_tokens": 900, "cache_write_tokens": 100 } } });
+        assert_eq!(provider_cached_tokens(&oai), 900);
+        assert_eq!(provider_cache_write_tokens(&oai), 100);
+
+        // Anthropic-native shape.
+        let ant = json!({ "usage": {
+            "cache_read_input_tokens": 42, "cache_creation_input_tokens": 7 } });
+        assert_eq!(provider_cached_tokens(&ant), 42);
+        assert_eq!(provider_cache_write_tokens(&ant), 7);
+
+        // Uncached responses stay at zero (no phantom counters).
+        let plain = json!({ "usage": { "prompt_tokens": 10 } });
+        assert_eq!(provider_cached_tokens(&plain), 0);
+        assert_eq!(provider_cache_write_tokens(&plain), 0);
+    }
+
+    #[test]
+    fn stream_cache_usage_is_read_from_the_terminal_frame() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"usage\":{\"prompt_tokens\":1000,\"prompt_tokens_details\":",
+            "{\"cached_tokens\":900,\"cache_write_tokens\":100}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        assert_eq!(sse_parse_cached_tokens(sse), 900);
+        assert_eq!(sse_parse_cache_write_tokens(sse), 100);
     }
 
     #[test]
@@ -5511,6 +5739,8 @@ mod tests {
             unrestricted_budget_micro_usd: None,
             pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
+            prompt_cache_mode: None,
+            prompt_cache_ttl: None,
         };
 
         let body = json!({
@@ -5759,6 +5989,8 @@ mod tests {
             unrestricted_budget_micro_usd: None,
             pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
+            prompt_cache_mode: None,
+            prompt_cache_ttl: None,
         };
 
         let body = Body::from(fixture);
@@ -6719,6 +6951,8 @@ mod fallback_tests {
             unrestricted_budget_micro_usd: None,
             pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
+            prompt_cache_mode: None,
+            prompt_cache_ttl: None,
         }
     }
 

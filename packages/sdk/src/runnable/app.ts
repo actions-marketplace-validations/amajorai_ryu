@@ -37,6 +37,28 @@ const DEFAULT_APP_WIDGET_MIME = "text/html+skybridge";
 /** The default widget display mode (mirrors Core `default_widget_display_mode`). */
 const DEFAULT_APP_DISPLAY_MODE = "inline";
 
+/**
+ * The grant Core requires before it will promote a tool's result into an inline
+ * chat widget (mirrors Core's `WIDGET_RENDER_GRANT`).
+ */
+export const WIDGET_RENDER_GRANT = "widget:render";
+
+/**
+ * `grants` plus {@link WIDGET_RENDER_GRANT} when the app actually contributes a
+ * widget. Order-preserving and idempotent, so an author who already declared it
+ * gets no duplicate.
+ */
+function withWidgetRenderGrant(
+	grants: readonly string[],
+	widgets: readonly WidgetContribution[]
+): string[] {
+	const out = [...grants];
+	if (widgets.length > 0 && !out.includes(WIDGET_RENDER_GRANT)) {
+		out.push(WIDGET_RENDER_GRANT);
+	}
+	return out;
+}
+
 /** One tool a Ryu App declares. */
 export interface AppToolSpec {
 	/**
@@ -210,7 +232,21 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		name: options.title,
 		version: options.version,
 		runnables,
-		permission_grants: options.grants ?? [],
+		// An app that synthesises widgets MUST hold `widget:render`, so this
+		// builder declares it rather than leaving the author to discover it.
+		//
+		// Core gates widget promotion on declared-AND-enabled-AND-granted, and a
+		// missing grant fails as `DeniedNoGrant` — which is an `info!` log and
+		// nothing else. The widget silently renders as plain text, with no error
+		// in the UI and nothing pointing at the manifest. Every app scaffolded
+		// through `defineApp` hit that, because the only fix was a grant string
+		// the templates never mention and the builder never added; the one
+		// working example on disk hand-writes it.
+		//
+		// Added only when there is a widget to render, and unioned rather than
+		// overwritten so an author's own `grants` list survives and re-declaring
+		// it is not an error.
+		permission_grants: withWidgetRenderGrant(options.grants ?? [], widgets),
 		activation_events: options.activationEvents ?? ["*"],
 		contributes,
 		// `targets: []` means EVERY surface, so an app that declares none is

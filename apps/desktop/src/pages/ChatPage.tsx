@@ -29,6 +29,7 @@ import type {
 	GhostControls,
 	PluginComposerControlRow,
 } from "@/components/agent-elements/input/goal-plus-button.tsx";
+import type { StreamedAcpConfig } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import type {
 	AttachedImage,
@@ -853,6 +854,13 @@ export default function ChatPage({
 	// back into the composer hook so the Approval picker reflects a mode the
 	// agent changed on its own — not only the user's clicks.
 	const [streamedAcpMode, setStreamedAcpMode] = useState<string | null>(null);
+	// The same shape one level up: session CONFIG values the agent asked the client
+	// to update (Core's `data-ryu-acp-config` part). Derived from `messages` below
+	// and fed back into the composer hook, which adopts and persists them — so a
+	// pick the agent's own action invalidated stops being re-sent next turn. The
+	// emission `key` rides along so both sides dedupe on the PART, not the value.
+	const [streamedAcpConfig, setStreamedAcpConfig] =
+		useState<StreamedAcpConfig | null>(null);
 
 	const acp = useComposerAcpSections({
 		agentId,
@@ -861,6 +869,7 @@ export default function ChatPage({
 		engineModel: effectiveModel,
 		onEngineModelChange: handleModelChange,
 		streamedMode: streamedAcpMode,
+		streamedConfig: streamedAcpConfig,
 	});
 
 	// Effective ACP selections for the request body, held in refs so the send path
@@ -1527,6 +1536,54 @@ export default function ChatPage({
 			setStreamedAcpMode(latestStreamedAcpMode);
 		}
 	}, [latestStreamedAcpMode]);
+
+	// Agent-requested session-config write-backs, the exact same shape one level up
+	// from the mode sync. Core streams `data-ryu-acp-config` (`{ config }`) when a
+	// tool result asked the client to change values it holds and re-sends every
+	// turn — an approved `ExitPlanMode` clearing the Plan mode pill is the shipped
+	// case. Most recent part wins; the composer hook adopts and persists it.
+	//
+	// Carries the EMISSION key (`messageId:partIndex`), exactly like the config
+	// warning below, because the identity that must be deduped is "this part", not
+	// "this value": a second plan cycle in one conversation re-emits the byte-identical
+	// `{"ryu.plan":"off"}`, and a value-keyed guard would swallow it and leave the
+	// pill armed — the very bug this channel exists to fix. The key also preserves
+	// what a value-keyed guard gave us: this memo re-runs on every stream chunk and
+	// hands back a fresh object, but a later chunk re-derives the SAME key, so the
+	// effect no-ops and a manual pick made mid-stream is never stomped.
+	const latestStreamedAcpConfig = useMemo<StreamedAcpConfig | null>(() => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role !== "assistant" || !m.parts) {
+				continue;
+			}
+			for (let j = m.parts.length - 1; j >= 0; j--) {
+				const part = m.parts[j] as { type?: string; data?: unknown };
+				if (part?.type !== "data-ryu-acp-config") {
+					continue;
+				}
+				const data = part.data as
+					| { config?: Record<string, string> }
+					| undefined;
+				const config = data?.config;
+				if (config && Object.keys(config).length > 0) {
+					return { key: `${m.id}:${j}`, config };
+				}
+			}
+		}
+		return null;
+	}, [messages]);
+	const lastStreamedAcpConfigRef = useRef<string | null>(null);
+	useEffect(() => {
+		if (
+			!latestStreamedAcpConfig ||
+			latestStreamedAcpConfig.key === lastStreamedAcpConfigRef.current
+		) {
+			return;
+		}
+		lastStreamedAcpConfigRef.current = latestStreamedAcpConfig.key;
+		setStreamedAcpConfig(latestStreamedAcpConfig);
+	}, [latestStreamedAcpConfig]);
 
 	// Non-fatal config warnings. Core streams `data-ryu-acp-config-warning` when a
 	// session control the user chose (e.g. a model pick) was not accepted by the

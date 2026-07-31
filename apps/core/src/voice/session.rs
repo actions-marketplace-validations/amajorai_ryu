@@ -339,6 +339,9 @@ pub async fn run_voice_turn(
                 deps.traces.clone(),
                 None,
                 None,
+                // Voice turns are spoken as they stream; a silent reroute mid-
+                // utterance has no surface to announce itself on.
+                crate::routing_policy::reactive::TurnWatch::off(),
             )
             .await;
             tokio::spawn(stream_text_reply(response, delta_tx))

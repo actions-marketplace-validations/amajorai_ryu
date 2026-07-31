@@ -20,44 +20,51 @@ import {
 
 const THREE_PATHS: BentoItem[] = [
 	{
-		title: "Left behind",
-		description: "Catch up without a platform team.",
+		title: "The demo is not the deployment",
+		description:
+			"An agent can look impressive and still fail its first production review.",
+		visual: <DemoDeathMock />,
+	},
+	{
+		title: "No control layer",
+		description:
+			"Without tools, memory, or an audit trail, chat stops where real work starts.",
 		visual: <ChatbotOnlyMock />,
 	},
 	{
-		title: "Quiet dread",
-		description: "Your agent won't be the leak.",
+		title: "The real blockers",
+		description:
+			"Customer data leaves, the bill is a guess, and nobody owns the runtime.",
 		visual: <AuditSafetyMock />,
-	},
-	{
-		title: "You know the moment",
-		description: "Demo great. Review kills it.",
-		visual: <DemoDeathMock />,
 	},
 ];
 
 const RYU_PATH_ITEMS: BentoItem[] = [
 	{
-		title: "Yours",
-		description: "Local. One click. No keys.",
+		title: "Bring any agent",
+		description:
+			"Use Claude Code, Codex, Gemini, OpenClaw, Ollama, or an agent you built.",
 		visual: <InstallLocalMock />,
 	},
 	{
-		title: "Now imagine the opposite",
-		description: "Logged. Redacted. Capped. Still running.",
+		title: "Govern every call",
+		description:
+			"Audit chain, PII redaction, approvals, and budget ceilings stay in the path.",
 		span: "md:col-span-2",
 		visual: <GovernedAgentMock />,
 	},
 	{
-		title: "Real work in 7 minutes",
-		description: "Not another chatbot thread.",
+		title: "Start with one real workflow",
+		description:
+			"Install, connect your tools, and run work. Add more agents as the team grows.",
 		span: "md:col-span-2",
 		visual: <SevenMinuteMock />,
 		action: <DownloadMenu />,
 	},
 	{
-		title: "Be the one who got it right",
-		description: "Works with everything. Locked to nothing.",
+		title: "Keep the option to leave",
+		description:
+			"Open standards and local-first deployment work on your laptop, your servers, or managed cloud.",
 		visual: <StillRunningMock />,
 		action: (
 			<Link
@@ -77,7 +84,11 @@ export default function EmotionalStory() {
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-6xl">
 				<div className="mb-10 max-w-2xl">
-					<SectionTitle title="Everyone else is shipping agents. You are still on ChatGPT." />
+					<SectionTitle title="Agents are easy to demo. Running them for real is the hard part." />
+					<p className="mt-4 max-w-xl text-muted-foreground leading-relaxed">
+						Adoption is not the problem. The missing layer is what makes an
+						agent private, governable, and dependable enough to run every day.
+					</p>
 				</div>
 
 				<div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -88,7 +99,7 @@ export default function EmotionalStory() {
 
 				<div className="mt-12 md:mt-16">
 					<p className="mb-6 font-medium text-foreground text-sm">
-						The path Ryu is built for
+						The control layer Ryu provides
 					</p>
 					<BentoGrid items={RYU_PATH_ITEMS} />
 				</div>

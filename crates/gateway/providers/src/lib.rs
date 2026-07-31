@@ -24,6 +24,7 @@ pub mod local;
 pub mod modal;
 pub mod openai;
 pub mod openrouter;
+pub mod prompt_cache;
 pub mod quota;
 pub mod replicate;
 
@@ -45,6 +46,10 @@ pub use local::LocalProvider;
 pub use modal::ModalProvider;
 pub use openai::OpenAiProvider;
 pub use openrouter::{OpenRouterOptions, OpenRouterProvider};
+pub use prompt_cache::{
+    PromptCacheDialect, PromptCacheMode, PromptCacheOptions, PromptCacheOutcome,
+    PromptCacheRequest,
+};
 pub use quota::{ProviderQuotas, RateLimitInfo};
 pub use replicate::ReplicateProvider;
 

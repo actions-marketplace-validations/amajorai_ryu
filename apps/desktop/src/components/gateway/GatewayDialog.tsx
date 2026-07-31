@@ -83,6 +83,7 @@ import {
 	type EvaluatorEditorMode,
 } from "@/src/components/evaluators/EvaluatorEditorDialog.tsx";
 import { AgentEgressSection } from "@/src/components/gateway/AgentEgressSection.tsx";
+import { AutoRetrySection } from "@/src/components/gateway/AutoRetrySection.tsx";
 import { FallbackRulesSection } from "@/src/components/gateway/FallbackRulesSection.tsx";
 import { UsageCostSection } from "@/src/components/gateway/UsageCostSection.tsx";
 import { WorkspaceSection } from "@/src/components/gateway/WorkspaceSection.tsx";
@@ -6414,6 +6415,7 @@ export function GatewayDialog({
 						    but the same question ("which model actually answers"), so it
 						    belongs in this section. */}
 						<FallbackRulesSection canConfigure={canConfigure} target={target} />
+						<AutoRetrySection canConfigure={canConfigure} target={target} />
 					</>
 				) : null}
 				{section === "guardrails" ? (

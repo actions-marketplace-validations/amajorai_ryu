@@ -34,30 +34,30 @@ const PATHS: PathCard[] = [
 	{
 		icon: UserRoundSearch,
 		tone: "orange",
-		title: "Hire",
+		title: "Bring or install",
 		description:
-			"Pre-made agents for people who don't want to wire tools, tune prompts, or hunt API keys. Pick a role, install, and go.",
+			"Use the agents you already have, or install one for a real business workflow without wiring the stack yourself.",
 		bullets: [
-			"Ready-made agents for sales, support, ops, and more",
-			"One-click install from the agents catalog",
+			"Claude Code, Codex, Gemini, OpenClaw, Ollama, and more",
+			"Ready-made agents for sales, support, ops, and other roles",
 			"Budgets, permissions, and governance already in place",
-			"White-glove build available if you want us to do it",
+			"Rollout support when your team wants help",
 		],
 		ctaHref: "/for",
-		ctaLabel: "Browse pre-made agents",
+		ctaLabel: "Browse agents",
 		secondaryCtaHref: DEMO_HREF,
 		secondaryCtaExternal: true,
-		secondaryCtaLabel: "Get it built for you",
+		secondaryCtaLabel: "Plan a rollout",
 	},
 	{
 		icon: Blocks,
 		tone: "purple",
-		title: "Build",
+		title: "Compose",
 		description:
-			"Compose your own agent for your exact workflow. Every slot—model, tools, memory, policy—is swappable. Nothing locked in.",
+			"Compose an agent for your exact workflow. Model, tools, memory, and policy stay swappable as the work changes.",
 		bullets: [
-			"Build agents like Pokémon cards with swappable slots",
 			"Custom tools, MCP, skills, and memory per agent",
+			"Routing and governance applied to every run",
 			"Git-native workspace, workflows, and parallel runs",
 			"SDK and open core when you want to go deeper",
 		],
@@ -138,8 +138,8 @@ export default function HireBuild() {
 		<section className="container mx-auto px-4">
 			<div className="mx-auto max-w-6xl">
 				<SectionHeading
-					subtitle="Start with a ready-made agent, or customize every part for your workflow."
-					title="Hire or build"
+					subtitle="Bring an agent, install one from the catalog, or build exactly what your workflow needs."
+					title="Start with the agent your company needs"
 				/>
 				<div className="grid gap-6 md:grid-cols-2">
 					{PATHS.map((card, i) => (

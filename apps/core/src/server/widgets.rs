@@ -52,6 +52,15 @@ pub struct WidgetInstance {
     pub created_at: Instant,
     /// Server-side authoritative `widgetState` snapshot (D4).
     pub widget_state: Option<Value>,
+    /// Whether this widget may inject a follow-up turn into the conversation.
+    ///
+    /// Mirrors the condition that mints the frame's `ui:send_message` grant at
+    /// emit time, recorded here so the SERVER can re-decide it. The desktop host
+    /// already refuses `ui.sendMessage` for a frame without the capability, but
+    /// that is a client-side check on a route that is reachable directly — and
+    /// injecting text into the user's conversation is the one widget power that
+    /// reaches the model, so it must not rest on the caller being well-behaved.
+    pub may_send_follow_up: bool,
 }
 
 impl WidgetInstance {
@@ -83,6 +92,7 @@ impl WidgetInstanceStore {
         agent_id: String,
         origin_server: String,
         widget_accessible_tool_ids: Vec<String>,
+        may_send_follow_up: bool,
     ) -> Option<WidgetInstance> {
         let mut map = self.inner.lock().ok()?;
         // Evict expired instances opportunistically.
@@ -107,6 +117,7 @@ impl WidgetInstanceStore {
             widget_accessible_tool_ids,
             created_at: Instant::now(),
             widget_state: None,
+            may_send_follow_up,
         };
         map.insert(instance_id, instance.clone());
         Some(instance)
@@ -150,12 +161,14 @@ pub fn mint_widget_instance(
     agent_id: String,
     origin_server: String,
     widget_accessible_tool_ids: Vec<String>,
+    may_send_follow_up: bool,
 ) -> Option<WidgetInstance> {
     store().mint(
         conversation_id,
         agent_id,
         origin_server,
         widget_accessible_tool_ids,
+        may_send_follow_up,
     )
 }
 
@@ -456,6 +469,25 @@ pub async fn widget_follow_up(
             StatusCode::BAD_REQUEST,
             "invalid_args",
             "prompt is required",
+        );
+    }
+
+    // Permission, BEFORE the scan: a widget that was never granted `ui:send_message`
+    // may not put words in the user's conversation, and there is no reason to run
+    // its prompt through the firewall to reach the same answer. The decision was
+    // made at emit time (`may_send_follow_up`) from the owning plugin's grants; this
+    // is where it is enforced, because the route is reachable without going through
+    // the desktop host that performs the client-side capability check.
+    if !record.may_send_follow_up {
+        tracing::info!(
+            instance = %record.instance_id,
+            server = %record.origin_server,
+            "widget follow-up refused: this widget was not granted `ui:send_message`"
+        );
+        return err_reply(
+            StatusCode::FORBIDDEN,
+            "denied",
+            "this widget is not allowed to send follow-up messages",
         );
     }
 
@@ -1135,7 +1167,9 @@ mod asset_proxy_tests {
         assert!(parse_resource_domains(&json!({})).is_empty());
     }
 
-    use super::{allow_gateway_fallback, err_reply, ip_is_blocked, WidgetInstanceStore};
+    use super::{
+        allow_gateway_fallback, err_reply, ip_is_blocked, WidgetInstance, WidgetInstanceStore,
+    };
     use axum::http::StatusCode;
     use std::net::IpAddr;
 
@@ -1147,20 +1181,20 @@ mod asset_proxy_tests {
     #[test]
     fn mint_enforces_per_session_cap() {
         let store = WidgetInstanceStore::new(2);
-        let a1 = store.mint("sess-a".into(), "ag".into(), "srv".into(), vec![]);
-        let a2 = store.mint("sess-a".into(), "ag".into(), "srv".into(), vec![]);
+        let a1 = store.mint("sess-a".into(), "ag".into(), "srv".into(), vec![], false);
+        let a2 = store.mint("sess-a".into(), "ag".into(), "srv".into(), vec![], false);
         assert!(a1.is_some() && a2.is_some(), "first two in a session mint");
         // Third for the SAME session is over cap → None.
         assert!(
             store
-                .mint("sess-a".into(), "ag".into(), "srv".into(), vec![])
+                .mint("sess-a".into(), "ag".into(), "srv".into(), vec![], false)
                 .is_none(),
             "over-cap mint must return None"
         );
         // A different session has its own budget.
         assert!(
             store
-                .mint("sess-b".into(), "ag".into(), "srv".into(), vec![])
+                .mint("sess-b".into(), "ag".into(), "srv".into(), vec![], false)
                 .is_some(),
             "the cap is per-session, not global"
         );
@@ -1172,10 +1206,16 @@ mod asset_proxy_tests {
     fn mint_ids_are_unique_and_resolvable() {
         let store = WidgetInstanceStore::new(8);
         let i1 = store
-            .mint("s".into(), "ag".into(), "srv".into(), vec!["tool.x".into()])
+            .mint(
+                "s".into(),
+                "ag".into(),
+                "srv".into(),
+                vec!["tool.x".into()],
+                false,
+            )
             .unwrap();
         let i2 = store
-            .mint("s".into(), "ag".into(), "srv".into(), vec![])
+            .mint("s".into(), "ag".into(), "srv".into(), vec![], false)
             .unwrap();
         assert_ne!(i1.instance_id, i2.instance_id, "ids must be unique");
         assert!(i1.instance_id.starts_with("wgt_"));
@@ -1193,7 +1233,7 @@ mod asset_proxy_tests {
     fn set_state_persists_for_live_and_noops_for_unknown() {
         let store = WidgetInstanceStore::new(8);
         let inst = store
-            .mint("s".into(), "ag".into(), "srv".into(), vec![])
+            .mint("s".into(), "ag".into(), "srv".into(), vec![], false)
             .unwrap();
         assert!(store.get(&inst.instance_id).unwrap().widget_state.is_none());
         store.set_state(&inst.instance_id, json!({ "count": 5 }));
@@ -1283,5 +1323,49 @@ mod asset_proxy_tests {
         assert!(!content_type_is_allowed("application/json"));
         assert!(!content_type_is_allowed(""));
         assert!(!content_type_is_allowed("text/html; charset=utf-8"));
+    }
+
+    fn mint(store: &WidgetInstanceStore, may_send_follow_up: bool) -> WidgetInstance {
+        store
+            .mint(
+                "conv1".to_owned(),
+                "agent1".to_owned(),
+                "srv".to_owned(),
+                vec![],
+                may_send_follow_up,
+            )
+            .expect("under the per-session cap")
+    }
+
+    /// The follow-up permission must survive the round-trip from emit to the
+    /// governed route, because that route is where it is enforced. If the flag
+    /// were dropped on the way into the store, `widget_follow_up` would read
+    /// `false` for every widget and silently refuse all of them — or, had the
+    /// default gone the other way, allow all of them.
+    #[test]
+    fn follow_up_permission_round_trips_through_the_instance_store() {
+        let store = WidgetInstanceStore::new(4);
+
+        let allowed = mint(&store, true);
+        assert!(allowed.may_send_follow_up);
+        assert!(
+            store
+                .get(&allowed.instance_id)
+                .expect("just minted")
+                .may_send_follow_up,
+            "a widget granted `ui:send_message` must still be permitted when the \
+             governed route re-reads its instance"
+        );
+
+        let refused = mint(&store, false);
+        assert!(!refused.may_send_follow_up);
+        assert!(
+            !store
+                .get(&refused.instance_id)
+                .expect("just minted")
+                .may_send_follow_up,
+            "a widget that was never granted `ui:send_message` must not become \
+             permitted by passing through the store"
+        );
     }
 }

@@ -51,16 +51,24 @@ impl AnthropicProvider {
         format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
 
+    /// A `POST /v1/messages` builder carrying the auth and version headers every
+    /// Anthropic call needs, plus the extended-cache-TTL beta when — and only
+    /// when — the payload actually asks for a non-default `cache_control.ttl`.
+    fn anthropic_post(&self, url: &str, key: &str, payload: &Value) -> reqwest::RequestBuilder {
+        let mut req = self
+            .client
+            .post(url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01");
+        if wants_extended_cache_ttl(payload) {
+            req = req.header("anthropic-beta", EXTENDED_CACHE_TTL_BETA);
+        }
+        req.json(payload)
+    }
+
     /// Convert an OpenAI-format chat request body into an Anthropic messages body.
     fn to_anthropic_body(&self, model: &str, body: &Value) -> Value {
         let messages = body["messages"].as_array().cloned().unwrap_or_default();
-
-        // Extract system messages and join them (Anthropic has a top-level system field)
-        let system_parts: Vec<&str> = messages
-            .iter()
-            .filter(|m| m["role"].as_str() == Some("system"))
-            .filter_map(|m| m["content"].as_str())
-            .collect();
 
         // Non-system messages become the messages array
         let filtered_messages: Vec<Value> = messages
@@ -69,6 +77,8 @@ impl AnthropicProvider {
             .map(|m| {
                 // Normalise content: Anthropic accepts a string or content-block array.
                 // If the OpenAI message already has a string content, pass it through.
+                // Block arrays pass through verbatim, so a per-block
+                // `cache_control` breakpoint on a user/assistant turn survives.
                 json!({
                     "role": m["role"],
                     "content": m["content"],
@@ -85,8 +95,9 @@ impl AnthropicProvider {
             "max_tokens": max_tokens,
         });
 
-        if !system_parts.is_empty() {
-            req["system"] = Value::String(system_parts.join("\n\n"));
+        // System messages hoist to Anthropic's top-level `system` field.
+        if let Some(system) = system_field(&messages) {
+            req["system"] = system;
         }
 
         // Forward optional parameters
@@ -127,10 +138,20 @@ impl AnthropicProvider {
             _ => "stop",
         };
 
-        let input_tokens = resp["usage"]["input_tokens"].as_u64().unwrap_or(0);
+        let cache = CacheUsage::from_anthropic(&resp["usage"]);
+        // Anthropic reports `input_tokens` *excluding* whatever it served from or
+        // wrote to the prompt cache, while OpenAI's `prompt_tokens` includes it.
+        // Add the cache legs back so downstream token accounting (and any cost
+        // model keyed on `prompt_tokens`) sees the true prompt size.
+        //
+        // This correction belongs to the NATIVE Anthropic `/v1/messages` shape
+        // only. Do not mirror it onto the OpenAI-compatible path (OpenRouter):
+        // there `prompt_tokens` already includes `cached_tokens`, so adding them
+        // again would double-count the prompt.
+        let input_tokens = resp["usage"]["input_tokens"].as_u64().unwrap_or(0) + cache.total();
         let output_tokens = resp["usage"]["output_tokens"].as_u64().unwrap_or(0);
 
-        json!({
+        let mut out = json!({
             "id": resp["id"].as_str().unwrap_or("msg_unknown"),
             "object": "chat.completion",
             "created": chrono::Utc::now().timestamp(),
@@ -149,9 +170,135 @@ impl AnthropicProvider {
                 "completion_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
             }
-        })
+        });
+        cache.merge_into_usage(&mut out["usage"]);
+        out
     }
 }
+
+/// Prompt-cache read/write token counts lifted off a provider `usage` block.
+///
+/// Anthropic names these `cache_read_input_tokens` / `cache_creation_input_tokens`;
+/// the OpenAI-compatible shape (what OpenRouter and this gateway's own pipeline
+/// read) names them `prompt_tokens_details.{cached_tokens,cache_write_tokens}`.
+/// This carries the pair between the two vocabularies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CacheUsage {
+    /// Prompt tokens served from the provider's cache (a cache *read*).
+    pub read: u64,
+    /// Prompt tokens written into the provider's cache (a cache *write* — billed
+    /// above the normal input rate, which is why it is reported separately).
+    pub write: u64,
+}
+
+impl CacheUsage {
+    /// Read the Anthropic-native field names off a `usage` object.
+    pub(crate) fn from_anthropic(usage: &Value) -> Self {
+        Self {
+            read: usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            write: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        }
+    }
+
+    pub(crate) fn total(self) -> u64 {
+        self.read + self.write
+    }
+
+    pub(crate) fn is_zero(self) -> bool {
+        self.total() == 0
+    }
+
+    /// Stamp both vocabularies onto an OpenAI-shaped `usage` object. A no-op when
+    /// the provider reported no caching, so a non-caching response keeps exactly
+    /// the wire shape it had before prompt-cache support existed.
+    pub(crate) fn merge_into_usage(self, usage: &mut Value) {
+        if self.is_zero() {
+            return;
+        }
+        usage["prompt_tokens_details"] = json!({
+            "cached_tokens": self.read,
+            "cache_write_tokens": self.write,
+        });
+        // Native names too, so an Anthropic-aware caller reading through the
+        // gateway sees the same fields it would get talking to Anthropic direct.
+        usage["cache_read_input_tokens"] = json!(self.read);
+        usage["cache_creation_input_tokens"] = json!(self.write);
+    }
+}
+
+/// Build Anthropic's top-level `system` value from the OpenAI-shape system
+/// messages.
+///
+/// Returns `None` when there are no system messages. When every block is plain
+/// text with no `cache_control`, the blocks are joined into a single string —
+/// the exact wire shape this adapter has always produced. As soon as any block
+/// carries a `cache_control` breakpoint (or is not a plain text block), the
+/// array form is emitted instead, because a string `system` cannot carry one.
+///
+/// This is also a plain correctness fix: the previous `filter_map(as_str)` threw
+/// away *any* array-form system content, silently dropping the whole system
+/// prompt for callers that send content blocks.
+fn system_field(messages: &[Value]) -> Option<Value> {
+    let mut blocks: Vec<Value> = Vec::new();
+    for m in messages.iter().filter(|m| m["role"].as_str() == Some("system")) {
+        blocks.extend(content_blocks(&m["content"]));
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+
+    // `collect::<Option<Vec<_>>>` short-circuits to `None` the moment one block
+    // is not plain cache-free text, which is exactly when we need the array form.
+    let plain: Option<Vec<&str>> = blocks
+        .iter()
+        .map(|b| {
+            let plain_text = b.get("cache_control").is_none() && b["type"] == json!("text");
+            plain_text.then(|| b["text"].as_str()).flatten()
+        })
+        .collect();
+
+    Some(match plain {
+        Some(parts) => Value::String(parts.join("\n\n")),
+        None => Value::Array(blocks),
+    })
+}
+
+/// Normalise one OpenAI-shape message `content` into Anthropic content blocks.
+/// A plain string becomes a single `text` block; an array passes through
+/// block-by-block so per-block `cache_control` breakpoints survive.
+fn content_blocks(content: &Value) -> Vec<Value> {
+    match content {
+        Value::String(s) => vec![json!({ "type": "text", "text": s })],
+        Value::Array(items) => items.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether any `cache_control` breakpoint in the outgoing payload asks for a TTL
+/// other than Anthropic's 5-minute default. Those require an opt-in beta header,
+/// and without it Anthropic rejects the request rather than silently downgrading
+/// — so the header is sent if and only if an extended TTL is actually present.
+fn wants_extended_cache_ttl(payload: &Value) -> bool {
+    fn walk(v: &Value) -> bool {
+        match v {
+            Value::Object(map) => {
+                if let Some(ttl) = map.get("cache_control").and_then(|c| c.get("ttl")) {
+                    if ttl.as_str().is_some_and(|t| t != "5m") {
+                        return true;
+                    }
+                }
+                map.values().any(walk)
+            }
+            Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    walk(payload)
+}
+
+/// Anthropic's opt-in beta for `cache_control.ttl` values beyond the 5-minute
+/// default (currently `"1h"`).
+const EXTENDED_CACHE_TTL_BETA: &str = "extended-cache-ttl-2025-04-11";
 
 impl Provider for AnthropicProvider {
     fn name(&self) -> &'static str {
@@ -177,11 +324,7 @@ impl Provider for AnthropicProvider {
             for _ in 0..attempts {
                 let key = self.next_key();
                 let resp = self
-                    .client
-                    .post(&url)
-                    .header("x-api-key", &key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&payload)
+                    .anthropic_post(&url, &key, &payload)
                     .send()
                     .await
                     .map_err(|e| {
@@ -257,11 +400,7 @@ impl Provider for AnthropicProvider {
             for _ in 0..attempts {
                 let key = self.next_key();
                 let resp = self
-                    .client
-                    .post(&url)
-                    .header("x-api-key", &key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&payload)
+                    .anthropic_post(&url, &key, &payload)
                     .send()
                     .await
                     .map_err(|e| {
@@ -335,6 +474,18 @@ fn translate_anthropic_stream(
     let created = chrono::Utc::now().timestamp();
 
     let mut last_event_type = String::new();
+    // Usage is spread across two Anthropic events: `message_start` carries the
+    // input legs (including the prompt-cache read/write counts) and
+    // `message_delta` carries the running output count. Accumulate both so the
+    // terminal OpenAI chunk can report a usage block — without one, the
+    // gateway's `sse_parse_usage` / `sse_parse_cached_tokens` see nothing and
+    // streaming token and cache accounting on this path is blind.
+    let mut input_tokens: u64 = 0;
+    let mut output_tokens: u64 = 0;
+    let mut cache = CacheUsage::default();
+    // Anthropic sends both `message_delta` and `message_stop`; emit the terminal
+    // chunk (and `[DONE]`) exactly once.
+    let mut finished = false;
     let cid = completion_id.clone();
 
     raw.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
@@ -381,7 +532,33 @@ fn translate_anthropic_stream(
                                         }
                                     }
                                 }
+                                "message_start" => {
+                                    if let Ok(v) = serde_json::from_str::<Value>(data) {
+                                        let usage = &v["message"]["usage"];
+                                        input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                                        cache = CacheUsage::from_anthropic(usage);
+                                    }
+                                }
                                 "message_stop" | "message_delta" => {
+                                    if let Ok(v) = serde_json::from_str::<Value>(data) {
+                                        if let Some(n) = v["usage"]["output_tokens"].as_u64() {
+                                            output_tokens = n;
+                                        }
+                                    }
+                                    if finished {
+                                        continue;
+                                    }
+                                    finished = true;
+                                    // Same `input_tokens` correction as the
+                                    // non-streaming path: Anthropic excludes the
+                                    // cache legs, OpenAI's `prompt_tokens` includes them.
+                                    let prompt_tokens = input_tokens + cache.total();
+                                    let mut usage = serde_json::json!({
+                                        "prompt_tokens": prompt_tokens,
+                                        "completion_tokens": output_tokens,
+                                        "total_tokens": prompt_tokens + output_tokens,
+                                    });
+                                    cache.merge_into_usage(&mut usage);
                                     let stop_chunk = serde_json::json!({
                                         "id": cid,
                                         "object": "chat.completion.chunk",
@@ -391,7 +568,8 @@ fn translate_anthropic_stream(
                                             "index": 0,
                                             "delta": {},
                                             "finish_reason": "stop",
-                                        }]
+                                        }],
+                                        "usage": usage,
                                     });
                                     if let Ok(json_str) = serde_json::to_string(&stop_chunk) {
                                         let line = format!("data: {json_str}\n\ndata: [DONE]\n\n");
@@ -544,6 +722,161 @@ mod tests {
         assert_eq!(out["id"], json!("msg_unknown"));
         assert_eq!(out["choices"][0]["message"]["content"], json!(""));
         assert_eq!(out["usage"]["total_tokens"], json!(0));
+    }
+
+    // ── prompt caching: system blocks, usage, TTL beta ───────────────────────
+
+    #[test]
+    fn to_anthropic_body_keeps_array_system_and_its_cache_breakpoint() {
+        let p = dummy();
+        // Before the fix this dropped the system prompt entirely: the old
+        // `filter_map(as_str)` skipped every array-form system message.
+        let body = json!({
+            "messages": [
+                { "role": "system", "content": [
+                    { "type": "text", "text": "HUGE PREFIX",
+                      "cache_control": { "type": "ephemeral" } }
+                ]},
+                { "role": "user", "content": "hi" }
+            ]
+        });
+        let out = p.to_anthropic_body("m", &body);
+        assert_eq!(out["system"][0]["text"], json!("HUGE PREFIX"));
+        assert_eq!(out["system"][0]["cache_control"]["type"], json!("ephemeral"));
+    }
+
+    #[test]
+    fn to_anthropic_body_joins_plain_array_system_into_a_string() {
+        let p = dummy();
+        // No cache_control anywhere ⇒ the historical string shape is preserved,
+        // so a non-caching caller's wire format is byte-identical to before.
+        let body = json!({
+            "messages": [
+                { "role": "system", "content": [{ "type": "text", "text": "one" }] },
+                { "role": "system", "content": "two" }
+            ]
+        });
+        let out = p.to_anthropic_body("m", &body);
+        assert_eq!(out["system"], json!("one\n\ntwo"));
+    }
+
+    #[test]
+    fn to_anthropic_body_passes_message_cache_control_through() {
+        let p = dummy();
+        let body = json!({
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": "ctx", "cache_control": { "type": "ephemeral" } }
+            ]}]
+        });
+        let out = p.to_anthropic_body("m", &body);
+        assert_eq!(
+            out["messages"][0]["content"][0]["cache_control"]["type"],
+            json!("ephemeral")
+        );
+    }
+
+    #[test]
+    fn from_anthropic_response_surfaces_cache_read_and_write_tokens() {
+        let p = dummy();
+        let resp = json!({
+            "content": [{ "type": "text", "text": "x" }],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 100
+            }
+        });
+        let out = p.from_anthropic_response(&resp, "m");
+        // OpenAI-shape prompt_tokens includes the cache legs Anthropic excludes.
+        assert_eq!(out["usage"]["prompt_tokens"], json!(1010));
+        assert_eq!(out["usage"]["total_tokens"], json!(1015));
+        assert_eq!(
+            out["usage"]["prompt_tokens_details"]["cached_tokens"],
+            json!(900)
+        );
+        assert_eq!(
+            out["usage"]["prompt_tokens_details"]["cache_write_tokens"],
+            json!(100)
+        );
+        // Native names survive too.
+        assert_eq!(out["usage"]["cache_read_input_tokens"], json!(900));
+        assert_eq!(out["usage"]["cache_creation_input_tokens"], json!(100));
+    }
+
+    #[test]
+    fn from_anthropic_response_omits_cache_details_when_uncached() {
+        let p = dummy();
+        let resp = json!({
+            "content": [{ "text": "x" }],
+            "usage": { "input_tokens": 4, "output_tokens": 2 }
+        });
+        let out = p.from_anthropic_response(&resp, "m");
+        assert_eq!(out["usage"]["prompt_tokens"], json!(4));
+        assert!(out["usage"].get("prompt_tokens_details").is_none());
+    }
+
+    #[test]
+    fn wants_extended_cache_ttl_only_for_non_default_ttl() {
+        assert!(!wants_extended_cache_ttl(&json!({
+            "system": [{ "cache_control": { "type": "ephemeral" } }]
+        })));
+        assert!(!wants_extended_cache_ttl(&json!({
+            "system": [{ "cache_control": { "type": "ephemeral", "ttl": "5m" } }]
+        })));
+        assert!(wants_extended_cache_ttl(&json!({
+            "messages": [{ "content": [{ "cache_control": { "ttl": "1h" } }] }]
+        })));
+    }
+
+    #[tokio::test]
+    async fn complete_sends_ttl_beta_header_only_when_asked() {
+        let ok = r#"{"id":"m","content":[{"text":"ok"}],"stop_reason":"end_turn",
+                    "usage":{"input_tokens":1,"output_tokens":1}}"#;
+
+        let plain = MockServer::always(MockResponse::ok_json(ok)).await;
+        let p = provider_with(plain.base_url().to_string(), vec!["k"]);
+        p.complete("m", &json!({ "messages": [{ "role": "user", "content": "hi" }] }))
+            .await
+            .unwrap();
+        assert!(plain.requests()[0].header("anthropic-beta").is_none());
+
+        let ttl = MockServer::always(MockResponse::ok_json(ok)).await;
+        let p = provider_with(ttl.base_url().to_string(), vec!["k"]);
+        p.complete(
+            "m",
+            &json!({ "messages": [{ "role": "system", "content": [
+                { "type": "text", "text": "big",
+                  "cache_control": { "type": "ephemeral", "ttl": "1h" } }
+            ]}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ttl.requests()[0].header("anthropic-beta").as_deref(),
+            Some(EXTENDED_CACHE_TTL_BETA)
+        );
+    }
+
+    #[tokio::test]
+    async fn translate_anthropic_stream_emits_usage_with_cache_counts_once() {
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":900,\"cache_creation_input_tokens\":0}}}\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        );
+        let out = collect_stream(vec![sse], "m").await;
+        assert!(out.contains(r#""prompt_tokens":910"#), "got: {out}");
+        assert!(out.contains(r#""completion_tokens":7"#), "got: {out}");
+        assert!(out.contains(r#""cached_tokens":900"#), "got: {out}");
+        // message_delta + message_stop must not both terminate the stream.
+        assert_eq!(out.matches("data: [DONE]").count(), 1, "got: {out}");
     }
 
     #[test]

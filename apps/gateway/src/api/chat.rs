@@ -139,6 +139,14 @@ pub async fn chat_completions(
         })
         .unwrap_or(false);
 
+    // Per-request provider prompt-cache override (`off` | `auto` | `explicit`)
+    // and TTL. An unparseable value is ignored rather than guessed — a typo must
+    // not silently start billing cache writes. The node can refuse overrides
+    // entirely via `[prompt_cache].allow_request_override = false`.
+    let prompt_cache_mode = header_string(&headers, "x-ryu-prompt-cache")
+        .and_then(|v| ryu_gw_providers::PromptCacheMode::parse(&v));
+    let prompt_cache_ttl = header_string(&headers, "x-ryu-prompt-cache-ttl");
+
     let ctx = authenticate(
         &state,
         AuthInputs {
@@ -157,6 +165,8 @@ pub async fn chat_completions(
             priority,
             tool_profile,
             raw_tools,
+            prompt_cache_mode,
+            prompt_cache_ttl,
         },
     )
     .await?;
@@ -187,6 +197,14 @@ pub async fn chat_completions(
                 response.headers_mut().insert("x-degraded", v);
             }
         }
+        // What the prompt-cache stage did. Read/write token counts are not
+        // available yet on a stream (they arrive in the terminal usage frame,
+        // after the headers are on the wire) — the observer records them into
+        // metrics at stream end instead.
+        response.headers_mut().insert(
+            "x-ryu-prompt-cache",
+            HeaderValue::from_static(output.prompt_cache.as_str()),
+        );
         // Ok-path policy-alert stamp: stash on the RESPONSE extensions so the
         // router's `map_response` layer writes `x-ryu-policy-alert`. Inserting on
         // the response (not the request) is the F1 correctness fix.
@@ -201,6 +219,9 @@ pub async fn chat_completions(
         let budget = output.budget.clone();
         let degraded = output.degraded.clone();
         let policy_alert = output.policy_alert.clone();
+        let prompt_cache = output.prompt_cache;
+        let cache_read_tokens = output.cache_read_tokens;
+        let cache_write_tokens = output.cache_write_tokens;
         let mut response = Json(output.response).into_response();
         let hdrs = response.headers_mut();
         if let Ok(v) = HeaderValue::from_str(&output.context.request_id) {
@@ -228,6 +249,22 @@ pub async fn chat_completions(
             if let Ok(v) = HeaderValue::from_str(&d.header_value()) {
                 hdrs.insert("x-degraded", v);
             }
+        }
+        // Provider prompt-cache observability, per request rather than only in
+        // the aggregate `/metrics` counters: what we did (`x-ryu-prompt-cache`)
+        // and what the provider reported back (`x-ryu-cache-read` / `-write`).
+        // Together these are how a caller verifies markers actually reached the
+        // provider and hit — note `x-cache: HIT` above means this gateway's own
+        // response cache answered instead, so the two are never both meaningful.
+        hdrs.insert(
+            "x-ryu-prompt-cache",
+            HeaderValue::from_static(prompt_cache.as_str()),
+        );
+        if let Ok(v) = HeaderValue::from_str(&cache_read_tokens.to_string()) {
+            hdrs.insert("x-ryu-cache-read", v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&cache_write_tokens.to_string()) {
+            hdrs.insert("x-ryu-cache-write", v);
         }
         // Ok-path policy-alert stamp (see the streaming branch): stash on the
         // response extensions for the router's `map_response` layer.

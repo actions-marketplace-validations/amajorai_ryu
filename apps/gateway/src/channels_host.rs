@@ -284,6 +284,10 @@ fn channel_context(channel_name: &str) -> RequestContext {
         priority: crate::concurrency::Priority::Interactive,
         // Channel messages don't select a named tool-policy profile.
         tool_profile: None,
+        // No HTTP headers on channel traffic, so the node's `[prompt_cache]`
+        // policy applies unmodified.
+        prompt_cache_mode: None,
+        prompt_cache_ttl: None,
         // Bots use the managed tool loops, not SDK raw passthrough.
         raw_tools: false,
         // Channel/bot traffic is not a dynamically-resolved managed tenant.

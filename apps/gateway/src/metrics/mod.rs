@@ -21,6 +21,13 @@ pub struct Metrics {
     /// which counts the gateway's own exact/semantic response cache: this
     /// measures provider-side prompt caching, the OpenRouter cache path.
     pub provider_cached_input_tokens: AtomicU64,
+    /// Aggregated input tokens the upstream *wrote into* its prompt cache
+    /// (`prompt_tokens_details.cache_write_tokens` / Anthropic
+    /// `cache_creation_input_tokens`). Counted apart from the read counter above
+    /// because a write is billed above the normal input rate: reads alone say
+    /// caching is active, but only reads-versus-writes says whether it is paying
+    /// for itself.
+    pub provider_cache_write_tokens: AtomicU64,
     /// Aggregated tokens saved by context compression (egress transform).
     pub compression_tokens_saved: AtomicU64,
     pub budget_exceeded: AtomicU64,
@@ -95,6 +102,13 @@ impl Metrics {
     /// reports no cached tokens.
     pub fn add_cached_tokens(&self, n: u64) {
         self.provider_cached_input_tokens
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    /// Add to the aggregated provider-side prompt-cache *write* counter. Fed
+    /// from `usage.prompt_tokens_details.cache_write_tokens`; a no-op when the
+    /// provider reports none.
+    pub fn add_cache_write_tokens(&self, n: u64) {
+        self.provider_cache_write_tokens
             .fetch_add(n, Ordering::Relaxed);
     }
     /// Add to the aggregated context-compression tokens-saved counter.
@@ -207,6 +221,7 @@ impl Metrics {
                 "input":  self.total_input_tokens.load(Ordering::Relaxed),
                 "output": self.total_output_tokens.load(Ordering::Relaxed),
                 "cached_input": self.provider_cached_input_tokens.load(Ordering::Relaxed),
+                "cache_write": self.provider_cache_write_tokens.load(Ordering::Relaxed),
             },
             "composio": {
                 "calls": self.composio_calls.load(Ordering::Relaxed),

@@ -74,10 +74,10 @@ export default function WorksWith() {
 		<section className="py-16 md:py-20">
 			<div className="container mx-auto px-4">
 				<div className="mx-auto max-w-5xl text-center">
-					<SectionTitle title="Use your existing stack" />
+					<SectionTitle title="Bring the agents you already use" />
 					<p className={cn(sectionSubtitleClass, "max-w-5xl")}>
-						Ryu is not another agent. It is the platform your agents and you
-						collaborate through, so it works with the tools you already run.
+						Ryu is not another closed agent. It is the interface and control
+						layer for the agents, models, providers, and tools you already run.
 					</p>
 				</div>
 			</div>

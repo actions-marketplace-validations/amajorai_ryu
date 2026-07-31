@@ -493,6 +493,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_cache_markers_reach_openrouter_unmodified() {
+        // The end-to-end gap the audit named: nothing proved cache markers
+        // actually leave the process. Assert on the bytes the mock server
+        // received, so a future change to `apply()` that reshapes or drops the
+        // caller's markers fails here.
+        let server = MockServer::always(MockResponse::ok_json(r#"{"id":"or"}"#)).await;
+        let opts = OpenRouterOptions {
+            data_collection: Some("deny".into()),
+            usage_accounting: true,
+            ..Default::default()
+        };
+        let p = provider_with(server.base_url().to_string(), vec!["sk-or"], opts);
+        let body = json!({
+            "cache_control": { "type": "ephemeral", "ttl": "1h" },
+            "session_id": "conv-abc",
+            "messages": [
+                { "role": "system", "content": [
+                    { "type": "text", "text": "HUGE PREFIX",
+                      "cache_control": { "type": "ephemeral" } }
+                ]},
+                { "role": "user", "content": "hi" }
+            ]
+        });
+        p.complete("anthropic/claude-sonnet-4", &body).await.unwrap();
+
+        let sent = server.requests()[0].json();
+        assert_eq!(sent["cache_control"], json!({ "type": "ephemeral", "ttl": "1h" }));
+        assert_eq!(sent["session_id"], json!("conv-abc"));
+        assert_eq!(
+            sent["messages"][0]["content"][0]["cache_control"]["type"],
+            json!("ephemeral")
+        );
+        // The managed options still applied alongside the cache markers.
+        assert_eq!(sent["provider"]["data_collection"], json!("deny"));
+        assert_eq!(sent["usage"]["include"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn prompt_cache_markers_survive_the_streaming_path_too() {
+        let server = MockServer::always(MockResponse::ok_json("data: [DONE]\n\n")).await;
+        let p = provider_with(
+            server.base_url().to_string(),
+            vec!["sk-or"],
+            OpenRouterOptions::default(),
+        );
+        let body = json!({
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": "ctx",
+                  "prompt_cache_breakpoint": { "mode": "explicit" } }
+            ]}],
+            "prompt_cache_key": "conv-abc"
+        });
+        p.complete_stream("openai/gpt-4o", &body).await.unwrap();
+
+        let sent = server.requests()[0].json();
+        assert_eq!(sent["prompt_cache_key"], json!("conv-abc"));
+        assert_eq!(
+            sent["messages"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+            json!("explicit")
+        );
+        assert_eq!(sent["stream"], json!(true));
+    }
+
+    #[tokio::test]
     async fn complete_error_does_not_leak_key() {
         const SECRET: &str = "sk-or-SECRET-abcdef";
         let server =

@@ -77,7 +77,7 @@ function CollaborationViz() {
 			{/* Output badge */}
 			<div className="flex items-center justify-center gap-2">
 				<div className="animate-node-pulse rounded-full bg-muted/40 px-3 py-1 text-foreground/50 text-xs">
-					Together → 10× output
+					One shared context
 				</div>
 			</div>
 		</div>
@@ -129,9 +129,9 @@ function InfraViz() {
 
 function ScaleViz() {
 	const tiers = [
-		{ label: "Solo developer", count: 1 },
-		{ label: "Small team", count: 3 },
-		{ label: "Enterprise", count: 7 },
+		{ label: "Laptop", count: 1 },
+		{ label: "Own servers", count: 3 },
+		{ label: "Managed cloud", count: 7 },
 	];
 	const [tier, setTier] = useState(0);
 
@@ -156,7 +156,7 @@ function ScaleViz() {
 						onClick={() => setTier(i)}
 						type="button"
 					>
-						{i === 0 ? "Solo" : i === 1 ? "Team" : "Org"}
+						{i === 0 ? "Laptop" : i === 1 ? "Servers" : "Cloud"}
 					</button>
 				))}
 			</div>
@@ -195,21 +195,21 @@ function ScaleViz() {
 const panels = [
 	{
 		viz: <CollaborationViz />,
-		title: "Helping humans, not replacing them.",
+		title: "People and agents share the work.",
 		description:
-			"Our mission is to bring reliable agents to the workforce - amplifying what people can do, not taking their seat at the table.",
+			"Agents and people work from the same context, with humans in the loop where judgment matters.",
 	},
 	{
 		viz: <InfraViz />,
-		title: "Deploying agents doesn't need to be hard.",
+		title: "The plumbing is already there.",
 		description:
-			"We manage the infrastructure - deployment, scaling, monitoring, retries. You just write your agent and ship it.",
+			"Routing, firewall, PII redaction, budgets, retries, and audit sit around the agent instead of inside every project.",
 	},
 	{
 		viz: <ScaleViz />,
-		title: "Built for every scale.",
+		title: "Start local. Expand as needed.",
 		description:
-			"Whether you're a solo developer or a large organisation, Ryu grows with you - no rearchitecting required.",
+			"Run the same control layer on a laptop, your own servers, or managed cloud without rearchitecting.",
 	},
 ];
 
@@ -220,10 +220,11 @@ export default function Mission() {
 				<div className="mb-10">
 					<SectionTitle
 						className="max-w-xl"
-						title="Built for both humans and agents to collaborate."
+						title="The missing layer between an agent demo and production."
 					/>
 					<p className={sectionSubtitleClass}>
-						The future of work is people and agents side by side, not competing.
+						Ryu gives people and agents one interface, one context, and one
+						control layer.
 					</p>
 				</div>
 

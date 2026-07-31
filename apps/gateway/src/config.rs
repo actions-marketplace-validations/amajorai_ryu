@@ -204,6 +204,14 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub credits: CreditsConfig,
 
+    /// Provider-side prompt caching (upstream keeps a prompt prefix warm so a
+    /// repeated prefix is billed at a discount). Distinct from `cache` /
+    /// `semantic_cache`, which are this gateway's own *response* caches.
+    /// Default off — a cache write bills above the normal input rate, so
+    /// enabling it moves a caller's bill.
+    #[serde(default)]
+    pub prompt_cache: PromptCacheConfig,
+
     /// Fleet mode (managed-cloud WS2). When true, this gateway is a publicly
     /// reachable multi-tenant replica sitting behind a co-located load balancer /
     /// reverse proxy, so external callers arrive over the loopback interface and
@@ -215,6 +223,84 @@ pub struct GatewayConfig {
     /// hardcoded.
     #[serde(default)]
     pub fleet: bool,
+}
+
+/// Node-level provider prompt-cache policy — the serde face of
+/// [`ryu_gw_providers::PromptCacheOptions`], which holds the actual injection
+/// logic and documents the wire formats and precedence.
+///
+/// Every field defaults to today's behaviour (`mode = "off"`, inject nothing),
+/// so an existing `gateway.toml` with no `[prompt_cache]` table is unchanged.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PromptCacheConfig {
+    /// `"off"` (default) | `"auto"` | `"explicit"`. `auto` hands breakpoint
+    /// placement to the provider; `explicit` places them here.
+    #[serde(default = "prompt_cache_mode")]
+    pub mode: String,
+    /// `cache_control.ttl`, e.g. `"1h"`. Empty ⇒ the provider default (5 min).
+    #[serde(default)]
+    pub ttl: String,
+    /// Skip injection below this estimated prompt size; under a provider's
+    /// minimum cacheable prefix a breakpoint cannot hit but can still bill a
+    /// write. 1024 is the smallest documented provider minimum.
+    #[serde(default = "prompt_cache_min_prefix_tokens")]
+    pub min_prefix_tokens: u64,
+    /// Explicit-mode breakpoint budget, clamped to the Anthropic maximum of 4.
+    #[serde(default = "prompt_cache_breakpoints")]
+    pub breakpoints: usize,
+    /// Forward `x-ryu-session-id` as the provider's cache-affinity `session_id`.
+    /// Off by default: that header is an audit identifier, and reusing it as a
+    /// cache key is a tenancy decision, not plumbing.
+    #[serde(default)]
+    pub session_affinity: bool,
+    /// Honour the per-request `x-ryu-prompt-cache` / `x-ryu-prompt-cache-ttl`
+    /// headers. On by default; an operator who needs a node-wide posture (fixed
+    /// cost profile, compliance) turns it off so config is the only lever.
+    #[serde(default = "default_true")]
+    pub allow_request_override: bool,
+}
+
+impl Default for PromptCacheConfig {
+    fn default() -> Self {
+        Self {
+            mode: prompt_cache_mode(),
+            ttl: String::new(),
+            min_prefix_tokens: prompt_cache_min_prefix_tokens(),
+            breakpoints: prompt_cache_breakpoints(),
+            session_affinity: false,
+            allow_request_override: true,
+        }
+    }
+}
+
+impl PromptCacheConfig {
+    /// Resolve into the provider-side policy. An unparseable `mode` falls back
+    /// to `Off` rather than guessing: a typo must not silently start billing
+    /// cache writes. An unsupported `ttl` likewise degrades to the provider
+    /// default instead of being forwarded — an arbitrary value is rejected
+    /// upstream mid-request, and on the Anthropic path it would also trigger the
+    /// extended-TTL beta header. Same closed set Core validates against, so the
+    /// two layers cannot disagree about what a legal TTL is.
+    pub fn options(&self) -> ryu_gw_providers::PromptCacheOptions {
+        let ttl = self.ttl.trim().to_ascii_lowercase();
+        ryu_gw_providers::PromptCacheOptions {
+            mode: ryu_gw_providers::PromptCacheMode::parse(&self.mode).unwrap_or_default(),
+            ttl: ryu_gw_providers::prompt_cache::is_supported_ttl(&ttl).then_some(ttl),
+            min_prefix_tokens: self.min_prefix_tokens,
+            breakpoints: self.breakpoints,
+            session_affinity: self.session_affinity,
+        }
+    }
+}
+
+fn prompt_cache_mode() -> String {
+    "off".to_string()
+}
+fn prompt_cache_min_prefix_tokens() -> u64 {
+    1024
+}
+fn prompt_cache_breakpoints() -> usize {
+    2
 }
 
 /// The default active-backend id for every inverted pipeline stage: the built-in
@@ -2438,11 +2524,6 @@ pub struct WidgetConfig {
     /// Default: true.
     #[serde(default = "default_true")]
     pub scan_followups: bool,
-    /// Require the widget manifest to carry the `chat.sendFollowUp` grant before
-    /// a follow-up is accepted. Default: true. Surfaced here so the follow-up
-    /// gate is a swappable policy, enforced with Core's provenance record.
-    #[serde(default = "default_true")]
-    pub require_followup_grant: bool,
 }
 
 fn default_widget_max_calls_per_min() -> u32 {
@@ -2465,7 +2546,6 @@ impl Default for WidgetConfig {
                 default_widget_max_concurrent_instances_per_session(),
             scan_arguments: true,
             scan_followups: true,
-            require_followup_grant: true,
         }
     }
 }
@@ -2724,6 +2804,35 @@ impl GatewayConfig {
         if let Ok(key) = std::env::var("GATEWAY_MASTER_KEY") {
             config.auth.master_key = Some(key);
             config.auth.require_auth = true;
+        }
+
+        // Provider prompt caching. Every knob is independently overridable so a
+        // managed node can set a posture without shipping a gateway.toml.
+        if let Ok(mode) = std::env::var("GATEWAY_PROMPT_CACHE") {
+            config.prompt_cache.mode = mode;
+        }
+        if let Ok(ttl) = std::env::var("GATEWAY_PROMPT_CACHE_TTL") {
+            config.prompt_cache.ttl = ttl;
+        }
+        if let Some(n) = std::env::var("GATEWAY_PROMPT_CACHE_MIN_PREFIX_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            config.prompt_cache.min_prefix_tokens = n;
+        }
+        if let Some(n) = std::env::var("GATEWAY_PROMPT_CACHE_BREAKPOINTS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+        {
+            config.prompt_cache.breakpoints = n;
+        }
+        if std::env::var("GATEWAY_PROMPT_CACHE_SESSION_AFFINITY").is_ok() {
+            config.prompt_cache.session_affinity =
+                env_bool("GATEWAY_PROMPT_CACHE_SESSION_AFFINITY", false);
+        }
+        if std::env::var("GATEWAY_PROMPT_CACHE_ALLOW_OVERRIDE").is_ok() {
+            config.prompt_cache.allow_request_override =
+                env_bool("GATEWAY_PROMPT_CACHE_ALLOW_OVERRIDE", true);
         }
 
         // Composio
@@ -3923,6 +4032,7 @@ impl Default for GatewayConfig {
             env_injected_classify_provider: false,
             file_classify_provider: None,
             firewall: FirewallConfig::default(),
+            prompt_cache: PromptCacheConfig::default(),
             custom_evaluators: Vec::new(),
             firewall_org_overlays: HashMap::new(),
             firewall_agent_overlays: HashMap::new(),
@@ -4020,6 +4130,90 @@ pub(crate) mod test_config_path {
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_cache_config_tests {
+    use super::{GatewayConfig, PromptCacheConfig};
+    use ryu_gw_providers::PromptCacheMode;
+
+    #[test]
+    fn default_is_off_so_an_existing_config_bills_the_same() {
+        let cfg = PromptCacheConfig::default();
+        assert_eq!(cfg.mode, "off");
+        assert_eq!(cfg.options().mode, PromptCacheMode::Off);
+        assert!(!cfg.session_affinity);
+        assert!(cfg.allow_request_override);
+        // A gateway.toml with no [prompt_cache] table deserializes to the same.
+        assert_eq!(GatewayConfig::default().prompt_cache, cfg);
+    }
+
+    #[test]
+    fn a_missing_table_deserializes_to_the_off_default() {
+        let cfg: PromptCacheConfig =
+            serde_json::from_value(serde_json::json!({})).expect("all fields default");
+        assert_eq!(cfg, PromptCacheConfig::default());
+    }
+
+    #[test]
+    fn options_map_every_knob_through() {
+        let cfg = PromptCacheConfig {
+            mode: "explicit".into(),
+            ttl: " 1h ".into(),
+            min_prefix_tokens: 4096,
+            breakpoints: 4,
+            session_affinity: true,
+            allow_request_override: false,
+        };
+        let o = cfg.options();
+        assert_eq!(o.mode, PromptCacheMode::Explicit);
+        assert_eq!(o.ttl.as_deref(), Some("1h"), "ttl is trimmed");
+        assert_eq!(o.min_prefix_tokens, 4096);
+        assert_eq!(o.breakpoints, 4);
+        assert!(o.session_affinity);
+    }
+
+    #[test]
+    fn an_unparseable_mode_falls_back_to_off_not_on() {
+        // A typo must never silently start billing cache writes.
+        let cfg = PromptCacheConfig {
+            mode: "atuo".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.options().mode, PromptCacheMode::Off);
+    }
+
+    #[test]
+    fn an_empty_ttl_means_the_provider_default() {
+        let cfg = PromptCacheConfig {
+            mode: "auto".into(),
+            ttl: "   ".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.options().ttl, None);
+    }
+
+    #[test]
+    fn an_unsupported_ttl_degrades_instead_of_being_forwarded() {
+        // `10m` is not a documented value: forwarding it would be rejected
+        // upstream mid-request, and on the Anthropic path it would also trigger
+        // the extended-TTL beta header. Degrade to the provider default.
+        for bad in ["10m", "forever", "3600"] {
+            let cfg = PromptCacheConfig {
+                mode: "auto".into(),
+                ttl: bad.into(),
+                ..Default::default()
+            };
+            assert_eq!(cfg.options().ttl, None, "{bad}");
+        }
+        // Case-insensitive on the values that ARE supported.
+        let cfg = PromptCacheConfig {
+            mode: "auto".into(),
+            ttl: " 1H ".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.options().ttl.as_deref(), Some("1h"));
     }
 }
 

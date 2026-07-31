@@ -39,7 +39,10 @@ import { useCreditGrants } from "@/src/hooks/useCreditGrants.ts";
 import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
-import type { PiProvider } from "@/src/lib/api/pi-config.ts";
+import {
+	filterEnabledModels,
+	type PiProvider,
+} from "@/src/lib/api/pi-config.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
 import { useAgentAutoDialog } from "@/src/store/useAgentAutoDialog.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
@@ -320,7 +323,15 @@ export function useUniversalPicker(
 					isActive,
 					currentModel: isActive ? (config?.model ?? null) : null,
 					currentThinking: isActive ? (config?.thinkingLevel ?? null) : null,
-					models: p.suggestedModels.map((m) => ({ id: m, name: m })),
+					modelOverrides: p.modelOverrides,
+					// Models the user turned off in Settings are not offered here. The
+					// row's own current model is exempt (see `filterEnabledModels`), and
+					// the submenu applies the same rule to the live-discovered list.
+					models: filterEnabledModels(
+						p.suggestedModels.map((m) => ({ id: m, name: m })),
+						p.modelOverrides,
+						isActive ? config?.model : null
+					),
 				};
 			});
 

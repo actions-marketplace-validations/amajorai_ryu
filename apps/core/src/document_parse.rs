@@ -1319,10 +1319,7 @@ fn decode_text(bytes: &[u8]) -> Result<(String, Vec<String>), ParseFailure> {
     // (0xFF/0xFE cannot start one), so testing it before or after the UTF-8 arm is the
     // same answer — but it MUST come before the NUL probe.
     if let Some(text) = decode_utf16_bom(bytes) {
-        return Ok((
-            text,
-            vec!["input was UTF-16; decoded to UTF-8".to_owned()],
-        ));
+        return Ok((text, vec!["input was UTF-16; decoded to UTF-8".to_owned()]));
     }
     if let Some(at) = nul_byte_offset(bytes) {
         return Err(ParseFailure::new(
@@ -1351,18 +1348,13 @@ fn decode_text(bytes: &[u8]) -> Result<(String, Vec<String>), ParseFailure> {
     }
     Ok((
         text,
-        vec![
-            "input was not valid UTF-8; undecodable bytes were replaced".to_owned(),
-        ],
+        vec!["input was not valid UTF-8; undecodable bytes were replaced".to_owned()],
     ))
 }
 
 /// Offset of the first NUL byte within the sniff window, or `None`.
 fn nul_byte_offset(bytes: &[u8]) -> Option<usize> {
-    bytes
-        .iter()
-        .take(BINARY_SNIFF_BYTES)
-        .position(|b| *b == 0)
+    bytes.iter().take(BINARY_SNIFF_BYTES).position(|b| *b == 0)
 }
 
 /// The share of `text`'s characters that are U+FFFD. `0.0` for empty input — an empty
@@ -1449,7 +1441,10 @@ pub fn blob_input_path(sha256: &str) -> Result<std::path::PathBuf, ParseFailure>
         ));
     }
     let shard = &sha256[..2];
-    Ok(crate::paths::ryu_dir().join("blobs").join(shard).join(sha256))
+    Ok(crate::paths::ryu_dir()
+        .join("blobs")
+        .join(shard)
+        .join(sha256))
 }
 
 /// Whether the host has a Python interpreter to bootstrap a sidecar venv from.
@@ -1730,12 +1725,10 @@ mod tests {
     /// question is asked from both sides of the wire.
     fn is_registered(path: &str) -> bool {
         let needle = format!("\"{path}\"");
-        SERVER_MOD_SRC
-            .match_indices(".route(")
-            .any(|(at, marker)| {
-                let rest = SERVER_MOD_SRC[at + marker.len()..].trim_start();
-                rest.starts_with(&needle)
-            })
+        SERVER_MOD_SRC.match_indices(".route(").any(|(at, marker)| {
+            let rest = SERVER_MOD_SRC[at + marker.len()..].trim_start();
+            rest.starts_with(&needle)
+        })
     }
 
     /// The mounted route is registered, by literal path AND by handler.
@@ -1888,10 +1881,7 @@ mod tests {
         // formats that do not, like a bare `%PDF` header).
         for (name, bytes) in [
             ("payload.txt", b"PK\x03\x04\x14\x00\x00\x00".to_vec()),
-            (
-                "logo.txt",
-                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec(),
-            ),
+            ("logo.txt", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec()),
             ("report.txt", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec()),
         ] {
             let err = builtin_parse(name, &bytes)
@@ -1922,7 +1912,9 @@ mod tests {
         let mut bommed = vec![0xFF, 0xFE];
         bommed.extend_from_slice(&bytes);
         assert_eq!(
-            builtin_parse("a.txt", &bommed).expect("BOM'd UTF-16 still reads").markdown,
+            builtin_parse("a.txt", &bommed)
+                .expect("BOM'd UTF-16 still reads")
+                .markdown,
             "hello there"
         );
     }

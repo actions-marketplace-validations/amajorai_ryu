@@ -17,7 +17,7 @@ const AMAJOR_HREF = "https://amajor.ai";
 const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
 
 const HERO_TITLE =
-	"We scale companies to 24/7 private and secure AI agent-native ops without hiring, in minutes.";
+	"One interface and one control layer for every agent your company runs.";
 
 export default function Hero() {
 	return (
@@ -64,6 +64,10 @@ export default function Hero() {
 								title={HERO_TITLE}
 								titleClassName={landingHeadlineClass}
 							/>
+							<p className="max-w-xl text-balance font-medium text-lg text-muted-foreground leading-relaxed tracking-tight md:text-xl">
+								Ryu gives your company 24/7 ops that are private, secure, and
+								without hiring a platform team.
+							</p>
 
 							<div className="flex flex-col gap-3 sm:flex-row">
 								<DownloadMenu />

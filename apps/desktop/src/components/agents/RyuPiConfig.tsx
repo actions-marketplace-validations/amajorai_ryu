@@ -12,7 +12,7 @@
 //   - any other provider → Pi talks directly to that provider (a deliberate
 //     egress bypass); an api-key credential is stored in the isolated auth.json.
 
-import { RyuPiConfigView } from "@ryu/blocks/desktop/agent-edit";
+import { RyuPiConfigView } from "@ryu/blocks/desktop/agent-edit.tsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { sileo } from "sileo";
@@ -25,7 +25,7 @@ import {
 	listInstalledModels,
 	setActiveModel,
 } from "@/src/lib/api/models.ts";
-import { discoverModels } from "@/src/lib/api/pi-config.ts";
+import { discoverModels, isPiModelEnabled } from "@/src/lib/api/pi-config.ts";
 
 /** Sentinel option id for defining a brand-new custom OpenAI-compatible provider. */
 const CUSTOM_PROVIDER_ID = "__custom__";
@@ -168,6 +168,12 @@ export function RyuPiConfig() {
 			if (!id || seen.has(id)) {
 				return;
 			}
+			// A model hidden in Settings is not offered — unless it is the one this
+			// config is already set to, which must stay visible or the picker shows
+			// an empty selection for a config that is in fact using it.
+			if (id !== model && !isPiModelEnabled(selectedMeta?.modelOverrides, id)) {
+				return;
+			}
 			seen.add(id);
 			items.push({ id, name: name ?? id });
 		};
@@ -201,6 +207,7 @@ export function RyuPiConfig() {
 		installedStems,
 		model,
 		routing,
+		selectedMeta?.modelOverrides,
 		selectedMeta?.suggestedModels,
 	]);
 

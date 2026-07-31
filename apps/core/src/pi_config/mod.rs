@@ -538,7 +538,10 @@ pub fn ensure_managed_defaults() -> Result<()> {
     }
     ensure_gateway_models_json()?;
     ensure_pi_mcp_extension()?;
-    ensure_pi_lsp_extension()
+    ensure_pi_lsp_extension()?;
+    ensure_pi_plan_extension()?;
+    ensure_pi_subagent_extension()?;
+    ensure_pi_shell_extension()
 }
 
 /// The Ryu-MCP Pi extension source, embedded into the Core binary so it ships
@@ -652,6 +655,122 @@ fn pi_lsp_servers_path() -> PathBuf {
 /// same idempotency guarantees as [`ensure_pi_mcp_extension`].
 fn ensure_pi_lsp_extension() -> Result<()> {
     ship_pi_extension(&pi_lsp_extension_path(), PI_LSP_EXTENSION_SRC)
+}
+
+/// The Ryu-Plan Pi extension source, embedded for the same reason as
+/// [`PI_MCP_EXTENSION_SRC`].
+///
+/// Pi ships **none** of plan mode, to-dos or permission prompts, and says so
+/// deliberately in its own docs (`pi/docs/usage.md:309`): "It intentionally does
+/// not include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or
+/// background bash. You can build or install those workflows as extensions or
+/// packages." Every other ACP agent Ryu drives (Claude Code, Codex) has all of
+/// them, so without this file the *flagship* agent was the only one that could
+/// not plan before editing, could not show a checklist, and could not ask before
+/// running something destructive. This is that binding, built the way Pi intends.
+///
+/// All three live in one file on purpose: plan-mode denial and the permission
+/// gate are both `tool_call` hooks, and Pi's `emitToolCall` iterates extensions in
+/// load order and returns on the FIRST `block: true`. Two hooks in two files would
+/// make the precedence depend on load order; one hook in one file makes it
+/// explicit. Do not split them.
+const PI_PLAN_EXTENSION_SRC: &str = include_str!("../../assets/pi-extensions/ryu-plan.ts");
+
+/// Absolute path to the managed Pi's Ryu-Plan extension file. Same folder and
+/// same registration rules as [`pi_mcp_extension_path`].
+fn pi_plan_extension_path() -> PathBuf {
+    config_dir().join("extensions").join("ryu-plan.ts")
+}
+
+/// Ship + register the Ryu-Plan Pi extension into the MANAGED Pi config, with the
+/// same idempotency guarantees as [`ensure_pi_mcp_extension`].
+fn ensure_pi_plan_extension() -> Result<()> {
+    ship_pi_extension(&pi_plan_extension_path(), PI_PLAN_EXTENSION_SRC)
+}
+
+/// The in-band token `ryu-plan.ts` watches for on the `input` event, and the ONLY
+/// Pi-specific string the agent-neutral ACP code is allowed to know about.
+///
+/// WHY A SENTINEL AT ALL. pi-acp closes every structural door to a per-turn mode:
+/// its argv is hardcoded so `registerFlag` never sees a value; ACP session modes
+/// are already taken (pi-acp maps them onto Pi *thinking levels* and rejects any
+/// other id); `setSessionConfigOption` accepts only `model` and `thought_level`;
+/// an extension slash command reached over ACP **deadlocks the turn** (Pi's
+/// `AgentSession.prompt` short-circuits on a registered command before
+/// `_runAgentPrompt`, so `agent_end` never fires and pi-acp's `pendingTurn` is
+/// never settled). What is left is the prompt text itself: `ryu-plan.ts` strips
+/// this token in its `input` hook and transforms the rest, so the token never
+/// reaches the model.
+///
+/// WHY IT LIVES HERE. `sidecar/adapters/` is agent-neutral ACP plumbing; the
+/// moment it spells `/plan` inline it has learned which engine is on the other
+/// end. Core's composer affordance (the synthesized `ryu.plan` config option)
+/// calls this one function instead, so there is exactly one place to change if
+/// the extension's grammar ever moves.
+///
+/// The grammar is `ryu-plan.ts`'s `SENTINEL_LINE_RE` / `SENTINEL_OFF_WORD_RE`:
+/// `/plan` enters, `/plan off` (and `/plan-off`) leaves, and anything after the
+/// token on that line is kept as the user's task. Callers must place the returned
+/// string as its own FIRST LINE of the user-message block — the extension refuses
+/// a bare regex-anywhere match precisely so a pasted diff cannot flip the mode.
+pub fn plan_mode_sentinel(on: bool) -> &'static str {
+    if on {
+        "/plan"
+    } else {
+        "/plan off"
+    }
+}
+
+/// The Ryu-Subagent Pi extension source, embedded for the same reason as
+/// [`PI_MCP_EXTENSION_SRC`]. Pi ships no sub-agents either — same sentence of
+/// `pi/docs/usage.md:309` quoted on [`PI_PLAN_EXTENSION_SRC`] — so the flagship
+/// agent had no way to delegate a bounded, context-isolated job to a child while
+/// every other ACP agent Ryu speaks to does. The extension registers a tool named
+/// exactly `Task`, which is what lands it on the desktop's existing subagent card
+/// and Cowork rail with zero client changes (`acp_tool_ui_name`'s `KNOWN_TOOLS`
+/// match on the ACP title, which pi-acp sets to the raw Pi tool name).
+///
+/// Unlike [`PI_LSP_EXTENSION_SRC`], an absent config here is NOT a no-op: the
+/// extension carries a built-in agent set and the optional
+/// `extensions/ryu-subagents.json` only overrides it. That asymmetry is
+/// deliberate and is documented in the file's own preamble — an LSP tool with no
+/// server is useless, whereas a subagent with default personas is immediately so.
+const PI_SUBAGENT_EXTENSION_SRC: &str = include_str!("../../assets/pi-extensions/ryu-subagent.ts");
+
+/// Absolute path to the managed Pi's Ryu-Subagent extension file. Same folder and
+/// same registration rules as [`pi_mcp_extension_path`].
+fn pi_subagent_extension_path() -> PathBuf {
+    config_dir().join("extensions").join("ryu-subagent.ts")
+}
+
+/// Ship + register the Ryu-Subagent Pi extension into the MANAGED Pi config, with
+/// the same idempotency guarantees as [`ensure_pi_mcp_extension`].
+fn ensure_pi_subagent_extension() -> Result<()> {
+    ship_pi_extension(&pi_subagent_extension_path(), PI_SUBAGENT_EXTENSION_SRC)
+}
+
+/// The Ryu-Shell Pi extension source, embedded for the same reason as
+/// [`PI_MCP_EXTENSION_SRC`]. Background bash is the last of the capabilities
+/// `pi/docs/usage.md:309` says Pi intentionally omits. Pi's built-in `bash` is
+/// synchronous — it holds the turn open for the whole command — so "start the dev
+/// server, then edit a file" was impossible on the flagship agent. This extension
+/// adds `bash_background` / `bash_output` / `bash_kill` beside it.
+///
+/// It deliberately does NOT replace the built-in `bash` tool, and none of its
+/// three tool names may ever be `bash`: pi-acp special-cases that exact name and
+/// would hijack the call into terminal rendering and drop `rawOutput` entirely.
+const PI_SHELL_EXTENSION_SRC: &str = include_str!("../../assets/pi-extensions/ryu-shell.ts");
+
+/// Absolute path to the managed Pi's Ryu-Shell extension file. Same folder and
+/// same registration rules as [`pi_mcp_extension_path`].
+fn pi_shell_extension_path() -> PathBuf {
+    config_dir().join("extensions").join("ryu-shell.ts")
+}
+
+/// Ship + register the Ryu-Shell Pi extension into the MANAGED Pi config, with the
+/// same idempotency guarantees as [`ensure_pi_mcp_extension`].
+fn ensure_pi_shell_extension() -> Result<()> {
+    ship_pi_extension(&pi_shell_extension_path(), PI_SHELL_EXTENSION_SRC)
 }
 
 /// Write `src` to `ext_path` and register that absolute path in the managed
@@ -941,10 +1060,34 @@ fn provider_owner(id: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The `models.json` key prefix under which an AGENT's per-model visibility
+/// overrides are stored (`agent:claude` → the `claude` agent's toggles).
+///
+/// An external agent (Claude Code, Codex, …) advertises its own model list over
+/// ACP; it is not a Pi provider and has no credential, base URL or routing. But
+/// the ONE thing the user wants for it is exactly what a provider already has —
+/// a per-model on/off flag — and [`set_model_enabled`] is already a generic
+/// `{provider, model, enabled}` writer. So agent overrides reuse that store under
+/// a reserved namespace rather than growing a second one.
+///
+/// The namespace is load-bearing in one direction: [`custom_provider_ids`] must
+/// EXCLUDE these keys, or every toggled agent would surface in the catalog as a
+/// user-added custom provider (an unconfigured "agent:claude" row in the picker
+/// and the providers tab) and would be accepted as a routing target.
+pub const AGENT_OVERRIDE_PREFIX: &str = "agent:";
+
+/// The user-added provider ids in `models.json`, excluding the reserved
+/// [`AGENT_OVERRIDE_PREFIX`] keys (which are agent model-visibility scopes, not
+/// providers).
 fn custom_provider_ids() -> Vec<String> {
     read_models()["providers"]
         .as_object()
-        .map(|m| m.keys().cloned().collect())
+        .map(|m| {
+            m.keys()
+                .filter(|k| !k.starts_with(AGENT_OVERRIDE_PREFIX))
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -1698,6 +1841,27 @@ fn model_overrides(models: &Value, id: &str) -> Value {
     Value::Object(out)
 }
 
+/// Every agent's per-model overrides as `{ agentId: { modelId: bool } }`, read
+/// from the reserved [`AGENT_OVERRIDE_PREFIX`] keys of an already-read
+/// models.json value. An agent with no toggles is absent, and an untoggled model
+/// is absent from its map — absent means enabled, exactly as for a provider.
+fn agent_model_overrides(models: &Value) -> Value {
+    let mut out = Map::new();
+    let Some(providers) = models["providers"].as_object() else {
+        return Value::Object(out);
+    };
+    for key in providers.keys() {
+        let Some(agent_id) = key.strip_prefix(AGENT_OVERRIDE_PREFIX) else {
+            continue;
+        };
+        if agent_id.is_empty() {
+            continue;
+        }
+        out.insert(agent_id.to_owned(), model_overrides(models, key));
+    }
+    Value::Object(out)
+}
+
 /// The catalog of supported providers + thinking levels, with per-provider
 /// `configured` and `suggestedModels` so the desktop can render a picker.
 /// The API key stored for one provider, in the same priority order
@@ -1801,6 +1965,12 @@ pub fn catalog() -> Value {
 
     json!({
         "providers": providers,
+        // Per-AGENT model visibility, keyed by agent id (the `agent:` scopes in
+        // models.json with the prefix stripped). Same absent ⇒ enabled rule as a
+        // provider's `modelOverrides`. Carried on the catalog so every surface
+        // that already reads the catalog can filter an agent's advertised model
+        // list without a second request.
+        "agentModelOverrides": agent_model_overrides(&models_value),
         "thinkingLevels": THINKING_LEVELS,
         "apiTypes": [
             "openai-completions",
@@ -2333,11 +2503,11 @@ fn resolve_provider_discovery(
         let key = explicit_key
             .or_else(|| auth_key_value(meta.auth_key))
             .or_else(|| std::env::var(meta.auth_env).ok().filter(|s| !s.is_empty()));
-        let auth = match key {
-            Some(k) if id == "anthropic" => DiscoveryAuth::Anthropic(k),
-            Some(k) => DiscoveryAuth::Bearer(k),
-            None => DiscoveryAuth::None,
-        };
+        // Keyed on the provider's API FORMAT, not its id, so any Anthropic-format
+        // built-in probes with `x-api-key` + `anthropic-version` — the same rule
+        // the custom-provider path below applies. An id-equality check would send
+        // a bearer token to the next `anthropic-messages` provider added here.
+        let auth = discovery_auth_for(Some(meta.api), key);
         return Some((meta.models_url.to_owned(), auth));
     }
 
@@ -2560,7 +2730,224 @@ mod tests {
     }
 
     #[test]
-    fn managed_defaults_ship_both_ryu_extensions() {
+    fn pi_plan_extension_is_shipped_and_registered_idempotently() {
+        with_temp_dir(|| {
+            ensure_pi_plan_extension().expect("first ensure");
+            let ext_path = pi_plan_extension_path();
+            let shipped = fs::read_to_string(&ext_path).expect("extension file is shipped");
+            assert_eq!(
+                shipped, PI_PLAN_EXTENSION_SRC,
+                "shipped source matches the embed"
+            );
+
+            // A second ensure must neither rewrite the source nor double-register.
+            let mtime = fs::metadata(&ext_path).unwrap().modified().unwrap();
+            ensure_pi_plan_extension().expect("second ensure");
+            assert_eq!(
+                fs::metadata(&ext_path).unwrap().modified().unwrap(),
+                mtime,
+                "identical source is not rewritten"
+            );
+
+            let abs = ext_path.to_string_lossy().into_owned();
+            let exts = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array present");
+            assert_eq!(
+                exts.iter()
+                    .filter(|v| v.as_str() == Some(abs.as_str()))
+                    .count(),
+                1,
+                "registered exactly once"
+            );
+        });
+    }
+
+    #[test]
+    fn pi_plan_extension_preserves_unrelated_extensions() {
+        with_temp_dir(|| {
+            let mut settings = read_settings();
+            settings
+                .extra
+                .insert("extensions".to_owned(), json!(["/tmp/other-ext.ts"]));
+            write_settings(&settings).unwrap();
+
+            ensure_pi_plan_extension().expect("ensure");
+            let exts = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array");
+            let abs = pi_plan_extension_path().to_string_lossy().into_owned();
+            assert!(exts.iter().any(|v| v.as_str() == Some("/tmp/other-ext.ts")));
+            assert!(exts.iter().any(|v| v.as_str() == Some(abs.as_str())));
+        });
+    }
+
+    /// The sentinel is a CONTRACT with `ryu-plan.ts`, not a free-form string: the
+    /// extension matches it with `/^\/plan(-off)?(?![\w-])[ \t]*(.*)$/` against the
+    /// first line of the prompt (or of its final `\n\n` block), then strips it. If
+    /// this drifts, plan mode does not fail loudly — the token simply reaches the
+    /// model as literal text and the mode never engages. So these assertions pin
+    /// the exact bytes the extension's regexes accept.
+    #[test]
+    fn plan_mode_sentinel_matches_the_extension_grammar() {
+        assert_eq!(plan_mode_sentinel(true), "/plan");
+        assert_eq!(plan_mode_sentinel(false), "/plan off");
+
+        // The extension's own two regexes, transcribed. `regex` is not a Core
+        // dependency, so this is a hand-rolled equivalent of what they accept —
+        // the point is that the token is a bare `/plan`, optionally followed by
+        // the word `off`, with nothing else attached to it.
+        for on in [true, false] {
+            let s = plan_mode_sentinel(on);
+            assert!(s.starts_with("/plan"), "{s}: sentinel token is `/plan`");
+            let rest = &s["/plan".len()..];
+            assert!(
+                rest.is_empty() || rest == " off",
+                "{s}: only the `off` word may follow, separated by a space"
+            );
+            // `(?![\w-])` — the character after the token must never extend it,
+            // or `/planning` and `/plan-offsite` would match too.
+            assert!(
+                !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '-'),
+                "{s}: the token must not run into a word character"
+            );
+            // Single line: callers place this as its own first line, and a
+            // newline inside it would push the sentinel off that line.
+            assert!(!s.contains('\n'), "{s}: sentinel is a single line");
+            assert_eq!(s.trim(), s, "{s}: no leading/trailing whitespace");
+        }
+
+        // ON and OFF must be distinguishable — `/plan off` starting with `/plan`
+        // is exactly why the extension checks the `off` word before concluding
+        // "enter". A helper that returned the same string for both would silently
+        // make the pill a one-way switch.
+        assert_ne!(plan_mode_sentinel(true), plan_mode_sentinel(false));
+    }
+
+    #[test]
+    fn pi_subagent_extension_is_shipped_and_registered_idempotently() {
+        with_temp_dir(|| {
+            ensure_pi_subagent_extension().expect("first ensure");
+            let ext_path = pi_subagent_extension_path();
+            let shipped = fs::read_to_string(&ext_path).expect("extension file is shipped");
+            assert_eq!(
+                shipped, PI_SUBAGENT_EXTENSION_SRC,
+                "shipped source matches the embed"
+            );
+
+            let mtime = fs::metadata(&ext_path).unwrap().modified().unwrap();
+            ensure_pi_subagent_extension().expect("second ensure");
+            assert_eq!(
+                fs::metadata(&ext_path).unwrap().modified().unwrap(),
+                mtime,
+                "identical source is not rewritten"
+            );
+
+            let abs = ext_path.to_string_lossy().into_owned();
+            let exts = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array present");
+            assert_eq!(
+                exts.iter()
+                    .filter(|v| v.as_str() == Some(abs.as_str()))
+                    .count(),
+                1,
+                "registered exactly once"
+            );
+        });
+    }
+
+    #[test]
+    fn pi_subagent_extension_preserves_unrelated_extensions() {
+        with_temp_dir(|| {
+            let mut settings = read_settings();
+            settings
+                .extra
+                .insert("extensions".to_owned(), json!(["/tmp/other-ext.ts"]));
+            write_settings(&settings).unwrap();
+
+            ensure_pi_subagent_extension().expect("ensure");
+            let exts = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array");
+            let abs = pi_subagent_extension_path().to_string_lossy().into_owned();
+            assert!(exts.iter().any(|v| v.as_str() == Some("/tmp/other-ext.ts")));
+            assert!(exts.iter().any(|v| v.as_str() == Some(abs.as_str())));
+        });
+    }
+
+    #[test]
+    fn pi_shell_extension_is_shipped_and_registered_idempotently() {
+        with_temp_dir(|| {
+            ensure_pi_shell_extension().expect("first ensure");
+            let ext_path = pi_shell_extension_path();
+            let shipped = fs::read_to_string(&ext_path).expect("extension file is shipped");
+            assert_eq!(
+                shipped, PI_SHELL_EXTENSION_SRC,
+                "shipped source matches the embed"
+            );
+
+            let mtime = fs::metadata(&ext_path).unwrap().modified().unwrap();
+            ensure_pi_shell_extension().expect("second ensure");
+            assert_eq!(
+                fs::metadata(&ext_path).unwrap().modified().unwrap(),
+                mtime,
+                "identical source is not rewritten"
+            );
+
+            let abs = ext_path.to_string_lossy().into_owned();
+            let exts = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array present");
+            assert_eq!(
+                exts.iter()
+                    .filter(|v| v.as_str() == Some(abs.as_str()))
+                    .count(),
+                1,
+                "registered exactly once"
+            );
+        });
+    }
+
+    #[test]
+    fn pi_shell_extension_preserves_unrelated_extensions() {
+        with_temp_dir(|| {
+            let mut settings = read_settings();
+            settings
+                .extra
+                .insert("extensions".to_owned(), json!(["/tmp/other-ext.ts"]));
+            write_settings(&settings).unwrap();
+
+            ensure_pi_shell_extension().expect("ensure");
+            let exts = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array");
+            let abs = pi_shell_extension_path().to_string_lossy().into_owned();
+            assert!(exts.iter().any(|v| v.as_str() == Some("/tmp/other-ext.ts")));
+            assert!(exts.iter().any(|v| v.as_str() == Some(abs.as_str())));
+        });
+    }
+
+    #[test]
+    fn managed_defaults_ship_every_ryu_extension() {
         with_temp_dir(|| {
             ensure_managed_defaults().expect("managed defaults");
             assert!(pi_mcp_extension_path().exists());
@@ -2568,6 +2955,81 @@ mod tests {
                 pi_lsp_extension_path().exists(),
                 "the LSP binding rides the same spawn-time invariant pass as the MCP bridge"
             );
+            assert!(pi_plan_extension_path().exists());
+            assert!(pi_subagent_extension_path().exists());
+            assert!(pi_shell_extension_path().exists());
+        });
+    }
+
+    /// The bijection guard: every `.ts` asset under `apps/core/assets/pi-extensions/`
+    /// must actually reach the managed Pi dir when Core runs its spawn-time
+    /// invariant pass.
+    ///
+    /// **Why this exists.** Unlike the sandboxed plugin code table
+    /// (`builtin_code_table_matches_package_manifests`), nothing forced a new
+    /// pi-extension asset to be wired up. Dropping a `.ts` into that folder without
+    /// an `include_str!` + `ensure_pi_*_extension()` + a line in
+    /// [`ensure_managed_defaults`] compiles, ships nothing, and fails **silently**
+    /// at runtime — the feature looks landed and is simply absent. That is exactly
+    /// how `ryu-plan.ts` / `ryu-subagent.ts` / `ryu-shell.ts` could have gone in.
+    ///
+    /// Three properties, and all three are load-bearing:
+    /// 1. it drives [`ensure_managed_defaults`], not the individual `ensure_pi_*`
+    ///    fns — so forgetting the chain line fails here even though every
+    ///    per-extension test above still passes;
+    /// 2. it compares BYTES, not existence — so an `include_str!` pointing at the
+    ///    wrong asset (a copy/paste of the trio above) fails here;
+    /// 3. it asserts the exact asset count, so a globbing or extension-filter
+    ///    mistake that skips a file cannot pass by vacuous truth.
+    #[test]
+    fn every_pi_extension_asset_is_shipped() {
+        with_temp_dir(|| {
+            ensure_managed_defaults().expect("managed defaults");
+
+            let assets_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join("pi-extensions");
+            let shipped_dir = config_dir().join("extensions");
+
+            let mut assets: Vec<PathBuf> = fs::read_dir(&assets_dir)
+                .expect("read the pi-extensions asset dir")
+                .map(|entry| entry.expect("asset dir entry").path())
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ts"))
+                .collect();
+            assets.sort();
+
+            // Every extension shipped by `ensure_managed_defaults` today. Bump this
+            // deliberately when adding one — that is the whole point of the guard.
+            const EXPECTED_ASSETS: usize = 5;
+            assert_eq!(
+                assets.len(),
+                EXPECTED_ASSETS,
+                "a pi-extension asset was added or removed without updating the \
+                 shipping chain in ensure_managed_defaults: {assets:?}"
+            );
+
+            for asset in &assets {
+                let name = asset
+                    .file_name()
+                    .expect("asset file name")
+                    .to_string_lossy()
+                    .into_owned();
+                let shipped = shipped_dir.join(&name);
+                let shipped_src = fs::read_to_string(&shipped).unwrap_or_else(|err| {
+                    panic!(
+                        "{name} is a pi-extension asset but ensure_managed_defaults never \
+                         shipped it ({err}) — add a PI_*_EXTENSION_SRC include_str!, a \
+                         pi_*_extension_path(), an ensure_pi_*_extension() and a line in \
+                         the ensure_managed_defaults chain"
+                    )
+                });
+                let asset_src = fs::read_to_string(asset).expect("read asset source");
+                assert_eq!(
+                    shipped_src, asset_src,
+                    "{name} was shipped, but not from its own asset — an include_str! \
+                     points at the wrong file"
+                );
+            }
         });
     }
 
@@ -3233,6 +3695,82 @@ mod tests {
                 Some("light")
             );
             assert_eq!(settings.default_model.as_deref(), Some("gpt-4o"));
+        });
+    }
+
+    #[test]
+    fn disabling_a_model_records_only_that_model() {
+        with_temp_dir(|| {
+            let catalog = set_model_enabled(ModelEnabledInput {
+                provider: "openai".to_owned(),
+                model: "gpt-4o".to_owned(),
+                enabled: false,
+            })
+            .expect("toggle");
+            let openai = catalog["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == "openai")
+                .expect("openai row");
+            assert_eq!(openai["modelOverrides"]["gpt-4o"], json!(false));
+            // Untoggled models stay absent — absent means enabled, so an existing
+            // config keeps every model it had before the feature existed.
+            assert!(openai["modelOverrides"].as_object().unwrap().len() == 1);
+
+            // Re-enabling records `true` rather than deleting, which is what lets
+            // the desktop show the switch as explicitly on.
+            let catalog = set_model_enabled(ModelEnabledInput {
+                provider: "openai".to_owned(),
+                model: "gpt-4o".to_owned(),
+                enabled: true,
+            })
+            .expect("re-enable");
+            let openai = catalog["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == "openai")
+                .expect("openai row");
+            assert_eq!(openai["modelOverrides"]["gpt-4o"], json!(true));
+        });
+    }
+
+    #[test]
+    fn agent_model_overrides_are_scoped_and_never_look_like_a_provider() {
+        with_temp_dir(|| {
+            let catalog = set_model_enabled(ModelEnabledInput {
+                provider: format!("{AGENT_OVERRIDE_PREFIX}claude"),
+                model: "claude-haiku-4-5".to_owned(),
+                enabled: false,
+            })
+            .expect("toggle an agent's model");
+
+            // Surfaced under its own map, keyed by the bare agent id.
+            assert_eq!(
+                catalog["agentModelOverrides"]["claude"]["claude-haiku-4-5"],
+                json!(false)
+            );
+
+            // …and NOT as a custom provider. A leaked `agent:claude` row would
+            // render an unconfigured provider in the picker and the providers tab,
+            // and would be accepted as a routing target.
+            let ids: Vec<&str> = catalog["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p["id"].as_str())
+                .collect();
+            assert!(
+                !ids.iter().any(|id| id.starts_with(AGENT_OVERRIDE_PREFIX)),
+                "agent scopes must not appear as providers: {ids:?}"
+            );
+            assert!(
+                !custom_provider_ids()
+                    .iter()
+                    .any(|id| id.starts_with(AGENT_OVERRIDE_PREFIX)),
+                "agent scopes must not be treated as custom providers"
+            );
         });
     }
 }

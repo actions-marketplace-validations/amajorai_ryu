@@ -156,6 +156,24 @@ for f in apps/desktop/.env.production apps/webapp/.env.production; do
   log "  $f -> $NEW"
 done
 
+# 6c) fumadocs docs version — the docs site serves versioned URLs (/docs/<v>/...).
+#
+# Three sites carry the literal train version and none of them is a manifest, so
+# nothing above catches them:
+#   - src/lib/docs-version.ts  DOCS_VERSION, the single source the whole site
+#     derives /docs/<v>/... paths from (docsPath / versionedDocsHref).
+#   - next.config.mjs          the bare-/docs redirect target.
+#   - README.md                the prose statement of the current release.
+# Miss these and the mirrored ryu-docs satellite keeps serving the OLD version's
+# URLs after the train has moved. Only these three files are touched, so the
+# literal-version replace cannot hit unrelated prose elsewhere in the site.
+log "fumadocs docs version (DOCS_VERSION + /docs redirect + README)"
+for f in apps/fumadocs/src/lib/docs-version.ts apps/fumadocs/next.config.mjs apps/fumadocs/README.md; do
+  [[ -f "$f" ]] || continue
+  perl -0777 -pi -e 'my ($o,$n)=($ENV{OLD},$ENV{NEW}); s/\Q$o\E/$n/g;' "$f"
+  log "  $f -> $NEW"
+done
+
 # 6) Validate the root workspace lock still resolves against the bumped manifests.
 if command -v cargo >/dev/null 2>&1; then
   log "Validating: cargo metadata --locked --offline"
@@ -173,4 +191,4 @@ fi
 log "Bump complete: $OLD -> $NEW. Changed files:"
 git diff --stat -- $(git ls-files '*Cargo.toml' '*Cargo.lock' '*package.json' '*tauri.conf.json' 'packages/create-ryu-app/index.ts' 'packages/create-ryu-app/index.test.ts') | tail -1
 printf '\nReview with: git diff --stat\n'
-printf 'Then sync bun.lock: bun install   (bun 1.3.5, matches CI)\n'
+printf 'Then sync bun.lock: bun install   (bun 1.3.14, matches CI)\n'

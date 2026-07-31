@@ -66,6 +66,24 @@ paths:
           required: false
           description: Core conversation id, recorded in the audit log for correlation.
           schema: { type: string }
+        - name: x-ryu-prompt-cache
+          in: header
+          required: false
+          description: |
+            Provider prompt-cache mode for this request, overriding the node's
+            `[prompt_cache].mode`. `off` injects nothing; `auto` lets the provider
+            place the breakpoint; `explicit` places breakpoints on the system
+            prompt and trailing turns. Cache markers already present in the request
+            body always win over any of these. Ignored when the node sets
+            `allow_request_override = false`. Unset ⇒ the node's config decides.
+          schema: { type: string, enum: [off, auto, explicit] }
+        - name: x-ryu-prompt-cache-ttl
+          in: header
+          required: false
+          description: |
+            Requested `cache_control.ttl`. `1h` bills more to write than the 5-minute
+            default, so it is opt-in. Unset ⇒ the provider default.
+          schema: { type: string, enum: ["5m", "1h"] }
       requestBody:
         required: true
         content:
@@ -88,6 +106,38 @@ paths:
             x-degraded:
               description: Set to `fallback:<provider>` when served by a fallback.
               schema: { type: string }
+            x-ryu-prompt-cache:
+              description: |
+                What the prompt-cache stage did. `injected` markers were added;
+                `caller` the body carried a root-level marker so the caller is
+                driving; `caller-breakpoints` a marker already sat inside
+                `messages`/`tools` and suppressed injection (a stray one from a
+                turn hook or a replayed transcript looks the same as a deliberate
+                one, hence the separate value); `automatic` the model family caches
+                with no marker; `below-minimum` the prompt was too small to be
+                cacheable; `disabled` injection is off (also the value when this
+                gateway's own response cache answered, i.e. `x-cache: HIT`).
+              schema:
+                type: string
+                enum:
+                  [
+                    injected,
+                    caller,
+                    caller-breakpoints,
+                    automatic,
+                    below-minimum,
+                    disabled,
+                  ]
+            x-ryu-cache-read:
+              description: |
+                Prompt tokens the provider served from its cache. Non-streaming only —
+                on a stream the counts arrive after the headers are sent.
+              schema: { type: integer }
+            x-ryu-cache-write:
+              description: |
+                Prompt tokens the provider wrote into its cache. Billed above the
+                normal input rate, so it is reported apart from the read count.
+              schema: { type: integer }
           content:
             application/json:
               schema:

@@ -108,13 +108,17 @@ export default function LandingIntegrations() {
 					<div className="border-border/60 border-y bg-muted/30 px-6 py-10 text-center sm:px-10 sm:py-12">
 						<SectionTitle
 							suffix={
-								<span className="text-muted-foreground"> out of the box</span>
+								<span className="text-muted-foreground">
+									{" "}
+									through one control layer
+								</span>
 							}
-							title="900+ integrations"
+							title="Your stack"
 						/>
 						<p className={cn(landingSubheadlineClass, "mx-auto max-w-xl")}>
-							GitHub, Slack, Notion, Gmail, Postgres, and hundreds more via MCP
-							and Composio, wired in and governed on every call.
+							MCP, ACP, OpenAI-compatible endpoints, and Composio connect agents
+							to the tools you already use. Routing, policy, budgets, and audit
+							stay in the path.
 						</p>
 					</div>
 

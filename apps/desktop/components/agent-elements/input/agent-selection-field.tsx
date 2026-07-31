@@ -30,19 +30,20 @@ import {
 	ArrowTurnBackwardIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Input } from "@ryu/ui/components/input";
-import { Label } from "@ryu/ui/components/label";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Label } from "@ryu/ui/components/label.tsx";
 import {
 	Select,
 	SelectContent,
 	SelectItem,
 	SelectTrigger,
 	SelectValue,
-} from "@ryu/ui/components/select";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/select.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { ComposerSettingsMenu } from "@/components/agent-elements/input/composer-settings-menu.tsx";
+import { ManageModelsButton } from "@/components/agent-elements/input/manage-models-button.tsx";
 import {
 	type ProviderEntry,
 	UniversalPickerBody,
@@ -53,7 +54,10 @@ import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import { fetchAcpConfig } from "@/src/lib/api/acp.ts";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import { fetchPiCatalog } from "@/src/lib/api/pi-config.ts";
+import {
+	fetchPiCatalog,
+	filterEnabledModels,
+} from "@/src/lib/api/pi-config.ts";
 import {
 	type AgentSelection,
 	EMPTY_AGENT_SELECTION,
@@ -227,7 +231,7 @@ export function AgentSelectionField({
 	disabled,
 }: AgentSelectionFieldProps) {
 	const catalogQuery = useQuery({
-		queryKey: ["pi-catalog", target.url, target.token ?? ""],
+		queryKey: ["pi-config-catalog", target.url],
 		queryFn: () => fetchPiCatalog(target),
 		staleTime: 5 * 60 * 1000,
 		refetchOnWindowFocus: false,
@@ -277,7 +281,7 @@ export function AgentSelectionField({
 	const data: UniversalPickerData = useMemo(() => {
 		const providers: ProviderEntry[] = (catalogQuery.data?.providers ?? [])
 			// The synthetic gateway pseudo-provider carries no models of its own.
-			.filter((p) => p.id !== "gateway" && p.suggestedModels.length > 0)
+			.filter((p) => p.id !== "gateway")
 			.map((p) => {
 				const isActive = !value.agent_id && value.provider === p.id;
 				return {
@@ -296,7 +300,14 @@ export function AgentSelectionField({
 					isActive,
 					currentModel: isActive ? value.model : null,
 					currentThinking: isActive ? value.thinking_level : null,
-					models: p.suggestedModels.map((m) => ({ id: m, name: m })),
+					modelOverrides: p.modelOverrides,
+					// Hidden models are not offerable here either; the field's own
+					// recorded model stays visible so an existing setting is readable.
+					models: filterEnabledModels(
+						p.suggestedModels.map((m) => ({ id: m, name: m })),
+						p.modelOverrides,
+						isActive ? value.model : null
+					),
 				};
 			});
 
@@ -386,6 +397,7 @@ export function AgentSelectionField({
 		<div className={cn("space-y-3", className)}>
 			<ComposerSettingsMenu
 				align="end"
+				footer={(close) => <ManageModelsButton close={close} />}
 				renderBody={(close) => (
 					<>
 						<UniversalPickerBody close={close} data={data} />

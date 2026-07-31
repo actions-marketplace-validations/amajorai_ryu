@@ -148,6 +148,7 @@ use utoipa::OpenApi;
         super::create_mcp_server,
         super::list_mcp_tools,
         super::call_mcp_tool,
+        super::exec_scan,
         super::tools_search,
         super::tools_describe,
         super::tools_exec,
@@ -286,6 +287,8 @@ use utoipa::OpenApi;
         super::routing_api::advice,
         super::routing_api::get_policy,
         super::routing_api::put_policy,
+        super::routing_api::get_retry_policy,
+        super::routing_api::put_retry_policy,
         super::load_acp_session_handler,
         super::set_agent_capabilities,
         // Approvals

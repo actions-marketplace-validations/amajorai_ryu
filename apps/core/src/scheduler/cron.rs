@@ -279,7 +279,10 @@ mod tests {
         let fired = (0..24 * 60)
             .map(|m| day + chrono::Duration::minutes(m))
             .any(|t| s.matches_in(t, tz));
-        assert!(!fired, "02:30 local does not exist on the spring-forward day");
+        assert!(
+            !fired,
+            "02:30 local does not exist on the spring-forward day"
+        );
     }
 
     #[test]

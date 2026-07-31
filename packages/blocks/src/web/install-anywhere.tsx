@@ -18,38 +18,38 @@ const PLACES = [
 	{
 		id: "personal",
 		Icon: Laptop,
-		place: "Personal machine",
-		use: "Your everyday private, local agent.",
+		place: "Your laptop",
+		use: "Keep sensitive work local while you get started.",
 	},
 	{
 		id: "work",
 		Icon: MonitorSmartphone,
-		place: "Work laptop",
-		use: "Day-to-day work agents, right where you already work.",
+		place: "Work machine",
+		use: "Run day-to-day agents where your team already works.",
 	},
 	{
 		id: "macmini",
 		Icon: HardDrive,
 		place: "Mac mini",
-		use: "24/7 always-on agents that never sleep.",
+		use: "Keep a private node running for background work.",
 	},
 	{
 		id: "pi",
 		Icon: Cpu,
 		place: "Raspberry Pi",
-		use: "Lightweight always-on tasks on tiny hardware.",
+		use: "Run lightweight, always-on tasks on small hardware.",
 	},
 	{
 		id: "homeserver",
 		Icon: Server,
 		place: "Home server",
-		use: "Monitoring and background jobs running quietly.",
+		use: "Keep monitoring and background jobs on your own network.",
 	},
 	{
 		id: "cloud",
 		Icon: Cloud,
 		place: "Cloud",
-		use: "Production for enterprises, startups, and SMEs.",
+		use: "Move to managed cloud when the team needs shared production.",
 	},
 ] as const;
 
@@ -61,8 +61,8 @@ export default function InstallAnywhere() {
 			<div className="mx-auto max-w-6xl">
 				<SectionHeading
 					eyebrow="Install anywhere"
-					subtitle="Ryu runs wherever the work is. You don't use one agent, you run many, each living where it belongs."
-					title="Where will your agents live?"
+					subtitle="Your laptop, your own servers, or managed cloud. The setup stays the same as the work moves."
+					title="Run it where the work is"
 				/>
 
 				<div className="grid gap-3 lg:grid-cols-[1fr_1fr]">
@@ -126,10 +126,9 @@ export default function InstallAnywhere() {
 							</p>
 						</motion.div>
 
-						<p className="text-balance text-muted-foreground/70 text-sm italic leading-relaxed">
-							“I use Ryu everywhere: to monitor servers, on my Pi, on my Mac
-							mini, on personal. They all serve different purposes. I don't use
-							one agent, they all live where they need to work.”
+						<p className="text-balance text-muted-foreground/70 text-sm leading-relaxed">
+							Use one control layer across personal machines, private servers,
+							and managed cloud. Keep the deployment choice yours.
 						</p>
 					</div>
 				</div>

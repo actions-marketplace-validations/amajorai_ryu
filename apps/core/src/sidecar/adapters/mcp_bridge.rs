@@ -759,6 +759,18 @@ pub(crate) async fn build_widget_event(
     let _ = mcp.prewarm_widgets(server).await;
     let tool_ids = mcp.widget_accessible_tool_ids(server).await;
 
+    // The frame's Gateway-sourced capabilities. Computed BEFORE the mint so the
+    // set handed to the iframe and the permission recorded on the instance come
+    // from one value and cannot drift into disagreeing: the desktop host gates
+    // `ui.sendMessage` on the former, Core gates `/api/widgets/follow-up` on the
+    // latter, and they must be the same decision.
+    let approved_grants = if binding.widget_accessible {
+        vec!["tool:call".to_owned(), "ui:send_message".to_owned()]
+    } else {
+        Vec::new()
+    };
+    let may_send_follow_up = approved_grants.iter().any(|g| g == "ui:send_message");
+
     // Mint the instance (round-trip identity). The conversation/session key is
     // the permission scope; over the per-session cap → no widget.
     let instance = crate::server::widgets::mint_widget_instance(
@@ -766,6 +778,7 @@ pub(crate) async fn build_widget_event(
         agent_id,
         server.to_owned(),
         tool_ids,
+        may_send_follow_up,
     )?;
 
     // The WIDGET channel: `structuredContent` → `toolOutput`, `_meta` minus
@@ -773,12 +786,6 @@ pub(crate) async fn build_widget_event(
     // [`widget_payload`] for why, and for the trace proving the model edge stays
     // neutralized.
     let (tool_output, meta) = widget_payload(typed);
-
-    let approved_grants = if binding.widget_accessible {
-        vec!["tool:call".to_owned(), "ui:send_message".to_owned()]
-    } else {
-        Vec::new()
-    };
 
     // Real tool-call id when the caller has one (the chat loop); otherwise the
     // synthetic instance-derived id (the ACP bridge, which cannot see it).

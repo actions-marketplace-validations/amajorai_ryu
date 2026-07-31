@@ -113,6 +113,40 @@ const RYU_UI_KEY = "ryu";
 const WIDGET_LIST_CAP = 12;
 
 /**
+ * True when this Pi was launched by `pi-acp` rather than by a human in a terminal.
+ * pi-acp spawns `pi --mode rpc --no-themes` (verified: `process.argv` inside a live
+ * ACP-driven turn is `[node, …/.bin/pi, "--mode", "rpc", "--no-themes"]`).
+ *
+ * WHY THIS GATE EXISTS: a registered slash command reached over ACP **hangs the
+ * turn**. Pi's `AgentSession.prompt` handles extension commands first and returns
+ * early — `preflightResult?.(true); return;` — without running the agent loop, so
+ * no `agent_end` is ever emitted. pi-acp settles its `pendingTurn` only from
+ * `agent_end` (or from the `.catch` on an RPC error, which does not fire because
+ * `proc.prompt()` resolved fine), so the ACP `session/prompt` request never
+ * returns and the chat spins until Core's turn timeout.
+ *
+ * Verified by running it, not inferred: registering a probe command and sending
+ * `/probe` over ACP ran the handler (so the command dispatched) and then timed
+ * out waiting for `session/prompt` to return.
+ *
+ * The two commands below are pure TUI decoration (`setStatus`/`setWidget`/
+ * `notify`), all of which pi-acp discards anyway — so under ACP they cost a hung
+ * turn and buy nothing. They stay registered for a human running the managed Pi
+ * directly in a terminal, where they work and are useful. The model reaches the
+ * same functionality over ACP through the `ryu_list_tools` / `ryu_call_tool`
+ * tools, which are unaffected.
+ *
+ * NOTE FOR ANY FUTURE RYU PI EXTENSION: do not register a slash command without
+ * this gate. `ryu-plan.ts`, `ryu-subagent.ts` and `ryu-shell.ts` register none at
+ * all, deliberately — `/plan` must fall through to the `input` event instead.
+ */
+const IS_ACP_RPC = ((): boolean => {
+	const argv = process.argv;
+	const i = argv.indexOf("--mode");
+	return i !== -1 && argv[i + 1] === "rpc";
+})();
+
+/**
  * Last fetched unfiltered catalog. Kept so the status line and the `/ryu-call`
  * argument completions are answerable without another round trip to Core (a
  * completion provider fires per keystroke). It is a display cache only — the
@@ -489,6 +523,13 @@ export default async function (pi: ExtensionAPI) {
 				// in Pi's process.
 			});
 	});
+
+	// Terminal-only: over ACP a registered slash command hangs the turn. See
+	// `IS_ACP_RPC`. The tools stay registered unconditionally above — only these
+	// human-facing commands are gated.
+	if (IS_ACP_RPC) {
+		return;
+	}
 
 	pi.registerCommand("ryu-tools", {
 		description:

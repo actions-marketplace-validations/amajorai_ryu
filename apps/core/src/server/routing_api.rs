@@ -135,3 +135,67 @@ pub async fn put_policy(
         Json(serde_json::json!({ "ok": true, "rules": policy.rules.len() })),
     )
 }
+
+/// `GET /api/routing/retry-policy` — the node's reactive failover config, plus
+/// the agents a `candidates` list may name.
+///
+/// The candidate pool rides along for the same reason `credit_providers` does on
+/// [`get_policy`]: a settings form must offer only agents whose windows can
+/// actually be read, or a user would list one that can never be failed over to
+/// and the feature would look broken. Serving it from `ryu_usage` means the form
+/// cannot drift away from the readers that implement it.
+#[utoipa::path(
+    get,
+    path = "/api/routing/retry-policy",
+    tag = "Routing",
+    summary = "The node's reactive failover config",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn get_retry_policy(State(state): State<ServerState>) -> impl IntoResponse {
+    let policy = routing_policy::reactive::load(&state.preferences).await;
+    Json(serde_json::json!({
+        "policy": policy,
+        "subscription_agents": ryu_usage::SUBSCRIPTION_AGENTS,
+    }))
+}
+
+/// `PUT /api/routing/retry-policy` — replace the node's reactive failover config.
+///
+/// Unlike [`put_policy`] this does NOT invalidate the signal cache: the reactive
+/// path deliberately reads windows uncached at the moment of failure (see
+/// `routing_policy::reactive`), so there is no cached reading for a config change
+/// to invalidate.
+#[utoipa::path(
+    put,
+    path = "/api/routing/retry-policy",
+    tag = "Routing",
+    summary = "Replace the node's reactive failover config",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Saved", body = serde_json::Value),
+        (status = 500, description = "Could not persist")
+    )
+)]
+pub async fn put_retry_policy(
+    State(state): State<ServerState>,
+    Json(policy): Json<routing_policy::reactive::RetryPolicy>,
+) -> impl IntoResponse {
+    if let Err(e) = state
+        .preferences
+        .set(
+            routing_policy::reactive::RETRY_POLICY_PREF,
+            &policy.to_pref_value(),
+        )
+        .await
+    {
+        tracing::error!(error = %e, "could not persist reactive failover policy");
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "could not persist policy" })),
+        );
+    }
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "enabled": policy.enabled })),
+    )
+}

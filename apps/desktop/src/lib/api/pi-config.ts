@@ -58,9 +58,52 @@ export interface PiProvider {
 }
 
 export interface PiCatalog {
+	/**
+	 * Per-AGENT model visibility, keyed by agent id then model id. An external
+	 * agent advertises its own models over ACP rather than through a provider, so
+	 * its toggles live here instead of on a {@link PiProvider}. Same rule: an id
+	 * absent from the map is enabled.
+	 */
+	agentModelOverrides?: Record<string, Record<string, boolean>>;
 	apiTypes: string[];
 	providers: PiProvider[];
 	thinkingLevels: string[];
+}
+
+/** A missing override is enabled; only an explicit false hides a model. */
+export function isPiModelEnabled(
+	modelOverrides: Record<string, boolean> | undefined,
+	modelId: string
+): boolean {
+	return modelOverrides?.[modelId] !== false;
+}
+
+/**
+ * The `provider` value that scopes a model toggle to an AGENT rather than a
+ * provider (mirrors Core's `AGENT_OVERRIDE_PREFIX`). Core stores both in one
+ * place and keeps the agent scopes out of the provider catalog.
+ */
+export function agentModelScope(agentId: string): string {
+	return `agent:${agentId}`;
+}
+
+/**
+ * Drop the models an agent has toggled off, but never drop `keep` — the model
+ * the surface is CURRENTLY set to. Hiding the active selection would leave a
+ * picker with no visible value and no way to see what is running; the settings
+ * list is where a user turns it back on.
+ */
+export function filterEnabledModels<T extends { id: string }>(
+	items: T[],
+	overrides: Record<string, boolean> | undefined,
+	keep?: string | null
+): T[] {
+	if (!overrides) {
+		return items;
+	}
+	return items.filter(
+		(item) => item.id === keep || isPiModelEnabled(overrides, item.id)
+	);
 }
 
 /** The desired configuration to apply. */

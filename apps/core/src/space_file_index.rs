@@ -183,8 +183,7 @@ const STALE_PENDING_GRACE: std::time::Duration = std::time::Duration::from_secs(
 /// because the poller has a hard ceiling and writes its own terminal row; if someone
 /// raised the budget to 30 minutes and this were a literal `20 * 60`, the read path
 /// would start declaring live parses dead and no test would notice.
-const STALE_PENDING_AFTER: std::time::Duration =
-    POLL_BUDGET.saturating_add(STALE_PENDING_GRACE);
+const STALE_PENDING_AFTER: std::time::Duration = POLL_BUDGET.saturating_add(STALE_PENDING_GRACE);
 
 /// Reason code for "the parser returned no text at all".
 ///
@@ -1520,7 +1519,13 @@ mod tests {
             .unwrap();
         let bytes = b"PK\x03\x04\x14\x00\x00\x00deck.xml".to_vec();
         let doc = spaces
-            .create_file(&space, "notes", &bytes, "text/plain", &DocOwner::unattributed())
+            .create_file(
+                &space,
+                "notes",
+                &bytes,
+                "text/plain",
+                &DocOwner::unattributed(),
+            )
             .await
             .unwrap();
 
@@ -1942,7 +1947,9 @@ mod tests {
         assert_eq!(one.state, IndexState::Failed);
         assert_eq!(one.reason_code.as_deref(), Some(REASON_PENDING_ABANDONED));
         assert!(
-            one.message.as_deref().is_some_and(|m| m.contains("never finished")),
+            one.message
+                .as_deref()
+                .is_some_and(|m| m.contains("never finished")),
             "the row has to say what happened: {:?}",
             one.message
         );
@@ -2007,10 +2014,7 @@ mod tests {
         // A host whose clock jumped backwards reads every row as being from the
         // future. Age clamps at zero, so it reports "still running" until the clock
         // catches up rather than declaring every in-flight parse dead at once.
-        assert_eq!(
-            demote_abandoned_pending(edge, 0).state,
-            IndexState::Pending
-        );
+        assert_eq!(demote_abandoned_pending(edge, 0).state, IndexState::Pending);
     }
 
     #[test]

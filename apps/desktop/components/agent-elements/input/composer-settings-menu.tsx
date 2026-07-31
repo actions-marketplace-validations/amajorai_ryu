@@ -7,7 +7,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -16,9 +16,9 @@ import {
 	DropdownMenuSubContent,
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
-} from "@ryu/ui/components/dropdown-menu";
-import { cn } from "@ryu/ui/lib/utils";
-import { type ReactNode, useState } from "react";
+} from "@ryu/ui/components/dropdown-menu.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
+import { type ReactElement, type ReactNode, useState } from "react";
 import { COMPOSER_SELECT_TRIGGER } from "@/components/agent-elements/input/composer-select.ts";
 
 export interface ComposerSettingItem {
@@ -84,7 +84,7 @@ export interface ComposerSettingsMenuProps {
 	 * self-hides when the node renders nothing, so passing a component that may
 	 * return `null` (like `UsageBar`) never leaves an empty bordered strip.
 	 */
-	footer?: ReactNode;
+	footer?: ReactNode | ((close: () => void) => ReactNode);
 	/**
 	 * A mark rendered at the START of the default trigger, before the summary —
 	 * the active agent's engine logo or custom avatar image in compact mode. It
@@ -121,7 +121,7 @@ export interface ComposerSettingsMenuProps {
 	 * Model · Thinking dropdown behind a different-looking trigger. When omitted,
 	 * the default `Ryu · Sonnet · Plan` summary button is shown.
 	 */
-	trigger?: ReactNode;
+	trigger?: ReactElement;
 }
 
 function activeItem(
@@ -205,6 +205,9 @@ export function ComposerSettingsMenu({
 	const selectItem = (section: ComposerSettingsSection) => (id: string) => {
 		section.onChange(id);
 	};
+	const closeMenu = () => setOpen(false);
+	const footerContent =
+		typeof footer === "function" ? footer(closeMenu) : footer;
 
 	const renderRow =
 		(section: ComposerSettingsSection) => (item: ComposerSettingItem) => {
@@ -324,7 +327,7 @@ export function ComposerSettingsMenu({
 				sideOffset={6}
 			>
 				{renderBody
-					? renderBody(() => setOpen(false))
+					? renderBody(closeMenu)
 					: visibleSections.map((section) => {
 							const loadingEmpty = isLoadingEmpty(section);
 							const activeDeco = section.decorate?.(
@@ -391,7 +394,11 @@ export function ComposerSettingsMenu({
 								</DropdownMenuSub>
 							);
 						})}
-				{footer && <div className="px-2 pt-2 pb-1 empty:hidden">{footer}</div>}
+				{footerContent && (
+					<div className="sticky bottom-0 z-10 shrink-0 border-border/50 border-t bg-muted/90 px-2 pt-2 pb-1 backdrop-blur-2xl empty:hidden">
+						{footerContent}
+					</div>
+				)}
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);

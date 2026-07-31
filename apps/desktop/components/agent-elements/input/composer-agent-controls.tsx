@@ -34,6 +34,7 @@ import {
 	ComposerSettingsMenu,
 	type ComposerSettingsSection,
 } from "@/components/agent-elements/input/composer-settings-menu.tsx";
+import { ManageModelsButton } from "@/components/agent-elements/input/manage-models-button.tsx";
 import {
 	ModeMenuContent,
 	type ModeOption,
@@ -44,6 +45,7 @@ import { useUniversalPicker } from "@/components/agent-elements/input/use-univer
 import type { InputBarInfoBar } from "@/components/agent-elements/input-bar.tsx";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
 import { useAgentCapabilities } from "@/src/hooks/useAgentCapabilities.ts";
+import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
 import { useRoutingAdvice } from "@/src/hooks/useRoutingAdvice.ts";
 import {
 	engineForAgent,
@@ -51,6 +53,7 @@ import {
 	getTeamStackIcon,
 } from "@/src/lib/agent-logos.tsx";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
+import { filterEnabledModels } from "@/src/lib/api/pi-config.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
 
 /** Sentinel `ModeSelector` value that routes to the "create a new agent" flow. */
@@ -275,6 +278,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// Pass the selected model so GGUF detection (vision/mmproj, template tools)
 	// tracks the composer's model pick, not just the agent's bound slot.
 	const { capabilities } = useAgentCapabilities(agentId, model);
+	const { catalog: piCatalog } = usePiConfig();
 
 	// Threshold fallback: what Core would actually run this turn, given how much
 	// Ryu credit / provider balance / subscription window is left. Derived here
@@ -353,6 +357,11 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// built-in engine catalog. ACP agents advertise their own models in-chat, so
 	// with no override their catalog section is empty (and thus auto-hidden).
 	const activeAgent = agents.find((a) => a.id === agentId);
+	// Per-model visibility for THIS agent (Settings → Providers → Agents), from
+	// the shared Pi catalog query.
+	const agentModelOverrides = agentId
+		? piCatalog?.agentModelOverrides?.[agentId]
+		: undefined;
 	const activeAgentIsAcp = activeAgent?.transport === "acp";
 	// Capability badges (tools / thinking / vision) only carry meaning for local
 	// models — where the effective capabilities are genuinely variable and detected
@@ -378,9 +387,16 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 				key: "model",
 				label: "Model",
 				ariaLabel: "Select model",
+				// Without a caller override this is the engine catalog; it obeys the
+				// same per-agent visibility toggles the override path applies, so a
+				// hidden model does not reappear on the surfaces that use this branch.
 				items: activeAgentIsAcp
 					? []
-					: modelOptions.map((m) => ({ id: m.id, name: label(m.name) })),
+					: filterEnabledModels(
+							modelOptions.map((m) => ({ id: m.id, name: label(m.name) })),
+							agentModelOverrides,
+							model
+						),
 				value: model ?? undefined,
 				onChange: onModelChange,
 			};
@@ -430,6 +446,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	const settingsMenu = (
 		<ComposerSettingsMenu
 			compact={compact || compactTrigger}
+			footer={(close) => <ManageModelsButton close={close} />}
 			leading={leading}
 			renderBody={renderBody}
 			sections={sections}

@@ -33,7 +33,7 @@ export const GENERAL_FAQ_ITEMS: FAQItem[] = [
 		id: "3",
 		title: "Which AI models does Ryu support?",
 		content: [
-			"Ryu supports OpenAI, Anthropic, local models (via Ollama or compatible runtimes), and 300+ models via OpenRouter. The router handles dynamic model switching - your agent code doesn't change when you swap providers.",
+			"Ryu supports OpenAI, Anthropic, Gemini, local models via Ollama or compatible runtimes, and 400+ models through supported providers. The router handles model switching, so your agent code does not change when you swap providers.",
 		],
 	},
 	{
@@ -54,7 +54,7 @@ export const GENERAL_FAQ_ITEMS: FAQItem[] = [
 		id: "6",
 		title: "Can I use Ryu with agents I've already built?",
 		content: [
-			"Yes. Ryu Gateway is an OpenAI-compatible proxy. Point your existing agent's base URL to your Ryu Gateway instance and it works immediately - no SDK changes, no refactoring.",
+			"Yes. Bring Claude Code, Codex, Gemini, OpenClaw, Ollama, or an agent you built. Ryu Gateway is OpenAI-compatible, so existing agents can point at it without a rewrite.",
 		],
 	},
 	{

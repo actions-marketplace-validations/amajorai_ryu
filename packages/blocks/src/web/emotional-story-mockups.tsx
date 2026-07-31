@@ -21,7 +21,7 @@ function StatusDot({ tone }: { tone: "ok" | "warn" | "bad" | "idle" }) {
 	);
 }
 
-/** Generic chatbot: copy-paste, no runs, no governance. */
+/** Generic chatbot: the conversation stops before the work begins. */
 export function ChatbotOnlyMock() {
 	return (
 		<MinimalCard contentClassName="space-y-3">
@@ -32,7 +32,7 @@ export function ChatbotOnlyMock() {
 				Here's a summary… (paste into Gmail yourself)
 			</div>
 			<div className="rounded-lg border border-border border-dashed bg-muted/20 px-3 py-2 text-center text-[10px] text-muted-foreground">
-				No audit · no tools · no memory · dies in prod
+				No audit trail · no tool access · no approval path
 			</div>
 		</MinimalCard>
 	);
@@ -162,7 +162,7 @@ export function DemoDeathMock() {
 	);
 }
 
-/** Governed agent — gateway overview the room can't argue with. */
+/** Governed agent — the controls a real deployment needs. */
 export function GovernedAgentMock() {
 	return (
 		<MinimalCard contentClassName="space-y-4">
@@ -197,13 +197,13 @@ export function GovernedAgentMock() {
 				</div>
 			</div>
 			<p className="text-center font-medium text-[11px] text-foreground">
-				Nobody in the room says no.
+				Ready for review and rollout
 			</p>
 		</MinimalCard>
 	);
 }
 
-/** Seven-minute path — install → agent → first real task. */
+/** First-run path — install → agent → first real task. */
 export function SevenMinuteMock() {
 	const steps = [
 		{ label: "Download Ryu", done: true },
@@ -214,9 +214,7 @@ export function SevenMinuteMock() {
 		<AppShell active="Chat" nav={["Chat", "Agents", "Runs", "Gateway"]}>
 			<div className="space-y-3">
 				<div className="flex items-center justify-between rounded-lg bg-foreground px-3 py-2 text-background">
-					<span className="font-medium text-[11px]">
-						7:00 · first run complete
-					</span>
+					<span className="font-medium text-[11px]">first run complete</span>
 					<span className="font-mono text-[10px] text-background/80">
 						gateway on
 					</span>
@@ -252,7 +250,7 @@ export function StillRunningMock() {
 					<div>
 						<p className="font-mono text-foreground text-xs">support-triage</p>
 						<p className="text-[10px] text-muted-foreground">
-							since Friday · 0 incidents
+							overnight run · governed
 						</p>
 					</div>
 					<span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2 py-1 text-[10px] text-success">

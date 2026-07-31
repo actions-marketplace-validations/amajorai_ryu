@@ -72,7 +72,7 @@ import { AgentLogo } from "@/src/lib/agent-logos.tsx";
 import type { AgentCatalogEntry, AgentSummary } from "@/src/lib/api/agents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
-import { discoverModels } from "@/src/lib/api/pi-config.ts";
+import { discoverModels, isPiModelEnabled } from "@/src/lib/api/pi-config.ts";
 import {
 	expiryClass,
 	formatCountdown,
@@ -111,6 +111,8 @@ export interface ProviderEntry {
 	/** True for the Ryu-managed provider (included with the plan, no key). Drives
 	 * the upsell body when the user has no active subscription (`configured` false). */
 	managed: boolean;
+	/** Explicit model visibility overrides; absent ids remain enabled. */
+	modelOverrides?: Record<string, boolean>;
 	/** Selectable models (from the provider's suggested set; live-discovered ids
 	 * are merged in on open for discovery-capable providers like OpenRouter). */
 	models: ComposerSettingItem[];
@@ -579,10 +581,20 @@ function ProviderSubBody({
 		const seen = new Set<string>();
 		const out: ComposerSettingItem[] = [];
 		const push = (id: string, name?: string) => {
-			if (id && !seen.has(id)) {
-				seen.add(id);
-				out.push({ id, name: name ?? id });
+			if (!id || seen.has(id)) {
+				return;
 			}
+			// A model the user turned off is hidden — EXCEPT the one this row is
+			// currently set to, which stays visible so the picker never renders a
+			// selection it can't show. Turning it back on is a Settings action.
+			if (
+				id !== provider.currentModel &&
+				!isPiModelEnabled(provider.modelOverrides, id)
+			) {
+				return;
+			}
+			seen.add(id);
+			out.push({ id, name: name ?? id });
 		};
 		for (const m of discovery.data?.models ?? []) {
 			push(m.id, m.name);
@@ -591,7 +603,12 @@ function ProviderSubBody({
 			push(it.id, it.name);
 		}
 		return out;
-	}, [discovery.data, provider.models]);
+	}, [
+		discovery.data,
+		provider.currentModel,
+		provider.modelOverrides,
+		provider.models,
+	]);
 
 	if (provider.upsell) {
 		const upgradeCopy =

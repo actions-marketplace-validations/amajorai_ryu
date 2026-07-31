@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_selection::AgentSelection;
 
+pub mod reactive;
 pub mod signals;
 
 /// Preference key holding the node's rule list, as JSON ([`RoutingPolicy`]).
@@ -808,7 +809,11 @@ mod tests {
         assert_eq!(advice.severity, Severity::Swap);
         assert_eq!(advice.effective.model, "sonnet");
         assert_eq!(advice.signal.as_ref().unwrap().value, 40.0);
-        assert!(advice.reason.as_deref().unwrap().contains("Claude · Weekly"));
+        assert!(advice
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("Claude · Weekly"));
     }
 
     #[test]
@@ -1072,7 +1077,11 @@ mod tests {
         // The thread keeps its agent (and so its session), but the user is told.
         assert_eq!(advice.severity, Severity::Warn);
         assert_eq!(advice.effective, mid_thread);
-        assert!(advice.reason.as_deref().unwrap().contains("new conversations"));
+        assert!(advice
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("new conversations"));
     }
 
     #[test]

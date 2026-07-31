@@ -2384,6 +2384,12 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         )
         .route("/api/mcp/tools", get(list_mcp_tools))
         .route("/api/mcp/tools/call", post(call_mcp_tool))
+        // Command-approval scan for callers Core cannot gate at the ACP
+        // `request_permission` seam — today the flagship Pi agent's built-in
+        // `bash`, via `assets/pi-extensions/ryu-plan.ts`. A thin proxy to
+        // `gateway::check_exec_scan`; see `exec_scan` for why every verdict,
+        // deny included, is an HTTP 200.
+        .route("/api/exec/scan", post(exec_scan))
         // ── Ryu Apps widgets (governed round-trips + resources) ──────────────
         .route("/api/widgets/tools/call", post(widgets::widget_call_tool))
         .route("/api/widgets/follow-up", post(widgets::widget_follow_up))
@@ -3219,6 +3225,14 @@ fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
         .route(
             "/api/routing/policy",
             get(routing_api::get_policy).put(routing_api::put_policy),
+        )
+        // ── Reactive failover: what to do when the plan a turn is running on
+        //    turns out to be out of room. Sibling of the rules above, separate
+        //    config because it answers a different question (see
+        //    `routing_policy::reactive`). ──
+        .route(
+            "/api/routing/retry-policy",
+            get(routing_api::get_retry_policy).put(routing_api::put_retry_policy),
         )
         // ── Per-agent capabilities (tools / reasoning / vision), Jan-style.
         //    GET resolves auto-detection + overrides; PUT persists overrides. ──
@@ -5237,12 +5251,186 @@ async fn chat_stream(
     run_chat_with_hooks(state, req).await
 }
 
-/// Run one chat turn: resolve the per-turn skills-disclosure + auto-recall config,
-/// then hand off to the single-agent route. Extracted so the plugin turn-hook
-/// wrapper can re-run a turn during a `continue` loop.
+/// Run one chat turn, retrying it on another subscription plan when the one it
+/// was aimed at turns out to be out of room.
+///
+/// Wrapper around [`route_single_turn_once`] rather than logic inside it: the
+/// retry has to re-resolve the whole per-turn binding (engine, persona, skills,
+/// MCP bridge, identity slots) for the agent it moves to, and re-entering at
+/// this level is what gets that for free. Doing it at the failure site — 500
+/// lines inside the ACP stream generator — would mean rebuilding all of it by
+/// hand from a scope that does not have it.
+///
+/// Inert unless the node opted in: [`RetryPolicy::enabled`] is false by default,
+/// and the disabled path is one preference read followed by the ordinary call
+/// with a disarmed watch.
+///
+/// [`RetryPolicy::enabled`]: crate::routing_policy::reactive::RetryPolicy::enabled
 async fn route_single_turn(
     state: &ServerState,
     req: crate::sidecar::adapters::ChatStreamRequest,
+) -> axum::response::Response {
+    use crate::routing_policy::reactive;
+
+    let policy = reactive::load(&state.preferences).await;
+    if !policy.enabled {
+        return route_single_turn_once(state, req, reactive::TurnWatch::off()).await;
+    }
+
+    // Attempt 1. `route_single_turn_once` returns as soon as the stream is set
+    // up — the body is lazy — so its head (status + SSE headers) is available to
+    // reuse for whichever attempt ends up answering. Reusing it also means an
+    // early non-stream refusal is forwarded with its own head intact rather than
+    // being wrapped in a fabricated one.
+    let watch = reactive::TurnWatch::armed();
+    let first = route_single_turn_once(state, req.clone(), watch.clone()).await;
+    let (parts, body) = first.into_parts();
+    let state = state.clone();
+
+    let stream = async_stream::stream! {
+        use futures_util::StreamExt as _;
+
+        let mut upstream = body.into_data_stream();
+        // Frames are held back only until the first assistant content appears.
+        // After that a retry is impossible anyway, so the buffer is flushed and
+        // everything passes straight through — the hold-back can never grow to
+        // the size of an answer.
+        let mut buffered: Vec<axum::body::Bytes> = Vec::new();
+        let mut gate = reactive::FrameGate::default();
+
+        while let Some(chunk) = upstream.next().await {
+            let Ok(bytes) = chunk else { break };
+            match gate.admit(watch.saw_content()) {
+                reactive::FrameAction::Pass => {
+                    yield Ok::<_, std::convert::Infallible>(bytes);
+                }
+                reactive::FrameAction::Hold => buffered.push(bytes),
+                reactive::FrameAction::Flush => {
+                    buffered.push(bytes);
+                    for frame in buffered.drain(..) {
+                        yield Ok::<_, std::convert::Infallible>(frame);
+                    }
+                }
+            }
+        }
+
+        if gate.forwarded_anything() {
+            return;
+        }
+
+        // Nothing was shown. Either the turn simply produced no content, or it
+        // failed early — which is exactly the shape a vendor cap arrives in.
+        let Some(failure) = watch.retryable() else {
+            for frame in buffered {
+                yield Ok::<_, std::convert::Infallible>(frame);
+            }
+            return;
+        };
+
+        // Confirm against the plans themselves, never against the error text.
+        let installed: Vec<String> = state
+            .agent_store
+            .installed_ids()
+            .await
+            .map(|ids| ids.into_iter().collect())
+            .unwrap_or_default();
+        let readings =
+            reactive::read_all_windows(&policy, &failure.agent_id, &installed).await;
+        let verdict = reactive::decide(
+            &policy,
+            &failure.agent_id,
+            failure.model.as_deref(),
+            failure.kind,
+            &readings,
+        );
+
+        let Some(target) = verdict.reroute_agent().map(str::to_owned) else {
+            // Not a cap, or nowhere to go. Announce whatever we did learn (which
+            // window reopens first, or that notify-only held the swap back) and
+            // let the original error stand behind it.
+            let note = (!matches!(verdict, reactive::Verdict::Stand)).then(|| {
+                tracing::info!(?verdict, agent = %failure.agent_id, "reactive failover: not rerouting");
+                let mut frames = crate::sidecar::adapters::ui_failover_note(&verdict);
+                if let Some(text) = crate::sidecar::adapters::ui_failover_text(&verdict) {
+                    frames.extend(text);
+                }
+                axum::body::Bytes::from(frames)
+            });
+            // The note goes AFTER the stream's opening frame, never before it: a
+            // data part that arrives ahead of `start` has no message to attach
+            // to, so the client would drop it or hang it off the previous turn.
+            let mut frames = buffered.into_iter();
+            if let Some(first) = frames.next() {
+                yield Ok::<_, std::convert::Infallible>(first);
+            }
+            if let Some(note) = note {
+                yield Ok::<_, std::convert::Infallible>(note);
+            }
+            for frame in frames {
+                yield Ok::<_, std::convert::Infallible>(frame);
+            }
+            return;
+        };
+
+        tracing::info!(
+            from = %failure.agent_id,
+            to = %target,
+            detail = %failure.detail,
+            "reactive failover: retrying the turn on another plan"
+        );
+        // Attempt 1's frames are dropped wholesale — they are the error triple
+        // and its preamble, and the client is about to be given a real answer.
+        drop(buffered);
+        let note = axum::body::Bytes::from({
+            let mut frames = crate::sidecar::adapters::ui_failover_note(&verdict);
+            if let Some(text) = crate::sidecar::adapters::ui_failover_text(&verdict) {
+                frames.extend(text);
+            }
+            frames
+        });
+
+        let mut retry = req;
+        retry.agent_id = Some(target);
+        // `target_agent_id` WINS over `agent_id` when resolving the effective
+        // agent for a turn (`route_chat_stream`), so leaving it set would send
+        // the retry straight back to the plan that just ran out — a failover
+        // that looks like it works and never moves anything.
+        retry.target_agent_id = None;
+        // The user turn is already persisted by attempt 1; appending it again
+        // would duplicate it in the thread.
+        retry.skip_user_append = true;
+        // The per-turn model pin belonged to the agent that ran out. Clearing it
+        // lets the agent we moved to run on its own binding — carrying it over
+        // would ask a different vendor for a model it does not have.
+        retry.acp_model = None;
+
+        // Disarmed watch: exactly one retry. Chaining failovers would walk a
+        // user through every plan they own on a single message.
+        let second = route_single_turn_once(&state, retry, reactive::TurnWatch::off()).await;
+        let mut retry_stream = second.into_body().into_data_stream();
+        // The note rides immediately behind the retry's opening frame so it
+        // attaches to the message the retry is about to write — emitting it
+        // first would leave a data part with no message to belong to.
+        let mut note = Some(note);
+        while let Some(chunk) = retry_stream.next().await {
+            let Ok(bytes) = chunk else { break };
+            yield Ok::<_, std::convert::Infallible>(bytes);
+            if let Some(note) = note.take() {
+                yield Ok::<_, std::convert::Infallible>(note);
+            }
+        }
+    };
+
+    axum::response::Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
+/// Run one chat turn: resolve the per-turn skills-disclosure + auto-recall config,
+/// then hand off to the single-agent route. Extracted so the plugin turn-hook
+/// wrapper can re-run a turn during a `continue` loop.
+async fn route_single_turn_once(
+    state: &ServerState,
+    req: crate::sidecar::adapters::ChatStreamRequest,
+    watch: crate::routing_policy::reactive::TurnWatch,
 ) -> axum::response::Response {
     // Apply the global skills disclosure mode (progressive vs full) from the pref
     // so the ACP chat path injects the L1 index + loads on demand (default) or the
@@ -5284,6 +5472,7 @@ async fn route_single_turn(
         state.traces.clone(),
         recall,
         ctx_window,
+        watch,
     )
     .await
 }
@@ -10704,6 +10893,46 @@ async fn plugin_contributions(
     // desktop reads `approved_grants` (NOT the manifest claim) to build the host
     // capability set, and only mounts third-party code when `has_ui` is true and
     // the experimental flag is on.
+    // Which enabled apps can put an interactive card in chat.
+    //
+    // A STATUS flag, not the `contributes.widgets` payload — that payload is
+    // Core-interpreted (uri / mime / ui_entry) and is deliberately not served here,
+    // gathered at its consumption site instead. What a client cannot otherwise know
+    // is the DECISION, and until now it could not: a widget announced itself only
+    // when a turn happened to emit one, so no store or settings surface could say
+    // "this app renders in chat" ahead of time — the same thing `has_ui` answers
+    // for companions.
+    //
+    // `granted` mirrors the manifest side of Core's own promotion gate: declared
+    // (non-empty `contributes.widgets`) AND the owning record enabled (this loop)
+    // AND holding `widget:render`. An app that declares widgets but lacks the grant
+    // is reported with `granted: false` rather than omitted — that is precisely the
+    // state worth surfacing, because its widgets silently degrade to text and
+    // nothing else in the UI says so.
+    let mut widget_apps: Vec<serde_json::Value> = Vec::new();
+    for manifest in manifests.iter() {
+        let Some(record) = enabled_records.get(&manifest.id) else {
+            continue;
+        };
+        let declared = manifest
+            .contributes
+            .as_ref()
+            .map(|c| c.widgets.len())
+            .unwrap_or(0);
+        if declared == 0 {
+            continue;
+        }
+        widget_apps.push(json!({
+            "plugin_id": manifest.id,
+            "name": manifest.name,
+            "widget_count": declared,
+            "granted": record
+                .approved_grants
+                .iter()
+                .any(|g| g == crate::sidecar::mcp::WIDGET_RENDER_GRANT),
+        }));
+    }
+
     let mut companions: Vec<serde_json::Value> = Vec::new();
     for manifest in manifests.iter() {
         let Some(record) = enabled_records.get(&manifest.id) else {
@@ -10764,6 +10993,7 @@ async fn plugin_contributions(
         "dock_panels": dock_panels,
         "channels": channels,
         "companions": companions,
+        "widget_apps": widget_apps,
     }))
     .into_response()
 }
@@ -17033,6 +17263,269 @@ async fn call_mcp_tool(
             Json(json!({ "ok": false, "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+// ── Command-approval scan for agents Core cannot gate at the ACP seam ────────
+
+/// The `backend` tag sent to the gateway scanner for this route.
+///
+/// It is **deliberately the same literal** the ACP `request_permission` handler
+/// uses (`sidecar/adapters/acp.rs`, `acp_exec_scan_verdict`). The whole point of
+/// this endpoint is to give the flagship Pi agent — which never sends
+/// `request_permission`, so it never reaches that seam — the *identical* posture
+/// every other ACP agent already gets. Today the gateway scanner ignores the
+/// backend entirely (`crates/gateway/firewall/src/cmdscan.rs`: `_backend`), so
+/// this only matters the day it starts branching on it; on that day Pi must land
+/// in the same branch as Claude Code and Codex, not in an unknown one.
+const EXEC_SCAN_BACKEND: &str = "acp";
+
+/// Body of `POST /api/exec/scan`.
+#[derive(serde::Deserialize)]
+struct ExecScanBody {
+    /// The shell command that is about to run, verbatim.
+    command: String,
+    /// Attribution only — it tags the gateway's audit row and nothing else.
+    ///
+    /// Unlike [`CallToolBody::agent_id`] this is **not** validated against the
+    /// agent registry, and that asymmetry is load-bearing rather than an
+    /// oversight. There, an unknown agent means "no allowlist" ⇒ every tool
+    /// permitted, so a 4xx is the fail-*closed* answer. Here the field grants
+    /// nothing, and a 4xx would be read by the caller as a transport failure —
+    /// which makes it fall back to its own local denylist, i.e. it would fail
+    /// **open**. Accepting any label (or none) is the safer behaviour.
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+/// Render an [`ExecScanOutcome`] as this route's wire shape.
+///
+/// `reason` is present on every non-allow verdict and absent on `allow`; the
+/// decision strings are the gateway's own (`allow` / `approval_required` /
+/// `deny`), round-tripped rather than renamed so the caller can be written
+/// against one vocabulary.
+fn exec_scan_reply(outcome: crate::sidecar::gateway::ExecScanOutcome) -> serde_json::Value {
+    use crate::sidecar::gateway::ExecScanOutcome;
+    match outcome {
+        ExecScanOutcome::Allow => json!({ "decision": "allow" }),
+        ExecScanOutcome::ApprovalRequired(reason) => {
+            json!({ "decision": "approval_required", "reason": reason })
+        }
+        ExecScanOutcome::Deny(reason) => json!({ "decision": "deny", "reason": reason }),
+    }
+}
+
+/// `POST /api/exec/scan` — scan a command through gateway policy before it runs.
+///
+/// ## Why this route exists
+///
+/// Core's exec/write scan runs **only** inside the ACP `request_permission`
+/// handler (`sidecar/adapters/acp.rs`). Pi — the flagship `ryu` agent — never
+/// sends `request_permission`, so its built-in `bash` reached the shell with no
+/// gateway governance at all while every other ACP agent was covered. This is
+/// the seam that closes that gap: `apps/core/assets/pi-extensions/ryu-plan.ts`
+/// POSTs here from its `tool_call` hook, blocks the call on `deny`, and raises
+/// its user confirmation on `approval_required`.
+///
+/// How far that goes, stated so nobody reads it as total coverage: the caller
+/// treats a failure to REACH this route as "no verdict" and falls back to its own
+/// local denylist, so an unreachable Core degrades to the weaker gate rather than
+/// stopping the agent. Everything downstream of a reached route is fail-closed.
+///
+/// It is a thin proxy. The policy lives in
+/// [`crate::sidecar::gateway::check_exec_scan`] and is **not** reimplemented
+/// here — including its fail-closed semantics (an unreachable, non-2xx or
+/// unparseable gateway is a `deny` unless `RYU_ALLOW_GATEWAY_FALLBACK=1`, and an
+/// explicit `RYU_EXEC_APPROVAL_MODE=off` short-circuits to `allow` without
+/// touching the network).
+///
+/// ## EVERY verdict is HTTP 200, INCLUDING `deny`
+///
+/// The verdict is the answer, not an error. The caller — a Pi extension that
+/// must never hang a turn on the scanner — treats any non-2xx as a transport
+/// failure and falls back to its own local denylist, which is far weaker. So
+/// answering `deny` with a 403 would silently turn this endpoint into a no-op:
+/// the strictest verdict would produce the loosest behaviour. Note that
+/// `widgets::widget_follow_up` deliberately DOES return 403 on `Deny` — it has
+/// no fallback path, so there the status code is the enforcement. Do not
+/// "align" the two.
+///
+/// An empty `command` is answered `deny` for exactly the same reason: a 400
+/// would be indistinguishable from an unreachable Core at the caller.
+#[utoipa::path(
+    post,
+    path = "/api/exec/scan",
+    tag = "Tools",
+    summary = "Scan a command against gateway exec policy",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Verdict", body = serde_json::Value))
+)]
+async fn exec_scan(Json(body): Json<ExecScanBody>) -> axum::response::Response {
+    let command = body.command.trim();
+    if command.is_empty() {
+        return Json(json!({
+            "decision": "deny",
+            "reason": "no command to scan",
+        }))
+        .into_response();
+    }
+    let outcome = crate::sidecar::gateway::check_exec_scan(
+        EXEC_SCAN_BACKEND,
+        command,
+        // No session correlation on this path: the extension knows its Pi
+        // session id, not Core's conversation id, and the gateway scanner does
+        // not consult the field (`ExecScanBody::session_id` is `_`-ignored).
+        None,
+        body.agent_id.as_deref().filter(|s| !s.is_empty()),
+    )
+    .await;
+    Json(exec_scan_reply(outcome)).into_response()
+}
+
+#[cfg(test)]
+mod exec_scan_route_tests {
+    use super::{exec_scan, exec_scan_reply, ExecScanBody};
+    use crate::sidecar::gateway::ExecScanOutcome;
+    use axum::Json;
+
+    /// Env vars `check_exec_scan` reads. Captured and restored around each test
+    /// so the crate-wide gateway env lock is the only cross-test coupling.
+    const SCAN_ENV: &[&str] = &[
+        "RYU_EXEC_APPROVAL_MODE",
+        "RYU_GATEWAY_URL",
+        "RYU_ALLOW_GATEWAY_FALLBACK",
+    ];
+
+    fn capture_env() -> Vec<(&'static str, Option<String>)> {
+        SCAN_ENV
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect()
+    }
+
+    fn restore_env(saved: &[(&'static str, Option<String>)]) {
+        for (key, value) in saved {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    fn body(command: &str) -> ExecScanBody {
+        serde_json::from_value(serde_json::json!({ "command": command, "agent_id": "ryu" }))
+            .expect("ExecScanBody literal")
+    }
+
+    async fn call(command: &str) -> (axum::http::StatusCode, serde_json::Value) {
+        let response = exec_scan(Json(body(command))).await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        (
+            status,
+            serde_json::from_slice(&bytes).expect("JSON response body"),
+        )
+    }
+
+    /// The wire vocabulary, pinned: the gateway's three decision strings survive
+    /// the proxy verbatim, and only a non-allow verdict carries a `reason`.
+    #[test]
+    fn exec_scan_reply_renders_every_verdict() {
+        assert_eq!(
+            exec_scan_reply(ExecScanOutcome::Allow),
+            serde_json::json!({ "decision": "allow" })
+        );
+        assert_eq!(
+            exec_scan_reply(ExecScanOutcome::ApprovalRequired("ask first".to_owned())),
+            serde_json::json!({ "decision": "approval_required", "reason": "ask first" })
+        );
+        assert_eq!(
+            exec_scan_reply(ExecScanOutcome::Deny("nope".to_owned())),
+            serde_json::json!({ "decision": "deny", "reason": "nope" })
+        );
+    }
+
+    /// THE test for this route. A `deny` must arrive as **HTTP 200** carrying the
+    /// verdict, because the Pi extension reads any non-2xx as "the scanner is
+    /// unreachable" and falls back to its much weaker local denylist — a 403 here
+    /// would make the strictest verdict produce the loosest behaviour.
+    ///
+    /// The deny itself is produced the same way a real outage would produce it:
+    /// the gate armed (nothing set) against an unreachable gateway, with the
+    /// fallback opt-out absent, i.e. `check_exec_scan`'s fail-closed path.
+    #[tokio::test]
+    async fn exec_scan_denies_with_http_200_so_the_caller_cannot_fall_back() {
+        let _lock = crate::sidecar::gateway::lock_gateway_env();
+        let saved = capture_env();
+        std::env::remove_var("RYU_EXEC_APPROVAL_MODE");
+        std::env::set_var("RYU_GATEWAY_URL", "http://127.0.0.1:1");
+        std::env::remove_var("RYU_ALLOW_GATEWAY_FALLBACK");
+
+        let (status, verdict) = call("rm -rf /").await;
+        restore_env(&saved);
+
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "a deny MUST be a 200; the caller treats non-2xx as a transport \
+             failure and falls back to its local denylist"
+        );
+        assert_eq!(verdict["decision"], "deny");
+        assert!(
+            verdict["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "a deny must carry a reason the model can be shown, got {verdict}"
+        );
+    }
+
+    /// The operator opt-out is inherited, not reimplemented: with the gate
+    /// explicitly disarmed the route allows without touching the network (the
+    /// gateway URL points at a closed port, so any HTTP call would fail closed).
+    #[tokio::test]
+    async fn exec_scan_inherits_the_off_mode_short_circuit() {
+        let _lock = crate::sidecar::gateway::lock_gateway_env();
+        let saved = capture_env();
+        std::env::set_var("RYU_EXEC_APPROVAL_MODE", "off");
+        std::env::set_var("RYU_GATEWAY_URL", "http://127.0.0.1:1");
+        std::env::remove_var("RYU_ALLOW_GATEWAY_FALLBACK");
+
+        let (status, verdict) = call("echo hi").await;
+        restore_env(&saved);
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(verdict, serde_json::json!({ "decision": "allow" }));
+    }
+
+    /// An empty command is answered `deny` at 200, not `400`: a 4xx is
+    /// indistinguishable from an unreachable Core at the caller, so it would fail
+    /// open. Also proves the route never reaches the gateway for it — the URL
+    /// below would otherwise fail closed with a network reason.
+    #[tokio::test]
+    async fn exec_scan_answers_an_empty_command_with_a_200_deny() {
+        let _lock = crate::sidecar::gateway::lock_gateway_env();
+        let saved = capture_env();
+        std::env::set_var("RYU_EXEC_APPROVAL_MODE", "off");
+        std::env::set_var("RYU_GATEWAY_URL", "http://127.0.0.1:1");
+        std::env::remove_var("RYU_ALLOW_GATEWAY_FALLBACK");
+
+        let (status, verdict) = call("   ").await;
+        restore_env(&saved);
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(verdict["decision"], "deny");
+    }
+
+    /// `agent_id` is optional and never authorizes anything, so its absence must
+    /// parse rather than 4xx (a 4xx would be read as a transport failure and fail
+    /// open). Pinned because the neighbouring `/api/mcp/tools/call` REQUIRES the
+    /// same-named field, and the difference is deliberate.
+    #[test]
+    fn exec_scan_body_accepts_a_missing_agent_id() {
+        let parsed: ExecScanBody =
+            serde_json::from_value(serde_json::json!({ "command": "ls" })).expect("parse");
+        assert_eq!(parsed.agent_id, None);
+        assert_eq!(parsed.command, "ls");
     }
 }
 

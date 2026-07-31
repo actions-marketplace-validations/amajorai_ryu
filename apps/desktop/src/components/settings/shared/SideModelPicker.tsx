@@ -11,14 +11,14 @@
 // is forwarded as `reasoning_effort` by Core (reaches OpenAI-compatible /
 // local / OpenRouter providers; Anthropic-direct ignores it).
 
-import { Label } from "@ryu/ui/components/label";
+import { Label } from "@ryu/ui/components/label.tsx";
 import {
 	Select,
 	SelectContent,
 	SelectItem,
 	SelectTrigger,
 	SelectValue,
-} from "@ryu/ui/components/select";
+} from "@ryu/ui/components/select.tsx";
 import { useQuery } from "@tanstack/react-query";
 import { AgentModelPickerField } from "@/components/agent-elements/input/agent-model-picker-field.tsx";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -46,7 +46,7 @@ export function SideModelPicker({
 	target,
 }: SideModelPickerProps) {
 	const { data: catalog } = useQuery({
-		queryKey: ["pi-catalog", target.url],
+		queryKey: ["pi-config-catalog", target.url],
 		queryFn: () => fetchPiCatalog(target),
 	});
 

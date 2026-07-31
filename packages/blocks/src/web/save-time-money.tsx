@@ -22,26 +22,26 @@ const COLUMNS: Column[] = [
 		icon: Clock,
 		tone: "yellow",
 		eyebrow: "Save time",
-		title: "Agents that are ready on install.",
-		body: "No MCP wiring, no API-key hunt, no week-long integration. The setup work that usually falls on an engineer is already done.",
+		title: "Skip the platform-team project.",
+		body: "Bring an agent or install one from the catalog. The control layer around it is ready instead of becoming another internal project.",
 		points: [
-			"One-click agents, tools, and skills with no glue code to write",
-			"Tools, memory, and audit wired in, not built per project",
-			"Ready-made agents for real roles instead of a blank prompt",
-			"Or we map the workflow and roll it out with you",
+			"Agents, tools, and skills without weeks of glue code",
+			"Sessions, memory, workflows, and audit in one layer",
+			"Ready-made agents for real workflows instead of a blank prompt",
+			"Rollout support when your team wants help",
 		],
 	},
 	{
 		icon: Wallet,
 		tone: "teal",
 		eyebrow: "Save money",
-		title: "Cheap work never touches expensive models.",
-		body: "Local models handle routine work; cloud models handle only the jobs that need them. Every call runs through one budget and routing layer.",
+		title: "Make the bill a setting, not a surprise.",
+		body: "Routine work runs local and free. A frontier model gets called only when the task earns it, with a ceiling on every agent and team.",
 		points: [
-			"Smart routing keeps simple tasks off premium cloud models",
-			"Per-agent budgets and full cost visibility, never blind spend",
-			"One layer for security, tools, and memory, not SaaS seats per team",
-			"Bring your own keys and subscriptions, zero lock-in",
+			"Route simple work away from premium cloud models",
+			"Per-agent and per-team budgets with visible spend",
+			"One control layer instead of separate infrastructure projects",
+			"Bring your own keys and subscriptions with no lock-in",
 		],
 	},
 ];
@@ -55,11 +55,10 @@ export default function SaveTimeMoney() {
 						suffix={
 							<span className="text-muted-foreground">
 								{" "}
-								Ryu removes the setup that eats weeks and the bills that never
-								stop.
+								Ryu turns the missing layer into a product.
 							</span>
 						}
-						title="Ryu saves you time and money."
+						title="Run agents without hiring the platform team."
 					/>
 				</div>
 

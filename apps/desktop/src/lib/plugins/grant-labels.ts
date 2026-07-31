@@ -63,19 +63,30 @@ const GRANT_META: Record<string, GrantMeta> = {
 		label: "Read and write chats",
 		description: "Read and post messages in your chats.",
 	},
-	"chat.sendFollowUp": {
+	// Key MUST be lower-case: `grantLabel` lowercases the grant before the
+	// lookup, so a camelCase key here silently never matches.
+	"chat.sendfollowup": {
 		label: "Send follow-up messages",
 		description: "Post a follow-up turn into the current chat.",
+	},
+	"widget:render": {
+		label: "Show interactive cards in chat",
+		description:
+			"Render its own interactive interface inline in your conversation, instead of returning plain text.",
 	},
 	calendar: {
 		label: "Access your calendar",
 		description: "Read and edit your calendar.",
 	},
+	"calendar:crud": {
+		label: "Access your calendar",
+		description: "Read and edit your scheduled runs and automations.",
+	},
 	contacts: {
 		label: "Access your contacts",
 		description: "Read your contacts.",
 	},
-	warmup: {
+	"warmup:crud": {
 		label: "Schedule keep-alive pings",
 		description:
 			"See which agents you have and what their usage limits say, and schedule its own short messages to them.",

@@ -10,12 +10,11 @@ import { Signature } from "@ryu/ui/components/signature.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 
 const STORY_PARAGRAPHS = [
-	"We spent three years shipping agents, and kept hitting the same wall. Agents that worked in a demo broke in production.",
-	"No observability. No security. Enterprise tools too expensive and too complicated for the teams we worked with.",
-	"I built Ryu for normal people so everyone can harness AI agents, not just the people who read and breathe tech every day.",
-	"That is why Ryu wraps whatever engine you pick with governance, routing, and audit on the default path, without ripping out Claude Code, Codex, or the subscription you already have.",
-	"We use Ryu deeply at A Major every single day. It automates 97% of our busy work and flags critical issues before we have time to manually review everything.",
-	"We also use Ryu to build Ryu.",
+	"We spent years shipping agents and kept hitting the same wall: an agent could work in a demo and still fail the first production review.",
+	"The blockers were always the same. No audit chain. Customer data leaving by default. An unforecastable bill. A runtime that needed a platform team to stay alive.",
+	"Ryu is the layer we wanted: one interface and one control layer around the agents a company already runs.",
+	"Bring Claude Code, Codex, Gemini, OpenClaw, Ollama, or your own agent. Ryu adds routing, governance, and audit without asking you to rebuild the stack.",
+	"We use Ryu to build Ryu, and we are building the layer so smaller teams can run serious agent workflows without hiring an AI platform team.",
 ];
 
 export default function LandingTestimonials() {
@@ -23,10 +22,10 @@ export default function LandingTestimonials() {
 		<section className="container mx-auto px-4">
 			<div className="mx-auto max-w-3xl">
 				<div className="mb-10 max-w-2xl">
-					<SectionTitle title="Built by people who shipped agents in production" />
+					<SectionTitle title="Built by people who learned this the hard way" />
 					<p className={sectionSubtitleClass}>
-						Three years of the same infrastructure layers breaking. Then we
-						built what was missing.
+						The demo is easy. The control layer that lets an agent run every day
+						is the part we built.
 					</p>
 				</div>
 

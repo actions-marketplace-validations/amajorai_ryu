@@ -110,10 +110,10 @@ mod server;
 mod sidecar;
 mod skills_catalog;
 mod skills_host;
+mod smtp_auth;
 /// The one path that puts an uploaded file's *contents* into a Space index —
 /// `create_file` + [`document_parse`] + a durable per-document index status.
 mod space_file_index;
-mod smtp_auth;
 mod stats_beacon;
 mod stt_host;
 mod support_access;
@@ -1664,7 +1664,9 @@ async fn main() {
     // Start the scheduled-job tick loop (reloads jobs from disk so schedules
     // survive a Core restart). The App store rides along so a job an App created
     // stops firing while that App is disabled or uninstalled.
-    scheduler::Scheduler::new().with_apps(scheduler_apps).spawn();
+    scheduler::Scheduler::new()
+        .with_apps(scheduler_apps)
+        .spawn();
 
     // Start the opt-in cross-device conversation sync loop (M10). A no-op every
     // tick until the user opts in (env `RYU_SYNC_ENABLED` or the

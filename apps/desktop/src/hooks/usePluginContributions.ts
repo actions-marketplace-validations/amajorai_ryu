@@ -45,6 +45,7 @@ const EMPTY: PluginContributions = {
 	dock_panels: [],
 	channels: [],
 	companions: [],
+	widget_apps: [],
 };
 
 /** The route path a contributed companion surface is navigable at. The companion

@@ -350,9 +350,10 @@ mod tests {
                 tz: None
             }
         );
-        let bare_agent: JobTarget =
-            serde_json::from_value(serde_json::json!({"type":"agent","agent_id":"a","prompt":"hi"}))
-                .unwrap();
+        let bare_agent: JobTarget = serde_json::from_value(
+            serde_json::json!({"type":"agent","agent_id":"a","prompt":"hi"}),
+        )
+        .unwrap();
         assert!(matches!(bare_agent, JobTarget::Agent { model: None, .. }));
 
         // Present: both round-trip, and neither is emitted when empty (so a
@@ -373,7 +374,8 @@ mod tests {
         assert!(j.owner_app.is_none());
         assert!(!serde_json::to_string(&j).unwrap().contains("owner_app"));
         j.owner_app = Some("com.ryu.warmup".into());
-        let round: ScheduledJob = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        let round: ScheduledJob =
+            serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
         assert_eq!(round.owner_app.as_deref(), Some("com.ryu.warmup"));
     }
 

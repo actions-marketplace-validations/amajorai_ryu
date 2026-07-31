@@ -1891,4 +1891,73 @@ mod tests {
             "a stored bundle must never be overwritten by the compiled-in one"
         );
     }
+
+    /// Every [`seed_overrides`] row must approve EXACTLY what its manifest declares
+    /// in `permission_grants` — no more, no less.
+    ///
+    /// # Why this is a test and not derived code
+    ///
+    /// The obvious "cleanup" here is to delete `SeedSpec::grants` and read
+    /// `manifest.permission_grants` at seed time. That would be a privilege
+    /// escalation, not a refactor. A plugin with NO row seeds with `grants: &[]`
+    /// (see [`default_on_specs`]), and ten default-on plugins are in exactly that
+    /// state while declaring grants in their manifests — `agentbrowser` and `exa`
+    /// declare `tool:execute`, `ghost` declares `mcp:ghost`, `shadow` and `exa`
+    /// declare `tool:http-egress:*`. Deriving would pre-approve all of it at seed
+    /// time, when the Gateway is not reachable to refuse anything, and would leave
+    /// any built-in able to widen its own approved set by editing its own manifest.
+    ///
+    /// This table is therefore a HUMAN-REVIEWED ALLOWLIST that is deliberately
+    /// narrower than the union of what manifests ask for. The same judgement is
+    /// already visible in [`backfill_host_api_grants`], which takes only the
+    /// `sidecars[].host_api.grants` INTERSECTED with `permission_grants` rather
+    /// than trusting the declaration.
+    ///
+    /// What is genuinely worth enforcing is that a row and its manifest do not
+    /// DRIFT: an over-grant hands a frame a capability its manifest never asked
+    /// for and the Gateway never reviewed, and an under-grant ships a companion
+    /// whose frame is refused a capability it actually uses — the failure mode the
+    /// `recipes` row's comment describes. Both are caught here, at compile-and-test
+    /// time, without surrendering the allowlist.
+    #[test]
+    fn seed_grants_match_the_manifest_they_belong_to() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let mut checked = 0;
+
+        for spec in seed_overrides() {
+            let Some(manifest) = manifests.iter().find(|m| m.id == spec.id) else {
+                panic!(
+                    "seed row '{}' has no compiled-in manifest — add it to BUILTIN_MANIFESTS \
+                     or drop the row",
+                    spec.id
+                );
+            };
+
+            let mut approved: Vec<&str> = spec.grants.to_vec();
+            approved.sort_unstable();
+            let mut declared: Vec<&str> = manifest
+                .permission_grants
+                .iter()
+                .map(String::as_str)
+                .collect();
+            declared.sort_unstable();
+
+            assert_eq!(
+                approved, declared,
+                "seed row '{}' and its manifest disagree on grants.\n  \
+                 seed approves: {approved:?}\n  manifest declares: {declared:?}\n\
+                 Extra in the seed is an UNREVIEWED grant; extra in the manifest means \
+                 the app's frame will be refused a capability it uses. Fix whichever \
+                 side is wrong — do not derive one from the other (see this test's docs).",
+                spec.id
+            );
+            checked += 1;
+        }
+
+        assert_eq!(
+            checked,
+            seed_overrides().len(),
+            "every seed row must be covered"
+        );
+    }
 }

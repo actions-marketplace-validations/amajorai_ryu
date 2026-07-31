@@ -160,3 +160,109 @@ export function formatRoutingSignal(signal: RoutingSignalReading): string {
 		? `$${signal.value.toFixed(2)}`
 		: `${Math.round(signal.value)}%`;
 }
+
+// ── Reactive failover ───────────────────────────────────────────────────────
+//
+// The sibling of the rules above, and a different question. A rule is proactive
+// ("when Claude's weekly drops under 50%, start using Sonnet") and fires before
+// a turn on a threshold you chose. This fires AFTER a turn failed, on no rule at
+// all: your agent hit its cap, so run the turn on whichever plan you already pay
+// for still has room. Off by default.
+
+/** The node's reactive failover config. */
+export interface RetryPolicy {
+	/**
+	 * Restrict failover to these agent ids, in PREFERENCE ORDER (not merely a
+	 * filter — listing Codex before Copilot states a priority that beats a raw
+	 * headroom comparison). Empty = any subscription agent Core can read.
+	 */
+	candidates: string[];
+	/** Off by default: a node that never opts in behaves exactly as today. */
+	enabled: boolean;
+	/**
+	 * Explain, never reroute. The turn still fails, but you are told which plan
+	 * had room instead of getting a bare vendor error. The setting to try first.
+	 */
+	notify_only: boolean;
+	/** Percent-left below which a window counts as spent. Defaults to 2. */
+	spent_below_percent: number;
+}
+
+/**
+ * The config plus the agents a `candidates` list may name. The pool comes from
+ * Core (which owns the window readers) rather than a hand-copied list here: only
+ * five vendors expose a readable subscription window, and naming any other agent
+ * would produce a fallback that can never report headroom.
+ */
+export interface RetryPolicyView {
+	policy: RetryPolicy;
+	subscription_agents: string[];
+}
+
+/**
+ * What Core decided about a failed turn, delivered as a `data-ryu-failover`
+ * message part. `stand` never reaches a client — it means the failure was not a
+ * cap and nothing was added to the stream.
+ *
+ * This is the MACHINE-READABLE record, not the display path. Core also emits the
+ * same verdict's `note` as an ordinary text block, because `/api/chat/stream` is
+ * not desktop-only — the TUI, native app and island all POST to it and none of
+ * them renders `data-*` frames, so a data-part-only explanation would let those
+ * surfaces receive an answer from a different subscription with no indication.
+ * Nothing renders this type today; it exists so tooling can read the structured
+ * fields (which plan, how much headroom, when the window reopens) without
+ * parsing the sentence.
+ */
+export type FailoverVerdict =
+	| { kind: "stand" }
+	| {
+			kind: "reroute";
+			agent_id: string;
+			/** Percent left on that agent's tightest gating window. */
+			headroom_percent: number;
+			note: string;
+	  }
+	| {
+			kind: "wait";
+			/** The agent whose window reopens first. */
+			agent_id: string;
+			/** RFC3339. */
+			resets_at: string;
+			note: string;
+	  }
+	| {
+			kind: "held";
+			/** The agent that would have taken the turn. */
+			agent_id: string;
+			headroom_percent: number;
+			note: string;
+	  }
+	| { kind: "no_candidate"; note: string };
+
+/** The default config — what a node that never opted in behaves as. */
+export function defaultRetryPolicy(): RetryPolicy {
+	return {
+		enabled: false,
+		notify_only: false,
+		candidates: [],
+		spent_below_percent: 2,
+	};
+}
+
+/** The node's reactive failover config, plus the agents it may name. */
+export async function fetchRetryPolicy(
+	target: ApiTarget
+): Promise<RetryPolicyView> {
+	return await request<RetryPolicyView>(target, "/api/routing/retry-policy");
+}
+
+/** Replace the node's reactive failover config. */
+export async function saveRetryPolicy(
+	target: ApiTarget,
+	policy: RetryPolicy
+): Promise<void> {
+	await request<unknown>(target, "/api/routing/retry-policy", {
+		method: "PUT",
+		body: policy,
+	});
+}

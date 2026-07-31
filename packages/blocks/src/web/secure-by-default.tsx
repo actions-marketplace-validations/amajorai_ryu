@@ -10,27 +10,22 @@ import { Reveal } from "./reveal.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 
 /**
- * "Secure by default" — the risk contrast. DIY agent setups (especially local
- * AI) are one misconfiguration away from an incident. Styled like the rest of
- * the landing page (SaveTimeMoney cards: muted surfaces, monochrome icons).
+ * The risk contrast: an agent can work in a demo and still lack the controls
+ * required for production. Styled like the rest of the landing page.
  */
 
 const RISKS = [
-	"API keys sit in plaintext .env files and shell history",
-	"Tools run with full disk and network access, no allowlist",
-	"A scraped page hides a prompt injection that runs unchecked",
-	"Your local model quietly phones home with no egress control",
-	"No budget cap, so a runaway loop bills you overnight",
-	"Nothing is logged, so you can't tell what went wrong",
+	"No record of what the agent did or who approved it",
+	"Customer data leaves for an outside provider on every call",
+	"No budget ceiling means next month's bill is unknown",
+	"Keeping the runtime alive becomes a platform team's full-time job",
 ] as const;
 
 const DEFENSES = [
-	"Keys encrypted at rest, never written to logs or plaintext",
-	"Every tool call is allowlisted and sandboxed before it runs",
-	"Firewall blocks prompt injection and data exfiltration",
-	"PII / DLP redaction before anything leaves your machine",
-	"Hard budget caps and rate limits on every agent",
-	"Full audit trail of every model call and tool run",
+	"Every call, tool use, and approval recorded in order",
+	"PII redacted before a request leaves for an outside provider",
+	"Per-agent and per-team budget ceilings enforced at request time",
+	"Writes and risky tool calls can wait for human approval",
 ] as const;
 
 function RiskCard() {
@@ -38,10 +33,10 @@ function RiskCard() {
 		<div className={landingMutedCardSurfaceClass}>
 			<AlertTriangle className="size-5 text-foreground" strokeWidth={1.75} />
 			<p className="mt-6 font-semibold text-muted-foreground/60 text-xs uppercase tracking-widest">
-				On your own
+				What stops production
 			</p>
 			<h3 className="mt-2 font-medium text-foreground text-xl tracking-tight md:text-2xl">
-				Wiring it up yourself
+				The agent works, but nobody can sign off
 			</h3>
 			<ul className="mt-6 space-y-3">
 				{RISKS.map((risk) => (
@@ -80,7 +75,7 @@ function DefenseCard() {
 					tone.title
 				)}
 			>
-				Secure out of the box
+				Governed by default
 			</h3>
 			<ul className="mt-6 space-y-3">
 				{DEFENSES.map((defense) => (
@@ -105,9 +100,10 @@ export default function SecureByDefault() {
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-5xl">
 				<div className="max-w-2xl">
-					<SectionTitle title="Setting up agents yourself is a security risk" />
+					<SectionTitle title="Governance is the deal" />
 					<p className={sectionSubtitleClass}>
-						One misconfiguration away from a leak. Ryu ships secure by default.
+						Ryu puts audit, redaction, budgets, and approvals in the path of
+						every call.
 					</p>
 				</div>
 
@@ -126,15 +122,15 @@ export default function SecureByDefault() {
 						className="size-4 shrink-0 text-muted-foreground"
 						strokeWidth={1.5}
 					/>
-					The industry standard for building secure team agents.
+					The control layer that makes a real deployment possible.
 				</p>
 
 				<div className="mt-16 md:mt-20">
 					<div className="max-w-2xl">
-						<SectionTitle title="A firewall in front of every agent" />
+						<SectionTitle title="One gateway in front of every agent" />
 						<p className={sectionSubtitleClass}>
-							Routing, firewall, DLP, budgets, and audit, with a console you
-							control.
+							Routing, firewall, PII/DLP, budgets, and audit sit between your
+							agents and the model providers.
 						</p>
 					</div>
 					<Reveal>

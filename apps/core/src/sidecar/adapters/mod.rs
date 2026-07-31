@@ -601,6 +601,102 @@ fn ui_tool_widget(w: &crate::sidecar::adapters::acp::ToolWidgetEvent) -> Vec<u8>
     )
 }
 
+/// The canonical Claude-style tool names the desktop binds rich renderers to
+/// (`tool-Bash` terminal, `tool-Edit` diff, `tool-TodoWrite` checklist, …).
+///
+/// Module-level rather than a `fn`-local const because the nested sub-step
+/// fan-out canonicalizes against the SAME list via [`nested_step_tool_name`].
+/// Two copies would drift, and the drift would surface only as nested rows with
+/// no title — no error, no failing test.
+///
+/// `TaskOutput` is the odd entry: no agent titles a call that, and the desktop
+/// deliberately SUPPRESSES `tool-TaskOutput` from the message list while
+/// `CoworkContextPanel` reads it as a subagent's final answer. It lives here so
+/// Core's own synthetic `<parent>:out` part shares one source of truth with
+/// every other tool name — [`acp_tool_ui_name`] does not need it, since that
+/// path mints the name directly.
+const KNOWN_TOOLS: [&str; 15] = [
+    "Bash",
+    "Read",
+    "Edit",
+    "Write",
+    "Grep",
+    "Glob",
+    "WebFetch",
+    "WebSearch",
+    "TodoWrite",
+    "PlanWrite",
+    "ExitPlanMode",
+    "Task",
+    "Agent",
+    "NotebookEdit",
+    "TaskOutput",
+];
+
+/// Map a nested sub-step's declared tool name onto the part type the desktop's
+/// nested-row registry can title.
+///
+/// Returns `(tool_name, dynamic)` with the same meaning as [`acp_tool_ui_name`].
+///
+/// The case fold is load-bearing, not cosmetic. Pi's built-in tools are
+/// LOWERCASE (`read`, `bash`, `edit`, `write` — observed in a live
+/// `before_agent_start` tool set) while [`KNOWN_TOOLS`] and the desktop's tool
+/// registry key on the capitalized Claude-style spellings. Passing a step's name
+/// through verbatim would mint `tool-read`, which no renderer knows, so the
+/// nested row would render blank-titled — visible only in the UI, invisible to
+/// every test on this side of the wire.
+///
+/// An unrecognized name (an MCP tool, a producer-specific verb) stays a
+/// `dynamic` row under its own label: generic, but never blank.
+fn nested_step_tool_name(raw: &str) -> (String, bool) {
+    KNOWN_TOOLS
+        .iter()
+        .find(|known| known.eq_ignore_ascii_case(raw))
+        .map_or_else(
+            || (raw.to_owned(), true),
+            |known| ((*known).to_owned(), false),
+        )
+}
+
+/// One nested sub-step (`details.ryuSteps[n]`), resolved into everything the
+/// synthetic child part's two frames need. Pure, so the defaulting rules are
+/// testable without a live ACP stream.
+struct NestedStep {
+    /// Part type name: a canonical [`KNOWN_TOOLS`] spelling, or the producer's
+    /// own name when it is not a known tool.
+    name: String,
+    /// `dynamic` flag — BOTH frames of the child part must carry the same one.
+    dynamic: bool,
+    /// Tool arguments; `null` while the producer has not filled them in yet.
+    input: Value,
+    /// The step's status verbatim, defaulting to `in_progress` when unstated —
+    /// an unstated status means "still running", never "done".
+    status: String,
+    /// The step can no longer change, so its output frame (which CLOSES the row)
+    /// may be emitted.
+    terminal: bool,
+}
+
+/// Resolve one `details.ryuSteps` entry. Every field is optional on the wire: a
+/// step is typically announced before its arguments, output and final status
+/// exist, so each default here has to mean "not yet", not "absent".
+fn nested_step(step: &Value) -> NestedStep {
+    let raw_name = step.get("name").and_then(Value::as_str).unwrap_or("tool");
+    let (name, dynamic) = nested_step_tool_name(raw_name);
+    let status = step
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("in_progress")
+        .to_owned();
+    NestedStep {
+        name,
+        dynamic,
+        input: step.get("input").cloned().unwrap_or(Value::Null),
+        terminal: matches!(status.as_str(), "completed" | "error" | "failed"),
+        status,
+    }
+}
+
 /// Map an ACP tool call (category `kind`, human `title`, raw `input`) onto the
 /// canonical tool name the desktop renders rich UI for.
 ///
@@ -609,22 +705,6 @@ fn ui_tool_widget(w: &crate::sidecar::adapters::acp::ToolWidgetEvent) -> Vec<u8>
 /// with a matching input shape, so the client shows the specialized card.
 /// Anything unrecognized stays a dynamic tool row under its original title.
 fn acp_tool_ui_name(kind: &str, title: &str, input: &Value) -> (String, bool) {
-    const KNOWN_TOOLS: [&str; 14] = [
-        "Bash",
-        "Read",
-        "Edit",
-        "Write",
-        "Grep",
-        "Glob",
-        "WebFetch",
-        "WebSearch",
-        "TodoWrite",
-        "PlanWrite",
-        "ExitPlanMode",
-        "Task",
-        "Agent",
-        "NotebookEdit",
-    ];
     // Some ACP adapters put the underlying tool name straight into the title.
     if KNOWN_TOOLS.contains(&title) {
         return (title.to_owned(), false);
@@ -673,6 +753,86 @@ fn acp_tool_ui_name(kind: &str, title: &str, input: &Value) -> (String, bool) {
             let name = if title.is_empty() { kind } else { title };
             (name.to_owned(), true)
         }
+    }
+}
+
+/// One ACP tool call whose opening `tool-input-available` frame has been sent,
+/// kept so a later update carrying the call's arguments can correct that frame
+/// instead of minting a second one.
+struct OpenToolCall {
+    /// ACP `kind` and `title` verbatim — the two inputs to [`acp_tool_frame`]
+    /// that an update never repeats, so they have to be remembered here.
+    kind: String,
+    title: String,
+    /// ACP `ToolCall.locations`, folded into every frame under `_ryuLocations`.
+    locations: Vec<Value>,
+    /// The part type and `dynamic` flag the opening frame declared. Both are
+    /// PINNED: a re-emission that changed either would create a second part
+    /// rather than update the first, so a later frame that would resolve
+    /// differently is dropped instead (see the `ToolResult` arm).
+    name: String,
+    dynamic: bool,
+    /// The raw arguments last turned into a frame, so an update that repeats
+    /// them costs nothing.
+    input: Value,
+}
+
+/// Resolve one ACP tool call's raw fields into the frame the client renders:
+/// the part-type name, its `dynamic` flag, and the input AS EMITTED — which is
+/// not the raw input, because a question tool is reshaped into the desktop's
+/// Question card and the ACP `locations` ride along under a namespaced key.
+///
+/// Extracted because this now runs twice per tool call: once when the call
+/// opens, and again when a later `tool_call_update` fills in arguments the
+/// opening frame did not have yet (pi-acp opens the call while the model is
+/// still streaming them). Hand-rolling the second site is how the two frames
+/// would drift, and a `tool-input-available` whose `toolName`/`dynamic` differ
+/// from the opening one is a NEW part in the AI SDK, not a correction to the
+/// existing one.
+fn acp_tool_frame(
+    kind: &str,
+    title: &str,
+    input: &Value,
+    locations: &[Value],
+) -> (String, bool, Value) {
+    // Bind the ACP call to the desktop's rich tool UI when the kind/input shape
+    // matches a known tool (Bash terminal, Edit diff, Read, search, …);
+    // otherwise generic dynamic row.
+    let (mut tool_name, mut dynamic) = acp_tool_ui_name(kind, title, input);
+    let mut emit_input = input.clone();
+    // A structured "ask the user" call (Claude's AskUserQuestion or any ACP
+    // agent's question tool): reshape it into the desktop's Question card.
+    // Guarded — only overrides when the reshape yields a well-formed question,
+    // so unrelated tools are untouched.
+    if let Some(question) = acp_question_input(title, input) {
+        tool_name = "Question".to_owned();
+        dynamic = false;
+        emit_input = question;
+    }
+    // Carry the ACP tool-call `locations` ([{path, line?}]) into the part's
+    // input under a namespaced key so the desktop can show which files/lines the
+    // tool touched. Namespaced (`_ryuLocations`) so it never collides with a
+    // real tool input field.
+    if !locations.is_empty() {
+        if let Value::Object(ref mut map) = emit_input {
+            map.insert("_ryuLocations".to_owned(), Value::Array(locations.to_vec()));
+        } else if emit_input.is_null() {
+            emit_input = serde_json::json!({ "_ryuLocations": locations });
+        }
+    }
+    (tool_name, dynamic, emit_input)
+}
+
+/// Whether a tool call's raw input carries nothing worth re-rendering.
+///
+/// `null` and `{}` are both "the agent has not told us the arguments yet" — the
+/// literal shape pi-acp opens a streaming tool call with — so neither may
+/// overwrite arguments a previous frame already carried.
+fn is_blank_tool_input(input: &Value) -> bool {
+    match input {
+        Value::Null => true,
+        Value::Object(map) => map.is_empty(),
+        _ => false,
     }
 }
 
@@ -966,6 +1126,50 @@ impl PartsAccumulator {
 /// interactive tool-permission prompts, and slash-command advertisements.
 fn ui_data(name: &str, data: &Value) -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": format!("data-{name}"), "data": data }))
+}
+
+/// The `data-ryu-failover` part announcing a reactive failover verdict — which
+/// plan ran out, what happened about it, and when the first window reopens.
+///
+/// A data part rather than injected text: the decision is metadata about the
+/// turn, not part of the answer, so it must not end up in the transcript that
+/// gets replayed to the model on the next turn. Surfaces that do not render data
+/// parts simply do not show it; the underlying vendor error is still emitted
+/// unchanged behind it, so nothing is hidden from a text-only client.
+pub(crate) fn ui_failover_note(verdict: &crate::routing_policy::reactive::Verdict) -> Vec<u8> {
+    ui_data(
+        "ryu-failover",
+        &serde_json::to_value(verdict).unwrap_or(Value::Null),
+    )
+}
+
+/// The same verdict as a visible **text** part — a self-contained text block
+/// carrying the note sentence.
+///
+/// The data part above is a machine-readable record; this is what a human
+/// actually sees, and it exists because `/api/chat/stream` is not a desktop-only
+/// endpoint. The TUI, the native app and the island all POST to it and none of
+/// them renders `data-*` frames, so shipping the explanation only as a data part
+/// would mean those surfaces silently receive an answer from a *different
+/// subscription* than the one selected — the exact silent-loss-of-control this
+/// feature is supposed to prevent.
+///
+/// Emitted by the failover wrapper, which sits OUTSIDE the inner turn's
+/// accumulator, so it is displayed but never persisted and never replayed to the
+/// model on the next turn. That is the property that makes it safe to put in the
+/// message body rather than in metadata: the transcript stays clean.
+///
+/// Its own `id` keeps it a separate text block from the answer, so it cannot be
+/// concatenated into the reply text by a client that merges deltas by id.
+pub(crate) fn ui_failover_text(
+    verdict: &crate::routing_policy::reactive::Verdict,
+) -> Option<Vec<u8>> {
+    let note = verdict.note()?;
+    const ID: &str = "ryu-failover-note";
+    let mut out = ui_text_start(ID);
+    out.extend(ui_text_delta(ID, note));
+    out.extend(ui_text_end(ID));
+    Some(out)
 }
 
 /// Build the `data-ryu-stats` part carrying per-message inference statistics
@@ -1789,7 +1993,10 @@ async fn apply_routing_policy(
         );
     }
 
-    let switches_agent = !advice.effective.agent_id.eq_ignore_ascii_case(&target.agent_id);
+    let switches_agent = !advice
+        .effective
+        .agent_id
+        .eq_ignore_ascii_case(&target.agent_id);
 
     tracing::info!(
         rule = ?advice.rule_id,
@@ -3005,6 +3212,10 @@ pub(crate) async fn run_text_turn_in(
         // overflow handling; app-level trimming is wired on the interactive
         // chat path (route_single_turn) only.
         None,
+        // No reactive failover on the fan-out path: it drains the stream to a
+        // string for a channel reply, so there is no info bar to explain a swap
+        // and no user watching one happen.
+        crate::routing_policy::reactive::TurnWatch::off(),
     )
     .await;
 
@@ -3085,6 +3296,7 @@ pub(crate) async fn run_text_turn_stream(
         traces,
         None,
         None,
+        crate::routing_policy::reactive::TurnWatch::off(),
     )
     .await
 }
@@ -3306,6 +3518,10 @@ async fn run_member_text(
         None,
         // Team member turns inherit engine overflow handling (see above).
         None,
+        // Team members run with `persist = false` and the orchestrator writes one
+        // combined turn, so a per-member retry would have to be reconciled against
+        // a reply that has not been assembled yet. Left on the direct path.
+        crate::routing_policy::reactive::TurnWatch::off(),
     )
     .await;
     drain_text_reply(response).await
@@ -3673,6 +3889,11 @@ pub async fn route_chat_stream(
     // path replaces its fixed last-10 replay with a budgeted window — both
     // always keeping the system block, optionally summarizing dropped turns.
     ctx_window: Option<context_window::ContextWindowConfig>,
+    // How this turn ended, reported back to a caller that may retry it on
+    // another subscription plan (`routing_policy::reactive`). Disarmed by
+    // default — `TurnWatch::off()` allocates nothing and every method is a
+    // no-op, so only the failover wrapper pays for this.
+    watch: crate::routing_policy::reactive::TurnWatch,
 ) -> Response {
     tracing::info!(
         agent_id = ?req.agent_id,
@@ -4288,6 +4509,7 @@ pub async fn route_chat_stream(
                         chat_tools_enabled,
                         tool_allowlist,
                         smart_route_override,
+                        watch.clone(),
                     )
                     .await;
                 }
@@ -4346,6 +4568,7 @@ pub async fn route_chat_stream(
                 // Direct-to-provider (no gateway hop) → never inject the
                 // gateway-only `ryu_smart_route` field.
                 None,
+                watch.clone(),
             )
             .await
         }
@@ -4387,6 +4610,7 @@ pub async fn route_chat_stream(
                 None,
                 // Local engine goes direct (no gateway hop) → no `ryu_smart_route`.
                 None,
+                watch.clone(),
             )
             .await
         }
@@ -4466,6 +4690,7 @@ pub async fn route_chat_stream(
                 // tool-call-time vault consult runs on the ACP plane.
                 identity_profile_ids,
                 traces,
+                watch,
             )
             .await
         }
@@ -4505,6 +4730,7 @@ pub async fn route_chat_stream(
                 // SDK app owns its own provider routing (injected OPENAI_BASE_URL);
                 // no gateway on this hop → no `ryu_smart_route`.
                 None,
+                watch.clone(),
             )
             .await
         }
@@ -4576,6 +4802,40 @@ async fn persist_assistant_reply(
     if let Err(e) = store.set_run_status(&conversation_id, outcome).await {
         tracing::warn!("failed to set run_status to {outcome}: {e:#}");
     }
+}
+
+// ── Provider prompt caching (forwarded to the gateway) ─────────────────────────
+
+/// Preference key for the node's provider prompt-cache mode: `off` | `auto` |
+/// `explicit`. Unset ⇒ nothing is forwarded and the gateway's `[prompt_cache]`
+/// config decides. Mirrored in `apps/desktop/src/lib/api/preferences.ts`.
+pub const PROMPT_CACHE_PREF: &str = "gateway.prompt-cache";
+
+/// Preference key for the prompt-cache TTL (e.g. `1h`). Unset ⇒ provider default.
+pub const PROMPT_CACHE_TTL_PREF: &str = "gateway.prompt-cache-ttl";
+
+fn is_prompt_cache_mode(v: &str) -> bool {
+    matches!(v, "off" | "auto" | "explicit")
+}
+
+/// Accepts the TTL spellings the providers document. Deliberately a closed set:
+/// an arbitrary string forwarded here would be rejected upstream mid-turn, and a
+/// caching hint is not worth failing a chat over.
+fn is_prompt_cache_ttl(v: &str) -> bool {
+    matches!(v, "5m" | "1h")
+}
+
+/// Read a validated prompt-cache preference, or `None` when unset, invalid, or
+/// no `ServerState` was published (tests / headless).
+///
+/// Uses the same published-`ServerState` handle the local-engine sync in this
+/// module already relies on, so no new plumbing is threaded through the six
+/// stream-dispatch signatures between here and the HTTP handler.
+async fn prompt_cache_pref(key: &str, valid: fn(&str) -> bool) -> Option<String> {
+    let state = crate::learning::global_state()?;
+    let raw = state.preferences.get(key).await.ok().flatten()?;
+    let v = raw.trim().to_ascii_lowercase();
+    valid(&v).then_some(v)
 }
 
 // ── OpenAI-compat streaming ────────────────────────────────────────────────────
@@ -4704,6 +4964,16 @@ async fn connect_openai(
     // rows back to a specific chat run without a separate session store (M4 / #176).
     if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
         builder = builder.header("x-ryu-session-id", sid);
+    }
+    // Provider prompt caching: the user's node-level preference, forwarded as
+    // `x-ryu-prompt-cache`. Sent ONLY when the user has actually set it, so an
+    // untouched install leaves the gateway's own `[prompt_cache]` policy in
+    // charge instead of pinning it from here.
+    if let Some(mode) = prompt_cache_pref(PROMPT_CACHE_PREF, is_prompt_cache_mode).await {
+        builder = builder.header("x-ryu-prompt-cache", mode);
+    }
+    if let Some(ttl) = prompt_cache_pref(PROMPT_CACHE_TTL_PREF, is_prompt_cache_ttl).await {
+        builder = builder.header("x-ryu-prompt-cache-ttl", ttl);
     }
     // Companion-source tag (M7 / #199): when set, the gateway applies unconditional
     // DLP/PII redaction before the provider call regardless of local firewall config.
@@ -4949,11 +5219,18 @@ async fn route_openai_stream<F, Fut>(
     // gateway-forward path for an agent that has a stored override; injected into
     // the outbound body as `ryu_smart_route` for the gateway to read and strip.
     smart_route_override: Option<Value>,
+    // How this turn ended, for the reactive failover wrapper. Disarmed on every
+    // path but the interactive chat one.
+    watch: crate::routing_policy::reactive::TurnWatch,
 ) -> Response
 where
     F: FnOnce(String, &'static str) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    // Identity of the turn, captured for the reactive failover watch before the
+    // request-building code below consumes `agent_id` / `model`.
+    let watch_agent_id = agent_id.clone();
+    let watch_model = model.clone();
     // Long-term memory (opt-in) is injected as a leading system message. The
     // client already supplies short-term context (the full message list), so we
     // do not re-inject it here.
@@ -5108,8 +5385,19 @@ where
             {
                 Ok(r) => r,
                 Err(e) => {
-                    if let Some(p) = persist.take() {
-                        p(std::mem::take(&mut reply_all), "failed").await;
+                    watch.record_failure(
+                        watch_agent_id.as_deref().unwrap_or_default(),
+                        Some(&watch_model),
+                        crate::routing_policy::reactive::FailureKind::Other,
+                        &e,
+                    );
+                    // Suppressed when the wrapper is going to retry: a `failed`
+                    // assistant row written now would sit ahead of the retry's
+                    // good reply on reload.
+                    if watch.retryable().is_none() {
+                        if let Some(p) = persist.take() {
+                            p(std::mem::take(&mut reply_all), "failed").await;
+                        }
                     }
                     for line in error_ui_lines(&e) {
                         yield Ok::<_, std::convert::Infallible>(line);
@@ -5147,8 +5435,22 @@ where
                         }
                     })
                     .unwrap_or_else(|| format!("Agent returned HTTP {status}"));
-                if let Some(p) = persist.take() {
-                    p(std::mem::take(&mut reply_all), "failed").await;
+                // Unlike the ACP plane, the Gateway names the reason in a typed
+                // field (`apps/gateway/src/error.rs`), so classify on that and on
+                // the status — never on the human message, which is prose.
+                watch.record_failure(
+                    watch_agent_id.as_deref().unwrap_or_default(),
+                    Some(&watch_model),
+                    crate::routing_policy::reactive::gateway_failure_kind(
+                        status.as_u16(),
+                        crate::routing_policy::reactive::error_type_of(&body).as_deref(),
+                    ),
+                    &detail,
+                );
+                if watch.retryable().is_none() {
+                    if let Some(p) = persist.take() {
+                        p(std::mem::take(&mut reply_all), "failed").await;
+                    }
                 }
                 for line in error_ui_lines(&detail) {
                     yield Ok::<_, std::convert::Infallible>(line);
@@ -5233,6 +5535,9 @@ where
                                 }
                                 delta_count += 1;
                                 iter_reply.push_str(delta_text);
+                                // The user is now reading an answer; a later
+                                // failure can no longer be retried on another plan.
+                                watch.mark_content();
                                 if !text_open {
                                     text_open = true;
                                     yield Ok::<_, std::convert::Infallible>(ui_text_start(&text_id));
@@ -6004,6 +6309,67 @@ fn build_acp_prompt(
     prompt
 }
 
+/// Turn the composer's plan-mode pick into the in-band token the agent reads.
+///
+/// The pill is a Core-synthesized ACP config option ([`acp::PLAN_MODE_CONFIG_ID`])
+/// that no agent has ever heard of, so it cannot be applied over the wire; the
+/// only per-turn channel that exists is the prompt text itself. This puts the
+/// token on its own FIRST LINE of the user's message, which is the placement the
+/// receiving hook requires: it accepts the token as the first line of the whole
+/// text (turn 2+, where Core sends the raw message as the turn delta) or as the
+/// first line of the final `\n\n`-separated block (turn 1, where Core prepends a
+/// preamble and short-term context). Applying it to `user_message` BEFORE
+/// [`build_acp_prompt`] satisfies both at once, and nothing downstream re-splits
+/// the message, so one edit covers both roads.
+///
+/// The exact token stays behind [`crate::pi_config::plan_mode_sentinel`] — this
+/// module is agent-neutral ACP plumbing and must not learn one engine's grammar.
+///
+/// ONLY the `on` value is materialized, deliberately. The composer persists an
+/// option's value per agent, so a user who ever touched the pill sends its value
+/// on every later turn forever; emitting an "off" token on all of those would put
+/// an unbounded number of tokens in front of prompts to no purpose, each one a
+/// chance for the match to misfire and leak literal text to the model. The cost is
+/// that switching the pill off does not itself leave a plan mode already in
+/// progress — the agent leaves it when its plan is approved, and the user can
+/// always say so in the chat. Known and accepted; do not "fix" it by emitting the
+/// off token unconditionally.
+///
+/// THE STICKY-PILL CONSEQUENCE, and how it is closed: because the composer
+/// persists the pick per agent (`use-composer-acp-sections.ts` seeds
+/// `acpOptionValues` from `getAcpConfig(agentId)`), a pill left ON sends the token
+/// on EVERY later turn. That used to undo an approved `ExitPlanMode` one turn
+/// later, when the re-sent token re-entered plan mode. The fix it needed was for
+/// the exit to be visible to whoever holds the stored option — not to this
+/// producer, which sees only one turn's request, but to the CLIENT that persists
+/// it. That is the write-back channel: the extension stamps
+/// `details.ryuConfig = { "ryu.plan": "off" }` on the approved result, `acp.rs`'s
+/// agent-neutral [`acp::AcpEvent::ConfigUpdate`] carries it, the desktop adopts and
+/// persists it, and the next turn's request no longer carries `on` — so this
+/// function emits nothing and there is no token to re-enter with.
+///
+/// It stays a REQUEST, not a latch. Every latch-shaped shortcut tried on the
+/// extension side either made plan mode un-re-enterable or re-entered it a turn
+/// later; here the user's own next click still wins, because the client's stored
+/// value is the single source of truth and the write-back is just another writer
+/// of it.
+fn apply_plan_mode_sentinel(
+    user_message: String,
+    config: Option<&std::collections::HashMap<String, String>>,
+) -> String {
+    let on = config
+        .and_then(|c| c.get(acp::PLAN_MODE_CONFIG_ID))
+        .map(String::as_str)
+        == Some(acp::PLAN_MODE_ON);
+    if !on {
+        return user_message;
+    }
+    format!(
+        "{}\n{user_message}",
+        crate::pi_config::plan_mode_sentinel(true)
+    )
+}
+
 /// Keep the resident local engine aligned with the flagship `ryu` agent's model
 /// pick. Today only Apple Foundation Models needs this: `apple-foundationmodel`
 /// is served by the `apfel` engine, and apfel validates the request's model id
@@ -6130,13 +6496,27 @@ async fn route_acp_stream(
     // AUTHENTICATED one reads the credential under the gateway grant. Empty = none.
     identity_profile_ids: Vec<String>,
     traces: TraceStore,
+    // How this turn ended, for the reactive failover wrapper. A vendor cap
+    // arrives here as an ordinary `AcpEvent::Error`, so this is the plane the
+    // whole feature exists for.
+    watch: crate::routing_policy::reactive::TurnWatch,
 ) -> Response {
     let user_message = last_user_message(&req.messages);
     if user_message.is_empty() {
         return error_stream("No user message to send to ACP agent".to_owned());
     }
+    // The composer's plan-mode pill, materialized into the message. Applied here,
+    // above BOTH consumers, because the same string is sent two ways: as the tail
+    // of the composed prompt on a session's first turn, and raw as the turn delta
+    // on every later one.
+    let user_message = apply_plan_mode_sentinel(user_message, req.acp_config.as_ref());
 
     let agent_id = req.agent_id.clone().unwrap_or_default();
+    // The model this turn is pinned to, captured for the failover watch before
+    // `req` is moved into the stream generator. `None` means the agent runs on
+    // whatever its binding says, which is also what the windows reader is told —
+    // an unattributed turn is not judged against a per-model cap.
+    let watch_model = req.acp_model.clone().filter(|m| !m.trim().is_empty());
     let prompt = build_acp_prompt(long_term_system, short_term, &user_message);
     let images = last_user_images(&req.messages);
 
@@ -6298,6 +6678,31 @@ async fn route_acp_stream(
         // tool-output frame matches its part type.
         let mut tool_dynamic: std::collections::HashMap<String, bool> =
             std::collections::HashMap::new();
+        // toolCallId -> the opening `tool-input-available` frame, so an update
+        // that carries arguments the opening frame did not have can correct it
+        // in place. Kept until the call reaches a terminal status; separate from
+        // `tool_dynamic` because that one is consumed by the FIRST update.
+        let mut tool_open: std::collections::HashMap<String, OpenToolCall> =
+            std::collections::HashMap::new();
+        // Nested sub-step fan-out (`AcpEvent::ToolSteps`), keyed by synthetic child
+        // part id (`<parent>:<n>`). The producer re-sends the WHOLE `ryuSteps` array
+        // on every tool update, so both of these exist to make the fan-out idempotent
+        // — but they are NOT the same kind of guard:
+        //
+        // - `steps_opened` remembers the `(tool_name, input)` last emitted for a
+        //   child, and the opening frame is re-emitted whenever that pair CHANGES. A
+        //   one-shot "seen this id" set would be wrong: a step can first appear with
+        //   an empty or partial `input` (the ACP wire does exactly this — the first
+        //   `tool_call` carries `rawInput: {}` and later updates fill it) and the row
+        //   would then be pinned to empty arguments forever. Re-emitting on change is
+        //   safe at both layers: the SSE part reconciles by `toolCallId` and
+        //   `PartsAccumulator::tool_input` updates a known id in place.
+        // - `steps_closed` is a CORRECTNESS gate, not noise control: a child's output
+        //   frame CLOSES its row, so it may go out only once, and only once that step
+        //   reached a terminal status.
+        let mut steps_opened: std::collections::HashMap<String, (String, Value)> =
+            std::collections::HashMap::new();
+        let mut steps_closed: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Maps ACP tool call id -> trace span id so we can close the span on ToolResult.
         let mut open_spans: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -6420,6 +6825,10 @@ async fn route_acp_stream(
                         emit!(ui_text_start(&id));
                     }
                     let id = format!("{TEXT_ID}-{text_seq}");
+                    // Past this point the user is reading an answer, so a later
+                    // failure can no longer be retried on another plan without
+                    // stacking a second answer on top of this one.
+                    watch.mark_content();
                     emit!(ui_text_delta(&id, &text));
                     acc.text_delta(&id, &text);
                 }
@@ -6427,6 +6836,12 @@ async fn route_acp_stream(
                     if text.is_empty() {
                         continue;
                     }
+                    // Thinking is output: it is on screen the moment it streams,
+                    // and it also fills `acc`. Not marking it would make the
+                    // failover wrapper hold every thought back until the first
+                    // text delta — turning a reasoning-heavy turn into a long
+                    // dead pause followed by a dump.
+                    watch.mark_content();
                     close_text!();
                     thought_acc.push_str(&text);
                     thought_open = true;
@@ -6436,6 +6851,8 @@ async fn route_acp_stream(
                     acc.tool_input(&tid, "Thinking", &thought_input, false);
                 }
                 acp::AcpEvent::Plan(entries) => {
+                    // Same as `Thought`: the todo checklist renders as it arrives.
+                    watch.mark_content();
                     close_thought!();
                     close_text!();
                     plan_open = true;
@@ -6453,36 +6870,33 @@ async fn route_acp_stream(
                     locations,
                 } => {
                     acp::record_observed_tool(&agent_id, &title, &kind);
+                    // A tool call has side effects. Retrying the turn on another
+                    // plan would run it a second time, so this counts as content
+                    // even though nothing has been written to the transcript yet.
+                    watch.mark_content();
                     close_thought!();
                     close_text!();
                     let input_value = input.unwrap_or(Value::Null);
-                    // Bind the ACP call to the desktop's rich tool UI when the
-                    // kind/input shape matches a known tool (Bash terminal,
-                    // Edit diff, Read, search, …); otherwise generic dynamic row.
-                    let (mut tool_name, mut dynamic) =
-                        acp_tool_ui_name(&kind, &title, &input_value);
-                    // A structured "ask the user" call (Claude's AskUserQuestion or
-                    // any ACP agent's question tool): reshape it into the desktop's
-                    // Question card. Guarded — only overrides when the reshape yields
-                    // a well-formed question, so unrelated tools are untouched.
-                    let mut emit_input = input_value.clone();
-                    if let Some(question) = acp_question_input(&title, &input_value) {
-                        tool_name = "Question".to_owned();
-                        dynamic = false;
-                        emit_input = question;
-                    }
-                    // Carry the ACP tool-call `locations` ([{path, line?}]) into the
-                    // part's input under a namespaced key so the desktop can show
-                    // which files/lines the tool touched. Namespaced (`_ryuLocations`)
-                    // so it never collides with a real tool input field.
-                    if !locations.is_empty() {
-                        if let Value::Object(ref mut map) = emit_input {
-                            map.insert("_ryuLocations".to_owned(), Value::Array(locations.clone()));
-                        } else if emit_input.is_null() {
-                            emit_input = serde_json::json!({ "_ryuLocations": locations });
-                        }
-                    }
+                    let (tool_name, dynamic, emit_input) =
+                        acp_tool_frame(&kind, &title, &input_value, &locations);
                     tool_dynamic.insert(id.clone(), dynamic);
+                    // Remembered so a later update that fills in the call's
+                    // arguments can correct THIS frame rather than mint a new
+                    // part. The opening frame is frequently argument-free: an ACP
+                    // agent may open the call while the model is still streaming
+                    // them (pi-acp sends `rawInput: {}` and fills it in later),
+                    // and every rich renderer reads `part.input`.
+                    tool_open.insert(
+                        id.clone(),
+                        OpenToolCall {
+                            kind: kind.clone(),
+                            title: title.clone(),
+                            locations: locations.clone(),
+                            name: tool_name.clone(),
+                            dynamic,
+                            input: input_value.clone(),
+                        },
+                    );
                     // Open a tool-call span in the trace store (no-op when no conv id).
                     if let Some(ref conv_id) = conversation_id {
                         let ah = hash_args(&input_value);
@@ -6499,9 +6913,54 @@ async fn route_acp_stream(
                     emit!(ui_tool_input(&id, &tool_name, &emit_input, dynamic));
                     acc.tool_input(&id, &tool_name, &input_value, dynamic);
                 }
-                acp::AcpEvent::ToolResult { id, status, output } => {
+                acp::AcpEvent::ToolResult {
+                    id,
+                    status,
+                    output,
+                    input,
+                } => {
                     close_thought!();
                     close_text!();
+                    // Arguments that arrived AFTER the call opened. Re-emitting
+                    // the opening frame is the supported correction mechanism —
+                    // the AI SDK's `tool-input-available` updates the part with
+                    // the same `toolCallId` in place, and so does
+                    // `PartsAccumulator::tool_input` — and it is the only way the
+                    // desktop's `PlanTool` (`input.plan`), `TodoTool`
+                    // (`input.todos`) and `SubagentTool` (`input.description`)
+                    // ever see arguments an agent streamed in late.
+                    if let Some(open) = tool_open.get_mut(&id) {
+                        let fresh = input.filter(|v| !is_blank_tool_input(v));
+                        if let Some(raw) = fresh.filter(|v| *v != open.input) {
+                            let (name, dynamic, emit_input) =
+                                acp_tool_frame(&open.kind, &open.title, &raw, &open.locations);
+                            // The part type and `dynamic` flag are PINNED to the
+                            // opening frame: a frame that resolves differently
+                            // would create a SECOND part instead of correcting
+                            // the first, which is strictly worse than keeping the
+                            // arguments the opening frame already had. Only the
+                            // kind-and-input heuristics in `acp_tool_ui_name` can
+                            // move this way, and only for an agent that opens a
+                            // call with no arguments at all.
+                            if name == open.name && dynamic == open.dynamic {
+                                emit!(ui_tool_input(&id, &name, &emit_input, dynamic));
+                                acc.tool_input(&id, &name, &raw, dynamic);
+                                open.input = raw;
+                            } else {
+                                tracing::debug!(
+                                    tool_call_id = %id,
+                                    was = %open.name,
+                                    now = %name,
+                                    "acp: late tool input would change the part type; keeping the opening frame"
+                                );
+                            }
+                        }
+                    }
+                    // Terminal states can carry no further arguments, so the
+                    // record is dropped rather than held for the whole turn.
+                    if status == "completed" || status == "failed" || status == "error" {
+                        tool_open.remove(&id);
+                    }
                     // Close the matching tool-call span.
                     if let Some(span_id) = open_spans.remove(&id) {
                         let err = if status == "error" {
@@ -6523,6 +6982,98 @@ async fn route_acp_stream(
                     });
                     emit!(ui_tool_output(&id, &payload, dynamic));
                     acc.tool_output(&id, &payload, is_err);
+                }
+                acp::AcpEvent::ToolSteps {
+                    parent_id,
+                    steps,
+                    final_answer,
+                } => {
+                    // A tool result declared the nested steps it ran internally.
+                    // Mint each one as a synthetic child tool part: the desktop
+                    // groups nested rows by splitting the child `toolCallId` at the
+                    // FIRST ':' and matching that prefix against a `tool-Task` /
+                    // `tool-Agent` parent (message-list.tsx, CoworkContextPanel.tsx).
+                    //
+                    // A parent id that already contains ':' can therefore never be a
+                    // valid prefix, so skip the fan-out entirely rather than emit
+                    // mis-parented children that vanish silently from BOTH consumers.
+                    // Provider tool_use ids are colon-free today (`toolu_…`,
+                    // `call_…`), but a gateway-routed provider is not audited.
+                    //
+                    // The guard also closes the reverse direction: because no real
+                    // provider mints a colon id, no incoming ACP `tool_call_update`
+                    // can ever collide with a `<parent>:<n>` child and reopen it
+                    // through the `ToolResult` arm's `tool_dynamic` lookup (children
+                    // are deliberately absent from that map — their `dynamic` flag is
+                    // carried inline here instead).
+                    //
+                    // Cross-unit invariant worth stating: this fan-out is INERT
+                    // unless the parent row's type is `tool-Task` or `tool-Agent` —
+                    // those are the only two the desktop collects parent ids from.
+                    // Rename the producing tool and the children orphan, with no
+                    // error anywhere.
+                    if parent_id.contains(':') {
+                        continue;
+                    }
+                    // Nested calls have side effects, exactly like the parent's own
+                    // `ToolCall`: replaying the turn on another plan would run them
+                    // again, so this counts as content.
+                    watch.mark_content();
+                    close_thought!();
+                    close_text!();
+                    for (n, raw_step) in steps.iter().enumerate() {
+                        let child = format!("{parent_id}:{n}");
+                        let step = nested_step(raw_step);
+                        // Re-emit while the step's name/arguments are still changing;
+                        // see `steps_opened` above for why one-shot would be wrong.
+                        let frame = (step.name, step.input);
+                        if steps_opened.get(&child) != Some(&frame) {
+                            emit!(ui_tool_input(&child, &frame.0, &frame.1, step.dynamic));
+                            acc.tool_input(&child, &frame.0, &frame.1, step.dynamic);
+                            steps_opened.insert(child.clone(), frame);
+                        }
+                        // Only a terminal step closes its row; a child pinned to a
+                        // terminal state mid-run would stop updating on screen.
+                        if !step.terminal || !steps_closed.insert(child.clone()) {
+                            continue;
+                        }
+                        let payload = serde_json::json!({
+                            "status": step.status,
+                            "output": raw_step.get("output").cloned().unwrap_or(Value::Null),
+                        });
+                        // `dynamic` must match the opening frame (see `ui_tool_output`).
+                        emit!(ui_tool_output(&child, &payload, step.dynamic));
+                        acc.tool_output(&child, &payload, step.status != "completed");
+                    }
+                    // The subagent's final answer, as a `<parent>:out` `TaskOutput`
+                    // part. CORE mints this id, which is the only reason the
+                    // `<parent>:<suffix>` contract is satisfiable at all — an
+                    // agent-side extension cannot emit sibling tool-call frames.
+                    // The desktop suppresses `tool-TaskOutput` from the message list
+                    // and reads it as the answer in the Cowork subagent transcript,
+                    // replacing the `partText(task.output)` fallback.
+                    if let Some(answer) = final_answer {
+                        let child = format!("{parent_id}:out");
+                        // `:out` shares `steps_closed` with the numeric children; the
+                        // suffixes cannot collide, and a repeated terminal update
+                        // must not append the answer twice.
+                        if steps_closed.insert(child.clone()) {
+                            // The opening frame carries NO answer text: neither
+                            // consumer reads a `tool-TaskOutput` part's `input`
+                            // (Cowork prefers `output`, the message list suppresses
+                            // the part), and duplicating a long final answer into the
+                            // persisted `parts` blob would double the row for nothing.
+                            let input = Value::Object(serde_json::Map::new());
+                            emit!(ui_tool_input(&child, "TaskOutput", &input, false));
+                            acc.tool_input(&child, "TaskOutput", &input, false);
+                            let payload = serde_json::json!({
+                                "status": "completed",
+                                "output": answer,
+                            });
+                            emit!(ui_tool_output(&child, &payload, false));
+                            acc.tool_output(&child, &payload, false);
+                        }
+                    }
                 }
                 acp::AcpEvent::ToolWidget(w) => {
                     // A tool call resolved to a Ryu App widget (D1): emit the
@@ -6569,6 +7120,18 @@ async fn route_acp_stream(
                             "requested": requested,
                             "message": message,
                         }),
+                    ));
+                }
+                acp::AcpEvent::ConfigUpdate(updates) => {
+                    // A tool result asked the CLIENT to update session config values
+                    // it holds and re-sends every turn (`details.ryuConfig`). Forward
+                    // as a data part; the desktop adopts each pair into its option
+                    // state AND persists it, so the NEXT turn carries the new value.
+                    // Advisory: Core keeps no session config state of its own here and
+                    // does not validate the ids — a client ignores what it doesn't hold.
+                    emit!(ui_data(
+                        "ryu-acp-config",
+                        &serde_json::json!({ "config": updates }),
                     ));
                 }
                 acp::AcpEvent::AvailableCommands(commands) => {
@@ -6660,6 +7223,23 @@ async fn route_acp_stream(
                     ));
                 }
                 acp::AcpEvent::Error(msg) => {
+                    // Report the failure to the reactive failover wrapper FIRST.
+                    // A vendor cap reaches this plane as an ordinary error with
+                    // no typed signal, so the kind is `Other` and the wrapper
+                    // confirms it against the agent's own usage windows rather
+                    // than against this string.
+                    watch.record_failure(
+                        &agent_id,
+                        watch_model.as_deref(),
+                        crate::routing_policy::reactive::FailureKind::Other,
+                        &msg,
+                    );
+                    // When the turn is going to be retried on another plan,
+                    // none of the failed-turn bookkeeping below may run: a
+                    // `failed` run status and a failed assistant row would
+                    // outlive the retry and a reload would show a failure that
+                    // never happened.
+                    let will_retry = watch.retryable().is_some();
                     // Close any still-open spans with an error on agent failure.
                     for (_tool_id, span_id) in open_spans.drain() {
                         let _ = traces.close_span(&span_id, Some("agent error")).await;
@@ -6667,7 +7247,9 @@ async fn route_acp_stream(
                     // Final persistence on error: update the existing row or
                     // create one if we never received text (a tool-only turn that
                     // errored still persists its parts).
-                    if let Some(ref conv_id) = persist_conversation_id {
+                    if let Some(ref conv_id) =
+                        persist_conversation_id.clone().filter(|_| !will_retry)
+                    {
                         if let Some(ref mid) = persisted_msg_id {
                             let _ = persist_store.update_message_content(mid, &reply).await;
                         } else if !reply.is_empty() || !acc.is_empty() {
@@ -6899,6 +7481,26 @@ pub trait AgentAdapter: Send + Sync {
 mod tests {
     use super::*;
 
+    /// The prompt-cache preference is forwarded verbatim as a header, so an
+    /// unvalidated value would reach the gateway (and the provider) mid-turn.
+    /// Both validators are closed sets for that reason.
+    #[test]
+    fn prompt_cache_preference_values_are_a_closed_set() {
+        for ok in ["off", "auto", "explicit"] {
+            assert!(is_prompt_cache_mode(ok), "{ok}");
+        }
+        for bad in ["", "on", "true", "ON", "atuo", "explicit "] {
+            assert!(!is_prompt_cache_mode(bad), "{bad}");
+        }
+
+        for ok in ["5m", "1h"] {
+            assert!(is_prompt_cache_ttl(ok), "{ok}");
+        }
+        for bad in ["", "1H", "10m", "forever", "3600"] {
+            assert!(!is_prompt_cache_ttl(bad), "{bad}");
+        }
+    }
+
     /// A hook-handled turn is framed exactly like a streamed one. Getting this
     /// wrong is not cosmetic: a missing `start`/`finish` leaves the client
     /// rendering a turn that never opens or never closes, and a stray `[DONE]`
@@ -6965,6 +7567,99 @@ mod tests {
     fn non_ui_tool_falls_through_to_title() {
         let (name, _) = acp_tool_ui_name("other", "some_custom_tool", &Value::Null);
         assert_eq!(name, "some_custom_tool");
+    }
+
+    // ── Nested sub-step fan-out (Unit 6) ──────────────────────────────────────
+
+    #[test]
+    fn nested_step_tool_name_canonicalizes_case() {
+        // Pi's built-in tools are lowercase (`read`/`bash`/`edit`/`write`) while the
+        // desktop's nested-row registry keys on the capitalized spellings. A
+        // verbatim pass-through would mint `tool-read` and the nested row would
+        // render with no title — the one failure this whole helper exists to stop.
+        for raw in ["read", "Read", "READ"] {
+            assert_eq!(
+                nested_step_tool_name(raw),
+                ("Read".to_owned(), false),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            nested_step_tool_name("bash"),
+            ("Bash".to_owned(), false),
+            "the terminal card keys on `Bash`",
+        );
+        assert_eq!(
+            nested_step_tool_name("webfetch"),
+            ("WebFetch".to_owned(), false)
+        );
+        // `TaskOutput` is reachable through the same list (Core mints it directly,
+        // but the list must stay the single source of truth for the spelling).
+        assert_eq!(
+            nested_step_tool_name("TaskOutput"),
+            ("TaskOutput".to_owned(), false)
+        );
+        // Unknown names stay dynamic under their own label: generic, never blank.
+        assert_eq!(
+            nested_step_tool_name("mcp__foo__bar"),
+            ("mcp__foo__bar".to_owned(), true),
+        );
+    }
+
+    #[test]
+    fn nested_step_defaults_mean_not_yet_not_absent() {
+        // A step announced before its arguments/status exist: the row must open
+        // (so the user sees the child working) but must NOT be treated as finished.
+        let announced = nested_step(&serde_json::json!({ "name": "bash" }));
+        assert_eq!(announced.name, "Bash");
+        assert!(!announced.dynamic);
+        assert_eq!(announced.input, Value::Null);
+        assert_eq!(announced.status, "in_progress");
+        assert!(
+            !announced.terminal,
+            "an unstated status means still running — closing the row here would \
+             freeze the nested card before the step ran",
+        );
+
+        // Both failure spellings close the row; only `completed` is a success.
+        for bad in ["error", "failed"] {
+            let step = nested_step(&serde_json::json!({ "name": "read", "status": bad }));
+            assert!(step.terminal, "{bad}");
+            assert_ne!(step.status, "completed", "{bad}");
+        }
+        assert!(nested_step(&serde_json::json!({ "status": "completed" })).terminal);
+
+        // No name at all → a generic dynamic row, never a blank `tool-` part type.
+        let anonymous = nested_step(&serde_json::json!({}));
+        assert_eq!(anonymous.name, "tool");
+        assert!(anonymous.dynamic);
+    }
+
+    #[test]
+    fn nested_step_input_grows_across_updates() {
+        // The producer re-sends the whole `ryuSteps` array per update, and a step's
+        // arguments stream in after it is announced (the ACP wire does the same:
+        // the first `tool_call` carries `rawInput: {}`). The fan-out keys its
+        // re-emit decision on the `(name, input)` pair, so that pair MUST differ
+        // between the announcement and the filled step — otherwise the nested row
+        // stays pinned to empty arguments for the rest of the turn.
+        let announced = nested_step(&serde_json::json!({ "name": "read", "input": {} }));
+        let filled =
+            nested_step(&serde_json::json!({ "name": "read", "input": { "file_path": "/a.rs" } }));
+        assert_ne!(
+            (announced.name, announced.input),
+            (filled.name, filled.input)
+        );
+    }
+
+    #[test]
+    fn known_tools_includes_task_output_for_the_subagent_answer() {
+        // `tool-TaskOutput` is what `CoworkContextPanel` reads as a subagent's final
+        // answer (and what the message list suppresses). Losing the entry would make
+        // the `<parent>:out` part render as an ordinary row in the transcript.
+        assert!(KNOWN_TOOLS.contains(&"TaskOutput"));
+        // The two parent types the desktop groups nested children under.
+        assert!(KNOWN_TOOLS.contains(&"Task") && KNOWN_TOOLS.contains(&"Agent"));
     }
 
     // ── Team orchestration linchpin: the SSE drain parser ──────────────────────
@@ -7346,6 +8041,179 @@ mod tests {
         let prompt = build_acp_prompt(merged, None, "hi");
         assert!(prompt.starts_with("Just the memory block."));
         assert!(!prompt.contains("## Skill:"));
+    }
+
+    // ── Plan-mode pill → in-band sentinel (Unit 7) ─────────────────────────────
+    //
+    // The composer's synthesized `ryu.plan` option cannot be applied over ACP, so
+    // the turn path materializes it into the prompt. These pin the PLACEMENT,
+    // which is the whole contract: the receiving hook matches the token only as
+    // the first line of the text, or the first line of its final `\n\n` block,
+    // precisely so a pasted diff cannot flip the mode.
+
+    fn plan_config(value: &str) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([(acp::PLAN_MODE_CONFIG_ID.to_owned(), value.to_owned())])
+    }
+
+    #[test]
+    fn plan_mode_sentinel_leads_the_user_message_on_both_roads() {
+        let cfg = plan_config(acp::PLAN_MODE_ON);
+        let message = apply_plan_mode_sentinel("add a health endpoint".to_owned(), Some(&cfg));
+        let sentinel = crate::pi_config::plan_mode_sentinel(true);
+
+        // Road 1 — turn 2+, where Core sends this string raw as the turn delta.
+        // The token must be the first line of the whole text, on its own.
+        assert_eq!(message, format!("{sentinel}\nadd a health endpoint"));
+
+        // Road 2 — turn 1, where the same string is the tail of a composed prompt
+        // carrying a preamble and short-term context. The token must then be the
+        // first line of the FINAL `\n\n` block. Building the real prompt is what
+        // proves one edit covers both roads.
+        let prompt = build_acp_prompt(
+            Some("You are helpful.".to_owned()),
+            Some("Earlier: the user prefers Rust.".to_owned()),
+            &message,
+        );
+        let final_block = prompt
+            .rsplit("\n\n")
+            .next()
+            .expect("prompt has a final block");
+        assert_eq!(
+            final_block.lines().next(),
+            Some(sentinel),
+            "sentinel leads the final block: {prompt}"
+        );
+        // ...and the user's own words survive intact, after it.
+        assert!(prompt.ends_with("add a health endpoint"));
+    }
+
+    #[test]
+    fn plan_mode_sentinel_absent_unless_the_pill_says_on() {
+        let untouched = "just do it".to_owned();
+        // No config at all — the overwhelmingly common turn.
+        assert_eq!(apply_plan_mode_sentinel(untouched.clone(), None), untouched);
+        // Config present but carrying other agent-reported options only.
+        let others = std::collections::HashMap::from([
+            ("model".to_owned(), "gpt-5".to_owned()),
+            ("thought_level".to_owned(), "high".to_owned()),
+        ]);
+        assert_eq!(
+            apply_plan_mode_sentinel(untouched.clone(), Some(&others)),
+            untouched
+        );
+        // Explicitly OFF. Deliberately a no-op rather than an `/plan off` token:
+        // the composer persists an option's value per agent, so this value rides
+        // every later turn forever once the pill has been touched.
+        assert_eq!(
+            apply_plan_mode_sentinel(untouched.clone(), Some(&plan_config("off"))),
+            untouched
+        );
+        // An unrecognised value is not "on" — fail towards the normal path.
+        assert_eq!(
+            apply_plan_mode_sentinel(untouched.clone(), Some(&plan_config("ON"))),
+            untouched,
+            "the value match is exact; a near-miss must not enter plan mode"
+        );
+    }
+
+    #[test]
+    fn plan_mode_sentinel_is_not_always_in_the_final_block() {
+        // The case that says why the receiving hook has to search the `\n\n`
+        // blocks FROM THE END rather than test only the last one: a first message
+        // with a blank line of its own pushes the sentinel's block into the middle
+        // of the composed prompt. Nothing on this side can prevent that — the
+        // user's own text is what carries the blank line — so this test exists to
+        // pin the shape the extension must cope with, and to fail loudly if the
+        // producer is ever changed to append the token instead of prepending it.
+        let cfg = plan_config(acp::PLAN_MODE_ON);
+        let message = apply_plan_mode_sentinel(
+            "add a health endpoint\n\nit should return the build sha".to_owned(),
+            Some(&cfg),
+        );
+        let sentinel = crate::pi_config::plan_mode_sentinel(true);
+        let prompt = build_acp_prompt(
+            Some("You are helpful.".to_owned()),
+            Some("Earlier: the user prefers Rust.".to_owned()),
+            &message,
+        );
+        let blocks: Vec<&str> = prompt.split("\n\n").collect();
+        assert_ne!(
+            blocks.last().and_then(|b| b.lines().next()),
+            Some(sentinel),
+            "the final block is the user's SECOND paragraph here, not the sentinel"
+        );
+        assert!(
+            blocks.iter().any(|b| b.lines().next() == Some(sentinel)),
+            "the sentinel still heads one of the blocks: {prompt}"
+        );
+    }
+
+    // ── Late-arriving tool arguments ────────────────────────────────────────
+    //
+    // An ACP agent may open a tool call before its arguments exist and fill them
+    // in on a later update — pi-acp does exactly that while the model streams the
+    // call. The desktop's rich cards read `part.input`, so the opening frame has
+    // to be re-emitted when the arguments land. These pin the two decisions that
+    // makes: what counts as "nothing yet", and that the re-emitted frame keeps the
+    // part type it opened with.
+
+    #[test]
+    fn blank_tool_input_is_null_or_an_empty_object() {
+        assert!(is_blank_tool_input(&Value::Null));
+        assert!(is_blank_tool_input(&serde_json::json!({})));
+        // Anything with content is real input, including a partial-JSON blob an
+        // adapter may hand over mid-stream — a later frame simply replaces it.
+        assert!(!is_blank_tool_input(&serde_json::json!({ "todos": [] })));
+        assert!(!is_blank_tool_input(&serde_json::json!([])));
+        assert!(!is_blank_tool_input(&serde_json::json!("")));
+    }
+
+    #[test]
+    fn tool_frame_is_stable_between_an_empty_open_and_a_filled_update() {
+        // The flagship's own shape: pi-acp puts Pi's tool NAME in the title, so
+        // `KNOWN_TOOLS` matches on the title alone and the part type cannot move
+        // when the arguments arrive. That stability is what lets the update
+        // CORRECT the part instead of minting a second one.
+        let (open_name, open_dynamic, open_input) =
+            acp_tool_frame("other", "PlanWrite", &serde_json::json!({}), &[]);
+        assert_eq!(open_name, "PlanWrite");
+        assert!(!open_dynamic);
+        assert_eq!(open_input, serde_json::json!({}));
+
+        let filled = serde_json::json!({ "plan": { "title": "Add a health endpoint" } });
+        let (late_name, late_dynamic, late_input) =
+            acp_tool_frame("other", "PlanWrite", &filled, &[]);
+        assert_eq!(late_name, open_name);
+        assert_eq!(late_dynamic, open_dynamic);
+        assert_eq!(
+            late_input["plan"]["title"],
+            serde_json::json!("Add a health endpoint")
+        );
+    }
+
+    #[test]
+    fn tool_frame_folds_locations_and_reshapes_a_question() {
+        // Both transformations the emitted input carries, exercised through the
+        // one function so the open and the late-update paths cannot drift.
+        let locations = vec![serde_json::json!({ "path": "/x.rs", "line": 3 })];
+        let (_, _, input) = acp_tool_frame(
+            "read",
+            "Read",
+            &serde_json::json!({ "file_path": "/x.rs" }),
+            &locations,
+        );
+        assert_eq!(input["_ryuLocations"][0]["path"], serde_json::json!("/x.rs"));
+
+        let question = serde_json::json!({
+            "questions": [{
+                "question": "Which one?",
+                "header": "Pick",
+                "options": [{ "label": "a" }, { "label": "b" }],
+            }]
+        });
+        let (name, dynamic, _) = acp_tool_frame("other", "AskUserQuestion", &question, &[]);
+        assert_eq!(name, "Question");
+        assert!(!dynamic);
     }
 
     #[test]

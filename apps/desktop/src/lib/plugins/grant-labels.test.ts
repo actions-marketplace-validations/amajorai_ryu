@@ -25,6 +25,20 @@ describe("grantLabel — known grants", () => {
 		expect(grantLabel("Fs.Read")).toBe("Read your files");
 	});
 
+	it("maps the app-capability grants that ship today", () => {
+		// Regression guard for a whole class of dead entry. `grantLabel` lowercases
+		// the grant before the lookup but the table's keys are used verbatim, and
+		// the keys must be the FULL grant string — a bare `warmup` key never
+		// matches the `warmup:crud` grant that is actually issued. Both mistakes
+		// were live here: every one of these rendered as the humanizer's fallback
+		// ("Widget render", "Warmup crud", "Chat sendFollowUp") in the consent
+		// dialog, which is exactly what the curated table exists to prevent.
+		expect(grantLabel("widget:render")).toBe("Show interactive cards in chat");
+		expect(grantLabel("warmup:crud")).toBe("Schedule keep-alive pings");
+		expect(grantLabel("calendar:crud")).toBe("Access your calendar");
+		expect(grantLabel("chat.sendFollowUp")).toBe("Send follow-up messages");
+	});
+
 	it("maps the coarse OS-style grants", () => {
 		expect(grantLabel("fs")).toBe("Access your files");
 		expect(grantLabel("net")).toBe("Access the internet");

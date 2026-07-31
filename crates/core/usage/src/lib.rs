@@ -356,6 +356,27 @@ const AGENT_ENGINES: &[(&str, Engine)] = &[
     ("acp:glm", Engine::Glm),
 ];
 
+/// The canonical agent ids [`AGENT_ENGINES`] maps, in a stable order — the whole
+/// set of agents whose subscription windows this crate can read.
+///
+/// Exported so a caller that wants to *shop across* plans (rather than read one
+/// agent it was handed) has a candidate pool it did not have to hardcode. Ryu's
+/// reactive failover uses it: when the agent running a turn hits its cap, the
+/// pool is every other id here, minus the ones whose snapshot comes back
+/// `NotLoggedIn` / `NoPlan` / `Unsupported`.
+///
+/// Derived from [`AGENT_ENGINES`] rather than written twice — the
+/// `subscription_agents_cover_every_engine` test pins the two together, so
+/// adding a reader without adding it to the pool fails the build's test run
+/// rather than silently shipping an agent nobody can fail over to.
+pub const SUBSCRIPTION_AGENTS: &[&str] = &[
+    "acp:claude",
+    "acp:codex",
+    "acp:copilot",
+    "acp:grok",
+    "acp:glm",
+];
+
 /// Substring fallbacks for engine-direct / custom ids built on the same CLI
 /// ("claude", "my-codex-agent"). Ordered most-specific-first; only consulted
 /// after every exact match missed.

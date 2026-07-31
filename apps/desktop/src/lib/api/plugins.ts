@@ -398,6 +398,21 @@ export async function fetchApps(target: ApiTarget): Promise<AppInfo[]> {
  * double-check composer toggle) without hardcoding them. Opaque records — the
  * renderer interprets the widget `type`.
  */
+/**
+ * An enabled app that declares inline chat widgets, and whether it may actually
+ * render them.
+ *
+ * `granted: false` means the app declares widgets but its record lacks
+ * `widget:render`, so Core refuses the promotion and every widget silently
+ * arrives as plain text. Worth surfacing: nothing else in the UI reports it.
+ */
+export interface PluginWidgetApp {
+	granted: boolean;
+	name: string;
+	plugin_id: string;
+	widget_count: number;
+}
+
 export interface PluginContributions {
 	/** Messaging-channel adapters an enabled plugin makes available. */
 	channels: PluginChannel[];
@@ -418,6 +433,9 @@ export interface PluginContributions {
 	 *  {@link ViewContribution} the desktop/island renderer maps to native components,
 	 *  tagged server-side with its owning `plugin` id. */
 	views: PluginView[];
+	/** Enabled apps that render interactive cards inline in chat (status only —
+	 *  the widget bindings themselves are Core-interpreted and not served here). */
+	widget_apps: PluginWidgetApp[];
 }
 
 /** An app-registered sidebar SECTION as served by Core (`contributes.sidebar_sections[]`),

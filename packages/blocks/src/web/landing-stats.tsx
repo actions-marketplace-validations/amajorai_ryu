@@ -14,13 +14,13 @@ const METRICS: {
 		icon: Plug,
 		iconColor: "text-emerald-500",
 		value: "900k",
-		label: "skills out of the box",
+		label: "skills available out of the box",
 	},
 	{
 		icon: Cpu,
 		iconColor: "text-blue-500",
 		value: "400+",
-		label: "models · one subscription",
+		label: "models reachable on one subscription",
 	},
 	{
 		icon: Bot,
@@ -32,7 +32,7 @@ const METRICS: {
 		icon: HardDrive,
 		iconColor: "text-amber-500",
 		value: "2.8M+",
-		label: "local models on Hugging Face",
+		label: "local models in the Hugging Face catalog",
 	},
 ];
 

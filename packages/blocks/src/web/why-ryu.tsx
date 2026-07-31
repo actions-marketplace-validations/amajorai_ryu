@@ -7,20 +7,20 @@ import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 
 const steps = [
 	{
-		title: "The agent bill is not just tokens.",
-		body: "Startups and SMEs pay for model calls, SaaS seats, API keys, tool wiring, retries, audits, and the engineer who has to hold it together.",
+		title: "The hard part is not the model.",
+		body: "The work needs tools, memory, policies, approvals, retries, and a record of what happened. Most teams have to assemble that layer by hand.",
 	},
 	{
-		title: "Ryu controls the expensive parts.",
-		body: "Local models handle routine work. Cloud models handle the jobs that need them. Budgets, routing, memory, tools, and audit live in one place.",
+		title: "Ryu owns the control layer.",
+		body: "Local models handle routine work. Frontier models handle the jobs that need them. Routing, budgets, redaction, tools, and audit live in one place.",
 	},
 	{
-		title: "Your team gets agents, not an infra project.",
-		body: "Install ready-made agents for real roles, connect them to the tools your team already uses, and keep humans in the loop where work needs review.",
+		title: "Your team gets agents, not another infra project.",
+		body: "Install an agent for a real workflow, connect the tools your team already uses, and keep humans in the loop where work needs review.",
 	},
 	{
-		title: "Or we roll it out with you.",
-		body: "For businesses, Ryu can be product plus implementation: we map the workflow, install the right agents, set the policies, and tune spend around the work.",
+		title: "Start narrow. Expand on the same core.",
+		body: "Map one workflow, set its policy, and add more agents as the platform proves itself. Each rollout hardens the same control layer instead of creating another silo.",
 	},
 ];
 
@@ -30,9 +30,9 @@ export default function WhyRyu() {
 			<div className="mx-auto grid max-w-6xl gap-10 lg:grid-cols-2 lg:gap-16">
 				{/* Left, pinned statement */}
 				<div className="lg:sticky lg:top-28 lg:self-start">
-					<SectionTitle title="Agents should save money before they spend it." />
+					<SectionTitle title="The layer that gets agents into production." />
 					<p className={sectionSubtitleClass}>
-						Useful agents without hiring a platform team.
+						One interface and one control layer for every agent a company runs.
 					</p>
 					<div className="mt-8 flex flex-col gap-3 sm:flex-row">
 						<Link
@@ -45,9 +45,9 @@ export default function WhyRyu() {
 						</Link>
 						<Link
 							className={cn(buttonVariants({ variant: "ghost" }))}
-							href="/products/agents-as-a-service"
+							href="/for"
 						>
-							Agents as a Service
+							See workflows
 						</Link>
 					</div>
 				</div>

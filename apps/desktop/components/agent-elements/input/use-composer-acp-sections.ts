@@ -33,6 +33,7 @@ import { useAcpConfig } from "@/src/hooks/useAcpConfig.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgentCapabilities } from "@/src/hooks/useAgentCapabilities.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
+import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
 import {
 	getAcpConfig,
 	getAcpMode,
@@ -45,6 +46,7 @@ import type { AcpConfig } from "@/src/lib/api/acp.ts";
 import { flattenConfigOptions } from "@/src/lib/api/acp.ts";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import { getActiveModel, listInstalledModels } from "@/src/lib/api/models.ts";
+import { filterEnabledModels } from "@/src/lib/api/pi-config.ts";
 import { friendlyModelDisplay } from "@/src/lib/catalog/friendly.ts";
 
 type AcpConfigOption = NonNullable<AcpConfig["configOptions"]>[number];
@@ -110,6 +112,13 @@ interface ModelSectionParams {
 	hasDedicatedAcpModels: boolean;
 	modelDisplayName: (raw: string) => string;
 	modelOptions: ModelOption[];
+	/**
+	 * The active agent's per-model visibility overrides (Settings → Providers →
+	 * Agents). Applies to whichever branch wins below: an agent advertises its
+	 * models over ACP rather than through a Pi provider, so a provider's
+	 * `modelOverrides` never covers this list.
+	 */
+	modelOverrides: Record<string, boolean> | undefined;
 	onAcpModelChange: (id: string) => void;
 	onAcpOptionChange: (configId: string, valueId: string) => void;
 	onEngineModelChange: (id: string) => void;
@@ -128,6 +137,7 @@ function buildModelSection(params: ModelSectionParams): ComposerModelSection {
 		effectiveAcpModel,
 		engineModel,
 		hasDedicatedAcpModels,
+		modelOverrides,
 		modelDisplayName,
 		modelOptions,
 		onAcpModelChange,
@@ -137,32 +147,45 @@ function buildModelSection(params: ModelSectionParams): ComposerModelSection {
 
 	if (hasDedicatedAcpModels && acpSessionConfig?.models) {
 		return {
-			items: acpSessionConfig.models.availableModels.map((m) => ({
-				id: m.modelId,
-				name: modelDisplayName(m.name),
-			})),
+			items: filterEnabledModels(
+				acpSessionConfig.models.availableModels.map((m) => ({
+					id: m.modelId,
+					name: modelDisplayName(m.name),
+				})),
+				modelOverrides,
+				effectiveAcpModel
+			),
 			value: effectiveAcpModel ?? undefined,
 			onChange: onAcpModelChange,
 		};
 	}
 	if (acpModelConfigOption) {
 		const opt = acpModelConfigOption;
+		const current = acpOptionValues[opt.id] ?? opt.currentValue;
 		return {
-			items: flattenConfigOptions(opt).map((o) => ({
-				id: o.value,
-				name: modelDisplayName(o.name),
-				description: o.description,
-			})),
-			value: acpOptionValues[opt.id] ?? opt.currentValue,
+			items: filterEnabledModels(
+				flattenConfigOptions(opt).map((o) => ({
+					id: o.value,
+					name: modelDisplayName(o.name),
+					description: o.description,
+				})),
+				modelOverrides,
+				current
+			),
+			value: current,
 			onChange: (valueId: string) => onAcpOptionChange(opt.id, valueId),
 		};
 	}
 	if (!activeAgentIsAcp) {
 		return {
-			items: modelOptions.map((m) => ({
-				id: m.id,
-				name: modelDisplayName(m.name),
-			})),
+			items: filterEnabledModels(
+				modelOptions.map((m) => ({
+					id: m.id,
+					name: modelDisplayName(m.name),
+				})),
+				modelOverrides,
+				engineModel
+			),
 			value: engineModel ?? undefined,
 			onChange: onEngineModelChange,
 		};
@@ -202,6 +225,21 @@ function withGroupedModelMenu(
 	};
 }
 
+/**
+ * One agent-requested session-config write-back, tagged with the identity of the
+ * stream part that carried it (`messageId:partIndex`). The key — not the value —
+ * is what both the producer (ChatPage) and this hook dedupe on: an agent re-emits
+ * the byte-identical map on every cycle (`ExitPlanMode` always writes
+ * `{"ryu.plan":"off"}`), so a value-keyed guard would adopt only the first one and
+ * silently drop every repeat.
+ */
+export interface StreamedAcpConfig {
+	/** configId → valueId pairs to adopt and persist. */
+	config: Record<string, string>;
+	/** Emission identity of the part that carried this map. */
+	key: string;
+}
+
 export interface ComposerAcpSectionsParams {
 	/** The active agent (drives the advertised config + ACP detection). */
 	agentId: string | null;
@@ -213,6 +251,19 @@ export interface ComposerAcpSectionsParams {
 	modelOptions: ModelOption[];
 	/** Persist an engine-catalog model pick (non-ACP fallback). */
 	onEngineModelChange: (modelId: string) => void;
+	/**
+	 * Session-config values the AGENT asked the client to update, observed on the
+	 * live chat stream (Core's `data-ryu-acp-config` part). Each pair is adopted
+	 * into the option state and persisted for the agent, exactly as a user's own
+	 * pick would be — so the NEXT turn sends the new value.
+	 *
+	 * This exists because the picks here are STICKY: `acpOptionValues` is seeded
+	 * from `getAcpConfig(agentId)` and re-sent every turn, so an agent-side action
+	 * that invalidates a pick (approving an exit from the mode the pick turns on)
+	 * would otherwise be undone by the next message. Session-scoped surfaces
+	 * (launchpad/dock) leave this undefined.
+	 */
+	streamedConfig?: StreamedAcpConfig | null;
 	/**
 	 * An agent-INITIATED permission-mode change observed on the live chat stream
 	 * (Core's `data-ryu-acp-mode` part). When this value changes to a new
@@ -254,6 +305,7 @@ export function useComposerAcpSections({
 	engineModel,
 	onEngineModelChange,
 	streamedMode,
+	streamedConfig,
 }: ComposerAcpSectionsParams): ComposerAcpSectionsResult {
 	const activeNode = useActiveNode();
 	const isRyuAgent = agentId === "ryu";
@@ -282,6 +334,13 @@ export function useComposerAcpSections({
 		() => (installedQuery.data ?? []).map((m) => m.stem).filter(Boolean),
 		[installedQuery.data]
 	);
+	// The active agent's per-model visibility, from the same Pi catalog the
+	// provider rows read (shared query key ⇒ no extra request). An agent's models
+	// come over ACP, so this is the only place its toggles can be applied.
+	const { catalog: piCatalog } = usePiConfig();
+	const agentModelOverrides = agentId
+		? piCatalog?.agentModelOverrides?.[agentId]
+		: undefined;
 	const activeStem = activeModelQuery.data?.active ?? null;
 
 	// The active agent's advertised permission modes / reasoning-effort config
@@ -306,14 +365,31 @@ export function useComposerAcpSections({
 	// Tracks the last streamed mode we adopted, so a repeated identical event
 	// (same value re-emitted) doesn't clobber a user's subsequent manual pick.
 	const lastStreamedModeRef = useRef<string | null>(null);
+	// Same guard for the config write-back, but holding the EMISSION key of the
+	// part we adopted rather than its value: the caller re-derives the map from the
+	// message list on every stream chunk (fresh object, identical contents), and an
+	// agent re-emits the same pairs on every cycle. Keying on the part means a
+	// re-render never re-adopts, and a genuinely new write-back always does.
+	const lastStreamedConfigRef = useRef<string | null>(null);
+	// The agent the write-back below should be applied to, read through a ref so
+	// `agentId` need not be an effect dep — see that effect for why.
+	const agentIdRef = useRef(agentId);
 
 	// Reset selections to the new agent's persisted choices when it changes.
 	useEffect(() => {
+		agentIdRef.current = agentId;
 		setAcpMode(getAcpMode(agentId));
 		setAcpModel(getAcpModel(agentId));
 		setAcpOptionValues(getAcpConfig(agentId));
-		// A streamed mode belongs to the previous agent's session; forget it.
+		// A streamed mode belongs to the previous agent's session; forget it, or the
+		// old agent's write-back would land on the new one.
 		lastStreamedModeRef.current = null;
+		// `lastStreamedConfigRef` is deliberately NOT cleared. It holds a per-part
+		// emission key, unique for the life of the conversation, so it can never go
+		// stale — while clearing it is precisely what would let the previous agent's
+		// write-back re-apply (the caller keeps the last one around; it only ever
+		// sets that state, never clears it), overwriting the pick the user just made
+		// for whichever agent is now selected.
 	}, [agentId]);
 
 	// Adopt an agent-initiated mode switch (Core's `data-ryu-acp-mode`): sync the
@@ -328,6 +404,40 @@ export function useComposerAcpSections({
 			persistAcpMode(agentId, streamedMode);
 		}
 	}, [streamedMode, agentId]);
+
+	// Adopt an agent-requested config write-back (Core's `data-ryu-acp-config`):
+	// MERGE the requested pairs over the current selections — never replace the
+	// map, which also carries every other advertised option (thought_level, …) —
+	// and persist each one, so the next turn's request body sends the new value.
+	//
+	// A write-back is LIVE-STREAM ONLY, which is what keeps this from fighting the
+	// user: Core's `PartsAccumulator` seals text/tool/file parts into the `parts`
+	// column and drops `data-*` ones, so a reloaded conversation carries no
+	// `data-ryu-acp-config` to re-adopt. The value survives as the persisted
+	// selection it wrote, not as a replayed instruction — so re-arming the pill and
+	// reloading keeps it armed. Same property the mode sync above relies on.
+	//
+	// `agentId` is read from a ref rather than listed as a dep on purpose: the
+	// caller never clears `streamedConfig`, so an agentId dep would re-fire this on
+	// every agent switch and persist the previous agent's write-back onto the newly
+	// selected one — clobbering the pick the reset effect above just restored.
+	useEffect(() => {
+		if (
+			!streamedConfig ||
+			streamedConfig.key === lastStreamedConfigRef.current
+		) {
+			return;
+		}
+		lastStreamedConfigRef.current = streamedConfig.key;
+		const { config } = streamedConfig;
+		setAcpOptionValues((prev) => ({ ...prev, ...config }));
+		const targetAgentId = agentIdRef.current;
+		if (targetAgentId) {
+			for (const [configId, valueId] of Object.entries(config)) {
+				persistAcpConfigValue(targetAgentId, configId, valueId);
+			}
+		}
+	}, [streamedConfig]);
 
 	const handleAcpModeChange = useCallback(
 		(modeId: string) => {
@@ -429,6 +539,7 @@ export function useComposerAcpSections({
 					effectiveAcpModel,
 					engineModel,
 					hasDedicatedAcpModels,
+					modelOverrides: agentModelOverrides,
 					modelDisplayName,
 					modelOptions,
 					onAcpModelChange: handleAcpModelChange,
@@ -479,6 +590,7 @@ export function useComposerAcpSections({
 	}, [
 		agentId,
 		agents,
+		agentModelOverrides,
 		acpSessionConfig,
 		acpConfigLoading,
 		capabilities,

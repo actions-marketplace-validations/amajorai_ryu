@@ -1,17 +1,18 @@
 "use client";
 
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
-} from "@ryu/ui/components/popover";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/popover.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { type ReactNode, useState } from "react";
 import {
 	ComposerSettingsMenu,
 	type ComposerSettingsSection,
 } from "@/components/agent-elements/input/composer-settings-menu.tsx";
+import { ManageModelsButton } from "@/components/agent-elements/input/manage-models-button.tsx";
 import { ProjectPickerContent } from "@/src/components/chat/ProjectPicker.tsx";
 import { AgentLogo } from "@/src/lib/agent-logos.tsx";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
@@ -179,6 +180,7 @@ export function EmptyStateHeader({
 			    sections, same behaviour, behind the big empty-state mark. */}
 			<ComposerSettingsMenu
 				align="center"
+				footer={(close) => <ManageModelsButton close={close} />}
 				renderBody={renderBody}
 				sections={sections}
 				side="bottom"

@@ -12,7 +12,8 @@ use agent_client_protocol::schema::{
     NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
     ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
+    SelectedPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, TerminalId,
     TerminalOutputRequest, TerminalOutputResponse, ToolCall, ToolCallContent, ToolCallLocation,
     ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest,
@@ -75,6 +76,21 @@ pub enum AcpEvent {
         status: String,
         /// Raw output and/or rendered content produced by the tool.
         output: Option<serde_json::Value>,
+        /// The call's arguments, when this update carries them.
+        ///
+        /// LOAD-BEARING, not a convenience: an ACP agent is free to open a tool
+        /// call before its arguments exist and fill them in afterwards, and
+        /// pi-acp does exactly that — the first `tool_call` frame carries
+        /// `rawInput: {}` (or a partial-JSON blob) while the model is still
+        /// streaming the call, and the real arguments arrive on a later
+        /// `tool_call_update`. The desktop's rich renderers read `part.input`
+        /// (`TodoTool` → `input.todos`, `PlanTool` → `input.plan`, `SubagentTool`
+        /// → `input.description`), so dropping this field pins those cards to the
+        /// empty opening frame: a plan card renders as a blank region, a to-do
+        /// list shimmers forever, and a subagent card loses its subtitle — with
+        /// no error anywhere. mod.rs re-emits the opening frame when this
+        /// changes.
+        input: Option<serde_json::Value>,
     },
     /// A non-text block in the assistant's message (ACP `Content`): an inline
     /// image or audio clip the agent emitted. Carries the base64 `data` + its
@@ -130,6 +146,42 @@ pub enum AcpEvent {
     /// choke point for both planes, D1) in addition to the normal tool-output
     /// part for the same tool. Boxed to keep the enum small.
     ToolWidget(Box<ToolWidgetEvent>),
+    /// A tool result declared the nested sub-steps it performed internally
+    /// (`details.ryuSteps`, see [`pi_subagent_steps`]). ACP carries no
+    /// parent/child relation on tool calls and an agent-side extension has no way
+    /// to emit a sibling tool-call frame, so Core minting `<parent_id>:<n>` child
+    /// parts from this marker is the ONLY route to the desktop's nested-subagent
+    /// rows and to `tool-TaskOutput`.
+    ///
+    /// Emitted on EVERY update carrying the marker, not only the terminal one:
+    /// the producer streams steps as the child performs them, so the array grows
+    /// across updates. mod.rs makes the fan-out idempotent by child part id.
+    ToolSteps {
+        /// The parent tool call's id — the model's own `tool_use` id, passed
+        /// through verbatim by the ACP agent.
+        parent_id: String,
+        /// `[{ name, input, output?, status }, …]`, one entry per nested step.
+        steps: Vec<serde_json::Value>,
+        /// The parent's own answer text, present only once the parent tool call
+        /// has COMPLETED. mod.rs emits it as a `<parent_id>:out` `TaskOutput`
+        /// part — the child's final answer, as the Cowork transcript reads it.
+        final_answer: Option<String>,
+    },
+    /// A tool result asked the CLIENT to update session config values it holds
+    /// (`details.ryuConfig`, see [`pi_config_updates`]). Carries the requested
+    /// `{ config_id: value_id }` pairs verbatim.
+    ///
+    /// The reverse of the usual direction: the client normally pushes its config
+    /// picks down to the agent per turn, and a client that PERSISTS a pick keeps
+    /// re-sending it, so an agent-side action that invalidates the pick has no way
+    /// to say so. This is that way. Agent-neutral by construction — keyed on the
+    /// generic `details.*` marker, never on a tool name or an agent id — so any
+    /// producer that stamps it gets the write-back.
+    ///
+    /// Advisory, not authoritative: the client owns its own state and is free to
+    /// ignore a key it does not hold. Core neither validates the ids nor mirrors
+    /// them into any session state of its own.
+    ConfigUpdate(std::collections::BTreeMap<String, String>),
     /// A fatal error from the session; the stream ends after this.
     Error(String),
 }
@@ -890,9 +942,122 @@ fn config_cache() -> &'static ConfigCache {
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+// ── Core-synthesized session config options ──────────────────────────────────
+//
+// Everything above this line is agent-reported: Ryu asks, the agent answers, and
+// the desktop renders whatever came back. This one option is the exception, and
+// it is deliberately narrow.
+//
+// Plan mode on the flagship is entered by an in-band token in the prompt text
+// (`crate::pi_config::plan_mode_sentinel`) — the only per-turn channel pi-acp
+// leaves open. A typed token is a poor affordance, so Core advertises the toggle
+// as if the agent had reported it. The desktop already renders every advertised
+// config option generically (`use-composer-acp-sections.ts`), so the pill costs
+// ZERO client change; the turn path turns the chosen value back into the token.
+//
+// Two consequences of "synthesized, not reported" follow, and both are handled
+// below rather than left to a reader: the agent has never heard of this id, so it
+// must never be sent to `session/set_config_option` (`apply_turn_config` filters
+// it), and Core has no per-session plan state to report as `currentValue`.
+
+/// The id of the Core-synthesized plan-mode option. Dotted and `ryu`-prefixed so
+/// it cannot collide with an agent-reported id: ACP ids are opaque strings and an
+/// agent is free to invent `plan`, but `ryu.` is ours by construction.
+///
+/// Shared with [`super::route_acp_stream`], which reads the turn's chosen value
+/// back out of the request. One const, so the producer and the consumer of this
+/// id cannot drift.
+pub const PLAN_MODE_CONFIG_ID: &str = "ryu.plan";
+
+/// The option value that means "plan mode on for this turn".
+pub const PLAN_MODE_ON: &str = "on";
+
+/// The option value that means "plan mode off", and the advertised default.
+const PLAN_MODE_OFF: &str = "off";
+
+/// Is `config_id` one Core made up rather than one the agent advertised?
+///
+/// Sending a synthesized id to `session/set_config_option` is not merely useless,
+/// it is an error the agent rejects: pi-acp accepts exactly `model` and
+/// `thought_level` and throws `Unknown configId` on anything else. The rejection
+/// is logged and skipped, so the visible symptom would be a warn line per turn
+/// forever — noise that trains people to ignore the log. Filter instead.
+fn is_core_synthesized_config_id(config_id: &str) -> bool {
+    config_id == PLAN_MODE_CONFIG_ID
+}
+
+/// The synthesized plan-mode selector, as an agent would have advertised it.
+///
+/// `category: "mode"` is the honest classification (it selects how the turn
+/// behaves, not which model runs it) and is what gives the desktop its icon and
+/// placement. One caveat worth knowing before changing it: the composer hides the
+/// agent's own `modes` picker as soon as ANY config option carries
+/// `category: "mode"`. That costs nothing today only because the flagship's modes
+/// picker is *already* hidden for an unrelated reason — pi-acp advertises its
+/// thinking levels twice, once as `modes` and once as the `thought_level` config
+/// option over the identical value set, which trips the composer's
+/// duplicate-detection. If pi-acp ever stops duplicating them, this category
+/// becomes load-bearing and must be revisited.
+///
+/// `name` must also stay clear of "thought"/"reason"/"think"/"effort": the
+/// composer treats any option whose category, id or name contains one of those as
+/// a reasoning control and hides it outright when the agent reports no reasoning
+/// capability. "Plan mode" is safe; "Planning effort" would silently vanish.
+///
+/// `currentValue` is always `off`, even while plan mode is on. Core has no
+/// per-session plan state to read — the flag lives inside the Pi process, and this
+/// probe is cached per spawn command and shared by every conversation. The
+/// desktop overlays the user's own pick (`acpOptionValues[opt.id] ?? currentValue`)
+/// so the pill still shows what they chose; `off` is only the cold-start default.
+fn plan_mode_config_option() -> SessionConfigOption {
+    SessionConfigOption::select(
+        PLAN_MODE_CONFIG_ID,
+        "Plan mode",
+        PLAN_MODE_OFF,
+        vec![
+            SessionConfigSelectOption::new(PLAN_MODE_OFF, "Off")
+                .description("Act on the request directly.".to_owned()),
+            SessionConfigSelectOption::new(PLAN_MODE_ON, "On").description(
+                "Investigate and propose a plan first; file edits are withheld until you approve it."
+                    .to_owned(),
+            ),
+        ],
+    )
+    .category(SessionConfigOptionCategory::Mode)
+    .description("Research and write a plan before changing anything.".to_owned())
+}
+
+/// Append the synthesized plan-mode option to what an agent advertised — for the
+/// flagship only.
+///
+/// Gated on [`RyuToolAccess::PiExtension`] rather than on an agent id: that is the
+/// SAME spawn-command predicate `run_acp_instance` uses to recognise the managed
+/// Pi, and it is true exactly when `ryu-plan.ts` has been shipped into the config
+/// dir the process will read. Offering the pill to an agent that cannot honour the
+/// sentinel would be a control that does nothing — and the user's `/plan` would
+/// reach that agent's model as literal text.
+///
+/// `None` (the agent advertised no config options at all) becomes a one-element
+/// list rather than staying `None`, so the pill does not depend on the agent
+/// happening to advertise something else first.
+fn with_plan_mode_option(
+    spawn_cmd: &str,
+    advertised: Option<Vec<SessionConfigOption>>,
+) -> Option<Vec<SessionConfigOption>> {
+    if ryu_tool_access(spawn_cmd) != RyuToolAccess::PiExtension {
+        return advertised;
+    }
+    let mut options = advertised.unwrap_or_default();
+    // Appended, never inserted: the agent's own options keep the order it chose,
+    // and the model selector in particular stays first where pi-acp put it.
+    options.push(plan_mode_config_option());
+    Some(options)
+}
+
 /// Probe an ACP agent for its advertised session config — `{ modes, models,
-/// configOptions }`, each `null` when unsupported. Fully agent-reported; Ryu
-/// hardcodes nothing. Cached per `spawn_cmd`.
+/// configOptions }`, each `null` when unsupported. Fully agent-reported apart
+/// from the one Core-synthesized option documented above; Ryu hardcodes nothing
+/// else. Cached per `spawn_cmd`.
 pub async fn probe_acp_config(
     spawn_cmd: String,
     cwd: PathBuf,
@@ -915,6 +1080,11 @@ pub async fn probe_acp_config(
     // flagship's user their tools are unavailable when they are not. Core owns
     // this derivation for exactly that reason — see [`RyuToolAccess`].
     let tool_access = ryu_tool_access(&spawn_cmd);
+    // Carried into the connect closure so the synthesized plan-mode option is
+    // appended INSIDE it — i.e. before the result is written to `config_cache`.
+    // Appending after the cache read instead would work on the first call and
+    // silently stop on every later one, which is the worst shape this bug has.
+    let plan_cmd = spawn_cmd.clone();
     // Bound the whole probe. Some agents advertise their session config statically
     // (Claude Code, Pi, the Ryu flagship) and answer `session/new` instantly; others
     // do real backend work inside `session/new` — Codex, notably, reaches its model
@@ -929,6 +1099,7 @@ pub async fn probe_acp_config(
             .builder()
             .connect_with(agent, move |cx: ConnectionTo<Agent>| {
                 let cwd = cwd.clone();
+                let plan_cmd = plan_cmd.clone();
                 async move {
                     // Capture the agent's advertised auth methods (ACP
                     // Authentication) so the desktop can offer "Login with …" for
@@ -948,7 +1119,7 @@ pub async fn probe_acp_config(
                     Ok(serde_json::json!({
                         "modes": resp.modes,
                         "models": resp.models,
-                        "configOptions": resp.config_options,
+                        "configOptions": with_plan_mode_option(&plan_cmd, resp.config_options),
                         "authMethods": init.auth_methods,
                         "agentCapabilities": agent_caps_json(&caps),
                         "ryuToolAccess": tool_access.as_str(),
@@ -1061,6 +1232,10 @@ pub async fn load_acp_session(
 ) -> anyhow::Result<serde_json::Value> {
     let agent =
         AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    // The resumed session's advertised config feeds the same composer pickers the
+    // cold probe does, so it gets the same synthesized plan-mode option. Omitting
+    // it here would make the pill disappear on exactly the sessions a user resumed.
+    let plan_cmd = spawn_cmd.clone();
     let value = tokio::time::timeout(
         ACP_PROBE_TIMEOUT,
         Client
@@ -1068,6 +1243,7 @@ pub async fn load_acp_session(
             .connect_with(agent, move |cx: ConnectionTo<Agent>| {
                 let session_id = session_id.clone();
                 let cwd = cwd.clone();
+                let plan_cmd = plan_cmd.clone();
                 async move {
                     let init: InitializeResponse = cx
                         .send_request(ryu_initialize_request())
@@ -1091,7 +1267,7 @@ pub async fn load_acp_session(
                         "sessionId": session_id,
                         "modes": resp.modes,
                         "models": resp.models,
-                        "configOptions": resp.config_options,
+                        "configOptions": with_plan_mode_option(&plan_cmd, resp.config_options),
                     }))
                 }
             }),
@@ -1206,6 +1382,15 @@ async fn apply_turn_config(
     }
     for (config_id, value) in &turn.config_options {
         if config_id.is_empty() {
+            continue;
+        }
+        // Core-synthesized ids never go on the wire — the agent never advertised
+        // them and rejects them. `ryu.plan` is applied by prepending the sentinel
+        // to the prompt instead (`super::route_acp_stream`), which is the whole
+        // reason it exists. Skipped here rather than removed from
+        // `turn.config_options`, because the model fallback below still has to see
+        // the full list to decide whether `model` was already sent explicitly.
+        if is_core_synthesized_config_id(config_id) {
             continue;
         }
         if let Err(e) = connection
@@ -1472,7 +1657,13 @@ impl AgentAdapter for AcpAdapter {
                             })),
                         });
                     }
-                    AcpEvent::ToolResult { id, status, output } => {
+                    // `input` is deliberately not surfaced on this legacy
+                    // chunk shape: it exists so the streaming UI can correct a
+                    // tool part's arguments in place, and this path has no
+                    // parts to correct — it flattens the turn into text chunks.
+                    AcpEvent::ToolResult {
+                        id, status, output, ..
+                    } => {
                         chunks.push(ChatChunk {
                             delta: None,
                             done: false,
@@ -1488,10 +1679,11 @@ impl AgentAdapter for AcpAdapter {
                             metadata: Some(serde_json::json!({ "error": true })),
                         });
                     }
-                    // Reasoning, plan snapshots, mode changes, permission prompts,
-                    // command advertisements and usage stats are surfaced only on the
-                    // streaming path (route_acp_stream); this legacy collect path
-                    // returns final text + tool metadata and runs non-interactively.
+                    // Reasoning, plan snapshots, mode changes, config write-backs,
+                    // permission prompts, command advertisements and usage stats are
+                    // surfaced only on the streaming path (route_acp_stream); this
+                    // legacy collect path returns final text + tool metadata and runs
+                    // non-interactively.
                     AcpEvent::Text(_)
                     | AcpEvent::UserText(_)
                     | AcpEvent::Thought(_)
@@ -1502,6 +1694,8 @@ impl AgentAdapter for AcpAdapter {
                     | AcpEvent::AvailableCommands(_)
                     | AcpEvent::Usage(_)
                     | AcpEvent::ToolWidget(_)
+                    | AcpEvent::ToolSteps { .. }
+                    | AcpEvent::ConfigUpdate(_)
                     | AcpEvent::PermissionRequest { .. } => {}
                 }
             }
@@ -2370,6 +2564,55 @@ pub async fn run_acp_instance(
                                                     }
                                                 }
                                             }
+                                            // Nested sub-step path: a tool result
+                                            // that declares `details.ryuSteps` gets
+                                            // those steps fanned out by mod.rs into
+                                            // synthetic `<id>:<n>` child tool parts.
+                                            // A SIBLING of the widget block above,
+                                            // not nested in it — this has nothing to
+                                            // do with the widget MCP registry, and
+                                            // it keys on the same kind of generic
+                                            // `details.*` marker (no agent id).
+                                            if let Some(steps) = pi_subagent_steps(
+                                                update.fields.raw_output.as_ref(),
+                                            ) {
+                                                // The final answer rides only the
+                                                // TERMINAL update: emitting it while
+                                                // the child is still working would
+                                                // publish a truncated answer that
+                                                // the id-keyed dedupe then pins.
+                                                let final_answer = matches!(
+                                                    update.fields.status.as_ref(),
+                                                    Some(ToolCallStatus::Completed)
+                                                )
+                                                .then(|| {
+                                                    pi_subagent_answer(
+                                                        update.fields.raw_output.as_ref(),
+                                                    )
+                                                })
+                                                .flatten();
+                                                let _ = tx_chunk.send(AcpEvent::ToolSteps {
+                                                    parent_id: update.tool_call_id.to_string(),
+                                                    steps: steps.clone(),
+                                                    final_answer,
+                                                });
+                                            }
+                                            // Session-config write-back: a tool result
+                                            // that declares `details.ryuConfig` asks the
+                                            // CLIENT to update the config values it holds
+                                            // and re-sends every turn. ALSO A SIBLING of
+                                            // the two blocks above — in particular NOT
+                                            // nested in the widget block, which is gated
+                                            // on an MCP registry this has nothing to do
+                                            // with. Generic `details.*` marker, no agent
+                                            // id and no tool name (AGENTS.md).
+                                            if let Some(updates) = pi_config_updates(
+                                                update.fields.status.as_ref(),
+                                                update.fields.raw_output.as_ref(),
+                                            ) {
+                                                let _ =
+                                                    tx_chunk.send(AcpEvent::ConfigUpdate(updates));
+                                            }
                                         }
                                         SessionUpdate::CurrentModeUpdate(m) => {
                                             // Agent switched mode itself; keep the
@@ -2909,6 +3152,12 @@ fn tool_update_event(update: &ToolCallUpdate) -> Option<AcpEvent> {
         id: update.tool_call_id.to_string(),
         status: status.unwrap_or_else(|| "in_progress".to_owned()),
         output,
+        // Carried, never interpreted here: an update that fills in arguments the
+        // opening `tool_call` frame did not have yet is the ONLY way the desktop
+        // ever learns them (see `AcpEvent::ToolResult::input`). `None` and an
+        // empty object are both "nothing new"; mod.rs is what decides that, so
+        // this stays a verbatim pass-through.
+        input: fields.raw_input.clone(),
     })
 }
 
@@ -2938,6 +3187,96 @@ fn pi_widget_binding(
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     Some((tool.to_owned(), args, result))
+}
+
+/// Extract the nested sub-steps a tool result declared it performed internally.
+///
+/// A tool result may carry `details.ryuSteps = [{ name, input, output?, status },
+/// …]`; pi-acp preserves a tool result's `details` verbatim as the ACP
+/// `rawOutput`. ACP models tool calls as a flat list with no parent/child
+/// relation, so this `details` marker is the only correlation channel that
+/// exists — the same seam [`pi_widget_binding`]'s `details.ryuWidget` already
+/// uses.
+///
+/// Keyed on the generic `details.*` marker and **never** on `agent_id`: this
+/// module is agent-neutral ACP plumbing, so any producer that stamps the marker
+/// gets the fan-out and no agent's name is compiled in here.
+///
+/// DIVERGES from [`pi_widget_binding`] on exactly one point, deliberately: there
+/// is **no** [`ToolCallStatus::Completed`] gate. A widget renders once, from a
+/// final result, so a partial `tool_execution_update` must not reach it. Steps
+/// are the opposite — the producer appends one entry per nested call and re-emits
+/// the growing array on every `tool_call_update`, so gating on `Completed` would
+/// collapse a live nested transcript into a single frame at the very end.
+/// Idempotency is handled downstream instead, by synthetic child part id.
+fn pi_subagent_steps(raw_output: Option<&serde_json::Value>) -> Option<&Vec<serde_json::Value>> {
+    raw_output?.get("details")?.get("ryuSteps")?.as_array()
+}
+
+/// Extract a client-side session-config write-back from a `ToolCallUpdate`.
+///
+/// A tool result may carry `details.ryuConfig = { "<configId>": "<valueId>" }`;
+/// pi-acp preserves a tool result's `details` verbatim as the ACP `rawOutput`.
+/// This is the agent→client direction of the session-config channel: a client that
+/// PERSISTS a config pick re-sends it on every later turn, so an agent-side action
+/// that invalidates the pick (approving an exit from a mode the pick turns on, say)
+/// needs a way to say "stop sending that". Returns the requested pairs, or `None`
+/// when the update is not a completed result carrying a well-formed marker.
+///
+/// Keyed on the generic `details.*` marker — the same seam
+/// [`pi_widget_binding`]'s `details.ryuWidget` and [`pi_subagent_steps`]'
+/// `details.ryuSteps` already use — and **never** on a tool name or an `agent_id`:
+/// this module is agent-neutral ACP plumbing, so no producer's vocabulary is
+/// compiled in here. The config ids and values are opaque strings forwarded
+/// verbatim; Core does not know which options a client holds and must not
+/// second-guess them.
+///
+/// Gates on [`ToolCallStatus::Completed`], like [`pi_widget_binding`] and unlike
+/// [`pi_subagent_steps`]: pi-acp also emits in-progress `tool_call_update` frames
+/// carrying a partial `rawOutput`, and a write-back is a one-shot instruction, not
+/// a growing snapshot. Acting on a partial frame would flip a user's picker while
+/// the tool was still running — and, worse, before the tool could still fail.
+///
+/// Non-string values are dropped per key rather than failing the whole marker (a
+/// config value is a `valueId` by ACP's own typing); a marker that yields no usable
+/// pair at all returns `None`, so no empty event is emitted.
+fn pi_config_updates(
+    status: Option<&ToolCallStatus>,
+    raw_output: Option<&serde_json::Value>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    if !matches!(status, Some(ToolCallStatus::Completed)) {
+        return None;
+    }
+    let updates: std::collections::BTreeMap<String, String> = raw_output?
+        .get("details")?
+        .get("ryuConfig")?
+        .as_object()?
+        .iter()
+        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+        .collect();
+    (!updates.is_empty()).then_some(updates)
+}
+
+/// The parent tool result's own answer text, for the synthetic `<parent>:out`
+/// `TaskOutput` part minted in mod.rs.
+///
+/// Read from the tool-result envelope pi-acp forwards as `rawOutput`
+/// (`{ content: [{ type: "text", text }, …], details: { … } }`) — deliberately
+/// NOT from a second `details.*` marker. A marker the producing extension does
+/// not happen to stamp would make the final-answer part silently absent (the
+/// "shipped and simply not there at runtime" failure class), whereas `content`
+/// is the one field every tool result already has.
+///
+/// Returns `None` when the envelope carries no text at all, so the caller emits
+/// no empty `TaskOutput` row.
+fn pi_subagent_answer(raw_output: Option<&serde_json::Value>) -> Option<String> {
+    let mut text = String::new();
+    for block in raw_output?.get("content")?.as_array()? {
+        if let Some(t) = block.get("text").and_then(serde_json::Value::as_str) {
+            text.push_str(t);
+        }
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 /// A single fallback provider entry in the default-agent recovery chain.
@@ -3346,8 +3685,16 @@ fn codex_acp_cmd() -> String {
     format!("OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} npx -y @agentclientprotocol/codex-acp@latest")
 }
 
-/// The three env vars the `ryu-mcp` Pi extension needs to reach Core, rendered for
+/// The three env vars the managed Pi's extensions need to reach Core, rendered for
 /// the target shell (`windows` ⇒ `set VAR=…&& ` chaining, else POSIX inline).
+///
+/// **Two consumers now, not one.** `ryu-mcp.ts` calls `/api/mcp/tools/call` with
+/// them, and `ryu-plan.ts` calls `/api/exec/scan` — the gateway command gate for
+/// the flagship's `bash`, which fails OPEN at that hop. So renaming or dropping
+/// one of these vars does not merely cost the agent its tools: it silently
+/// removes a safety gate, with the extension logging into a stderr stream pi-acp
+/// discards. The `RYU_MCP_` prefix is historical; treat it as the Pi-extension
+/// channel, not as MCP's.
 ///
 /// **Extracted because it has two callers and they drifted.** Pi cannot accept the
 /// in-process MCP bridge (`pi-acp` advertises `mcpCapabilities {http:false,sse:false}`
@@ -4256,6 +4603,324 @@ mod tests {
         assert!(pi_widget_binding(Some(&ToolCallStatus::Completed), None).is_none());
     }
 
+    // ── Nested sub-step fan-out (Unit 6) ───────────────────────────────────
+    //
+    // A tool result stamps `details.ryuSteps = [{ name, input, output?, status }]`
+    // and pi-acp preserves it as ACP `rawOutput`. These cover the extraction only;
+    // the `<parent>:<n>` minting itself lives in mod.rs.
+
+    fn ryu_steps_raw_output(answer: &str, steps: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "content": [{ "type": "text", "text": answer }],
+            "details": { "mode": "single", "ryuSteps": steps }
+        })
+    }
+
+    #[test]
+    fn pi_subagent_steps_extracts_on_every_update_not_only_completed() {
+        // The deliberate DIVERGENCE from `pi_widget_binding`: steps stream, so the
+        // extractor has no `Completed` gate. A widget renders once from a final
+        // result; a nested transcript has to grow live, which is why this asserts
+        // the opposite of `pi_widget_binding_extracts_only_on_completed_with_marker`.
+        let raw = ryu_steps_raw_output(
+            "done",
+            serde_json::json!([
+                { "name": "read", "input": { "file_path": "/a.rs" }, "status": "completed" },
+            ]),
+        );
+        let steps = pi_subagent_steps(Some(&raw)).expect("marker extracts regardless of status");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["name"], serde_json::json!("read"));
+        // Status never enters the extractor at all — there is nothing to gate on.
+    }
+
+    #[test]
+    fn pi_subagent_steps_none_without_marker_or_wrong_shape() {
+        // An ordinary tool result (no `details.ryuSteps`) must not fan out.
+        let plain = serde_json::json!({ "content": [{ "type": "text", "text": "hi" }] });
+        assert!(pi_subagent_steps(Some(&plain)).is_none());
+        // The widget marker is a different seam; it must not be mistaken for steps.
+        let widget = ryu_widget_raw_output("checklist__render", serde_json::json!({}));
+        assert!(pi_subagent_steps(Some(&widget)).is_none());
+        // Marker present but not an array → none (never mint a child from a scalar).
+        let scalar = serde_json::json!({ "details": { "ryuSteps": "oops" } });
+        assert!(pi_subagent_steps(Some(&scalar)).is_none());
+        // No raw_output at all → none.
+        assert!(pi_subagent_steps(None).is_none());
+    }
+
+    // ── Session-config write-back (`details.ryuConfig`) ────────────────────
+    //
+    // The agent→client direction of the session-config channel: a tool result
+    // stamps `details.ryuConfig = { configId: valueId }` and pi-acp preserves it
+    // as ACP `rawOutput`. Structural twin of `pi_widget_binding` (Completed-gated,
+    // marker-keyed); these cover the extraction only, the `data-ryu-acp-config`
+    // part is emitted in mod.rs.
+
+    fn ryu_config_raw_output(config: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "content": [{ "type": "text", "text": "done" }],
+            "details": { "exited": true, "ryuConfig": config }
+        })
+    }
+
+    #[test]
+    fn pi_config_updates_extracts_only_on_completed_with_marker() {
+        let raw = ryu_config_raw_output(serde_json::json!({ "ryu.plan": "off" }));
+
+        // Completed + marker → the requested pairs, verbatim.
+        let got = pi_config_updates(Some(&ToolCallStatus::Completed), Some(&raw))
+            .expect("completed + marker extracts a config write-back");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got.get("ryu.plan").map(String::as_str), Some("off"));
+
+        // In-progress (a partial `tool_execution_update`) must NOT extract — a
+        // write-back is a one-shot instruction, and acting on a partial frame
+        // would flip the user's picker before the tool could still fail.
+        assert!(pi_config_updates(Some(&ToolCallStatus::InProgress), Some(&raw)).is_none());
+        // Missing status → none.
+        assert!(pi_config_updates(None, Some(&raw)).is_none());
+    }
+
+    #[test]
+    fn pi_config_updates_none_without_marker_or_wrong_shape() {
+        // An ordinary tool result (no `details.ryuConfig`) must not write back.
+        let plain = serde_json::json!({ "content": [{ "type": "text", "text": "hi" }] });
+        assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&plain)).is_none());
+        // The sibling markers are different seams and must not be mistaken for this
+        // one (mirrors `pi_subagent_steps_none_without_marker_or_wrong_shape`).
+        let widget = ryu_widget_raw_output("checklist__render", serde_json::json!({}));
+        assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&widget)).is_none());
+        let steps = ryu_steps_raw_output("done", serde_json::json!([]));
+        assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&steps)).is_none());
+        // Marker present but not an object → none (never mint a pair from a scalar).
+        let scalar = ryu_config_raw_output(serde_json::json!("off"));
+        assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&scalar)).is_none());
+        // An empty object yields no usable pair → none, so no empty event is emitted.
+        let empty = ryu_config_raw_output(serde_json::json!({}));
+        assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&empty)).is_none());
+        // No raw_output at all → none.
+        assert!(pi_config_updates(Some(&ToolCallStatus::Completed), None).is_none());
+    }
+
+    #[test]
+    fn pi_config_updates_drops_non_string_values_and_keeps_the_rest() {
+        // A `valueId` is a string by ACP's own typing. A malformed entry is dropped
+        // per key rather than voiding a marker that also carries usable pairs; a
+        // marker with NOTHING usable left degrades to `None`.
+        let mixed = ryu_config_raw_output(serde_json::json!({
+            "ryu.plan": "off",
+            "thought_level": 3,
+            "nested": { "a": "b" },
+        }));
+        let got = pi_config_updates(Some(&ToolCallStatus::Completed), Some(&mixed))
+            .expect("the one well-formed pair survives");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got.get("ryu.plan").map(String::as_str), Some("off"));
+
+        let all_bad = ryu_config_raw_output(serde_json::json!({ "thought_level": 3 }));
+        assert!(pi_config_updates(Some(&ToolCallStatus::Completed), Some(&all_bad)).is_none());
+    }
+
+    #[test]
+    fn pi_config_updates_is_value_agnostic_and_not_pi_specific() {
+        // The extractor compiles in no vocabulary of its own: an arbitrary agent's
+        // arbitrary option/value round-trips untouched. If this ever needs to know
+        // an id or a value, the channel has stopped being agent-neutral.
+        let raw = ryu_config_raw_output(serde_json::json!({
+            "some.other.agent/option": "whatever-value",
+        }));
+        let got = pi_config_updates(Some(&ToolCallStatus::Completed), Some(&raw))
+            .expect("any producer's ids extract");
+        assert_eq!(
+            got.get("some.other.agent/option").map(String::as_str),
+            Some("whatever-value")
+        );
+    }
+
+    #[test]
+    fn pi_subagent_answer_concatenates_text_blocks() {
+        // The `<parent>:out` TaskOutput text comes from the result envelope's
+        // `content`, NOT from a second `details.*` marker a producer might forget.
+        let raw = ryu_steps_raw_output("", serde_json::json!([]));
+        assert!(
+            pi_subagent_answer(Some(&raw)).is_none(),
+            "empty text → no row"
+        );
+
+        let multi = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "part one " },
+                { "type": "image", "data": "…" },
+                { "type": "text", "text": "part two" },
+            ],
+            "details": { "ryuSteps": [] }
+        });
+        assert_eq!(
+            pi_subagent_answer(Some(&multi)).as_deref(),
+            Some("part one part two"),
+        );
+        // No `content` key, and no raw output at all → none.
+        assert!(pi_subagent_answer(Some(&serde_json::json!({ "details": {} }))).is_none());
+        assert!(pi_subagent_answer(None).is_none());
+    }
+
+    // ── Core-synthesized plan-mode config option (Unit 7) ────────────────────
+    //
+    // The ONE option Ryu invents rather than reports. These pin the two halves
+    // that make it safe: it is offered only to the agent that can honour it, and
+    // it never goes back to that agent over the wire.
+
+    /// A flagship spawn command, in the POSIX spelling `ryu_pi_acp_cmd` emits.
+    fn flagship_spawn_cmd() -> String {
+        format!("PI_CODING_AGENT_DIR=/tmp/pi-agent {}", pi_acp_cmd_gated())
+    }
+
+    #[test]
+    fn plan_mode_config_option_is_appended_only_for_the_flagship() {
+        // The flagship gets the pill appended AFTER whatever it advertised, so
+        // pi-acp's own model selector keeps the leading slot it chose.
+        let advertised = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "gpt-5",
+            vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
+        )];
+        let out = with_plan_mode_option(&flagship_spawn_cmd(), Some(advertised))
+            .expect("flagship gets options");
+        assert_eq!(out.len(), 2, "appended, not replaced");
+        assert_eq!(&*out[0].id.0, "model", "agent's order is preserved");
+        assert_eq!(&*out[1].id.0, PLAN_MODE_CONFIG_ID);
+
+        // An agent that advertised nothing still gets the pill — otherwise the
+        // affordance would depend on the agent happening to report something else.
+        let bare = with_plan_mode_option(&flagship_spawn_cmd(), None).expect("None becomes a list");
+        assert_eq!(bare.len(), 1);
+        assert_eq!(&*bare[0].id.0, PLAN_MODE_CONFIG_ID);
+
+        // Every OTHER agent is untouched, in both directions. A pill on an agent
+        // with no `ryu-plan.ts` would be a control that does nothing worse than
+        // nothing: the sentinel would reach that model as literal text.
+        for cmd in [
+            "npx -y claude-code-acp",
+            "npx -y @zed-industries/codex-acp",
+            // Bare pi-acp: pi, but NOT the managed config dir, so no extension.
+            &pi_acp_cmd_gated(),
+        ] {
+            assert!(
+                with_plan_mode_option(cmd, None).is_none(),
+                "{cmd}: no synthesized option"
+            );
+            let one = with_plan_mode_option(
+                cmd,
+                Some(vec![SessionConfigOption::select(
+                    "model",
+                    "Model",
+                    "a",
+                    vec![SessionConfigSelectOption::new("a", "A")],
+                )]),
+            )
+            .expect("advertised list survives");
+            assert_eq!(one.len(), 1, "{cmd}: agent's own options are not extended");
+        }
+    }
+
+    #[test]
+    fn plan_mode_config_option_renders_in_the_composer() {
+        // Three properties the desktop's generic renderer depends on. None is
+        // cosmetic: each one, if broken, makes the pill silently absent rather
+        // than visibly wrong.
+        let opt = plan_mode_config_option();
+        let json = serde_json::to_value(&opt).expect("serializes");
+
+        // 0. The field names the desktop's `AcpConfigOption` interface requires.
+        //    Asserted explicitly because a serde rename would leave every other
+        //    assertion below passing while the renderer saw an option with no id.
+        assert_eq!(json["id"], serde_json::json!(PLAN_MODE_CONFIG_ID));
+        assert!(json["name"].is_string(), "camelCase field names: {json}");
+
+        // 1. It is a `select` with both values, in off→on order.
+        assert_eq!(json["type"], serde_json::json!("select"));
+        let values: Vec<&str> = json["options"]
+            .as_array()
+            .expect("options array")
+            .iter()
+            .map(|o| o["value"].as_str().expect("value"))
+            .collect();
+        assert_eq!(values, vec![PLAN_MODE_OFF, PLAN_MODE_ON]);
+
+        // 2. `currentValue` is the OFF default. Core holds no per-session plan
+        //    state and this probe is cached per spawn command, so there is
+        //    nothing else it could honestly be; the desktop overlays the user's
+        //    own pick on top.
+        assert_eq!(json["currentValue"], serde_json::json!(PLAN_MODE_OFF));
+
+        // 3. Neither the category, the id nor the name may contain a word the
+        //    composer reads as "this is a reasoning control" — such options are
+        //    hidden outright for an agent that reports no reasoning capability.
+        let haystack = format!(
+            "{} {} {}",
+            json["category"].as_str().unwrap_or_default(),
+            json["id"].as_str().unwrap_or_default(),
+            json["name"].as_str().unwrap_or_default()
+        )
+        .to_lowercase();
+        for needle in ["thought", "reason", "think", "effort"] {
+            assert!(
+                !haystack.contains(needle),
+                "'{needle}' in \"{haystack}\" would hide the pill when reasoning is off"
+            );
+        }
+        assert_eq!(json["category"], serde_json::json!("mode"));
+    }
+
+    #[test]
+    fn plan_mode_id_is_filtered_from_set_config_option() {
+        // pi-acp accepts `model` and `thought_level` and throws on anything else,
+        // so sending the synthesized id would produce a rejected request and a
+        // warn line on every single turn.
+        assert!(is_core_synthesized_config_id(PLAN_MODE_CONFIG_ID));
+        for agent_reported in ["model", "thought_level", "mode", "ryu", "ryu.plan.extra"] {
+            assert!(
+                !is_core_synthesized_config_id(agent_reported),
+                "{agent_reported} is agent-reported and must still be sent"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_mode_id_coexists_with_the_model_config_option() {
+        // Covers the DATA `apply_turn_config` reads, not its send loop (that needs
+        // a live `ConnectionTo<Agent>`). It skips the synthesized id inside the loop rather
+        // than removing it from `turn.config_options`, because the model fallback
+        // below scans that same list to decide whether `model` was already sent
+        // explicitly. This pins that the scan still sees `model` when a plan pick
+        // rides alongside it — a `.retain()` "cleanup" would break it silently.
+        let turn = AcpTurnConfig {
+            session_mode: None,
+            config_options: vec![
+                (PLAN_MODE_CONFIG_ID.to_owned(), PLAN_MODE_ON.to_owned()),
+                (MODEL_CONFIG_OPTION_ID.to_owned(), "gpt-5".to_owned()),
+            ],
+            model_id: Some("gpt-5".to_owned()),
+            interactive: true,
+        };
+        assert!(
+            turn.config_options
+                .iter()
+                .any(|(id, _)| id == MODEL_CONFIG_OPTION_ID),
+            "the model fallback's `already_via_config` scan must still hit"
+        );
+        assert_eq!(
+            turn.config_options
+                .iter()
+                .filter(|(id, _)| !is_core_synthesized_config_id(id))
+                .count(),
+            1,
+            "exactly one option reaches the wire"
+        );
+    }
+
     #[tokio::test]
     async fn pi_widget_synthesis_builds_tool_widget_event() {
         // End-to-end (minus the live Pi subprocess): the exact two-step the ACP
@@ -5108,7 +5773,9 @@ mod tests {
             .raw_output(serde_json::json!({ "ignored": true }));
         let update = ToolCallUpdate::new("c2", fields);
         match tool_update_event(&update).expect("actionable update") {
-            AcpEvent::ToolResult { id, status, output } => {
+            AcpEvent::ToolResult {
+                id, status, output, ..
+            } => {
                 assert_eq!(id, "c2");
                 assert_eq!(status, "completed");
                 let out = output.expect("diff output");
@@ -5144,6 +5811,41 @@ mod tests {
             AcpEvent::ToolResult { output, .. } => {
                 assert_eq!(output, Some(serde_json::json!("plain result")));
             }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_update_event_carries_late_arriving_raw_input() {
+        // The shape that motivates the field: pi-acp opens a tool call while the
+        // model is still streaming its arguments (`rawInput: {}`) and fills them
+        // in on a later update. Dropping this leaves every rich renderer that
+        // reads `part.input` — the plan card, the to-do checklist, the subagent
+        // card — pinned to the empty opening frame with no error anywhere.
+        let update = ToolCallUpdate::new(
+            "c5",
+            ToolCallUpdateFields::new()
+                .status(ToolCallStatus::InProgress)
+                .raw_input(serde_json::json!({ "plan": { "title": "Add a health endpoint" } })),
+        );
+        match tool_update_event(&update).expect("actionable update") {
+            AcpEvent::ToolResult { input, .. } => {
+                assert_eq!(
+                    input,
+                    Some(serde_json::json!({ "plan": { "title": "Add a health endpoint" } }))
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+
+        // An update with no arguments carries `None` rather than an empty object,
+        // so mod.rs can tell "unchanged" from "cleared" without guessing.
+        let bare = ToolCallUpdate::new(
+            "c6",
+            ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+        );
+        match tool_update_event(&bare).expect("actionable update") {
+            AcpEvent::ToolResult { input, .. } => assert_eq!(input, None),
             other => panic!("expected ToolResult, got {other:?}"),
         }
     }

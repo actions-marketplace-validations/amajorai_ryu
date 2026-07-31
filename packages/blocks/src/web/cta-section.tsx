@@ -11,10 +11,10 @@ export default function CtaSection() {
 	return (
 		<section className="container mx-auto px-4 py-24">
 			<div className="mx-auto max-w-2xl text-center">
-				<SectionTitle title="The new way to build agents." />
+				<SectionTitle title="Put your agents into production." />
 				<p className={cn(landingSubheadlineClass, "mx-auto mt-4")}>
-					Install Ryu, connect the agents and tools you already run, and keep
-					every call governed — budgets, firewall, and audit included.
+					Bring the agents and tools you already run. Ryu keeps every call
+					governed with routing, redaction, budgets, and audit included.
 				</p>
 				<div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
 					<DownloadMenu />
