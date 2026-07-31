@@ -145,6 +145,30 @@ export function isMarkdownFile(path: string): boolean {
 }
 
 /**
+ * Whether to render the SKILL.md authoring affordances (New skill / Edit).
+ *
+ * Two independent conditions, and getting only the first was a live bug:
+ *   1. `navigate` — the host CAN deep link. A read-only surface (web) omits it.
+ *   2. `canAuthorSkills` — the deep link LANDS somewhere. The editor is a Ryu App
+ *      (`com.ryu.skill-editor`) that ships default-OFF, and desktop always has
+ *      `navigate`, so on a fresh install every New/Edit button opened a tab reading
+ *      "App not enabled". Omitted ⇒ `true`, so hosts with no notion of app
+ *      enablement keep the old `navigate`-only behaviour.
+ *
+ * Exported (rather than inlined at the use site) because both consumers — the filter
+ * panel's "New skill" button and the detail pane's Edit — mount inside the
+ * Dialog-portaled preview that `renderToStaticMarkup` never emits, so this is the
+ * only place the rule can actually be asserted. Deliberately NOT named
+ * `canAuthorSkills`: that is the host FIELD this reads, and a function sharing its
+ * name invites `host.canAuthorSkills` where the two-condition rule was meant.
+ */
+export function skillAuthoringEnabled(
+	host: Pick<CatalogHost, "canAuthorSkills" | "navigate">
+): boolean {
+	return Boolean(host.navigate) && host.canAuthorSkills !== false;
+}
+
+/**
  * Skills catalog Store section, shared by desktop and web. Browses the active
  * catalog source (skills.sh by default, or a custom Claude plugin marketplace)
  * joined with live installed/enabled state, and drives install → enable → disable
@@ -197,10 +221,7 @@ export default function SkillsCatalogSection({
 
 	const [friendly, setFriendly] = useFriendlyMode();
 
-	// Authoring (create/edit a SKILL.md) is only reachable where the host can deep
-	// link into the app. A read-only surface (web) omits `navigate`, which hides
-	// every New/Edit affordance.
-	const canAuthor = Boolean(host.navigate);
+	const canAuthor = skillAuthoringEnabled(host);
 	const openNewSkill = useCallback(() => {
 		host.navigate?.("/skills/new");
 	}, [host]);

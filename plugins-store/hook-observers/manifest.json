@@ -1,0 +1,27 @@
+{
+  "id": "com.ryuhq.hook-observers",
+  "name": "Hook Observers",
+  "version": "1.0.0",
+  "runnables": [],
+  "permission_grants": [],
+  "activation_events": ["*"],
+  "contributes": {
+    "turn_hooks": [
+      {
+        "id": "observers.subagent-stop",
+        "on": "subagent_stop",
+        "code_file": "hooks/subagent-stop.js"
+      },
+      {
+        "id": "observers.session-end",
+        "on": "session_end",
+        "code_file": "hooks/session-end.js"
+      },
+      {
+        "id": "observers.notification",
+        "on": "notification",
+        "code_file": "hooks/notification.js"
+      }
+    ]
+  }
+}

@@ -53,7 +53,13 @@ export type CreditPack = (typeof CREDIT_PACKS)[number];
 export const MIN_TOPUP_DOLLARS = 5;
 export const MAX_TOPUP_DOLLARS = 1000;
 
-/** Why a ledger entry was written. Mirrors the server's `LedgerReason`. */
+/**
+ * Why a ledger entry was written. Mirrors the server's `LedgerReason` in
+ * `@ryu/db/models/credits.model`. Nothing enforces the mirror — this union
+ * narrows JSON the server already sent, it does not validate it — so a reason
+ * added there and forgotten here renders as an UNLABELED row rather than a type
+ * error. Adding a `LEDGER_REASONS` member is therefore always a two-file edit.
+ */
 export type LedgerReason =
 	| "topup"
 	| "plan_grant"
@@ -61,13 +67,17 @@ export type LedgerReason =
 	| "openrouter"
 	| "composio"
 	| "subscription_offset"
-	| "adjustment";
+	| "adjustment"
+	| "campaign_grant"
+	| "referral_grant";
 
 /** Reasons that CREDIT the wallet (positive delta). Mirrors the server's
  * `CREDIT_REASONS`; used so the ledger badges a credit consistently. */
 export const CREDIT_LEDGER_REASONS: readonly LedgerReason[] = [
 	"topup",
 	"plan_grant",
+	"campaign_grant",
+	"referral_grant",
 ];
 
 /** Human label for each ledger reason, for the ledger list. */
@@ -79,6 +89,12 @@ export const LEDGER_REASON_LABELS: Record<LedgerReason, string> = {
 	composio: "Composio action",
 	subscription_offset: "Subscription offset",
 	adjustment: "Adjustment",
+	// Campaign and referral money is POOL-RESTRICTED, but the label deliberately
+	// does not say which pool: the pool is a supply-side fact, and the user-facing
+	// promise is one Ryu-native unit. The per-pool breakdown lives on the balance
+	// card, not on every ledger row.
+	campaign_grant: "Campaign credit",
+	referral_grant: "Referral credit",
 };
 
 /** The materialized prepaid balance for the caller's active org. */

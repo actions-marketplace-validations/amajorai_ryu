@@ -17,6 +17,7 @@ import {
 	sortModelGroups,
 } from "@/components/agent-elements/input/model-groups.ts";
 import { ModelHoverPreview } from "@/components/agent-elements/input/model-hover-preview.tsx";
+import { ModelUsageBadge } from "@/components/agent-elements/input/usage-bar.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import {
 	getModelInsight,
@@ -43,11 +44,18 @@ function ModelRow({
 	isActive,
 	onSelect,
 	target,
+	usageAgentId,
 }: {
 	model: ModelMenuOption;
 	isActive: boolean;
 	onSelect: (modelId: string) => void;
 	target: { url: string; token: string | null };
+	/**
+	 * The subscription agent these models belong to, when it has per-model quotas
+	 * worth showing (Claude's weekly Sonnet/Opus limits, Codex's Spark). Null for
+	 * Ryu's own Gateway-routed models, which have no vendor window.
+	 */
+	usageAgentId?: string | null;
 }) {
 	const [open, setOpen] = useState(false);
 	const [insight, setInsight] = useState<ModelInsight | null>(null);
@@ -96,6 +104,13 @@ function ModelRow({
 		>
 			<span className="flex w-full items-center gap-2.5">
 				<span className="flex-1 truncate">{model.name}</span>
+				{usageAgentId ? (
+					<ModelUsageBadge
+						agentId={usageAgentId}
+						modelId={model.id}
+						modelName={model.name}
+					/>
+				) : null}
 				{isActive ? (
 					<HugeiconsIcon
 						className="shrink-0 text-muted-foreground"
@@ -148,10 +163,13 @@ export function ModelMenuContent({
 	models,
 	activeId,
 	onSelect,
+	usageAgentId,
 }: {
 	models: ModelMenuOption[];
 	activeId?: string;
 	onSelect: (modelId: string) => void;
+	/** See `ModelRow.usageAgentId`. */
+	usageAgentId?: string | null;
 }) {
 	const node = useActiveNode();
 	const target = useMemo(
@@ -192,6 +210,7 @@ export function ModelMenuContent({
 			model={model}
 			onSelect={onSelect}
 			target={target}
+			usageAgentId={usageAgentId}
 		/>
 	);
 
@@ -231,10 +250,16 @@ export function ModelMenuContent({
 
 export function createModelMenuRenderer(
 	models: ModelMenuOption[],
-	activeId?: string
+	activeId?: string,
+	usageAgentId?: string | null
 ) {
 	return (onSelect: (id: string) => void) => (
-		<ModelMenuContent activeId={activeId} models={models} onSelect={onSelect} />
+		<ModelMenuContent
+			activeId={activeId}
+			models={models}
+			onSelect={onSelect}
+			usageAgentId={usageAgentId}
+		/>
 	);
 }
 

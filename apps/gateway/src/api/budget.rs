@@ -11,10 +11,11 @@
 //! master key always passes; otherwise only a loopback peer under the
 //! zero-config dev posture (the Core-proxy path).
 //!
-//! NOTE: there is no per-org spend *number* to expose here — org budgets are a
-//! control-plane wallet whose only local state is a "wallet empty" boolean
-//! (`WalletState`), not a running total. The three token-counter scopes the
-//! built-in enforcer keeps (users / agents / sessions) are what this returns.
+//! There is no per-org *spend* number here — org budgets are a control-plane
+//! wallet, and what the node caches is the balance the last debit reported, not
+//! a running total. The three token-counter scopes the built-in enforcer keeps
+//! (users / agents / sessions) are what this returns; the remaining balance is
+//! [`get_wallet`].
 
 use std::net::SocketAddr;
 
@@ -91,6 +92,65 @@ pub async fn get_spend(
             "agents": config.agents.iter().map(|(k, r)| (k.clone(), r.limit)).collect::<std::collections::HashMap<_, _>>(),
             "session": config.session.limit,
         },
+    })))
+}
+
+/// Optional org scope for `GET /v1/wallet`.
+#[derive(Debug, Default, Deserialize)]
+pub struct WalletQuery {
+    /// Which org's wallet to report. Omit on a single-org node (the normal
+    /// case) and the sole cached balance is returned.
+    pub org_id: Option<String>,
+}
+
+/// `GET /v1/wallet` — the org's remaining Ryu $ balance, as last reported by the
+/// control plane on a metered call.
+///
+/// This exists so Core's threshold fallback rules ("under $5, use the cheap
+/// model") have a number to test. Core cannot read the wallet itself — it holds
+/// no control-plane session, the balance is an org-level billing fact, and the
+/// desktop reads it with the user's own Better-Auth token. The Gateway, however,
+/// relearns the authoritative figure on every billed request via its debit hook.
+/// One loopback hop, no new credential, and a value exactly as fresh as the last
+/// metered call.
+///
+/// `balance_micro_usd` is **null** when no debit has resolved a balance on this
+/// node yet (or when several orgs are cached and no `org_id` was given). Null
+/// means *unknown*, and Core's evaluator treats an unknown signal as a reason to
+/// abstain — never as "you are out of money".
+///
+/// Auth: the same local-admin gate as [`get_spend`] — a wallet balance is
+/// tenant-scoped billing data, not an aggregate metric.
+pub async fn get_wallet(
+    State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<WalletQuery>,
+) -> Result<Json<Value>, GatewayError> {
+    let raw_key = headers.get("authorization").and_then(|v| v.to_str().ok());
+    let ctx = authenticate(&state, AuthInputs::with_key(raw_key)).await?;
+    crate::api::config::require_local_admin(
+        &state,
+        &peer,
+        ctx.is_master_key,
+        &headers,
+        "Wallet balance access",
+    )?;
+
+    let balance = match q.org_id.as_deref() {
+        Some(org_id) => state.wallet.org_balance_micro_usd(org_id),
+        None => state.wallet.sole_balance_micro_usd(),
+    };
+    Ok(Json(json!({
+        "org_id": q.org_id,
+        "balance_micro_usd": balance,
+        // The gate's own verdict, so a caller never has to re-derive it from the
+        // balance (and cannot disagree with the gate when the balance is null
+        // because a debit failed fail-closed).
+        "empty": q
+            .org_id
+            .as_deref()
+            .map(|org_id| state.wallet.is_org_empty(org_id)),
     })))
 }
 

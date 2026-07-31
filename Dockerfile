@@ -35,22 +35,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
-# apps/core and apps/gateway are each their own Cargo workspace (there is no root
-# manifest), so build each by its manifest path — the same invocation the release
-# workflow uses. Binaries land at apps/<app>/target/release/.
+# apps/core and apps/gateway are MEMBERS of the root virtual workspace (see the
+# root Cargo.toml — every crate shares ONE ./target, which is why that file exists
+# at all). They are still built by manifest path, matching the release workflow, but
+# the artifacts land in the WORKSPACE root /src/target/release — NOT
+# apps/<app>/target/release, which is where this stage used to copy from and does not
+# exist, so the build failed at the `cp`. Same note as release.yml's staging step.
+#
+# Core also needs its three shipped-but-not-default features: they are off in
+# `[features] default` to keep `cargo test`/`cargo check` lean, so a bare
+# `cargo build --release` yields a Core with NO WASM sandbox, NO parakeet STT
+# inference and NO Silero VAD — each of which degrades silently at runtime. Mirrors
+# apps/core/package.json (`build`), release.yml and release-local.sh; keep all four
+# in sync. (Docker cannot reuse the package.json script: bun is not in this image.)
 RUN cargo build --release --manifest-path apps/gateway/Cargo.toml \
  && cargo build --release --manifest-path apps/core/Cargo.toml \
- && cp apps/gateway/target/release/ryu-gateway /usr/local/bin/ryu-gateway \
- && cp apps/core/target/release/ryu-core /usr/local/bin/ryu-core
+      --features sandbox-wasmtime,voice-parakeet,voice-vad \
+ && cp target/release/ryu-gateway /usr/local/bin/ryu-gateway \
+ && cp target/release/ryu-core /usr/local/bin/ryu-core
 
 # ---- runtime ------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
+# libstdc++6 is defensive cover for the `voice-parakeet` feature, which links ONNX
+# Runtime (C++) in. `ort` links its prebuilt copy STATICALLY — verified on macOS
+# aarch64, where `otool -L` on a feature-built ryu-core shows no libonnxruntime — so
+# no ORT .so needs copying, but a statically linked C++ library still resolves the
+# C++ runtime dynamically. NOT verified: whether bookworm-slim already carries
+# libstdc++6 (it may, making this a no-op) and whether the Linux ORT static bundle
+# actually needs it. Listed anyway because the failure mode if it is missing is the
+# container refusing to start at all, and one apt name is cheap insurance.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       libssl3 \
       libdbus-1-3 \
+      libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/ryu-core /usr/local/bin/ryu-core

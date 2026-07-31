@@ -34,9 +34,265 @@ import {
 } from "@ryu/ui/components/empty";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
+import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/radio-group";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
+
+/**
+ * Which retrieval algorithm a Space uses. Structurally identical to the desktop
+ * client's `RetrievalMode` (`apps/desktop/src/lib/api/spaces.ts`) — restated here
+ * rather than imported because `@ryu/blocks` must not depend on `apps/desktop`.
+ * Both are the wire spellings from `RetrievalMode::as_str` in Core.
+ */
+export type SpaceRetrievalMode = "graph" | "vector";
+
+/**
+ * The ONE definition of how the two retrieval modes are named and explained.
+ *
+ * Exported because the choice appears twice — at Space creation
+ * (`apps/desktop/src/components/spaces/CreateSpaceDialog.tsx`) and on an existing
+ * Space (below) — and two hand-written copies of a tradeoff explanation drift into
+ * two different promises about what the product does.
+ *
+ * The blurbs are deliberately about consequences a non-expert can act on (speed,
+ * indexing cost, what kind of question each mode can answer), not about KNN or BFS.
+ */
+export const RETRIEVAL_MODE_OPTIONS: readonly {
+	blurb: string;
+	label: string;
+	value: SpaceRetrievalMode;
+}[] = [
+	{
+		value: "vector",
+		label: "Vector",
+		blurb:
+			"Fast similarity search. Finds the passages that most resemble your question.",
+	},
+	{
+		value: "graph",
+		label: "Graph",
+		blurb:
+			"Also extracts the entities in each document and how they relate, so it can answer questions that connect facts across documents. Indexing takes longer. An uploaded file is mapped by its name and file type unless its text has been extracted.",
+	},
+];
+
+/**
+ * WHERE the retrieval mode applies — the half of the story this UI has now got
+ * wrong in both directions, and the half a user needs before picking Graph.
+ *
+ * `retrieval_mode` is read in exactly one place in Core: `SpaceStore::search_ext`
+ * calls `space_mode()` and branches to `vector_search` or `graph_search`
+ * (`crates/core/spaces/src/lib.rs`). What changed is how many paths reach that
+ * function — two now do:
+ *
+ *  - `POST /api/spaces/:id/search` (`apps/core/src/server/mod.rs`), which a Spaces
+ *    search box hits and which the `ryu_search_space` MCP tool calls when an agent
+ *    is told to search a named space;
+ *  - the automatic recall on a chat turn. `RetrievalStore::retrieve`
+ *    (`crates/core/rag/src/lib.rs`) delegates the Spaces half of a recall back to
+ *    `search_ext` via its `SpaceRecall` hook (implemented in
+ *    `apps/core/src/rag_host.rs`), so an agent's allowlisted spaces are answered
+ *    under their own mode.
+ *
+ * The history is worth keeping, because both failures were invisible from the UI:
+ * the FIRST version of this copy claimed the setting decided "how this space finds
+ * answers when an agent searches it" while chat recall never read the column
+ * (overclaim); the correction then said chat "does not use this setting", which
+ * became false the moment the delegate landed (underclaim). A control whose copy
+ * understates it is not harmless — a user who wants graph recall in chat is told
+ * to stop looking.
+ *
+ * So the sentence names WHERE it applies and does not enumerate what is excluded:
+ * every path that searches a space now goes through the one branch point, and a
+ * carve-out is exactly the kind of clause that rots when a new caller appears.
+ *
+ * Lives next to {@link RETRIEVAL_MODE_OPTIONS} and is rendered by
+ * {@link RetrievalModeChoice} so both surfaces that offer the choice (the create
+ * dialog and the Space detail card) state the same scope. Putting it in the
+ * picker rather than in each caller is what stops one surface from drifting back
+ * into a wider promise than the code keeps.
+ */
+export const RETRIEVAL_MODE_SCOPE =
+	"Applies whenever this space is searched — from a Spaces search box, when an agent is told to search it, and during the automatic recall an agent does in a chat.";
+
+/** Narrow an untyped radio value to a mode; `null` for anything unexpected. */
+function asRetrievalMode(value: unknown): SpaceRetrievalMode | null {
+	return value === "graph" || value === "vector" ? value : null;
+}
+
+/**
+ * The Vector-vs-Graph picker, shared by the create dialog and the Space detail so
+ * both surfaces offer the same two options with the same explanation.
+ *
+ * `idPrefix` scopes the generated ids: the label→radio association is by `htmlFor`
+ * (a `<button role="radio">` is a labelable element), so two pickers mounted at
+ * once with the same ids would make one label drive the other's radio.
+ *
+ * The picker also renders {@link RETRIEVAL_MODE_SCOPE}. That is deliberate: the
+ * two blurbs say what each mode *does*, and the scope line says *where the choice
+ * is honoured*. Shipping the first without the second is how this control first
+ * ended up promising that Graph changed what an agent finds on a chat turn while
+ * nothing on that path read the setting — and, later, how the corrected line kept
+ * denying it after Core made it true. Carrying the line inside the picker means a
+ * new surface that adopts the picker cannot forget it, and it is
+ * `aria-describedby`-linked so the qualification is announced with the group
+ * rather than read as unrelated trailing text.
+ */
+export function RetrievalModeChoice({
+	disabled,
+	idPrefix,
+	mode,
+	onModeChange,
+}: {
+	disabled?: boolean;
+	idPrefix: string;
+	mode: SpaceRetrievalMode;
+	onModeChange: (mode: SpaceRetrievalMode) => void;
+}) {
+	const scopeId = `${idPrefix}-scope`;
+	return (
+		<div className="flex flex-col gap-2">
+			<RadioGroup
+				aria-describedby={scopeId}
+				disabled={disabled}
+				onValueChange={(next: unknown) => {
+					const picked = asRetrievalMode(next);
+					if (picked) {
+						onModeChange(picked);
+					}
+				}}
+				value={mode}
+			>
+				{RETRIEVAL_MODE_OPTIONS.map((option) => {
+					const id = `${idPrefix}-${option.value}`;
+					return (
+						<div className="flex items-start gap-2.5" key={option.value}>
+							<RadioGroupItem className="mt-0.5" id={id} value={option.value} />
+							<div className="flex flex-col gap-0.5">
+								<Label className="font-medium text-sm" htmlFor={id}>
+									{option.label}
+								</Label>
+								<p className="text-muted-foreground text-xs">{option.blurb}</p>
+							</div>
+						</div>
+					);
+				})}
+			</RadioGroup>
+			<p className="text-muted-foreground text-xs" id={scopeId}>
+				{RETRIEVAL_MODE_SCOPE}
+			</p>
+		</div>
+	);
+}
+
+/**
+ * What changing the mode on an EXISTING Space actually does, stated where the
+ * change is made.
+ *
+ * This is not decoration. Core's switch rebuilds the Space's entity graph from the
+ * chunks already stored (→ graph) or drops it (→ vector) in the same transaction
+ * as the column write. A control that silently implied either "this re-indexes
+ * everything" or "this is just a label" would be wrong in opposite directions, so
+ * the line names both directions and what is left alone.
+ *
+ * The last clause is the one that pairs with {@link FILE_CONTENTS_NOT_INDEXED_NOTE},
+ * and it is here to head off a specific wrong action. A user who has just been told
+ * a file's contents are not searchable will look for the nearest re-index button,
+ * and this is it. It cannot help: `set_retrieval_mode` rebuilds from
+ * `SELECT id, content FROM chunks` — the text Core already has — and never re-opens
+ * a stored blob, so flipping the mode twice re-derives a file's name and type and
+ * finds no more of its text than before. That is true both before and after Core
+ * learns to extract file text, so the sentence does not need a third revision.
+ */
+const RETRIEVAL_MODE_SWITCH_DISCLOSURE =
+	"Changing this rebuilds the entity graph from the documents already in this space; switching back to Vector discards that graph. Documents are never re-embedded, so you can switch back. Switching modes never re-reads an uploaded file's contents.";
+
+/**
+ * What happened to a file's **contents**. Structurally identical to the desktop
+ * client's `SpaceFileIndexState` (`apps/desktop/src/lib/api/spaces.ts`), restated
+ * rather than imported because `@ryu/blocks` must not depend on `apps/desktop`.
+ * Both are the wire spellings from `IndexState::as_str` plus the synthetic
+ * `unattempted` that `unknown_json` returns for a document with no status row.
+ */
+export type SpaceFileIndexState =
+	| "failed"
+	| "indexed"
+	| "pending"
+	| "skipped"
+	| "unattempted";
+
+/**
+ * The badge on a file row whose bytes were never turned into text.
+ *
+ * Two words, because it replaces the chunk count rather than joining it — see
+ * {@link FILE_INDEX_NOTES} for why showing both would be worse than showing
+ * neither. It names what IS indexed ("name only") instead of what is not, so the row
+ * is readable without the note; the note carries the consequence.
+ *
+ * Deliberately the SAME badge for `skipped`, `failed` and `unattempted`: from where
+ * the user is standing those three have one meaning ("a search will not find the
+ * text in here"), and three different badge words at the end of a row would read as
+ * three different severities. The three *actions* differ, and that is what the notes
+ * are for.
+ */
+export const FILE_CONTENTS_NOT_INDEXED_BADGE = "Name only";
+
+/** The badge while a reader is still working on the file. */
+export const FILE_CONTENTS_PENDING_BADGE = "Reading…";
+
+/**
+ * One sentence per index state, saying what it means for searching and what the
+ * reader can DO. Rendered under the document list, once per state present.
+ *
+ * ## The overclaim this replaces
+ *
+ * Every document row used to carry a `<n> chunks` badge, files included. A file
+ * whose text was never extracted gets exactly one chunk — `title` + mime, the
+ * descriptor `SpaceStore::create_file` embeds — so a 300-page PDF sat in this list
+ * reading "1 chunk", beside pages whose badge counts real extracted text, under a
+ * heading with a search box. Nothing anywhere said the PDF's prose had never been
+ * read. A user searching for a phrase they knew was in that PDF got no result and no
+ * reason.
+ *
+ * That is why the badge REPLACES the count instead of sitting next to it. "1 chunk ·
+ * Name only" invites the reading that one chunk of the file's *text* is indexed,
+ * which is the same wrong belief in a smaller font.
+ *
+ * ## Why there are four sentences and not one
+ *
+ * Because there are four different things to do, and the reason a file is not
+ * searchable is not observable from the file. Core distinguishes them on purpose:
+ * `skipped` is *"nothing on this node can read this format — not an error, a missing
+ * install"*; `failed` is *"something attempted the parse and could not finish it"*;
+ * `unattempted` is *"nobody looked, as opposed to nobody could read it"*, which is
+ * every file stored before extraction shipped. Collapsing those into "not
+ * searchable" would leave a user with a fixable problem no way to learn it is
+ * fixable — which is the same shape of defect as the badge itself.
+ *
+ * `skipped` is the only one that names an install, and it may do so **because it is
+ * now true**: `create_file_indexed` really does route every upload through the
+ * `document.parse` facade, so binding a provider changes the outcome of the next
+ * upload. Naming a specific app is avoided anyway — which providers exist is the
+ * Store's business and this sentence should not go stale when a fifth one ships.
+ *
+ * `indexed` has no entry: a searchable file is the unremarkable case and gets the
+ * ordinary chunk badge, like a page. Its {@link SpaceDocumentRow.indexWarnings} are
+ * still surfaced — a parse that half-worked and says nothing is the silent-drop bug
+ * wearing a hat.
+ */
+export const FILE_INDEX_NOTES: Readonly<
+	Record<Exclude<SpaceFileIndexState, "indexed">, string>
+> = {
+	unattempted:
+		"Files marked “Name only” are stored and open normally, but a search of this space only matches their name and file type — not the text inside them. Nothing has tried to read these yet: upload one again to have it read now, or paste its text into “Ingest a document” above.",
+	skipped:
+		"Files marked “Name only” are stored and open normally, but nothing installed on this node can read their format, so a search only matches their name and file type. Install a document reader from the Store, then upload the file again to make its text searchable.",
+	failed:
+		"Files marked “Name only” are stored and open normally, but reading their text did not finish, so a search only matches their name and file type. Upload the file again to retry — the reason is shown on each file.",
+	pending:
+		"Files marked “Reading…” are being read now. Their text becomes searchable when that finishes; reopen this space to check.",
+};
 
 /** A space row as the view needs it. */
 export interface SpaceRow {
@@ -44,11 +300,55 @@ export interface SpaceRow {
 	documentCount: number;
 	id: string;
 	name: string;
+	/** Optional: surfaces that do not know a Space's mode (the storyboard's mock
+	 *  data) omit it, and the detail's Retrieval card then does not render at all
+	 *  rather than assert a default it has not been told. */
+	retrievalMode?: SpaceRetrievalMode;
 }
 
 export interface SpaceDocumentRow {
 	chunkCount: number;
 	id: string;
+	/**
+	 * Why this file's text is not searchable, when the state is `failed`. Rendered as
+	 * a second line on the row, because a retry the user cannot diagnose is a retry
+	 * they will make twice. Core guarantees this is never the document's contents.
+	 */
+	indexMessage?: string | null;
+	/**
+	 * What happened to this document's **contents**.
+	 *
+	 * `undefined` is the important value and the default: it means *this surface has
+	 * not been told*, and it renders exactly as the list always did — the chunk
+	 * count, no searchability claim either way. That is the standing answer for a
+	 * page, database, whiteboard or app document, which is chunked from its own
+	 * source on every save: `GET /api/spaces/:id/documents` attaches the extraction
+	 * record to `kind = 'file'` rows and deliberately omits it everywhere else, so
+	 * those rows arrive here undefined and stay silent. The storyboard's mock rows
+	 * omit it for the same reason — nothing has told them either.
+	 *
+	 * A real FILE row is told: the state arrives on the list response itself (see
+	 * `DocumentWire` in `apps/desktop/src/lib/api/spaces.ts`), so the badges render
+	 * from the same request that renders the filenames rather than from a per-row
+	 * follow-up.
+	 *
+	 * Silence is the right default rather than a stub, because the alternative is a
+	 * guess. There is no client-side derivation of this: "it is a file, therefore its
+	 * contents are not searchable" was true only until Core started extracting, and
+	 * is now wrong for every `.txt`/`.md`/`.csv` — those go through Core's in-process
+	 * floor and are `indexed` before the upload response is written.
+	 *
+	 * A state rather than a boolean because the three not-searchable states carry
+	 * three different user actions; see {@link FILE_INDEX_NOTES}.
+	 */
+	indexState?: SpaceFileIndexState;
+	/**
+	 * Non-fatal notes from a parse that DID work — a lossy decode, a missing OCR
+	 * tool, a truncated result. Rendered on `indexed` rows, which is the only place
+	 * they can appear: a degraded parse whose result is searchable but incomplete is
+	 * otherwise indistinguishable from a clean one.
+	 */
+	indexWarnings?: string[];
 	/** `"page"` (markdown), `"database"` (data grid), or `"whiteboard"`
 	 * (Excalidraw scene). Defaults to a page. */
 	kind?: "page" | "database" | "whiteboard";
@@ -75,8 +375,18 @@ export interface SpacesDetailProps {
 	onNewPage?: () => void;
 	onNewWhiteboard?: () => void;
 	onOpenDoc?: (docId: string, title: string) => void;
+	/** Omit (together with `space.retrievalMode`) to hide the Retrieval card. */
+	onRetrievalModeChange?: (mode: SpaceRetrievalMode) => void;
 	onSearchQueryChange?: (value: string) => void;
 	onSearchSubmit?: () => void;
+	/** True while Core is rebuilding the graph. The picker MUST stay disabled for
+	 *  the whole call: the rebuild runs inline in Core, so a second click would
+	 *  queue a second full rebuild of the same Space. */
+	retrievalModeBusy?: boolean;
+	retrievalModeError?: string | null;
+	/** What the last switch actually did (entity/connection counts), so the result
+	 *  is reported rather than assumed. */
+	retrievalModeNotice?: string | null;
 	searchBusy?: boolean;
 	searchError?: string | null;
 	// Search
@@ -95,6 +405,49 @@ export interface SpacesViewProps {
 	spaces: SpaceRow[];
 }
 
+/**
+ * The badge at the end of a document row.
+ *
+ * `null` is not a state — it is what an untold surface renders, i.e. the chunk
+ * count. Every branch that hides the count must be one the caller explicitly asked
+ * for, never a fallback.
+ *
+ * `pending` is deliberately NOT badged "Name only": the text is on its way, and
+ * calling a file unsearchable while a reader is mid-parse would be wrong within
+ * seconds. The other three share one badge (see
+ * {@link FILE_CONTENTS_NOT_INDEXED_BADGE}) and differ only in their note.
+ */
+function indexBadgeLabel(
+	state: SpaceFileIndexState | undefined
+): string | null {
+	if (state === undefined || state === "indexed") {
+		return null;
+	}
+	return state === "pending"
+		? FILE_CONTENTS_PENDING_BADGE
+		: FILE_CONTENTS_NOT_INDEXED_BADGE;
+}
+
+/**
+ * The notes to render under the list: one per distinct state actually present, in a
+ * fixed order so the list does not reshuffle as files finish parsing.
+ *
+ * Per-list rather than per-row because the sentence is identical for every file in
+ * the same state, and repeating it down an Uploads space full of PDFs would bury the
+ * filenames the user came here to read.
+ */
+function indexNotesFor(documents: SpaceDocumentRow[]): string[] {
+	const order: Exclude<SpaceFileIndexState, "indexed">[] = [
+		"pending",
+		"skipped",
+		"failed",
+		"unattempted",
+	];
+	return order
+		.filter((state) => documents.some((doc) => doc.indexState === state))
+		.map((state) => FILE_INDEX_NOTES[state]);
+}
+
 /** The list icon for a document row, by kind. */
 function docIcon(kind: SpaceDocumentRow["kind"]) {
 	if (kind === "database") {
@@ -104,6 +457,86 @@ function docIcon(kind: SpaceDocumentRow["kind"]) {
 		return CanvasIcon;
 	}
 	return File01Icon;
+}
+
+/**
+ * The second line on a document row, or `null` for the common case of none.
+ *
+ * Exactly two things go here, and both are per-document — which is precisely why
+ * they cannot live in the per-list notes:
+ *
+ * - a **`failed`** file's reason. A retry the user cannot diagnose is a retry they
+ *   will make twice. Core guarantees `message` is never the document's contents.
+ * - an **`indexed`** file's non-fatal warnings (a lossy decode, a missing OCR tool,
+ *   a truncated result). This row's badge says the file IS searchable, and it is —
+ *   just not completely. A degraded parse the user cannot see is the silent-drop bug
+ *   wearing a hat, which is the same defect as the badge this whole change adds.
+ */
+function rowDetail(doc: SpaceDocumentRow): string | null {
+	if (doc.indexState === "failed") {
+		return doc.indexMessage ?? null;
+	}
+	const warnings = doc.indexWarnings ?? [];
+	if (doc.indexState === "indexed" && warnings.length > 0) {
+		return warnings.join(" · ");
+	}
+	return null;
+}
+
+/**
+ * One row of the document list.
+ *
+ * Extracted from the map body because a row now has a conditional second line and
+ * two badge branches, and an inline JSX block that size inside the section makes the
+ * section's own structure unreadable.
+ *
+ * The second line is a `failed` file's reason. It is inside the button rather than
+ * beside it so the whole row stays one click target — the file still opens, which is
+ * the fact the copy is at pains to establish.
+ */
+function DocumentRow({
+	doc,
+	onOpenDoc,
+}: {
+	doc: SpaceDocumentRow;
+	onOpenDoc?: (docId: string, title: string) => void;
+}) {
+	const badge = indexBadgeLabel(doc.indexState);
+	const detail = rowDetail(doc);
+	return (
+		<li>
+			<button
+				className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left hover:bg-accent/50"
+				onClick={() => onOpenDoc?.(doc.id, doc.title)}
+				type="button"
+			>
+				<HugeiconsIcon
+					className="size-4 shrink-0 opacity-70"
+					icon={docIcon(doc.kind)}
+				/>
+				<span className="flex min-w-0 flex-1 flex-col">
+					<span className="truncate text-sm">{doc.title}</span>
+					{detail ? (
+						<span className="truncate text-muted-foreground text-xs">
+							{detail}
+						</span>
+					) : null}
+				</span>
+				{badge === null ? (
+					<Badge variant="secondary">
+						{doc.chunkCount} {doc.chunkCount === 1 ? "chunk" : "chunks"}
+					</Badge>
+				) : (
+					// Replaces the chunk badge rather than joining it — see
+					// FILE_INDEX_NOTES. `outline` (not `destructive`) even for `failed`:
+					// nothing is lost, the file is stored and opens; only its reach is
+					// narrower than the row above it, and a red badge on a working file
+					// reads as data loss.
+					<Badge variant="outline">{badge}</Badge>
+				)}
+			</button>
+		</li>
+	);
 }
 
 function SpaceDetail(props: SpacesDetailProps) {
@@ -121,13 +554,25 @@ function SpaceDetail(props: SpacesDetailProps) {
 		onNewDatabase,
 		onNewWhiteboard,
 		onOpenDoc,
+		onRetrievalModeChange,
+		retrievalModeBusy,
+		retrievalModeError,
+		retrievalModeNotice,
 		searchQuery,
 		searchBusy,
 		searchError,
 		searchResults,
 		onSearchQueryChange,
 		onSearchSubmit,
+		space,
 	} = props;
+
+	// Both halves are required: without the mode there is nothing truthful to
+	// show, and without the handler the picker would be a control that does
+	// nothing. Either alone hides the card rather than rendering a half-wired one.
+	const retrievalMode = space.retrievalMode;
+	const canEditRetrieval =
+		retrievalMode !== undefined && onRetrievalModeChange !== undefined;
 
 	const handleIngest = (e: FormEvent) => {
 		e.preventDefault();
@@ -144,6 +589,52 @@ function SpaceDetail(props: SpacesDetailProps) {
 
 	return (
 		<div className="flex flex-col gap-6 p-4">
+			{canEditRetrieval && retrievalMode !== undefined ? (
+				<Card>
+					<CardHeader>
+						<CardTitle className="text-sm">Retrieval</CardTitle>
+						{/* Names the CHOICE only. Where it applies is a line down, in
+						    RETRIEVAL_MODE_SCOPE, which the picker renders; restating it
+						    here would either duplicate it or (worse) let the two drift into
+						    different promises. This line has been wrong twice in opposite
+						    directions: "How this space finds answers when an agent searches
+						    it" claimed the whole agent surface while chat recall ignored
+						    the setting, and the correction ("a DIRECT search of this
+						    space") became an underclaim once chat recall started
+						    delegating to the same search. Naming the algorithm and letting
+						    the scope line own the reach is what stops a third round. */}
+						<CardDescription>
+							Which algorithm this space is searched with.
+						</CardDescription>
+					</CardHeader>
+					<CardContent className="flex flex-col gap-3">
+						<RetrievalModeChoice
+							disabled={retrievalModeBusy}
+							idPrefix="space-retrieval-mode"
+							mode={retrievalMode}
+							onModeChange={(next) => onRetrievalModeChange?.(next)}
+						/>
+						<p className="text-muted-foreground text-xs">
+							{RETRIEVAL_MODE_SWITCH_DISCLOSURE}
+						</p>
+						{retrievalModeBusy ? (
+							<p className="flex items-center gap-2 text-muted-foreground text-xs">
+								<Spinner className="size-3" />
+								Rebuilding this space's entity graph…
+							</p>
+						) : null}
+						{retrievalModeError ? (
+							<p className="text-destructive text-sm">{retrievalModeError}</p>
+						) : null}
+						{retrievalModeNotice && !retrievalModeBusy ? (
+							<p className="text-muted-foreground text-xs">
+								{retrievalModeNotice}
+							</p>
+						) : null}
+					</CardContent>
+				</Card>
+			) : null}
+
 			<Card>
 				<CardHeader>
 					<CardTitle className="text-sm">Ingest a document</CardTitle>
@@ -220,28 +711,18 @@ function SpaceDetail(props: SpacesDetailProps) {
 						for a structured table.
 					</p>
 				) : (
-					<ul className="flex flex-col gap-2">
-						{documents.map((doc) => (
-							<li key={doc.id}>
-								<button
-									className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left hover:bg-accent/50"
-									onClick={() => onOpenDoc?.(doc.id, doc.title)}
-									type="button"
-								>
-									<HugeiconsIcon
-										className="size-4 shrink-0 opacity-70"
-										icon={docIcon(doc.kind)}
-									/>
-									<span className="min-w-0 flex-1 truncate text-sm">
-										{doc.title}
-									</span>
-									<Badge variant="secondary">
-										{doc.chunkCount} {doc.chunkCount === 1 ? "chunk" : "chunks"}
-									</Badge>
-								</button>
-							</li>
+					<>
+						<ul className="flex flex-col gap-2">
+							{documents.map((doc) => (
+								<DocumentRow doc={doc} key={doc.id} onOpenDoc={onOpenDoc} />
+							))}
+						</ul>
+						{indexNotesFor(documents).map((note) => (
+							<p className="text-muted-foreground text-xs" key={note}>
+								{note}
+							</p>
 						))}
-					</ul>
+					</>
 				)}
 			</section>
 

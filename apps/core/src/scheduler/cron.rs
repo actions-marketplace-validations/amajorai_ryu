@@ -18,8 +18,14 @@
 //! In addition to cron, the scheduler accepts an `@every <humantime>` form
 //! (e.g. `@every 30s`, `@every 5m`); that interval form is handled by the
 //! caller, not this parser.
+//!
+//! Expressions match in UTC by default ([`CronSchedule::matches`]). A schedule
+//! that carries an IANA zone matches against that zone's wall clock instead
+//! ([`CronSchedule::matches_in`]) — the whole point of which is DST: "05:00
+//! every day" must stay 05:00 to the human who wrote it.
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
+pub use chrono_tz::Tz;
 
 /// A parsed 5-field cron schedule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,12 +77,42 @@ impl CronSchedule {
     /// Following cron convention: when both day-of-month and day-of-week are
     /// restricted (neither is `*`), a match on *either* fires.
     pub fn matches(&self, time: DateTime<Utc>) -> bool {
-        let minute = time.minute() as u8;
-        let hour = time.hour() as u8;
-        let dom = time.day() as u8;
-        let month = time.month() as u8;
-        let dow = time.weekday().num_days_from_sunday() as u8;
+        self.matches_parts(
+            time.minute() as u8,
+            time.hour() as u8,
+            time.day() as u8,
+            time.month() as u8,
+            time.weekday().num_days_from_sunday() as u8,
+        )
+    }
 
+    /// True when `time`, **read in `tz`**, matches the schedule.
+    ///
+    /// A schedule the user expressed in wall-clock terms ("05:00") must be
+    /// evaluated against their own clock, not UTC. Converting the expression to
+    /// a UTC one at write time would be wrong for exactly half the year in any
+    /// DST zone, so the conversion happens here, on every evaluation, against
+    /// the live zone rules.
+    ///
+    /// DST edges follow from evaluating the local wall clock minute-by-minute:
+    /// an hour that the spring-forward skips never matches (that minute does not
+    /// exist locally), and a schedule inside the autumn repeated hour matches on
+    /// the first pass — the tick loop's once-per-slot debounce, keyed on the
+    /// local `%Y%m%d%H%M`, suppresses the second.
+    pub fn matches_in(&self, time: DateTime<Utc>, tz: Tz) -> bool {
+        let local = time.with_timezone(&tz);
+        self.matches_parts(
+            local.minute() as u8,
+            local.hour() as u8,
+            local.day() as u8,
+            local.month() as u8,
+            local.weekday().num_days_from_sunday() as u8,
+        )
+    }
+
+    /// The shared field comparison, over already-extracted calendar parts, so
+    /// the UTC and zoned entry points cannot drift apart.
+    fn matches_parts(&self, minute: u8, hour: u8, dom: u8, month: u8, dow: u8) -> bool {
         let minute_ok = self.minutes.contains(&minute);
         let hour_ok = self.hours.contains(&hour);
         let month_ok = self.months.contains(&month);
@@ -99,6 +135,12 @@ impl CronSchedule {
     /// schedule. Scans up to one year ahead; returns `None` if nothing matches
     /// in that window (e.g. an impossible date like Feb 30).
     pub fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.next_after_in(after, None)
+    }
+
+    /// [`next_after`](Self::next_after), evaluated in `tz` when one is given.
+    /// The returned instant is still UTC — only the matching is zoned.
+    pub fn next_after_in(&self, after: DateTime<Utc>, tz: Option<Tz>) -> Option<DateTime<Utc>> {
         // Advance to the start of the next whole minute.
         let mut candidate = (after + chrono::Duration::minutes(1))
             .with_second(0)?
@@ -106,13 +148,28 @@ impl CronSchedule {
         // 366 days * 24h * 60m minutes of scan budget.
         let max_iterations = 366 * 24 * 60;
         for _ in 0..max_iterations {
-            if self.matches(candidate) {
+            let hit = match tz {
+                Some(tz) => self.matches_in(candidate, tz),
+                None => self.matches(candidate),
+            };
+            if hit {
                 return Some(candidate);
             }
             candidate += chrono::Duration::minutes(1);
         }
         None
     }
+}
+
+/// Parse an IANA zone name (`"Europe/Lisbon"`, `"UTC"`) into a [`Tz`].
+///
+/// Kept beside the parser so every caller — the tick loop, the create-job
+/// validator — rejects the same strings, and so a bad zone is a startup-time
+/// 400 rather than a job that silently never fires.
+pub fn parse_tz(name: &str) -> Result<Tz, String> {
+    name.trim()
+        .parse::<Tz>()
+        .map_err(|_| format!("unknown IANA time zone '{name}'"))
 }
 
 /// Parse one cron field into the sorted, de-duplicated set of values it covers.
@@ -183,6 +240,65 @@ mod tests {
     fn every_minute_matches_any() {
         let s = CronSchedule::parse("* * * * *").unwrap();
         assert!(s.matches(at(2026, 6, 3, 12, 34)));
+    }
+
+    #[test]
+    fn zoned_match_reads_the_local_wall_clock() {
+        // 05:00 in New York is 09:00 UTC in summer (UTC-4).
+        let s = CronSchedule::parse("0 5 * * *").unwrap();
+        let tz = parse_tz("America/New_York").unwrap();
+        assert!(s.matches_in(at(2026, 7, 1, 9, 0), tz));
+        assert!(!s.matches_in(at(2026, 7, 1, 5, 0), tz));
+        // …and the same instant does NOT match the plain UTC reading.
+        assert!(!s.matches(at(2026, 7, 1, 9, 0)));
+    }
+
+    #[test]
+    fn zoned_match_follows_dst_instead_of_drifting() {
+        // The whole point of storing the zone: 05:00 local stays 05:00 local
+        // across the transition, which is two different UTC hours. A schedule
+        // folded to UTC at write time would be an hour off for half the year.
+        let s = CronSchedule::parse("0 5 * * *").unwrap();
+        let tz = parse_tz("America/New_York").unwrap();
+        // Summer (EDT, UTC-4): 09:00 UTC.
+        assert!(s.matches_in(at(2026, 7, 1, 9, 0), tz));
+        assert!(!s.matches_in(at(2026, 7, 1, 10, 0), tz));
+        // Winter (EST, UTC-5): 10:00 UTC.
+        assert!(s.matches_in(at(2026, 1, 15, 10, 0), tz));
+        assert!(!s.matches_in(at(2026, 1, 15, 9, 0), tz));
+    }
+
+    #[test]
+    fn zoned_match_skips_an_hour_the_spring_forward_deletes() {
+        // 2026-03-08, New York jumps 02:00 → 03:00 local. A 02:30 schedule has
+        // no instant to match that day, and must simply not fire — never
+        // silently slide to another hour.
+        let s = CronSchedule::parse("30 2 * * *").unwrap();
+        let tz = parse_tz("America/New_York").unwrap();
+        let day = at(2026, 3, 8, 0, 0);
+        let fired = (0..24 * 60)
+            .map(|m| day + chrono::Duration::minutes(m))
+            .any(|t| s.matches_in(t, tz));
+        assert!(!fired, "02:30 local does not exist on the spring-forward day");
+    }
+
+    #[test]
+    fn next_after_in_returns_a_utc_instant_matching_the_local_time() {
+        let s = CronSchedule::parse("0 5 * * *").unwrap();
+        let tz = parse_tz("America/New_York").unwrap();
+        let next = s
+            .next_after_in(at(2026, 7, 1, 0, 0), Some(tz))
+            .expect("a daily schedule always has a next occurrence");
+        assert_eq!(next, at(2026, 7, 1, 9, 0));
+    }
+
+    #[test]
+    fn parse_tz_rejects_a_name_that_is_not_a_zone() {
+        assert!(parse_tz("Europe/Lisbon").is_ok());
+        assert!(parse_tz("UTC").is_ok());
+        assert!(parse_tz("Mars/Olympus").is_err());
+        // Whitespace is tolerated; the desktop sends `Intl`'s value verbatim.
+        assert!(parse_tz("  Asia/Tokyo  ").is_ok());
     }
 
     #[test]

@@ -1,5 +1,5 @@
-import { Logo as OrbLogo } from "@ryu/ui/components/logo";
-import { Toaster, toast } from "@ryu/ui/components/sileo";
+import { Logo as OrbLogo } from "@ryu/ui/components/logo.tsx";
+import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
 import { listen } from "@tauri-apps/api/event";
 import { ThemeProvider } from "next-themes";
 import { useEffect, useState } from "react";
@@ -35,6 +35,8 @@ import { initDialogOverlayBlur } from "./hooks/useDialogOverlayBlur.ts";
 import { initInvertedBackgrounds } from "./hooks/useInvertedBackgrounds.ts";
 import { initPointerCursor } from "./hooks/usePointerCursor.ts";
 import { initTheme, useThemePreset } from "./hooks/useThemePreset.ts";
+import { useBuildProfile } from "./lib/build-profile.ts";
+import { useReleaseChannel } from "./lib/release-channel.ts";
 import CompanionPage from "./pages/CompanionPage.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
 import OnboardingPage from "./pages/OnboardingPage.tsx";
@@ -90,6 +92,34 @@ function CompanionOverlay() {
 
 function ThemeWatcher() {
 	useThemePreset();
+	return null;
+}
+
+/** Syncs the macOS dock / Windows taskbar label with the release channel. */
+function WindowTitleManager() {
+	const { dev } = useBuildProfile();
+	const [channel] = useReleaseChannel();
+
+	useEffect(() => {
+		const suffix = dev
+			? "Dev"
+			: channel === "canary"
+				? "Canary"
+				: channel === "nightly"
+					? "Nightly"
+					: channel === "beta"
+						? "Beta"
+						: null;
+
+		const title = suffix ? `Ryu (Research Preview ${suffix})` : "Ryu";
+
+		import("@tauri-apps/api/window")
+			.then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title))
+			.catch(() => {
+				// Not running in Tauri — ignore.
+			});
+	}, [dev, channel]);
+
 	return null;
 }
 
@@ -468,6 +498,7 @@ function MainApp() {
 			themes={["light", "dark", "system"]}
 		>
 			<ThemeWatcher />
+			<WindowTitleManager />
 			<Toaster position="bottom-right" theme="system" />
 			<AgentationToolbar />
 			<GlobalContextMenu>

@@ -12,10 +12,13 @@ import {
 	searchSpace as apiSearchSpace,
 	setDocumentIcon as apiSetDocumentIcon,
 	setSpaceIcon as apiSetSpaceIcon,
+	setSpaceRetrievalMode as apiSetSpaceRetrievalMode,
 	updateDocument as apiUpdateDocument,
 	fetchDocument,
 	fetchDocuments,
 	fetchSpaces,
+	type RetrievalMode,
+	type RetrievalModeChange,
 	type Space,
 	type SpaceDocument,
 	type SpaceDocumentContent,
@@ -29,7 +32,19 @@ export interface UseSpacesResult {
 	/** Set when Core refused the spaces routes because the Spaces App is disabled
 	 *  (`503 app_disabled`). Carries the id to enable + the message. */
 	appDisabled: { app: string; message: string } | null;
-	create: (name: string, description: string | null) => Promise<void>;
+	/**
+	 * Create a Space. Pass `retrievalMode` only when the user explicitly picked
+	 * one — omitting it lets Core apply the node-wide `rag_strategy` default,
+	 * which is the only way that operator setting can still take effect.
+	 *
+	 * Resolves to the mode Core actually stamped (echoed by the create response),
+	 * or `null` when the managed-tier cap blocked the create so no Space exists.
+	 */
+	create: (
+		name: string,
+		description: string | null,
+		retrievalMode?: RetrievalMode
+	) => Promise<RetrievalMode | null>;
 	/** Create a new blank database (data grid); returns its document id. */
 	createDatabase: (spaceId: string, title: string) => Promise<string>;
 	/**
@@ -74,6 +89,16 @@ export interface UseSpacesResult {
 		documentId: string,
 		icon: GlyphValue
 	) => Promise<void>;
+	/**
+	 * Switch a Space's retrieval mode. Core rebuilds (or drops) the Space's entity
+	 * graph as part of the call, so this is slow on a large Space and the caller
+	 * must keep its control disabled until it resolves. Resolves to what the switch
+	 * actually did, so the UI can report the consequence instead of implying one.
+	 */
+	setRetrievalMode: (
+		id: string,
+		mode: RetrievalMode
+	) => Promise<RetrievalModeChange>;
 	/** Set or clear a Space glyph. */
 	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
 	spaces: Space[];
@@ -126,14 +151,24 @@ export function useSpaces(): UseSpacesResult {
 	useCoreRefresh(reload);
 
 	const create = useCallback(
-		async (name: string, description: string | null) => {
+		async (
+			name: string,
+			description: string | null,
+			retrievalMode?: RetrievalMode
+		) => {
 			// Managed-path numeric cap (free tier). Blocks + opens the upgrade modal
 			// when at the limit; a no-op off the managed path (self-host uncapped).
 			if (!guard("maxSpaces", spaces.length)) {
-				return;
+				return null;
 			}
-			await apiCreateSpace({ url, token }, name, description);
+			const created = await apiCreateSpace(
+				{ url, token },
+				name,
+				description,
+				retrievalMode
+			);
 			await reload();
+			return created.retrievalMode;
 		},
 		[url, token, reload, guard, spaces.length]
 	);
@@ -230,6 +265,23 @@ export function useSpaces(): UseSpacesResult {
 		[url, token]
 	);
 
+	const setRetrievalMode = useCallback(
+		async (id: string, mode: RetrievalMode) => {
+			const change = await apiSetSpaceRetrievalMode({ url, token }, id, mode);
+			// Patch in place rather than `reload()`: the switch changes no document
+			// counts, and a full refetch would blank the detail pane mid-interaction.
+			// `change.mode` (Core's echo), never the requested `mode` — the list must
+			// show what the node has, not what this client asked for.
+			setSpaces((prev) =>
+				prev.map((s) =>
+					s.id === id ? { ...s, retrievalMode: change.mode } : s
+				)
+			);
+			return change;
+		},
+		[url, token]
+	);
+
 	const setDocumentIcon = useCallback(
 		async (spaceId: string, documentId: string, icon: GlyphValue) => {
 			await apiSetDocumentIcon({ url, token }, spaceId, documentId, icon);
@@ -255,6 +307,7 @@ export function useSpaces(): UseSpacesResult {
 		saveDocument,
 		removeDocument,
 		setSpaceIcon,
+		setRetrievalMode,
 		setDocumentIcon,
 	};
 }

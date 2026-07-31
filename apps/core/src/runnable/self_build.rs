@@ -295,8 +295,12 @@ async fn install_app_tool(
                     manifest_path.display()
                 )
             })?;
-            let m: PluginManifest = serde_json::from_str(&raw)
+            let mut m: PluginManifest = serde_json::from_str(&raw)
                 .with_context(|| format!("invalid plugin manifest for '{id}'"))?;
+            // Resolve any `code_file` bodies from the plugin's own directory before
+            // this manifest reaches the registry or the installer.
+            crate::plugin_manifest::hydrate_manifest_code_files(&mut m, Some(&app_dir))
+                .map_err(|e| anyhow!("{e}"))?;
             // Hot-load into memory.
             hot_reload_manifest(m.clone(), Arc::clone(&hot_manifests)).await;
             m
@@ -355,9 +359,17 @@ async fn write_ryu_json(
         )
     })?;
 
-    // Write to disk and hot-reload.
+    // Write to disk and hot-reload. Hydration happens AFTER the write and against
+    // the written directory: a self-built manifest may reference its sandbox JS by
+    // `code_file`, and those files can only be resolved once the plugin dir exists.
+    // Hot-reloading the un-hydrated manifest would put a hook with an empty body into
+    // the live registry, which no read site can distinguish from a hook that chose to
+    // do nothing.
     let app_dir = write_manifest_to_disk(&manifest).await?;
-    hot_reload_manifest(manifest.clone(), hot_manifests).await;
+    let mut hydrated = manifest.clone();
+    crate::plugin_manifest::hydrate_manifest_code_files(&mut hydrated, Some(&app_dir))
+        .map_err(|e| anyhow!("{e}"))?;
+    hot_reload_manifest(hydrated, hot_manifests).await;
 
     tracing::info!(
         app_id,

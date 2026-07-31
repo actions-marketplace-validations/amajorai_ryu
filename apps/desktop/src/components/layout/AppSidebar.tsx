@@ -158,6 +158,8 @@ import {
 	splitPaneTabs,
 	useTabsContext,
 } from "@/src/contexts/TabsContext.tsx";
+import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
+import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
@@ -6415,6 +6417,11 @@ export function SidebarPanelContent({
 		loadHiddenChrome()
 	);
 	const [chromeOrder, setChromeOrder] = useState<ChromeKey[]>(loadChromeOrder);
+	// "inbox" is the last built-in chrome key still owned by an APP (the approvals
+	// app's tray, rendered in NavUser). NavUser hides the button itself when nothing
+	// claims the path; the Customize dialog has to make the same call, or it offers a
+	// "show Inbox" toggle whose only outcome is a tab reading "App not enabled".
+	const inboxOwner = useCompanionAlias(APPROVALS_ALIAS);
 	// App-registered header buttons (`sidebar_buttons`), appended to the persisted
 	// chrome order the same way dynamic sections are. Empty until an enabled app
 	// contributes one, so this is inert by default.
@@ -7411,8 +7418,9 @@ export function SidebarPanelContent({
 			</SidebarFooter>
 
 			<CustomizeSidebarDialog
-				bottomChromeItems={CHROME_ORDER.filter((key) =>
-					FOOTER_CHROME.has(key)
+				bottomChromeItems={CHROME_ORDER.filter(
+					(key) =>
+						FOOTER_CHROME.has(key) && (key !== "inbox" || inboxOwner !== null)
 				).map((key) => ({
 					key,
 					label: CHROME_LABELS[key as BuiltinChromeKey] ?? key,

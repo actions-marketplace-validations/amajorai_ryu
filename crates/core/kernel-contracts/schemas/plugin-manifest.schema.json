@@ -130,8 +130,16 @@
       "description": "Provider-shipped JavaScript that maps one capability verb onto one provider tool.\n\nRuns in the SAME Deno sandbox as an `inline_deno` plugin tool, under the same\n[`crate`-level] grant model: the providing plugin must hold `tool:execute`, so\nshipping code is a visible, approvable act rather than a silent one.\n\nThe program is handed:\n- `input` — the canonical verb arguments, after layer defaults are applied.\n- `defaults` — the provider's resolved `arg_defaults`, including any `pref:`\n  tokens already looked up. This is what lets an adapter read per-install\n  configuration a template could not (`arg_template` expands from the CALLER's\n  arguments, so it can never see a resolved preference).\n- `callTool(args)` — invokes the provider's own [`CapabilityToolBinding::tool`]\n  and resolves to its raw response. It takes NO tool id: the target is fixed by\n  the manifest, so sandboxed code cannot redirect the call at another tool. An\n  adapter therefore grants no authority the declarative path did not already\n  grant — it is strictly the same single re-entry, expressed as code.\n\nIt returns the canonical result shape, which the facade passes through unchanged.\n\n**Bounded by the sandbox wall-clock.** A run gets `DEFAULT_DEADLINE_SECS` of\nactive compute, and time spent awaiting a tool call counts against it. An\nadapter that polls an async job must therefore treat \"still running\" as a normal\noutcome to report, not something to wait out.",
       "properties": {
         "code": {
-          "description": "The adapter body. Evaluated as the tail of a sandbox program that has already\nbound `input`, `defaults`, `callTool` and `callNamed`; it `return`s the\ncanonical result.",
+          "default": "",
+          "description": "The adapter body. Evaluated as the tail of a sandbox program that has already\nbound `input`, `defaults`, `callTool` and `callNamed`; it `return`s the\ncanonical result.\n\nEmpty in a **source** manifest that declares [`Self::code_file`] instead;\n[`PluginManifest::hydrate_code_files`] fills it in at parse time and\n[`PluginManifest::validate`] refuses a manifest where it is still empty.",
           "type": "string"
+        },
+        "code_file": {
+          "description": "Path to the file holding the adapter body, relative to the plugin root\n(`adapters/<verb>.js`) — the authoring form. Mutually exclusive with\n[`Self::code`]; see [`PluginManifest::hydrate_code_files`].",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tools": {
           "description": "ADDITIONAL provider tool ids this adapter may call, beyond\n[`CapabilityToolBinding::tool`], reachable from the body as\n`callNamed(id, args)`.\n\nExists because a whole class of real APIs is two calls, not one: an async job\nAPI starts work at one endpoint and reads the result from another\n(`POST /crawl` → job id → `GET /crawl/{id}`). A single-tool adapter cannot\nexpress that, so those providers would stay unbindable — the gap that\nexcluded every async API from every layer.\n\nThis is an ALLOWLIST fixed by the manifest and checked host-side: a name not\nlisted here (and not [`CapabilityToolBinding::tool`]) is refused. Sandboxed\ncode chooses only *among* tools the provider declared, never a tool of its\nown — which is what keeps the id-taking form from becoming an escalation seam.",
@@ -141,9 +149,6 @@
           "type": "array"
         }
       },
-      "required": [
-        "code"
-      ],
       "type": "object"
     },
     "CapabilityReq": {
@@ -1809,11 +1814,19 @@
       "type": "object"
     },
     "TurnHookContribution": {
-      "description": "A server-side chat turn hook contributed by a plugin. The `code` is a JS body\nrun in the plugin sandbox with `ctx` (the turn context) and `host` (the\ncapability bridge: `host.sideModel`, `host.storage`, `host.log`) in scope; it\nreturns a directive (`{kind:\"none\"}` | `{kind:\"note\",text}` |\n`{kind:\"continue\",text}`). See Core's `plugin_host`.",
+      "description": "A server-side chat turn hook contributed by a plugin. The `code` is a JS body\nrun in the plugin sandbox with `ctx` (the turn context) and `host` (the\ncapability bridge: `host.sideModel`, `host.storage`, `host.log`) in scope; it\nreturns a directive (`{kind:\"none\"}` | `{kind:\"note\",text}` |\n`{kind:\"continue\",text}`). See Core's `plugin_host`.\n\nThe body is authored as a **file** ([`code_file`]) and hydrated into [`code`]\nat parse time — see [`PluginManifest::hydrate_code_files`] for why the two\nfields are a source-form/wire-form pair rather than alternatives.\n\n[`code`]: Self::code\n[`code_file`]: Self::code_file",
       "properties": {
         "code": {
-          "description": "The JS hook body executed in the sandbox (returns a directive).",
+          "default": "",
+          "description": "The JS hook body executed in the sandbox (returns a directive).\n\nEmpty in a **source** manifest that declares [`Self::code_file`] instead;\n[`PluginManifest::hydrate_code_files`] fills it in before any consumer sees\nthe manifest, and [`PluginManifest::validate`] refuses a manifest where it\nis still empty. Every read site therefore keeps reading exactly this field.",
           "type": "string"
+        },
+        "code_file": {
+          "description": "Path to the file holding the hook body, relative to the plugin root\n(`hooks/<name>.js`) — the authoring form. Mutually exclusive with\n[`Self::code`]; see [`PluginManifest::hydrate_code_files`].",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "id": {
           "description": "Stable id for this hook (for logging/audit), unique within the plugin.",
@@ -1838,8 +1851,7 @@
       },
       "required": [
         "id",
-        "on",
-        "code"
+        "on"
       ],
       "type": "object"
     },

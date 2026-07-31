@@ -319,7 +319,7 @@ export const registerRyuTools = (
 		{
 			title: "Ryu Search Space",
 			description:
-				"Semantic search within a single Space. Returns ranked document matches.",
+				"Search within a single Space. Returns ranked chunk matches. A Space set to graph retrieval answers by traversing an entity graph, so this can connect facts across documents; a vector Space answers by similarity alone.",
 			inputSchema: {
 				spaceId: z.string().describe("Id of the Space to search."),
 				query: z.string().describe("Search query."),

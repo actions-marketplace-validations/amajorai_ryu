@@ -1,3 +1,8 @@
+import {
+	RETRIEVAL_MODE_OPTIONS,
+	RetrievalModeChoice,
+	type SpaceRetrievalMode,
+} from "@ryu/blocks/desktop/spaces";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Dialog,
@@ -9,8 +14,25 @@ import {
 } from "@ryu/ui/components/dialog";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
+import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { type ChangeEvent, type FormEvent, useState } from "react";
+
+/**
+ * What the picker shows before the user touches it. `"vector"` is Core's shipped
+ * default (`DEFAULT_RAG_STRATEGY` in `apps/core/src/registry/mod.rs`), so this is
+ * right on every node an operator has not reconfigured. For the node that HAS
+ * been reconfigured, `handleSubmit` compares this against the mode Core echoes
+ * back and says so rather than leaving a wrong impression standing.
+ */
+const DEFAULT_MODE: SpaceRetrievalMode = "vector";
+
+/** Human label for a mode, from the one shared copy table. */
+function modeLabel(mode: SpaceRetrievalMode): string {
+	return (
+		RETRIEVAL_MODE_OPTIONS.find((o) => o.value === mode)?.label ?? String(mode)
+	);
+}
 
 /**
  * Create-a-space dialog, shared by the Spaces page and the sidebar's Spaces
@@ -24,16 +46,30 @@ export function CreateSpaceDialog({
 }: {
 	open: boolean;
 	onClose: () => void;
-	onCreate: (name: string, description: string | null) => Promise<void>;
+	/**
+	 * Resolves to the retrieval mode Core actually stamped on the new Space, or
+	 * `null` when nothing was created (the managed-tier cap blocked it).
+	 */
+	onCreate: (
+		name: string,
+		description: string | null,
+		retrievalMode?: SpaceRetrievalMode
+	) => Promise<SpaceRetrievalMode | null>;
 }) {
 	const [name, setName] = useState("");
 	const [description, setDescription] = useState("");
+	// `null` = the user never touched the picker, which is NOT the same as picking
+	// Vector. Only an explicit pick is sent, because an omitted field is what lets
+	// the node-wide `rag_strategy` default still apply; always transmitting the
+	// displayed value would make that operator setting unreachable from here.
+	const [mode, setMode] = useState<SpaceRetrievalMode | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
 	const reset = () => {
 		setName("");
 		setDescription("");
+		setMode(null);
 		setError(null);
 	};
 
@@ -45,7 +81,25 @@ export function CreateSpaceDialog({
 		setBusy(true);
 		setError(null);
 		try {
-			await onCreate(name.trim(), description.trim() || null);
+			const created = await onCreate(
+				name.trim(),
+				description.trim() || null,
+				mode ?? undefined
+			);
+			// The picker showed `mode ?? DEFAULT_MODE`. On a node whose operator set
+			// `rag_strategy` to something else, an untouched picker produces a Space
+			// in a mode the dialog did not show — so say so instead of leaving the
+			// user with a wrong belief about the Space they just made.
+			const shown = mode ?? DEFAULT_MODE;
+			if (created !== null && created !== shown) {
+				toast.info({
+					// A fixed slot id: repeated creates on such a node should replace
+					// this notice, not stack identical copies of it.
+					id: "space-retrieval-mode-default",
+					title: `Created with ${modeLabel(created)} retrieval`,
+					description: `This node's default retrieval mode is ${modeLabel(created)}. You can change it in the space's Retrieval settings.`,
+				});
+			}
 			reset();
 			onClose();
 		} catch (err) {
@@ -94,6 +148,15 @@ export function CreateSpaceDialog({
 								}
 								placeholder="What's in this space?"
 								value={description}
+							/>
+						</div>
+						<div className="flex flex-col gap-2">
+							<Label>Retrieval</Label>
+							<RetrievalModeChoice
+								disabled={busy}
+								idPrefix="new-space-retrieval-mode"
+								mode={mode ?? DEFAULT_MODE}
+								onModeChange={setMode}
 							/>
 						</div>
 						{error ? <p className="text-destructive text-sm">{error}</p> : null}

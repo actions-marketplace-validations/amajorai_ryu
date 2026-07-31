@@ -1322,7 +1322,11 @@ async fn host_capability(
 /// port + upstream path + optional wake target) — resolving the named sidecar's port
 /// + mount + route. Returns a 501 for an in-process capability (no sidecar/route) the
 /// broker cannot proxy.
-fn resolve_provider_route(
+///
+/// `pub(crate)` for [`crate::document_parse`], which resolves a `document.parse`
+/// provider's sidecar route exactly the way the broker does rather than growing a
+/// second, drifting copy of the mount+route+wake derivation.
+pub(crate) fn resolve_provider_route(
     provider: &crate::plugin_manifest::PluginManifest,
     entry: &crate::plugin_manifest::ProvidesEntry,
     provider_id: &str,
@@ -1360,14 +1364,17 @@ fn resolve_provider_route(
 }
 
 /// A resolved broker target: where to forward + how to wake the provider sidecar.
+///
+/// `pub(crate)` alongside [`resolve_provider_route`] — the facade in
+/// [`crate::document_parse`] holds one of these across its submit/poll hops.
 #[derive(Debug)]
-struct ProviderRoute {
-    provider_id: String,
-    port: u16,
-    upstream_path: String,
+pub(crate) struct ProviderRoute {
+    pub(crate) provider_id: String,
+    pub(crate) port: u16,
+    pub(crate) upstream_path: String,
     /// The manager key to wake before forwarding, when the provider sidecar is
     /// lazy/idle-eligible; `None` for an eager provider (forward directly).
-    wake_name: Option<String>,
+    pub(crate) wake_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -1998,9 +2005,7 @@ mod tests {
     /// sidecar never declared in `host_api.grants` is not a licence to use it.
     #[test]
     fn host_api_grant_needs_both_declaration_and_approval() {
-        let manifest = fixture(include_str!(
-            "../plugin_manifest/fixtures/recipes.manifest.json"
-        ));
+        let manifest = fixture(include_str!("../../../../apps-store/recipes/manifest.json"));
         let approved: HashSet<String> = ["ghost:record".to_owned()].into_iter().collect();
         assert!(host_api_grant_usable(&manifest, &approved, "ghost:record"));
 
@@ -2033,22 +2038,20 @@ mod tests {
                 "mcp.callTool",
                 "monitors",
                 &fixture(include_str!(
-                    "../plugin_manifest/fixtures/monitors.manifest.json"
+                    "../../../../apps-store/monitors/manifest.json"
                 )),
             ),
             (
                 "spaces.fileNotes",
                 "meetings",
                 &fixture(include_str!(
-                    "../plugin_manifest/fixtures/meetings.manifest.json"
+                    "../../../../apps-store/meetings/manifest.json"
                 )),
             ),
             (
                 "ghost.recordStart",
                 "recipes",
-                &fixture(include_str!(
-                    "../plugin_manifest/fixtures/recipes.manifest.json"
-                )),
+                &fixture(include_str!("../../../../apps-store/recipes/manifest.json")),
             ),
         ];
         for (cap, app, manifest) in cases {

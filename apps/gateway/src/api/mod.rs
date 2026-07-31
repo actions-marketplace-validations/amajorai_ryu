@@ -97,6 +97,10 @@ pub fn router(state: SharedState) -> Router {
         // Exposes the in-memory per-user/agent/session token counters the budget
         // stage tracks so the desktop can render live spend (P2 #1).
         .route("/v1/budget/spend", get(budget::get_spend))
+        // Remaining Ryu $ wallet balance as of the last metered call. Backs
+        // Core's dollar-threshold model fallback ("under $5, use the cheap
+        // model"), which has no other way to see an org-level billing figure.
+        .route("/v1/wallet", get(budget::get_wallet))
         // Audit log (local query; master-key only)
         .route("/v1/audit", get(audit::query_audit))
         // Exec audit ingest + pre-run budget gate (M6 / #192)

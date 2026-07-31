@@ -233,8 +233,27 @@ mod tests {
     use super::*;
 
     /// A skill directory owned by plugin A is discovered as owned by A and not B.
+    ///
+    /// Holds [`ryu_skills::SKILLS_ENV_LOCK`] for the whole body. `RYU_SKILLS_DIR`
+    /// is process-global, and `owned_skill_dirs` resolves through it, so a
+    /// concurrent test pointing the var at its own tempdir makes the assertions
+    /// below read an unrelated (empty) tree and fail with `left: 0, right: 1`.
+    /// This was the one `RYU_SKILLS_DIR` test in the binary not taking the lock
+    /// every one of its siblings takes (`skills_catalog::from_source`,
+    /// `sidecar::mcp::skills_tool`), so it only flaked once enough lock-holding
+    /// neighbours existed to keep the var pointed elsewhere a meaningful share of
+    /// the run. `unwrap_or_else(into_inner)` matches the siblings: a poisoned lock
+    /// means some other test panicked, which must not cascade into this one.
+    ///
+    /// The prior value is saved and restored rather than blindly removed, so this
+    /// test cannot clobber an outer override it did not set.
     #[test]
     fn owner_marker_scopes_ownership() {
+        let _env = ryu_skills::SKILLS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("RYU_SKILLS_DIR");
+
         let tmp = std::env::temp_dir().join(format!("ryu-plugin-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -250,7 +269,10 @@ mod tests {
         assert_eq!(owned_by_a[0].0, "skill-a");
         assert!(owned_skill_dirs("plugin-b").is_empty());
 
-        std::env::remove_var("RYU_SKILLS_DIR");
+        match prev {
+            Some(v) => std::env::set_var("RYU_SKILLS_DIR", v),
+            None => std::env::remove_var("RYU_SKILLS_DIR"),
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

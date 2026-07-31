@@ -123,7 +123,17 @@ export async function fetchMeshStatus(
 
 /** Normalized webhook-ingress status (`GET /api/webhook-ingress/status`). */
 export interface WebhookIngressStatus {
-	/** Backend selector, e.g. "ryu_relay" | "tailscale_funnel" | "cloudflared". */
+	/**
+	 * Backend selector, **kebab-case**: `"ryu-relay" | "tailscale-funnel" |
+	 * "cloudflared" | "own-relay"`. Core emits `IngressKind::as_str()`
+	 * (`crates/core/webhook-ingress/src/lib.rs`) verbatim here; the snake_case
+	 * spelling this comment used to give never appeared on the wire, and a
+	 * consumer that matched on it would have fallen through every branch.
+	 *
+	 * Left as `string` rather than a union on purpose — Core owns the enum and
+	 * may add a backend, so a consumer should map unknown values to a readable
+	 * fallback instead of failing to compile.
+	 */
 	kind: string;
 	/** Resolved public URL, or null when not yet established. */
 	publicUrl: string | null;

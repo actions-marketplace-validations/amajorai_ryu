@@ -94,6 +94,26 @@ export function resolveCompanionAlias(
 	return companions.find((c) => companionIdSlug(c.id) === segment)?.id ?? null;
 }
 
+// The two legacy paths no app can derive from its own id, so the shell has to spell
+// them out. Both name a PATH, never a companion id, so every consumer still goes
+// through `resolveCompanionAlias` and still sees `null` when the owning app is
+// disabled. They live HERE rather than beside the routes that mount them because
+// two other kinds of caller need them too: a surface deciding whether to RENDER an
+// entry point at all (the sidebar footer's Inbox tray), and a deep link picking a
+// click target (an OS notification). Route, affordance and deep link therefore read
+// the same path from the same module and cannot drift.
+
+/** The short path the SKILL.md editor app answers to (its companion id slug).
+ *  `/skills/new` and `/skills/:id/edit` are shell VERB routes — "author a skill",
+ *  not "open an app" — and `/skills` belongs to the skills store, so neither can be
+ *  derived from its own path. */
+export const SKILL_EDITOR_ALIAS = "/skill-editor";
+
+/** The short path the approvals app answers to. `/inbox` is the historic name of the
+ *  same surface (pending HITL approvals + quest check-offs) and is still linked from
+ *  the sidebar footer tray, the palette and OS notification clicks. */
+export const APPROVALS_ALIAS = "/approvals";
+
 /** The alias a deep link belongs to: `/timeline/1234` → `/timeline`. Lets the
  *  context-carrying routes find their app from their OWN path, so no route has to
  *  name one. */

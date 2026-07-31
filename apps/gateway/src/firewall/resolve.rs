@@ -18,7 +18,10 @@
 //! 3. Apply the agent overlay the same way.
 //! 4. `locked_fields` **union upward**: a field locked at any *broader* scope
 //!    cannot be loosened by a narrower one — on conflict the *stricter* value
-//!    wins. A narrower scope may still *tighten* a locked field.
+//!    wins. A narrower scope may still *tighten* a locked field. "Stricter" is
+//!    per-field but always one idea (more protection / more notification):
+//!    `true` for a bool, higher severity for `policy`, more inspection for
+//!    `inspector`, the louder tier for `alert`.
 //!
 //! A [`FirewallScanner`] cache keyed by a stable hash of the resolved config lets
 //! identical policies share one compiled scanner (no per-request regex compile).
@@ -33,7 +36,7 @@ use std::sync::{Arc, RwLock};
 use tracing::warn;
 
 use crate::config::{
-    FirewallConfig, FirewallOverlay, FirewallPolicy, InspectorConfig, InspectorMode,
+    AlertTier, FirewallConfig, FirewallOverlay, FirewallPolicy, InspectorConfig, InspectorMode,
 };
 use crate::evaluators::EvaluatorBinding;
 use crate::firewall::FirewallScanner;
@@ -341,6 +344,14 @@ fn apply_overlay(cfg: &mut FirewallConfig, ov: &FirewallOverlay, locked: &HashSe
         };
     }
 
+    if let Some(tier) = ov.alert {
+        cfg.alert = if locked.contains("alert") {
+            louder_alert(cfg.alert, tier)
+        } else {
+            tier
+        };
+    }
+
     if let Some(ins) = &ov.inspector {
         cfg.inspector = if locked.contains("inspector") {
             stricter_inspector(&cfg.inspector, ins)
@@ -466,6 +477,19 @@ fn policy_severity(p: &FirewallPolicy) -> u8 {
         FirewallPolicy::Sanitize => 1,
         FirewallPolicy::WarnAndContinue => 0,
     }
+}
+
+/// The stricter of two alert tiers for a **locked** `alert` field: the louder one.
+///
+/// Not a second resolution rule — the same one the other locked fields use, expressed
+/// in the type's own ordering. [`AlertTier`] derives `Ord` over variants declared in
+/// ascending severity (`Silent < Warn < Fanout < Email`), and that order is already
+/// load-bearing elsewhere (Core takes the `max` tier across all matched rules), so
+/// `max` here is what `current || incoming` is for [`apply_bool`] and what
+/// [`stricter_policy`] is for `policy`: a narrower scope may make a locked field
+/// noisier, never quieter.
+fn louder_alert(current: AlertTier, incoming: AlertTier) -> AlertTier {
+    current.max(incoming)
 }
 
 /// The stricter of two policies for a locked `policy` field.
@@ -623,6 +647,197 @@ mod tests {
         assert_eq!(cfg.policy, FirewallPolicy::Sanitize);
     }
 
+    /// `alert` is the trigger for the ENTIRE alert fan-out (`pipeline/mod.rs`
+    /// ::`firewall_policy_alert` gates on `cfg.alert >= AlertTier::Warn`), and the node
+    /// base defaults it to `Silent`. So overlay resolution for this field is what makes
+    /// org/agent-scoped delivery possible at all.
+    #[test]
+    fn alert_tier_resolves_through_the_cascade() {
+        let r = FirewallResolver::new(unlocked_base());
+        assert_eq!(
+            r.resolve(None, None, None).alert,
+            AlertTier::Silent,
+            "the node base default is Silent — nothing is delivered until a scope raises it"
+        );
+
+        // Org raises it; the agent leaf leaves it None and therefore inherits.
+        let mut agent_overlays = HashMap::new();
+        agent_overlays.insert("a1".to_string(), FirewallOverlay::default());
+        let bundle = PolicyBundle {
+            firewall: Some(FirewallOverlay {
+                alert: Some(AlertTier::Fanout),
+                ..Default::default()
+            }),
+            agent_overlays,
+        };
+        assert_eq!(
+            r.resolve(Some("o1"), Some("a1"), Some(&bundle)).alert,
+            AlertTier::Fanout,
+            "None at the leaf inherits the org tier"
+        );
+
+        // An UNLOCKED tier is a plain override in both directions: the leaf may go
+        // louder…
+        let mut agent_overlays = HashMap::new();
+        agent_overlays.insert(
+            "a1".to_string(),
+            FirewallOverlay {
+                alert: Some(AlertTier::Email),
+                ..Default::default()
+            },
+        );
+        let bundle = PolicyBundle {
+            firewall: Some(FirewallOverlay {
+                alert: Some(AlertTier::Warn),
+                ..Default::default()
+            }),
+            agent_overlays,
+        };
+        assert_eq!(
+            r.resolve(Some("o1"), Some("a1"), Some(&bundle)).alert,
+            AlertTier::Email
+        );
+
+        // …and quieter, including all the way back to Silent. `alert` is deliberately
+        // NOT in `default_firewall_locked_fields` (it is a notification dial, not one of
+        // the protection dials whose loosening disables the firewall), so this is the
+        // default posture and a scope CAN opt out of noise.
+        let mut agent_overlays = HashMap::new();
+        agent_overlays.insert(
+            "a1".to_string(),
+            FirewallOverlay {
+                alert: Some(AlertTier::Silent),
+                ..Default::default()
+            },
+        );
+        let bundle = PolicyBundle {
+            firewall: Some(FirewallOverlay {
+                alert: Some(AlertTier::Email),
+                ..Default::default()
+            }),
+            agent_overlays,
+        };
+        assert_eq!(
+            r.resolve(Some("o1"), Some("a1"), Some(&bundle)).alert,
+            AlertTier::Silent
+        );
+    }
+
+    /// A LOCKED broader scope: once locked, a narrower scope may only raise the tier.
+    /// Same rule as every other locked field, expressed in `AlertTier`'s ascending-
+    /// severity `Ord` (`louder_alert` = `max`, mirroring `apply_bool`'s `||`).
+    #[test]
+    fn locked_alert_tier_can_only_be_raised() {
+        // Locked at the NODE base, so both narrower scopes are constrained.
+        let node = FirewallConfig {
+            alert: AlertTier::Fanout,
+            locked_fields: vec!["alert".into()],
+            ..FirewallConfig::default()
+        };
+        let r = FirewallResolver::new(node);
+
+        // Going quieter is refused at the org level…
+        let bundle = PolicyBundle {
+            firewall: Some(FirewallOverlay {
+                alert: Some(AlertTier::Silent),
+                ..Default::default()
+            }),
+            agent_overlays: HashMap::new(),
+        };
+        assert_eq!(
+            r.resolve(Some("o1"), None, Some(&bundle)).alert,
+            AlertTier::Fanout,
+            "a locked tier cannot be silenced by a narrower scope"
+        );
+
+        // …and at the agent leaf, even when the org already tried.
+        let mut agent_overlays = HashMap::new();
+        agent_overlays.insert(
+            "a1".to_string(),
+            FirewallOverlay {
+                alert: Some(AlertTier::Warn),
+                ..Default::default()
+            },
+        );
+        let bundle = PolicyBundle {
+            firewall: Some(FirewallOverlay {
+                alert: Some(AlertTier::Silent),
+                ..Default::default()
+            }),
+            agent_overlays,
+        };
+        assert_eq!(
+            r.resolve(Some("o1"), Some("a1"), Some(&bundle)).alert,
+            AlertTier::Fanout,
+            "Warn < Fanout is still a loosening"
+        );
+
+        // Raising it is allowed — a lock is a floor, not a pin.
+        let mut agent_overlays = HashMap::new();
+        agent_overlays.insert(
+            "a1".to_string(),
+            FirewallOverlay {
+                alert: Some(AlertTier::Email),
+                ..Default::default()
+            },
+        );
+        let bundle = PolicyBundle {
+            firewall: Some(FirewallOverlay {
+                alert: Some(AlertTier::Silent),
+                ..Default::default()
+            }),
+            agent_overlays,
+        };
+        assert_eq!(
+            r.resolve(Some("o1"), Some("a1"), Some(&bundle)).alert,
+            AlertTier::Email
+        );
+
+        // A lock authored by the ORG binds the agent leaf too (locks union upward).
+        let r = FirewallResolver::new(unlocked_base());
+        let mut agent_overlays = HashMap::new();
+        agent_overlays.insert(
+            "a1".to_string(),
+            FirewallOverlay {
+                alert: Some(AlertTier::Warn),
+                ..Default::default()
+            },
+        );
+        let bundle = PolicyBundle {
+            firewall: Some(FirewallOverlay {
+                alert: Some(AlertTier::Email),
+                locked_fields: vec!["alert".into()],
+                ..Default::default()
+            }),
+            agent_overlays,
+        };
+        let cfg = r.resolve(Some("o1"), Some("a1"), Some(&bundle));
+        assert_eq!(
+            cfg.alert,
+            AlertTier::Email,
+            "the org's lock survives into the leaf's resolution"
+        );
+        assert!(cfg.locked_fields.iter().any(|f| f == "alert"));
+    }
+
+    /// `alert` must NOT be treated like `wrap_untrusted_tool_results`: it is a real
+    /// per-scope value (the resolved config reaches `firewall_policy_alert` via
+    /// `FirewallScanner::config()`), so `normalize_overlay` must leave it — and its
+    /// lock — alone.
+    #[test]
+    fn normalize_overlay_keeps_alert_and_its_lock() {
+        let ov = FirewallOverlay {
+            alert: Some(AlertTier::Email),
+            locked_fields: vec!["alert".into(), NODE_ONLY_WRAP_FIELD.into()],
+            wrap_untrusted_tool_results: Some(false),
+            ..Default::default()
+        };
+        let cleaned = normalize_overlay(&ov);
+        assert_eq!(cleaned.alert, Some(AlertTier::Email));
+        assert_eq!(cleaned.locked_fields, vec!["alert".to_string()]);
+        assert!(cleaned.wrap_untrusted_tool_results.is_none());
+    }
+
     #[test]
     fn custom_patterns_union_across_scopes() {
         let mut node = base();
@@ -769,9 +984,9 @@ mod tests {
         );
         let bundle = PolicyBundle {
             firewall: Some(FirewallOverlay {
-                enabled: Some(false),                            // attempt: disable
-                scan_inbound: Some(false),                       // attempt: skip scan
-                policy: Some(FirewallPolicy::WarnAndContinue),   // attempt: downgrade
+                enabled: Some(false),                          // attempt: disable
+                scan_inbound: Some(false),                     // attempt: skip scan
+                policy: Some(FirewallPolicy::WarnAndContinue), // attempt: downgrade
                 ..Default::default()
             }),
             agent_overlays,

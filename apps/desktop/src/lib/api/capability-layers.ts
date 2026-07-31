@@ -343,3 +343,38 @@ export function setCapabilityBinding(
 		});
 	});
 }
+
+/**
+ * Drop `capability`'s override so it falls back to Core's automatic pick
+ * (sole provider > declared default > lowest id), leaving every OTHER
+ * capability's override in place.
+ *
+ * The mirror image of {@link setCapabilityBinding} and, like it, a
+ * read-merge-write through the same {@link serializeWrite} queue — for the same
+ * reason: `PUT /api/capabilities/bindings` REPLACES the map, so "reset this one
+ * layer" implemented anywhere else would wipe the rest. It existed only as a
+ * concept until a surface needed it (the Document parsing panel's "Reset to
+ * automatic"), and re-deriving the merge at that call site is exactly the partial
+ * PUT this module exists to make unreachable.
+ *
+ * Clearing an absent key is a no-op that costs one GET and no write, so a surface
+ * may call it unconditionally.
+ *
+ * Throws {@link CapabilityBindingConflictError} when Core refuses — resetting is
+ * refusable too: with two providers enabled and neither declared default, the
+ * automatic pick is `Ambiguous`, which leaves an enabled consumer unbound.
+ */
+export function clearCapabilityBinding(
+	target: ApiTarget,
+	capability: string
+): Promise<Record<string, string>> {
+	return serializeWrite(async () => {
+		const current = await fetchCapabilityBindings(target);
+		if (!(capability in current)) {
+			return current;
+		}
+		const next = { ...current };
+		delete next[capability];
+		return await replaceCapabilityBindings(target, next);
+	});
+}

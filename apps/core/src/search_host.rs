@@ -36,6 +36,20 @@ impl CoreSearchEmbedder {
     /// Build from the environment-configured model registry (the default chat
     /// embedder), resolved through the single RAG resolver. Used by the
     /// process-wide default constructors.
+    ///
+    /// # `from_env` is accurate here, and staying on it is deliberate
+    ///
+    /// The sibling retrieval openers (`server::spaces::open_default`,
+    /// `rag_host::open_retrieval_store`) were moved to
+    /// `rag_host::retrieval_registry()` (`ProviderRegistry::load`) because they read
+    /// `registry.json`-backed fields. This one reads **only** the embed trio
+    /// (`embed_base_url`, `embedder.id`, `embedder.dims`), which has no
+    /// `registry.json` key at all — the vector space of `message-embeddings.db`
+    /// hangs off it, and `registry`'s module header explains why that makes it
+    /// env-only. So `load()` here would be a redundant file read that implies a file
+    /// layer this path does not have. Swap the model with `RYU_EMBED_MODEL` /
+    /// `RYU_EMBED_DIMS` / `RYU_EMBED_BASE_URL`; `MessageIndex::open` reconciles a
+    /// changed dimensionality by rebuilding the vec0 table.
     pub fn from_env() -> Self {
         let registry = crate::registry::ModelRegistry::from_env();
         Self {

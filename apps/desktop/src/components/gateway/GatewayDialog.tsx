@@ -8,6 +8,7 @@ import {
 	Delete01Icon,
 	Dollar01Icon,
 	EyeIcon,
+	File01Icon,
 	GitBranchIcon,
 	Key01Icon,
 	PencilEdit01Icon,
@@ -81,11 +82,14 @@ import {
 	EvaluatorEditorDialog,
 	type EvaluatorEditorMode,
 } from "@/src/components/evaluators/EvaluatorEditorDialog.tsx";
+import { AgentEgressSection } from "@/src/components/gateway/AgentEgressSection.tsx";
+import { FallbackRulesSection } from "@/src/components/gateway/FallbackRulesSection.tsx";
 import { UsageCostSection } from "@/src/components/gateway/UsageCostSection.tsx";
 import { WorkspaceSection } from "@/src/components/gateway/WorkspaceSection.tsx";
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
 import { ConnectionsTab } from "@/src/components/settings/ConnectionsTab.tsx";
 import { DangerZoneSettings } from "@/src/components/settings/DangerZoneSettings.tsx";
+import { DocumentParsingSettings } from "@/src/components/settings/DocumentParsingSettings.tsx";
 import { EmailAlertsSettings } from "@/src/components/settings/EmailAlertsSettings.tsx";
 import { EntitySettings } from "@/src/components/settings/EntitySettings.tsx";
 import { IntegrationsTab } from "@/src/components/settings/IntegrationsTab.tsx";
@@ -100,6 +104,7 @@ import {
 } from "@/src/components/settings/shared/settings-items.tsx";
 import { UpdatesSettings } from "@/src/components/settings/UpdatesSettings.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
+import { useAdvancedSettings } from "@/src/hooks/useAdvancedSettings.ts";
 import { useGatewayStatus } from "@/src/hooks/useGatewayStatus.ts";
 import {
 	APP_SECTION_PREFIX,
@@ -118,6 +123,7 @@ import type {
 	BudgetRule,
 	BudgetSpend,
 	ByokProvider,
+	ClassifyTierState,
 	CustomPattern,
 	CustomPatternKind,
 	EvalCaseScore,
@@ -125,6 +131,7 @@ import type {
 	EvalRunResult,
 	Evaluator,
 	EvaluatorBinding,
+	GatewayAlertTier,
 	GatewayAuthConfig,
 	GatewayBudgetConfig,
 	GatewayConfig,
@@ -137,6 +144,8 @@ import type {
 	GatewayStatus,
 	InspectorConfig,
 	InspectorMode,
+	Modality,
+	ModalityMapping,
 	ModelMapping,
 	ProviderCircuitState,
 	ProviderKind,
@@ -144,18 +153,30 @@ import type {
 	SmartRoutingConfig,
 } from "@/src/lib/api/gateway.ts";
 import {
+	ALERT_TIERS,
+	buildBudgetRule,
+	CLASSIFY_MODEL_ID,
+	CLASSIFY_TIER_COPY,
+	classifyTierCannotServeModel,
+	classifyTierServable,
 	clearGatewayProvider,
 	DEFAULT_INSPECTOR,
 	DEFAULT_SESSION_BUDGET,
 	DEFAULT_SMART_ROUTING,
 	deleteCustomEvaluator,
+	deriveClassifyTierState,
 	fetchBudgetSpend,
+	fetchClassifyWeightsPresent,
 	fetchEvaluators,
 	fetchGatewayAudit,
 	fetchGatewayConfig,
+	MODALITIES,
+	routingViewIncludesModalityMap,
+	routingViewIncludesSmartRouting,
 	runGatewayEvals,
 	setGatewayProvider,
 	updateGatewayConfig,
+	withModalityMapping,
 } from "@/src/lib/api/gateway.ts";
 import {
 	fetchMyPermissions,
@@ -178,6 +199,7 @@ import {
 	setReplicateApiKey,
 } from "@/src/lib/api/preferences.ts";
 import { deleteProviderKey, setProviderKey } from "@/src/lib/api/secrets.ts";
+import { fetchSidecarStatus } from "@/src/lib/api/system.ts";
 import { PreflightPage } from "@/src/pages/PreflightPage.tsx";
 import type { GatewaySection } from "@/src/store/useGatewayDialog.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
@@ -1157,9 +1179,58 @@ const ACTION_DESCRIPTIONS: Record<BudgetAction, string> = {
 	stop: "Reject with 402 budget_exceeded",
 };
 
+// ── Alert tier copy (shared by the budget dialogs and the guardrails card) ────
+//
+// ONE source for the wording, in two maps: a short name (for a locked-field
+// summary or an "Inherit (…)" label) and a clause saying what the tier actually
+// delivers. Every option list below is derived from them, so the four tiers
+// cannot end up described one way in Budgets and another in Safety filters.
+//
+// The clauses are Core's behaviour, read out of the one function that turns a tier
+// into sinks: `dispatch` in `apps/core/src/policy_alerts/mod.rs`. `email` sends to
+// the node's email recipients INSTEAD OF the webhook/Telegram/push targets, because
+// Core's tier match arms are exclusive. The gateway's `AlertTier` doc used to claim
+// "fan out AND send email" — it has since been corrected and now agrees, but read
+// `dispatch` rather than either comment if this copy ever needs changing.
+
+/** Short tier names, for inline summaries. */
+const ALERT_TIER_LABELS: Record<GatewayAlertTier, string> = {
+	silent: "Silent",
+	warn: "Warn",
+	fanout: "Fanout",
+	email: "Email",
+};
+
+/** What each tier delivers, as a mid-sentence clause. */
+const ALERT_TIER_DESCRIPTIONS: Record<GatewayAlertTier, string> = {
+	silent: "No notification (default)",
+	warn: "In-app notification only",
+	fanout: "Webhook, Telegram, and mobile push",
+	email: "Email recipients only (instead of the fan-out channels)",
+};
+
+/** `Label — clause` options, ascending in severity (the Rust `Ord` order). */
+const ALERT_TIER_OPTIONS: { value: GatewayAlertTier; label: string }[] =
+	ALERT_TIERS.map((tier) => ({
+		value: tier,
+		label: `${ALERT_TIER_LABELS[tier]} — ${ALERT_TIER_DESCRIPTIONS[tier]}`,
+	}));
+
+/**
+ * The dependency this control cannot satisfy on its own, said once and reused by
+ * both surfaces: the tier chooses a delivery CHANNEL, and the channel's targets
+ * (SMTP transport, recipients, webhook/Telegram/push) are node settings edited on
+ * the "Email & alerts" pane. Raising the tier with no targets configured delivers
+ * nothing beyond the in-app notification.
+ */
+const ALERT_TIER_TARGETS_NOTE =
+	"Anything above Silent needs delivery targets: Fanout uses this node's webhook / Telegram / push targets, Email its recipient list. Both are configured under Email & alerts.";
+
 interface BudgetFormState {
 	action: BudgetAction;
 	agentId: string;
+	/** Notification tier for this rule. Round-trips, so an edit cannot demote it. */
+	alert: GatewayAlertTier;
 	downgrade_to: string;
 	limit: string;
 	restrict_max_tokens: string;
@@ -1169,9 +1240,71 @@ const DEFAULT_FORM: BudgetFormState = {
 	agentId: "",
 	limit: "100000",
 	action: "notify",
+	alert: "silent",
 	downgrade_to: "",
 	restrict_max_tokens: "256",
 };
+
+/**
+ * The single form → wire mapping for budget rules. Was duplicated verbatim in
+ * `BudgetsCard` and `BudgetScopeSection`; both copies built a fresh literal that
+ * carried only limit/action/downgrade_to/restrict_max_tokens, so every save
+ * dropped the rule's `alert` tier (and `PUT /v1/config` replaces the whole
+ * `BudgetConfig`, so "dropped" meant "reset to silent"). Numeric/trim handling
+ * lives in {@link buildBudgetRule} so it is unit-testable without React.
+ */
+function formToRule(form: BudgetFormState): BudgetRule {
+	return buildBudgetRule({
+		limit: Number(form.limit),
+		action: form.action,
+		alert: form.alert,
+		downgradeTo: form.downgrade_to,
+		restrictMaxTokens: form.restrict_max_tokens,
+	});
+}
+
+/**
+ * Inherit-free tier Select, used by both budget dialogs. Kept next to the copy
+ * maps so a new tier only has to be added to {@link ALERT_TIERS}.
+ */
+function AlertTierSelect({
+	id,
+	value,
+	onChange,
+}: {
+	id: string;
+	value: GatewayAlertTier;
+	onChange: (next: GatewayAlertTier) => void;
+}) {
+	// No `disabled` prop: both call sites are inside a budget editor whose other
+	// selects (`budget-action`, `session-budget-action`) are always enabled too —
+	// the permission gate on those surfaces is on the Save button, not the fields.
+	return (
+		<Select
+			items={ALERT_TIER_OPTIONS}
+			onValueChange={(v: string | null) => {
+				if (v) {
+					onChange(v as GatewayAlertTier);
+				}
+			}}
+			value={value}
+		>
+			<SelectTrigger id={id}>
+				<SelectValue />
+			</SelectTrigger>
+			<SelectContent>
+				{ALERT_TIER_OPTIONS.map((opt) => (
+					<SelectItem key={opt.value} value={opt.value}>
+						<span className="font-medium">{ALERT_TIER_LABELS[opt.value]}</span>
+						<span className="ml-1 text-muted-foreground text-xs">
+							— {ALERT_TIER_DESCRIPTIONS[opt.value]}
+						</span>
+					</SelectItem>
+				))}
+			</SelectContent>
+		</Select>
+	);
+}
 
 function BudgetRuleDialog({
 	trigger,
@@ -1361,6 +1494,17 @@ function BudgetRuleDialog({
 							/>
 						</div>
 					) : null}
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="budget-alert">Notify when this rule fires</Label>
+						<AlertTierSelect
+							id="budget-alert"
+							onChange={(next) => setForm((f) => ({ ...f, alert: next }))}
+							value={form.alert}
+						/>
+						<p className="text-muted-foreground text-xs">
+							{ALERT_TIER_TARGETS_NOTE}
+						</p>
+					</div>
 					{err ? <p className="text-destructive text-sm">{err}</p> : null}
 				</div>
 				<DialogFooter>
@@ -1542,6 +1686,386 @@ function ModelMappingDialog({
 	);
 }
 
+// ── Modality routing ─────────────────────────────────────────────────────────
+
+/**
+ * Display names for every provider id that can appear in `routing.modality_map`,
+ * which is a strictly WIDER set than {@link PROVIDER_LABELS}.
+ *
+ * `PROVIDER_LABELS` is `Record<ProviderKind, string>`, and `ProviderKind` covers
+ * only the chat-capable passthroughs. The media providers registered in
+ * `apps/gateway/src/providers/mod.rs` — `modal`, `replicate`, `fal` — plus the
+ * `classify` tier alias are NOT in that union, so the model-map editor's
+ * `configuredProviders.filter((p) => p in PROVIDER_LABELS)` drops them. Reusing
+ * that filtered list here would have left the modality editor unable to select
+ * the exact three providers the modality map exists to select. Unknown ids fall
+ * through to the raw id rather than being hidden.
+ *
+ * DELIBERATE DIVERGENCE from the model-map rows directly above, so nobody
+ * "tidies" the two back together: those rows filter, these do not. `provider` in
+ * `ModalityMapping` is an open `ProviderId`, and this editor offers whatever
+ * `available_providers()` reports. One visible consequence is `classify`, which
+ * IS registered on every Core-spawned gateway (Core publishes
+ * `RYU_CLASSIFY_LLM_URL` unconditionally) and so appears in this dropdown while
+ * the model-map dropdown hides it. Offering it is honest — the gateway would
+ * accept it — and hardcoding a media-only allowlist here is exactly the closed
+ * list that broke `fal`/`replicate`/`modal` in the first place.
+ */
+const MODALITY_PROVIDER_LABELS: Record<string, string> = {
+	...PROVIDER_LABELS,
+	modal: "Modal",
+	replicate: "Replicate",
+	fal: "fal.ai",
+	classify: "Classify tier",
+	// Credit-pool providers: the Gateway registers these as ALIASES over the
+	// OpenAI / Anthropic impls (`register_as` in `apps/gateway/src/providers/mod.rs`),
+	// so they carry their own ids and belong here like any other selectable
+	// provider. They are named for what an operator configured, not for the impl
+	// underneath — an operator who set up a segregated Bedrock pool must not see
+	// it presented as "Anthropic".
+	cloudflare: "Cloudflare Workers AI",
+	bedrock: "Amazon Bedrock",
+};
+
+function modalityProviderLabel(id: string): string {
+	return MODALITY_PROVIDER_LABELS[id] ?? id;
+}
+
+/**
+ * Row copy for each `Modality` variant. Keyed by the enum's wire form, so a
+ * variant added on the Rust side surfaces here as a type error rather than as a
+ * quietly missing row.
+ */
+const MODALITY_COPY: Record<Modality, { label: string; note: string }> = {
+	chat: {
+		label: "Chat",
+		note: "Rarely reached: ordinary chat is routed by the model map above, not by this row. The router only consults the chat entry for an agent that carries a per-agent chat MODEL slot and no provider slot — with a provider slot set, that slot wins outright.",
+	},
+	image: {
+		label: "Image generation",
+		note: "Used by POST /v1/images/generations.",
+	},
+	tts: {
+		label: "Text to speech",
+		note: "Used by POST /v1/audio/speech.",
+	},
+	stt: {
+		label: "Speech to text",
+		note: "Used by POST /v1/audio/transcriptions.",
+	},
+	video: {
+		label: "Video generation",
+		note: "Used by POST /v1/videos/generations — job-based, so the client polls for the result.",
+	},
+};
+
+interface ModalityMappingFormState {
+	model: string;
+	provider: string;
+}
+
+/**
+ * Add/edit dialog for one modality row. Deliberately the same shape as
+ * {@link ModelMappingDialog} — provider select, optional model override,
+ * validate-on-save, inline error — so the two editors in this card read as one
+ * mechanism. Only the two differences the wire format forces: the modality is
+ * fixed (it is the map KEY, not a free-text field), and `providers` is
+ * `string[]` because `ModalityMapping.provider` is an open `ProviderId`.
+ */
+function ModalityMappingDialog({
+	trigger,
+	modality,
+	initial,
+	providers,
+	onSave,
+}: {
+	trigger: ReactElement;
+	modality: Modality;
+	initial: ModalityMappingFormState;
+	/** Selectable provider ids: those this node reports, plus the stored one. */
+	providers: string[];
+	onSave: (form: ModalityMappingFormState) => Promise<void>;
+}) {
+	const [open, setOpen] = useState(false);
+	const [form, setForm] = useState<ModalityMappingFormState>(initial);
+	const [saving, setSaving] = useState(false);
+	const [err, setErr] = useState<string | null>(null);
+
+	const handleOpenChange = (next: boolean) => {
+		if (next) {
+			setForm(initial);
+			setErr(null);
+		}
+		setOpen(next);
+	};
+
+	const handleSave = async () => {
+		if (!form.provider.trim()) {
+			setErr("Pick a provider, or clear the row to fall back to the default.");
+			return;
+		}
+		setSaving(true);
+		setErr(null);
+		try {
+			await onSave(form);
+			setOpen(false);
+		} catch (e) {
+			setErr(e instanceof Error ? e.message : "Failed to save mapping.");
+		} finally {
+			setSaving(false);
+		}
+	};
+
+	const label = MODALITY_COPY[modality].label;
+
+	return (
+		<Dialog onOpenChange={handleOpenChange} open={open}>
+			<DialogTrigger render={trigger} />
+			<DialogContent>
+				<DialogHeader>
+					<DialogTitle>{label} routing</DialogTitle>
+					<DialogDescription>
+						Send {label.toLowerCase()} requests to a specific provider. Checked
+						before the model map; clear the row to fall back to the default
+						provider.
+					</DialogDescription>
+				</DialogHeader>
+				<div className="flex flex-col gap-4 py-2">
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="modality-provider">Provider</Label>
+						<Select
+							items={providers.map((p) => ({
+								value: p,
+								label: modalityProviderLabel(p),
+							}))}
+							onValueChange={(v) =>
+								v && setForm((f) => ({ ...f, provider: v }))
+							}
+							value={form.provider}
+						>
+							<SelectTrigger id="modality-provider">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{providers.map((p) => (
+									<SelectItem key={p} value={p}>
+										{modalityProviderLabel(p)}
+									</SelectItem>
+								))}
+								{providers.length === 0 ? (
+									<SelectItem disabled value="__none__">
+										No providers configured
+									</SelectItem>
+								) : null}
+							</SelectContent>
+						</Select>
+					</div>
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="modality-model">Model (optional)</Label>
+						<Input
+							id="modality-model"
+							onChange={(e) =>
+								setForm((f) => ({ ...f, model: e.target.value }))
+							}
+							placeholder="e.g. dall-e-3 (blank keeps the request's model)"
+							value={form.model}
+						/>
+						<p className="text-muted-foreground text-xs">
+							Pins the model sent to the provider. Left blank, the model name
+							from the request is forwarded unchanged.
+						</p>
+					</div>
+					<p className="text-muted-foreground text-xs">
+						{MODALITY_COPY[modality].note}
+					</p>
+					{err ? <p className="text-destructive text-sm">{err}</p> : null}
+				</div>
+				<DialogFooter>
+					<Button
+						disabled={saving}
+						onClick={() => setOpen(false)}
+						variant="ghost"
+					>
+						Cancel
+					</Button>
+					<Button disabled={saving} onClick={() => handleSave()}>
+						{saving ? <Spinner className="size-4" /> : null}
+						Save
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+/** One modality row's second line: what this modality actually does today. */
+function ModalityRowDescription({
+	mapping,
+	defaultProvider,
+	configuredProviders,
+}: {
+	mapping: ModalityMapping | undefined;
+	defaultProvider: string;
+	configuredProviders: string[];
+}) {
+	if (!mapping) {
+		// An unmapped modality is not an empty setting, it is an explicit
+		// fallback — say so. This is also the gateway's own vocabulary:
+		// `GET /v1/modalities` reports `"provider": "default"` for exactly this
+		// state (apps/gateway/src/api/multimodal.rs).
+		//
+		// Deliberately NOT "falls back to <default_provider>" full stop. Step 3 of
+		// `route_modality` is ordinary MODEL routing, and `RoutingTables::route`
+		// tries the exact model map, then the longest user prefix, then the
+		// built-in prefix table, and only then `default_provider` — so an unmapped
+		// image request for `dall-e-3` can land on a built-in prefix rule and never
+		// reach the default at all. Naming the default as the destination would be
+		// wrong for exactly the requests most likely to hit this row.
+		return (
+			<span className="text-muted-foreground">
+				Falls back to the default provider — strictly, to ordinary model
+				routing, which lands on {modalityProviderLabel(defaultProvider)} when no
+				model mapping or built-in prefix rule matches the requested model.
+			</span>
+		);
+	}
+	// An EMPTY list means "we do not know yet", not "nothing is registered": the
+	// card receives `health?.providers ?? []`, so a health query that is still in
+	// flight or that failed is indistinguishable from a gateway with no providers.
+	// Flagging on that would put "not configured on this node" under a perfectly
+	// good mapping every time the dialog opens — the same false-alarm shape the
+	// `served === null` gate exists to prevent one level up.
+	const unavailable =
+		configuredProviders.length > 0 &&
+		!configuredProviders.includes(mapping.provider);
+	return (
+		<>
+			{modalityProviderLabel(mapping.provider)}
+			{mapping.model ? ` → ${mapping.model}` : null}
+			{unavailable ? (
+				<span className="text-warning"> — not configured on this node</span>
+			) : null}
+		</>
+	);
+}
+
+/**
+ * The five modality rows. Extracted from {@link RoutingCard} so each editor in
+ * that card stays independently readable, and because the row list comes from
+ * `MODALITIES` (the Rust enum's wire form) rather than from whatever happens to
+ * be configured — an UNMAPPED modality has to be visible to state what it falls
+ * back to.
+ *
+ * `served` is the load-bearing prop; see `routingViewIncludesModalityMap`. When
+ * it is false there is nothing safe to render, because this app cannot
+ * round-trip a field the node never sent. It is strictly two-state here: the
+ * caller must not mount this component until the config has actually loaded, or
+ * "not loaded yet" and "unreachable" would both render the too-old-gateway
+ * warning and accuse a perfectly healthy node of being about to lose data.
+ */
+function ModalityRoutingRows({
+	served,
+	modalityMap,
+	defaultProvider,
+	configuredProviders,
+	disabled,
+	onSave,
+}: {
+	served: boolean;
+	modalityMap: Partial<Record<Modality, ModalityMapping>>;
+	defaultProvider: string;
+	configuredProviders: string[];
+	disabled: boolean;
+	onSave: (
+		modality: Modality,
+		mapping: { model?: string; provider: string } | null
+	) => Promise<void>;
+}) {
+	if (!served) {
+		return (
+			<p className="text-sm text-warning">
+				This gateway does not report its modality map, so it cannot be edited
+				here — and it cannot be preserved either: saving anything in this card
+				replaces the whole routing section, so a{" "}
+				<span className="font-mono">[routing.modality_map]</span> written by
+				hand in <span className="font-mono">gateway.toml</span> is dropped.
+				Update the gateway to route image, speech and video from the app.
+			</p>
+		);
+	}
+	return (
+		<SettingsGroup>
+			{MODALITIES.map((modality) => {
+				const mapping = modalityMap[modality];
+				// Keep the stored provider selectable even when this node no longer
+				// reports it (key removed, sidecar uninstalled) so opening the row
+				// cannot silently re-home a working mapping onto another provider.
+				const options =
+					mapping && !configuredProviders.includes(mapping.provider)
+						? [...configuredProviders, mapping.provider]
+						: configuredProviders;
+				return (
+					<SettingsItem
+						actions={
+							<div className="flex shrink-0 items-center gap-1">
+								<ModalityMappingDialog
+									initial={{
+										provider: mapping?.provider ?? options[0] ?? "",
+										model: mapping?.model ?? "",
+									}}
+									modality={modality}
+									onSave={(form) =>
+										onSave(modality, {
+											provider: form.provider,
+											model: form.model,
+										})
+									}
+									providers={options}
+									trigger={
+										<Button disabled={disabled} size="icon" variant="ghost">
+											<HugeiconsIcon
+												className="size-3.5"
+												icon={mapping ? PencilEdit01Icon : Add01Icon}
+											/>
+											<span className="sr-only">
+												{mapping ? "Edit" : "Set"}{" "}
+												{MODALITY_COPY[modality].label} routing
+											</span>
+										</Button>
+									}
+								/>
+								<Button
+									disabled={disabled || !mapping}
+									onClick={() => onSave(modality, null)}
+									size="icon"
+									variant="ghost"
+								>
+									<HugeiconsIcon
+										className="size-3.5 text-destructive"
+										icon={Delete01Icon}
+									/>
+									<span className="sr-only">
+										Clear {MODALITY_COPY[modality].label} routing
+									</span>
+								</Button>
+							</div>
+						}
+						description={
+							<ModalityRowDescription
+								configuredProviders={configuredProviders}
+								defaultProvider={defaultProvider}
+								mapping={mapping}
+							/>
+						}
+						key={modality}
+						title={MODALITY_COPY[modality].label}
+					/>
+				);
+			})}
+		</SettingsGroup>
+	);
+}
+
 /** Editing row for a smart-routing rule, with a stable client-side id for keys. */
 interface RuleRow {
 	description: string;
@@ -1561,6 +2085,124 @@ const SMART_STRATEGY_DESCRIPTIONS: Record<RouteStrategy, string> = {
 	keyword: "case-insensitive word match, zero cost",
 };
 
+// ── Local classify tier (shared by the two "cheap model" fields) ──────────────
+//
+// Both the guardrail inspector and smart routing want a small, fast, free model
+// that runs per turn. Core ships one — a lazy `llama.cpp` sidecar serving Gemma
+// 3 270M, exposed by the gateway as the `classify` provider — but nothing in
+// this dialog used to say so, so the fields read as "type a model id and hope".
+// These two pieces make the tier visible: read its live state off the node, and
+// offer its model id as a one-click value. The state MACHINE (and the copy, and
+// the "can this node serve it" predicates) lives in `lib/api/gateway.ts` so it is
+// testable without rendering the dialog; this file only owns the polling.
+
+/** Matches the status cadence of the app-wide `useSystemStatus` poll. */
+const CLASSIFY_STATUS_POLL_MS = 5000;
+
+/**
+ * The weights either exist or they don't; nothing but an install changes that,
+ * and an install is minutes of download. Polled far slower than the run state so
+ * a dialog left open doesn't re-stat the model directory every 5s.
+ */
+const CLASSIFY_WEIGHTS_POLL_MS = 30_000;
+
+/**
+ * Live state of the classify tier on the node this dialog is configuring, from
+ * two independent probes:
+ *
+ *  - `/api/sidecar/status` — is the sidecar registered, and is it resident?
+ *    Read through the shared system API client (the same endpoint the node
+ *    selector and the Store's sidecar toggles use) because the sidecar is Core's,
+ *    not the gateway's, and no gateway route reports it.
+ *  - `/api/models/installed` — are its WEIGHTS on disk? Registered-but-idle is
+ *    the sidecar's normal resting state, so the run state alone cannot tell a
+ *    lazy tier apart from one whose non-fatal onboarding download failed and
+ *    which will therefore bail on every start attempt. That failure is the whole
+ *    reason this row exists, and it is invisible in the run state.
+ *
+ * Both are keyed by node URL, so every card in this dialog shares one poll of
+ * each rather than one per card.
+ */
+function useClassifyTier(target: ApiTarget, enabled: boolean) {
+	const status = useQuery({
+		enabled,
+		queryKey: ["sidecar-status", target.url],
+		queryFn: () => fetchSidecarStatus(target),
+		refetchInterval: CLASSIFY_STATUS_POLL_MS,
+	});
+	const weights = useQuery({
+		enabled,
+		queryKey: ["classify-weights", target.url],
+		queryFn: () => fetchClassifyWeightsPresent(target),
+		refetchInterval: CLASSIFY_WEIGHTS_POLL_MS,
+	});
+	// `undefined` for either probe while pending OR on failure (an older Core has
+	// no `/api/models/installed`), which keeps the row silent instead of crying
+	// "not downloaded" — the derivation, not this hook, decides what that means.
+	return deriveClassifyTierState({
+		sidecarStatus: status.isSuccess ? status.data : undefined,
+		weightsPresent: weights.isSuccess ? weights.data : undefined,
+	});
+}
+
+/**
+ * Badge tone per tier state: `running` reads as active, `unweighted` is the one
+ * state that is a genuine fault on this node (the sidecar can never start), and
+ * `idle`/`absent` are neutral facts.
+ */
+function classifyBadgeVariant(
+	state: Exclude<ClassifyTierState, "unknown">
+): "default" | "destructive" | "secondary" {
+	if (state === "running") {
+		return "default";
+	}
+	if (state === "unweighted") {
+		return "destructive";
+	}
+	return "secondary";
+}
+
+/**
+ * Status + one-click adopt row for the local classify tier, rendered under a
+ * "cheap model" picker. The button only appears when this node can actually
+ * serve the tier and it isn't already the selected value — offering it otherwise
+ * would hand the user a model id whose call is guaranteed to fail.
+ */
+function ClassifyTierNote({
+	disabled,
+	onUse,
+	state,
+	value,
+}: {
+	disabled: boolean;
+	onUse: () => void;
+	state: ClassifyTierState;
+	value: string;
+}) {
+	if (state === "unknown") {
+		return null;
+	}
+	const copy = CLASSIFY_TIER_COPY[state];
+	const servable = classifyTierServable(state);
+	return (
+		<div className="flex flex-wrap items-center gap-2">
+			<Badge variant={classifyBadgeVariant(state)}>{copy.badge}</Badge>
+			<span className="text-muted-foreground text-xs">{copy.hint}</span>
+			{servable && value.trim() !== CLASSIFY_MODEL_ID ? (
+				<Button
+					disabled={disabled}
+					onClick={onUse}
+					size="sm"
+					type="button"
+					variant="ghost"
+				>
+					Use it
+				</Button>
+			) : null}
+		</div>
+	);
+}
+
 function SmartRoutingCard({
 	target,
 	reachable,
@@ -1574,10 +2216,28 @@ function SmartRoutingCard({
 	const [config, setConfig] = useState<SmartRoutingConfig | null>(null);
 	const [draft, setDraft] = useState<SmartRoutingConfig | null>(null);
 	const [rules, setRules] = useState<RuleRow[]>([]);
+	// Did this gateway actually report `routing.smart_routing`? Three-state on
+	// purpose, exactly like `modalityMapServed`: `null` = not loaded yet. Folding
+	// "unknown" into `false` would flash a data-loss warning at every healthy,
+	// current gateway for the duration of the first fetch.
+	//
+	// This exists because the card cannot otherwise tell "the node says smart
+	// routing is off" from "the node never mentioned smart routing". Both render
+	// as a switch in the off position, but only one of them is a fact. Saving in
+	// the second case WRITES that fabricated off — `put_config` replaces the
+	// routing section wholesale and `RoutingConfig::smart_routing` is
+	// `#[serde(default)]`, so a hand-written `[routing.smart_routing]` in
+	// `gateway.toml` is silently turned off by a user who came here to change a
+	// rule. `fetchGatewayConfig` no longer coalesces the field precisely so this
+	// distinction survives the client; consuming it here is the other half.
+	const [served, setServed] = useState<boolean | null>(null);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
 	const [saveError, setSaveError] = useState<string | null>(null);
 	const [saveOk, setSaveOk] = useState(false);
+	// Only polled while the node answers at all — a down node would otherwise
+	// retry the sidecar status every 5s behind an already-explained error.
+	const classifyTier = useClassifyTier(target, reachable);
 
 	useEffect(() => {
 		if (!reachable || config !== null) {
@@ -1589,6 +2249,11 @@ function SmartRoutingCard({
 				if (cancelled) {
 					return;
 				}
+				setServed(routingViewIncludesSmartRouting(cfg.routing));
+				// The `??` stays: React Selects and Switches bound to `undefined`
+				// go uncontrolled. It is now only a *rendering* stand-in — `served`
+				// carries the truth, and the save path refuses to write this
+				// stand-in back.
 				const sr = cfg.routing.smart_routing ?? DEFAULT_SMART_ROUTING;
 				setConfig(sr);
 				setDraft(sr);
@@ -1645,7 +2310,11 @@ function SmartRoutingCard({
 	};
 
 	const handleSave = async () => {
-		if (!draft) {
+		// `served === false` is a hard refusal, not belt-and-braces behind a
+		// disabled button: writing here replaces a section this app never received
+		// with a fabricated default — destroying config in order to "save" it.
+		// `null` (not loaded yet) is refused for the same reason.
+		if (!draft || served !== true) {
 			return;
 		}
 		setSaving(true);
@@ -1656,6 +2325,16 @@ function SmartRoutingCard({
 			// default_provider / model_map / fallback_chain) with only the
 			// smart_routing section replaced.
 			const cfg = await fetchGatewayConfig(target);
+			// Re-checked against the FRESH config, not the one from mount. The
+			// gateway can be restarted (or swapped for an older build) between the
+			// two fetches, and it is this object that is about to be written back.
+			if (!routingViewIncludesSmartRouting(cfg.routing)) {
+				setServed(false);
+				setSaveError(
+					"This gateway no longer reports its smart-routing config, so saving would overwrite it. Nothing was changed."
+				);
+				return;
+			}
 			const cleanRules = rules
 				.map((r) => ({
 					description: r.description.trim(),
@@ -1688,7 +2367,34 @@ function SmartRoutingCard({
 		}
 	};
 
-	const isDisabled = !reachable || draft === null || !canConfigure;
+	// `served === false` disables every control for the same reason the modality
+	// rows render nothing: this app cannot round-trip a field the node never sent,
+	// so an editable control here is an affordance that can only lose data.
+	const isDisabled =
+		!reachable || draft === null || !canConfigure || served === false;
+
+	// Smart routing's two inert-but-enabled states, both of which the gateway
+	// treats as a no-op WITHOUT saying so (`SmartRoutingConfig::is_active` returns
+	// false, and the request silently keeps its originally requested model):
+	//
+	//  - the LLM strategy with a blank classifier model — `is_active` requires a
+	//    non-empty one, so the whole feature is off despite the switch reading on.
+	//    (Unlike the guardrail inspector, the gateway does NOT substitute a
+	//    default here, so this really is a blank.)
+	//  - a classifier model served only by the local classify tier on a node that
+	//    cannot serve it — either no such tier at all, or (the reachable case) the
+	//    tier's weights were never downloaded so its sidecar can never start. The
+	//    classification call errors, and smart routing fails open by design.
+	const classifierModel = draft?.classifier_model.trim() ?? "";
+	const smartLlm =
+		draft?.enabled === true && (draft.strategy ?? "llm") === "llm";
+	const classifierMissing = smartLlm && classifierModel === "";
+	const classifierUnserved =
+		smartLlm && classifyTierCannotServeModel(classifyTier, classifierModel);
+	const classifierUnservedReason =
+		classifyTier === "absent" || classifyTier === "unweighted"
+			? CLASSIFY_TIER_COPY[classifyTier].reason
+			: null;
 
 	return (
 		<SettingsSection
@@ -1716,6 +2422,18 @@ function SmartRoutingCard({
 						smart routing.
 					</p>
 				)}
+				{served === false ? (
+					<p className="text-sm text-warning">
+						This gateway does not report its smart-routing config, so it cannot
+						be edited here — and it cannot be preserved either: saving anything
+						in this card replaces the whole routing section, so a{" "}
+						<span className="font-mono">[routing.smart_routing]</span> written
+						by hand in <span className="font-mono">gateway.toml</span> would be
+						dropped. The switch below shows off because nothing was reported,
+						not because routing is off. Update the gateway to configure smart
+						routing from the app.
+					</p>
+				) : null}
 
 				<SettingsGroup>
 					<SettingsItem
@@ -1780,6 +2498,27 @@ function SmartRoutingCard({
 							A cheap, fast model used only to sort requests. Any routable model
 							id works (including local models or openrouter/ slugs).
 						</p>
+						{classifierMissing ? (
+							<p className="text-destructive text-xs">
+								Smart routing is on but no classifier model is picked, so it
+								never runs — every request keeps the model it asked for. Pick
+								one to turn it on for real.
+							</p>
+						) : null}
+						{classifierUnserved ? (
+							<p className="text-destructive text-xs">
+								Smart routing is on with the local classify tier as its
+								classifier, but {classifierUnservedReason} — so the
+								classification call will fail and every request will quietly
+								keep the model it asked for. Pick a model this node can reach.
+							</p>
+						) : null}
+						<ClassifyTierNote
+							disabled={isDisabled}
+							onUse={() => patch({ classifier_model: CLASSIFY_MODEL_ID })}
+							state={classifyTier}
+							value={draft?.classifier_model ?? ""}
+						/>
 					</div>
 				) : null}
 
@@ -2018,6 +2757,35 @@ function RoutingCard({
 		setDraft(next);
 	};
 
+	/**
+	 * Author or clear one `modality_map` row. Same read-modify-write shape as
+	 * {@link addMapping}/{@link removeMapping} above, and for the same two
+	 * reasons: `PUT /v1/config { routing }` replaces the section wholesale, and
+	 * the gateway persists routing WITHOUT updating its startup snapshot — so the
+	 * body has to be built from a fresh `GET`, not from `draft`, or this save
+	 * spreads stale values back over the file.
+	 *
+	 * `withModalityMapping` does the spread, which is what carries `eval_routing`,
+	 * `smart_routing`, `provider_tiers` and the rest through untouched.
+	 *
+	 * Inherited from that shape, and worth stating rather than discovering: the
+	 * re-seeded `draft` is server state, so an UNSAVED edit to the default
+	 * provider or fallback chain sitting in the draft is discarded by this save.
+	 * The model-map rows have always behaved this way; the two row editors and the
+	 * draft-plus-Save controls are deliberately not merged, because merging them
+	 * would mean a row edit could also commit a half-finished chain reorder.
+	 */
+	const saveModalityMapping = async (
+		modality: Modality,
+		mapping: { model?: string; provider: string } | null
+	) => {
+		const cfg = await fetchGatewayConfig(target);
+		const next = withModalityMapping(cfg.routing, modality, mapping);
+		await updateGatewayConfig(target, { routing: next });
+		setConfig(next);
+		setDraft(next);
+	};
+
 	const moveFallback = (index: number, direction: "up" | "down") => {
 		if (!draft) {
 			return;
@@ -2054,6 +2822,20 @@ function RoutingCard({
 
 	const isDisabled = !reachable || draft === null || !canConfigure;
 	const mappingEntries = Object.entries(draft?.model_map ?? {});
+	// Presence is read off `config` — the last thing the NODE actually said —
+	// rather than off `draft`, which is that same object plus local edits.
+	//
+	// THREE states, not two, and the third is why this is a `null` and not a
+	// boolean: `config === null` covers both "gateway unreachable" (the fetch
+	// effect returns early on `!reachable`) and "fetch still in flight", neither
+	// of which says anything about what the node serves. Collapsing either into
+	// "not served" would flash a warning accusing a healthy, current gateway of
+	// being about to drop its modality map every time this dialog opens.
+	const modalityMapServed =
+		config === null ? null : routingViewIncludesModalityMap(config);
+	// Coalesce only at the render site — never in `fetchGatewayConfig`, which
+	// would erase the difference between "not served" and "served, empty".
+	const modalityMap = draft?.modality_map ?? {};
 
 	return (
 		<SettingsSection
@@ -2233,6 +3015,27 @@ function RoutingCard({
 						</SettingsGroup>
 					)}
 				</div>
+
+				{modalityMapServed === null ? null : (
+					<div className="flex flex-col gap-2">
+						<Label>Modality routing</Label>
+						<p className="text-muted-foreground text-xs">
+							Which provider serves image, speech and video requests. Consulted
+							BEFORE the model mappings above for any non-chat request, so this
+							is the swap point for media providers such as fal, Replicate and
+							Modal. A per-agent slot forwarded by Core still outranks it. Each
+							row saves immediately.
+						</p>
+						<ModalityRoutingRows
+							configuredProviders={configuredProviders}
+							defaultProvider={draft?.default_provider ?? "openai"}
+							disabled={isDisabled}
+							modalityMap={modalityMap}
+							onSave={saveModalityMapping}
+							served={modalityMapServed}
+						/>
+					</div>
+				)}
 
 				<div className="flex flex-col gap-2">
 					<Label>Fallback chain</Label>
@@ -2589,29 +3392,12 @@ function BudgetsCard({
 		[target]
 	);
 
-	const formToRule = (form: BudgetFormState): BudgetRule => {
-		const rule: BudgetRule = {
-			limit: Number(form.limit),
-			action: form.action,
-		};
-		if (form.action === "downgrade" && form.downgrade_to.trim()) {
-			rule.downgrade_to = form.downgrade_to.trim();
-		}
-		if (form.action === "restrict" && form.restrict_max_tokens.trim()) {
-			const cap = Number(form.restrict_max_tokens);
-			if (Number.isInteger(cap) && cap > 0) {
-				rule.restrict_max_tokens = cap;
-			}
-		}
-		return rule;
-	};
-
 	const userEntries = Object.entries(budgets?.users ?? {});
 	const agentEntries = Object.entries(budgets?.agents ?? {});
 
 	return (
 		<SettingsSection
-			caption="Token caps per user, per agent, and a single global per-session cap. When a cap is reached the gateway applies the configured action (notify / downgrade / restrict / stop). Changes take effect after the gateway restarts."
+			caption="Token caps per user, per agent, and a single global per-session cap. When a cap is reached the gateway applies the configured action (notify / downgrade / restrict / stop) and, separately, the rule's notification tier decides who is told. Changes take effect after the gateway restarts."
 			title="Budgets"
 		>
 			{loading ? (
@@ -2729,23 +3515,6 @@ function BudgetScopeSection({
 	/** Node target — threaded to each row's edit dialog for the model picker. */
 	target: ApiTarget;
 }) {
-	const formToRule = (form: BudgetFormState): BudgetRule => {
-		const rule: BudgetRule = {
-			limit: Number(form.limit),
-			action: form.action,
-		};
-		if (form.action === "downgrade" && form.downgrade_to.trim()) {
-			rule.downgrade_to = form.downgrade_to.trim();
-		}
-		if (form.action === "restrict" && form.restrict_max_tokens.trim()) {
-			const cap = Number(form.restrict_max_tokens);
-			if (Number.isInteger(cap) && cap > 0) {
-				rule.restrict_max_tokens = cap;
-			}
-		}
-		return rule;
-	};
-
 	return (
 		<div className="flex flex-col gap-2">
 			<div className="flex items-center justify-between px-3">
@@ -2768,6 +3537,9 @@ function BudgetScopeSection({
 											agentId: id,
 											limit: String(rule.limit),
 											action: rule.action,
+											// Seeded, not defaulted: without this the edit dialog opens
+											// at `silent` and Save demotes a rule that was fanning out.
+											alert: rule.alert ?? "silent",
 											downgrade_to: rule.downgrade_to ?? "",
 											restrict_max_tokens: String(
 												rule.restrict_max_tokens ?? 256
@@ -2819,6 +3591,11 @@ function BudgetScopeSection({
 									{rule.action === "restrict" && rule.restrict_max_tokens
 										? ` (max ${rule.restrict_max_tokens})`
 										: null}
+									{/* Only shown once raised: `silent` is every rule's default, so
+									    printing it on every row would be noise. */}
+									{rule.alert && rule.alert !== "silent"
+										? ` · notifies ${ALERT_TIER_LABELS[rule.alert]}`
+										: null}
 								</>
 							}
 							key={id}
@@ -2851,6 +3628,11 @@ function SessionBudgetEditor({
 }) {
 	const [limit, setLimit] = useState(String(rule.limit));
 	const [action, setAction] = useState<BudgetAction>(rule.action);
+	// `SessionBudgetConfig.alert` exists in Rust (crates/gateway/budget/src/lib.rs)
+	// and the pipeline folds a session decision's tier into the same `max_tier` as
+	// user/agent rules, so leaving it out of this editor made the session cap's tier
+	// reachable only by hand-editing gateway.toml — and wiped it on every save.
+	const [alert, setAlert] = useState<GatewayAlertTier>(rule.alert ?? "silent");
 	const [downgradeTo, setDowngradeTo] = useState(rule.downgrade_to ?? "");
 	const [restrictMax, setRestrictMax] = useState(
 		String(rule.restrict_max_tokens ?? 256)
@@ -2865,16 +3647,13 @@ function SessionBudgetEditor({
 			setSaveError("Limit must be a non-negative integer.");
 			return;
 		}
-		const next: BudgetRule = { limit: limitNum, action };
-		if (action === "downgrade" && downgradeTo.trim()) {
-			next.downgrade_to = downgradeTo.trim();
-		}
-		if (action === "restrict" && restrictMax.trim()) {
-			const cap = Number(restrictMax);
-			if (Number.isInteger(cap) && cap > 0) {
-				next.restrict_max_tokens = cap;
-			}
-		}
+		const next = buildBudgetRule({
+			limit: limitNum,
+			action,
+			alert,
+			downgradeTo,
+			restrictMaxTokens: restrictMax,
+		});
 		setSaving(true);
 		setSaveError(null);
 		setSaveOk(false);
@@ -2996,6 +3775,22 @@ function SessionBudgetEditor({
 						/>
 					</div>
 				) : null}
+				<div className="flex flex-col gap-1.5">
+					<Label htmlFor="session-budget-alert">
+						Notify when this cap fires
+					</Label>
+					<AlertTierSelect
+						id="session-budget-alert"
+						onChange={(next) => {
+							setAlert(next);
+							setSaveOk(false);
+						}}
+						value={alert}
+					/>
+					<p className="text-muted-foreground text-xs">
+						{ALERT_TIER_TARGETS_NOTE}
+					</p>
+				</div>
 				{saveError ? (
 					<p className="text-destructive text-sm">{saveError}</p>
 				) : null}
@@ -3435,6 +4230,129 @@ function GuardrailPolicyRow({ ctx }: { ctx: ScopeCtx }) {
 	);
 }
 
+/**
+ * The firewall's alert tier — who gets told when the firewall matches — rendered
+ * per the active scope, beside `policy` (which decides what happens to the
+ * request). The two are orthogonal by design in the gateway.
+ *
+ * Structurally a mirror of {@link GuardrailPolicyRow}: same three branches
+ * (broader-locked read-only / overlay `Inherit (…)` select / node select + lock
+ * toggle), same `ctx` plumbing. Two things about the gateway side are worth
+ * stating, because an earlier revision of this comment asserted the opposite of
+ * each and both are cross-process claims that were re-read here rather than
+ * assumed:
+ *
+ * 1. The lock toggle is REAL. `apply_overlay`
+ *    (apps/gateway/src/firewall/resolve.rs) honours locks through explicit
+ *    per-field arms, and `alert` has one: on a locked field it takes
+ *    `louder_alert` = `max` over `AlertTier`'s ascending-severity `Ord`, so a
+ *    narrower scope may only RAISE the tier, never go quieter. `"alert"` is also
+ *    one of the canonical lockable names on `FirewallConfig::locked_fields`. (It
+ *    is deliberately NOT in `default_firewall_locked_fields` — a notification
+ *    dial is not a protection dial, so it starts unlocked.)
+ * 2. Scoped tiers do NOT cover every alert site, and the boundary is not
+ *    inbound-vs-outbound. In `pipeline/mod.rs`, `pre_process`,
+ *    `apply_inline_input_evaluators` and `apply_inline_output_evaluators` read
+ *    the per-request `state.resolved_scanner(ctx)` — so an org/agent tier governs
+ *    those, including an OUTBOUND block raised by an output-target evaluator.
+ *    But `run`'s stage-9 outbound response scan, `run_multimodal`'s inbound scan
+ *    and `submit_video_job`'s inbound scan read `state.with_firewall` (the node
+ *    base), so those three fire the NODE tier whatever an overlay says. The node
+ *    scope is the only one that covers all six. The full call-site table lives on
+ *    `GatewayFirewallOverlay.alert`.
+ */
+function GuardrailAlertRow({ ctx }: { ctx: ScopeCtx }) {
+	// `??` at every read: `alert` is optional on the wire for older gateways, and a
+	// Select bound to `undefined` renders uncontrolled (it would then save whatever
+	// the placeholder implied).
+	const nodeVal: GatewayAlertTier = ctx.node.alert ?? "silent";
+	const overlayVal = ctx.overlay.alert;
+	const resolved: GatewayAlertTier = overlayVal ?? nodeVal;
+
+	const note = (
+		<p className="text-muted-foreground text-xs">{ALERT_TIER_TARGETS_NOTE}</p>
+	);
+
+	if (ctx.broaderLocked.has("alert")) {
+		return (
+			<div className="flex flex-col gap-1.5 px-3">
+				<Label>Alerts</Label>
+				<LockedByBroader summary={ALERT_TIER_LABELS[resolved] ?? resolved} />
+			</div>
+		);
+	}
+
+	if (ctx.isOverlay) {
+		const items = [
+			{
+				value: "inherit",
+				label: `Inherit (${ALERT_TIER_LABELS[nodeVal] ?? nodeVal})`,
+			},
+			...ALERT_TIER_OPTIONS,
+		];
+		return (
+			<div className="flex flex-col gap-1.5 px-3">
+				<Label htmlFor="fw-alert">Alerts</Label>
+				<Select
+					disabled={ctx.disabled || !ctx.overlayReady}
+					items={items}
+					onValueChange={(v: string | null) =>
+						ctx.setOverlayField({
+							alert: v && v !== "inherit" ? (v as GatewayAlertTier) : null,
+						})
+					}
+					value={overlayVal ?? "inherit"}
+				>
+					<SelectTrigger id="fw-alert">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent>
+						{items.map((opt) => (
+							<SelectItem key={opt.value} value={opt.value}>
+								{opt.label}
+							</SelectItem>
+						))}
+					</SelectContent>
+				</Select>
+				{note}
+			</div>
+		);
+	}
+
+	return (
+		<div className="flex flex-col gap-1.5 px-3">
+			<div className="flex items-center justify-between">
+				<Label htmlFor="fw-alert">Alerts</Label>
+				<LockToggle
+					disabled={ctx.disabled}
+					locked={ctx.lockedHere.has("alert")}
+					onToggle={() => ctx.toggleLock("alert")}
+				/>
+			</div>
+			<Select
+				disabled={ctx.disabled}
+				items={ALERT_TIER_OPTIONS}
+				onValueChange={(v: string | null) =>
+					ctx.setNodeField({ alert: (v ?? "silent") as GatewayAlertTier })
+				}
+				value={nodeVal}
+			>
+				<SelectTrigger id="fw-alert">
+					<SelectValue />
+				</SelectTrigger>
+				<SelectContent>
+					{ALERT_TIER_OPTIONS.map((opt) => (
+						<SelectItem key={opt.value} value={opt.value}>
+							{opt.label}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+			{note}
+		</div>
+	);
+}
+
 /** Add/edit/remove custom firewall patterns for the active scope. Remounted on
  * scope/id change (via a `key` from the parent) so its local row state reseeds. */
 function CustomPatternsEditor({ ctx }: { ctx: ScopeCtx }) {
@@ -3628,6 +4546,11 @@ function FirewallCard({ ctx, caption }: { ctx: ScopeCtx; caption: string }) {
 
 				<GuardrailPolicyRow ctx={ctx} />
 
+				{/* Beside `policy`: enforcement (what happens to the request) and alerting
+				    (who is told) are orthogonal in the gateway, and reading them together
+				    is the only way to see that a Block rule is delivering nothing. */}
+				<GuardrailAlertRow ctx={ctx} />
+
 				<CustomPatternsEditor ctx={ctx} key={`${ctx.scope}:${ctx.overlayId}`} />
 			</div>
 		</SettingsSection>
@@ -3655,6 +4578,40 @@ function InspectorCard({ ctx, target }: { ctx: ScopeCtx; target: ApiTarget }) {
 
 	const editorDisabled =
 		ctx.disabled || (ctx.isOverlay && !(ctx.overlayReady && overriding));
+
+	const classifyTier = useClassifyTier(target, !broaderLocked);
+	// What the gateway will ACTUALLY ask, mirrored so this card judges the model the
+	// gateway uses rather than the empty string in the box: `de_inspector_model`
+	// (apps/gateway/src/config.rs) resolves a blank to the classify-tier classifier
+	// as it reads the wire.
+	//
+	// DISPLAY ONLY — and that is exactly how a real bug hid here. This line made the
+	// card behave as if a blank box were already the classifier, while the save path
+	// shipped the literal blank; Core reads the proxied body BEFORE the gateway
+	// resolves anything (`maybe_start_classify_tier`), took the blank as "no classify
+	// selection", and never started the sidecar — so with weights on disk the tier
+	// stayed `idle`, `unservedModel` below stayed false, and nothing warned. The save
+	// path now normalizes for real (`withResolvedInspectorModels` in lib/api/gateway),
+	// so this mirror and the persisted value finally agree.
+	const resolvedModel = effective.model.trim() || CLASSIFY_MODEL_ID;
+	// The trap the empty box used to be, in its remaining form: the inspector is
+	// pointed at the LOCAL classifier on a node that cannot serve it. The call then
+	// errors, and the inspector fails open by design (a timeout or provider error is
+	// treated as not-flagged), so the guardrail reports "on", shows a Block action,
+	// and allows every single turn. Nothing else in this card can reveal that — it is
+	// a property of the node, not of the config.
+	//
+	// The REACHABLE form of it is `unweighted`: the classifier GGUF's onboarding
+	// download is non-fatal, and the sidecar it feeds is registered either way, so a
+	// node whose download failed looks identical in the run state and bails on every
+	// start attempt (logged at `debug`, so nothing surfaces it).
+	const unservedModel =
+		effective.enabled &&
+		classifyTierCannotServeModel(classifyTier, resolvedModel);
+	const unservedReason =
+		classifyTier === "absent" || classifyTier === "unweighted"
+			? CLASSIFY_TIER_COPY[classifyTier].reason
+			: null;
 
 	return (
 		<SettingsSection
@@ -3726,13 +4683,37 @@ function InspectorCard({ ctx, target }: { ctx: ScopeCtx; target: ApiTarget }) {
 								disabled={editorDisabled}
 								mode="model"
 								onChange={(next) => patchInspector({ model: next })}
-								placeholder="Gateway default model"
+								placeholder="Local classifier (Gemma 3 270M)"
 								target={target}
 								value={effective.model}
 							/>
+							{/* Describes the WIRE, not the box: the substitution happens in
+							    the save transport (`withResolvedInspectorModels`), so the
+							    field itself still renders empty until the next refetch. The
+							    old copy promised "the box is never really blank" and credited
+							    a gateway-side substitution that lands too late to keep the
+							    local classifier running. */}
 							<p className="text-muted-foreground text-xs">
-								Any routable model id. Leave empty to use the gateway default.
+								Any routable model id. Leave empty for this node's local
+								classifier (Gemma 3 270M) — saving writes that id explicitly,
+								because a blank value would leave the local classifier stopped.
 							</p>
+							{unservedModel ? (
+								<p className="text-destructive text-xs">
+									The inspector is on and pointed at the local classifier, but{" "}
+									{unservedReason}. The inspection call will fail, and the
+									inspector fails open — so it will allow every turn while still
+									reporting as enabled. Pick a model this node can reach.
+								</p>
+							) : null}
+							{/* Judged on the RESOLVED model, so a blank box doesn't offer
+							    "Use it" for the model the gateway already substitutes. */}
+							<ClassifyTierNote
+								disabled={editorDisabled}
+								onUse={() => patchInspector({ model: CLASSIFY_MODEL_ID })}
+								state={classifyTier}
+								value={resolvedModel}
+							/>
 						</div>
 
 						<div className="flex flex-col gap-1.5 px-3">
@@ -4155,6 +5136,12 @@ function GuardrailsSection({
 		setSaveError(null);
 		setSaveOk(false);
 		try {
+			// Sent as-drafted on purpose: `updateGatewayConfig` runs every patch through
+			// `withResolvedInspectorModels`, so a blank `inspector.model` becomes the
+			// classify id before it reaches Core — which reads this body to decide
+			// whether to start `llamacpp-classify` and treats a blank as "no". Do not
+			// re-implement that here; the transport is the one seam every firewall save
+			// in the app (node base and both overlay stores) passes through.
 			await updateGatewayConfig(target, {
 				firewall: draft.firewall,
 				firewall_org_overlays: draft.firewall_org_overlays,
@@ -4314,6 +5301,12 @@ function GuardrailsSection({
 			) : null}
 
 			<CommandApprovalCard target={target} />
+
+			{/* Which agents these filters actually see. Every rule above only
+			    applies to model calls that traverse the gateway, and three of the
+			    four agent families route through it only when opted in — so a
+			    guardrails page without this list overstates its own reach. */}
+			<AgentEgressSection target={target} />
 		</div>
 	);
 }
@@ -4858,31 +5851,175 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 	);
 }
 
+/**
+ * The 19 built-in gateway sections.
+ *
+ * `value` is a deep-link key (`openGateway("keys")`, `?section=privacy`, the
+ * command palette) — **never rename one**. `label` and `hint` are free to change
+ * and are written for someone who has never read a routing doc: the label says
+ * what it is, the hint says what it's for, and `keywords` keeps the old
+ * developer-facing names ("guardrails", "BYOK", "evals", "audit") searchable so
+ * renaming costs nobody their muscle memory.
+ *
+ * `advanced` sections are hidden until the "Show advanced settings" switch is on.
+ * They are hidden, never removed: search still surfaces them, and a deep link
+ * still opens them.
+ */
 const GATEWAY_SECTIONS: {
-	value: GatewaySection;
-	label: string;
+	advanced?: boolean;
+	hint: string;
 	icon: IconSvgElement;
+	keywords?: string;
+	label: string;
+	value: GatewaySection;
 }[] = [
-	{ value: "overview", label: "Overview", icon: Activity01Icon },
-	{ value: "workspace", label: "Workspace", icon: UserGroupIcon },
-	{ value: "defaults", label: "Defaults", icon: SparklesIcon },
-	{ value: "providers", label: "Providers", icon: CpuIcon },
-	{ value: "routing", label: "Routing", icon: GitBranchIcon },
-	{ value: "guardrails", label: "Guardrails", icon: Shield01Icon },
-	{ value: "budgets", label: "Budgets", icon: Dollar01Icon },
-	{ value: "keys", label: "Keys", icon: Key01Icon },
-	{ value: "integrations", label: "Integrations", icon: Share08Icon },
-	{ value: "usage", label: "Usage & Cost", icon: Dollar01Icon },
-	{ value: "audit", label: "Audit", icon: Activity01Icon },
-	{ value: "evals", label: "Evals", icon: Activity01Icon },
+	{
+		value: "overview",
+		label: "Overview",
+		hint: "Is everything running, and how much has it done.",
+		icon: Activity01Icon,
+		keywords: "health status metrics requests cache",
+	},
+	{
+		value: "workspace",
+		label: "Team & workspace",
+		hint: "Who can use this node, and what they're allowed to do.",
+		icon: UserGroupIcon,
+		keywords: "members seats roles org permissions",
+	},
+	{
+		value: "defaults",
+		label: "Default agent & model",
+		hint: "What every new chat and agent starts with.",
+		icon: SparklesIcon,
+		keywords: "defaults fallback global agent model",
+	},
+	{
+		value: "providers",
+		label: "AI providers",
+		hint: "The AI services this node can use, and which models they offer.",
+		icon: CpuIcon,
+		keywords: "providers llm openai anthropic local models",
+	},
+	{
+		value: "keys",
+		label: "API keys",
+		hint: "Your own provider keys, and the keys apps use to reach this node.",
+		icon: Key01Icon,
+		keywords: "keys byok api token composio replicate fal secrets",
+	},
+	{
+		value: "budgets",
+		label: "Spending limits",
+		hint: "Cap what can be spent, and what happens when a cap is hit.",
+		icon: Dollar01Icon,
+		keywords: "budget spend limit cost cap alerts",
+	},
+	{
+		value: "guardrails",
+		label: "Safety filters",
+		hint: "Block unsafe or private content before it reaches a model.",
+		icon: Shield01Icon,
+		keywords:
+			"guardrails firewall pii moderation safety filter egress agents routing governed bypass",
+	},
+	{
+		value: "routing",
+		label: "Model routing",
+		advanced: true,
+		hint: "Rules that send a request to a different model than the one asked for.",
+		icon: GitBranchIcon,
+		keywords:
+			"routing smart route fallback rewrite mapping credit balance quota low threshold cheaper",
+	},
+	{
+		value: "integrations",
+		label: "Integrations",
+		hint: "Third-party apps your agents can act through.",
+		icon: Share08Icon,
+		keywords: "integrations composio apps oauth connect",
+	},
 	// Moved from the App Settings dialog (node-level Core infra, not apps).
-	{ value: "connections", label: "Connections", icon: Share08Icon },
-	{ value: "email-alerts", label: "Email & Alerts", icon: BubbleChatIcon },
-	{ value: "privacy", label: "Privacy", icon: SquareLock01Icon },
-	{ value: "storage", label: "Storage", icon: Key01Icon },
-	{ value: "updates", label: "Updates", icon: Refresh01Icon },
-	{ value: "health", label: "Health", icon: Shield01Icon },
-	{ value: "danger", label: "Danger Zone", icon: Delete01Icon },
+	{
+		value: "connections",
+		label: "Connected accounts",
+		hint: "The accounts already linked, and what each one can reach.",
+		icon: Share08Icon,
+		keywords: "connections accounts linked identities",
+	},
+	{
+		value: "email-alerts",
+		label: "Email & alerts",
+		hint: "Where this node sends mail, and what it notifies you about.",
+		icon: BubbleChatIcon,
+		keywords: "email smtp alerts notifications",
+	},
+	{
+		value: "usage",
+		label: "Usage & cost",
+		hint: "What has been spent, by whom, on which model.",
+		icon: Dollar01Icon,
+		keywords: "usage cost spend tokens billing report",
+	},
+	{
+		value: "audit",
+		label: "Activity log",
+		advanced: true,
+		hint: "Every request this node handled, in raw form.",
+		icon: Activity01Icon,
+		keywords: "audit log trace requests history",
+	},
+	{
+		value: "evals",
+		label: "Quality tests",
+		advanced: true,
+		hint: "Score models against a set of prompts and compare the results.",
+		icon: Activity01Icon,
+		keywords: "evals eval quality benchmark scoring tests",
+	},
+	{
+		value: "privacy",
+		label: "Privacy",
+		hint: "What leaves this computer, and what stays on it.",
+		icon: SquareLock01Icon,
+		keywords: "privacy telemetry analytics learning data",
+	},
+	{
+		value: "storage",
+		label: "Storage",
+		hint: "Where files, models, and databases are kept on this computer.",
+		icon: Key01Icon,
+		keywords: "storage disk path database models cache",
+	},
+	{
+		value: "parsing",
+		label: "Document parsing",
+		hint: "Which app reads PDFs and Word files, and how large a file can be.",
+		icon: File01Icon,
+		keywords:
+			"parsing parser document pdf docx xlsx markitdown docling unstructured extract text ocr upload limit size",
+	},
+	{
+		value: "updates",
+		label: "Updates",
+		hint: "Which version each part is on, and how updates are installed.",
+		icon: Refresh01Icon,
+		keywords: "updates version upgrade channel release",
+	},
+	{
+		value: "health",
+		label: "Diagnostics",
+		hint: "Start, stop, and check each part when something looks wrong.",
+		icon: Shield01Icon,
+		keywords: "health diagnostics preflight restart status logs",
+	},
+	{
+		value: "danger",
+		label: "Danger zone",
+		hint: "Reset or wipe this node. Read twice before clicking.",
+		icon: Delete01Icon,
+		keywords: "danger reset wipe delete factory",
+	},
 ];
 
 /** Health + metrics observability block, shown on the Overview tab. */
@@ -5020,35 +6157,57 @@ function OverviewSection({
  * SettingsDialog (inset sidebar + scrollable content pane). Cosmetic only —
  * groups the 7 gateway sections.
  */
+/**
+ * Nav groups, retitled around the question each group answers rather than the
+ * subsystem it belongs to ("Policy" / "Observability" / "Node" meant nothing to
+ * anyone who hadn't read the code). Order is by how often a person needs it.
+ *
+ * The "Node" group's position is load-bearing: {@link buildEntityNavGroups}
+ * output (manifest-registered app/plugin settings tabs) is spliced in directly
+ * before it, so app tabs land above the computer-level infra and below the
+ * gateway's own sections.
+ */
 const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	{ items: ["overview", "workspace", "defaults"] },
 	{
-		title: "Policy",
-		items: [
-			"providers",
-			"routing",
-			"guardrails",
-			"budgets",
-			"keys",
-			"integrations",
-		],
+		title: "AI & models",
+		items: ["providers", "keys", "routing"],
 	},
-	{ title: "Observability", items: ["usage", "audit", "evals"] },
+	{
+		title: "Limits & safety",
+		items: ["budgets", "guardrails"],
+	},
+	{
+		title: "Connect",
+		items: ["integrations", "connections", "email-alerts"],
+	},
+	{ title: "Reports", items: ["usage", "audit", "evals"] },
 	// Node-level Core-infra tabs moved out of the App Settings dialog (not apps —
 	// apps register their own tabs dynamically under the Apps/Plugins headers).
 	{
-		title: "Node",
-		items: [
-			"connections",
-			"email-alerts",
-			"privacy",
-			"storage",
-			"updates",
-			"health",
-		],
+		title: "This computer",
+		// "parsing" sits beside "storage": both are about files this machine holds
+		// — where they are kept, and what can read them. A section listed in
+		// GATEWAY_SECTIONS but missing from a group here renders NOWHERE, with no
+		// type error and no warning, so the two lists move together.
+		items: ["privacy", "storage", "parsing", "updates", "health"],
 	},
 	{ title: "Danger", items: ["danger"] },
 ];
+
+/** Case-insensitive match of a query against a section's label, hint, keywords. */
+function sectionMatches(
+	section: (typeof GATEWAY_SECTIONS)[number],
+	query: string
+): boolean {
+	const haystack =
+		`${section.label} ${section.hint} ${section.keywords ?? ""} ${section.value}`.toLowerCase();
+	return query
+		.toLowerCase()
+		.split(/\s+/)
+		.filter(Boolean)
+		.every((term) => haystack.includes(term));
+}
 
 /**
  * Gateway settings rendered as a dialog with the same inset-sidebar design and
@@ -5072,6 +6231,11 @@ export function GatewayDialog({
 	// Section is a string, not just GatewaySection: dynamic app/plugin entities use
 	// `app:<id>` / `plugin:<id>` values that aren't part of the static union.
 	const [section, setSection] = useState<string>(defaultSection);
+	// Nineteen built-in sections plus one nav row per node-scoped app means the
+	// list outgrew "just read it" — a filter is the shortest path from "I know
+	// what I want" to the pane that holds it.
+	const [search, setSearch] = useState("");
+	const [advanced, setAdvanced] = useAdvancedSettings();
 	const openSettings = useSettingsDialog((s) => s.openSettings);
 
 	// Node-scoped app/plugin settings tabs (user-scoped ones render in the App
@@ -5119,23 +6283,49 @@ export function GatewayDialog({
 		[appEntities, pluginEntities]
 	);
 	const navGroups = useMemo(() => {
-		const nodeIdx = GATEWAY_NAV_GROUPS.findIndex((g) => g.title === "Node");
-		const before = GATEWAY_NAV_GROUPS.slice(0, nodeIdx).map((group) => ({
+		const query = search.trim();
+		// A search reveals advanced sections: hiding a section the user just typed
+		// the name of would read as "this setting doesn't exist".
+		const visible = (value: GatewaySection) => {
+			const meta = GATEWAY_SECTIONS.find((s) => s.value === value);
+			if (!meta) {
+				return false;
+			}
+			if (query) {
+				return sectionMatches(meta, query);
+			}
+			// The open section always shows, even when advanced is off: a deep link
+			// (openGateway("routing"), the command palette) must not land the user on
+			// a pane with no highlighted row in the nav.
+			return advanced || !meta.advanced || value === section;
+		};
+		const toGroup = (group: (typeof GATEWAY_NAV_GROUPS)[number]) => ({
 			title: group.title,
-			items: group.items.map((value) => ({
+			items: group.items.filter(visible).map((value) => ({
 				value: value as string,
 				label: GATEWAY_SECTIONS.find((s) => s.value === value)?.label ?? value,
 			})),
-		}));
-		const nodeAndAfter = GATEWAY_NAV_GROUPS.slice(nodeIdx).map((group) => ({
-			title: group.title,
-			items: group.items.map((value) => ({
-				value: value as string,
-				label: GATEWAY_SECTIONS.find((s) => s.value === value)?.label ?? value,
-			})),
-		}));
-		return [...before, ...entityGroups, ...nodeAndAfter];
-	}, [entityGroups]);
+		});
+		const nodeIdx = GATEWAY_NAV_GROUPS.findIndex(
+			(g) => g.title === "This computer"
+		);
+		const before = GATEWAY_NAV_GROUPS.slice(0, nodeIdx).map(toGroup);
+		const nodeAndAfter = GATEWAY_NAV_GROUPS.slice(nodeIdx).map(toGroup);
+		// App/plugin tabs are matched on their own labels when searching.
+		const entities = query
+			? entityGroups
+					.map((group) => ({
+						title: group.title,
+						items: group.items.filter((item) =>
+							item.label.toLowerCase().includes(query.toLowerCase())
+						),
+					}))
+					.filter((group) => group.items.length > 0)
+			: entityGroups;
+		return [...before, ...entities, ...nodeAndAfter].filter(
+			(group) => group.items.length > 0
+		);
+	}, [advanced, entityGroups, search, section]);
 
 	const node = getActiveNode();
 	const target: ApiTarget = { url: node.url, token: node.token ?? null };
@@ -5158,10 +6348,9 @@ export function GatewayDialog({
 	const health = status?.health ?? null;
 	const metrics = status?.metrics ?? null;
 	const activeEntity = entityById.get(section);
-	const activeLabel =
-		activeEntity?.label ??
-		GATEWAY_SECTIONS.find((s) => s.value === section)?.label ??
-		"";
+	const activeMeta = GATEWAY_SECTIONS.find((s) => s.value === section);
+	const activeLabel = activeEntity?.label ?? activeMeta?.label ?? "";
+	const activeHint = activeEntity ? "" : (activeMeta?.hint ?? "");
 
 	const body = (() => {
 		if (loading && !status) {
@@ -5219,6 +6408,12 @@ export function GatewayDialog({
 							reachable={reachable}
 							target={target}
 						/>
+						{/* Threshold-driven fallback: proactively swap the model when
+						    credit / a subscription window runs low. A different axis from
+						    the cards above, which react to an error or a prompt's shape —
+						    but the same question ("which model actually answers"), so it
+						    belongs in this section. */}
+						<FallbackRulesSection canConfigure={canConfigure} target={target} />
 					</>
 				) : null}
 				{section === "guardrails" ? (
@@ -5293,6 +6488,10 @@ export function GatewayDialog({
 				{section === "email-alerts" ? <EmailAlertsSettings /> : null}
 				{section === "privacy" ? <PrivacySettings /> : null}
 				{section === "storage" ? <StorageSettings /> : null}
+				{/* Node-wide `document.parse` binding + the ceiling the node enforces.
+				    Reads the active node directly (`useActiveNode`), like the other
+				    "This computer" panels, so it takes no props from the dialog. */}
+				{section === "parsing" ? <DocumentParsingSettings /> : null}
 				{section === "updates" ? <UpdatesSettings /> : null}
 				{section === "health" ? <PreflightPage embedded /> : null}
 				{section === "danger" ? <DangerZoneSettings /> : null}
@@ -5312,12 +6511,30 @@ export function GatewayDialog({
 				<ResizableSettingsLayout
 					content={
 						<div className="px-4 py-4 md:px-8 md:py-6">
-							<h2 className="mb-6 font-semibold text-base">{activeLabel}</h2>
+							<div className="mb-6 flex flex-col gap-1">
+								<h2 className="font-semibold text-base">{activeLabel}</h2>
+								{/* One plain sentence saying what this pane is for. Cheap, and
+								    it removes most of the "what even is this tab" tax. */}
+								{activeHint ? (
+									<p className="text-muted-foreground text-sm leading-snug">
+										{activeHint}
+									</p>
+								) : null}
+							</div>
 							{body}
 						</div>
 					}
 					sidebar={
 						<>
+							<SidebarGroup className="py-1">
+								<Input
+									aria-label="Search settings"
+									className="h-8 text-sm"
+									onChange={(e) => setSearch(e.target.value)}
+									placeholder="Search settings…"
+									value={search}
+								/>
+							</SidebarGroup>
 							{navGroups.map((group) => (
 								<SidebarGroup className="py-1" key={group.title ?? "general"}>
 									{group.title && (
@@ -5337,6 +6554,13 @@ export function GatewayDialog({
 									</SidebarMenu>
 								</SidebarGroup>
 							))}
+							{search.trim() && navGroups.length === 0 ? (
+								<SidebarGroup className="py-1">
+									<p className="px-2 text-muted-foreground text-xs">
+										Nothing matches “{search.trim()}”.
+									</p>
+								</SidebarGroup>
+							) : null}
 							<SidebarGroup className="mt-auto py-1">
 								<SidebarGroupLabel>App</SidebarGroupLabel>
 								<SidebarMenu>
@@ -5346,6 +6570,21 @@ export function GatewayDialog({
 										</SidebarMenuButton>
 									</SidebarMenuItem>
 								</SidebarMenu>
+								{/* Advanced sections are hidden, not gone: this reveals model
+								    routing, the raw activity log, and quality tests. */}
+								<div className="mt-1 flex items-center justify-between gap-2 px-2 py-1.5">
+									<Label
+										className="cursor-pointer font-normal text-muted-foreground text-xs"
+										htmlFor="gateway-advanced-toggle"
+									>
+										Advanced settings
+									</Label>
+									<Switch
+										checked={advanced}
+										id="gateway-advanced-toggle"
+										onCheckedChange={setAdvanced}
+									/>
+								</div>
 							</SidebarGroup>
 						</>
 					}

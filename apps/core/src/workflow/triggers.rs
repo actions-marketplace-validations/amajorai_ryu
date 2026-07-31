@@ -69,7 +69,12 @@ pub fn reconcile_schedule_jobs(
         } = trigger
         {
             let schedule = match (cron, every) {
-                (Some(expr), _) if !expr.trim().is_empty() => Schedule::Cron { expr: expr.clone() },
+                (Some(expr), _) if !expr.trim().is_empty() => Schedule::Cron {
+                    expr: expr.clone(),
+                    // Workflow schedule triggers have always been UTC; a zone
+                    // would have to come from the trigger declaration.
+                    tz: None,
+                },
                 (_, Some(interval)) if !interval.trim().is_empty() => Schedule::Every {
                     interval: interval.clone(),
                 },
@@ -144,6 +149,8 @@ pub fn apply_schedule_reconcile(
                 },
                 enabled: true,
                 require_approval: upsert.require_approval,
+                // Core owns workflow-trigger jobs, not an App.
+                owner_app: None,
                 created_at: now.clone(),
                 updated_at: now.clone(),
                 last_run_at: None,
@@ -205,7 +212,8 @@ mod tests {
         assert_eq!(
             upserts[0].schedule,
             Schedule::Cron {
-                expr: "0 9 * * *".into()
+                expr: "0 9 * * *".into(),
+                tz: None,
             }
         );
         assert_eq!(upserts[1].id, "wf-sched-wf_x-2");
@@ -229,7 +237,8 @@ mod tests {
         assert_eq!(
             upserts[0].schedule,
             Schedule::Cron {
-                expr: "* * * * *".into()
+                expr: "* * * * *".into(),
+                tz: None,
             }
         );
     }

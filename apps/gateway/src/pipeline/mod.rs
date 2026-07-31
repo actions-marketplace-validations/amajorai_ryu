@@ -154,7 +154,20 @@ pub struct RequestContext {
     /// The resolved org's remaining credit budget in micro-USD, from the
     /// control-plane token resolution. `Some(b)` with `b <= 0` ⇒ wallet exhausted
     /// ⇒ pre-flight 402. `None` ⇒ no managed cap (uncapped / non-managed).
+    ///
+    /// TOTAL spendable: subscription + top-up + pool-restricted grants. The two
+    /// fields below decompose it so the gate can answer "has $10 cloudflare, $0
+    /// bedrock" — a question one scalar cannot express.
     pub remaining_budget_micro_usd: Option<i64>,
+    /// The part of [`Self::remaining_budget_micro_usd`] spendable against ANY
+    /// pool. `None` ⇒ pre-pool control plane; the gate then treats the whole
+    /// balance as unrestricted, which is byte-for-byte today's behavior.
+    pub unrestricted_budget_micro_usd: Option<i64>,
+    /// Remaining pool-restricted grant money by credit-pool id (see
+    /// [`crate::credit_pools`]). Grants for a pool this request is not routed to
+    /// are unreachable by construction: the gate only ever adds the ONE matching
+    /// entry to the unrestricted part.
+    pub pool_budgets_micro_usd: std::collections::HashMap<String, i64>,
     /// The org's resolved effective policy when auth came from a dynamic `rgw_`
     /// token. `Some` ⇒ the pipeline enforces THIS tenant's policy (allowlist /
     /// locked guardrails) instead of the global startup policy; `None` ⇒ the
@@ -314,6 +327,8 @@ pub async fn authenticate(
                      key_config: Option<ApiKeyConfig>,
                      managed_inference: bool,
                      remaining_budget_micro_usd: Option<i64>,
+                     unrestricted_budget_micro_usd: Option<i64>,
+                     pool_budgets_micro_usd: std::collections::HashMap<String, i64>,
                      resolved_policy: Option<crate::policy::EffectivePolicy>|
      -> RequestContext {
         RequestContext {
@@ -341,6 +356,8 @@ pub async fn authenticate(
             raw_tools,
             managed_inference,
             remaining_budget_micro_usd,
+            unrestricted_budget_micro_usd,
+            pool_budgets_micro_usd,
             resolved_policy,
         }
     };
@@ -383,6 +400,8 @@ pub async fn authenticate(
                         false,
                         None,
                         None,
+                        std::collections::HashMap::new(),
+                        None,
                     ));
                 }
             }
@@ -398,6 +417,8 @@ pub async fn authenticate(
                 None,
                 false,
                 None,
+                None,
+                std::collections::HashMap::new(),
                 None,
             ));
         }
@@ -423,6 +444,8 @@ pub async fn authenticate(
                     None,
                     false,
                     None,
+                    None,
+                    std::collections::HashMap::new(),
                     None,
                 ));
             }
@@ -458,6 +481,8 @@ pub async fn authenticate(
                     Some(cfg_key.clone()),
                     false,
                     None,
+                    None,
+                    std::collections::HashMap::new(),
                     None,
                 ));
             }
@@ -500,6 +525,8 @@ pub async fn authenticate(
                         None,
                         resolved.managed_inference,
                         resolved.remaining_budget_micro_usd,
+                        resolved.unrestricted_budget_micro_usd,
+                        resolved.pool_budgets_micro_usd.clone(),
                         Some(resolved.policy.clone()),
                     ))
                 }
@@ -1986,6 +2013,10 @@ pub async fn run(
                             cost,
                             fail_closed_sticky,
                             debit_alert_tier,
+                            // Authoritative pool attribution: the provider that
+                            // actually answered, not the one the pre-flight gate
+                            // guessed (a fallback may have served this).
+                            crate::credit_pools::pool_for_gateway_provider(provider.name()),
                         ));
                     }
                 }
@@ -2765,6 +2796,7 @@ pub async fn run_multimodal(
                             // Media debits carry no budget-cap tier (item 4 is
                             // scoped to token budgets).
                             None,
+                            crate::credit_pools::pool_for_gateway_provider(provider.name()),
                         ));
                     }
                 }
@@ -2961,6 +2993,7 @@ pub async fn submit_video_job(
                     cost,
                     fail_closed_sticky,
                     None,
+                    crate::credit_pools::pool_for_gateway_provider(provider.name()),
                 ));
             }
         }
@@ -3034,6 +3067,7 @@ pub async fn poll_video_job(
                     cost,
                     fail_closed_sticky,
                     None,
+                    crate::credit_pools::pool_for_gateway_provider(provider.name()),
                 ));
             }
         }
@@ -3224,11 +3258,24 @@ fn enforce_budget(
     // balance (refreshed on the 60s cache TTL), so a top-up auto-recovers without a
     // sticky flag. Independent of `credits.is_active()` (the balance is
     // control-plane authoritative). Non-managed / BYOK / master traffic is exempt.
-    if let Some(err) = preflight_credit_gate(ctx) {
+    //
+    // POOL-AWARE (segregated credit pools): the gate is evaluated against the
+    // pool the ROUTED provider bills, so a wallet holding only frontier-pool
+    // grant money cannot serve a free-pool request (and vice versa) even though
+    // its total is positive. Two honest limits of doing it here:
+    //   - This runs BEFORE the fallback chain, so it gates on the PRIMARY
+    //     provider's pool. A request admitted here can still be served by a
+    //     fallback in a different pool. The authoritative pool attribution is the
+    //     post-call debit, which knows the provider that actually answered.
+    //   - An untagged provider yields `None` and the pre-pool check applies.
+    let routed_pool = crate::credit_pools::pool_for_gateway_provider(decision.provider.as_str());
+    if let Some(err) = preflight_credit_gate(ctx, routed_pool) {
         state.metrics.inc_budget_exceeded();
         warn!(
             org_id = ?ctx.org_id,
             remaining_budget_micro_usd = ?ctx.remaining_budget_micro_usd,
+            unrestricted_budget_micro_usd = ?ctx.unrestricted_budget_micro_usd,
+            pool = ?routed_pool,
             "credits: managed tenant wallet exhausted, rejecting pre-flight (402)"
         );
         return Err(err);
@@ -3352,14 +3399,45 @@ fn enforce_budget(
 /// ctx — it is refreshed on the resolve cache's 60s TTL, so a top-up auto-recovers
 /// (no sticky flag to strand a re-funded org). Returns `None` for non-managed,
 /// uncapped (`None` budget), or positive-balance requests.
-fn preflight_credit_gate(ctx: &RequestContext) -> Option<GatewayError> {
+///
+/// `pool` is the credit pool this request is ROUTED to (see
+/// [`crate::credit_pools`]), and it is what makes the gate able to answer a
+/// question the total cannot: a wallet holding $50 of Bedrock grant and nothing
+/// else has a positive total, yet funds no Cloudflare token at all. With a pool,
+/// the spendable amount is the unrestricted buckets PLUS that one pool's grant —
+/// grants for every other pool are unreachable by construction, because no other
+/// entry of the map is ever added in.
+///
+/// `pool == None` (the provider is not pool-tagged — `openai`, `anthropic`,
+/// `local`, …) is NOT the pre-pool check. It gates on the UNRESTRICTED balance,
+/// because a restricted grant cannot pay an untagged provider: the debit that
+/// follows carries no pool, so `debitWallet` skips every grant row and drives
+/// the top-up bucket negative while the grant sits untouched. Gating such a
+/// request on the blended total would admit it against money it can never
+/// spend, and Ryu would absorb the provider's bill. Concretely: a Founding-50
+/// claimant with `sub=0, topup=0, bedrock grant=$50` sending `gpt-4o`.
+///
+/// One degradation is deliberate and must stay:
+///   - `unrestricted_budget_micro_usd == None` (control plane predates pool
+///     segregation) ⇒ treat the whole balance as unrestricted, i.e. the pre-pool
+///     check again, on BOTH branches. Collapsing this into `0` would gate every
+///     request to death the moment the gateway outran the control plane.
+fn preflight_credit_gate(ctx: &RequestContext, pool: Option<&str>) -> Option<GatewayError> {
     if !ctx.managed_inference {
         return None;
     }
-    match ctx.remaining_budget_micro_usd {
-        Some(balance) if balance <= 0 => Some(GatewayError::InsufficientCredits),
-        _ => None,
-    }
+    // `None` ⇒ no managed cap at all; nothing to gate on, pooled or not.
+    let total = ctx.remaining_budget_micro_usd?;
+    let unrestricted = ctx.unrestricted_budget_micro_usd.unwrap_or(total);
+    let Some(pool) = pool else {
+        return (unrestricted <= 0).then_some(GatewayError::InsufficientCredits);
+    };
+    let pooled = ctx
+        .pool_budgets_micro_usd
+        .get(pool)
+        .copied()
+        .unwrap_or_default();
+    (unrestricted.saturating_add(pooled) <= 0).then_some(GatewayError::InsufficientCredits)
 }
 
 fn wallet_empty_decision(state: &AppState, ctx: &RequestContext) -> Option<BudgetDecision> {
@@ -3497,6 +3575,50 @@ fn sse_parse_cost(raw: &str) -> Option<f64> {
     best
 }
 
+/// The `POST /api/credits/debit` request body. Pulled out of
+/// [`debit_wallet_for_request`] so the wire contract with the control plane is
+/// assertable without a live endpoint — this is the one place the gateway tells
+/// the ledger which donated allowance a spend came out of, and a silently
+/// dropped or misnamed `pool` key books frontier tokens against the free pool.
+///
+/// Both optional fields are ADDITIVE: absent means absent, not `null`, so a
+/// control plane that ignores them (or predates them) sees a byte-identical
+/// legacy body.
+fn debit_request_body(
+    org_id: &str,
+    amount_micro_usd: u64,
+    reason: &str,
+    ref_id: &str,
+    budget_alert_tier: Option<AlertTier>,
+    pool: Option<&str>,
+) -> Value {
+    let mut body = json!({
+        "orgId": org_id,
+        "amountMicroUsd": amount_micro_usd,
+        "reason": reason,
+        "refId": ref_id,
+    });
+    let Some(obj) = body.as_object_mut() else {
+        return body;
+    };
+    // Only stamp `alertTier` when a budget cap actually asked for an alert, so
+    // existing debit consumers see the legacy body otherwise. Reuses the
+    // `AlertTier` serde (lowercase) as the wire value.
+    if let Some(tier) = budget_alert_tier {
+        if let Ok(value) = serde_json::to_value(tier) {
+            obj.insert("alertTier".to_string(), value);
+        }
+    }
+    // An untagged provider omits `pool` entirely, and the control-plane debit
+    // then takes its pre-pool path: no grant is reachable and the spend falls
+    // through to the subscription and top-up buckets. Only a tagged provider can
+    // reach pool-restricted grant money, and only its OWN pool's.
+    if let Some(pool) = pool {
+        obj.insert("pool".to_string(), Value::String(pool.to_string()));
+    }
+    body
+}
+
 /// Best-effort post-call wallet debit (#486). Computes the marked-up debit for a
 /// metered call's `costMicroUsd` and POSTs it to the control-plane
 /// `/credits/debit` for the request's org, then updates the cached empty flag
@@ -3527,6 +3649,13 @@ async fn debit_wallet_for_request(
     // already touch) so `credits.ts /debit` can email managed owners. Additive:
     // `None` omits the field entirely, leaving the legacy debit body unchanged.
     budget_alert_tier: Option<AlertTier>,
+    // The segregated credit pool this spend bills against, from the registry id
+    // of the provider that ACTUALLY served the request (see
+    // [`crate::credit_pools`]). Deliberately a required parameter rather than a
+    // defaulted one: every debit site has to make the attribution decision
+    // explicitly, because an accidental `None` is silent — the spend simply never
+    // draws grant money and never appears in per-pool burn.
+    pool: Option<&'static str>,
 ) {
     let credits = &state.config.credits;
     if !credits.is_active() {
@@ -3541,22 +3670,7 @@ async fn debit_wallet_for_request(
     };
 
     let url = format!("{}/credits/debit", credits.base_url.trim_end_matches('/'));
-    let mut body = json!({
-        "orgId": org_id,
-        "amountMicroUsd": amount,
-        "reason": reason,
-        "refId": ref_id,
-    });
-    // Additive: only stamp `alertTier` when a budget cap actually asked for an
-    // alert, so existing debit consumers see a byte-identical body otherwise.
-    if let Some(tier) = budget_alert_tier {
-        if let Some(obj) = body.as_object_mut() {
-            // Reuse the AlertTier serde (lowercase) as the wire value.
-            if let Ok(v) = serde_json::to_value(tier) {
-                obj.insert("alertTier".to_string(), v);
-            }
-        }
-    }
+    let body = debit_request_body(&org_id, amount, reason, &ref_id, budget_alert_tier, pool);
 
     let resp = state
         .http
@@ -3574,8 +3688,10 @@ async fn debit_wallet_for_request(
             match r.json::<Value>().await {
                 Ok(v) => {
                     let balance = v["balanceMicroUsd"].as_i64().unwrap_or(0);
-                    let empty = balance <= 0;
-                    state.wallet.set_org_empty(&org_id, empty);
+                    // Records the figure AND derives the empty flag from it, so
+                    // Core's dollar-threshold fallback rules read the same number
+                    // this gate does (`WalletState::set_org_balance`).
+                    state.wallet.set_org_balance(&org_id, balance);
                     if v["wentNonPositive"].as_bool().unwrap_or(false) {
                         warn!(
                             org_id = %org_id,
@@ -3678,6 +3794,12 @@ fn spawn_tool_call_debit(
         "composio",
         cost,
         fail_closed_sticky,
+        None,
+        // No pool, and this is an invariant rather than a stub: a Composio tool
+        // call is not donated inference supply. Neither the Bedrock nor the
+        // Cloudflare allowance pays for it, so it must never draw pool-restricted
+        // grant money — it bills the ordinary subscription/top-up buckets, which
+        // is what `None` means to the control-plane debit.
         None,
     ));
 }
@@ -4006,6 +4128,10 @@ fn attach_stream_observer(
                                 // state so streaming managed chat (the common
                                 // case) emails owners too.
                                 s.budget_alert_tier,
+                                // Same authoritative attribution as the
+                                // non-streaming path; the stream state carries
+                                // the provider that actually served the bytes.
+                                crate::credit_pools::pool_for_gateway_provider(&s.provider_name),
                             )
                             .await;
                         }
@@ -4391,6 +4517,8 @@ mod tests {
             raw_tools: false,
             managed_inference: false,
             remaining_budget_micro_usd: None,
+            unrestricted_budget_micro_usd: None,
+            pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
         }
     }
@@ -4404,30 +4532,136 @@ mod tests {
         // static-key / master paths are exempt).
         ctx.managed_inference = false;
         ctx.remaining_budget_micro_usd = Some(0);
-        assert!(preflight_credit_gate(&ctx).is_none());
+        assert!(preflight_credit_gate(&ctx, None).is_none());
 
         // Managed + positive balance ⇒ allowed.
         ctx.managed_inference = true;
         ctx.remaining_budget_micro_usd = Some(500);
-        assert!(preflight_credit_gate(&ctx).is_none());
+        assert!(preflight_credit_gate(&ctx, None).is_none());
 
         // Managed + uncapped (None budget) ⇒ allowed.
         ctx.remaining_budget_micro_usd = None;
-        assert!(preflight_credit_gate(&ctx).is_none());
+        assert!(preflight_credit_gate(&ctx, None).is_none());
 
         // Managed + exhausted (zero) ⇒ hard 402.
         ctx.remaining_budget_micro_usd = Some(0);
         assert!(matches!(
-            preflight_credit_gate(&ctx),
+            preflight_credit_gate(&ctx, None),
             Some(GatewayError::InsufficientCredits)
         ));
 
         // Managed + overdrawn (negative) ⇒ hard 402.
         ctx.remaining_budget_micro_usd = Some(-5);
         assert!(matches!(
-            preflight_credit_gate(&ctx),
+            preflight_credit_gate(&ctx, None),
             Some(GatewayError::InsufficientCredits)
         ));
+    }
+
+    #[test]
+    fn debit_body_carries_the_pool_only_when_the_provider_is_tagged() {
+        // Untagged provider ⇒ the pre-pool body, byte-identical. `pool` must be
+        // ABSENT, not `null`: the control plane distinguishes the two.
+        let legacy = debit_request_body("o1", 1_234, "gateway_usage", "req_1", None, None);
+        assert_eq!(legacy["orgId"], "o1");
+        assert_eq!(legacy["amountMicroUsd"], 1_234);
+        assert_eq!(legacy["reason"], "gateway_usage");
+        assert_eq!(legacy["refId"], "req_1");
+        assert!(legacy.get("pool").is_none());
+        assert!(legacy.get("alertTier").is_none());
+
+        // Tagged provider ⇒ the pool id travels verbatim under `pool`. This key
+        // and this value are what let the ledger reach pool-restricted grants;
+        // renaming either is a control-plane contract change.
+        let pooled = debit_request_body(
+            "o1",
+            1_234,
+            "gateway_usage",
+            "req_1",
+            Some(AlertTier::Warn),
+            crate::credit_pools::pool_for_gateway_provider("bedrock"),
+        );
+        assert_eq!(pooled["pool"], "bedrock");
+        assert_eq!(pooled["alertTier"], "warn");
+    }
+
+    #[test]
+    fn preflight_credit_gate_segregates_pool_restricted_grants() {
+        // The wallet the whole pool split exists for: $50 of FRONTIER grant and
+        // nothing unrestricted. Its total is positive, so the pre-pool scalar gate
+        // would wave a Cloudflare request through and let cheap traffic burn the
+        // scarce expensive allowance.
+        let mut ctx = signal_ctx(None, false, false);
+        ctx.org_id = Some("o1".to_string());
+        ctx.managed_inference = true;
+        ctx.remaining_budget_micro_usd = Some(50_000_000);
+        ctx.unrestricted_budget_micro_usd = Some(0);
+        ctx.pool_budgets_micro_usd = std::collections::HashMap::from([
+            ("bedrock".to_string(), 50_000_000_i64),
+            ("cloudflare".to_string(), 0_i64),
+        ]);
+
+        // Routed to the pool that funds it ⇒ served.
+        assert!(preflight_credit_gate(&ctx, Some("bedrock")).is_none());
+
+        // Routed to a pool it holds nothing for ⇒ 402, DESPITE a positive total.
+        // This is the one case where reading `unrestricted_budget_micro_usd`
+        // diverges from falling back to the total, so it is what proves the field
+        // is actually being read.
+        assert!(matches!(
+            preflight_credit_gate(&ctx, Some("cloudflare")),
+            Some(GatewayError::InsufficientCredits)
+        ));
+
+        // A pool absent from the map is treated as funding nothing — same as an
+        // explicit zero, because both mean "no grant money here".
+        assert!(matches!(
+            preflight_credit_gate(&ctx, Some("openrouter")),
+            Some(GatewayError::InsufficientCredits)
+        ));
+
+        // An UNTAGGED provider (openai, anthropic, local, …) is gated on the
+        // unrestricted balance, NOT the total — this wallet funds it with nothing.
+        // Admitting it here was a live money leak: the debit that follows carries
+        // no pool, so `debitWallet` skips every grant row and drives the top-up
+        // bucket negative while the $50 Bedrock grant sits untouched and Ryu
+        // absorbs OpenAI's bill.
+        assert!(matches!(
+            preflight_credit_gate(&ctx, None),
+            Some(GatewayError::InsufficientCredits)
+        ));
+
+        // Unrestricted money alone funds every pool: grants top it up, never cap it.
+        ctx.unrestricted_budget_micro_usd = Some(1_000);
+        assert!(preflight_credit_gate(&ctx, Some("cloudflare")).is_none());
+        // …and it funds an untagged provider too. Tightening the untagged branch
+        // must not become a blanket block on every non-pooled provider for anyone
+        // who happens to hold a grant.
+        assert!(preflight_credit_gate(&ctx, None).is_none());
+    }
+
+    #[test]
+    fn preflight_credit_gate_degrades_to_the_scalar_on_a_pre_pool_control_plane() {
+        // A control plane that does not yet emit `unrestrictedBudgetMicroUsd`
+        // leaves it `None`. Collapsing that to 0 would gate every pooled request
+        // to death the moment the gateway outran the control plane, so `None`
+        // must mean "treat the whole balance as unrestricted".
+        let mut ctx = signal_ctx(None, false, false);
+        ctx.org_id = Some("o1".to_string());
+        ctx.managed_inference = true;
+        ctx.remaining_budget_micro_usd = Some(500);
+        ctx.unrestricted_budget_micro_usd = None;
+        assert!(preflight_credit_gate(&ctx, Some("bedrock")).is_none());
+
+        ctx.remaining_budget_micro_usd = Some(0);
+        assert!(matches!(
+            preflight_credit_gate(&ctx, Some("bedrock")),
+            Some(GatewayError::InsufficientCredits)
+        ));
+
+        // Uncapped stays uncapped whether or not a pool is in play.
+        ctx.remaining_budget_micro_usd = None;
+        assert!(preflight_credit_gate(&ctx, Some("bedrock")).is_none());
     }
 
     #[test]
@@ -5274,6 +5508,8 @@ mod tests {
             raw_tools: false,
             managed_inference: false,
             remaining_budget_micro_usd: None,
+            unrestricted_budget_micro_usd: None,
+            pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
         };
 
@@ -5520,6 +5756,8 @@ mod tests {
             raw_tools: false,
             managed_inference: false,
             remaining_budget_micro_usd: None,
+            unrestricted_budget_micro_usd: None,
+            pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
         };
 
@@ -6478,6 +6716,8 @@ mod fallback_tests {
             raw_tools: false,
             managed_inference: false,
             remaining_budget_micro_usd: None,
+            unrestricted_budget_micro_usd: None,
+            pool_budgets_micro_usd: std::collections::HashMap::new(),
             resolved_policy: None,
         }
     }

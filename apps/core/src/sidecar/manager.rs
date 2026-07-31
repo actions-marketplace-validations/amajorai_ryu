@@ -1045,6 +1045,35 @@ impl SidecarManager {
         Err(last_err.unwrap())
     }
 
+    /// Start (or replace) the background `/health` poll loop for `name`.
+    ///
+    /// Called by every path that brings a sidecar up — `start_all`, [`Self::start_sidecar`],
+    /// [`Self::restart_sidecar`], [`Self::start_dynamic_locked`], [`Self::wake_sidecar`] —
+    /// and therefore called **repeatedly for the same name** in normal operation: the
+    /// gateway config-push path fires a lazy `start_sidecar` for the classify tier on
+    /// every push that selects it, and `server/mod.rs` fires one for `llamacpp-rerank`
+    /// on every search. Those repeat starts are otherwise cheap (the sidecar adopts its
+    /// own already-running server), so the monitor is the only thing that accumulates.
+    ///
+    /// # Replacing a monitor must abort the one it displaces
+    ///
+    /// `HashMap::insert` returns the displaced [`JoinHandle`], and **dropping a tokio
+    /// `JoinHandle` does not cancel its task** — it only detaches it. So before this
+    /// abort existed, every repeat start leaked one monitor loop that kept polling the
+    /// same sidecar's `/health` on [`HEALTH_INTERVAL`] for the life of the process: N
+    /// config pushes ⇒ N pollers on one port, N log lines per interval when it is
+    /// unhealthy, and no way to ever cancel the extras (the map only held the newest).
+    ///
+    /// Aborting the displaced handle is safe because no caller wants a name's *previous*
+    /// monitor to outlive its replacement, and nothing anywhere reads a monitor handle
+    /// for anything but cancellation: the map is only ever `insert`ed here,
+    /// `remove`d-and-aborted (stop / restart / uninstall / deregister / idle-reap), or
+    /// aborted wholesale in [`Self::stop_all`] — no path awaits a monitor's completion or
+    /// inspects its result. [`Self::restart_sidecar`] and the reaper remove-and-abort
+    /// before their next start, so they displace nothing and are unaffected either way.
+    /// (The task also exits on its own once the name is gone from both sidecar maps —
+    /// which is why a leaked monitor for a *deregistered* sidecar self-healed, and one
+    /// for a still-registered sidecar never did.)
     fn spawn_health_monitor(self: &Arc<Self>, name: &str) {
         let manager = Arc::clone(self);
         let name = name.to_string();
@@ -1078,7 +1107,14 @@ impl SidecarManager {
                 }
             }
         });
-        self.health_monitors.lock().unwrap().insert(name, handle);
+        // Take the displaced handle out from under the lock, then abort it (a cheap
+        // sync signal that takes no lock of ours, so the order is not load-bearing —
+        // but keeping the guard's scope to the map mutation matches every other
+        // access here).
+        let displaced = self.health_monitors.lock().unwrap().insert(name, handle);
+        if let Some(previous) = displaced {
+            previous.abort();
+        }
     }
 }
 
@@ -1465,6 +1501,71 @@ mod tests {
             1,
             "the child process was started exactly once"
         );
+    }
+
+    /// Poll `cond` on the runtime until it holds, so an aborted task's cancellation
+    /// has a chance to be processed. Bounded, and it panics with `what` on timeout so a
+    /// regression reads as a failed assertion instead of a hung test.
+    async fn eventually(what: &str, cond: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
+    /// A repeat start must not leave a second health monitor behind.
+    ///
+    /// Every start path funnels into the same `spawn_health_monitor`, so this asserts
+    /// the shared helper rather than one caller: `start_sidecar` (the path the gateway
+    /// config-push and the per-search rerank wake use) needs an entry in the built-in
+    /// `sidecars` map plus `setup.is_installed`, neither of which a `new_noop` manager
+    /// can have, while `wake_sidecar` reaches the same helper with a `FakeSidecar`.
+    /// Before the abort-on-displace fix, the second start silently detached the first
+    /// monitor: it kept polling `/health` forever and the map had no handle for it.
+    #[tokio::test]
+    async fn a_repeat_start_replaces_the_health_monitor_instead_of_leaking_it() {
+        let mgr = SidecarManager::new_noop();
+        let sc = FakeSidecar::new("com.acme.tool/engine");
+        mgr.register(sc.clone()).unwrap();
+
+        assert!(mgr.wake_sidecar("com.acme.tool/engine").await.unwrap());
+        // Take an abort handle (not the JoinHandle — removing it would defeat the
+        // displacement this test is about) so the first monitor's fate is observable.
+        let first = mgr
+            .health_monitors
+            .lock()
+            .unwrap()
+            .get("com.acme.tool/engine")
+            .expect("a started sidecar has a health monitor")
+            .abort_handle();
+        assert!(
+            !first.is_finished(),
+            "the first monitor must be live before the repeat start"
+        );
+
+        // A repeat start: exactly what a second config push / second search does.
+        sc.stop().await.unwrap();
+        assert!(mgr.wake_sidecar("com.acme.tool/engine").await.unwrap());
+
+        assert_eq!(
+            mgr.health_monitors.lock().unwrap().len(),
+            1,
+            "one monitor per name — the map is keyed by name, so a leak is invisible here"
+        );
+        eventually("the displaced health monitor to be cancelled", || {
+            first.is_finished()
+        })
+        .await;
+
+        // And the monitor that survived is the new one, still cancellable through the
+        // normal teardown path.
+        mgr.stop_and_deregister("com.acme.tool/engine")
+            .await
+            .unwrap();
+        assert!(mgr.health_monitors.lock().unwrap().is_empty());
     }
 
     /// A per-name idle override (a manifest sidecar's `idle_stop_secs`, applied at

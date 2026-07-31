@@ -61,6 +61,8 @@ import { addAccountViaDeviceAuth } from "@/lib/oauth.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
+import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { fetchEntitlementStatus } from "@/src/lib/api/billing.ts";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
@@ -304,6 +306,13 @@ export function NavUser({
 	const { data: session, isPending } = useSession();
 	const { verdict } = useEntitlementContext();
 	const { openTab } = useTabsContext();
+	// Whether ANY enabled app answers to the Inbox path. The tray previews that app's
+	// data (pending approvals + quest check-off suggestions) and its every action ends
+	// at `/inbox`, so with no owner it is a button that can only ever say "App not
+	// enabled". Read from the live contributions feed rather than a baked
+	// `com.ryu.approvals`, so this affordance and the route it opens resolve from one
+	// source. Approvals ships default-OFF, so on a fresh install this is null.
+	const inboxOwner = useCompanionAlias(APPROVALS_ALIAS);
 	const badgePlan = entitlementBadgeTier(verdict);
 	const { isLifetime } = useSubscription();
 	const {
@@ -346,7 +355,7 @@ export function NavUser({
 		return null;
 	}
 
-	const showInbox = !hiddenChrome.has("inbox");
+	const showInbox = !hiddenChrome.has("inbox") && inboxOwner !== null;
 	const showUser = !hiddenChrome.has("user");
 	const showDownloads = !hiddenChrome.has("downloads");
 	const showSettings = !hiddenChrome.has("settings");
@@ -432,7 +441,9 @@ export function NavUser({
 												<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
 													<DitherAvatar
 														className="size-full"
-														name={user?.email ?? user?.name ?? "ryu"}
+														name={
+															user?.id ?? user?.email ?? user?.name ?? "ryu"
+														}
 													/>
 												</AvatarFallback>
 											</Avatar>

@@ -1,0 +1,40 @@
+{
+  "id": "double-check",
+  "name": "Double Check",
+  "version": "1.0.0",
+  "runnables": [],
+  "permission_grants": ["hook:side-model"],
+  "activation_events": ["*"],
+  "contributes": {
+    "composer_controls": [
+      {
+        "id": "double-check.toggle",
+        "type": "toggle",
+        "flag": "io.ryu.double-check",
+        "label": "Double-check",
+        "description": "Have a second model review each answer."
+      }
+    ],
+    "settings_tabs": [
+      {
+        "id": "double-check.settings",
+        "title": "Double-check",
+        "fields": [
+          {
+            "type": "model_picker",
+            "pref_key": "double-check-model",
+            "label": "Reviewer model"
+          }
+        ]
+      }
+    ],
+    "turn_hooks": [
+      {
+        "id": "double-check.review",
+        "on": "post_assistant_turn",
+        "match": { "flag": "io.ryu.double-check" },
+        "code_file": "hooks/review.js"
+      }
+    ]
+  }
+}

@@ -139,6 +139,8 @@ mod tests {
             org_id: "o1".to_string(),
             managed_inference: true,
             remaining_budget_micro_usd: Some(1000),
+            unrestricted_budget_micro_usd: None,
+            pool_budgets_micro_usd: std::collections::HashMap::new(),
             policy: EffectivePolicy::default(),
         })
     }

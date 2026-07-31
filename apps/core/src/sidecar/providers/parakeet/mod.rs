@@ -14,6 +14,15 @@
 //! maps to *model loaded in memory* (start = ensure downloaded + load; stop =
 //! unload). It is opt-in (not in `startup_order`), matching the voice-engine
 //! download-only default.
+//!
+//! **Lean builds never claim to be running.** A build compiled without
+//! `voice-parakeet` cannot transcribe at all, so this lifecycle refuses to start
+//! and reports [`HealthStatus::Unhealthy`] naming the missing feature (see
+//! [`FEATURE_MISSING`]). It used to download the model, `warn!` once, and then
+//! mark itself loaded — which made `health_check()` say `Healthy`, `is_running()`
+//! say `true`, and the desktop's `VoiceInputSettings` print "Running" for an
+//! engine whose every transcription 500s. A capability the binary does not have
+//! must be visibly absent, not silently broken.
 
 pub mod downloader;
 
@@ -24,6 +33,17 @@ use std::sync::Arc;
 
 use crate::sidecar::{BoxFuture, HealthStatus, Sidecar};
 
+/// The one message every lean-build (`voice-parakeet` off) path reports, so
+/// `start()`'s error and `health_check()`'s reason read identically wherever they
+/// surface (sidecar list, Store row, `/api/voice/*` error body). Names the exact
+/// remedy: pick whisper, or rebuild with the feature.
+///
+/// Only compiled on lean builds — with the feature on, nothing references it.
+#[cfg(not(feature = "voice-parakeet"))]
+pub const FEATURE_MISSING: &str = "this Core build was compiled without the `voice-parakeet` \
+     feature, so parakeet cannot transcribe on this node. Use the `whisper` voice engine, or \
+     rebuild Core with `--features voice-parakeet` (see apps/core/package.json `build`).";
+
 /// Lifecycle manager for the in-process parakeet STT engine.
 pub struct ParakeetManager {
     /// `true` once the model has been ensured present (and, with the feature on,
@@ -32,6 +52,11 @@ pub struct ParakeetManager {
     /// Global download center (#456), injected at construction in `main.rs`.
     /// Routes the model bundle download through the center so it shows in the
     /// overlay. (`DownloadCenter` is itself a cheap `Arc` wrapper.)
+    ///
+    /// `main.rs` wires this on every build, but only the `voice-parakeet` arm of
+    /// [`Sidecar::start`] reads it — a lean build refuses before downloading
+    /// anything, so the field is legitimately write-only there.
+    #[cfg_attr(not(feature = "voice-parakeet"), allow(dead_code))]
     downloads: Option<crate::downloads::DownloadCenter>,
 }
 
@@ -65,40 +90,43 @@ impl Sidecar for ParakeetManager {
         false
     }
 
+    /// Ensure the model bundle is on disk, then load it into memory.
+    ///
+    /// On a lean build (`voice-parakeet` off) this **fails** instead of half-
+    /// succeeding. Two reasons it must fail rather than warn-and-continue:
+    /// storing `loaded = true` is what made a build that cannot transcribe report
+    /// `Healthy`/`is_running()` to every surface; and there is no point pulling a
+    /// multi-hundred-MB ONNX bundle for an inference path that is not compiled
+    /// in, so the refusal comes *before* the download.
     fn start(&self) -> BoxFuture<anyhow::Result<()>> {
-        let loaded = Arc::clone(&self.loaded);
-        let downloads = self.downloads.clone();
-        Box::pin(async move {
-            // Ensure the ONNX model bundle is on disk (downloads on first start)
-            // through the download center (#456) so it shows in the overlay.
-            let downloads =
-                downloads.expect("parakeet manager: download center not wired (main.rs)");
-            ParakeetDownloader::new()
-                .ensure_model(&downloads)
-                .await
-                .map_err(|e| anyhow::anyhow!("downloading parakeet model: {e:#}"))?;
+        #[cfg(feature = "voice-parakeet")]
+        {
+            let loaded = Arc::clone(&self.loaded);
+            let downloads = self.downloads.clone();
+            Box::pin(async move {
+                // Ensure the ONNX model bundle is on disk (downloads on first start)
+                // through the download center (#456) so it shows in the overlay.
+                let downloads =
+                    downloads.expect("parakeet manager: download center not wired (main.rs)");
+                ParakeetDownloader::new()
+                    .ensure_model(&downloads)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("downloading parakeet model: {e:#}"))?;
 
-            // With the inference feature on, preload the model so the first
-            // transcription is fast. Without it, the model is downloaded but
-            // transcription will return a clear "feature not built" error.
-            #[cfg(feature = "voice-parakeet")]
-            {
+                // Preload the model so the first transcription is fast. `loaded`
+                // is only ever set once inference is genuinely ready.
                 ryu_stt::parakeet::preload(&model_dir())
                     .map_err(|e| anyhow::anyhow!("loading parakeet model: {e:#}"))?;
                 tracing::info!("parakeet engine loaded (ONNX inference enabled)");
-            }
-            #[cfg(not(feature = "voice-parakeet"))]
-            {
-                tracing::warn!(
-                    "parakeet model downloaded, but this Core build was compiled without the \
-                     `voice-parakeet` feature — transcription via parakeet will return an error. \
-                     Rebuild Core with `--features voice-parakeet` to enable ONNX inference."
-                );
-            }
 
-            loaded.store(true, Ordering::Relaxed);
-            Ok(())
-        })
+                loaded.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+        }
+        #[cfg(not(feature = "voice-parakeet"))]
+        {
+            Box::pin(async move { anyhow::bail!(FEATURE_MISSING) })
+        }
     }
 
     fn stop(&self) -> BoxFuture<anyhow::Result<()>> {
@@ -112,19 +140,35 @@ impl Sidecar for ParakeetManager {
         })
     }
 
+    /// `Healthy` only when inference is compiled in *and* the model is loaded.
+    ///
+    /// On a lean build this is always `Unhealthy` and says why. `start()` already
+    /// refuses, so `loaded` can never be true there — but stating it in the health
+    /// arm too means the "Running" claim cannot be resurrected by any future flag
+    /// write, and the reason travels to whatever renders the status.
     fn health_check(&self) -> BoxFuture<HealthStatus> {
-        let loaded = Arc::clone(&self.loaded);
-        Box::pin(async move {
-            if loaded.load(Ordering::Relaxed) {
-                HealthStatus::Healthy
-            } else {
-                HealthStatus::Unhealthy("parakeet model not loaded".into())
-            }
-        })
+        #[cfg(feature = "voice-parakeet")]
+        {
+            let loaded = Arc::clone(&self.loaded);
+            Box::pin(async move {
+                if loaded.load(Ordering::Relaxed) {
+                    HealthStatus::Healthy
+                } else {
+                    HealthStatus::Unhealthy("parakeet model not loaded".into())
+                }
+            })
+        }
+        #[cfg(not(feature = "voice-parakeet"))]
+        {
+            Box::pin(async move { HealthStatus::Unhealthy(FEATURE_MISSING.into()) })
+        }
     }
 
     fn is_running(&self) -> bool {
-        self.loaded.load(Ordering::Relaxed)
+        // Compile-time false on a lean build (the `cfg!` short-circuits): an
+        // engine that cannot transcribe must never report itself as running to
+        // the sidecar list, the Store row, or `VoiceInputSettings`.
+        cfg!(feature = "voice-parakeet") && self.loaded.load(Ordering::Relaxed)
     }
 
     fn uninstall(&self, delete_data: bool) -> BoxFuture<anyhow::Result<()>> {
@@ -147,3 +191,58 @@ impl Sidecar for ParakeetManager {
 // infra: `start`/`stop` above call `ryu_stt::parakeet::{preload,unload}`, and the
 // `/api/voice/transcribe` data path routes through `ryu_stt::transcribe_wav*`
 // (wired in `apps/core/src/stt_host.rs`).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lean-build honesty contract. This is the arm that regressed: `start()`
+    /// used to download the model, `warn!`, and still store `loaded = true`, so a
+    /// binary with no ONNX inference reported `Healthy`/running while every
+    /// transcription 500'd. Only compiled where it can actually be false — with
+    /// the feature on there is no lean arm to assert.
+    #[cfg(not(feature = "voice-parakeet"))]
+    #[tokio::test]
+    async fn lean_build_refuses_to_start_and_never_reports_running() {
+        // No download center wired ON PURPOSE: the refusal must land *before* the
+        // download (the old code would have panicked on the `expect` here, which
+        // is itself proof the download came first).
+        let manager = ParakeetManager::new();
+
+        let err = manager
+            .start()
+            .await
+            .expect_err("a build without `voice-parakeet` must refuse to start");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("voice-parakeet"),
+            "the start error must name the missing feature: {msg}"
+        );
+
+        assert!(
+            !manager.is_running(),
+            "an engine that cannot transcribe must never report itself running"
+        );
+        match manager.health_check().await {
+            HealthStatus::Unhealthy(reason) => assert!(
+                reason.contains("voice-parakeet"),
+                "the health reason must name the missing feature: {reason}"
+            ),
+            other => panic!("lean build must be Unhealthy, got {other:?}"),
+        }
+    }
+
+    /// The feature-on arm keeps its original contract: not loaded yet ⇒ not
+    /// running and `Unhealthy("…not loaded")`. Pinned so the lean-arm fix above
+    /// can never be "achieved" by making the engine unconditionally unhealthy.
+    #[cfg(feature = "voice-parakeet")]
+    #[tokio::test]
+    async fn feature_build_is_unhealthy_until_the_model_is_loaded() {
+        let manager = ParakeetManager::new();
+        assert!(!manager.is_running());
+        match manager.health_check().await {
+            HealthStatus::Unhealthy(reason) => assert!(reason.contains("not loaded")),
+            other => panic!("expected Unhealthy before load, got {other:?}"),
+        }
+    }
+}

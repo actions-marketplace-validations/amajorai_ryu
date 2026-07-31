@@ -36,6 +36,17 @@ pub const TOOL_SEARCH_NAME: &str = "tool_search";
 /// dispatched calls with this prefix so the pipeline can debit them at cost.
 pub const COMPOSIO_TOOL_PREFIX: &str = "composio__";
 
+/// FQ id of Core's Agent-Skill loader. Mirrors `skills_tool::LOAD_TOOL_ID`
+/// (`apps/core/src/sidecar/mcp/skills_tool.rs`) the same way
+/// [`COMPOSIO_TOOL_PREFIX`] mirrors Core's Composio id shape — the gateway does not
+/// link Core, so this is a hand-kept string.
+///
+/// It cannot be checked at compile time, so [`handle_search`] fails **loudly**: if
+/// Core ever renames the tool, `describe` returns `Err` and the injection is skipped
+/// with a `warn`, rather than silently leaving the model unable to act on the skill
+/// rows the same response advertised.
+pub const SKILLS_LOAD_TOOL_ID: &str = "skills__load";
+
 /// Whether the mesh is enabled (B-9). When userspace networking is on, mesh
 /// peers appear as `127.0.0.1`, so loopback-trust gates fail open; the exec gate
 /// must neutralize loopback trust. Read locally so P2 compiles without P5.
@@ -49,19 +60,33 @@ pub fn mesh_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// The `tool_search` function-tool definition (Contract 3, byte-identical to the
-/// ACP bridge). Permits the model to query Core's catalog for a capability.
+/// The `tool_search` function-tool definition (Contract 3). Permits the model to
+/// query Core's catalog for a capability — tools **and** Agent Skills, one door.
+///
+/// The twin lives in Core's ACP bridge (`apps/core/src/sidecar/adapters/
+/// mcp_bridge.rs::tool_search_def`). Both advertise the same `kind` set, and both
+/// cross-check it against Core's `ToolKind::parse_filter`
+/// (`crates/core/tool-registry`), which is the only thing that honors the
+/// `?kind=` value — so neither plane advertises a filter Core would silently
+/// drop (`parse_filter` maps anything unrecognized to "no filter", which would
+/// have made a `core-api` filter look like it worked while returning every
+/// plane).
+///
+/// The description tells the model what to do with a `skill` row, because the
+/// gateway deliberately does **not** inject a function definition for one (see
+/// [`handle_search`]): without that sentence the model would see a row it has no
+/// tool for and no instruction on how to reach it.
 pub fn tool_search_def() -> Value {
     json!({
         "type": "function",
         "function": {
             "name": TOOL_SEARCH_NAME,
-            "description": "Search the available tool catalog for tools that can accomplish a task. Returns a ranked list of tool descriptors (id, name, description). Call this FIRST when you need a capability not already provided as a tool, then call the returned tool by its exact id (or describe it for its argument schema).",
+            "description": "Search the available catalog for tools AND Agent Skills that can accomplish a task. Returns a ranked list of descriptors (id, name, description, kind). Call this FIRST when you need a capability not already provided as a tool. A row whose kind is 'skill' is instruction text, not a function: do NOT call its id — pass the part after the 'skills__' prefix to skills__load and follow what it returns. Every other kind is called directly by its exact id (or describe it first for its argument schema).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Natural-language description of the capability you need (e.g. 'send a slack message')." },
-                    "kind":  { "type": "string", "enum": ["mcp","builtin","composio","app","any"], "description": "Optional filter by tool source plane. 'any' (default) searches all.", "default": "any" },
+                    "kind":  { "type": "string", "enum": ["mcp","builtin","composio","app","core-api","command","skill","any"], "description": "Optional filter by source plane. 'skill' returns only Agent Skills. 'any' (default) searches all.", "default": "any" },
                     "limit": { "type": "integer", "description": "Max results.", "default": 8, "minimum": 1, "maximum": 25 }
                 },
                 "required": ["query"]
@@ -284,9 +309,23 @@ pub async fn run_tool_loop(
     Ok((response, billable_tool_calls))
 }
 
-/// Handle a `tool_search` call: query Core's catalog, describe the top hits and
-/// inject their tool defs so the model can call them next round. Returns the
-/// descriptor list (id/name/description) as the tool result the model sees.
+/// Handle a `tool_search` call: query Core's catalog, describe the top *callable*
+/// hits and inject their tool defs so the model can call them next round. Returns
+/// the descriptor list (id/name/description/kind) as the tool result the model sees.
+///
+/// ## Agent Skills are listed but never injected
+///
+/// Core's catalog now returns Agent Skills alongside tools so the model has one
+/// search door. A skill is instruction text loaded with `skills__load`, not a
+/// function — so `kind == "skill"` rows are **filtered out before** the
+/// `describe_top_n` budget is applied, not skipped inside the loop. Skipping inside
+/// would let a skill-heavy top-N consume the injection budget and leave the model
+/// with no tool definitions at all.
+///
+/// They stay in the returned list, carrying their `kind`, which is how the model
+/// learns they exist and (via the `tool_search` description) that `skills__load` is
+/// the way to reach them — and when any skill row is surfaced, that loader is
+/// injected alongside, because on this plane the model does not otherwise have it.
 async fn handle_search(
     body: &mut Value,
     catalog: &dyn CoreCatalog,
@@ -328,7 +367,12 @@ async fn handle_search(
         .unwrap_or_default();
 
     let mut to_inject: Vec<Value> = Vec::new();
-    for d in descriptors.iter().take(describe_top_n) {
+    for d in descriptors
+        .iter()
+        // Skills are not callable, so they must not consume the injection budget.
+        .filter(|d| d.kind != catalog_client::ToolKind::Skill)
+        .take(describe_top_n)
+    {
         if existing.contains(&d.id) {
             continue;
         }
@@ -343,6 +387,39 @@ async fn handle_search(
         }
     }
 
+    // The loader companion. Telling the model to reach a skill with `skills__load`
+    // is worthless if it has no such function: on this plane the only tools a model
+    // holds are `tool_search`, the caller's own, the `always_on` set, and whatever
+    // previous searches injected — `skills__load` is in none of those by default.
+    // So the moment a search surfaces a skill, inject the loader in the same round.
+    //
+    // Outside the `describe_top_n` budget on purpose: it is the *access path* for
+    // rows that were themselves excluded from that budget, not a competing hit.
+    // Deduped through `existing`, so repeated searches inject it once.
+    //
+    // Injection is not a grant — `ToolLoopContext::is_allowed` still gates the call,
+    // and a request without `skills__load` in its allowlist gets the usual denial
+    // result. That is the correct governance outcome; what this fixes is the model
+    // being told to call something it could not even emit.
+    let surfaced_a_skill = descriptors
+        .iter()
+        .any(|d| d.kind == catalog_client::ToolKind::Skill);
+    if surfaced_a_skill && !existing.contains(SKILLS_LOAD_TOOL_ID) {
+        match catalog.describe(SKILLS_LOAD_TOOL_ID).await {
+            Ok(described) => {
+                existing.insert(SKILLS_LOAD_TOOL_ID.to_string());
+                to_inject.push(described.to_tool_def());
+            }
+            // `warn`, not `debug`: every other describe failure costs the model one
+            // tool it can search for again, but this one leaves skill rows in the
+            // result with no way to act on them — an advertised path gone dark.
+            Err(e) => {
+                warn!(error = %e, "could not describe {SKILLS_LOAD_TOOL_ID}; skill rows in this \
+                      search are not loadable by the model this round");
+            }
+        }
+    }
+
     if !to_inject.is_empty() {
         let tools = body.get_mut("tools").and_then(Value::as_array_mut);
         match tools {
@@ -351,7 +428,9 @@ async fn handle_search(
         }
     }
 
-    // The result the model sees: a compact descriptor list.
+    // The result the model sees: a compact descriptor list. `kind` is included so a
+    // `skill` row is distinguishable from a callable tool — without it the model
+    // gets an id it was never given a function for and no way to tell why.
     let listed: Vec<Value> = descriptors
         .iter()
         .map(|d| {
@@ -359,6 +438,7 @@ async fn handle_search(
                 "id": d.id,
                 "name": d.name,
                 "description": d.description,
+                "kind": d.kind.wire_name(),
             })
         })
         .collect();
@@ -422,6 +502,12 @@ mod tests {
     use crate::error::GatewayError;
     use crate::providers::Provider;
     use async_trait::async_trait;
+    // Core's real enum (dev-dependency, tests only) — the authority on which
+    // `tool_search.kind` values do anything. Aliased because
+    // `catalog_client::ToolKind`, the gateway's hand-written wire mirror, is already
+    // in scope via `super::*` and the whole point is to check one against the other's
+    // source of truth.
+    use ryu_tool_registry::ToolKind as CoreToolKind;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -550,6 +636,15 @@ mod tests {
         }
     }
 
+    /// A `kind: skill` row — what Core returns for an Agent Skill in the merged
+    /// catalog. Ids are namespaced `skills__<slug>`.
+    fn skill_descriptor(id: &str, name: &str) -> catalog_client::ToolDescriptor {
+        catalog_client::ToolDescriptor {
+            kind: catalog_client::ToolKind::Skill,
+            ..descriptor(id, name)
+        }
+    }
+
     fn described(id: &str, name: &str) -> catalog_client::DescribedTool {
         catalog_client::DescribedTool {
             id: id.to_string(),
@@ -592,6 +687,187 @@ mod tests {
             }],
             "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
         })
+    }
+
+    /// Agent Skills come back from Core's one catalog, but they are not functions.
+    /// They must reach the model **listed with their kind** and must never be
+    /// injected as a callable tool definition.
+    #[tokio::test]
+    async fn skill_rows_are_listed_with_their_kind_but_never_injected() {
+        let catalog = MockCatalog {
+            search_results: vec![
+                skill_descriptor("skills__merge-conflicts", "Resolve merge conflicts"),
+                descriptor("exa__search", "search"),
+            ],
+            // Both are describable, so an injected skill WOULD be visible in `tools`
+            // — the assertion below is about the skip, not about a describe failure.
+            described: std::collections::HashMap::from([
+                (
+                    "skills__merge-conflicts".to_string(),
+                    described("skills__merge-conflicts", "Resolve merge conflicts"),
+                ),
+                (
+                    "exa__search".to_string(),
+                    described("exa__search", "search"),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let ctx = ToolLoopContext::default();
+        let mut body = json!({ "messages": [] });
+        inject_search_tool(&mut body, &[]);
+
+        let result = handle_search(
+            &mut body,
+            &catalog,
+            &ctx,
+            json!({ "query": "merge conflict" }),
+            5,
+        )
+        .await;
+
+        // The model sees both rows, each labelled with its plane.
+        let rows = result["data"].as_array().expect("data array");
+        let skill_row = rows
+            .iter()
+            .find(|r| r["id"] == json!("skills__merge-conflicts"))
+            .unwrap_or_else(|| panic!("skill row missing: {result}"));
+        assert_eq!(skill_row["kind"], json!("skill"), "{skill_row}");
+        let tool_row = rows
+            .iter()
+            .find(|r| r["id"] == json!("exa__search"))
+            .unwrap_or_else(|| panic!("tool row missing: {result}"));
+        assert_eq!(tool_row["kind"], json!("builtin"), "{tool_row}");
+
+        // Only the callable one became a function the model can emit.
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"exa__search"), "{names:?}");
+        assert!(
+            !names.contains(&"skills__merge-conflicts"),
+            "a skill must never be offered as a callable function: {names:?}"
+        );
+    }
+
+    /// Telling the model to use `skills__load` is only actionable if it HAS
+    /// `skills__load`. On this plane it does not: the injected set is `tool_search`
+    /// plus whatever previous searches added. So a search that surfaces any skill
+    /// must inject the loader in the same round — including when every hit is a
+    /// skill and nothing else was injected at all.
+    #[tokio::test]
+    async fn surfacing_a_skill_injects_the_loader_the_model_needs() {
+        let catalog = MockCatalog {
+            search_results: vec![skill_descriptor("skills__merge-conflicts", "Conflicts")],
+            described: std::collections::HashMap::from([(
+                SKILLS_LOAD_TOOL_ID.to_string(),
+                described(SKILLS_LOAD_TOOL_ID, "load"),
+            )]),
+            ..Default::default()
+        };
+        let ctx = ToolLoopContext::default();
+        let mut body = json!({ "messages": [] });
+        inject_search_tool(&mut body, &[]);
+
+        let result = handle_search(&mut body, &catalog, &ctx, json!({ "query": "x" }), 5).await;
+        assert_eq!(
+            result["data"].as_array().expect("data").len(),
+            1,
+            "the skill is still listed: {result}"
+        );
+
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&SKILLS_LOAD_TOOL_ID),
+            "an all-skills result must still leave the model able to load: {names:?}"
+        );
+        // The skill itself is still not a function.
+        assert!(!names.contains(&"skills__merge-conflicts"), "{names:?}");
+
+        // Idempotent: a second search does not inject a duplicate definition.
+        handle_search(&mut body, &catalog, &ctx, json!({ "query": "x" }), 5).await;
+        let loaders = body["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter(|t| t["function"]["name"] == json!(SKILLS_LOAD_TOOL_ID))
+            .count();
+        assert_eq!(loaders, 1, "the loader must be injected once");
+    }
+
+    /// A tools-only result must not drag the loader in — it is injected because a
+    /// skill needs it, not on every search.
+    #[tokio::test]
+    async fn a_result_without_skills_does_not_inject_the_loader() {
+        let catalog = MockCatalog {
+            search_results: vec![descriptor("exa__search", "search")],
+            described: std::collections::HashMap::from([
+                (
+                    "exa__search".to_string(),
+                    described("exa__search", "search"),
+                ),
+                (
+                    SKILLS_LOAD_TOOL_ID.to_string(),
+                    described(SKILLS_LOAD_TOOL_ID, "load"),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let ctx = ToolLoopContext::default();
+        let mut body = json!({ "messages": [] });
+
+        handle_search(&mut body, &catalog, &ctx, json!({ "query": "x" }), 5).await;
+
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["exa__search"], "{names:?}");
+    }
+
+    /// The skip happens **before** `describe_top_n` is applied. With a budget of 1
+    /// and a skill ranked first, the real tool must still get injected — filtering
+    /// inside the loop would have spent the budget on the skill and injected nothing.
+    #[tokio::test]
+    async fn skills_do_not_consume_the_describe_budget() {
+        let catalog = MockCatalog {
+            search_results: vec![
+                skill_descriptor("skills__a", "A skill"),
+                skill_descriptor("skills__b", "Another skill"),
+                descriptor("exa__search", "search"),
+            ],
+            described: std::collections::HashMap::from([(
+                "exa__search".to_string(),
+                described("exa__search", "search"),
+            )]),
+            ..Default::default()
+        };
+        let ctx = ToolLoopContext::default();
+        let mut body = json!({ "messages": [] });
+
+        handle_search(&mut body, &catalog, &ctx, json!({ "query": "x" }), 1).await;
+
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["exa__search"],
+            "the one injection slot must go to the one callable hit"
+        );
     }
 
     #[tokio::test]
@@ -963,5 +1239,72 @@ mod tests {
             allowed: vec!["spider__crawl".into()],
         };
         assert!(!scoped.is_allowed("exa__search"));
+    }
+
+    /// The `kind` filter advertised to the model must be exactly the set Core's
+    /// [`CoreToolKind::parse_filter`] honors (`crates/core/tool-registry`), plus the
+    /// `any` sentinel the gateway strips before the request.
+    ///
+    /// Both directions are bugs, so both are asserted against the real
+    /// `parse_filter` (a dev-only dependency; the gateway's runtime still never
+    /// links Core). Advertising **more** would be a lie — `parse_filter` maps
+    /// anything unrecognized to "no filter", so the model would get every plane back
+    /// and believe it filtered. Advertising **less** is what hid `core-api`/`command`
+    /// from it. Mirrors Core's ACP twin,
+    /// `sidecar::adapters::mcp_bridge::tests::advertised_kind_filter_matches_cores_parse_filter_set`,
+    /// so the two planes cannot drift apart from each other either.
+    #[test]
+    fn advertised_kind_filter_matches_cores_parse_filter_set() {
+        let def = tool_search_def();
+        let kinds = def["function"]["parameters"]["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("kind must advertise an enum")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        // Direction 1: everything advertised is honored by Core.
+        for kind in &kinds {
+            if *kind == "any" {
+                assert_eq!(
+                    CoreToolKind::parse_filter(kind),
+                    None,
+                    "'any' is the documented no-filter sentinel"
+                );
+                continue;
+            }
+            assert!(
+                CoreToolKind::parse_filter(kind).is_some(),
+                "advertised kind '{kind}' is not honored by Core's parse_filter — the \
+                 model would filter and silently get every plane back"
+            );
+        }
+
+        // Direction 2: every plane Core can filter on is advertised, or that plane is
+        // unreachable for every model driven through the gateway's tool loop.
+        // Enumerated from `CoreToolKind::ALL` — the enum's own list — so a plane Core
+        // grows cannot be missed by a list copied into this file, which is precisely
+        // how `core-api` and `command` stayed invisible.
+        for kind in CoreToolKind::ALL.iter().copied() {
+            let wire = kind.wire_name();
+            assert_eq!(
+                CoreToolKind::parse_filter(wire),
+                Some(kind),
+                "'{wire}' must be the wire spelling of {kind:?}"
+            );
+            assert!(
+                kinds.contains(&wire),
+                "'{wire}' is filterable in Core but not advertised to the model"
+            );
+        }
+        assert_eq!(
+            kinds.len(),
+            CoreToolKind::ALL.len() + 1,
+            "exactly every ToolKind plus the 'any' sentinel: {kinds:?}"
+        );
+        assert_eq!(
+            def["function"]["parameters"]["properties"]["kind"]["default"],
+            "any"
+        );
     }
 }

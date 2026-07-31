@@ -9,6 +9,18 @@ use super::*;
 /// connection on a detached thread, so `fetch`'s reqwest call can be driven
 /// end-to-end. Returns the base URL to point `RYU_USAGE_*_URL` at.
 pub(crate) fn spawn_loopback(status_line: &'static str, body: &'static str) -> String {
+    spawn_loopback_with_headers(status_line, "", body)
+}
+
+/// [`spawn_loopback`] with extra response headers, for the vendors that carry
+/// data in headers (Codex's `x-codex-*-used-percent` / credit balance) or that
+/// tell us when to retry (`Retry-After`). `extra_headers` must be a
+/// already-CRLF-terminated block, e.g. `"Retry-After: 120\r\n"`.
+pub(crate) fn spawn_loopback_with_headers(
+    status_line: &'static str,
+    extra_headers: &'static str,
+    body: &'static str,
+) -> String {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let addr = listener.local_addr().expect("addr");
@@ -20,7 +32,7 @@ pub(crate) fn spawn_loopback(status_line: &'static str, body: &'static str) -> S
             let mut buf = [0u8; 1024];
             let _ = stream.read(&mut buf);
             let response = format!(
-                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes());
@@ -50,10 +62,31 @@ fn engine_maps_engine_direct_and_custom_ids() {
 }
 
 #[test]
+fn engine_maps_every_curated_acp_id() {
+    let cases = [
+        ("acp:claude", Engine::Claude),
+        ("acp:codex", Engine::Codex),
+        ("acp:copilot", Engine::Copilot),
+        ("acp:grok", Engine::Grok),
+        ("acp:glm", Engine::Glm),
+    ];
+    for (id, expected) in cases {
+        assert_eq!(engine_for_agent(id), Some(expected), "{id}");
+    }
+}
+
+#[test]
 fn engine_none_for_unsupported_agents() {
     for id in [
         "ryu",
+        // Cursor, Gemini/Antigravity, Droid and Qwen are deliberately out of
+        // scope (see the crate docs' "Known gaps"), so they must stay hidden
+        // rather than half-reported.
+        "acp:cursor",
         "acp:gemini",
+        "acp:droid",
+        "acp:qwen",
+        "acp:codebuddy",
         "acp:pi",
         "openclaw",
         "zeroclaw",
@@ -97,7 +130,10 @@ fn engine_prefers_claude_when_both_substrings_present() {
         Some(Engine::Claude)
     ));
     // Case-insensitivity applies to the exact-id branch too.
-    assert!(matches!(engine_for_agent("ACP:CLAUDE"), Some(Engine::Claude)));
+    assert!(matches!(
+        engine_for_agent("ACP:CLAUDE"),
+        Some(Engine::Claude)
+    ));
     assert!(matches!(engine_for_agent("ACP:CODEX"), Some(Engine::Codex)));
 }
 
@@ -197,6 +233,7 @@ fn unavailable_reason_serializes_snake_case() {
         (UsageUnavailable::NotLoggedIn, "not_logged_in"),
         (UsageUnavailable::TokenExpired, "token_expired"),
         (UsageUnavailable::MissingScope, "missing_scope"),
+        (UsageUnavailable::NoPlan, "no_plan"),
         (UsageUnavailable::RateLimited, "rate_limited"),
         (UsageUnavailable::Error, "error"),
     ];
@@ -217,33 +254,33 @@ fn unavailable_snapshot_serialization_skips_optional_fields() {
     assert_eq!(obj.get("available").unwrap(), false);
     assert_eq!(obj.get("reason").unwrap(), "unsupported");
     assert!(obj.get("windows").unwrap().as_array().unwrap().is_empty());
-    // skip_serializing_if — must be absent when None.
+    // skip_serializing_if — must be absent when None/empty.
     assert!(!obj.contains_key("plan"));
     assert!(!obj.contains_key("extra_usage_usd"));
+    assert!(!obj.contains_key("retry_after_seconds"));
+    assert!(!obj.contains_key("meters"));
 }
 
 #[test]
 fn available_snapshot_serializes_all_fields() {
-    let snap = UsageSnapshot {
-        agent_id: "acp:claude".to_string(),
-        engine: "claude".to_string(),
-        available: true,
-        plan: Some("Max 20x".to_string()),
-        reason: None,
-        windows: vec![
-            UsageWindow {
-                label: "Session".to_string(),
-                used_percent: 42.5,
-                resets_at: Some("2026-07-23T00:00:00Z".to_string()),
-            },
-            UsageWindow {
-                label: "Weekly".to_string(),
-                used_percent: 0.0,
-                resets_at: None,
-            },
-        ],
-        extra_usage_usd: Some(1.25),
-    };
+    let mut snap = UsageSnapshot::available("acp:claude", "claude", Some("Max 20x".to_string()));
+    snap.windows = vec![
+        UsageWindow {
+            label: "Session".to_string(),
+            used_percent: 42.5,
+            resets_at: Some("2026-07-23T00:00:00Z".to_string()),
+            window_seconds: Some(18_000),
+            model: None,
+        },
+        UsageWindow {
+            label: "Weekly".to_string(),
+            used_percent: 0.0,
+            resets_at: None,
+            window_seconds: None,
+            model: None,
+        },
+    ];
+    snap.extra_usage_usd = Some(1.25);
     let v = serde_json::to_value(&snap).unwrap();
     let obj = v.as_object().unwrap();
     assert_eq!(obj.get("available").unwrap(), true);
@@ -253,10 +290,128 @@ fn available_snapshot_serializes_all_fields() {
     assert!(!obj.contains_key("reason"));
     let windows = obj.get("windows").unwrap().as_array().unwrap();
     assert_eq!(windows.len(), 2);
-    // First window carries resets_at, second omits it (skip_serializing_if).
+    // First window carries resets_at + window_seconds, second omits both.
     assert!(windows[0].as_object().unwrap().contains_key("resets_at"));
+    assert_eq!(windows[0].get("window_seconds").unwrap(), 18_000);
     assert!(!windows[1].as_object().unwrap().contains_key("resets_at"));
+    assert!(!windows[1]
+        .as_object()
+        .unwrap()
+        .contains_key("window_seconds"));
     assert_eq!(windows[0].get("used_percent").unwrap(), 42.5);
+}
+
+#[test]
+fn meter_serializes_values_kinds_and_expiries() {
+    let mut snap = UsageSnapshot::available("acp:codex", "codex", None);
+    snap.meters = vec![
+        UsageMeter::new(
+            "Rate limit resets",
+            vec![UsageValue::new(
+                2.0,
+                UsageValueKind::Count,
+                Some("available"),
+            )],
+        )
+        .with_expiries(vec![
+            "2026-07-31T09:00:00+00:00".to_string(),
+            "2026-08-02T17:30:00+00:00".to_string(),
+        ]),
+        UsageMeter::new(
+            "Credits",
+            vec![
+                UsageValue::new(32.84, UsageValueKind::Dollars, None),
+                UsageValue::new(821.0, UsageValueKind::Count, Some("credits")),
+            ],
+        )
+        .with_resets_at(Some("2026-08-01T00:00:00+00:00".to_string())),
+    ];
+    let v = serde_json::to_value(&snap).unwrap();
+    let meters = v.get("meters").unwrap().as_array().unwrap();
+    assert_eq!(meters.len(), 2);
+
+    let banked = meters[0].as_object().unwrap();
+    assert_eq!(banked.get("label").unwrap(), "Rate limit resets");
+    assert_eq!(
+        banked.get("expires_at").unwrap().as_array().unwrap().len(),
+        2
+    );
+    // A row with no period rollover omits resets_at entirely.
+    assert!(!banked.contains_key("resets_at"));
+    let value = banked.get("values").unwrap().as_array().unwrap()[0]
+        .as_object()
+        .unwrap();
+    assert_eq!(value.get("kind").unwrap(), "count");
+    assert_eq!(value.get("unit").unwrap(), "available");
+
+    let credits = meters[1].as_object().unwrap();
+    // No per-item expiries → the array is skipped rather than sent empty.
+    assert!(!credits.contains_key("expires_at"));
+    assert!(credits.contains_key("resets_at"));
+    let dollars = credits.get("values").unwrap().as_array().unwrap()[0]
+        .as_object()
+        .unwrap();
+    assert_eq!(dollars.get("kind").unwrap(), "dollars");
+    // `unit` is skipped when the kind already says everything.
+    assert!(!dollars.contains_key("unit"));
+}
+
+#[test]
+fn clamp_percent_holds_the_range() {
+    assert_eq!(clamp_percent(-4.0), 0.0);
+    assert_eq!(clamp_percent(0.0), 0.0);
+    assert_eq!(clamp_percent(55.5), 55.5);
+    assert_eq!(clamp_percent(140.0), 100.0);
+    assert_eq!(clamp_percent(f64::NAN), 0.0);
+}
+
+#[test]
+fn timestamp_to_rfc3339_accepts_every_shape_vendors_send() {
+    let parse = |v: serde_json::Value| timestamp_to_rfc3339(Some(&v));
+    // ISO-8601 with a zone.
+    assert!(parse(serde_json::json!("2026-07-31T09:00:00Z"))
+        .unwrap()
+        .starts_with("2026-07-31T09:00:00"));
+    // A bare calendar date (Copilot's free tier) → midnight UTC.
+    assert!(parse(serde_json::json!("2026-07-31"))
+        .unwrap()
+        .starts_with("2026-07-31T00:00:00"));
+    // Epoch seconds vs. epoch milliseconds, told apart by magnitude.
+    let secs = parse(serde_json::json!(1_800_000_000i64)).unwrap();
+    let millis = parse(serde_json::json!(1_800_000_000_000i64)).unwrap();
+    assert_eq!(secs, millis);
+    // Junk yields None rather than a fabricated date.
+    assert!(parse(serde_json::json!("not a date")).is_none());
+    assert!(parse(serde_json::json!("")).is_none());
+    assert!(timestamp_to_rfc3339(None).is_none());
+}
+
+#[test]
+fn title_case_splits_on_separators() {
+    assert_eq!(title_case("plus", &['_']), "Plus");
+    assert_eq!(title_case("PRO", &['_']), "Pro");
+    assert_eq!(title_case(" team ", &['_']), "Team");
+    assert_eq!(title_case("copilot_pro", &['_']), "Copilot Pro");
+    assert_eq!(title_case("business-plus", &['_', '-']), "Business Plus");
+    assert_eq!(title_case("", &['_']), "");
+}
+
+#[test]
+fn retry_after_reads_delta_seconds_only() {
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+    let mut headers = HeaderMap::new();
+    assert_eq!(retry_after_seconds(&headers), None);
+    headers.insert(RETRY_AFTER, HeaderValue::from_static("120"));
+    assert_eq!(retry_after_seconds(&headers), Some(120));
+    // A negative value is nonsense; an HTTP-date is deliberately unparsed rather
+    // than guessed at.
+    headers.insert(RETRY_AFTER, HeaderValue::from_static("-5"));
+    assert_eq!(retry_after_seconds(&headers), None);
+    headers.insert(
+        RETRY_AFTER,
+        HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+    );
+    assert_eq!(retry_after_seconds(&headers), None);
 }
 
 struct FakeHost {

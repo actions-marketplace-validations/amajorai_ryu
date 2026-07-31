@@ -174,7 +174,13 @@ function buildModelSection(params: ModelSectionParams): ComposerModelSection {
 function withGroupedModelMenu(
 	section: ComposerModelSection,
 	installedStems: string[],
-	activeStem?: string | null
+	activeStem?: string | null,
+	/**
+	 * The subscription agent whose per-model quotas the rows should show. Null for
+	 * Ryu (Gateway-routed models have no vendor window) and for any agent with no
+	 * readable subscription usage.
+	 */
+	usageAgentId?: string | null
 ): ComposerModelSection {
 	if (section.items.length === 0) {
 		return section;
@@ -188,7 +194,11 @@ function withGroupedModelMenu(
 	return {
 		...section,
 		items: merged,
-		renderContent: createModelMenuRenderer(grouped, section.value),
+		renderContent: createModelMenuRenderer(
+			grouped,
+			section.value,
+			usageAgentId
+		),
 	};
 }
 
@@ -426,7 +436,10 @@ export function useComposerAcpSections({
 					onEngineModelChange,
 				}),
 				isRyuAgent ? installedStems : [],
-				isRyuAgent ? activeStem : null
+				isRyuAgent ? activeStem : null,
+				// Only an external ACP harness runs on its own vendor subscription, so
+				// only its models can carry a per-model quota.
+				activeAgentIsAcp ? agentId : null
 			),
 			loading: activeAgentIsAcp && acpConfigLoading,
 		};

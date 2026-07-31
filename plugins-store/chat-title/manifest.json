@@ -1,0 +1,52 @@
+{
+  "id": "chat-title",
+  "name": "Chat Title",
+  "version": "1.0.0",
+  "runnables": [],
+  "permission_grants": [
+    "hook:side-model",
+    "conversation:set-title",
+    "preferences:read"
+  ],
+  "activation_events": ["*"],
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "chat-title.settings",
+        "title": "Chat titles",
+        "scope": "node",
+        "fields": [
+          {
+            "type": "toggle",
+            "pref_key": "auto-title-enabled",
+            "label": "Auto-rename chats",
+            "description": "Generate short titles as the conversation progresses. Off leaves the first-message placeholder.",
+            "default": true
+          },
+          {
+            "type": "number",
+            "pref_key": "auto-title-every-n",
+            "label": "Rename every N turns",
+            "description": "Re-title after this many completed assistant turns (1 = every turn). Default 5.",
+            "default": 5,
+            "min": 1,
+            "max": 100
+          },
+          {
+            "type": "model_picker",
+            "pref_key": "auto-title-model",
+            "label": "Title model",
+            "description": "Optional. Empty uses the local engine (or the node default)."
+          }
+        ]
+      }
+    ],
+    "turn_hooks": [
+      {
+        "id": "chat-title.rename",
+        "on": "post_assistant_turn",
+        "code_file": "hooks/rename.js"
+      }
+    ]
+  }
+}

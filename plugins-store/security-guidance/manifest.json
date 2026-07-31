@@ -1,0 +1,53 @@
+{
+  "id": "security-guidance",
+  "name": "Security Guidance",
+  "version": "1.0.0",
+  "engines": {
+    "ryu": ">=0.0.1"
+  },
+  "runnables": [],
+  "permission_grants": ["hook:side-model"],
+  "activation_events": ["*"],
+  "contributes": {
+    "composer_controls": [
+      {
+        "id": "security-guidance.toggle",
+        "type": "toggle",
+        "flag": "io.ryu.security-guidance",
+        "label": "Security review",
+        "description": "Scan each answer for security vulnerabilities and review the code with a second model."
+      }
+    ],
+    "settings_tabs": [
+      {
+        "id": "security-guidance.settings",
+        "title": "Security review",
+        "fields": [
+          {
+            "type": "model_picker",
+            "pref_key": "security-review-model",
+            "label": "Reviewer model"
+          }
+        ]
+      }
+    ],
+    "slash_commands": [
+      {
+        "id": "security-guidance.run",
+        "command": "/security",
+        "description": "Run a one-off security review of the last answer."
+      }
+    ],
+    "turn_hooks": [
+      {
+        "id": "security-guidance.review",
+        "on": "post_assistant_turn",
+        "match": {
+          "flag": "io.ryu.security-guidance",
+          "commands": ["/security"]
+        },
+        "code_file": "hooks/review.js"
+      }
+    ]
+  }
+}

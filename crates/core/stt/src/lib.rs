@@ -89,11 +89,18 @@ fn parse_verbose_segments(body: &Value) -> Vec<TranscriptSegment> {
 
 /// The cross-surface default STT engine, resolved as a swappable default (never
 /// a hardcoded literal). Parakeet v3 (in-process ONNX) is the default whenever
-/// this build compiled the `voice-parakeet` feature — the shipped dev and
-/// release binaries do, so the installed app transcribes with parakeet out of the
-/// box. Lean CI/`cargo test` builds omit the feature and fall back to whisper.cpp
-/// so transcription still works there. `RYU_STT_ENGINE` overrides both, so one
-/// env var re-points every surface.
+/// this build compiled the `voice-parakeet` feature. Lean builds omit the feature
+/// and default to whisper.cpp so transcription still works there.
+/// `RYU_STT_ENGINE` overrides both, so one env var re-points every surface.
+///
+/// Which builds carry the feature is a *release-pipeline* fact, and it has been
+/// wrong before: the flag lived only in `apps/core/package.json` (`dev`/
+/// `dev:watch`/`build`), so every developer had parakeet while the three binaries
+/// users actually install — `.github/workflows/release.yml`,
+/// `scripts/release/release-local.sh`, `Dockerfile` — were built featureless and
+/// silently defaulted to whisper. All four sites now pass
+/// `--features sandbox-wasmtime,voice-parakeet,voice-vad`; keep them in sync (the
+/// release workflow asserts the resolved feature graph).
 pub fn default_stt_engine() -> String {
     if let Ok(env_engine) = std::env::var("RYU_STT_ENGINE") {
         let trimmed = env_engine.trim();
@@ -150,6 +157,16 @@ pub async fn transcribe_wav_detailed(
         .unwrap_or_else(default_stt_engine);
 
     // Route to the in-process parakeet engine (default). Text only — no segments.
+    //
+    // No silent fallback to whisper on a lean build. `parakeet::transcribe` hard-
+    // errors when `voice-parakeet` is off, and that error is surfaced verbatim on
+    // purpose: reaching here at all means parakeet was *named* — either explicitly
+    // per-request, via `RYU_STT_ENGINE`, or by a stored preference — because
+    // [`default_stt_engine`] already picks whisper when the feature is absent.
+    // Honouring a named engine by quietly running a different one is the silent
+    // swap `ryu_sandbox::select_backend` refuses for the same reason: the caller
+    // would get whisper's accuracy/latency while believing it measured parakeet.
+    // The error text names both remedies (switch to whisper, or rebuild).
     if engine == "parakeet" {
         return parakeet::transcribe(bytes, host.parakeet_model_dir())
             .await

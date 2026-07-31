@@ -13,7 +13,12 @@ import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
-import type { SpaceDocument, SpaceMatch } from "@/src/lib/api/spaces.ts";
+import {
+	describeRetrievalModeChange,
+	type RetrievalMode,
+	type SpaceDocument,
+	type SpaceMatch,
+} from "@/src/lib/api/spaces.ts";
 import { WHITEBOARD_PLUGIN_ID } from "@/src/lib/whiteboard/app.ts";
 
 /** URL segment for a document editor route, by kind: page → doc, database → db,
@@ -46,8 +51,13 @@ export default function SpacesPage({
 		search,
 		createPage,
 		createDatabase,
+		setRetrievalMode,
 	} = useSpacesContext();
 	const { openTab } = useTabsContext();
+	// Only the whiteboard create reaches the node directly (through the plugin host);
+	// documents, ingest and search all go through `useSpacesContext`, which owns the
+	// target. No `nodeUrl`/`nodeToken` split is needed here now that nothing in this
+	// page issues its own per-document request.
 	const node = useActiveNode();
 
 	const [selectedId, setSelectedId] = useState<string | null>(
@@ -74,6 +84,13 @@ export default function SpacesPage({
 	const [searchResults, setSearchResults] = useState<SpaceMatch[] | null>(null);
 	const [searchBusy, setSearchBusy] = useState(false);
 	const [searchError, setSearchError] = useState<string | null>(null);
+	const [retrievalModeBusy, setRetrievalModeBusy] = useState(false);
+	const [retrievalModeError, setRetrievalModeError] = useState<string | null>(
+		null
+	);
+	const [retrievalModeNotice, setRetrievalModeNotice] = useState<string | null>(
+		null
+	);
 
 	// Select the requested space once it resolves in the loaded list.
 	useEffect(() => {
@@ -97,17 +114,43 @@ export default function SpacesPage({
 		}
 	}, [visibleSpaces, selectedId]);
 
+	// Bumped on every load so a list that resolves after the user has switched spaces
+	// (or reloaded) is discarded instead of overwriting the current selection's rows.
+	const loadSeq = useRef(0);
+
+	// ── One request, badges included ────────────────────────────────────────────
+	//
+	// Whether each file's TEXT is searchable arrives on the list itself: Core joins
+	// its per-document extraction record onto every `kind = 'file'` row of `GET
+	// /api/spaces/:id/documents` (`space_file_index::attach_index_states`), so
+	// `SpaceDocument.indexState` is populated by `fetchDocuments` and nothing else.
+	//
+	// This used to be a second pass — one `…/documents/:doc_id/index` request per
+	// file row, batched eight at a time — because the status lived in a Core-side
+	// store the list route did not read. Against the **Uploads** system space, which
+	// collects every chat attachment and editor paste on the node and is nothing but
+	// file rows, that was one round trip per row with no upper bound. The join
+	// replaced it; re-introducing a per-row fetch here would restore the cost and
+	// give the same three fields two writers.
 	const loadDocuments = useCallback(
 		async (spaceId: string) => {
 			setDocsError(null);
+			loadSeq.current += 1;
+			const seq = loadSeq.current;
+			let docs: SpaceDocument[];
 			try {
-				setDocuments(await listDocuments(spaceId));
+				docs = await listDocuments(spaceId);
 			} catch (e) {
 				console.error("Failed to load space documents", e);
 				setDocsError(
 					"We couldn't load this space's documents. Please try again."
 				);
+				return;
 			}
+			if (seq !== loadSeq.current) {
+				return;
+			}
+			setDocuments(docs);
 		},
 		[listDocuments]
 	);
@@ -120,6 +163,10 @@ export default function SpacesPage({
 		setIngestTitle("");
 		setIngestContent("");
 		setIngestError(null);
+		// The retrieval notice describes ONE space's rebuild. Carrying it across a
+		// selection change would report another space's entity counts as this one's.
+		setRetrievalModeError(null);
+		setRetrievalModeNotice(null);
 		if (selected) {
 			loadDocuments(selected.id).catch(() => undefined);
 		} else {
@@ -134,8 +181,14 @@ export default function SpacesPage({
 		setIngestBusy(true);
 		setIngestError(null);
 		try {
-			const docs = await ingest(selected.id, ingestTitle.trim(), ingestContent);
-			setDocuments(docs);
+			await ingest(selected.id, ingestTitle.trim(), ingestContent);
+			// Reload through `loadDocuments`, like the three sibling create handlers,
+			// so this page has one path that writes `documents` and one place the
+			// `loadSeq` guard has to hold. (The list `ingest` returns now carries index
+			// state too — Core joins it — so adopting it would no longer blank the
+			// badges; going through the same call is a consistency choice, not a
+			// workaround.)
+			await loadDocuments(selected.id);
 			setIngestTitle("");
 			setIngestContent("");
 		} catch (err) {
@@ -159,6 +212,30 @@ export default function SpacesPage({
 			setSearchError("Search didn't work just now. Please try again.");
 		} finally {
 			setSearchBusy(false);
+		}
+	};
+
+	const handleRetrievalModeChange = async (mode: RetrievalMode) => {
+		// Guard on `retrievalModeBusy` as well as disabling the control: the rebuild
+		// runs in one uncancellable `spawn_blocking` transaction on the node, so a
+		// second call would queue a second full rebuild of the same space.
+		if (!selected || retrievalModeBusy || selected.retrievalMode === mode) {
+			return;
+		}
+		setRetrievalModeBusy(true);
+		setRetrievalModeError(null);
+		setRetrievalModeNotice(null);
+		try {
+			setRetrievalModeNotice(
+				describeRetrievalModeChange(await setRetrievalMode(selected.id, mode))
+			);
+		} catch (err) {
+			console.error("Failed to change retrieval mode", err);
+			setRetrievalModeError(
+				"We couldn't change this space's retrieval mode. It is unchanged — please try again."
+			);
+		} finally {
+			setRetrievalModeBusy(false);
 		}
 	};
 
@@ -261,12 +338,26 @@ export default function SpacesPage({
 					name: selected.name,
 					description: selected.description,
 					documentCount: selected.documentCount,
+					// The Retrieval card renders off THIS mapping, not the list one
+					// below. Dropping it here hides the control silently.
+					retrievalMode: selected.retrievalMode,
 				},
 				documents: documents.map((d) => ({
 					id: d.id,
 					title: d.title,
 					chunkCount: d.chunkCount,
 					kind: d.kind,
+					// Passed straight through, never derived. `d.kind` could not answer
+					// this anyway (`toDocumentKind` coerces the wire's `'file'` to
+					// `'page'`), but the deeper reason is that "is this file's text
+					// searchable" is a fact about the `document.parse` capability that only
+					// Core holds. `null` becomes `undefined` here, which the view reads as
+					// "say nothing" and renders as the plain chunk count — the right
+					// answer for a non-file row (Core omits `index` for pages, databases,
+					// whiteboards and app documents) and for an older node.
+					indexState: d.indexState ?? undefined,
+					indexMessage: d.indexMessage,
+					indexWarnings: d.indexWarnings,
 				})),
 				documentsError: docsError,
 				ingestTitle,
@@ -288,6 +379,12 @@ export default function SpacesPage({
 					handleNewWhiteboard().catch(() => undefined);
 				},
 				onOpenDoc: openDoc,
+				onRetrievalModeChange: (mode) => {
+					handleRetrievalModeChange(mode).catch(() => undefined);
+				},
+				retrievalModeBusy,
+				retrievalModeError,
+				retrievalModeNotice,
 				searchQuery,
 				searchBusy,
 				searchError,
@@ -332,6 +429,7 @@ export default function SpacesPage({
 				name: s.name,
 				description: s.description,
 				documentCount: s.documentCount,
+				retrievalMode: s.retrievalMode,
 			}))}
 		/>
 	);

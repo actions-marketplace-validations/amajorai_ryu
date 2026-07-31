@@ -105,6 +105,7 @@
     "takumi-js"
   ],
   "patchedDependencies": {
-    "@expo/cli@55.0.16": "patches/@expo%2Fcli@55.0.16.patch"
+    "@expo/cli@55.0.16": "patches/@expo%2Fcli@55.0.16.patch",
+    "sileo@0.1.5": "patches/sileo@0.1.5.patch"
   }
 }

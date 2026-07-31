@@ -78,11 +78,14 @@ import {
 	DEFAULT_CARD_SPACING,
 	DEFAULT_CHAT_WIDTH,
 	DEFAULT_RADIUS,
+	DEFAULT_SCALE,
 	DEFAULT_SIDEBAR_WIDTH,
 	DEFAULT_SPACING,
 	HEADING_FONTS,
 	MAX_SIDEBAR_WIDTH,
 	MIN_SIDEBAR_WIDTH,
+	SCALE_MAX,
+	SCALE_MIN,
 	SIDEBAR_WIDTH_KEY,
 	setCardSpacing,
 	setChatWidth,
@@ -92,6 +95,7 @@ import {
 	setHeadingFont,
 	setLightPreset,
 	setRadius,
+	setScale,
 	setSidebarWidthSetting,
 	setSpacing,
 	setUiFont,
@@ -862,6 +866,9 @@ export function AppearanceTab() {
 			localStorage.getItem(STORAGE_KEYS.spacing) ?? String(DEFAULT_SPACING)
 		)
 	);
+	const [scaleValue, setScaleValue] = useState<number>(() =>
+		Number(localStorage.getItem(STORAGE_KEYS.scale) ?? String(DEFAULT_SCALE))
+	);
 	const [cardSpacingValue, setCardSpacingValue] = useState<number>(() =>
 		Number(
 			localStorage.getItem(STORAGE_KEYS.cardSpacing) ??
@@ -1027,6 +1034,14 @@ export function AppearanceTab() {
 		setSpacing(value);
 	};
 
+	const handleScale = (vals: number | readonly number[]) => {
+		const value = Array.isArray(vals)
+			? ((vals as number[])[0] ?? DEFAULT_SCALE)
+			: (vals as number);
+		setScaleValue(value);
+		setScale(value);
+	};
+
 	const handleCardSpacing = (vals: number | readonly number[]) => {
 		const value = Array.isArray(vals)
 			? ((vals as number[])[0] ?? DEFAULT_CARD_SPACING)
@@ -1074,6 +1089,7 @@ export function AppearanceTab() {
 		setContrastValue(APPEARANCE_DEFAULTS.contrast);
 		setRadiusValue(APPEARANCE_DEFAULTS.radius);
 		setSpacingValue(APPEARANCE_DEFAULTS.spacing);
+		setScaleValue(APPEARANCE_DEFAULTS.scale);
 		setCardSpacingValue(DEFAULT_CARD_SPACING);
 		setChatWidthValue(APPEARANCE_DEFAULTS.chatWidth);
 		setSidebarWidthValue(APPEARANCE_DEFAULTS.sidebarWidth);
@@ -1201,6 +1217,22 @@ export function AppearanceTab() {
 						step={0.025}
 						value={radiusValue}
 					/>
+
+					<div className="space-y-1.5">
+						<ElasticSlider
+							formatValue={(v) => `${(v * 100).toFixed(0)}%`}
+							label="Scale (UI zoom)"
+							max={SCALE_MAX}
+							min={SCALE_MIN}
+							onValueChange={handleScale}
+							step={0.05}
+							value={scaleValue}
+						/>
+						<p className="text-muted-foreground text-xs">
+							Scales the whole interface like a browser zoom — text, spacing,
+							and everything else. 100% is the default.
+						</p>
+					</div>
 
 					<div className="space-y-1.5">
 						<ElasticSlider

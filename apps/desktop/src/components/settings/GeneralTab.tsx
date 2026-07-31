@@ -199,6 +199,7 @@ export function GeneralTab() {
 			STORAGE_KEYS.contrast,
 			STORAGE_KEYS.radius,
 			STORAGE_KEYS.spacing,
+			STORAGE_KEYS.scale,
 			STORAGE_KEYS.cardSpacing,
 			STORAGE_KEYS.chatWidth,
 		]) {

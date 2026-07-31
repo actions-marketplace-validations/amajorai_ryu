@@ -1,0 +1,38 @@
+{
+  "id": "goal",
+  "name": "Goal",
+  "version": "1.0.0",
+  "runnables": [],
+  "permission_grants": ["hook:side-model", "storage:kv"],
+  "activation_events": ["*"],
+  "contributes": {
+    "slash_commands": [
+      {
+        "id": "goal.set",
+        "command": "/goal",
+        "description": "Pursue a goal until a judge model says it is met. Use '/goal clear' to stop."
+      }
+    ],
+    "settings_tabs": [
+      {
+        "id": "goal.settings",
+        "title": "Goals",
+        "fields": [
+          {
+            "type": "model_picker",
+            "pref_key": "goal-judge-model",
+            "label": "Judge model"
+          }
+        ]
+      }
+    ],
+    "turn_hooks": [
+      {
+        "id": "goal.loop",
+        "on": "post_assistant_turn",
+        "match": { "commands": ["/goal"], "stateful": true },
+        "code_file": "hooks/loop.js"
+      }
+    ]
+  }
+}

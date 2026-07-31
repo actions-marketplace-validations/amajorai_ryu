@@ -1,12 +1,12 @@
 "use client";
 
-import { AppleHelloEffect } from "@ryu/ui/components/apple-hello-effect.tsx";
 import {
 	Avatar,
 	AvatarFallback,
 	AvatarImage,
 } from "@ryu/ui/components/avatar.tsx";
 import { Card } from "@ryu/ui/components/card.tsx";
+import { Signature } from "@ryu/ui/components/signature.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 
 const STORY_PARAGRAPHS = [
@@ -38,7 +38,12 @@ export default function LandingTestimonials() {
 					</div>
 
 					<div className="mt-10">
-						<AppleHelloEffect className="h-16 text-foreground" text="jiawei" />
+						<Signature
+							className="text-foreground"
+							fontSize={24}
+							inView
+							text="Jia Wei Ng"
+						/>
 					</div>
 
 					<div className="mt-12 flex items-center gap-4">

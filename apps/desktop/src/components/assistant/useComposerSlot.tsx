@@ -23,6 +23,7 @@ import { useComposerAcpSections } from "@/components/agent-elements/input/use-co
 import {
 	type AttachedImage,
 	InputBar,
+	type InputBarInfoBar,
 	type InputBarProps,
 } from "@/components/agent-elements/input-bar.tsx";
 import { VoiceModeSurface } from "@/src/components/voice/VoiceModeSurface.tsx";
@@ -150,9 +151,14 @@ export function useComposerSlot(
 	});
 
 	// The shared composer controls, driven by this surface's runtime selection.
-	const { leftActions, rightActions, sections, renderBody } =
+	const { infoBar, leftActions, rightActions, sections, renderBody } =
 		useComposerAgentControls({
 			agents,
+			// Derived, never hardcoded: a dock/builder pane with no conversation yet
+			// is opening one, which is the same first clause the turn path tests
+			// (`req.conversation_id.is_none()`). Hardcoding false here would let a
+			// cross-agent rule fire on a turn whose own composer said it wouldn't.
+			atConversationStart: !conversationId,
 			agentId: runtime.agentId,
 			onSelectAgent: runtime.setAgentId,
 			modelOptions: runtime.modelOptions,
@@ -277,12 +283,16 @@ export function useComposerSlot(
 		left: ReactNode;
 		onGenerateImage?: (prompt: string) => void | Promise<void>;
 		onStartVoiceMode: () => void;
+		infoBar: InputBarInfoBar | undefined;
 		placeholder?: string;
 		right: ReactNode;
 		sections: ComposerSettingsSection[];
 		shortcuts: typeof composerShortcuts;
 	}>({
 		compact,
+		// The threshold-fallback notice, so a dock/builder composer says the same
+		// thing the chat page does when a rule reroutes a turn.
+		infoBar,
 		left: leftActions,
 		onGenerateImage,
 		onStartVoiceMode: voiceMode.start,
@@ -293,6 +303,7 @@ export function useComposerSlot(
 	});
 	liveRef.current = {
 		compact,
+		infoBar,
 		left: leftActions,
 		onGenerateImage,
 		onStartVoiceMode: voiceMode.start,
@@ -310,6 +321,7 @@ export function useComposerSlot(
 					<InputBar
 						{...props}
 						compact={live.compact}
+						infoBar={live.infoBar}
 						leftActions={live.left}
 						onGenerateImage={live.onGenerateImage}
 						onTextareaKeyDown={(event) => {

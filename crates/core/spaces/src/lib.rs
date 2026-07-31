@@ -167,7 +167,107 @@ pub struct SpaceAccessMeta {
 }
 
 /// Maximum characters per chunk before the ingestion pipeline splits.
+///
+/// Also the reason entity fan-out per chunk is bounded by a constant: a chunk this
+/// size holds ≲ 250 tokens of ≥ 3 characters, so [`extract_entities`] can return at
+/// most ~250 entities and [`build_graph_for_chunks`] at most ~62,250 edges for it.
+/// That is the worst case; measured on English prose it is **≈57 distinct entities
+/// ⇒ ≈3,200 edges per chunk**. Raising this raises the graph's per-chunk cost
+/// **quadratically** — and the per-Space cost with it (see the measured table on
+/// [`build_graph_for_chunks`]).
 const CHUNK_CHAR_SIZE: usize = 1_000;
+
+/// Maximum entities carried from one [`SpaceStore::graph_search`] BFS hop into the
+/// next.
+///
+/// Not a tuning knob so much as the thing that makes the traversal terminate in
+/// bounded work: co-occurrence edges join every entity pair within a chunk, so an
+/// entity's out-degree grows with the size of the Space, and an unbounded hop-2
+/// frontier is "every entity in the Space". 512 is far above what any fixture or
+/// realistic query needs to reach its `limit` chunks (the multi-hop fixture walks
+/// frontiers of size ≤ 3), and far below the point where a hop's SQL cost is
+/// noticeable.
+///
+/// # Exact semantics, because "a cap" underspecifies three things
+///
+/// - **Per hop, not cumulative.** `next_frontier` is rebuilt each iteration, so the
+///   ceiling on entities expanded by a whole search is `seeds + max_hops × 512`, not
+///   512.
+/// - **It keeps the lexicographically smallest neighbours**, because the edge query
+///   carries `ORDER BY e.dst_entity` (that `ORDER BY` is there for determinism, and
+///   this is its second, unadvertised job). Which entities survive is therefore
+///   arbitrary with respect to relevance — it is alphabetical.
+/// - **It bounds frontier growth only, not the hop's work.** The check sits *after*
+///   chunk collection, so a saturated hop still issues one chunk query per frontier
+///   entity; what it stops is the *next* hop exploding.
+///
+/// Retuning this **changes retrieval**, it does not merely change speed: a chunk
+/// whose only path runs through a truncated frontier entity stops being reachable —
+/// and in a sparse Space it stays unreachable, since nothing rediscovers the dropped
+/// entity on a later hop. That is not a theory; it is asserted by
+/// `graph_search_frontier_truncation_can_drop_a_reachable_chunk`, which fails (finds
+/// the chunk) the moment the cap is lifted. Three tests hold the bound, sized from
+/// this constant so changing it cannot leave them vacuous:
+/// `graph_search_truncates_an_oversized_frontier` (the branch runs, over stored
+/// edges), `graph_search_reaches_a_two_hop_chunk_through_a_truncated_frontier` (a
+/// truncated search still returns the grounded chunk), and the lossiness test above.
+const MAX_FRONTIER_ENTITIES: usize = 512;
+
+/// **The graph seed floor.** A query entity present in more than this fraction of a
+/// Space's chunks does not discriminate between them, so it is not allowed to seed
+/// the traversal when a rarer query entity can.
+///
+/// # Why a floor exists at all
+///
+/// [`extract_entities`] admits every token ≥ 3 chars that is capitalised **or**
+/// longer than 4 — i.e. most words of ordinary prose. Seeding a BFS from all of them
+/// makes graph recall approximately "any chunk sharing a long word with the query",
+/// and since [`fuse_ranked_lists`](ryu_rag::fuse_ranked_lists) merges by *rank*, that
+/// list's first element lands next to the best cosine hit in **every** chat turn for
+/// an allowlisted graph Space. Worse, the seed loop stops the moment `limit` chunks
+/// are collected, so a Space-wide-common entity that happens to sort first in the
+/// query crowds the rare, discriminating one out entirely — the chunk the user was
+/// actually asking about is never even visited.
+/// `graph_seed_floor_keeps_a_common_word_from_crowding_out_a_rare_one` is that case,
+/// and it fails without this floor.
+///
+/// # Why *this* floor, and what it deliberately does not do
+///
+/// It is classic inverse-document-frequency pruning, computed from the Space's own
+/// `graph_nodes` rows: deterministic, offline, no model, one `COUNT` per query
+/// entity. It filters **seeds only** — a common entity reached as a *neighbour* is
+/// still expanded, so no multi-hop path is cut. That is what keeps
+/// `graphrag_multi_hop_finds_connected_chunk_that_vector_misses` (the only proof the
+/// feature works) answering exactly as before.
+///
+/// The cost of that restraint, stated rather than left to be discovered: this is
+/// **not** a filter over the result. When the flooding word and the rare one share a
+/// chunk — the normal case, since that is usually why the user typed both — the
+/// flooding entity comes back as a hop-1 neighbour and its chunks are collected a hop
+/// later. What the floor changes is which chunk is visited *first*, and therefore
+/// what occupies rank 0, which is the position the chat path injects.
+///
+/// Two escape hatches keep it from ever emptying a result set that works today:
+///
+/// - **Small Spaces are exempt** ([`SEED_FLOOR_MIN_CHUNKS`]): below that many chunks
+///   the fraction is noise, not a statistic.
+/// - **If every query entity floods, none is dropped.** A single-entity query, and a
+///   query made only of Space-wide words, seed exactly as they did before — there is
+///   no rarer alternative to prefer, and returning nothing would be strictly worse
+///   than returning something weakly grounded.
+///
+/// 0.5 is a judgement, not a measurement, and is stated as one: an entity in more
+/// than half a Space's chunks cannot partition it. Retuning it **changes which
+/// chunks a graph query returns**, so it belongs in the same commit as the test
+/// above.
+const SEED_MAX_CHUNK_FRACTION: f64 = 0.5;
+
+/// Minimum Space size (in chunks) before [`SEED_MAX_CHUNK_FRACTION`] is applied at
+/// all. In a three-chunk Space "appears in more than half the chunks" describes two
+/// chunks, which says nothing about a term's specificity — so the floor would be
+/// filtering on noise. Kept deliberately small: it exists to exempt fixtures and
+/// brand-new Spaces, not to disable the floor in practice.
+const SEED_FLOOR_MIN_CHUNKS: i64 = 8;
 
 /// Name of the auto-created, hidden Space that backs meeting notes. Kept in sync
 /// with `meetings_api::MEETINGS_SPACE_NAME` and the desktop's spaces hide-filter.
@@ -378,19 +478,86 @@ pub enum RetrievalMode {
 }
 
 impl RetrievalMode {
-    fn as_str(self) -> &'static str {
+    /// The wire + column spelling. This is the ONE spelling: it is what the
+    /// `retrieval_mode` column stores, what `Serialize` emits (the `snake_case`
+    /// rename above produces the same two strings), and what [`Self::parse`]
+    /// accepts. Keep the three in lockstep — a wire form that does not round-trip
+    /// through `parse`/`as_str` silently degrades to `Vector`, which is exactly the
+    /// "settable value that cannot take effect" defect this API exists to remove.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Vector => "vector",
             Self::Graph => "graph",
         }
     }
 
+    /// **Strict** parse for values that arrive from a *caller* (HTTP body, env var,
+    /// `registry.json`). Returns `None` for an unknown or empty spelling so the
+    /// caller can reject it loudly instead of quietly retrieving with the wrong
+    /// algorithm. Use this everywhere a human typed the value.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "vector" => Some(Self::Vector),
+            "graph" => Some(Self::Graph),
+            _ => None,
+        }
+    }
+
+    /// **Lenient** parse for values read back out of the `retrieval_mode` column.
+    ///
+    /// Deliberately different from [`Self::parse`]: a DB row is not a caller. The
+    /// column is `NOT NULL DEFAULT 'vector'`, so the only way an unknown spelling
+    /// gets there is a hand-edited sqlite file or a downgrade from a future build
+    /// that added a third mode. Degrading such a row to `Vector` keeps its Space
+    /// searchable; erroring would make every query on it fail. Writes are guarded
+    /// by `parse` at the boundary, so this can never mask a live typo.
     fn from_str(s: &str) -> Self {
         match s {
             "graph" => Self::Graph,
             _ => Self::Vector,
         }
     }
+}
+
+/// What a [`SpaceStore::set_retrieval_mode`] call actually did.
+///
+/// Every field exists so the HTTP response can *state the consequence* rather than
+/// just returning 200. Switching a populated Space to `Graph` is not a metadata
+/// edit: graph extraction is gated on mode inside `insert_chunks`, so a Space that
+/// was ingested in `Vector` mode has **no** `graph_nodes`/`graph_edges` rows at all,
+/// and flipping only the column would route its searches at an empty graph — a
+/// Space that answers nothing. So the switch rebuilds the graph from the chunks
+/// already on disk, in the same transaction, and reports what it built.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RetrievalModeChange {
+    /// The mode the Space had before this call.
+    pub previous: RetrievalMode,
+    /// The mode the Space has now.
+    pub mode: RetrievalMode,
+    /// Whether `previous != mode`. A no-op re-assert still rebuilds a graph (see
+    /// `graph_rebuilt`), because that is the *only* repair path for a Space whose
+    /// graph was dropped or never built — there is no incremental "top up the
+    /// missing rows" mode, so re-asserting `Graph` is how an operator fixes one.
+    ///
+    /// This used to read "the cheap repair path", which was wrong in the same way
+    /// [`SpaceStore::set_retrieval_mode`]'s doc was before it was measured: a
+    /// re-assert is a *full* rebuild and costs exactly what a first build costs
+    /// (~16 s on a 1,566-chunk Space, and it was tens of seconds to minutes before
+    /// [`graph_row_id`] — see the table on
+    /// [`build_graph_for_chunks`]). `changed: false` therefore does **not** mean
+    /// "this call did nothing"; it is often the most expensive call the endpoint
+    /// makes, and a caller that renders it as a cheap no-op is lying to the user.
+    pub changed: bool,
+    /// Whether the entity graph was (re)built by this call. True whenever the new
+    /// mode is `Graph`; false when switching to `Vector` (which instead *drops* the
+    /// now-unmaintained graph rows).
+    pub graph_rebuilt: bool,
+    /// How many chunks the rebuild walked. `0` when switching to `Vector`.
+    pub chunks_scanned: usize,
+    /// Entity nodes written by the rebuild.
+    pub graph_nodes: usize,
+    /// Co-occurrence edges written by the rebuild.
+    pub graph_edges: usize,
 }
 
 // ── Domain types ───────────────────────────────────────────────────────────────
@@ -677,6 +844,68 @@ fn extract_entities(text: &str) -> Vec<String> {
         }
     }
     entities
+}
+
+/// Drop query entities that are too common in `space_id` to discriminate between
+/// its chunks, so [`SpaceStore::graph_search`] seeds from the informative ones.
+/// See [`SEED_MAX_CHUNK_FRACTION`] for the policy and its two escape hatches.
+///
+/// Reads document frequency from `graph_nodes` (one indexed `COUNT` per query
+/// entity — queries are a handful of words, so this is a constant-ish cost paid
+/// once per search, against the per-entity chunk+edge queries the traversal itself
+/// issues).
+///
+/// Entities with **zero** stored nodes are dropped unconditionally, and that is
+/// behaviour-preserving rather than a second policy: [`build_graph_for_chunks`]
+/// writes a chunk's nodes and its edges from the same entity set, so an entity with
+/// no `graph_nodes` row has no `graph_edges` row either — it can contribute neither
+/// a chunk nor a neighbour. It is excluded from the "did everything flood?" test for
+/// the same reason: falling back to a word the Space has never seen would answer
+/// nothing at all.
+fn seed_entities_above_floor(
+    conn: &Connection,
+    space_id: &str,
+    entities: Vec<String>,
+) -> Result<Vec<String>> {
+    // One entity: there is no rarer alternative to prefer, so the floor could only
+    // turn a working query into an empty one. Skips two queries on the common path.
+    if entities.len() < 2 {
+        return Ok(entities);
+    }
+    let total_chunks: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE space_id = ?1",
+            params![space_id],
+            |row| row.get(0),
+        )
+        .context("counting space chunks for the graph seed floor")?;
+    if total_chunks < SEED_FLOOR_MIN_CHUNKS {
+        return Ok(entities);
+    }
+    let cutoff = total_chunks as f64 * SEED_MAX_CHUNK_FRACTION;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT COUNT(DISTINCT chunk_id) FROM graph_nodes
+             WHERE space_id = ?1 AND entity = ?2",
+        )
+        .context("preparing seed-entity document frequency query")?;
+    let mut kept = Vec::with_capacity(entities.len());
+    for entity in &entities {
+        let df: i64 = stmt
+            .query_row(params![space_id, entity], |row| row.get(0))
+            .context("reading seed-entity document frequency")?;
+        if df > 0 && (df as f64) <= cutoff {
+            kept.push(entity.clone());
+        }
+    }
+    // Nothing survived: either every entity the Space holds floods it, or the Space
+    // holds none of them. Seed exactly as before — returning the original list is
+    // "no floor applied" in the first case and inert in the second.
+    if kept.is_empty() {
+        return Ok(entities);
+    }
+    Ok(kept)
 }
 
 // ── Wiki page-link extraction ───────────────────────────────────────────────────
@@ -1379,9 +1608,21 @@ impl SpaceStore {
         Ok(())
     }
 
-    /// Create a new Space and return its id. The `retrieval_mode` defaults to
-    /// `"vector"` (backward-compatible). Pass `Some(RetrievalMode::Graph)` to opt
-    /// into graph retrieval for this Space.
+    /// Create a new Space and return its id, hard-defaulting `retrieval_mode` to
+    /// `"vector"`.
+    ///
+    /// This is the *literal* default (`DEFAULT_RAG_STRATEGY`'s twin), not the
+    /// operator-configurable one. The node-wide default from `registry.json` /
+    /// `RYU_RAG_STRATEGY` is applied one layer up, at the HTTP creator
+    /// (`server::create_space` → `ModelRegistry::resolve_rag_strategy`), because
+    /// this crate deliberately has no dependency on Core's model registry. In-crate
+    /// and system-space callers (`ensure_system_space`) intentionally stay on the
+    /// literal `Vector`: an Artifacts/Clips/Uploads singleton is a filing drawer,
+    /// not a knowledge base, and flipping it to graph on an operator's global knob
+    /// would change retrieval for surfaces that never asked for it.
+    ///
+    /// Use [`Self::create_space_with_mode`] to opt a Space into graph retrieval, or
+    /// [`Self::set_retrieval_mode`] to change one after the fact.
     pub async fn create_space(
         &self,
         name: &str,
@@ -1514,6 +1755,40 @@ impl SpaceStore {
     /// Ingest a document into a Space: chunk the text, embed each chunk, and store
     /// the rows plus their vectors. In graph mode also extracts entities/relations.
     /// Returns the new document id. Errors if the Space does not exist.
+    ///
+    /// # Why the write half runs on `spawn_blocking`
+    ///
+    /// In **graph** mode this transaction reaches [`build_graph_for_chunks`], whose
+    /// cost is `O(chunks × entities²)`: measured on English prose, ≈57 distinct
+    /// entities per ~990-char chunk ⇒ ≈3,200 edge INSERTs **per chunk**, and ~20–55
+    /// ms per chunk on an on-disk db (see the table on [`build_graph_for_chunks`]).
+    /// A large upload is therefore seconds-to-minutes of uninterruptible SQLite
+    /// work, and it used to run inline on the tokio worker that polled this future —
+    /// the same defect that [`Self::set_retrieval_mode`] was moved off the worker
+    /// for, differing only in that the input is one document rather than a whole
+    /// Space. "One document" is not a bound: a single uploaded book is one document.
+    /// `graph_ingest_does_not_occupy_the_async_worker` is the regression guard, and
+    /// it counted 0 scheduler ticks against the inline shape.
+    ///
+    /// Be precise about what moving it does and does not buy — the same three points
+    /// as [`Self::set_retrieval_mode`], because it is the same connection and the
+    /// same one-transaction guarantee:
+    ///
+    /// - **Fixed:** no runtime worker is parked for the duration. Embedding still
+    ///   happens *before* the lock (it may do network I/O), so only the SQL runs on
+    ///   the blocking pool.
+    /// - **NOT fixed:** the connection mutex is held for the whole transaction, so
+    ///   every other `SpaceStore` call — including every *other* Space — still
+    ///   queues behind it. Moving the work changes *who* waits, not *whether*.
+    /// - **Behaviour change, stated rather than discovered:** the write is now
+    ///   detached from the caller's future. Dropping that future (client disconnect,
+    ///   request timeout) after the blocking task is spawned no longer even
+    ///   *appears* to abandon the ingest — it runs to completion and **commits**,
+    ///   and the caller never learns the new id. Inline, the same commit happened
+    ///   (the body had no await point, so it could not be interrupted either), so
+    ///   nothing became less cancellable; what changed is that the result can now be
+    ///   dropped on the floor. A panic inside the body likewise surfaces as
+    ///   `Err(… task panicked)` instead of unwinding into the caller's task.
     pub async fn ingest_document(
         &self,
         space_id: &str,
@@ -1533,7 +1808,53 @@ impl SpaceStore {
 
         let document_id = uuid::Uuid::new_v4().to_string();
         let now = now_millis();
-        let mut conn = self.conn.lock().await;
+        // `spawn_blocking` demands `'static`, so the borrowed arguments are cloned
+        // and the guard is taken as an *owned* one. Acquiring the lock HERE rather
+        // than inside the closure keeps the wait asynchronous: callers queue on the
+        // tokio mutex instead of occupying a blocking-pool thread while they wait.
+        let space_id = space_id.to_owned();
+        let title = title.to_owned();
+        let content = content.to_owned();
+        let tenancy = tenancy.clone();
+        let guard = self.conn.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            Self::ingest_document_blocking(
+                guard,
+                &document_id,
+                &space_id,
+                &title,
+                &content,
+                now,
+                &model_id,
+                dims,
+                &embedded,
+                &tenancy,
+            )
+        })
+        .await
+        .context("document ingest task panicked")?
+    }
+
+    /// The blocking body of [`SpaceStore::ingest_document`]. Split out only so the
+    /// `spawn_blocking` closure stays a one-liner; all the reasoning about *why* it
+    /// is shaped this way lives on the public method.
+    ///
+    /// Takes the guard **by value** so the connection is released exactly when the
+    /// transaction ends, on the blocking thread, whether it commits or unwinds.
+    #[allow(clippy::too_many_arguments)]
+    fn ingest_document_blocking(
+        mut guard: tokio::sync::OwnedMutexGuard<Connection>,
+        document_id: &str,
+        space_id: &str,
+        title: &str,
+        content: &str,
+        now: i64,
+        model_id: &str,
+        dims: usize,
+        embedded: &[(String, Vec<f32>)],
+        tenancy: &DocOwner,
+    ) -> Result<String> {
+        let conn = &mut *guard;
         let tx = conn.transaction().context("starting ingest transaction")?;
 
         // Verify the Space exists and read its retrieval mode.
@@ -1550,7 +1871,7 @@ impl SpaceStore {
 
         upsert_document_row(
             &tx,
-            &document_id,
+            document_id,
             space_id,
             title,
             now,
@@ -1565,11 +1886,11 @@ impl SpaceStore {
 
         insert_chunks(
             &tx,
-            &document_id,
+            document_id,
             space_id,
-            &embedded,
+            embedded,
             now,
-            &model_id,
+            model_id,
             dims,
             mode,
         )?;
@@ -1582,11 +1903,11 @@ impl SpaceStore {
 
         // Wiki page-links: store this document's outgoing links, and resolve any
         // pending inbound links now that this title exists.
-        store_doc_links(&tx, space_id, &document_id, content, now)?;
-        reresolve_pending_links(&tx, space_id, &document_id, title)?;
+        store_doc_links(&tx, space_id, document_id, content, now)?;
+        reresolve_pending_links(&tx, space_id, document_id, title)?;
 
         tx.commit().context("committing ingest transaction")?;
-        Ok(document_id)
+        Ok(document_id.to_owned())
     }
 
     /// Create an empty Notion-style page (document with no content yet) in a Space.
@@ -1865,6 +2186,40 @@ impl SpaceStore {
     ///
     /// This is the substrate the `create_artifact` tool and chat auto-filing sit
     /// on: a generated pptx/xlsx/csv/pdf/png lands here as a first-class Space doc.
+    ///
+    /// # The descriptor chunk obeys the Space's `retrieval_mode`, like every other
+    /// # chunk
+    ///
+    /// This used to pass a hardcoded [`RetrievalMode::Vector`] to [`insert_chunks`],
+    /// so a file added to a **graph**-mode Space got a chunk with no
+    /// `graph_nodes`/`graph_edges` row. That is not a missing optimisation, it is an
+    /// inconsistency with a user-visible edge: [`Self::set_retrieval_mode`] rebuilds
+    /// from `SELECT id, content FROM chunks`, which **does** include file chunks. So
+    /// the same file in the same Space was retrievable or not depending on the order
+    /// the user happened to do things — upload-then-flip worked, create-Graph-Space-
+    /// then-upload did not — and the natural flow was the broken one. The mode is now
+    /// read from the Space row inside the same transaction that writes the document,
+    /// exactly as [`Self::ingest_document`] and [`Self::update_document`] do.
+    ///
+    /// **What that does and does not make findable.** The only chunk a file has is
+    /// the descriptor (`title` + `mime`) — a file's *bytes* are never chunked, in
+    /// either mode. So the graph rows this now writes are entities of the filename
+    /// and mime type, which is precisely what the rebuild would have written for the
+    /// same row. Closing this makes ingest and rebuild agree; it does not make a
+    /// PDF's prose reachable. Text extraction is the `document.parse` facade's job,
+    /// and its output reaches a Space through [`Self::ingest_document`].
+    ///
+    /// # Why the transaction runs on the blocking pool
+    ///
+    /// It is the **fourth** `SpaceStore` write path that can now reach
+    /// [`build_graph_for_chunks`], and it joins its three siblings on
+    /// [`tokio::task::spawn_blocking`] for the same reason. "It is only one chunk" is
+    /// true but is not a bound: the descriptor is never split by [`chunk_text`], and
+    /// `title` is caller-supplied with no length cap at any HTTP or MCP entry point,
+    /// so its entity count — and therefore the `n·(n−1)` edge fan-out — is bounded by
+    /// nothing this crate controls. That hazard already existed on the rebuild path
+    /// (which scans this same row); what changes here is only that the *cheap* path
+    /// no longer differs from it.
     pub async fn create_file(
         &self,
         space_id: &str,
@@ -1888,43 +2243,98 @@ impl SpaceStore {
 
         let document_id = uuid::Uuid::new_v4().to_string();
         let now = now_millis();
-        let mut conn = self.conn.lock().await;
-        let exists: Option<i64> = conn
+        // Same ownership shape as `ingest_document`: the guard is acquired HERE (so
+        // callers queue on the async mutex, not on a blocking-pool thread) and moved
+        // into the closure, which releases it when the transaction ends.
+        let space_id = space_id.to_owned();
+        let title = title.to_owned();
+        let mime = mime.to_owned();
+        let tenancy = tenancy.clone();
+        let guard = self.conn.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            Self::create_file_blocking(
+                guard,
+                &document_id,
+                &space_id,
+                &title,
+                &mime,
+                &sha,
+                byte_size,
+                &descriptor,
+                vector,
+                now,
+                &model_id,
+                dims,
+                &tenancy,
+            )
+        })
+        .await
+        .context("file insert task panicked")?
+    }
+
+    /// The blocking body of [`SpaceStore::create_file`]. Split out only so the
+    /// `spawn_blocking` closure stays a one-liner; the reasoning lives on the public
+    /// method. Takes the guard by value so the connection is released exactly when
+    /// the transaction ends, on the blocking thread.
+    #[allow(clippy::too_many_arguments)]
+    fn create_file_blocking(
+        mut guard: tokio::sync::OwnedMutexGuard<Connection>,
+        document_id: &str,
+        space_id: &str,
+        title: &str,
+        mime: &str,
+        sha: &str,
+        byte_size: i64,
+        descriptor: &str,
+        vector: Vec<f32>,
+        now: i64,
+        model_id: &str,
+        dims: usize,
+        tenancy: &DocOwner,
+    ) -> Result<String> {
+        let conn = &mut *guard;
+        let tx = conn.transaction().context("starting file insert")?;
+
+        // Verify the Space exists and read its retrieval mode — one query, inside the
+        // transaction, so the mode cannot change between the check and the write. The
+        // "not found" wording is load-bearing: `POST /api/spaces/:id/files` maps it to
+        // a 404 by substring.
+        let mode_str: Option<String> = tx
             .query_row(
-                "SELECT 1 FROM spaces WHERE id = ?1",
+                "SELECT retrieval_mode FROM spaces WHERE id = ?1",
                 params![space_id],
                 |row| row.get(0),
             )
             .optional()
             .context("verifying space exists")?;
-        if exists.is_none() {
-            anyhow::bail!("space '{space_id}' not found");
-        }
-        let tx = conn.transaction().context("starting file insert")?;
+        let mode_str = mode_str.ok_or_else(|| anyhow::anyhow!("space '{space_id}' not found"))?;
+        let mode = RetrievalMode::from_str(&mode_str);
+
         upsert_document_row(
             &tx,
-            &document_id,
+            document_id,
             space_id,
             title,
             now,
-            &descriptor,
+            descriptor,
             "file",
             None,
             Some(mime),
-            Some(&sha),
+            Some(sha),
             Some(byte_size),
             tenancy,
         )?;
-        // Store the single descriptor chunk + its vector so the file is retrievable.
+        // Store the single descriptor chunk + its vector so the file is retrievable,
+        // and (in graph mode) its entity rows so graph traversal can reach it too.
         insert_chunks(
             &tx,
-            &document_id,
+            document_id,
             space_id,
-            &[(descriptor.clone(), vector)],
+            &[(descriptor.to_owned(), vector)],
             now,
-            &model_id,
+            model_id,
             dims,
-            RetrievalMode::Vector,
+            mode,
         )?;
         tx.execute(
             "UPDATE spaces SET updated_at = ?1 WHERE id = ?2",
@@ -1932,7 +2342,166 @@ impl SpaceStore {
         )
         .context("bumping space updated_at")?;
         tx.commit().context("committing file insert")?;
-        Ok(document_id)
+        Ok(document_id.to_owned())
+    }
+
+    /// Replace a **file** document's chunk set from extracted text, leaving every
+    /// other column on the row alone. Returns the number of chunks written.
+    ///
+    /// # Why this exists rather than reusing `update_document`
+    ///
+    /// [`Self::create_file`] stores exactly one chunk — the `{title}\n{mime}`
+    /// descriptor — so a PDF was findable by its *filename* and by nothing else. The
+    /// bytes are extracted Core-side by the `document.parse` facade (which is
+    /// apps/core code and must stay there: this crate has zero dependency on
+    /// apps/core), and the result has to land as chunks on the document that already
+    /// exists. [`Self::update_document`] is the obvious-looking seam and is the wrong
+    /// one, for three reasons that are all invisible until they have already
+    /// happened:
+    ///
+    /// 1. It writes `documents.source`. For `kind = 'file'` that column is the
+    ///    descriptor, [`Self::create_file`] is its only writer, and `get_document`
+    ///    hands it to clients. Repointing it at 400 KB of extracted markdown changes
+    ///    what every file document returns, irreversibly — the descriptor is not
+    ///    recoverable afterwards.
+    /// 2. It runs [`store_doc_links`] over the new source, so `[[…]]`-shaped text
+    ///    inside an *uploaded PDF* would mint wiki links, then unresolve and
+    ///    re-resolve inbound links as if the page had been renamed.
+    /// 3. It has nowhere to express "these chunks came from extraction" versus
+    ///    "these chunks are the descriptor" — the distinction the caller's index
+    ///    status is built on.
+    ///
+    /// So this is deliberately the *middle third* of [`Self::update_document_blocking`]
+    /// and nothing else: drop the old chunk/vector/graph rows, insert the new ones,
+    /// bump the Space. Title, `source`, and the link graph are untouched.
+    ///
+    /// # `kind = 'file'` is enforced, not assumed
+    ///
+    /// Skipping the `source` write is only *safe* for a file. For a page, `source`
+    /// IS the text the chunks were derived from, and rewriting chunks without it
+    /// would leave the row silently desynchronised from its own index — the exact
+    /// class of bug this method was written to close. A non-file id is an error.
+    ///
+    /// # Chunking is this crate's, on purpose
+    ///
+    /// `text` arrives whole and is split here by [`chunk_text`], the same function
+    /// [`Self::ingest_document`] and [`Self::update_document`] use. Chunking Core-side
+    /// and passing a `&[String]` would put a second definition of "what a chunk is"
+    /// one crate boundary away from the first, and the two would drift the moment
+    /// [`CHUNK_CHAR_SIZE`] moved. The caller controls only *what text* is indexed
+    /// (it prepends the descriptor as its own paragraph so filename retrieval
+    /// survives), never *how it is cut*.
+    ///
+    /// Empty/whitespace `text` is refused rather than accepted: [`chunk_text`] maps
+    /// it to a single empty chunk, which would replace a working descriptor chunk
+    /// with an unretrievable blank and make the document *less* findable than
+    /// before. The caller must keep the descriptor-only state instead.
+    ///
+    /// Runs the transaction on [`tokio::task::spawn_blocking`] with the guard taken
+    /// outside the closure, for the same reasons — and with the same three caveats —
+    /// as [`Self::ingest_document`]: in graph mode this reaches
+    /// [`build_graph_for_chunks`], whose cost is quadratic in entities per chunk, and
+    /// an extracted document is exactly the large input that makes that bite.
+    pub async fn replace_file_chunks(&self, doc_id: &str, text: &str) -> Result<usize> {
+        if text.trim().is_empty() {
+            anyhow::bail!("refusing to replace file chunks with empty text");
+        }
+        let chunks = chunk_text(text);
+
+        // Embed outside the lock — the embedder may do network I/O.
+        let emb = self.embedder_snapshot().await;
+        let model_id = emb.model_id().to_string();
+        let dims = emb.dims();
+        let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            embedded.push((chunk.clone(), emb.embed(chunk).await?));
+        }
+
+        let written = embedded.len();
+        let doc_id = doc_id.to_owned();
+        let now = now_millis();
+        let guard = self.conn.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            Self::replace_file_chunks_blocking(guard, &doc_id, now, &model_id, dims, &embedded)
+        })
+        .await
+        .context("file re-chunk task panicked")??;
+        Ok(written)
+    }
+
+    /// The blocking body of [`SpaceStore::replace_file_chunks`]. Split out only so the
+    /// `spawn_blocking` closure stays a one-liner; the reasoning lives on the public
+    /// method. Takes the guard by value so the connection is released exactly when the
+    /// transaction ends, on the blocking thread.
+    fn replace_file_chunks_blocking(
+        mut guard: tokio::sync::OwnedMutexGuard<Connection>,
+        doc_id: &str,
+        now: i64,
+        model_id: &str,
+        dims: usize,
+        embedded: &[(String, Vec<f32>)],
+    ) -> Result<()> {
+        let conn = &mut *guard;
+        let tx = conn.transaction().context("starting file re-chunk")?;
+
+        // Resolve the document's space + kind + the Space's retrieval mode in ONE
+        // query inside the transaction, so the mode cannot change between the read
+        // and the write — the same guarantee `create_file_blocking` relies on, and
+        // the reason a file added to a graph-mode Space gets graph rows.
+        let row: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT d.space_id, d.kind, s.retrieval_mode
+                 FROM documents d JOIN spaces s ON s.id = d.space_id
+                 WHERE d.id = ?1",
+                params![doc_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .context("resolving document for re-chunk")?;
+        let (space_id, kind, mode_str) =
+            row.ok_or_else(|| anyhow::anyhow!("document '{doc_id}' not found"))?;
+        if kind != "file" {
+            anyhow::bail!("document '{doc_id}' is kind '{kind}', not 'file'");
+        }
+        let mode = RetrievalMode::from_str(&mode_str);
+
+        // Drop the old chunk set — vectors and graph rows first, since both are keyed
+        // off the chunk rows this is about to delete.
+        tx.execute(
+            "DELETE FROM chunk_vectors WHERE rowid IN
+                 (SELECT rowid FROM chunks WHERE document_id = ?1)",
+            params![doc_id],
+        )
+        .context("deleting old file chunk vectors")?;
+        tx.execute(
+            "DELETE FROM graph_nodes WHERE chunk_id IN
+                 (SELECT id FROM chunks WHERE document_id = ?1)",
+            params![doc_id],
+        )?;
+        tx.execute(
+            "DELETE FROM graph_edges WHERE chunk_id IN
+                 (SELECT id FROM chunks WHERE document_id = ?1)",
+            params![doc_id],
+        )?;
+        tx.execute("DELETE FROM chunks WHERE document_id = ?1", params![doc_id])
+            .context("deleting old file chunks")?;
+
+        insert_chunks(&tx, doc_id, &space_id, embedded, now, model_id, dims, mode)?;
+
+        // The row's own `updated_at` moves (its index changed) but `source`, `title`
+        // and the link graph deliberately do NOT — see the method doc.
+        tx.execute(
+            "UPDATE documents SET updated_at = ?1 WHERE id = ?2",
+            params![now, doc_id],
+        )
+        .context("bumping document updated_at")?;
+        tx.execute(
+            "UPDATE spaces SET updated_at = ?1 WHERE id = ?2",
+            params![now, space_id],
+        )
+        .context("bumping space updated_at")?;
+        tx.commit().context("committing file re-chunk")?;
+        Ok(())
     }
 
     /// Fetch a file document's blob metadata (mime, sha256, size). Returns
@@ -2088,6 +2657,174 @@ impl SpaceStore {
         Ok(n > 0)
     }
 
+    /// Change a Space's [`RetrievalMode`], **rebuilding its entity graph so the new
+    /// mode actually takes effect**. Returns `None` when no such space exists.
+    ///
+    /// Why this is not a one-line `UPDATE`: graph extraction is gated on the mode
+    /// *at ingest time* (`insert_chunks`), so a Space ingested in `Vector` mode has
+    /// zero `graph_nodes`/`graph_edges` rows. Flipping only the column would point
+    /// `search_ext` at `graph_search`, which seeds its BFS from `graph_nodes` — and
+    /// an empty graph returns an empty result set. The Space would answer *nothing*
+    /// while reporting `retrieval_mode: "graph"`. So:
+    ///
+    /// - **→ `Graph`**: drop this space's graph rows and rebuild them from every
+    ///   chunk currently on disk, via the shared [`build_graph_for_chunks`].
+    ///   Re-asserting `Graph` on a Space that is already `Graph` therefore doubles
+    ///   as a graph *repair*.
+    /// - **→ `Vector`**: drop this space's graph rows. Nothing maintains them in
+    ///   vector mode, so keeping them would leave a graph that silently rots as
+    ///   documents change, and a later switch back would either double-insert or
+    ///   serve stale entities. The switch back rebuilds from scratch, so dropping
+    ///   loses nothing.
+    ///
+    /// The column write and the graph rebuild share ONE transaction: a crash
+    /// between them would leave `retrieval_mode = 'graph'` over an empty graph,
+    /// which is the precise failure this method exists to prevent.
+    ///
+    /// Chunk *vectors* are untouched in both directions — switching modes never
+    /// re-embeds, so it is safe to toggle back and forth.
+    ///
+    /// # What this costs, and what running it off the async worker does and does
+    /// # not buy
+    ///
+    /// The rebuild is **not** cheap, and this used to say it was ("pure SQL +
+    /// string work and runs inline") on the strength of "no model call". Measured on
+    /// an **on-disk** db, which is what a real Space is: a 1,566-chunk Space of
+    /// English prose writes 5.1M `graph_edges` rows and takes **46–87 s** across two
+    /// runs — 392 chunks takes ~10 s, and per-chunk cost *rises* with size. See
+    /// [`build_graph_for_chunks`] for the full table, the reproduction command, and
+    /// the `O(chunks × entities²)` shape. The unbounded dimension is the chunk
+    /// count, which is whatever the Space happens to hold, so one UI click on a
+    /// large Space is **minutes** of uninterruptible SQLite work.
+    ///
+    /// So the whole transaction runs on [`tokio::task::spawn_blocking`]. Be precise
+    /// about what that fixes, because the two are easy to conflate:
+    ///
+    /// - **Fixed:** the tokio worker thread is no longer occupied for the duration.
+    ///   Before, a large rebuild parked a runtime worker in a minutes-long
+    ///   `rusqlite` call with no yield point, so unrelated Core requests scheduled
+    ///   onto that worker stalled behind a Spaces button.
+    /// - **NOT fixed:** the *Space* is still unavailable for the duration, and on
+    ///   the numbers above that duration is minutes, not a blink. The connection
+    ///   mutex is held across the whole rebuild (it has to be — the column write and
+    ///   the graph rebuild are one transaction, which is the crash-consistency
+    ///   guarantee above), so every other `SpaceStore` call — search, list, ingest,
+    ///   *and every other Space*, since one connection serves all of them — waits.
+    ///   Moving the work to a blocking thread changes *who* waits, not *whether*.
+    /// - **Also NOT fixed:** the call is uncancellable and reports no progress.
+    ///   Dropping the caller's future (client disconnect, request timeout) does not
+    ///   stop the blocking task; it runs to completion and only then releases the
+    ///   guard. The HTTP caller may time out while the node stays busy.
+    ///
+    /// Both remaining problems have the same root — one `Connection` behind one
+    /// mutex, one transaction — so neither is fixable by tweaking this call. A
+    /// rebuild that is concurrent, cancellable, or resumable needs a second
+    /// connection (WAL readers) and chunked commits, which trades away the
+    /// all-or-nothing guarantee documented above. That trade has not been made;
+    /// this doc exists so it is made deliberately rather than discovered.
+    pub async fn set_retrieval_mode(
+        &self,
+        space_id: &str,
+        mode: RetrievalMode,
+    ) -> Result<Option<RetrievalModeChange>> {
+        // `spawn_blocking` demands `'static`, so the borrowed id is cloned and the
+        // guard is taken as an *owned* one. Acquiring the lock here rather than
+        // inside the closure keeps the wait itself asynchronous: callers queue on
+        // the tokio mutex, they do not occupy a blocking-pool thread while waiting.
+        let space_id = space_id.to_owned();
+        let mut guard = self.conn.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            Self::set_retrieval_mode_blocking(&mut guard, &space_id, mode)
+        })
+        .await
+        .context("retrieval-mode rebuild task panicked")?
+    }
+
+    /// The blocking body of [`SpaceStore::set_retrieval_mode`]. Split out only so
+    /// the `spawn_blocking` closure stays a one-liner; all the reasoning about
+    /// *why* it is shaped this way lives on the public method.
+    fn set_retrieval_mode_blocking(
+        conn: &mut Connection,
+        space_id: &str,
+        mode: RetrievalMode,
+    ) -> Result<Option<RetrievalModeChange>> {
+        let now = now_millis();
+        let tx = conn
+            .transaction()
+            .context("starting retrieval-mode transaction")?;
+
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT retrieval_mode FROM spaces WHERE id = ?1",
+                params![space_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("reading current retrieval_mode")?;
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+        let previous = RetrievalMode::from_str(&previous);
+
+        tx.execute(
+            "UPDATE spaces SET retrieval_mode = ?1, updated_at = ?2 WHERE id = ?3",
+            params![mode.as_str(), now, space_id],
+        )
+        .context("updating space retrieval_mode")?;
+
+        // Always clear first: in the → `Graph` direction this makes the rebuild
+        // idempotent (the tables carry no UNIQUE constraint, so a second pass over
+        // the same chunks would duplicate every node and edge); in the → `Vector`
+        // direction it is the whole point.
+        tx.execute(
+            "DELETE FROM graph_edges WHERE space_id = ?1",
+            params![space_id],
+        )
+        .context("clearing graph edges")?;
+        tx.execute(
+            "DELETE FROM graph_nodes WHERE space_id = ?1",
+            params![space_id],
+        )
+        .context("clearing graph nodes")?;
+
+        let mut chunks_scanned = 0usize;
+        let mut graph_nodes = 0usize;
+        let mut graph_edges = 0usize;
+        if mode == RetrievalMode::Graph {
+            let rows: Vec<(String, String)> = {
+                let mut stmt = tx
+                    .prepare("SELECT id, content FROM chunks WHERE space_id = ?1 ORDER BY rowid")
+                    .context("preparing chunk scan for graph rebuild")?;
+                let mapped =
+                    stmt.query_map(params![space_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                let mut v = Vec::new();
+                for row in mapped {
+                    v.push(row?);
+                }
+                v
+            };
+            chunks_scanned = rows.len();
+            let pairs: Vec<(&str, &str)> = rows
+                .iter()
+                .map(|(id, content)| (id.as_str(), content.as_str()))
+                .collect();
+            let (n, e) = build_graph_for_chunks(&tx, space_id, &pairs)?;
+            graph_nodes = n;
+            graph_edges = e;
+        }
+
+        tx.commit().context("committing retrieval-mode change")?;
+        Ok(Some(RetrievalModeChange {
+            previous,
+            mode,
+            changed: previous != mode,
+            graph_rebuilt: mode == RetrievalMode::Graph,
+            chunks_scanned,
+            graph_nodes,
+            graph_edges,
+        }))
+    }
+
     /// Set (or clear) a document's Notion-style glyph without re-embedding.
     /// Returns `false` when no such document exists.
     pub async fn set_document_icon(
@@ -2125,8 +2862,7 @@ impl SpaceStore {
             params![now, space_id],
         )
         .context("bumping space updated_at")?;
-        tx.commit()
-            .context("committing document icon update")?;
+        tx.commit().context("committing document icon update")?;
         Ok(true)
     }
 
@@ -2168,7 +2904,40 @@ impl SpaceStore {
         }
 
         let now = now_millis();
-        let mut conn = self.conn.lock().await;
+        // Same reasoning (and the same three caveats) as [`Self::ingest_document`]:
+        // in graph mode this transaction re-runs [`build_graph_for_chunks`] over the
+        // whole document, so an editor save on a large page is the same quadratic
+        // SQLite burst. Guard acquired here, outside the closure, so callers queue on
+        // the async mutex rather than on a blocking-pool thread.
+        let doc_id = doc_id.to_owned();
+        let title = title.to_owned();
+        let source = source.to_owned();
+        let guard = self.conn.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            Self::update_document_blocking(
+                guard, &doc_id, &title, &source, now, &model_id, dims, &embedded,
+            )
+        })
+        .await
+        .context("document update task panicked")?
+    }
+
+    /// The blocking body of [`SpaceStore::update_document`]. Split out only so the
+    /// `spawn_blocking` closure stays a one-liner; the reasoning lives on the public
+    /// method. Takes the guard by value so the connection is released exactly when
+    /// the transaction ends, on the blocking thread.
+    #[allow(clippy::too_many_arguments)]
+    fn update_document_blocking(
+        mut guard: tokio::sync::OwnedMutexGuard<Connection>,
+        doc_id: &str,
+        title: &str,
+        source: &str,
+        now: i64,
+        model_id: &str,
+        dims: usize,
+        embedded: &[(String, Vec<f32>)],
+    ) -> Result<()> {
+        let conn = &mut *guard;
         let tx = conn.transaction().context("starting update transaction")?;
 
         // Resolve the document's space + retrieval mode (and prove it exists).
@@ -2206,9 +2975,7 @@ impl SpaceStore {
         tx.execute("DELETE FROM chunks WHERE document_id = ?1", params![doc_id])
             .context("deleting old chunks")?;
 
-        insert_chunks(
-            &tx, doc_id, &space_id, &embedded, now, &model_id, dims, mode,
-        )?;
+        insert_chunks(&tx, doc_id, &space_id, embedded, now, model_id, dims, mode)?;
 
         tx.execute(
             "UPDATE documents SET title = ?1, source = ?2, updated_at = ?3 WHERE id = ?4",
@@ -2414,8 +3181,10 @@ impl SpaceStore {
     /// - `vector`: KNN similarity search (original behaviour, unchanged).
     /// - `graph`: entity-match + BFS traversal, returns grounded chunks.
     ///
-    /// Both paths return `Vec<ChunkMatch>`. For graph results, `distance` is
-    /// set to `0.0` (traversal hit) or a hop-count–derived synthetic value.
+    /// Both paths return `Vec<ChunkMatch>`. For graph results `distance` is the
+    /// constant `0.0` — a traversal hit has no metric distance, and no
+    /// hop-count-derived value is synthesised. Do not rank on `distance` across
+    /// modes: it is a real `vec0` distance only on the vector path.
     pub async fn search(
         &self,
         space_id: &str,
@@ -2626,10 +3395,73 @@ impl SpaceStore {
     /// Algorithm:
     /// 1. Extract query entities (same extractor used at ingest time).
     /// 2. Seed the BFS frontier with all chunks that contain those entities.
-    /// 3. For each frontier chunk, follow all outgoing edges to neighbour
+    /// 3. For each frontier entity, follow all outgoing edges to neighbour
     ///    entities, then find chunks containing those neighbours.
     /// 4. Continue until `limit` unique chunks are collected or no new frontier.
     /// 5. Return the collected chunks ordered: direct hits first, then 1-hop, etc.
+    ///
+    /// # Why the traversal is explicitly bounded
+    ///
+    /// The edges this walks are **co-occurrence**, not semantics: every pair of
+    /// entities in a chunk is joined (see [`build_graph_for_chunks`]), so with the
+    /// ≈57 entities measured in a 1,000-char chunk of prose each entity has ≈56
+    /// neighbours *from one chunk alone*, plus every entity of every other chunk it
+    /// appears in. An
+    /// unbounded 3-hop BFS over that is not a search, it is a table scan with extra
+    /// steps: hop 1 is thousands of entities, hop 2 is most of the Space.
+    ///
+    /// Three bounds hold it, and all three are load-bearing rather than defensive:
+    ///
+    /// - `max_hops = 3` — pre-existing, and the reason the multi-hop fixture
+    ///   (Alice→Acme→Paris) resolves at all.
+    /// - [`MAX_FRONTIER_ENTITIES`] per hop — new. Without it a hop's frontier is
+    ///   `Σ out-degree` over the previous hop, which on real prose is unbounded in
+    ///   the Space's size.
+    /// - `limit` is now checked **inside** the per-entity loop, not only between
+    ///   hops. It used to keep walking (and re-preparing SQL) long after the caller
+    ///   had all the chunks it asked for.
+    ///
+    /// # The frontier cap is lossy — this is a retrieval trade, not a speed knob
+    ///
+    /// When a hop's frontier saturates, the neighbours past the cap are simply not
+    /// expanded, and the survivors are whichever sort first (`ORDER BY
+    /// e.dst_entity`) — alphabetical order, which has nothing to do with relevance.
+    /// A chunk whose *only* path runs through a dropped entity is not returned. In a
+    /// dense Space the dropped entity is usually rediscovered a hop later through a
+    /// chunk it shares with a survivor, so the loss is often invisible; in a sparse
+    /// one it is permanent within `max_hops`.
+    /// `graph_search_frontier_truncation_can_drop_a_reachable_chunk` pins exactly
+    /// that case, and `graph_search_reaches_a_two_hop_chunk_through_a_truncated_frontier`
+    /// pins the other side: truncation alone does not break a two-hop answer. See
+    /// [`MAX_FRONTIER_ENTITIES`] for the per-hop-vs-cumulative semantics.
+    ///
+    /// # Determinism
+    ///
+    /// The frontier was a `HashSet`, so the traversal visited entities in
+    /// randomised order; whenever a Space had more reachable chunks than `limit`,
+    /// **which** chunks came back varied run to run. It is now insertion-ordered
+    /// (seeded in [`extract_entities`] order) and both queries carry an explicit
+    /// `ORDER BY`, so the same query over the same Space returns the same chunks in
+    /// the same order. Entities are also expanded at most once across all hops —
+    /// re-expanding one can only re-collect chunks already collected, so this drops
+    /// work without dropping reachable chunks.
+    ///
+    /// # The seeds carry a relevance floor; the traversal does not
+    ///
+    /// Query entities are filtered by [`SEED_MAX_CHUNK_FRACTION`] before the first
+    /// hop, so a word that appears in most of the Space cannot seed the walk while a
+    /// rarer query word can. Read that constant for why, for the two cases in which
+    /// it deliberately does nothing, and for the failing-without-it test.
+    ///
+    /// **Everything after the seed is still unfiltered**, and that is the accepted
+    /// trade rather than an oversight: hop-1..3 chunks come back with no relevance
+    /// requirement of their own (a multi-hop answer has none by construction — see
+    /// `graphrag_multi_hop_finds_connected_chunk_that_vector_misses`, where the
+    /// correct chunk shares no word with the query), carrying a synthetic
+    /// `distance` of 0.0. What orders them is BFS depth, then
+    /// [`Self::apply_reranking`]'s cross-encoder pass — which reorders but never
+    /// drops. The consequence for the chat path is documented on
+    /// `ryu_rag::SpaceRecall`.
     async fn graph_search(
         &self,
         space_id: &str,
@@ -2637,54 +3469,76 @@ impl SpaceStore {
         limit: usize,
     ) -> Result<Vec<ChunkMatch>> {
         let query_entities = extract_entities(query);
-        if query_entities.is_empty() {
+        if query_entities.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
 
         let conn = self.conn.lock().await;
+        let query_entities = seed_entities_above_floor(&conn, space_id, query_entities)?;
+
+        // Prepared once for the whole traversal. These used to be re-prepared per
+        // entity per hop, i.e. `2 × Σ frontier` SQL parses for one search.
+        let mut chunk_stmt = conn.prepare(
+            "SELECT DISTINCT n.chunk_id
+             FROM graph_nodes n
+             WHERE n.space_id = ?1 AND n.entity = ?2
+             ORDER BY n.chunk_id",
+        )?;
+        let mut edge_stmt = conn.prepare(
+            "SELECT DISTINCT e.dst_entity
+             FROM graph_edges e
+             WHERE e.space_id = ?1 AND e.src_entity = ?2
+             ORDER BY e.dst_entity",
+        )?;
 
         // Seed: find chunks that directly contain a query entity.
         let mut visited_chunks = LinkedHashSet::<String>::new();
-        let mut frontier_entities: std::collections::HashSet<String> =
-            query_entities.into_iter().collect();
-        let mut next_frontier: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Every entity that has been (or is about to be) expanded, so no entity is
+        // walked twice across hops.
+        let mut expanded = LinkedHashSet::<String>::new();
+        let mut frontier: Vec<String> = Vec::new();
+        for entity in query_entities {
+            if expanded.insert(entity.clone()) {
+                frontier.push(entity);
+            }
+        }
 
         let max_hops = 3usize;
-        for _ in 0..max_hops {
-            if frontier_entities.is_empty() || visited_chunks.len() >= limit {
+        'hops: for _ in 0..max_hops {
+            if frontier.is_empty() || visited_chunks.len() >= limit {
                 break;
             }
+            let mut next_frontier: Vec<String> = Vec::new();
             // For each frontier entity, collect the chunks it appears in.
-            for entity in &frontier_entities {
-                let mut stmt = conn.prepare(
-                    "SELECT DISTINCT n.chunk_id
-                     FROM graph_nodes n
-                     WHERE n.space_id = ?1 AND n.entity = ?2",
-                )?;
-                let chunk_rows =
-                    stmt.query_map(params![space_id, entity], |row| row.get::<_, String>(0))?;
+            for entity in &frontier {
+                let chunk_rows = chunk_stmt
+                    .query_map(params![space_id, entity], |row| row.get::<_, String>(0))?;
                 for row in chunk_rows {
-                    let cid = row?;
-                    if visited_chunks.len() < limit {
-                        visited_chunks.insert(cid);
+                    visited_chunks.insert(row?);
+                    // Stop the moment the caller's budget is met: any further
+                    // traversal can only produce chunks that would be truncated.
+                    if visited_chunks.len() >= limit {
+                        break 'hops;
                     }
                 }
-                // Collect neighbour entities via outgoing edges from this entity.
-                let mut edge_stmt = conn.prepare(
-                    "SELECT DISTINCT e.dst_entity
-                     FROM graph_edges e
-                     WHERE e.space_id = ?1 AND e.src_entity = ?2",
-                )?;
+                // Collect neighbour entities via outgoing edges from this entity,
+                // up to the per-hop frontier bound.
+                if next_frontier.len() >= MAX_FRONTIER_ENTITIES {
+                    continue;
+                }
                 let edge_rows = edge_stmt
                     .query_map(params![space_id, entity], |row| row.get::<_, String>(0))?;
                 for row in edge_rows {
                     let neighbour = row?;
-                    if !frontier_entities.contains(&neighbour) {
-                        next_frontier.insert(neighbour);
+                    if expanded.insert(neighbour.clone()) {
+                        next_frontier.push(neighbour);
+                        if next_frontier.len() >= MAX_FRONTIER_ENTITIES {
+                            break;
+                        }
                     }
                 }
             }
-            frontier_entities = std::mem::take(&mut next_frontier);
+            frontier = next_frontier;
         }
 
         // Load the matched chunks.
@@ -3499,35 +4353,365 @@ fn insert_chunks(
     }
 
     if mode == RetrievalMode::Graph {
-        for (chunk_content, chunk_id) in embedded.iter().map(|(c, _)| c).zip(chunk_ids.iter()) {
-            let entities = extract_entities(chunk_content);
-            for entity in &entities {
-                let node_id = uuid::Uuid::new_v4().to_string();
-                tx.execute(
-                    "INSERT OR IGNORE INTO graph_nodes (id, space_id, entity, chunk_id)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![node_id, space_id, entity, chunk_id],
-                )
+        let pairs: Vec<(&str, &str)> = chunk_ids
+            .iter()
+            .map(String::as_str)
+            .zip(embedded.iter().map(|(c, _)| c.as_str()))
+            .collect();
+        build_graph_for_chunks(tx, space_id, &pairs)?;
+    }
+    Ok(())
+}
+
+/// Monotonic row-id source for `graph_nodes` / `graph_edges`.
+///
+/// # Why these two tables do not get a `Uuid::new_v4()` like everything else
+///
+/// Both tables declare `id TEXT PRIMARY KEY`. On a rowid table that is **not** an
+/// alias for the rowid (only `INTEGER PRIMARY KEY` is); SQLite materialises it as a
+/// separate `sqlite_autoindex_*` b-tree keyed by the text. So every graph row pays
+/// an insertion into a second index, and with a v4 UUID that insertion lands at a
+/// uniformly random point in the key space — no write locality, a dirty page per
+/// row once the index outgrows the page cache, and page splits all the way down.
+/// That is a per-row tax on the one table this crate writes *millions* of rows to:
+/// [`build_graph_for_chunks`] emits `n·(n−1)` edges per chunk.
+///
+/// Ids here are also **write-only** — `grep 'FROM graph_nodes\|FROM graph_edges'`
+/// returns counts, joins on `chunk_id`, and traversals on `src_entity`/`dst_entity`;
+/// nothing anywhere selects, returns, or filters on `id`. It is a uniqueness token
+/// and nothing else, so its *shape* is free to change as long as uniqueness holds.
+///
+/// The shape chosen is `{process-start millis:012x}{process nonce:010x}{seq:010x}`:
+/// 32 hex characters, exactly the width of a `Uuid::simple()`, so the index does not
+/// grow. It sorts ascending within a process (the counter) and across process
+/// restarts (the timestamp), which turns a random-scatter insert into an append at
+/// the right-hand edge of the b-tree.
+///
+/// **Uniqueness is not weakened, which is the constraint that matters.**
+/// `INSERT OR IGNORE` on these tables is documented as inert — a colliding id would
+/// silently *drop an edge*, i.e. change what the graph contains, which is precisely
+/// the thing this work is not allowed to do. Within one process `(millis, nonce)` is
+/// fixed and the `AtomicU64` counter makes every id distinct by construction (10 hex
+/// = 1.1e12 ids, ~800× the largest graph ever measured here). Two *different*
+/// processes collide only if they start in the same millisecond **and** draw the
+/// same 40-bit nonce — 2⁻⁴⁰ — and Core runs one `SpaceStore` per process anyway.
+/// A backwards clock step costs locality, never uniqueness.
+///
+/// Measured effect: see the table on [`build_graph_for_chunks`].
+fn graph_row_id() -> String {
+    static PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let prefix = PREFIX.get_or_init(|| {
+        let millis = now_millis().max(0) as u64;
+        // Low 40 bits of a fresh v4 UUID: same entropy source as the ids this
+        // replaces, drawn once instead of once per row.
+        let nonce = uuid::Uuid::new_v4().as_u128() as u64 & 0xff_ffff_ffff;
+        format!("{millis:012x}{nonce:010x}")
+    });
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{prefix}{seq:010x}")
+}
+
+/// Counts written by one [`build_graph_for_chunks`] pass: `(nodes, edges)`.
+type GraphCounts = (usize, usize);
+
+/// Write the entity/co-occurrence graph for `chunks` (`(chunk_id, content)` pairs).
+///
+/// **The single definition of "what a Space's graph looks like."** Both writers go
+/// through it: `insert_chunks` (ingest / document update, graph mode only) and
+/// [`SpaceStore::set_retrieval_mode`] (rebuild when a Space is switched to graph).
+/// It exists as one function precisely so those two cannot drift — a rebuilt graph
+/// that differed from an ingested one would be invisible until a query returned
+/// different chunks depending on *how* the graph happened to be built.
+///
+/// Extraction is [`extract_entities`]: deterministic, offline co-occurrence over
+/// the chunk text. No embedder, no network, no model call.
+///
+/// # Cost — measured, because "no model call" is not the same as "cheap"
+///
+/// This used to claim the absence of a model call made the rebuild "affordable
+/// enough to run inline". That was never measured, and it is wrong: the expense
+/// here is not the extractor, it is the **quadratic edge fan-out** it feeds.
+/// [`extract_entities`] keeps every token ≥ 3 chars that is capitalised OR longer
+/// than 4 — i.e. most words of ordinary prose — and this function then emits
+/// `n·(n−1)` directed edges for a chunk with `n` distinct entities.
+///
+/// Measured, and **re-measurable** — that matters more than the exact seconds. The
+/// numbers below come from `measure_graph_rebuild_cost`, an `#[ignore]`d test in
+/// this file that prints them. Re-derive rather than trust:
+///
+/// ```text
+/// cargo test --release -p ryu-spaces measure_graph_rebuild_cost -- --ignored --nocapture --test-threads=1
+/// ```
+///
+/// Release build, English prose, `chunk_text` output averaging ~990 chars/chunk and
+/// **≈57 distinct entities/chunk** (see `PROSE`; per-chunk minima of 44 appear only
+/// at the short first/last boundary chunks of a small corpus and wash out as it
+/// grows — a full 1,000-char prose chunk sits at 57–58):
+///
+/// Two rows per size, because the interesting quantity is the **difference**: the
+/// `v4` line is the original measurement, taken while `graph_nodes.id` /
+/// `graph_edges.id` were `Uuid::new_v4()`; the `ordered` line is the same harness
+/// after [`graph_row_id`] replaced them. Same code otherwise, same corpus.
+///
+/// | chunks | nodes  | edge rows | id      | in-memory db | **on-disk db** | on-disk per chunk |
+/// |--------|--------|-----------|---------|--------------|----------------|-------------------|
+/// |     98 |  5,638 |   318,926 | v4      |       ~0.9 s |        ~2.0 s  |            ~20 ms |
+/// |     98 |  5,638 |   318,926 | ordered |       0.56 s |        0.97 s  |            ~10 ms |
+/// |    392 | 22,592 | 1,279,718 | v4      |       ~4.1 s |        ~9.6 s  |            ~24 ms |
+/// |    392 | 22,592 | 1,279,718 | ordered |       2.39 s |        4.35 s  |            ~11 ms |
+/// |  1,566 | 90,306 | 5,117,688 | v4      |      ~18.0 s |  **46 – 87 s** |         29 – 55 ms |
+/// |  1,566 | 90,306 | 5,117,688 | ordered |      10.09 s |     **16.3 s** |            ~10 ms |
+///
+/// The **row counts are exact and reproduce byte for byte** across runs *and across
+/// the id change* — 5,638/318,926, 22,592/1,279,718, 90,306/5,117,688 came back
+/// identical afterwards, which is the direct evidence that the speed-up did not cost
+/// a single graph row. They are a property of the algorithm, and
+/// `graph_edge_count_matches_the_quadratic_fan_out` asserts the formula behind them.
+///
+/// The **wall clocks are not exact**: two runs of the `v4` shape on the same
+/// idle-ish laptop put the 1,566-chunk on-disk case at 87 s and 46 s. That ~2× spread
+/// is the honest error bar on the old rows — and it is not mere noise, it is the
+/// mechanism, since a randomly-addressed index costs whatever happens to be resident.
+/// The `ordered` rows vary by ~10 %, and the two sets were taken on the same machine
+/// in different sessions, so read the ratio (2.8–5.3× at the bottom row) rather than
+/// subtracting seconds.
+///
+/// **Always compare within a session.** Free disk space moves the absolute figures
+/// by roughly 2× on its own: every A/B pair quoted here and on
+/// `measure_attachment_stall` was taken back to back on a volume that was ~100 %
+/// full, and re-running the ordered shape once the volume had ~56 GB free landed
+/// materially lower again (406 KB: 7.46 s → 3.77 s) with no code change whatsoever.
+/// That is why the claim made here is a ratio and never a wall clock.
+///
+/// **Read the on-disk column anyway.** A real Space is a file, so on-disk is the
+/// production number, and at 1,566 chunks it is still **~16 s** of uninterruptible
+/// SQLite work inside ONE transaction, from one UI click. What changed is the
+/// *shape*: per-chunk cost used to grow with the Space (20 → 24 → 29–55 ms) as
+/// `graph_edges` and its indexes outgrew the page cache, and is now flat at ~10 ms
+/// across a 16× range. A bigger Space is finally a straight multiple rather than
+/// worse than one — so extrapolate linearly, which the previous version of this
+/// paragraph explicitly told you not to do.
+///
+/// Order of magnitude — seconds to tens of seconds — is all the precision the "can
+/// this block a runtime worker" question needs, and it is the precision these
+/// numbers actually support. Concurrent load inflates them further.
+///
+/// The shape is `O(chunks × entities²)`. Both factors are bounded differently:
+/// - **entities per chunk is bounded by a constant.** [`chunk_text`] appends a word
+///   only while the running chunk stays under [`CHUNK_CHAR_SIZE`], so a chunk holds
+///   ≲ 250 tokens of ≥ 3 chars and therefore ≤ ~250 distinct entities → ≤ ~62,250
+///   edges. (`chunk_text` breaks *before* appending, so a single token longer than
+///   `CHUNK_CHAR_SIZE` does produce one oversized chunk — but one giant token is
+///   one entity, so it cannot inflate the fan-out.)
+/// - **chunk count is NOT bounded.** It is whatever the caller hands over. That is
+///   the dimension to budget for.
+///
+/// # Every path that can reach this function runs off the async worker
+///
+/// That is the checkable claim, and here is the whole set to check it against —
+/// **two callers, reached from four public paths, all four of which can carry graph
+/// work** (`grep 'build_graph_for_chunks('`; and `grep 'INTO graph_nodes\|INTO
+/// graph_edges'` returns only this function's two prepared statements, so nothing
+/// writes graph rows around it — `reindex_all` re-embeds vectors and never touches
+/// the graph tables):
+///
+/// - caller 1 — `set_retrieval_mode_blocking`, i.e.
+///   [`SpaceStore::set_retrieval_mode`]: passes **every chunk in the Space** from a
+///   single UI click, with no upper bound at all.
+/// - caller 2 — `insert_chunks`, itself reached from three places:
+///   - [`SpaceStore::ingest_document`] and [`SpaceStore::update_document`] pass
+///     **one document's** chunks — which is not a bound either, since one uploaded
+///     book is one document;
+///   - [`SpaceStore::create_file`] passes the file's single descriptor chunk
+///     (`title` + `mime`). It used to hardcode `RetrievalMode::Vector` and so never
+///     reached this function — which meant a file added to a graph-mode Space got no
+///     graph rows, while `set_retrieval_mode`'s rebuild (which scans that same chunk
+///     row) *did* give it some. That inconsistency is fixed; the budget note is that
+///     the descriptor is **not** split by [`chunk_text`] and `title` is uncapped at
+///     the HTTP/MCP entry points, so this path's fan-out is bounded by the caller's
+///     filename, not by `CHUNK_CHAR_SIZE`.
+///
+/// All four graph-carrying paths now wrap their transaction in
+/// [`tokio::task::spawn_blocking`]. Ingest used to be inline, on the reasoning that
+/// "one document" was a smaller input than "a whole Space" — true, and irrelevant:
+/// the per-chunk cost is this same `O(chunks × entities²)` fan-out either way, so a
+/// large upload parked a runtime worker for exactly as long as its own chunk count
+/// implied. `graph_ingest_does_not_occupy_the_async_worker` is the guard; it counted
+/// **0** scheduler ticks against the inline shape.
+///
+/// (The table above is *not* a measurement of ingest — it times a cold
+/// `set_retrieval_mode` rebuild over already-stored chunks, whereas ingest also
+/// embeds and writes `chunk_vectors`. Nobody has measured ingest end to end; if you
+/// need its real number, measure it rather than reusing these digits.)
+///
+/// The per-row work is a bound-and-step on ONE prepared statement per table,
+/// hoisted out of the loops: `rusqlite`'s `Transaction::execute` re-parses and
+/// re-plans its SQL on every call, so the old shape paid one parse per row. A/B'd
+/// in a single process over an identical 392-chunk / 1,279,718-edge corpus, run in
+/// both orderings so cache warmth cannot explain the gap:
+///
+/// | ordering       | `execute` per row | one prepared statement |
+/// |----------------|-------------------|------------------------|
+/// | prepared first |            4.93 s |                 3.75 s |
+/// | `execute` first|            5.03 s |                 3.88 s |
+///
+/// **≈23 % off**, with byte-identical output (22,592 nodes / 1,279,718 edges either
+/// way). So the parse was real but never dominant: the remaining ~3.8 s is b-tree
+/// insertion into `graph_edges` and its **three** indexes.
+///
+/// Three, not two — and the third is the interesting one. `idx_graph_edges_space_src`
+/// and `idx_graph_edges_space_dst` are declared; the third is the
+/// `sqlite_autoindex_*` SQLite materialises for `id TEXT PRIMARY KEY`, because only
+/// an `INTEGER PRIMARY KEY` aliases the rowid. That index was invisible in the
+/// schema and in the sentence this replaces, which used to end:
+///
+/// > *Nothing short of writing fewer rows changes the order of magnitude.*
+///
+/// **That was wrong, and it was wrong for the same reason "affordable enough to run
+/// inline" was wrong before it: nobody had looked.** Feeding that hidden index a v4
+/// UUID per row meant every insert landed at a uniformly random point in the key
+/// space, so once it outgrew the page cache each row dirtied its own page. Replacing
+/// the UUID with the ascending [`graph_row_id`] — same rows, same columns, same
+/// counts, one fewer random write per row — took the chat-attachment path
+/// **2–5× faster**, measured by `measure_attachment_stall`, A/B'd in both orderings
+/// (v4 UUID → ordered → v4 UUID) so cache warmth cannot explain it:
+///
+/// | corpus | chunks | edge rows | v4 UUID id  | ordered id | speed-up |
+/// |--------|--------|-----------|-------------|------------|----------|
+/// |   8 KB |      8 |    26,106 | 236 / 129ms |  103–114ms |  ~1.2–2× |
+/// |  32 KB |     33 |   104,918 | 1.89 / 0.78s|  414–488ms |  ~1.9–4× |
+/// | 101 KB |    102 |   333,336 | 6.53 / 3.32s|  1.60–1.86s|  ~2–3.5× |
+/// | 406 KB |    409 | 1,336,650 |19.9 / 38.4s |  7.46–7.83s|  ~2.7–5× |
+///
+/// Two figures in the UUID column because its run-to-run spread is ~2×, and that
+/// spread is not noise — it *is* the mechanism, since the cost depends on how much
+/// of a randomly-addressed index happens to be resident. The ordered column varies
+/// by ~10 %. Note also that per-chunk cost stopped growing with corpus size (v4:
+/// 29 → 94 ms/chunk; ordered: 13 → 19 ms/chunk): the super-linearity was the random
+/// index outgrowing cache, not the algorithm.
+///
+/// One caveat on those numbers: they were taken against a **fresh** database. An
+/// existing install's graph tables already hold random UUID keys, so ordered ids
+/// cluster into one region of that key space rather than appending past its end. The
+/// locality win holds — all new ids share a 22-character prefix and so hit one hot
+/// region — but the upgrade case was not measured.
+///
+/// Unlike the table above, that A/B is a **one-off against code that no longer
+/// exists** — there is no harness to re-run, because keeping one would mean keeping
+/// a second copy of the graph builder in the test module, and "one definition of
+/// what a Space's graph looks like" is the property this function exists to hold.
+/// Take the 23 % as history explaining why the current shape was chosen, not as a
+/// number to re-verify.
+///
+/// That byte-identical output is exactly why this was the optimisation taken and an
+/// entity cap was not. A cap would be far faster — it attacks the `entities²` term
+/// rather than the constant — but it changes **which chunks a graph query can
+/// reach**, and that is a retrieval-quality decision, not a performance one.
+///
+/// **If you ever add a cap, say so out loud**: the multi-hop retrieval test
+/// (`graphrag_multi_hop_finds_connected_chunk_that_vector_misses`) and
+/// `graph_edge_count_matches_the_quadratic_fan_out` both pin today's contents, and
+/// a silent cap would change which chunks a graph query can reach.
+///
+/// Note on `INSERT OR IGNORE`: `graph_nodes`/`graph_edges` have no UNIQUE
+/// constraint beyond their `id` primary key, and [`graph_row_id`] cannot collide
+/// (see its doc), so the conflict clause never actually fires today — it is inert,
+/// not a de-duplicator. Callers that may run over chunks whose rows already exist
+/// MUST delete the space's rows first (as `set_retrieval_mode` does), or they will
+/// double-insert. **This is the constraint any future id scheme has to satisfy**: a
+/// collidable id would make the clause fire and drop an edge with no error anywhere.
+///
+/// # What this function still does NOT fix: it holds the global connection mutex
+///
+/// `SpaceStore` is one `Connection` behind one `tokio::Mutex`, and every caller
+/// takes that mutex for the whole transaction. So the cost above is not merely the
+/// caller's latency — it is a **node-wide stall**: while a graph-mode attachment is
+/// indexed, every other Space's search, every sidebar list, every concurrent upload
+/// waits. `measure_attachment_stall` measures exactly that, by racing a
+/// `count_spaces()` probe against the ingest, and it reports the probe's worst
+/// latency as equal to the whole call to the millisecond — i.e. 100 % of the work is
+/// lock-held, at every size.
+///
+/// [`graph_row_id`] shrank that stall by 2–5×; it did not change its shape. Two
+/// follow-ups remain, both deliberately out of scope here:
+///
+/// - **Batch the graph phase across several transactions**, taking the mutex per
+///   batch, so the *hold* is bounded by batch size rather than by document size.
+///   Cheap to describe, not cheap to land: it moves the graph write out of the chunk
+///   write's transaction (a crash between them leaves chunks with a partial graph,
+///   repairable only by re-asserting the retrieval mode), and because
+///   `graph_nodes.chunk_id`/`graph_edges.chunk_id` are `REFERENCES chunks(id)` under
+///   `PRAGMA foreign_keys = ON`, a chunk deleted by a concurrent writer between two
+///   batches turns today's benign race into a hard FK failure — each batch would
+///   have to re-check that its chunks still exist.
+/// - **A second write connection** for ingest, so bulk graph writes stop sharing a
+///   mutex with interactive reads at all. That is the structural fix; the mutex, not
+///   this function, is the thing that makes one slow write everyone's problem.
+///
+/// [`SpaceStore::set_retrieval_mode`] is the same stall an order of magnitude worse
+/// (a whole-Space rebuild from one UI click) and got the same speed-up for free —
+/// 46–87 s down to 16.3 s at 1,566 chunks. Sixteen seconds of node-wide freeze is
+/// still a defect; it is just no longer a minute and a half of one.
+///
+/// The returned counts accumulate each `execute`'s **rows-affected** return value,
+/// not the number of statements issued. Those are equal today precisely because the
+/// conflict clause is inert — but the counts are surfaced to callers as "how big is
+/// this Space's graph", and a reported number that stops matching what is stored is
+/// the second defect class this work exists to remove. Reading rows-affected makes
+/// them right by construction, so adding the UNIQUE index the note above invites
+/// cannot silently turn these into over-reports.
+fn build_graph_for_chunks(
+    tx: &rusqlite::Transaction<'_>,
+    space_id: &str,
+    chunks: &[(&str, &str)],
+) -> Result<GraphCounts> {
+    // Prepared ONCE for the whole pass, not once per row. `Transaction::execute`
+    // (what this used to call) parses + plans its SQL string on every invocation
+    // and drops the statement afterwards, so a 4.7M-row rebuild paid 4.7M parses.
+    let mut node_stmt = tx
+        .prepare(
+            "INSERT OR IGNORE INTO graph_nodes (id, space_id, entity, chunk_id)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .context("preparing graph node insert")?;
+    let mut edge_stmt = tx
+        .prepare(
+            "INSERT OR IGNORE INTO graph_edges
+             (id, space_id, src_entity, dst_entity, chunk_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .context("preparing graph edge insert")?;
+
+    let mut nodes = 0usize;
+    let mut edges = 0usize;
+    for (chunk_id, chunk_content) in chunks {
+        let entities = extract_entities(chunk_content);
+        for entity in &entities {
+            let node_id = graph_row_id();
+            nodes += node_stmt
+                .execute(params![node_id, space_id, entity, chunk_id])
                 .context("inserting graph node")?;
-            }
-            for i in 0..entities.len() {
-                for j in 0..entities.len() {
-                    if i == j {
-                        continue;
-                    }
-                    let edge_id = uuid::Uuid::new_v4().to_string();
-                    tx.execute(
-                        "INSERT OR IGNORE INTO graph_edges
-                         (id, space_id, src_entity, dst_entity, chunk_id)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![edge_id, space_id, &entities[i], &entities[j], chunk_id],
-                    )
-                    .context("inserting graph edge")?;
+        }
+        for i in 0..entities.len() {
+            for j in 0..entities.len() {
+                if i == j {
+                    continue;
                 }
+                let edge_id = graph_row_id();
+                edges += edge_stmt
+                    .execute(params![
+                        edge_id,
+                        space_id,
+                        &entities[i],
+                        &entities[j],
+                        chunk_id
+                    ])
+                    .context("inserting graph edge")?;
             }
         }
     }
-    Ok(())
+    Ok((nodes, edges))
 }
 
 /// Serialize an `f32` vector to little-endian bytes for the `vec0` BLOB binding.
@@ -4667,6 +5851,486 @@ mod tests {
         );
     }
 
+    /// **A file uploaded to a Graph Space must be as retrievable as the same file
+    /// uploaded to a Vector Space that is later flipped to Graph.**
+    ///
+    /// `create_file` used to hardcode `RetrievalMode::Vector`, so it never reached
+    /// [`build_graph_for_chunks`] — while [`SpaceStore::set_retrieval_mode`]'s
+    /// rebuild scans `SELECT id, content FROM chunks`, which *does* include the file's
+    /// descriptor chunk. The result was that the same file in the same Space was
+    /// findable or not depending on the order the user did things, and the natural
+    /// order (create a Graph Space → upload → ask) was the broken one.
+    ///
+    /// The assertion is deliberately an **equality against the rebuild**, not "some
+    /// rows exist": the rebuild is the only other definition of what a Space's graph
+    /// should contain, so pinning ingest to it is what stops the two drifting again.
+    #[tokio::test]
+    async fn a_file_added_to_a_graph_space_gets_the_same_graph_rows_as_a_rebuild() {
+        const TITLE: &str = "quarterly revenue report.csv";
+        const MIME: &str = "text/csv";
+        let bytes = b"period,revenue\nQ1,10\n";
+        let store = SpaceStore::open_in_memory().unwrap();
+
+        // Path 1 — the natural flow: Graph Space first, then upload.
+        let graph_space = store
+            .create_space_with_mode(
+                "GraphSpace",
+                None,
+                RetrievalMode::Graph,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        store
+            .create_file(&graph_space, TITLE, bytes, MIME, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let ingested = graph_row_counts(&store, &graph_space).await;
+        assert!(
+            ingested.0 > 0 && ingested.1 > 0,
+            "a file uploaded to a graph-mode Space must carry graph rows; got {ingested:?}"
+        );
+
+        // Path 2 — the flow that always worked: upload to a Vector Space, flip after.
+        let flipped = store
+            .create_space_with_mode(
+                "FlippedSpace",
+                None,
+                RetrievalMode::Vector,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        store
+            .create_file(&flipped, TITLE, bytes, MIME, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        assert_eq!(
+            graph_row_counts(&store, &flipped).await,
+            (0, 0),
+            "a vector-mode Space must still write no graph rows"
+        );
+        store
+            .set_retrieval_mode(&flipped, RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .expect("space exists");
+        assert_eq!(
+            ingested,
+            graph_row_counts(&store, &flipped).await,
+            "upload-into-graph and upload-then-flip must produce the SAME graph"
+        );
+
+        // And the point of all of it: the file answers a graph query. (Only the
+        // descriptor — title + mime — is ever chunked for a file, in either mode; the
+        // bytes are not extracted here. That is `document.parse`'s job, and its
+        // output reaches a Space through `ingest_document`.)
+        let hits = store
+            .graph_search(&graph_space, "revenue", 5)
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|c| c.content.contains(TITLE)),
+            "graph traversal must reach the uploaded file's descriptor chunk; got {hits:?}"
+        );
+    }
+
+    /// **The graph seed floor ([`SEED_MAX_CHUNK_FRACTION`]): a Space-wide-common word
+    /// must not crowd out the rare word the user actually asked about.**
+    ///
+    /// Without the floor this fails outright, and not marginally: `graph_search`
+    /// stops collecting the moment `limit` chunks are visited, so seeding on
+    /// `platform` (in 12 of 13 chunks, and first in [`extract_entities`] order) fills
+    /// the budget with chunks that merely share a common word and the traversal never
+    /// reaches `kryptonite` at all. The answer chunk is not ranked low — it is never
+    /// visited. That list's head is then merged at rank parity with the best cosine
+    /// hit on every chat turn (see `ryu_rag::fuse_ranked_lists`), which is why this is
+    /// a retrieval defect rather than a nicety.
+    ///
+    /// The second half pins the escape hatch: when **every** query entity floods, no
+    /// floor is applied, because "weakly grounded" beats "nothing". The third case —
+    /// a Space too small for the statistic — is pinned by
+    /// `graphrag_multi_hop_finds_connected_chunk_that_vector_misses` (3 chunks, below
+    /// [`SEED_FLOOR_MIN_CHUNKS`]), which must keep passing unchanged.
+    #[tokio::test]
+    async fn graph_seed_floor_keeps_a_common_word_from_crowding_out_a_rare_one() {
+        const COMMON_DOCS: usize = 12;
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode(
+                "Flood",
+                None,
+                RetrievalMode::Graph,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        // 12 chunks sharing `platform` + `ledger`, and one that shares nothing with
+        // them. 13 ≥ SEED_FLOOR_MIN_CHUNKS, so the floor is in force.
+        for i in 0..COMMON_DOCS {
+            store
+                .ingest_document(
+                    &space,
+                    &format!("D{i}"),
+                    &format!("platform ledger entry number{i} routing"),
+                    &DocOwner::unattributed(),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .ingest_document(
+                &space,
+                "Answer",
+                "kryptonite quarantine vault",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+
+        // `platform` sorts first in the query, and appears in 12/13 chunks; the floor
+        // is what stops it seeding while `kryptonite` (1/13) can.
+        let hits = store
+            .graph_search(&space, "platform kryptonite", 3)
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|c| c.content.contains("kryptonite")),
+            "the rare query entity must seed the traversal; got {hits:?}"
+        );
+        assert!(
+            hits.iter().all(|c| c.content.contains("kryptonite")),
+            "chunks that share only a Space-wide-common word must not fill the \
+             result; got {hits:?}"
+        );
+
+        // Escape hatch: a query whose every entity floods the Space seeds exactly as
+        // it did before the floor existed, rather than returning nothing.
+        let all_common = store
+            .graph_search(&space, "platform ledger", 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            all_common.len(),
+            3,
+            "when every query entity floods, the floor must not apply; got {all_common:?}"
+        );
+    }
+
+    // ── Changing an existing Space's retrieval mode ────────────────────────────
+
+    /// Count this space's graph rows — the thing that decides whether `graph_search`
+    /// can answer anything at all.
+    async fn graph_row_counts(store: &SpaceStore, space_id: &str) -> (i64, i64) {
+        let conn = store.conn.lock().await;
+        let nodes = conn
+            .query_row(
+                "SELECT COUNT(*) FROM graph_nodes WHERE space_id = ?1",
+                params![space_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let edges = conn
+            .query_row(
+                "SELECT COUNT(*) FROM graph_edges WHERE space_id = ?1",
+                params![space_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (nodes, edges)
+    }
+
+    /// **The defect this method exists to prevent.**
+    ///
+    /// A Space ingested in vector mode has no entity graph. If switching to graph
+    /// only flipped the column, `search_ext` would dispatch to `graph_search`, whose
+    /// BFS seeds from `graph_nodes` — and would return nothing. This asserts the
+    /// switch rebuilds the graph from the chunks already on disk, and that the
+    /// multi-hop traversal then works on content ingested *before* the switch.
+    #[tokio::test]
+    async fn switching_to_graph_rebuilds_the_graph_so_search_actually_works() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Later", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        for (title, body) in [
+            ("ChunkA", "Alice works at Acme."),
+            ("ChunkB", "Acme is based in Paris."),
+            ("ChunkC", "Paris has the Eiffel Tower."),
+        ] {
+            store
+                .ingest_document(&space, title, body, &DocOwner::unattributed())
+                .await
+                .unwrap();
+        }
+        // Ingested in vector mode ⇒ no graph exists yet.
+        assert_eq!(graph_row_counts(&store, &space).await, (0, 0));
+
+        let change = store
+            .set_retrieval_mode(&space, RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .expect("space exists");
+        assert_eq!(change.previous, RetrievalMode::Vector);
+        assert_eq!(change.mode, RetrievalMode::Graph);
+        assert!(change.changed);
+        assert!(change.graph_rebuilt);
+        assert_eq!(change.chunks_scanned, 3);
+        assert!(change.graph_nodes > 0, "rebuild must write entity nodes");
+        assert!(change.graph_edges > 0, "rebuild must write co-occurrences");
+
+        let (nodes, edges) = graph_row_counts(&store, &space).await;
+        assert_eq!(nodes as usize, change.graph_nodes);
+        assert_eq!(edges as usize, change.graph_edges);
+
+        // The column moved AND retrieval follows it.
+        assert_eq!(
+            store.space_mode(&space).await.unwrap(),
+            RetrievalMode::Graph
+        );
+        let hits = store.search(&space, "Alice", 10).await.unwrap();
+        assert!(
+            hits.iter().any(|c| c.content.contains("Eiffel")),
+            "after the switch, Alice→Acme→Paris multi-hop must reach ChunkC \
+             (this is what an empty graph would silently fail to do); got: {:?}",
+            hits.iter().map(|c| &c.content).collect::<Vec<_>>()
+        );
+    }
+
+    /// Re-asserting `graph` on a Space that is already `graph` must not duplicate
+    /// rows. The tables carry no UNIQUE constraint (their `INSERT OR IGNORE` is
+    /// inert), so this is only true because the method clears before rebuilding.
+    /// It doubles as the graph *repair* path.
+    #[tokio::test]
+    async fn re_asserting_graph_mode_rebuilds_idempotently() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode("G", None, RetrievalMode::Graph, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        store
+            .ingest_document(
+                &space,
+                "Doc",
+                "Alice works at Acme.",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        let before = graph_row_counts(&store, &space).await;
+        assert!(before.0 > 0);
+
+        let change = store
+            .set_retrieval_mode(&space, RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!change.changed, "same mode ⇒ changed = false");
+        assert!(change.graph_rebuilt, "…but the graph is still repaired");
+        assert_eq!(
+            graph_row_counts(&store, &space).await,
+            before,
+            "a second rebuild must not double the rows"
+        );
+
+        // And a third pass is still stable.
+        store
+            .set_retrieval_mode(&space, RetrievalMode::Graph)
+            .await
+            .unwrap();
+        assert_eq!(graph_row_counts(&store, &space).await, before);
+    }
+
+    /// Ingest and rebuild must produce the SAME graph — they share
+    /// [`build_graph_for_chunks`] precisely so they cannot drift. This pins that:
+    /// a Space born in graph mode and a Space converted into graph mode, over
+    /// identical content, end up with identical row counts and identical answers.
+    #[tokio::test]
+    async fn rebuilt_graph_matches_an_ingest_built_graph() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let docs = [
+            ("ChunkA", "Alice works at Acme."),
+            ("ChunkB", "Acme is based in Paris."),
+            ("ChunkC", "Paris has the Eiffel Tower."),
+        ];
+
+        let born = store
+            .create_space_with_mode(
+                "Born",
+                None,
+                RetrievalMode::Graph,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        let converted = store
+            .create_space("Converted", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        for (title, body) in docs {
+            for space in [&born, &converted] {
+                store
+                    .ingest_document(space, title, body, &DocOwner::unattributed())
+                    .await
+                    .unwrap();
+            }
+        }
+        store
+            .set_retrieval_mode(&converted, RetrievalMode::Graph)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            graph_row_counts(&store, &born).await,
+            graph_row_counts(&store, &converted).await,
+            "a rebuilt graph must be shaped exactly like an ingested one"
+        );
+        let born_hits = store.search(&born, "Alice", 10).await.unwrap().len();
+        let converted_hits = store.search(&converted, "Alice", 10).await.unwrap().len();
+        assert_eq!(born_hits, converted_hits);
+    }
+
+    /// Switching back to vector drops the graph (nothing maintains it in vector
+    /// mode), restores KNN retrieval, and leaves chunk vectors intact — so the
+    /// round trip is lossless and never re-embeds.
+    #[tokio::test]
+    async fn switching_to_vector_drops_the_graph_and_keeps_vectors() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode(
+                "RoundTrip",
+                None,
+                RetrievalMode::Graph,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        store
+            .ingest_document(
+                &space,
+                "Doc",
+                "Cats are small carnivorous mammals.",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        assert!(graph_row_counts(&store, &space).await.0 > 0);
+
+        let change = store
+            .set_retrieval_mode(&space, RetrievalMode::Vector)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.previous, RetrievalMode::Graph);
+        assert!(change.changed);
+        assert!(!change.graph_rebuilt);
+        assert_eq!(change.chunks_scanned, 0);
+        assert_eq!(graph_row_counts(&store, &space).await, (0, 0));
+
+        // Vector retrieval works without a re-index: the chunk vectors were never
+        // touched, so a semantic (non-token-overlapping) query still hits.
+        assert_eq!(
+            store.space_mode(&space).await.unwrap(),
+            RetrievalMode::Vector
+        );
+        assert!(!store
+            .search(&space, "small mammals", 5)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // …and switching back rebuilds from those same chunks.
+        let back = store
+            .set_retrieval_mode(&space, RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(back.chunks_scanned, 1);
+        assert!(graph_row_counts(&store, &space).await.0 > 0);
+    }
+
+    /// A missing Space is `Ok(None)`, not an error and not a silent success — the
+    /// HTTP layer turns it into a 404.
+    #[tokio::test]
+    async fn setting_mode_on_a_missing_space_reports_not_found() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        assert!(store
+            .set_retrieval_mode("nope", RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Documents ingested *after* a switch to graph must join the same graph — the
+    /// ingest path reads the (now updated) column, so the two writers stay coherent.
+    #[tokio::test]
+    async fn documents_ingested_after_the_switch_extend_the_graph() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Growing", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        store
+            .ingest_document(
+                &space,
+                "ChunkA",
+                "Alice works at Acme.",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        store
+            .set_retrieval_mode(&space, RetrievalMode::Graph)
+            .await
+            .unwrap();
+        let after_rebuild = graph_row_counts(&store, &space).await;
+
+        store
+            .ingest_document(
+                &space,
+                "ChunkB",
+                "Acme is based in Paris.",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        let after_ingest = graph_row_counts(&store, &space).await;
+        assert!(
+            after_ingest.0 > after_rebuild.0,
+            "post-switch ingest must keep extending the graph"
+        );
+        let hits = store.search(&space, "Alice", 10).await.unwrap();
+        assert!(hits.iter().any(|c| c.content.contains("Paris")));
+    }
+
+    /// The strict parse used at every caller boundary. Distinct from the lenient
+    /// `from_str` used on DB reads — conflating them is how a typo becomes a
+    /// silently-vector Space.
+    #[test]
+    fn retrieval_mode_parse_is_strict() {
+        assert_eq!(RetrievalMode::parse("vector"), Some(RetrievalMode::Vector));
+        assert_eq!(RetrievalMode::parse("graph"), Some(RetrievalMode::Graph));
+        for bad in ["graphrag", "Graph", "GRAPH", "vec", "", " graph"] {
+            assert!(
+                RetrievalMode::parse(bad).is_none(),
+                "{bad:?} must not parse"
+            );
+        }
+        // The wire form round-trips through both directions and matches what serde
+        // emits, so the column, the JSON body, and the API response agree.
+        for mode in [RetrievalMode::Vector, RetrievalMode::Graph] {
+            assert_eq!(RetrievalMode::parse(mode.as_str()), Some(mode));
+            assert_eq!(
+                serde_json::to_string(&mode).unwrap(),
+                format!("\"{}\"", mode.as_str())
+            );
+        }
+        // The DB-read path stays lenient by design: an unknown column value
+        // degrades to vector rather than failing every search on that Space.
+        assert_eq!(RetrievalMode::from_str("graphrag"), RetrievalMode::Vector);
+    }
+
     // ── AC3: retrieval mode + extraction model are registry-configurable ────────
     // (The `ModelRegistry`-level tests for this live Core-side in the `spaces`
     // shim's test module, since `ModelRegistry` is a Core type.)
@@ -4704,5 +6368,805 @@ mod tests {
         assert_eq!(RetrievalMode::from_str("vector"), RetrievalMode::Vector);
         assert_eq!(RetrievalMode::from_str("graph"), RetrievalMode::Graph);
         assert_eq!(RetrievalMode::from_str("unknown"), RetrievalMode::Vector);
+    }
+
+    // ── Graph cost / bound regressions (H3) ───────────────────────────────────
+    //
+    // These exist because the rebuild's cost was *documented* rather than measured,
+    // and the documented figure ("pure SQL + string work", "affordable enough to
+    // run inline") was wrong by two orders of magnitude on a real Space. The two
+    // tests below pin the two things the corrected docs assert: what the graph
+    // CONTAINS (so a later speed-up cannot quietly shrink it) and that a query over
+    // a dense graph is bounded and deterministic.
+    //
+    // Ordinary English prose on purpose — `extract_entities` keeps every token ≥ 3
+    // chars that is capitalised or longer than 4, so a synthetic fixture of short
+    // repeated words would understate the fan-out that makes this expensive.
+    const PROSE: &str = "The quarterly revenue report from Acme Corporation shows that \
+        European operations delivered stronger margins than the North American division, \
+        largely because logistics costs in Rotterdam and Hamburg fell after the shipping \
+        contract renegotiation completed in March. Analysts covering the industrial sector \
+        expect similar improvements at competing firms, although currency exposure remains \
+        a meaningful risk for companies without hedging programs. Management reiterated \
+        guidance for the full year and announced additional investment in automation across \
+        three manufacturing facilities. ";
+
+    /// Prose that `chunk_text` splits into roughly `target_chunks` chunks near
+    /// [`CHUNK_CHAR_SIZE`]. The `marker{i}` tokens keep chunks textually distinct so
+    /// nothing collapses into one document-level entity set.
+    fn prose_corpus(target_chunks: usize) -> String {
+        let reps = (target_chunks * CHUNK_CHAR_SIZE / PROSE.len()).max(1);
+        let mut out = String::new();
+        for i in 0..reps {
+            out.push_str(PROSE);
+            out.push_str(&format!("marker{i} "));
+        }
+        out
+    }
+
+    /// **Pins what the graph CONTAINS: `n` entities per chunk ⇒ `n` nodes and
+    /// `n·(n−1)` directed edges, exactly.**
+    ///
+    /// The cost documented on [`build_graph_for_chunks`] is `O(chunks × entities²)`,
+    /// and the fix taken for it (hoisting the two INSERTs onto prepared statements)
+    /// was chosen *because* it preserves this identity byte for byte. A cap on
+    /// entities per chunk, a narrower `extract_entities`, or emitting one direction
+    /// instead of two would each be a legitimate optimisation — and each would break
+    /// this assertion, which is the point: they change which chunks a graph query
+    /// can reach, so they must be argued for, not slipped in.
+    ///
+    /// **Both properties of [`graph_row_id`] at once: strictly ascending (the
+    /// performance property) and all-distinct (the correctness property).**
+    ///
+    /// They are asserted together because each alone is satisfiable by a broken
+    /// generator — a constant is "ascending" if you only check `>=`, and a v4 UUID is
+    /// distinct while being the random-scatter insert this replaced. Ascending is
+    /// what turns the `TEXT PRIMARY KEY` insert into an append at the right edge of
+    /// its b-tree; distinct is what keeps the `INSERT OR IGNORE` on `graph_nodes` /
+    /// `graph_edges` inert, and an inert conflict clause is the only reason a
+    /// collision cannot silently *drop an edge*.
+    ///
+    /// String comparison, not numeric, because that is what SQLite's index orders by:
+    /// the ids are `TEXT`, so the fixed-width zero-padded hex encoding is doing real
+    /// work and a formatting change that dropped the padding would show up here.
+    ///
+    /// The second, independent guard on the same property is
+    /// `graph_edge_count_matches_the_quadratic_fan_out`: it compares reported counts
+    /// (accumulated from each `execute`'s rows-affected) against the `n·(n−1)`
+    /// formula, so any collision that made the conflict clause fire would under-count
+    /// and fail it. This test says the ids are sound; that one says the graph a real
+    /// ingest wrote is still the graph it was.
+    #[test]
+    fn graph_row_ids_are_unique_and_monotonic() {
+        const N: usize = 100_000;
+        let ids: Vec<String> = (0..N).map(|_| graph_row_id()).collect();
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "graph row ids must sort strictly ascending as TEXT — that is the whole \
+             point of not using a v4 UUID here"
+        );
+        let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            N,
+            "a duplicate id makes INSERT OR IGNORE fire and silently drops a graph row"
+        );
+        // Fixed width: a variable-length id would sort lexicographically wrong the
+        // moment the counter gained a digit, which is exactly how a "monotonic" id
+        // scheme regresses into a random one without anything failing.
+        assert!(ids.iter().all(|id| id.len() == 32), "ids must be 32 hex chars");
+    }
+
+    /// Asserted on the *rebuild* path (`set_retrieval_mode`) so the reported counts,
+    /// the stored rows, and the formula are checked against each other at once.
+    #[tokio::test]
+    async fn graph_edge_count_matches_the_quadratic_fan_out() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Dense", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let corpus = prose_corpus(6);
+        let per_chunk: Vec<usize> = chunk_text(&corpus)
+            .iter()
+            .map(|c| extract_entities(c).len())
+            .collect();
+        // Guard the guard: if the fixture ever degenerated into a couple of tiny
+        // chunks this test would pass while proving nothing about fan-out.
+        assert!(
+            per_chunk.len() >= 4,
+            "fixture must span several chunks, got {}",
+            per_chunk.len()
+        );
+        assert!(
+            per_chunk.iter().all(|n| *n >= 20),
+            "fixture chunks must be entity-dense (this is what makes the graph \
+             expensive); got {per_chunk:?}"
+        );
+        let expected_nodes: usize = per_chunk.iter().sum();
+        let expected_edges: usize = per_chunk.iter().map(|n| n * n.saturating_sub(1)).sum();
+
+        store
+            .ingest_document(&space, "Dense", &corpus, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let change = store
+            .set_retrieval_mode(&space, RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .expect("space exists");
+
+        assert_eq!(change.chunks_scanned, per_chunk.len());
+        assert_eq!(
+            change.graph_nodes, expected_nodes,
+            "one node per entity occurrence"
+        );
+        assert_eq!(
+            change.graph_edges, expected_edges,
+            "n·(n−1) directed edges per chunk — if you meant to change this, change \
+             the cost docs on build_graph_for_chunks in the same commit"
+        );
+        // Reported counts must equal what is actually stored.
+        let (nodes, edges) = graph_row_counts(&store, &space).await;
+        assert_eq!(nodes as usize, expected_nodes);
+        assert_eq!(edges as usize, expected_edges);
+    }
+
+    /// **A query over a dense co-occurrence graph must terminate in bounded work and
+    /// return the same chunks every time.**
+    ///
+    /// With ≈57 entities per chunk every entity has ≈56 neighbours, so an
+    /// unbounded 3-hop BFS reaches essentially the whole Space. `graph_search` now
+    /// stops the moment `limit` chunks are collected (previously it only checked
+    /// between hops) and carries at most [`MAX_FRONTIER_ENTITIES`] into the next
+    /// hop.
+    ///
+    /// The determinism half is a real defect, not a nicety: the frontier used to be
+    /// a `HashSet`, so on any Space with more reachable chunks than `limit` the
+    /// answer to an identical query changed between runs.
+    #[tokio::test]
+    async fn graph_search_is_bounded_and_deterministic_on_a_dense_space() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode(
+                "Dense",
+                None,
+                RetrievalMode::Graph,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        let corpus = prose_corpus(12);
+        let total_chunks = chunk_text(&corpus).len();
+        store
+            .ingest_document(&space, "Dense", &corpus, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        assert!(
+            total_chunks > 5,
+            "fixture must hold more chunks than the limit under test"
+        );
+
+        // Bounded: never more than asked for, even though the traversal could reach
+        // every chunk in the Space.
+        let first = store.graph_search(&space, "logistics", 5).await.unwrap();
+        assert!(
+            first.len() <= 5,
+            "graph_search returned {} chunks for limit=5",
+            first.len()
+        );
+        assert!(
+            !first.is_empty(),
+            "a query entity present in the corpus must hit"
+        );
+
+        // Deterministic: identical query ⇒ identical chunks in identical order.
+        for _ in 0..3 {
+            let again = store.graph_search(&space, "logistics", 5).await.unwrap();
+            assert_eq!(
+                again.iter().map(|c| &c.chunk_id).collect::<Vec<_>>(),
+                first.iter().map(|c| &c.chunk_id).collect::<Vec<_>>(),
+                "graph_search must be stable across runs"
+            );
+        }
+
+        // A limit larger than the Space cannot invent chunks, and the public
+        // `search` entry point honours the limit through reranking too.
+        let wide = store
+            .graph_search(&space, "logistics", 10_000)
+            .await
+            .unwrap();
+        assert!(wide.len() <= total_chunks);
+        let via_search = store.search(&space, "logistics", 3).await.unwrap();
+        assert!(via_search.len() <= 3);
+    }
+
+    /// `limit = 0` must not walk the graph at all. Cheap, but it is the boundary the
+    /// new "check the budget inside the loop" logic is built on.
+    #[tokio::test]
+    async fn graph_search_with_zero_limit_returns_nothing() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode("G", None, RetrievalMode::Graph, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        store
+            .ingest_document(
+                &space,
+                "A",
+                "Alice works at Acme.",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .graph_search(&space, "Alice", 0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// **Exercises [`MAX_FRONTIER_ENTITIES`].** A bound whose truncation branch no
+    /// test ever executes is a bound that might not take effect — the same defect
+    /// family as the mode flag that could not take effect.
+    ///
+    /// `prose_corpus` cannot reach the cap: it repeats one paragraph, so the whole
+    /// corpus has ≈57 shared entities plus one `marker{i}` per chunk, and a frontier
+    /// tops out in the dozens. This fixture instead gives every chunk its own 30
+    /// unique tokens around one shared hub, so the hub's out-degree is `30 ×
+    /// chunks` — asserted below to exceed the cap, so the truncation is provably
+    /// reached rather than assumed.
+    ///
+    /// Be precise about what this does and does not establish, because a bound test
+    /// that overstates itself is the same species of defect as the bound it guards:
+    ///
+    /// - **Does:** prove the truncation branch executes over real stored data (the
+    ///   hub's degree is read back from `graph_edges` and asserted to exceed the
+    ///   cap), and that a search whose frontier is truncated still terminates,
+    ///   obeys `limit`, and returns the same chunks in the same order every run.
+    /// - **Does not:** prove the cap is what determines the *result*. Every chunk
+    ///   here contains the hub, so hop 1 already collects all of them and this test
+    ///   would pass with the cap set to 5 or to 5,000.
+    ///
+    /// That second half is no longer a gap in the file, only in this test:
+    /// `graph_search_frontier_truncation_can_drop_a_reachable_chunk` closes it by
+    /// putting a chunk behind a bridge entity that the cap drops, and it fails the
+    /// moment the cap is lifted. It stays sized from the constant rather than from
+    /// the literal 512, so retuning the cap re-scales the fixture instead of
+    /// silently un-testing the bound.
+    #[tokio::test]
+    async fn graph_search_truncates_an_oversized_frontier() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode("Hub", None, RetrievalMode::Graph, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        const DOCS: usize = 24;
+        const UNIQUE_PER_DOC: usize = 30;
+        for doc in 0..DOCS {
+            let mut text = String::from("hubentity ");
+            for tok in 0..UNIQUE_PER_DOC {
+                text.push_str(&format!("satellite{doc}x{tok} "));
+            }
+            store
+                .ingest_document(&space, &format!("D{doc}"), &text, &DocOwner::unattributed())
+                .await
+                .unwrap();
+        }
+
+        // The truncation branch is only reached if the hub really does have more
+        // neighbours than the cap. Assert that from the data, not from arithmetic.
+        let hub_degree: i64 = {
+            let conn = store.conn.lock().await;
+            conn.query_row(
+                "SELECT COUNT(DISTINCT dst_entity) FROM graph_edges
+                 WHERE space_id = ?1 AND src_entity = 'hubentity'",
+                params![space],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(
+            hub_degree as usize > MAX_FRONTIER_ENTITIES,
+            "fixture must overflow the frontier cap to exercise it; hub degree was \
+             {hub_degree}, cap is {MAX_FRONTIER_ENTITIES}"
+        );
+
+        // A limit far above the Space's size means the traversal never short-circuits
+        // on `limit`, so the cap is the only thing bounding hop 2.
+        let wide = store
+            .graph_search(&space, "hubentity", 10_000)
+            .await
+            .unwrap();
+        assert!(
+            wide.len() <= DOCS,
+            "traversal returned {} chunks for a {DOCS}-chunk Space",
+            wide.len()
+        );
+        assert!(!wide.is_empty(), "the hub entity must hit its own chunks");
+        for _ in 0..3 {
+            let again = store
+                .graph_search(&space, "hubentity", 10_000)
+                .await
+                .unwrap();
+            assert_eq!(
+                again.iter().map(|c| &c.chunk_id).collect::<Vec<_>>(),
+                wide.iter().map(|c| &c.chunk_id).collect::<Vec<_>>(),
+                "a truncated frontier must truncate the SAME way every run"
+            );
+        }
+    }
+
+    /// Builds a Space whose hub entity provably overflows [`MAX_FRONTIER_ENTITIES`],
+    /// plus a two-hop path off it: `hubentity → <bridge> → <answer chunk>`.
+    ///
+    /// Shared by the two traversal-bound tests so they differ in exactly ONE
+    /// variable — where the bridge sorts relative to the satellites — which is the
+    /// variable the cap keys on (`ORDER BY e.dst_entity`, so truncation keeps the
+    /// lexicographically smallest neighbours). Everything else is identical, so a
+    /// difference in outcome can only be the cap.
+    ///
+    /// Layout, all lowercase because [`extract_entities`] normalizes:
+    /// - `docs` hub chunks, each `hubentity` + `{satellite_prefix}{d}x{t}`. Sized
+    ///   from the constant, never from a literal, so retuning the cap cannot make
+    ///   the fixture vacuous.
+    /// - one **bridge** chunk: `hubentity {bridge}` — and nothing else, so the
+    ///   bridge co-occurs with the hub and with the answer, and with no satellite.
+    ///   That is what makes the negative case genuinely unreachable: a dense fixture
+    ///   would rediscover a truncated entity one hop later through a shared chunk.
+    /// - one **answer** chunk: `{bridge} zzzanswerfact` — no `hubentity`, so it can
+    ///   only be reached by traversal, never as a direct hit.
+    ///
+    /// Returns `(store, space_id, answer_chunk_content)`.
+    async fn hub_fixture(
+        satellite_prefix: &str,
+        bridge: &str,
+    ) -> (SpaceStore, String, &'static str) {
+        const UNIQUE_PER_DOC: usize = 30;
+        // Comfortably past the cap whatever the cap is, so the truncation branch is
+        // reached and enough entities are left over to be dropped.
+        let docs = (MAX_FRONTIER_ENTITIES + 64).div_ceil(UNIQUE_PER_DOC);
+
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode("Hub", None, RetrievalMode::Graph, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        for doc in 0..docs {
+            let mut text = String::from("hubentity");
+            for tok in 0..UNIQUE_PER_DOC {
+                text.push_str(&format!(" {satellite_prefix}{doc}x{tok}"));
+            }
+            store
+                .ingest_document(&space, &format!("D{doc}"), &text, &DocOwner::unattributed())
+                .await
+                .unwrap();
+        }
+        store
+            .ingest_document(
+                &space,
+                "Bridge",
+                &format!("hubentity {bridge}"),
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        const ANSWER: &str = "zzzanswerfact";
+        store
+            .ingest_document(
+                &space,
+                "Answer",
+                &format!("{bridge} {ANSWER}"),
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+
+        // Non-vacuity, read from the stored graph rather than assumed from
+        // arithmetic: if the hub's out-degree did not exceed the cap, neither test
+        // below would be exercising the truncation branch at all.
+        let hub_degree: i64 = {
+            let conn = store.conn.lock().await;
+            conn.query_row(
+                "SELECT COUNT(DISTINCT dst_entity) FROM graph_edges
+                 WHERE space_id = ?1 AND src_entity = 'hubentity'",
+                params![space],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(
+            hub_degree as usize > MAX_FRONTIER_ENTITIES,
+            "fixture must overflow the frontier cap; hub degree was {hub_degree}, \
+             cap is {MAX_FRONTIER_ENTITIES}"
+        );
+        (store, space, ANSWER)
+    }
+
+    /// **The cap truncates, and the grounded chunk still comes back.**
+    ///
+    /// The bridge is named so it sorts *before* every satellite, so it survives the
+    /// truncation and the two-hop path `hubentity → aaabridge → answer chunk`
+    /// resolves. This is the half that proves the cap bounds the traversal without
+    /// breaking it: the search terminates and returns the chunk that a full
+    /// traversal would have returned — even though hop 1 threw away every neighbour
+    /// past the cap.
+    ///
+    /// Stated plainly, because a test that overstates itself is the defect it
+    /// guards: this one would also pass with the cap lifted. Its job is that
+    /// truncation (asserted from the hub's stored out-degree in [`hub_fixture`])
+    /// does **not** cost the answer. The test whose *outcome* depends on the cap is
+    /// the lossiness one below.
+    #[tokio::test]
+    async fn graph_search_reaches_a_two_hop_chunk_through_a_truncated_frontier() {
+        let (store, space, answer) = hub_fixture("sat", "aaabridge").await;
+        let hits = store
+            .graph_search(&space, "hubentity", 10_000)
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|c| c.content.contains(answer)),
+            "the two-hop answer chunk must survive frontier truncation when its \
+             bridge entity sorts inside the cap"
+        );
+        // The answer chunk contains no query entity, so a direct hit cannot explain
+        // the result — it is genuinely two hops away.
+        assert!(
+            !hits
+                .iter()
+                .any(|c| c.content.contains(answer) && c.content.contains("hubentity")),
+            "fixture broken: the answer chunk must not contain the query entity"
+        );
+    }
+
+    /// **The cap is LOSSY, and that is a retrieval claim, not a performance one.**
+    ///
+    /// Identical fixture to the test above with one change: the bridge sorts *after*
+    /// every satellite, so hop 1 fills its [`MAX_FRONTIER_ENTITIES`] budget with
+    /// satellites and the bridge is dropped. The chunk behind it then becomes
+    /// unreachable — permanently, not just later: the bridge shares a chunk with the
+    /// hub and the answer only, so no hop-2 or hop-3 frontier can rediscover it
+    /// (in a *dense* Space a truncated entity usually does come back a hop later
+    /// through a shared chunk, which is why the fixture is deliberately sparse here).
+    ///
+    /// This is asserted rather than left as a doc sentence because a silently lossy
+    /// bound is exactly the defect class this file has been shedding: a knob whose
+    /// stated effect (speed) is not its real effect (which chunks exist, as far as
+    /// retrieval is concerned). Retuning `MAX_FRONTIER_ENTITIES` therefore changes
+    /// answers, and the fixture is sized from the constant so this stays true at any
+    /// value.
+    #[tokio::test]
+    async fn graph_search_frontier_truncation_can_drop_a_reachable_chunk() {
+        let (store, space, answer) = hub_fixture("aaa", "zzzbridge").await;
+
+        // Reachable in principle: seeded directly at the bridge, the traversal finds
+        // the answer chunk in one hop. So the fixture is connected, and the miss
+        // below is the cap's doing.
+        let direct = store
+            .graph_search(&space, "zzzbridge", 10_000)
+            .await
+            .unwrap();
+        assert!(
+            direct.iter().any(|c| c.content.contains(answer)),
+            "fixture broken: the answer chunk must be reachable from its bridge"
+        );
+
+        let hits = store
+            .graph_search(&space, "hubentity", 10_000)
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|c| c.content.contains("zzzbridge")),
+            "the bridge's own chunk is a direct hop-1 hit and must still be returned"
+        );
+        assert!(
+            !hits.iter().any(|c| c.content.contains(answer)),
+            "the cap is lossy by construction: a chunk whose only path runs through \
+             a truncated frontier entity is NOT returned. If this now passes, the \
+             traversal's reachability changed — update the docs on graph_search and \
+             MAX_FRONTIER_ENTITIES in the same commit"
+        );
+    }
+
+    /// **The regression guard for "document ingest no longer occupies a runtime
+    /// worker."**
+    ///
+    /// `#[tokio::test]` builds a **current-thread** runtime: exactly one worker. So
+    /// a spawned ticker task can only advance while the test's own task is parked at
+    /// an await point — which makes "did the ingest yield the worker?" directly
+    /// observable as a tick count, with no timing assertion.
+    ///
+    /// Both halves were run against the pre-fix (inline) shape and both counted
+    /// **exactly 0** ticks: the embed loop's awaits are all immediately-ready and an
+    /// uncontended `tokio::Mutex::lock().await` does not yield, so nothing between
+    /// the call and its return ever returned `Pending`. After the fix, one observed
+    /// run on a laptop counted 35,301 (ingest) and 56,473 (update). Those two
+    /// figures are a *spin rate* — they say nothing beyond "the worker was free" and
+    /// will differ per machine — so the threshold asserted below is 8, chosen to sit
+    /// far above the pre-fix 0 and far below any real run, pinning the shape rather
+    /// than the scheduler.
+    #[tokio::test]
+    async fn graph_ingest_does_not_occupy_the_async_worker() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode(
+                "Dense",
+                None,
+                RetrievalMode::Graph,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        // Dense enough that the blocking phase is the dominant cost of the call:
+        // ≈57 entities/chunk ⇒ ≈3,200 edge rows per chunk (see
+        // [`build_graph_for_chunks`]).
+        let corpus = prose_corpus(24);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticker = tokio::spawn({
+            let stop = Arc::clone(&stop);
+            let ticks = Arc::clone(&ticks);
+            async move {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        // Let the ticker reach its loop before the measurement window opens.
+        tokio::task::yield_now().await;
+        let before = ticks.load(std::sync::atomic::Ordering::Relaxed);
+
+        let doc = store
+            .ingest_document(&space, "Dense", &corpus, &DocOwner::unattributed())
+            .await
+            .unwrap();
+
+        let during_ingest = ticks.load(std::sync::atomic::Ordering::Relaxed) - before;
+
+        // `update_document` (the editor's embed-on-save path) re-runs the same
+        // quadratic graph build over the whole document, so it was moved off the
+        // worker in the same change and is measured in the same window.
+        let before_update = ticks.load(std::sync::atomic::Ordering::Relaxed);
+        store.update_document(&doc, "Dense", &corpus).await.unwrap();
+        let during_update = ticks.load(std::sync::atomic::Ordering::Relaxed) - before_update;
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = ticker.await;
+
+        assert!(
+            during_ingest >= 8,
+            "the ingest never parked the single runtime worker ({during_ingest} \
+             ticks) — the graph build is back on the async worker"
+        );
+        assert!(
+            during_update >= 8,
+            "the document update never parked the single runtime worker \
+             ({during_update} ticks) — the graph rebuild is back on the async worker"
+        );
+        // The work must still have happened: an off-worker ingest that wrote no
+        // graph is a green test over a broken path. (`update_document` deletes the
+        // document's graph rows before re-inserting, so a non-zero count here also
+        // says the update's own rebuild ran.)
+        let (nodes, edges) = graph_row_counts(&store, &space).await;
+        assert!(
+            nodes > 0 && edges > 0,
+            "graph-mode ingest wrote no graph rows (nodes={nodes}, edges={edges})"
+        );
+    }
+
+    /// **The reproduction harness for the cost table on [`build_graph_for_chunks`].**
+    ///
+    /// `#[ignore]`d, not deleted: it takes 1–2 minutes, so it must not run in CI, but
+    /// a documented measurement nobody can re-derive decays into folklore — which is
+    /// precisely how the "affordable enough to run inline" claim it replaced
+    /// survived. It prints; it asserts nothing about wall clock (timings on a shared
+    /// machine are not a pass/fail signal), so it cannot rot into a false red or a
+    /// false green. Run it with:
+    ///
+    /// ```text
+    /// cargo test --release -p ryu-spaces measure_graph_rebuild_cost -- --ignored --nocapture --test-threads=1
+    /// ```
+    ///
+    /// Both storage shapes are measured because they differ by ~1.6×, and the
+    /// production one is the slow one: `open_in_memory` is what every other test in
+    /// this file uses, and quoting only that number understates a real Space by
+    /// seconds. The row/edge counts it prints are exact and reproduce byte for byte
+    /// (they did so across the [`graph_row_id`] change, which is how that change was
+    /// shown to cost no graph rows); the seconds are a range and should be read as
+    /// one.
+    ///
+    /// How wide a range depends on which shape you are measuring, and that is itself
+    /// the finding: under v4-UUID ids the 1,566-chunk on-disk case came out at 87 s
+    /// and 46 s on two runs of the same laptop, because the cost of a
+    /// randomly-addressed index is whatever of it happens to be resident. Since
+    /// [`graph_row_id`] made the inserts ordered, runs sit within ~10 % of each
+    /// other. Free disk space also moves the absolute numbers noticeably — treat
+    /// figures from different sessions as ratios, not as differences.
+    #[tokio::test]
+    #[ignore = "measurement harness: ~35 s, run manually (see doc comment)"]
+    async fn measure_graph_rebuild_cost() {
+        let dir = std::env::temp_dir().join(format!("ryu-spaces-measure-{}", uuid::Uuid::new_v4()));
+        for target in [96usize, 383, 1530] {
+            let corpus = prose_corpus(target);
+            let chunks = chunk_text(&corpus);
+            let per: Vec<usize> = chunks.iter().map(|c| extract_entities(c).len()).collect();
+            let avg_chars = chunks.iter().map(|c| c.chars().count()).sum::<usize>() / chunks.len();
+            let avg_entities = per.iter().sum::<usize>() / per.len();
+
+            for on_disk in [false, true] {
+                let store = if on_disk {
+                    SpaceStore::open_at(
+                        dir.join(format!("{target}/spaces.db")),
+                        Embedder::Local { dims: 8 },
+                        8,
+                        DEFAULT_GRAPH_EXTRACTION_MODEL.to_owned(),
+                        Reranker::Local,
+                        dir.join(format!("{target}/blobs")),
+                        None,
+                    )
+                    .unwrap()
+                } else {
+                    SpaceStore::open_in_memory().unwrap()
+                };
+                let space = store
+                    .create_space("Measure", None, &DocOwner::unattributed())
+                    .await
+                    .unwrap();
+                store
+                    .ingest_document(&space, "Measure", &corpus, &DocOwner::unattributed())
+                    .await
+                    .unwrap();
+                // Ingest happened in vector mode, so this is a cold, full rebuild —
+                // the exact work one click on the retrieval-mode switch performs.
+                let started = std::time::Instant::now();
+                let change = store
+                    .set_retrieval_mode(&space, RetrievalMode::Graph)
+                    .await
+                    .unwrap()
+                    .expect("space exists");
+                let wall = started.elapsed();
+                println!(
+                    "storage={:9} chunks={:5} chars/chunk={:4} entities/chunk={:3} (min {:3} max {:3}) nodes={:7} edges={:9} wall={:>12?} per-chunk={:?}",
+                    if on_disk { "on-disk" } else { "in-memory" },
+                    change.chunks_scanned,
+                    avg_chars,
+                    avg_entities,
+                    per.iter().min().unwrap(),
+                    per.iter().max().unwrap(),
+                    change.graph_nodes,
+                    change.graph_edges,
+                    wall,
+                    wall / (change.chunks_scanned.max(1) as u32),
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The reproduction harness for the chat-attachment stall (X2).**
+    ///
+    /// Measures the thing the defect is actually about, which is *not* how long the
+    /// upload takes. `SpaceStore` holds ONE `Connection` behind ONE
+    /// `tokio::Mutex`, so the number that matters is the **worst latency a cheap,
+    /// unrelated Space operation sees while an attachment is being indexed** — a
+    /// sidebar refresh, another Space's search, a second upload. A slow upload is a
+    /// slow upload; a slow upload that freezes every Space on the node is the bug.
+    ///
+    /// Shape of the measurement:
+    /// - on-disk store (WAL, the production storage shape — `open_in_memory` is
+    ///   2–5× faster and would understate this), graph-mode Space;
+    /// - `create_file` then [`SpaceStore::replace_file_chunks`], i.e. exactly the
+    ///   path `space_file_index::record_parse_result` takes for a floor-readable
+    ///   `.md`/`.csv`/`.txt` attachment;
+    /// - a concurrent probe task looping `count_spaces()` (one indexed `COUNT`,
+    ///   microseconds uncontended) and recording its **maximum** observed latency.
+    ///
+    /// Prints; asserts nothing about wall clock, for the same reason
+    /// [`measure_graph_rebuild_cost`] does not — timings on a shared machine are a
+    /// diagnostic, not a pass/fail signal.
+    ///
+    /// ```text
+    /// cargo test --release -p ryu-spaces measure_attachment_stall -- --ignored --nocapture --test-threads=1
+    /// ```
+    ///
+    /// Current-thread runtime, and that is fine rather than a compromise: the
+    /// transaction runs on `spawn_blocking` (a separate pool), the test's own task
+    /// is parked awaiting its `JoinHandle`, so the probe is freely schedulable
+    /// throughout. What it waits on is therefore the connection **mutex**, not the
+    /// executor — which is exactly the quantity under measurement. (This crate's
+    /// `tokio` dev-dependency does not enable `rt-multi-thread`, and Cargo.toml is
+    /// not this change's to edit.)
+    #[tokio::test]
+    #[ignore = "measurement harness: minutes, run manually (see doc comment)"]
+    async fn measure_attachment_stall() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let dir = std::env::temp_dir().join(format!("ryu-spaces-stall-{}", uuid::Uuid::new_v4()));
+        // Sizes chosen to bracket "a file someone drags into a chat": a note, a
+        // README, a spec, a long report.
+        for target in [8usize, 32, 100, 400] {
+            let corpus = prose_corpus(target);
+            let case = dir.join(target.to_string());
+            let store = SpaceStore::open_at(
+                case.join("spaces.db"),
+                Embedder::Local { dims: 8 },
+                8,
+                DEFAULT_GRAPH_EXTRACTION_MODEL.to_owned(),
+                Reranker::Local,
+                case.join("blobs"),
+                None,
+            )
+            .unwrap();
+            let space = store
+                .create_space_with_mode(
+                    "Attach",
+                    None,
+                    RetrievalMode::Graph,
+                    &DocOwner::unattributed(),
+                )
+                .await
+                .unwrap();
+            let doc = store
+                .create_file(
+                    &space,
+                    "attachment.md",
+                    corpus.as_bytes(),
+                    "text/markdown",
+                    &DocOwner::unattributed(),
+                )
+                .await
+                .unwrap();
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let worst_us = Arc::new(AtomicU64::new(0));
+            let probe = tokio::spawn({
+                let store = store.clone();
+                let stop = Arc::clone(&stop);
+                let worst_us = Arc::clone(&worst_us);
+                async move {
+                    let mut samples = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        let t = std::time::Instant::now();
+                        let _ = store.count_spaces().await;
+                        let us = t.elapsed().as_micros() as u64;
+                        worst_us.fetch_max(us, Ordering::Relaxed);
+                        samples += 1;
+                        tokio::task::yield_now().await;
+                    }
+                    samples
+                }
+            });
+            tokio::task::yield_now().await;
+
+            let started = std::time::Instant::now();
+            let chunks = store.replace_file_chunks(&doc, &corpus).await.unwrap();
+            let wall = started.elapsed();
+
+            stop.store(true, Ordering::Relaxed);
+            let samples = probe.await.unwrap();
+            let (nodes, edges) = graph_row_counts(&store, &space).await;
+            println!(
+                "bytes={:7} chunks={:4} nodes={:6} edges={:8} call={:>10.3?} \
+                 worst-concurrent-op={:>10.3?} probes={}",
+                corpus.len(),
+                chunks,
+                nodes,
+                edges,
+                wall,
+                std::time::Duration::from_micros(worst_us.load(Ordering::Relaxed)),
+                samples,
+            );
+            // Per-case cleanup, not just at the end: the 400-chunk graph is ~1.3M
+            // edge rows across two indexes — several hundred MB on disk — and
+            // keeping every case alive would make the harness's peak footprint the
+            // sum rather than the max.
+            drop(store);
+            let _ = std::fs::remove_dir_all(&case);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

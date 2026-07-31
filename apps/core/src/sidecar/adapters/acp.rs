@@ -369,9 +369,11 @@ async fn terminal_create(
                 "terminal command denied by gateway policy: {reason}"
             ))
         }
-        ExecScanOutcome::ApprovalRequired(reason) => return Err(anyhow::anyhow!(
+        ExecScanOutcome::ApprovalRequired(reason) => {
+            return Err(anyhow::anyhow!(
             "terminal command requires approval and terminal/create has no prompt seam: {reason}"
-        )),
+        ))
+        }
     }
 
     let mut cmd = tokio::process::Command::new(&req.command);
@@ -905,6 +907,14 @@ pub async fn probe_acp_config(
     let agent =
         AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
     let probe_cmd = spawn_cmd.clone();
+    // Which road Ryu's tools take to this agent, resolved from the spawn command
+    // BEFORE the subprocess answers anything. Reported alongside the agent's own
+    // capabilities because clients must NOT derive it from `mcpCapabilities`: the
+    // managed Pi advertises `http:false` yet has full tool access through the
+    // `ryu-mcp` extension, so a UI reading the raw capability would tell the
+    // flagship's user their tools are unavailable when they are not. Core owns
+    // this derivation for exactly that reason — see [`RyuToolAccess`].
+    let tool_access = ryu_tool_access(&spawn_cmd);
     // Bound the whole probe. Some agents advertise their session config statically
     // (Claude Code, Pi, the Ryu flagship) and answer `session/new` instantly; others
     // do real backend work inside `session/new` — Codex, notably, reaches its model
@@ -941,6 +951,7 @@ pub async fn probe_acp_config(
                         "configOptions": resp.config_options,
                         "authMethods": init.auth_methods,
                         "agentCapabilities": agent_caps_json(&caps),
+                        "ryuToolAccess": tool_access.as_str(),
                     }))
                 }
             }),
@@ -1620,6 +1631,163 @@ struct AcpTurn {
 /// the subprocess is torn down; the chat's next message lazily respawns it.
 const ACP_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Whether this ACP transport can be handed an MCP server at all.
+///
+/// pi-acp advertises NO MCP-server support in its `initialize` response, so a
+/// server passed to its `session/new` is simply not honored — skip it for pi (the
+/// flagship `ryu` engine and bare `acp:pi`). Every other ACP agent supports it.
+///
+/// A transport fact, deliberately kept separate from the user's preference: no
+/// preference value may make Core try to inject into an agent that cannot accept
+/// one, which is exactly the mistake defaulting the bridge ON invites.
+///
+/// ## Verified, not inherited (2026-07-31, pi-acp 0.0.33)
+///
+/// The claim above was carried as an unsourced comment for long enough that it
+/// had to be re-checked against the published artifact rather than trusted. It
+/// still holds, and here is what was actually read:
+///
+/// * `pi-acp@0.0.33`'s `initialize` returns
+///   `agentCapabilities.mcpCapabilities = { http: false, sse: false }`, and its
+///   `session/new` assigns `params.mcpServers` onto a `PiAcpSession` field that
+///   **nothing else in the bundle reads** (the whole `dist/index.js` contains 8
+///   occurrences of the substring `mcp`, all of them that one plumbing path).
+///   So the servers are accepted, stored, and dropped — silently, with no error
+///   the client could react to.
+/// * By contrast `@zed-industries/claude-code-acp@0.16.2` advertises
+///   `{ http: true, sse: true }` and forwards `params.mcpServers` into the
+///   Claude Agent SDK's own `mcpServers` option, and
+///   `@zed-industries/codex-acp@0.16.0` (probed live) returns
+///   `{ http: true, sse: false, acp: false }`. Both honor the bridge.
+///
+/// ## Why this is a spawn-string match and NOT `mcpCapabilities.http`
+///
+/// The temptation is real: Ryu's bridge is injected by
+/// `agent-client-protocol`'s `SessionBuilder::with_mcp_server`, which pushes a
+/// `McpServer::Http` entry (an `acp:<uuid>` pseudo-URL served back over the ACP
+/// connection), and `agent-client-protocol-schema` 0.12.0 documents
+/// `McpCapabilities::http` as, verbatim, "Agent supports `McpServer::Http`".
+/// Semantically it is *exactly* the right question, and the three probes above
+/// all agree with the string match.
+///
+/// It is still the wrong gate, for a reason that is about the wire format rather
+/// than the semantics: every field of `McpCapabilities` is `#[serde(default)]
+/// bool`, so **an agent that omits `agentCapabilities` (or omits
+/// `mcpCapabilities` within it) is indistinguishable from one that answered
+/// `false`**. Gating on it would silently drop the bridge for every agent that
+/// under-advertises — Gemini's experimental ACP mode, OpenClaw, any
+/// `acp-exec:` BYO agent, any older build — converting "your tools work" into
+/// "your tools quietly vanished", which is the same class of failure this whole
+/// round exists to remove. The string match only ever *withholds* the bridge from
+/// the one transport we have positively verified cannot use it.
+///
+/// The capability is still read: [`run_acp_instance`] logs a WARN when it injects
+/// the bridge into an agent that advertised no HTTP MCP support, so a
+/// silently-inert bridge leaves a trace instead of looking like a tool the model
+/// merely chose not to call.
+///
+/// Watch item: codex-acp returned an `acp: false` member inside `mcpCapabilities`
+/// that does **not** exist in `agent-client-protocol-schema` 0.12.0. That reads
+/// like a future ACP revision promoting `acp:`-over-HTTP to a first-class
+/// transport with its own capability bit. If that lands, re-verify this whole
+/// comment — it is the one change that would make the analysis above obsolete.
+fn acp_bridge_supported(spawn_cmd: &str) -> bool {
+    !spawn_cmd.contains("pi-acp")
+}
+
+/// How — if at all — Ryu's registered tools can reach a given ACP agent.
+///
+/// Ryu has **two** unrelated mechanisms for this, and until now nothing named
+/// them together, so the bridge code read as "pi has no tools" when the truth is
+/// "pi has tools by another road entirely":
+///
+/// * [`RyuToolAccess::Bridge`] — the in-process MCP server injected into
+///   `session/new` ([`super::mcp_bridge::build_ryu_mcp_server`]). Every ACP agent
+///   except pi-acp.
+/// * [`RyuToolAccess::PiExtension`] — the `ryu-mcp.ts` **Pi extension**
+///   (`crate::pi_config::ensure_pi_mcp_extension`), which registers
+///   `ryu_call_tool` / `ryu_list_tools` inside Pi and POSTs to Core's
+///   `/api/mcp/tools/call`. Reaches the same allowlist-gated registry as the
+///   bridge, over HTTP instead of in-process. Only the **managed** Pi has it:
+///   the extension is written into Ryu's isolated config dir and only a Pi
+///   spawned with `PI_CODING_AGENT_DIR` pointed there will load it.
+/// * [`RyuToolAccess::None`] — a pi-acp spawn that is *not* the managed Pi, i.e.
+///   bare `acp:pi` (the user's own `~/.pi`) and any custom agent bound to the
+///   `acp:pi` engine. No bridge (unsupported transport) and no extension (Ryu
+///   never writes into the user's own Pi config dir — see
+///   `pi_config::ensure_pi_mcp_extension` for why that restraint is deliberate
+///   rather than an oversight). Such an agent cannot call a single Ryu tool.
+///
+/// Derived from the spawn command alone: pure, unit-testable, and — unlike the
+/// agent's `initialize` response — knowable *before* the subprocess is started,
+/// which is what lets [`probe_acp_config`] report it for the picker.
+///
+/// This answers "which road exists", never "is it switched on". Whether a
+/// `Bridge` agent actually receives the bridge additionally depends on the
+/// `agent-tool-bridge` preference ([`acp_tool_bridge_enabled`]); whether a
+/// `PiExtension` agent's calls succeed depends on the `RYU_MCP_*` env the spawn
+/// command carries. Keeping the two apart is the point: a user who turns the
+/// bridge off has made a choice, whereas `None` is a structural fact they were
+/// never told about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RyuToolAccess {
+    /// In-process MCP server injected into `session/new`.
+    Bridge,
+    /// The managed Pi's `ryu-mcp` extension calling Core's HTTP tool API.
+    PiExtension,
+    /// Neither mechanism applies — this agent cannot reach Ryu's tools.
+    None,
+}
+
+impl RyuToolAccess {
+    /// Stable wire string for clients (`probe_acp_config`'s `ryuToolAccess`).
+    /// Kebab-case, matching the rest of the probe payload's JSON conventions.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Bridge => "bridge",
+            Self::PiExtension => "pi-extension",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Classify a spawn command into the tool-access road it can use.
+///
+/// The managed-Pi test is the same pair of substrings `run_acp_instance` uses to
+/// recognise the flagship (`pi-acp` + `PI_CODING_AGENT_DIR`, present on both
+/// platforms — POSIX inline `VAR=…`, Windows `set VAR=…`; see
+/// [`ryu_pi_acp_cmd`]). `is_managed_pi` is derived from this function rather than
+/// re-spelled, so the two predicates cannot drift into disagreeing about which
+/// process is the flagship.
+fn ryu_tool_access(spawn_cmd: &str) -> RyuToolAccess {
+    if acp_bridge_supported(spawn_cmd) {
+        return RyuToolAccess::Bridge;
+    }
+    if spawn_cmd.contains("PI_CODING_AGENT_DIR") {
+        return RyuToolAccess::PiExtension;
+    }
+    RyuToolAccess::None
+}
+
+/// The full decision for whether an ACP session gets Ryu's MCP tool bridge:
+/// the transport must support it AND the user must not have opted this agent out.
+///
+/// Both halves live in one named function so a call site cannot take the
+/// preference and forget the transport guard. The transport term is FIRST and
+/// short-circuits, so pi-acp is answered without ever consulting the preference
+/// map — the `is_tool_bridge_enabled` default is ON, and an agent that cannot
+/// accept a bridge must not be given one just because nobody configured it.
+///
+/// Note the two gates read different things about "this agent": the transport
+/// half looks at the spawn command, the preference half at the client-selected
+/// agent id (`AcpTurn::agent_id`, the same id the pool keys sessions on). An
+/// empty agent id — a turn that named no agent — hits the ON default, matching the
+/// pre-split behaviour for such turns as far as the user can tell (they had no
+/// agent record to toggle either way).
+fn acp_tool_bridge_enabled(spawn_cmd: &str, agent_id: &str) -> bool {
+    acp_bridge_supported(spawn_cmd) && crate::agent_routing::is_tool_bridge_enabled(agent_id)
+}
+
 /// Run one chat's ACP instance: spawn the subprocess ONCE, `initialize` ONCE,
 /// build the Ryu MCP bridge ONCE and the ACP session ONCE, then serve every queued
 /// turn on that same session until the chat goes idle (`ACP_IDLE_TTL`) or the pool
@@ -1633,10 +1801,12 @@ pub async fn run_acp_instance(
     cwd: PathBuf,
     turns_rx: mpsc::UnboundedReceiver<AcpTurn>,
 ) -> anyhow::Result<()> {
-    // pi-acp advertises NO MCP-server support in its `initialize` response, so
-    // injecting Ryu's bridge into its `session/new` is not honored — skip it for
-    // pi (the flagship `ryu` engine + `acp:pi`). Every other ACP agent gets it.
-    let bridge_supported = !spawn_cmd.contains("pi-acp");
+    // The spawn command is consumed below (`AcpAgent::from_str` then the move into
+    // the session closure), but the bridge decision also needs it — and it must be
+    // taken with BOTH halves in one place (`acp_tool_bridge_enabled`) so the
+    // transport guard cannot be forgotten at this call site. One small clone per
+    // pooled instance, i.e. once per chat, buys that.
+    let bridge_spawn_cmd = spawn_cmd.clone();
     // Claude Code (via `claude-code-acp`) otherwise loads the session cwd's project
     // `.mcp.json` + local settings on every `session/new`, spawning that folder's
     // MCP servers before the first token (measured: 62s -> 8s once constrained) and
@@ -1645,13 +1815,33 @@ pub async fn run_acp_instance(
     // `build_session_from`, per turn below).
     let is_claude_code =
         spawn_cmd.contains("claude-code-acp") || spawn_cmd.contains("claude-agent-acp");
+    // Which road (if any) Ryu's tools can take to this agent. Recorded once per
+    // pooled instance — i.e. once per chat's subprocess — because until now the
+    // `None` case was completely silent: an agent that structurally cannot reach a
+    // single configured tool looked, from every log and every surface, exactly like
+    // an agent that simply chose not to call one.
+    let tool_access = ryu_tool_access(&spawn_cmd);
+    match tool_access {
+        RyuToolAccess::None => tracing::warn!(
+            access = tool_access.as_str(),
+            "ACP agent has NO access to Ryu tools: this is a pi-acp transport (which does not \
+             honor session/new mcpServers) spawned WITHOUT Ryu's managed Pi config dir, so it \
+             gets neither the MCP bridge nor the ryu-mcp Pi extension. Use the flagship `ryu` \
+             agent for Ryu tools on Pi."
+        ),
+        _ => tracing::debug!(access = tool_access.as_str(), "ACP tool access"),
+    }
     // The flagship managed `ryu` agent: pi-acp pointed at Ryu's ISOLATED config dir
     // (`PI_CODING_AGENT_DIR` → `~/.ryu/pi-agent`). Only this Pi reads the managed
     // `auth.json`, so it is the only agent whose subscription OAuth logins we
     // proactively refresh before a turn — never bare `acp:pi` (the user's own
     // `~/.pi`) or any other engine. Both platforms carry the `PI_CODING_AGENT_DIR`
     // substring (POSIX inline `VAR=…`, Windows `set VAR=…`), see `ryu_pi_acp_cmd`.
-    let is_managed_pi = spawn_cmd.contains("pi-acp") && spawn_cmd.contains("PI_CODING_AGENT_DIR");
+    //
+    // Derived from `ryu_tool_access` rather than re-spelling the two substrings:
+    // `PiExtension` IS "this is the managed Pi", and one predicate that two call
+    // sites read cannot drift the way two copies of it can.
+    let is_managed_pi = tool_access == RyuToolAccess::PiExtension;
 
     if is_managed_pi {
         // Resolve every enabled plugin's `contributes.lsp_servers` and drop the
@@ -1750,16 +1940,38 @@ pub async fn run_acp_instance(
                     }
                 });
 
-                // Build the Ryu MCP bridge ONCE for this chat, gated on the agent's
-                // gateway-routing toggle: gateway-OFF runs the agent VANILLA / un-
-                // governed (its own MCP only, `ryu_server = None`); gateway-ON injects
-                // Ryu's universal governed bridge (Ghost/Shadow/Composio/registry tools
-                // through the allowlist-gated `call_tool` path — AC3 governance). The
-                // `bridge_supported` guard still skips pi-acp, which advertises no
-                // MCP-server support. Loading user-level MCP happens here ONCE — the
-                // whole point of building the session a single time (see below).
-                let gateway_on = crate::agent_routing::is_gateway_routing(&first_turn.agent_id);
-                let ryu_server = if bridge_supported && gateway_on {
+                // Build the Ryu MCP bridge ONCE for this chat. When enabled, the
+                // session gets Ryu's universal governed bridge (Ghost/Shadow/Composio/
+                // registry tools reached through the allowlist-gated `call_tool` path
+                // — AC3 governance); when not, the agent runs with its own MCP only
+                // (`ryu_server = None`). Loading user-level MCP happens here ONCE —
+                // the whole point of building the session a single time (see below).
+                //
+                // This gate is `agent-tool-bridge` (default ON), NOT the egress
+                // `agent-gateway-routing` toggle it used to share. See
+                // `acp_tool_bridge_enabled` and the `agent_routing` module docs.
+                //
+                // The agent's OWN advertised capability is not the gate (see
+                // `acp_bridge_supported` for why `mcpCapabilities.http` cannot be
+                // trusted to distinguish "no" from "did not say"), but a mismatch is
+                // worth a line in the log: the bridge Ryu injects is an
+                // `McpServer::Http` entry, so an agent that advertised no HTTP MCP
+                // support will most likely ignore it, and the model will then look
+                // like it declined to use tools it was never actually offered.
+                if acp_tool_bridge_enabled(&bridge_spawn_cmd, &first_turn.agent_id)
+                    && !agent_caps.mcp_http
+                {
+                    tracing::warn!(
+                        agent = %first_turn.agent_id,
+                        "ACP agent advertised no HTTP MCP support (mcpCapabilities.http=false) \
+                         but is being given Ryu's MCP bridge; if it ignores session/new \
+                         mcpServers the agent will silently have no Ryu tools"
+                    );
+                }
+                let ryu_server = if acp_tool_bridge_enabled(
+                    &bridge_spawn_cmd,
+                    &first_turn.agent_id,
+                ) {
                     match &first_turn.mcp {
                         Some(registry) => {
                             super::mcp_bridge::build_ryu_mcp_server(
@@ -1779,7 +1991,7 @@ pub async fn run_acp_instance(
                     None
                 };
                 // Keep `instance_tx` alive for the whole instance so the relay task
-                // survives idle gaps even when the bridge is absent (gateway-off).
+                // survives idle gaps even when the bridge is absent.
                 let _instance_tx_keepalive = instance_tx;
 
                 let session_cwd = cwd.clone();
@@ -1800,8 +2012,9 @@ pub async fn run_acp_instance(
                 // win: the live session already holds the conversation, so subsequent
                 // turns send only the delta message (no history re-send).
                 //
-                // `ryu_server` is `None` for pi-acp / gateway-off agents, so those
-                // sessions are created without it.
+                // `ryu_server` is `None` for pi-acp and for agents the user has
+                // explicitly opted out of the bridge, so those sessions are created
+                // without it.
                 let mut new_session = NewSessionRequest::new(session_cwd);
                 if is_claude_code {
                     // See `is_claude_code` above: constrain the Claude Agent SDK's
@@ -3057,11 +3270,7 @@ pub fn ryu_pi_acp_cmd() -> Option<String> {
         } else {
             String::new()
         };
-        let mut mcp_env =
-            format!("set RYU_MCP_CORE_URL={core_url}&& set RYU_MCP_AGENT_ID={mcp_agent_id}&& ");
-        if let Some(t) = &core_token {
-            mcp_env.push_str(&format!("set RYU_MCP_CORE_TOKEN={t}&& "));
-        }
+        let mcp_env = pi_mcp_extension_env(true);
         Some(format!(
             "cmd /c {gateway_env}{mcp_env}set PI_CODING_AGENT_DIR={config_dir}&& set PI_ACP_PI_COMMAND={pi_path}&& npx -y pi-acp"
         ))
@@ -3073,10 +3282,7 @@ pub fn ryu_pi_acp_cmd() -> Option<String> {
         } else {
             String::new()
         };
-        let mut mcp_env = format!("RYU_MCP_CORE_URL={core_url} RYU_MCP_AGENT_ID={mcp_agent_id} ");
-        if let Some(t) = &core_token {
-            mcp_env.push_str(&format!("RYU_MCP_CORE_TOKEN={t} "));
-        }
+        let mcp_env = pi_mcp_extension_env(false);
         Some(format!(
             "{gateway_env}{mcp_env}PI_CODING_AGENT_DIR={config_dir} PI_ACP_PI_COMMAND={pi_path} npx -y pi-acp"
         ))
@@ -3138,6 +3344,44 @@ fn codex_acp_cmd() -> String {
     });
     // POSIX: prefix the command with inline env var assignments.
     format!("OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} npx -y @agentclientprotocol/codex-acp@latest")
+}
+
+/// The three env vars the `ryu-mcp` Pi extension needs to reach Core, rendered for
+/// the target shell (`windows` ⇒ `set VAR=…&& ` chaining, else POSIX inline).
+///
+/// **Extracted because it has two callers and they drifted.** Pi cannot accept the
+/// in-process MCP bridge (`pi-acp` advertises `mcpCapabilities {http:false,sse:false}`
+/// and drops `session/new`'s `mcpServers`), so this extension is its ONLY road to
+/// Ryu's tools. There are two spawn paths to the same agent — [`ryu_pi_acp_cmd`] for
+/// the managed binary and the PATH fallback in `super::ryu_agent_route` — and only the
+/// first injected these. The fallback's Pi silently used the extension's compiled-in
+/// defaults instead: `http://127.0.0.1:7980` (the wrong port under any non-release
+/// `RYU_PROFILE`) and an empty bearer. The agent still started and answered; it just
+/// never had a tool.
+///
+/// Keeping the rendering here, rather than the values, is deliberate: a caller that
+/// re-derives `core_url` itself is free to derive it differently, which is how the
+/// drift happened. Both callers now emit the same bytes or neither does.
+pub(crate) fn pi_mcp_extension_env(windows: bool) -> String {
+    let core_url = crate::sidecar::gateway::core_self_url();
+    let mcp_agent_id = crate::registry::DEFAULT_AGENT_ID;
+    let core_token = std::env::var("RYU_TOKEN")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let mut env = if windows {
+        format!("set RYU_MCP_CORE_URL={core_url}&& set RYU_MCP_AGENT_ID={mcp_agent_id}&& ")
+    } else {
+        format!("RYU_MCP_CORE_URL={core_url} RYU_MCP_AGENT_ID={mcp_agent_id} ")
+    };
+    if let Some(t) = &core_token {
+        if windows {
+            env.push_str(&format!("set RYU_MCP_CORE_TOKEN={t}&& "));
+        } else {
+            env.push_str(&format!("RYU_MCP_CORE_TOKEN={t} "));
+        }
+    }
+    env
 }
 
 /// The gateway URL Claude Code is pointed at via `ANTHROPIC_BASE_URL`. Claude Code
@@ -3780,6 +4024,184 @@ mod tests {
 
     fn pi_acp_cmd_gated() -> String {
         pi_acp_cmd()
+    }
+
+    // ── MCP tool bridge gate (split from egress routing) ───────────────────
+    //
+    // These assert on `acp_tool_bridge_enabled` — the SAME function
+    // `run_acp_instance` calls — rather than re-deriving the rule, so a change to
+    // the composition (or to the default) fails here instead of only in a live
+    // session nobody runs in CI.
+
+    /// The headline behaviour change: an ACP agent nobody has configured now gets
+    /// the bridge. Before the split this required opting into gateway EGRESS,
+    /// which is why an installed agent had no Ryu tools out of the box.
+    #[test]
+    fn fresh_acp_agent_gets_the_tool_bridge() {
+        let _guard = crate::agent_routing::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::agent_routing::set_bridge_from_json("");
+        // Egress explicitly OFF for this agent — the bridge must not care.
+        crate::agent_routing::set_from_json(r#"{"acp:goose": false}"#);
+        assert!(acp_tool_bridge_enabled("npx -y goose-acp", "acp:goose"));
+        assert!(!crate::agent_routing::is_gateway_routing("acp:goose"));
+    }
+
+    /// The opt-out must be reachable. A default-ON gate whose `false` never lands
+    /// is not a toggle, it is a constant with a misleading name.
+    #[test]
+    fn explicit_opt_out_withholds_the_bridge() {
+        let _guard = crate::agent_routing::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::agent_routing::set_bridge_from_json(r#"{"acp:goose": false}"#);
+        assert!(!acp_tool_bridge_enabled("npx -y goose-acp", "acp:goose"));
+        // Scoped to that agent id only.
+        assert!(acp_tool_bridge_enabled("npx -y goose-acp", "acp:opencode"));
+    }
+
+    /// pi-acp advertises no MCP-server support, so the transport guard must win
+    /// over the (now ON) preference default in BOTH orders of configuration —
+    /// otherwise defaulting the bridge on would make Core inject into an agent
+    /// that cannot accept it. Covers the managed `ryu` engine's command too,
+    /// which carries `PI_CODING_AGENT_DIR` but is still pi-acp.
+    #[test]
+    fn pi_acp_never_gets_the_bridge_despite_the_on_default() {
+        let _guard = crate::agent_routing::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Unconfigured (the default-ON path) …
+        crate::agent_routing::set_bridge_from_json("");
+        assert!(!acp_tool_bridge_enabled(&pi_acp_cmd_gated(), "acp:pi"));
+        // … and explicitly opted IN, which must not override a transport fact.
+        crate::agent_routing::set_bridge_from_json(r#"{"ryu": true, "acp:pi": true}"#);
+        assert!(!acp_tool_bridge_enabled(&pi_acp_cmd_gated(), "acp:pi"));
+        assert!(!acp_bridge_supported(&pi_acp_cmd_gated()));
+        let managed = format!("PI_CODING_AGENT_DIR=/tmp/pi {}", pi_acp_cmd_gated());
+        assert!(!acp_tool_bridge_enabled(&managed, "ryu"));
+        // A non-pi transport with the same preference IS enabled, proving the
+        // rejection above came from the transport guard and not a stuck map.
+        assert!(acp_tool_bridge_enabled("npx -y claude-code-acp", "ryu"));
+    }
+
+    // ── Tool-access classification (which road, if any) ───────────────────
+    //
+    // These pin the CLASSIFIER, not any claim about the pi-acp npm package: a
+    // Rust unit test cannot observe what `dist/index.js` does with
+    // `params.mcpServers`. That claim lives in `acp_bridge_supported`'s doc
+    // comment, with the version and date it was verified against.
+
+    /// Every non-pi transport takes the in-process bridge — the road the whole
+    /// `mcp_bridge` module exists to serve.
+    #[test]
+    fn non_pi_transports_are_classified_as_bridge() {
+        for cmd in [
+            "npx -y claude-code-acp",
+            "npx -y @zed-industries/codex-acp",
+            "npx -y goose-acp",
+            "/usr/local/bin/my-own-agent --acp",
+        ] {
+            assert_eq!(ryu_tool_access(cmd), RyuToolAccess::Bridge, "{cmd}");
+        }
+    }
+
+    /// The flagship. Its spawn command is pi-acp (so no bridge) but carries
+    /// `PI_CODING_AGENT_DIR`, which is what makes the managed Pi load the
+    /// `ryu-mcp` extension — the road that gives the DEFAULT agent its tools.
+    /// Asserted on BOTH platform spellings of the env prefix, because the Windows
+    /// `set VAR=…&&` form is the one a POSIX-only substring test would miss.
+    #[test]
+    fn managed_pi_is_classified_as_pi_extension() {
+        let posix = format!("PI_CODING_AGENT_DIR=/tmp/pi-agent {}", pi_acp_cmd_gated());
+        assert_eq!(ryu_tool_access(&posix), RyuToolAccess::PiExtension);
+        let windows = "cmd /c set PI_CODING_AGENT_DIR=C:\\pi&& npx -y pi-acp";
+        assert_eq!(ryu_tool_access(windows), RyuToolAccess::PiExtension);
+    }
+
+    /// The gap this classification exists to make visible: bare `acp:pi` (the
+    /// user's own `~/.pi`) and any custom agent bound to the `acp:pi` engine get
+    /// NEITHER road. The bridge is unsupported by the transport and the extension
+    /// lives only in Ryu's managed config dir, so such an agent cannot call a
+    /// single Ryu tool — a fact nothing surfaced before this.
+    #[test]
+    fn bare_pi_acp_is_classified_as_no_tool_access() {
+        assert_eq!(ryu_tool_access(&pi_acp_cmd_gated()), RyuToolAccess::None);
+    }
+
+    /// The wire strings are a client contract (`probe_acp_config`'s
+    /// `ryuToolAccess`, which the desktop switches on to word its copy), so a
+    /// rename must break here rather than silently fall through a `default:` arm
+    /// in TypeScript.
+    #[test]
+    fn tool_access_wire_strings_are_stable() {
+        assert_eq!(RyuToolAccess::Bridge.as_str(), "bridge");
+        assert_eq!(RyuToolAccess::PiExtension.as_str(), "pi-extension");
+        assert_eq!(RyuToolAccess::None.as_str(), "none");
+    }
+
+    /// `is_managed_pi` in `run_acp_instance` is derived from this classifier, and
+    /// it gates real behaviour (managed-Pi OAuth refresh, the LSP-server table,
+    /// the widget-synthesis path). So `PiExtension` must mean *exactly* what that
+    /// call site's original two-substring test meant — no wider, no narrower.
+    #[test]
+    fn pi_extension_matches_the_managed_pi_predicate() {
+        for cmd in [
+            format!("PI_CODING_AGENT_DIR=/tmp/pi {}", pi_acp_cmd_gated()),
+            pi_acp_cmd_gated(),
+            "npx -y claude-code-acp".to_owned(),
+            // A non-pi agent that happens to carry the env var must NOT be taken
+            // for the managed Pi: the extension is a Pi mechanism, and the bridge
+            // is the road this command actually gets.
+            "PI_CODING_AGENT_DIR=/tmp/pi npx -y claude-code-acp".to_owned(),
+        ] {
+            let legacy = cmd.contains("pi-acp") && cmd.contains("PI_CODING_AGENT_DIR");
+            assert_eq!(
+                ryu_tool_access(&cmd) == RyuToolAccess::PiExtension,
+                legacy,
+                "{cmd}"
+            );
+        }
+    }
+
+    /// What the bridge actually exposes: exactly the agent's own allowlist, never a
+    /// superset. If that ever stops holding, the ON default must be revisited.
+    ///
+    /// It is **not**, on its own, the justification for defaulting ON — the baseline
+    /// assertion below is the reason why. `allowlist_for` resolves only from
+    /// `RYU_MCP_ALLOWLIST*`, so on a stock node the allowlist is `None` =
+    /// unrestricted, and "exactly the allowlist" is then the full built-in set. The
+    /// real argument is parity: the Pi-extension and openai-compat planes pass the
+    /// same `allowlist_for(agent_id)` and are already default-on, and every bridged
+    /// call still crosses `approvals::gate_tool_call`. See the module doc on
+    /// `crate::agent_routing`.
+    #[tokio::test]
+    async fn bridge_offers_exactly_the_agents_tool_allowlist() {
+        let mcp = Arc::new(McpRegistry::empty());
+        let unrestricted = mcp.tools_for_agent(None).await;
+        assert!(
+            !unrestricted.is_empty(),
+            "the built-in providers must offer something, or this test is vacuous"
+        );
+
+        // Restrict to ONE of the tools the unrestricted agent can see.
+        let keep = unrestricted[0].id.clone();
+        let restricted = mcp.tools_for_agent(Some(&[keep.clone()])).await;
+        let ids: Vec<String> = restricted.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(
+            ids,
+            vec![keep],
+            "a restricted agent sees exactly its allowlist through the bridge"
+        );
+
+        // An allowlist naming nothing real yields no registry tools at all — the
+        // bridge cannot widen an allowlist, only honour it. (The always-on
+        // meta/discovery tools are added on top and are not a grant: every call
+        // still re-enters `McpRegistry::call_tool`'s allowlist check.)
+        let none = mcp
+            .tools_for_agent(Some(&["no-such-server".to_owned()]))
+            .await;
+        assert!(none.is_empty());
     }
 
     // ── Managed-Pi widget synthesis (Round A) ──────────────────────────────

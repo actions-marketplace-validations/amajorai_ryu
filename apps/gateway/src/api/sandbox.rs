@@ -248,6 +248,11 @@ async fn debit_sandbox_sync(
 
     let url = format!("{}/credits/debit", credits.base_url.trim_end_matches('/'));
     let ref_id = format!("{run_id}:sandbox:{tick_index}");
+    // No `pool` field, and that is deliberate: sandbox compute is Ryu's own
+    // container time, not inference drawn from a donated provider allowance.
+    // Neither credit pool funds it, so it must never reach pool-restricted grant
+    // money — omitting `pool` is what tells the control-plane debit to bill the
+    // ordinary subscription/top-up buckets. See `crate::credit_pools`.
     let body = json!({
         "orgId": org_id,
         "amountMicroUsd": billed_micro,
@@ -270,9 +275,11 @@ async fn debit_sandbox_sync(
 
     let v = resp.json::<Value>().await.ok()?;
     let balance = v["balanceMicroUsd"].as_i64()?;
-    // Steady-state truth: keep the cached empty flag in sync so the chat path is
-    // gated after a sandbox drains the wallet (self-heals after a top-up).
-    state.wallet.set_org_empty(org_id, balance <= 0);
+    // Steady-state truth: keep the cached balance (and the empty flag derived
+    // from it) in sync so the chat path is gated after a sandbox drains the
+    // wallet (self-heals after a top-up), and so Core's dollar-threshold
+    // fallback rules see a sandbox's spend too.
+    state.wallet.set_org_balance(org_id, balance);
     Some(balance)
 }
 

@@ -24,6 +24,11 @@ mod crash;
 mod crypto_host;
 mod dashboards_client;
 mod data_path;
+/// The `document.parse` extraction facade. Shipped in `9bf1e2023` **without a
+/// `mod` line**, so it was never in the module tree and never compiled — the
+/// deepest form of the gap it was written to close. Declared here so
+/// [`space_file_index`] can call it.
+mod document_parse;
 mod downloads;
 mod entitlement;
 mod events;
@@ -94,6 +99,7 @@ mod recipes_client;
 mod recipes_host;
 mod registry;
 mod replicate_auth;
+mod routing_policy;
 mod rtk_config;
 mod runnable;
 mod sandbox;
@@ -104,6 +110,9 @@ mod server;
 mod sidecar;
 mod skills_catalog;
 mod skills_host;
+/// The one path that puts an uploaded file's *contents* into a Space index —
+/// `create_file` + [`document_parse`] + a durable per-document index status.
+mod space_file_index;
 mod smtp_auth;
 mod stats_beacon;
 mod stt_host;
@@ -130,9 +139,9 @@ use sidecar::{
     install_state::InstallStatusStore,
     onboarding::SetupManager,
     providers::{
-        apfel::ApfelManager, llamacpp::LlamaCppEmbedManager, llamacpp::LlamaCppManager,
-        llamacpp::LlamaCppRerankManager, mlx::MlxManager, mlx_vlm::MlxVlmManager,
-        ollama::OllamaManager, omlx::OmlxManager, outetts::OuteTtsManager,
+        apfel::ApfelManager, llamacpp::LlamaCppClassifyManager, llamacpp::LlamaCppEmbedManager,
+        llamacpp::LlamaCppManager, llamacpp::LlamaCppRerankManager, mlx::MlxManager,
+        mlx_vlm::MlxVlmManager, ollama::OllamaManager, omlx::OmlxManager, outetts::OuteTtsManager,
         parakeet::ParakeetManager, ryutts::RyuTtsManager, sdcpp::StableDiffusionManager,
         sglang::SglangManager, vllm::VllmManager, whispercpp::WhisperCppManager,
         DockerModelRunnerManager,
@@ -399,8 +408,32 @@ async fn main() {
     // Clean up the `<exe>.old` backup left by a prior self-update, if any.
     crate::update::apply::cleanup_stale_backup();
 
-    // Load the unified provider/model/strategy registry at startup so the
-    // resolved defaults are visible in logs (env > ~/.ryu/registry.json > literal).
+    // Load the unified provider/model registry at startup so the resolved defaults
+    // are visible in logs (env > ~/.ryu/registry.json > literal).
+    //
+    // # Every value printed here is one the running system will actually use
+    //
+    // That is a property of the *fields chosen*, not of the constructor, and it was
+    // not true before. This block used to print `load()`'s answer for `embed_model`
+    // and `embed_dims` while their consumers (`spaces::open_default`,
+    // `rag_host::open_retrieval_store`, `search_host`) built with `from_env()` and
+    // never opened the file: an operator who wrote `{"embed_model":"X"}` read
+    // `embed_model=X` here and reasonably concluded Spaces now embed with X. A log
+    // line that corroborates a false belief is worse than no log line. It was
+    // patched by ALSO logging a warning naming the divergent fields — printing the
+    // lie and the correction side by side.
+    //
+    // The divergence itself is now gone: the embed trio and all four local-GGUF
+    // triples have no `registry.json` key, so `load()` and `from_env()` return the
+    // same values for them, and every other field printed here is read by consumers
+    // that all use `load()`. Hence one line and no warning — there is nothing left
+    // for a warning to name. `registry::from_env_and_load_agree_on_every_field_a_from_env_consumer_reads`
+    // is what keeps that true; if it ever fails, this log is lying again.
+    //
+    // `embed_model`/`embed_dims` are still printed because they are still the values
+    // in force — env or literal now, never file. `strategies_count` is NOT printed
+    // any more: nothing ever read a `strategies` entry, so the count advertised a
+    // knob that did not exist, and the field is deleted.
     {
         let reg = crate::registry::ProviderRegistry::load();
         tracing::info!(
@@ -409,9 +442,9 @@ async fn main() {
             embed_model = %reg.embedder.id,
             embed_dims = reg.embedder.dims,
             reranker_model = %reg.reranker.id,
+            rag_strategy = %reg.rag_strategy,
             providers_count = reg.providers.len(),
-            strategies_count = reg.strategies.len(),
-            "registry: loaded provider/model/strategy defaults"
+            "registry: loaded provider/model defaults"
         );
     }
 
@@ -444,6 +477,13 @@ async fn main() {
         // lazily started by the Spaces search path on first use. The model is
         // still auto-downloaded during onboarding.
         Arc::new(LlamaCppRerankManager::new().with_downloads(download_center.clone())),
+        // Dedicated classify server — serves the 270M gemma GGUF as the cheap
+        // "classify tier" the gateway's firewall inspector and smart-routing
+        // classifier route to (instead of the user's full-size resident chat
+        // engine). Off by default (NOT in startup_order): Core's gateway
+        // config-push path lazily starts it when a pushed config selects the tier.
+        // The model is still auto-downloaded during onboarding.
+        Arc::new(LlamaCppClassifyManager::new().with_downloads(download_center.clone())),
         Arc::new(OllamaManager::new().with_downloads(download_center.clone())),
         Arc::new(VllmManager::new()),
         Arc::new(SglangManager::new()),
@@ -559,6 +599,13 @@ async fn main() {
     // `start_all` runs (see the `seed_installed_from_disk` call below).
     let seed_names = startup_order.clone();
     let sidecars = SidecarManager::new(all_sidecars, startup_order, Arc::clone(&setup));
+
+    // Publish the manager to the gateway config-push path so it can lazily start
+    // the off-by-default classify tier when a pushed `/v1/config` selects it. The
+    // gateway is a separate process and cannot start a Core sidecar itself, and
+    // `push_config` is a free function with no `ServerState` in scope — so the
+    // handle travels as a process-global, seeded here at the single build site.
+    crate::sidecar::gateway::register_sidecar_manager(Arc::clone(&sidecars));
 
     // Preflight the OS permissions the native capture/automation sidecars (ghost,
     // shadow) depend on. Core only detects and reports — it is a background
@@ -693,7 +740,11 @@ async fn main() {
     {
         tracing::warn!("failed to ensure Whiteboard system space: {e:#}");
     }
-    let retrieval = match rag_host::open_retrieval_store() {
+    // `&spaces` is what lets `RetrievalOptions::space_ids` reach a real Space: the
+    // retrieval store delegates the Spaces half of every recall back to the Spaces
+    // store, where each Space's own `retrieval_mode` (vector or graph) decides how
+    // it is answered. See `rag_host::SpacesRecall`.
+    let retrieval = match rag_host::open_retrieval_store(&spaces) {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open retrieval store: {e:#}"),
     };
@@ -863,6 +914,18 @@ async fn main() {
         .await
     {
         agent_routing::set_from_json(&value);
+    }
+    // Per-agent MCP tool-bridge opt-OUTs. Independent of the egress toggle above
+    // (they used to share one preference, so declining credential routing also
+    // silently stripped every Ryu tool). Seeded the same way, but note the
+    // asymmetry: this map holds only opt-OUTs — an absent preference is the
+    // default-ON case and needs no seeding at all, which is exactly what a missing
+    // key here leaves behind. See `agent_routing`'s module docs.
+    if let Ok(Some(value)) = preferences
+        .get(agent_routing::AGENT_TOOL_BRIDGE_PREF_KEY)
+        .await
+    {
+        agent_routing::set_bridge_from_json(&value);
     }
     // Per-agent Plane A model-routing overrides (spec §1). One pref holds a JSON
     // map of agent id → SmartRoutingConfig; seed the in-process map so the (async)
@@ -1386,6 +1449,9 @@ async fn main() {
         Err(e) => boot_fail!("failed to open experience store: {e:#}"),
     };
 
+    // Handed to the scheduler further down, which is spawned after `ServerState`
+    // has taken ownership of the store. `PluginStore` clones share one pool.
+    let scheduler_apps = app_store.clone();
     let server_state = server::ServerState {
         setup: Arc::clone(&setup),
         manager: Arc::clone(&sidecars),
@@ -1596,8 +1662,9 @@ async fn main() {
     }
 
     // Start the scheduled-job tick loop (reloads jobs from disk so schedules
-    // survive a Core restart).
-    scheduler::Scheduler::new().spawn();
+    // survive a Core restart). The App store rides along so a job an App created
+    // stops firing while that App is disabled or uninstalled.
+    scheduler::Scheduler::new().with_apps(scheduler_apps).spawn();
 
     // Start the opt-in cross-device conversation sync loop (M10). A no-op every
     // tick until the user opts in (env `RYU_SYNC_ENABLED` or the
@@ -1827,6 +1894,8 @@ fn ensure_identity_health_job() -> Result<(), String> {
         target: JobTarget::IdentityHealth,
         enabled: true,
         require_approval: false,
+        // Core-owned (reconciled by Core itself), not an App-created job.
+        owner_app: None,
         created_at: existing
             .as_ref()
             .map(|j| j.created_at.clone())
@@ -1860,6 +1929,8 @@ fn ensure_learning_cycle_job() -> Result<(), String> {
         target: JobTarget::LearningCycle,
         enabled: true,
         require_approval: false,
+        // Core-owned (reconciled by Core itself), not an App-created job.
+        owner_app: None,
         created_at: existing
             .as_ref()
             .map(|j| j.created_at.clone())

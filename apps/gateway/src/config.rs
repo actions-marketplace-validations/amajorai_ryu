@@ -43,6 +43,61 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub routing: RoutingConfig,
 
+    /// Which `routing.model_map` key [`seed_classify_route`] inserted during
+    /// [`Self::load`], if any. Provenance of a DERIVED value, never configuration —
+    /// which is why it hangs off the config root rather than living inside
+    /// [`RoutingConfig`] (a `routing` value that arrived on a `PUT` body has no
+    /// provenance at all).
+    ///
+    /// `#[serde(skip)]`, so it exists ONLY in the in-memory config: never read from
+    /// `gateway.toml`, never written back by [`Self::save`], not a field a
+    /// `PUT /v1/config` body can set. It exists so
+    /// [`Self::strip_seeded_classify_route`] can drop **exactly** the row the seed
+    /// added — once a row is in the map, a seeded one and an operator's own
+    /// byte-identical one are indistinguishable, and stripping by shape would
+    /// silently rewrite a hand-authored file.
+    ///
+    /// `None` therefore also covers the row already being present when the file was
+    /// read: a pre-existing `<classify id> → classify` row in `gateway.toml` (an
+    /// alias a pre-fix gateway persisted, or a deliberate operator entry) is treated
+    /// as operator-authored and left alone — the same conservative call `or_insert`
+    /// makes about which entry wins.
+    #[serde(skip)]
+    pub seeded_classify_model: Option<String>,
+
+    /// Whether the live `providers.classify` came from Core's `RYU_CLASSIFY_LLM_URL`
+    /// rather than from `gateway.toml`. The second piece of derived-value provenance,
+    /// `#[serde(skip)]` for the same reasons as [`Self::seeded_classify_model`].
+    ///
+    /// Why it has to exist: the env WINS this slot (see the env overlay in
+    /// [`Self::load`]), and every provider slot serializes back out on
+    /// [`Self::save`]. Without this marker the first save on a Core-spawned node
+    /// would freeze Core's computed, **profile-scoped** loopback URL into the file as
+    /// an operator-authored table — a value that is wrong the moment the profile,
+    /// the port, or the machine changes, and one that becomes *live* the moment the
+    /// gateway is started by something other than Core (no env ⇒ nothing shadows it).
+    #[serde(skip)]
+    pub env_injected_classify_provider: bool,
+
+    /// The `[providers.classify]` table exactly as `gateway.toml` had it, captured by
+    /// [`Self::load`] immediately before the env overwrote the live slot. `None` when
+    /// the file carried no table (the ordinary Core-spawned case) *and* when the env
+    /// did not fire at all — it is only ever written alongside
+    /// [`Self::env_injected_classify_provider`].
+    ///
+    /// This exists because env-wins and "never persist a derived slot" would
+    /// otherwise combine into data loss: the strip used to blank `providers.classify`
+    /// outright, which was safe only while a file table BEAT the env (the marker was
+    /// then never set for a file-authored table). Under env-wins the env overwrites
+    /// the operator's table in memory, so a blanking strip would delete it from the
+    /// file on the next `PUT`-triggered save. [`Self::strip_env_injected_classify_provider`]
+    /// therefore *restores* this value rather than clearing the slot.
+    ///
+    /// `#[serde(skip)]`: provenance, never configuration — a `PUT /v1/config` body
+    /// must not be able to nominate what a save writes into the operator's file.
+    #[serde(skip)]
+    pub file_classify_provider: Option<ClassifyProviderConfig>,
+
     #[serde(default)]
     pub firewall: FirewallConfig,
 
@@ -315,33 +370,55 @@ pub struct CreditsConfig {
     // disabling storage billing. Everything downstream (accrual, debit, wallet,
     // balance, budgets) stays micro-USD — the single nano→micro conversion
     // happens inside `sandbox_tick_cost_raw_micro`.
+    //
+    // Every rate below carries `default = "fn"`, NOT a bare `#[serde(default)]`.
+    // The difference is only visible when a `[credits]` table is PRESENT and
+    // omits the rate — which is the shape the published self-host doc hands
+    // operators (`docs/gateway/configuration.mdx`, the `[credits]` sample lists
+    // `enabled`/`base_url`/`internal_secret`/`markup_bps`/`wallet_empty_*`/
+    // `timeout_ms` and no sandbox rate at all). An ABSENT `[credits]` table takes
+    // `impl Default for CreditsConfig` and was always correct; a present one used
+    // to deserialize all nine rates to 0, and a 0 rate is not "free", it is
+    // billing turned OFF plus a missing safety stop:
+    // `sandbox_tick_cost_raw_micro` returns 0 → `sandbox_debit_amount` returns 0
+    // → `debit_sandbox_sync` short-circuits on `billed_micro == 0` and returns
+    // `None` → `compute_verdict` sees `balance: None` and cannot reach
+    // `KillBalance`, and `accrued` never grows so `KillBudget` is unreachable
+    // too. A sandbox on a drained wallet runs until something else stops it.
+    // (Core-spawned gateways were rescued incidentally because Core force-injects
+    // all nine `GATEWAY_CREDITS_COST_PER_SANDBOX_*` envs at spawn; a hand-run
+    // gateway following the doc got the zeros.)
+    //
+    // The default fns are the SINGLE source for these nine numbers —
+    // `impl Default for CreditsConfig` calls them rather than repeating the
+    // literals, so the serde path and the struct default cannot drift apart.
     /// vCPU rate, nano-USD per vCPU-second. Default: 14000 (0.014 micro/s).
-    #[serde(default)]
+    #[serde(default = "default_sandbox_vcpu_rate")]
     pub cost_per_sandbox_vcpu_second_nano_usd: u64,
     /// Memory rate, nano-USD per GiB-second. Default: 4500.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_mem_rate")]
     pub cost_per_sandbox_mem_gib_second_nano_usd: u64,
     /// Storage rate, nano-USD per GiB-second (over the free tier). Default: 30.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_storage_rate")]
     pub cost_per_sandbox_storage_gib_second_nano_usd: u64,
     /// GPU H200 rate, nano-USD per GPU-second. Default: 1261000.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_gpu_h200_rate")]
     pub cost_per_sandbox_gpu_h200_second_nano_usd: u64,
     /// GPU H100 rate, nano-USD per GPU-second. Default: 1097000.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_gpu_h100_rate")]
     pub cost_per_sandbox_gpu_h100_second_nano_usd: u64,
     /// GPU RTX PRO 6000 rate, nano-USD per GPU-second. Default: 842000.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_gpu_rtx_pro_6000_rate")]
     pub cost_per_sandbox_gpu_rtx_pro_6000_second_nano_usd: u64,
     /// GPU RTX 5090 rate, nano-USD per GPU-second. Default: 358000.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_gpu_rtx_5090_rate")]
     pub cost_per_sandbox_gpu_rtx_5090_second_nano_usd: u64,
     /// GPU RTX 4090 rate, nano-USD per GPU-second. Default: 275000.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_gpu_rtx_4090_rate")]
     pub cost_per_sandbox_gpu_rtx_4090_second_nano_usd: u64,
     /// Windows surcharge, nano-USD per vCPU-second (added on top of the base
     /// vCPU rate for Windows workspaces). Default: 23800.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_windows_vcpu_rate")]
     pub cost_per_sandbox_windows_vcpu_second_nano_usd: u64,
     /// Storage GiB that are free before the storage rate applies. Default: 5.
     #[serde(default = "default_sandbox_free_storage_gib")]
@@ -405,6 +482,49 @@ fn default_sandbox_free_storage_gib() -> u64 {
     5
 }
 
+// ─── Sandbox rate defaults (nano-USD per unit-second) ────────────────────────
+// These nine fns are the ONLY place the published sandbox rates are written.
+// Both the serde `default = "…"` attribute on each `CreditsConfig` field and
+// `impl Default for CreditsConfig` call them, so "the default when the key is
+// absent from a present `[credits]` table" and "the default when the whole table
+// is absent" are the same number by construction rather than by review.
+
+fn default_sandbox_vcpu_rate() -> u64 {
+    14_000
+}
+
+fn default_sandbox_mem_rate() -> u64 {
+    4_500
+}
+
+fn default_sandbox_storage_rate() -> u64 {
+    30
+}
+
+fn default_sandbox_gpu_h200_rate() -> u64 {
+    1_261_000
+}
+
+fn default_sandbox_gpu_h100_rate() -> u64 {
+    1_097_000
+}
+
+fn default_sandbox_gpu_rtx_pro_6000_rate() -> u64 {
+    842_000
+}
+
+fn default_sandbox_gpu_rtx_5090_rate() -> u64 {
+    358_000
+}
+
+fn default_sandbox_gpu_rtx_4090_rate() -> u64 {
+    275_000
+}
+
+fn default_sandbox_windows_vcpu_rate() -> u64 {
+    23_800
+}
+
 impl Default for CreditsConfig {
     fn default() -> Self {
         Self {
@@ -422,15 +542,19 @@ impl Default for CreditsConfig {
             wallet_empty_alert: AlertTier::default(),
             timeout_ms: default_credits_timeout_ms(),
             fail_closed: false,
-            cost_per_sandbox_vcpu_second_nano_usd: 14_000,
-            cost_per_sandbox_mem_gib_second_nano_usd: 4_500,
-            cost_per_sandbox_storage_gib_second_nano_usd: 30,
-            cost_per_sandbox_gpu_h200_second_nano_usd: 1_261_000,
-            cost_per_sandbox_gpu_h100_second_nano_usd: 1_097_000,
-            cost_per_sandbox_gpu_rtx_pro_6000_second_nano_usd: 842_000,
-            cost_per_sandbox_gpu_rtx_5090_second_nano_usd: 358_000,
-            cost_per_sandbox_gpu_rtx_4090_second_nano_usd: 275_000,
-            cost_per_sandbox_windows_vcpu_second_nano_usd: 23_800,
+            // Delegated, not repeated: these must equal the serde `default = "…"`
+            // fns on the same fields or an absent `[credits]` table and a present
+            // one that omits the rates would bill differently.
+            cost_per_sandbox_vcpu_second_nano_usd: default_sandbox_vcpu_rate(),
+            cost_per_sandbox_mem_gib_second_nano_usd: default_sandbox_mem_rate(),
+            cost_per_sandbox_storage_gib_second_nano_usd: default_sandbox_storage_rate(),
+            cost_per_sandbox_gpu_h200_second_nano_usd: default_sandbox_gpu_h200_rate(),
+            cost_per_sandbox_gpu_h100_second_nano_usd: default_sandbox_gpu_h100_rate(),
+            cost_per_sandbox_gpu_rtx_pro_6000_second_nano_usd:
+                default_sandbox_gpu_rtx_pro_6000_rate(),
+            cost_per_sandbox_gpu_rtx_5090_second_nano_usd: default_sandbox_gpu_rtx_5090_rate(),
+            cost_per_sandbox_gpu_rtx_4090_second_nano_usd: default_sandbox_gpu_rtx_4090_rate(),
+            cost_per_sandbox_windows_vcpu_second_nano_usd: default_sandbox_windows_vcpu_rate(),
             sandbox_free_storage_gib: default_sandbox_free_storage_gib(),
             sandbox_markup_bps: default_sandbox_markup_bps(),
         }
@@ -779,6 +903,32 @@ pub struct ProvidersConfig {
     pub openai: Option<OpenAiProviderConfig>,
     pub anthropic: Option<AnthropicProviderConfig>,
     pub local: Option<LocalProviderConfig>,
+    /// The **classify tier**: a second OpenAI-compatible local server dedicated
+    /// to the tiny always-on classifier model (llama.cpp on
+    /// [`DEFAULT_CLASSIFY_PORT`], fed by `RYU_CLASSIFY_LLM_URL`).
+    ///
+    /// Deliberately its own slot rather than a second `local`, because `local` is
+    /// aimed by Core at the resident **chat** engine: sharing one slot would make
+    /// the guardrail inspector, the LLM-judge evaluators, and smart routing
+    /// contend for — and be circuit-broken alongside — the user's chat model, and
+    /// would pin the classifier to whatever chat engine happens to be resident.
+    ///
+    /// **`Some` is the normal state on a Ryu node, and `None` means "standalone
+    /// gateway".** This used to read "`None` is the normal state (the sidecar is
+    /// lazy…)" — an inversion worth spelling out, because three units reasoned from
+    /// it. The sidecar *process* is indeed lazy, but Core publishes
+    /// `RYU_CLASSIFY_LLM_URL` **unconditionally** (`gateway_spawn_env` does not gate
+    /// it on the sidecar being installed or running — deliberately, so a classifier
+    /// installed later needs no gateway respawn), so every Core-spawned gateway
+    /// fills this slot and registers a `classify` provider at boot.
+    ///
+    /// The consequence to design against: a *cold* tier is `Some(slot)` +
+    /// connection-refused, NOT `None`. It surfaces as a `ProviderError` from
+    /// `provider.complete`, not as the absent-provider branch — see
+    /// [`crate::providers::ProviderRegistry::new`] and
+    /// `firewall/inspector.rs`. Both are graceful (fail open), but only the `None`
+    /// branch names the provider in its warning.
+    pub classify: Option<ClassifyProviderConfig>,
     pub openrouter: Option<OpenRouterProviderConfig>,
     pub core: Option<CoreProviderConfig>,
     pub modal: Option<ModalProviderConfig>,
@@ -790,6 +940,37 @@ pub struct ProvidersConfig {
     /// Fal (https://fal.ai) — cloud image/video/audio generation via a queued
     /// request API (submit → poll status → result). Opt-in.
     pub fal: Option<FalProviderConfig>,
+    /// Cloudflare Workers AI — the cheap open-model supply behind the
+    /// `cloudflare` credit pool (see [`crate::credit_pools`]). OpenAI-compatible
+    /// dialect, so it needs no impl of its own; see the registration in
+    /// [`crate::providers::ProviderRegistry::new`]. Opt-in: absent unless both
+    /// `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` are set, because the
+    /// base URL is account-scoped and there is no sane hardcoded default.
+    pub cloudflare: Option<CloudflareProviderConfig>,
+    /// AWS Bedrock — the frontier supply behind the `bedrock` credit pool.
+    /// Speaks the Anthropic Messages dialect (NOT OpenAI-compatible for Claude);
+    /// see the registration for why. Opt-in: absent unless a bearer token and a
+    /// region (or explicit base URL) are set, because the endpoint is
+    /// region-scoped.
+    pub bedrock: Option<BedrockProviderConfig>,
+    /// Google Cloud Vertex AI — the supply behind the `vertex` credit pool,
+    /// reached through Vertex's OpenAI-compatible Chat Completions surface.
+    /// Opt-in: absent unless a bearer token plus a project and a location (or an
+    /// explicit base URL) are set, because the endpoint embeds all three.
+    pub vertex: Option<VertexProviderConfig>,
+    /// The DONATED OpenAI allowance behind the `openai-credits` credit pool —
+    /// deliberately a SECOND slot rather than reusing [`Self::openai`].
+    ///
+    /// Both speak the same dialect against the same endpoint, so the temptation
+    /// to fold them together is real; the reason not to is money, not wiring. The
+    /// `openai` slot carries a caller's OWN key (BYOK / pass-through) and is
+    /// untagged, so its spend falls through to subscription and top-up buckets.
+    /// This slot carries the donor's key, and every request served by it debits a
+    /// grant. One slot would make the two indistinguishable at the debit site,
+    /// and the failure is silent in the expensive direction: BYOK traffic would
+    /// start burning donated credit that the user is already paying for
+    /// themselves.
+    pub openai_credits: Option<OpenAiProviderConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -837,6 +1018,78 @@ fn anthropic_base_url() -> String {
     "https://api.anthropic.com".to_string()
 }
 
+/// Cloudflare Workers AI, reached through its OpenAI-compatibility surface.
+///
+/// No `#[serde(default)]` on `base_url` on purpose: the endpoint embeds the
+/// account id (`…/accounts/{account_id}/ai/v1`), so a compiled-in default would
+/// be wrong for every deployment. The env overlay in [`GatewayConfig::load`]
+/// interpolates it — serde default fns take no arguments and so cannot.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CloudflareProviderConfig {
+    pub api_key: String,
+    /// Additional accounts for round-robin rotation (#4). See
+    /// [`OpenAiProviderConfig::api_keys`].
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    pub base_url: String,
+}
+
+impl CloudflareProviderConfig {
+    pub fn all_keys(&self) -> Vec<String> {
+        all_provider_keys(&self.api_key, &self.api_keys)
+    }
+}
+
+/// AWS Bedrock, reached through its Anthropic-Messages-compatible surface.
+///
+/// Same "no default base URL" reasoning as [`CloudflareProviderConfig`]: the
+/// endpoint is region-scoped (`https://bedrock-mantle.{region}.api.aws/anthropic`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BedrockProviderConfig {
+    pub api_key: String,
+    /// Additional accounts for round-robin rotation (#4). See
+    /// [`OpenAiProviderConfig::api_keys`].
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    pub base_url: String,
+}
+
+impl BedrockProviderConfig {
+    pub fn all_keys(&self) -> Vec<String> {
+        all_provider_keys(&self.api_key, &self.api_keys)
+    }
+}
+
+/// Google Cloud Vertex AI, reached through its OpenAI-compatible Chat
+/// Completions surface (`…/endpoints/openapi/chat/completions`, bearer auth) —
+/// byte-for-byte what [`crate::providers::OpenAiProvider`] already sends.
+///
+/// Same "no default base URL" reasoning as [`CloudflareProviderConfig`], only
+/// more so: the endpoint embeds the project AND the location
+/// (`https://{loc}-aiplatform.googleapis.com/v1/projects/{project}/locations/{loc}/endpoints/openapi`).
+///
+/// **`api_key` must be a LONG-LIVED credential, not a pasted access token.** The
+/// obvious way to get a Vertex bearer is `gcloud auth print-access-token`, and it
+/// expires in about an hour. On a donated pool that failure is nasty: the
+/// provider keeps registering, every request 401s, and the pool looks *dead*
+/// rather than misconfigured. Use a Vertex AI API key (express-mode) or a
+/// credential broker that hands the gateway something durable.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VertexProviderConfig {
+    pub api_key: String,
+    /// Additional accounts for round-robin rotation (#4). See
+    /// [`OpenAiProviderConfig::api_keys`].
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    pub base_url: String,
+}
+
+impl VertexProviderConfig {
+    pub fn all_keys(&self) -> Vec<String> {
+        all_provider_keys(&self.api_key, &self.api_keys)
+    }
+}
+
 /// Merge a primary key + an optional extra-accounts list into the rotation set,
 /// preferring the explicit list and always including the primary. Blank entries
 /// are dropped so a stray empty string never becomes a "key". Falls back to a
@@ -867,6 +1120,142 @@ pub struct LocalProviderConfig {
 fn local_base_url() -> String {
     "http://127.0.0.1:11434/v1".to_string()
 }
+
+/// Loopback port the classify-tier llama.cpp server listens on, kept in lockstep
+/// with Core's `llamacpp::classify::CLASSIFY_PORT_BASE` (chat 8080, embed 8081,
+/// rerank 8082, classify 8083).
+pub const DEFAULT_CLASSIFY_PORT: u16 = 8083;
+
+/// The classify tier's connection config — the same single-field shape as
+/// [`LocalProviderConfig`], kept as a distinct type purely so it carries its own
+/// `base_url` default: reusing `LocalProviderConfig` would make a bare
+/// `[providers.classify]` table in `gateway.toml` silently default to Ollama's
+/// `:11434` (the chat engine) instead of the classifier.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClassifyProviderConfig {
+    /// The **standalone-gateway** setting for the classify tier. Core's injected
+    /// `RYU_CLASSIFY_LLM_URL` wins it (same rule as `local`/`LOCAL_LLM_URL`), and Core
+    /// publishes that variable on EVERY gateway spawn — so on a Core-spawned gateway
+    /// this field is overwritten at load and has no effect. Repointing the tier on
+    /// such a node is done from Core's environment instead. The env overlay in
+    /// [`GatewayConfig::load`] carries the full reasoning, including why the
+    /// alternative (file-wins) could not be made safe across the two processes.
+    ///
+    /// The env-overwritten slot is never persisted, and the operator's own table is
+    /// restored before anything is written
+    /// ([`GatewayConfig::strip_env_injected_classify_provider`]).
+    #[serde(default = "classify_base_url")]
+    pub base_url: String,
+}
+
+/// Profile-aware so a standalone dev gateway (`RYU_PROFILE=dev`) reaches the dev
+/// classifier on `:9083` rather than the release one on `:8083` — the same
+/// reasoning as [`default_bind`]. This default is what a bare
+/// `[providers.classify]` table resolves to, and the standalone gateway is the one
+/// that reaches it: a Core-spawned gateway is handed an already-offset
+/// `RYU_CLASSIFY_LLM_URL`, which overwrites the slot at load.
+fn classify_base_url() -> String {
+    format!(
+        "http://127.0.0.1:{}/v1",
+        crate::profile::port(DEFAULT_CLASSIFY_PORT)
+    )
+}
+
+/// Make the resolved classify-tier model id route to the `classify` provider by
+/// seeding an **exact** `routing.model_map` entry for it.
+///
+/// Why this is needed at all, given the `"gemma-3-270m"` built-in prefix: the
+/// prefix table is a compile-time constant, so it cannot follow a registry
+/// override (`RYU_LOCAL_CLASSIFIER_MODEL_ID` → [`ENV_CLASSIFY_MODEL_ID`]). Without
+/// this seed, an operator who coherently swapped BOTH the registry id and
+/// `inspector.model` got: no exact hit, no prefix hit, fall through to
+/// `default_provider` — i.e. the classifier id shipped to OpenAI/Anthropic, a 400,
+/// and an inspector failing open in silence, while Core still started the sidecar
+/// nobody then called.
+///
+/// It also hardens the DEFAULT id, which is why the seed is unconditional rather
+/// than override-only: `RoutingTables::route` evaluates the user `model_map`
+/// (exact, then longest prefix) BEFORE the built-in table, so a pre-existing user
+/// mapping like `gemma` → `openrouter` silently sent the guardrail classifier to a
+/// paid hosted provider. An exact entry wins step 1, ahead of that prefix scan.
+///
+/// `or_insert` semantics: an operator's **explicit exact** entry for the classify
+/// id is deliberate and still wins.
+///
+/// The seeded row is DERIVED, not configuration, so it must never be served or
+/// saved. The inserted key is RETURNED (`None` when nothing was inserted) for
+/// [`GatewayConfig::seeded_classify_model`] to record, and removed again by
+/// [`GatewayConfig::strip_seeded_classify_route`] on both of those paths.
+/// (The ideal fix seeds at route-resolution time so the config is never touched at
+/// all, but the `RoutingConfig` → `ryu_gw_router::RoutingTables` lowering lives in
+/// `router/mod.rs::ModelRouter::new`, outside this change's file scope.)
+///
+/// That makes routing correctness depend on the seed being re-applied on every
+/// `load()`, upstream of every router. Verified, not assumed: `main.rs:85` builds
+/// the process config with [`GatewayConfig::load`] and hands it to
+/// `AppState::new` (`main.rs:143`), whose `state.rs:275`
+/// `RouterRegistry::new(config.routing.clone())` is the only production
+/// `ModelRouter` construction — the other `RouterRegistry::new` call sites in
+/// `state.rs` are `#[cfg(test)]` constructors. A `PUT /v1/config` cannot break this
+/// either: `model_map` is a restart-only startup snapshot, so the running router
+/// keeps the seeded tables until the next boot re-seeds them. (One pre-existing gap
+/// is unchanged: if `load()` *errors*, `main` falls back to
+/// `GatewayConfig::default()`, which has no seed — and no operator config either.)
+fn seed_classify_route(routing: &mut RoutingConfig, model_id: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    let mut inserted = false;
+    routing
+        .model_map
+        .entry(model_id.to_owned())
+        .or_insert_with(|| {
+            inserted = true;
+            ModelMapping {
+                provider: ProviderId::from(CLASSIFY_PROVIDER_ID),
+                provider_model: None,
+            }
+        });
+    // Only OUR insert is reported. A row that was already there — an operator's entry,
+    // or an alias a pre-fix gateway persisted — stays unmarked and is therefore never
+    // stripped from the file or the view.
+    inserted.then(|| model_id.to_owned())
+}
+
+/// Registry id of the classify provider. Must match the id
+/// `ProviderRegistry::register_as` aliases the classify tier under, and the
+/// `("gemma-3-270m", "classify")` row in `ryu_gw_router::builtin_prefixes`.
+///
+/// `pub(crate)` for `firewall::inspector`, which compares a routed decision's
+/// provider against it to tell "the local classify tier is not running" apart from
+/// "the upstream returned an error" — one id, so those two cannot drift.
+pub(crate) const CLASSIFY_PROVIDER_ID: &str = "classify";
+
+/// Registry ids of the segregated credit-pool supplies. Named constants rather
+/// than repeated literals because THREE places must agree on each string or money
+/// lands in the wrong donor account: the `register_as` id in
+/// [`crate::providers::ProviderRegistry::new`], the pool table in
+/// [`crate::credit_pools`], and `CREDIT_POOLS[*].gatewayProviders` over in
+/// `packages/auth/src/lib/credit-pools.ts`. Only the last one is out of the
+/// compiler's reach; these consts remove the other two failure modes.
+///
+/// They are also the strings `apps/desktop/src/lib/provider-brand.tsx` matches on
+/// to render the vendor marks, so renaming one is a UI change too.
+pub(crate) const CLOUDFLARE_PROVIDER_ID: &str = "cloudflare";
+pub(crate) const BEDROCK_PROVIDER_ID: &str = "bedrock";
+pub(crate) const VERTEX_PROVIDER_ID: &str = "vertex";
+
+/// Registry id of the DONATED OpenAI supply — note the suffix, and do not "tidy"
+/// it to `"openai"`.
+///
+/// Every other pool got to name itself after its vendor because no BYOK slot
+/// claimed that id first. OpenAI is the exception: `"openai"` is already the
+/// pass-through slot serving callers' own keys, and it must stay UNTAGGED so its
+/// spend keeps falling through to subscription/top-up. Collapsing the two ids
+/// would make `pool_for_gateway_provider("openai")` return a pool, and from then
+/// on every BYOK request would silently debit the donated grant.
+pub(crate) const OPENAI_CREDITS_PROVIDER_ID: &str = "openai-credits";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OpenRouterProviderConfig {
@@ -1498,7 +1887,8 @@ pub struct FirewallConfig {
     /// locked field, keeps the stricter value. Canonical names are the serde
     /// field names: `enabled`, `scan_inbound`, `scan_outbound`, `policy`,
     /// `log_detections`, `redact_pii`, `redact_secrets`,
-    /// `wrap_untrusted_tool_results`, `inspector`. Defaults to locking
+    /// `wrap_untrusted_tool_results`, `inspector`, `alert` (locking that one means a
+    /// narrower scope may only RAISE the tier, never go quieter). Defaults to locking
     /// `enabled`, `scan_inbound`, and `policy` — the three dials whose
     /// loosening silently disables the inbound firewall for a scope — so an
     /// org/agent overlay can only tighten them. A node admin opts out with an
@@ -1547,6 +1937,49 @@ pub struct FirewallOverlay {
     pub redact_secrets: Option<bool>,
     #[serde(default)]
     pub wrap_untrusted_tool_results: Option<bool>,
+    /// Notification fan-out tier for this scope (see [`FirewallConfig::alert`]).
+    /// `None` inherits the broader scope's tier.
+    ///
+    /// This is the org/agent half of alert delivery. Until it existed, `AlertTier` was
+    /// `#[default] Silent` on the node base and *no* scope could raise it, so the whole
+    /// fan-out — `firewall_policy_alert` (`pipeline/mod.rs`) gates on
+    /// `cfg.alert >= AlertTier::Warn`, Core's webhook/Telegram/push/SMTP sinks behind
+    /// it — could never fire.
+    ///
+    /// It is NOT node-only, and that was verified rather than assumed, because the
+    /// `wrap_untrusted_tool_results` footgun (a per-scope override of a
+    /// process-global, hence a silent no-op — see
+    /// [`crate::firewall::resolve::normalize_overlay`]) is exactly what an unread
+    /// assumption produces here. The resolved value does reach delivery:
+    /// `FirewallScanner::new_scoped` stores the whole resolved [`FirewallConfig`]
+    /// (`firewall/mod.rs::build`) and `config()` hands it back, so every
+    /// `firewall_policy_alert(scanner.config(), …)` site is scope-aware.
+    ///
+    /// # Coverage is partial — three alert sites read the NODE BASE
+    ///
+    /// An earlier revision of this doc said flatly that "the pipeline reads
+    /// `state.resolved_scanner(ctx).config()` before calling `firewall_policy_alert`",
+    /// which is true of most sites but not all. Enumerated from the call sites in
+    /// `pipeline/mod.rs` rather than inferred from one of them:
+    ///
+    /// * **Scope-aware** (`state.resolved_scanner(ctx)`) — `pre_process` (inbound text),
+    ///   `apply_inline_input_evaluators`, and `apply_inline_output_evaluators`.
+    /// * **Node base only** (`state.with_firewall`, which reads the boot/hot-swap global
+    ///   and ignores every overlay) — `run`'s stage-9 outbound response scan,
+    ///   `run_multimodal`'s inbound scan, and `submit_video_job`'s inbound scan.
+    ///
+    /// So the split is NOT inbound-vs-outbound, and describing it that way is wrong in
+    /// both directions: an org/agent tier *does* govern an outbound block raised by an
+    /// output-target inline evaluator, and it *does not* govern the image and video
+    /// handlers' inbound scans. Those three sites fire the node-base tier instead.
+    /// Widening them means routing `with_firewall` through `resolved_scanner`, which is
+    /// a `pipeline/mod.rs` change, not a config one.
+    ///
+    /// Lock semantics are the shared ones: with `alert` in a broader scope's
+    /// `locked_fields`, a narrower scope may only raise the tier — the `alert` arm of
+    /// `resolve.rs::apply_overlay`, via `resolve.rs::louder_alert`.
+    #[serde(default)]
+    pub alert: Option<AlertTier>,
     #[serde(default)]
     pub inspector: Option<InspectorConfig>,
     /// Appended to the inherited pattern set (union), never replacing it.
@@ -1580,8 +2013,26 @@ pub struct InspectorConfig {
     pub enabled: bool,
     /// Model id used for inspection, resolved through the normal
     /// [`crate::router::ModelRouter`] so it stays swappable (local, hosted, or an
-    /// `openrouter/…` slug). Empty ⇒ the gateway's default model. Default: "".
-    #[serde(default)]
+    /// `openrouter/…` slug).
+    ///
+    /// Defaults to [`classify_model_id`] — the classify-tier classifier, resolved
+    /// from the id Core published for the sidecar it actually runs — and an
+    /// **empty value is resolved to that default at deserialization** (see
+    /// [`de_inspector_model`]), so this field is never empty in practice.
+    ///
+    /// It used to default to `""` with a doc comment claiming "empty ⇒ the
+    /// gateway's default model". That was false and load-bearing: `route("")`
+    /// matches no map and no prefix, so it fell through to `default_provider`,
+    /// which then stamped `"model": ""` on the payload and got a 400 from any
+    /// real upstream. The inspector fails open, so turning the guardrail on
+    /// without *also* remembering to pick a model produced a guardrail that
+    /// silently never fired while `action` still read `Block`. Resolving the
+    /// empty case here — at the one construction seam every reader flows through
+    /// — is what makes "enabled" mean "working".
+    #[serde(
+        default = "default_inspector_model",
+        deserialize_with = "de_inspector_model"
+    )]
     pub model: String,
     /// What the inspector looks for. Default: [`InspectorMode::Both`].
     #[serde(default)]
@@ -1614,6 +2065,83 @@ pub enum InspectorMode {
     Both,
 }
 
+/// Env var Core publishes alongside `RYU_CLASSIFY_LLM_URL`: the **resolved
+/// registry id** of the model the classify sidecar actually serves
+/// (`ModelRegistry::local_classifier_model.id`, itself
+/// overridable via `RYU_LOCAL_CLASSIFIER_MODEL_ID`). Set in
+/// `apps/core/src/sidecar/gateway.rs::gateway_spawn_env`.
+///
+/// This closes the seam `sidecar/providers/llamacpp/classify.rs` documents as
+/// "swappable registry defaults, never hardcoded": before it existed the gateway
+/// knew the classify tier's **URL** but not its **id**, so
+/// [`DEFAULT_INSPECTOR_MODEL`] was an independent literal and an operator who
+/// swapped the registry id got an inspector default that no longer named the model
+/// on the other end of the URL.
+const ENV_CLASSIFY_MODEL_ID: &str = "RYU_CLASSIFY_MODEL_ID";
+
+/// Compile-time fallback classify-tier model id, used only when Core has not
+/// published [`ENV_CLASSIFY_MODEL_ID`] (a standalone gateway). Kept in lockstep
+/// with Core's `registry::DEFAULT_LOCAL_CLASSIFIER_MODEL_ID`; it is the id the
+/// `"gemma-3-270m"` built-in prefix routes to the `classify` provider (see
+/// `ryu_gw_router::builtin_prefixes`). Cheap enough to sit in front of every turn,
+/// and local — so the default guardrail never leaks traffic to a hosted provider
+/// or spends a cent.
+///
+/// Prefer [`classify_model_id`] over this constant: on a Core-spawned gateway the
+/// published id is authoritative and may differ from this literal.
+pub const DEFAULT_INSPECTOR_MODEL: &str = "gemma-3-270m-it-qat-Q4_0";
+
+/// The classify tier's resolved model id: Core's published
+/// [`ENV_CLASSIFY_MODEL_ID`] when present, else [`DEFAULT_INSPECTOR_MODEL`].
+///
+/// The single reader of that env var, so "which id is the classifier" has one
+/// answer for the inspector default, the LLM-judge default, and the seeded
+/// `model_map` route ([`seed_classify_route`]).
+pub fn classify_model_id() -> String {
+    resolve_classify_model_id(std::env::var(ENV_CLASSIFY_MODEL_ID).ok().as_deref())
+}
+
+/// Pure core of [`classify_model_id`] — split out so the precedence is testable
+/// without mutating the process environment (the gateway has no env test lock).
+/// A blank published value is treated as absent: Core pushes the var
+/// unconditionally, so an empty string must never become "the classifier is
+/// named nothing" (that is the exact failure `de_inspector_model` exists to stop).
+fn resolve_classify_model_id(published: Option<&str>) -> String {
+    published
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_INSPECTOR_MODEL)
+        .to_owned()
+}
+
+fn default_inspector_model() -> String {
+    classify_model_id()
+}
+
+/// Resolve a blank `inspector.model` to [`classify_model_id`] as the value is
+/// read off the wire.
+///
+/// This is the **single** choke point: `#[serde(default = …)]` alone only covers
+/// an *absent* field, but the UI and the `PUT /v1/config` overlay path both send
+/// an explicit `""` when an operator clears the box, and `firewall/resolve.rs`
+/// clones deserialized overlays wholesale into the resolved config. Normalizing
+/// here means every consumer that reads the plain `model` field — the inspector
+/// (`firewall/inspector.rs`) *and* the `EvaluatorImpl::LlmJudge` arm in
+/// `pipeline/mod.rs`, which reads `scanner.config().inspector.model` regardless
+/// of `inspector.enabled` — gets a working id without either of them needing a
+/// resolution call of its own.
+fn de_inspector_model<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(if raw.trim().is_empty() {
+        default_inspector_model()
+    } else {
+        raw
+    })
+}
+
 fn default_inspector_min_chars() -> usize {
     40
 }
@@ -1626,7 +2154,10 @@ impl Default for InspectorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: String::new(),
+            // Non-empty by default so `..InspectorConfig::default()` — how every
+            // struct-literal construction in the codebase fills this field — can
+            // never reintroduce the empty-model trap documented on `model`.
+            model: default_inspector_model(),
             mode: InspectorMode::default(),
             min_chars: default_inspector_min_chars(),
             timeout_ms: default_inspector_timeout_ms(),
@@ -1951,9 +2482,107 @@ impl GatewayConfig {
             .or_else(crate::profile::default_config_path)
     }
 
+    /// Remove the load-time classify seed from `routing.model_map`.
+    ///
+    /// Why the seeded row must not be served or saved: `GET /v1/config` renders
+    /// `routing.model_map` as the desktop's hand-authored "Model mappings" list
+    /// (`GatewayDialog.tsx`), each row with a delete button. A seeded row there reads
+    /// as operator-authored, and deleting it *cannot work* — the delete is a
+    /// read-modify-write `PUT` of the whole `routing`, so the row does leave the file,
+    /// and then the next [`Self::load`] seeds it straight back. The operator sees a
+    /// mapping they never wrote, deletes it successfully, and watches it return. Same
+    /// reason it must not reach `gateway.toml`: there it looks operator-authored
+    /// forever and outlives the id it was seeded for.
+    ///
+    /// Routing is unaffected because the seed is re-applied on every `load()`, which
+    /// is upstream of every production router — see [`seed_classify_route`].
+    ///
+    /// The shape re-check guards the one case the marker cannot: something replaced
+    /// the mapping in memory after the seed ran, in which case the current value is
+    /// somebody's choice and not ours to delete. (The converse — `routing` replaced
+    /// wholesale by a `PUT` body that happens to contain a byte-identical
+    /// `<id> → classify` row while the marker is still set — is unreachable:
+    /// `api::config::persisted_config` consumes the marker before `put_config`
+    /// assigns `routing`, so the value the strip sees is always the one it seeded.)
+    pub fn strip_seeded_classify_route(&mut self) {
+        let Some(model_id) = self.seeded_classify_model.take() else {
+            return;
+        };
+        let is_untouched_seed = self
+            .routing
+            .model_map
+            .get(&model_id)
+            .is_some_and(|mapping| {
+                mapping.provider.as_str() == CLASSIFY_PROVIDER_ID
+                    && mapping.provider_model.is_none()
+            });
+        if is_untouched_seed {
+            self.routing.model_map.remove(&model_id);
+        }
+    }
+
+    /// Undo the env overlay on `providers.classify`: restore whatever
+    /// `gateway.toml` said ([`Self::file_classify_provider`] — `None` when it said
+    /// nothing) if and only if [`Self::load`] overwrote the slot from Core's
+    /// `RYU_CLASSIFY_LLM_URL`.
+    ///
+    /// RESTORE, not clear. The env wins the live slot, so on a node whose operator
+    /// *did* author `[providers.classify]` the in-memory value is Core's; clearing
+    /// would delete the operator's table from their own file on the next
+    /// `PUT`-triggered save (`api::config::put_config` re-serializes this shape).
+    /// A marker-less config — no env, or a standalone gateway — is untouched.
+    ///
+    /// Why `classify` is stripped when `openai` / `anthropic` / `local` are not,
+    /// stated honestly: for all four the env wins the next `load()`, so a persisted
+    /// copy is shadowed rather than obeyed while Core is the spawner. The difference
+    /// is what gets frozen. The others persist an operator's own credential or an
+    /// engine URL; `classify` would persist a **computed, profile-scoped loopback
+    /// port** (`:8083` release, `:9083` dev) that Core recomputes on every spawn — so
+    /// the copy is stale on the next profile or port change and becomes *live* as soon
+    /// as something other than Core starts the gateway. The same argument does apply
+    /// to `local` (also computed by Core, from the active-engine store) and simply is
+    /// not implemented there; this is the narrower, safer slot, not a categorical
+    /// distinction.
+    pub fn strip_env_injected_classify_provider(&mut self) {
+        if std::mem::take(&mut self.env_injected_classify_provider) {
+            self.providers.classify = self.file_classify_provider.take();
+        }
+    }
+
+    /// `self` minus every DERIVED value that [`Self::load`] adds on top of the file:
+    /// the seeded classify route is removed, and an env-overwritten
+    /// `[providers.classify]` is reverted to what the file said. This is the shape
+    /// that may leave the process — written to `gateway.toml`, or read by
+    /// `api::config::persisted_config`.
+    ///
+    /// Applied in exactly two places, which between them cover both directions:
+    /// [`Self::save`] (so no `save()` caller can persist a derived value) and
+    /// `api::config::persisted_config` (whose `routing` half genuinely reaches
+    /// `GET /v1/config` and the read-modify-write clients that PUT it back).
+    ///
+    /// The two halves are NOT equally load-bearing at the `persisted_config` call —
+    /// see that function's doc for which is which; they are applied together because
+    /// this is the single "may leave the process" gate and splitting it would create a
+    /// second rule to keep in sync. See [`Self::strip_seeded_classify_route`] and
+    /// [`Self::strip_env_injected_classify_provider`].
+    pub fn without_derived_values(&self) -> Self {
+        let mut clean = self.clone();
+        clean.strip_seeded_classify_route();
+        clean.strip_env_injected_classify_provider();
+        clean
+    }
+
     /// Atomically persist `self` to `gateway.toml`, creating the parent directory
     /// if needed. Writes to a `.tmp` file in the same directory, then renames over
     /// the target so a crash mid-write never leaves a corrupt file.
+    ///
+    /// Persists [`Self::without_derived_values`], never `self` verbatim: `load()`
+    /// seeds a `routing.model_map` row for the classify tier and may overwrite
+    /// `providers.classify` from Core's env, and writing either back would turn a
+    /// derived value into a permanent, operator-authored-looking file entry — an
+    /// undeletable "Model mappings" row in the first case; in the second, a computed
+    /// profile-scoped loopback port frozen into the file (and, where the operator had
+    /// authored a table of their own, that table silently replaced).
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::config_path()
             .ok_or_else(|| anyhow::anyhow!("Cannot determine gateway config path"))?;
@@ -1962,7 +2591,7 @@ impl GatewayConfig {
             std::fs::create_dir_all(parent)?;
         }
 
-        let toml_str = toml::to_string_pretty(self)
+        let toml_str = toml::to_string_pretty(&self.without_derived_values())
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
 
         let tmp_path = path.with_extension("toml.tmp");
@@ -2016,6 +2645,80 @@ impl GatewayConfig {
         if let Ok(url) = std::env::var("LOCAL_LLM_URL") {
             config.providers.local = Some(LocalProviderConfig { base_url: url });
         }
+
+        // Classify-tier LLM. Core publishes `RYU_CLASSIFY_LLM_URL` into the gateway
+        // spawn env pointing at its lazy llama.cpp classify sidecar (profile-offset
+        // [`DEFAULT_CLASSIFY_PORT`]) — unconditionally, so on a Core-spawned gateway
+        // this slot is always `Some`. Absent (a STANDALONE gateway) ⇒ the slot stays
+        // `None` and the `classify` provider is never registered, which the
+        // inspector/judge handle by failing open — see
+        // [`crate::providers::ProviderRegistry::new`].
+        //
+        // THE ENV WINS over the file here, exactly like `local`/`LOCAL_LLM_URL` above.
+        // A previous round inverted this (file-wins) so that a `[providers.classify]
+        // base_url` in `gateway.toml` would stop being inert on a Core-spawned node.
+        // That is a real improvement in isolation and it is deliberately given up,
+        // because the precedence is not a local decision — it is half of a
+        // cross-process contract, and file-wins made the other half unsatisfiable:
+        //
+        //   Core lazily starts a ~300-400 MB `llamacpp-classify` sidecar whenever a
+        //   config push selects the classify tier (`apps/core/src/sidecar/gateway.rs`
+        //   ::`maybe_start_classify_tier`). Read, not assumed: its only locality check
+        //   is `url_targets_this_machine(gateway_url())` — "is the gateway on this
+        //   box" — and there is nothing else it *could* check under file-wins, because
+        //   the deciding value then lives in a file in the gateway's own config
+        //   directory, which Core neither reads nor is notified about. So on a node
+        //   whose operator pointed `[providers.classify]` at an external small model,
+        //   every selecting push started a local sidecar nothing ever dialed. Idle-stop
+        //   is off unless `RYU_SIDECAR_IDLE`, so that RAM stayed resident for the life
+        //   of the process.
+        //
+        // Under env-wins the URL the gateway will dial for `classify` on a Core-spawned
+        // node is EXACTLY the value Core published, i.e. `classify_gateway_url()` — a
+        // fact Core can evaluate from its own process with no file access and no new
+        // channel. That is what lets the lazy start be gated on the classify *target's*
+        // locality (it now is), which removes the wasted-RAM class instead of trading
+        // it for an inert setting.
+        //
+        // Consequence, stated plainly rather than left implicit: `[providers.classify]`
+        // is the **standalone-gateway** setting. On a gateway Core spawned it is
+        // overwritten on every load and therefore has no effect; repointing the tier
+        // there takes `RYU_CLASSIFY_LLM_URL` (plus `RYU_LOCAL_CLASSIFIER_MODEL_ID` for
+        // the id) in *Core's* environment. This matches `local`/`LOCAL_LLM_URL`, the
+        // established precedent for a Core-published provider URL, so there is one rule
+        // for both slots instead of two.
+        //
+        // A blank env value reads as "not published" (Core never sends one, but a shell
+        // could): the file table — or `None` — survives, so the tier fails open rather
+        // than registering an unusable "" URL.
+        //
+        // The slot the env fills is DERIVED and is stripped again before anything is
+        // written ([`GatewayConfig::without_derived_values`]). It must be: every
+        // provider slot serializes back out on `save()`, and Core's URL is a computed,
+        // profile-scoped loopback address — persisting it would record a value that is
+        // wrong on the next profile/port change and that goes live the moment Core is
+        // not the spawner. The operator's own table is CAPTURED here
+        // ([`Self::file_classify_provider`]) so the strip restores it instead of
+        // deleting it from their file.
+        if let Some(url) = std::env::var("RYU_CLASSIFY_LLM_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+        {
+            config.file_classify_provider = config.providers.classify.take();
+            config.providers.classify = Some(ClassifyProviderConfig { base_url: url });
+            config.env_injected_classify_provider = true;
+        }
+        // …and make the classifier id ROUTABLE, not just readable. The built-in
+        // `"gemma-3-270m"` prefix cannot follow a registry override (it is a
+        // compile-time table), and `route`'s two user-`model_map` steps run BEFORE
+        // it — so both an overridden id and a stray user `gemma` prefix mapping
+        // would send the guardrail classifier somewhere other than the classify
+        // tier. Seeding an exact entry fixes both at once because exact-match is
+        // step 1. The seeded key is remembered so the row can be stripped again from
+        // everything that leaves the process — it is derived, not operator config.
+        // See [`seed_classify_route`] and [`GatewayConfig::without_derived_values`].
+        config.seeded_classify_model =
+            seed_classify_route(&mut config.routing, &classify_model_id());
 
         // Auth master key
         if let Ok(key) = std::env::var("GATEWAY_MASTER_KEY") {
@@ -2113,6 +2816,117 @@ impl GatewayConfig {
         ) {
             if !base_url.trim().is_empty() && !api_key.trim().is_empty() {
                 config.providers.modal = Some(ModalProviderConfig { api_key, base_url });
+            }
+        }
+
+        // Cloudflare Workers AI — the `cloudflare` credit pool's supply. Both the
+        // account id and the token are required because the endpoint embeds the
+        // account (`…/accounts/{id}/ai/v1`); absent either, the provider stays off
+        // and the id is simply missing from the registry (nothing hardcoded, no
+        // default URL, no boot failure). `CLOUDFLARE_BASE_URL` overrides the
+        // interpolation wholesale for gateways fronted by a proxy.
+        if let Ok(token) = std::env::var("CLOUDFLARE_API_TOKEN") {
+            let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID").unwrap_or_default();
+            let base_url = std::env::var("CLOUDFLARE_BASE_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    (!account_id.trim().is_empty()).then(|| {
+                        format!(
+                            "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1",
+                            account_id.trim()
+                        )
+                    })
+                });
+            if let Some(base_url) = base_url {
+                if !token.trim().is_empty() {
+                    config.providers.cloudflare = Some(CloudflareProviderConfig {
+                        api_key: token,
+                        api_keys: env_keys("CLOUDFLARE_API_TOKENS"),
+                        base_url,
+                    });
+                }
+            }
+        }
+
+        // AWS Bedrock — the `bedrock` credit pool's supply. `AWS_BEARER_TOKEN_BEDROCK`
+        // is Bedrock's own long-lived API key (not SigV4 credentials), which is what
+        // lets the Anthropic-Messages impl talk to it unmodified. Region-scoped, so
+        // the URL is interpolated from `AWS_REGION` unless `BEDROCK_BASE_URL` pins it.
+        if let Ok(token) = std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
+            let region = std::env::var("AWS_REGION").unwrap_or_default();
+            let base_url = std::env::var("BEDROCK_BASE_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    (!region.trim().is_empty()).then(|| {
+                        format!(
+                            "https://bedrock-mantle.{}.api.aws/anthropic",
+                            region.trim()
+                        )
+                    })
+                });
+            if let Some(base_url) = base_url {
+                if !token.trim().is_empty() {
+                    config.providers.bedrock = Some(BedrockProviderConfig {
+                        api_key: token,
+                        api_keys: env_keys("AWS_BEARER_TOKENS_BEDROCK"),
+                        base_url,
+                    });
+                }
+            }
+        }
+
+        // Google Cloud Vertex AI — the `vertex` credit pool's supply, on Vertex's
+        // OpenAI-compatible surface. Project AND location are both required because
+        // the endpoint embeds both; absent either, the provider stays off and the id
+        // is simply missing from the registry. `VERTEX_BASE_URL` overrides the
+        // interpolation wholesale (global endpoint, a proxy, or a pinned API version).
+        //
+        // The interpolated form deliberately stops at `/endpoints/openapi` — the
+        // OpenAI impl appends `/chat/completions` itself.
+        if let Ok(token) = std::env::var("VERTEX_API_KEY") {
+            let project = std::env::var("VERTEX_PROJECT_ID").unwrap_or_default();
+            let location = std::env::var("VERTEX_LOCATION").unwrap_or_default();
+            let base_url = std::env::var("VERTEX_BASE_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    (!project.trim().is_empty() && !location.trim().is_empty()).then(|| {
+                        format!(
+                            "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/endpoints/openapi",
+                            location.trim(),
+                            project.trim(),
+                            location.trim()
+                        )
+                    })
+                });
+            if let Some(base_url) = base_url {
+                if !token.trim().is_empty() {
+                    config.providers.vertex = Some(VertexProviderConfig {
+                        api_key: token,
+                        api_keys: env_keys("VERTEX_API_KEYS"),
+                        base_url,
+                    });
+                }
+            }
+        }
+
+        // The donated OpenAI allowance — a SEPARATE env var from `OPENAI_API_KEY`
+        // on purpose. Reading the same var would tag a BYOK deploy's own key as
+        // donated supply, which is the whole failure this slot exists to avoid.
+        // Unlike the other three pools the endpoint is not account/region-scoped,
+        // so `base_url` keeps its ordinary default and only the key gates the slot.
+        if let Ok(key) = std::env::var("OPENAI_CREDITS_API_KEY") {
+            if !key.trim().is_empty() {
+                config.providers.openai_credits = Some(OpenAiProviderConfig {
+                    api_key: key,
+                    api_keys: env_keys("OPENAI_CREDITS_API_KEYS"),
+                    base_url: std::env::var("OPENAI_CREDITS_BASE_URL")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(openai_base_url),
+                });
             }
         }
 
@@ -3103,6 +3917,11 @@ impl Default for GatewayConfig {
             bind: default_bind(),
             providers: ProvidersConfig::default(),
             routing: RoutingConfig::default(),
+            // Nothing derived until `load()` runs: a default config is the "we could
+            // not read the file" fallback, and it has no env overlay applied yet.
+            seeded_classify_model: None,
+            env_injected_classify_provider: false,
+            file_classify_provider: None,
             firewall: FirewallConfig::default(),
             custom_evaluators: Vec::new(),
             firewall_org_overlays: HashMap::new(),
@@ -3128,6 +3947,78 @@ impl Default for GatewayConfig {
             widget: WidgetConfig::default(),
             credits: CreditsConfig::default(),
             fleet: false,
+        }
+    }
+}
+
+/// Test-only isolation for the process-global `GATEWAY_CONFIG` variable.
+///
+/// [`GatewayConfig::config_path`] falls back to the machine's REAL
+/// `<config>/ryu/gateway.toml` when the var is unset, so any test that reaches
+/// `load()` / `save()` / `config_path()` — directly or through a handler like
+/// `api::config::get_config` — otherwise reads (or writes!) developer state and
+/// becomes host-dependent. Every such test takes this guard.
+///
+/// `pub(crate)` and mutex-backed on purpose: the whole crate's unit tests share one
+/// process, so `api::config`'s tests and `config`'s tests would race each other over
+/// this one variable if each rolled its own window. One lock, one owner at a time.
+#[cfg(test)]
+pub(crate) mod test_config_path {
+    /// RAII window in which `GATEWAY_CONFIG` points at a private temp file.
+    ///
+    /// Restores the prior value and deletes the temp directory on drop, so a panicking
+    /// test cannot leak the variable pointing at a directory that no longer exists —
+    /// which would silently redirect every later test in the binary.
+    pub(crate) struct ConfigPathGuard {
+        dir: std::path::PathBuf,
+        path: std::path::PathBuf,
+        prior: Option<std::ffi::OsString>,
+        /// Declared LAST so field-drop order releases the lock only after the
+        /// variable is restored and the directory is gone.
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ConfigPathGuard {
+        /// Point `GATEWAY_CONFIG` at `gateway.toml` in a fresh, uniquely named temp
+        /// directory. `tag` only makes the path readable while debugging; uniqueness
+        /// comes from the pid plus a monotonic counter, so repeated guards in one run
+        /// never collide (nor with a parallel `cargo test` of another crate).
+        pub(crate) fn isolated(tag: &str) -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            // A poisoned lock means an earlier guarded test panicked; the env was
+            // still restored by its `Drop`, so the window is safe to re-enter.
+            let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("ryu-gwcfg-{tag}-{}-{seq}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp gateway config dir");
+            let path = dir.join("gateway.toml");
+            let prior = std::env::var_os("GATEWAY_CONFIG");
+            std::env::set_var("GATEWAY_CONFIG", &path);
+            Self {
+                dir,
+                path,
+                prior,
+                _lock: lock,
+            }
+        }
+
+        /// The `gateway.toml` the window points at. It does not exist until something
+        /// writes it, which is the "fresh node" case.
+        pub(crate) fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for ConfigPathGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(prior) => std::env::set_var("GATEWAY_CONFIG", prior),
+                None => std::env::remove_var("GATEWAY_CONFIG"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 }
@@ -3875,6 +4766,204 @@ mod toml_roundtrip_tests {
         assert_eq!(back.fleet, cfg.fleet);
     }
 
+    /// The `[credits]` table the PUBLISHED self-host doc hands operators
+    /// (`apps/fumadocs/content/docs/gateway/configuration.mdx`, "## Credits") must
+    /// deserialize the nine sandbox rates to their documented non-zero defaults.
+    ///
+    /// ## Why the round-trip test above cannot catch this
+    ///
+    /// [`default_config_survives_toml_roundtrip`] serializes
+    /// `GatewayConfig::default()` first, and `toml::to_string_pretty` EMITS every
+    /// non-skipped field — including all nine rates, already at their default
+    /// values. The re-parse therefore reads a `[credits]` table in which each key
+    /// is *present*, so serde never runs the absent-key branch. A round-trip test
+    /// is structurally blind to a wrong `#[serde(default)]`: it can only prove
+    /// that a value serde WROTE survives being read back. Only a hand-authored
+    /// TOML that OMITS the keys exercises the default path, which is why the
+    /// fixture below is pasted from the docs verbatim rather than generated.
+    ///
+    /// ## Why a zero here is not "free"
+    ///
+    /// Zeroed rates do not make sandboxes cheap, they turn sandbox billing off and
+    /// remove a safety stop: `sandbox_tick_cost_raw_micro` → 0 ⇒
+    /// `sandbox_debit_amount` → 0 ⇒ `debit_sandbox_sync` short-circuits on
+    /// `billed_micro == 0` and returns `None` ⇒ `compute_verdict` (api/sandbox.rs)
+    /// sees `balance: None`, so `KillBalance` is unreachable and `accrued` never
+    /// grows past a `per_run_budget`, so `KillBudget` is unreachable too.
+    ///
+    /// An ABSENT `[credits]` table was never affected (it takes
+    /// `impl Default for CreditsConfig` wholesale) — which is exactly why this
+    /// needs its own fixture with the table present.
+    #[test]
+    fn published_credits_doc_toml_keeps_the_documented_sandbox_rates() {
+        // Verbatim from docs/gateway/configuration.mdx ("## Credits"). A present
+        // `[credits]` table that names no sandbox rate.
+        let doc_toml = r#"
+[credits]
+enabled = false
+base_url = "http://127.0.0.1:3000/api"  # defaults to control_plane.base_url
+internal_secret = "..."                 # also RYU_CREDITS_INTERNAL_SECRET
+markup_bps = 0                          # platform markup in basis points (0 = pass-through)
+wallet_empty_action = "stop"            # "stop" | "downgrade"
+wallet_empty_downgrade_to = ""
+timeout_ms = 3000
+"#;
+
+        let parsed: GatewayConfig =
+            toml::from_str(doc_toml).expect("the documented [credits] table parses");
+        let credits = &parsed.credits;
+        let want = CreditsConfig::default();
+
+        // The keys the doc DOES set are honored (proves the table was really read
+        // and the assertions below are not passing on an ignored fragment).
+        assert!(!credits.enabled);
+        assert_eq!(credits.timeout_ms, 3000);
+
+        // The nine rates the doc does NOT set fall back to the documented values,
+        // not to 0.
+        assert_eq!(
+            credits.cost_per_sandbox_vcpu_second_nano_usd,
+            want.cost_per_sandbox_vcpu_second_nano_usd
+        );
+        assert_eq!(
+            credits.cost_per_sandbox_mem_gib_second_nano_usd,
+            want.cost_per_sandbox_mem_gib_second_nano_usd
+        );
+        assert_eq!(
+            credits.cost_per_sandbox_storage_gib_second_nano_usd,
+            want.cost_per_sandbox_storage_gib_second_nano_usd
+        );
+        assert_eq!(
+            credits.cost_per_sandbox_gpu_h200_second_nano_usd,
+            want.cost_per_sandbox_gpu_h200_second_nano_usd
+        );
+        assert_eq!(
+            credits.cost_per_sandbox_gpu_h100_second_nano_usd,
+            want.cost_per_sandbox_gpu_h100_second_nano_usd
+        );
+        assert_eq!(
+            credits.cost_per_sandbox_gpu_rtx_pro_6000_second_nano_usd,
+            want.cost_per_sandbox_gpu_rtx_pro_6000_second_nano_usd
+        );
+        assert_eq!(
+            credits.cost_per_sandbox_gpu_rtx_5090_second_nano_usd,
+            want.cost_per_sandbox_gpu_rtx_5090_second_nano_usd
+        );
+        assert_eq!(
+            credits.cost_per_sandbox_gpu_rtx_4090_second_nano_usd,
+            want.cost_per_sandbox_gpu_rtx_4090_second_nano_usd
+        );
+        assert_eq!(
+            credits.cost_per_sandbox_windows_vcpu_second_nano_usd,
+            want.cost_per_sandbox_windows_vcpu_second_nano_usd
+        );
+        // The two siblings that already had `default = "fn"` — asserted here so
+        // the fixture covers the whole rate block, not just the repaired nine.
+        assert_eq!(
+            credits.sandbox_free_storage_gib,
+            want.sandbox_free_storage_gib
+        );
+        assert_eq!(credits.sandbox_markup_bps, want.sandbox_markup_bps);
+
+        // The rates the doc omits are non-zero, so a tick costs something and the
+        // wallet path stays reachable. Pinned against the documented values rather
+        // than only `!= 0` so a future "default" of 1 nano-USD is caught too.
+        assert_eq!(credits.cost_per_sandbox_vcpu_second_nano_usd, 14_000);
+        assert_eq!(credits.cost_per_sandbox_gpu_h200_second_nano_usd, 1_261_000);
+    }
+
+    /// A non-zero sandbox rate is what makes the wallet kill-switch reachable at
+    /// all: with a present `[credits]` table that names no rate, a tick must still
+    /// bill a non-zero `billed_micro`, so `debit_sandbox_sync` does not take its
+    /// `billed_micro == 0` early return. The test above pins the parsed numbers;
+    /// this one pins what those numbers DO.
+    ///
+    /// Each resource is priced in ISOLATION (one dimension non-zero at a time,
+    /// with a long enough window that the nano→micro round-half-up cannot swallow
+    /// the result). Pricing a mixed workspace instead would let one healthy rate
+    /// mask eight zeroed ones — the assertion would pass while eight of the nine
+    /// fields were still broken.
+    #[test]
+    fn each_documented_sandbox_rate_bills_a_nonzero_tick_on_its_own() {
+        // A present `[credits]` table naming no sandbox rate at all — the shape
+        // the published doc produces.
+        let doc_toml = r#"
+[credits]
+enabled = false
+timeout_ms = 3000
+"#;
+        let credits = toml::from_str::<GatewayConfig>(doc_toml)
+            .expect("parses")
+            .credits;
+        // 1000s so even the smallest rate (storage, 30 nano/GiB/s) clears the
+        // nano→micro rounding floor rather than testing the rounding.
+        const SECS: u64 = 1_000;
+
+        let mut cases: Vec<(&str, u64)> = vec![
+            (
+                "vcpu",
+                credits.sandbox_tick_cost_raw_micro(1, 0, 0, GpuKind::None, 0, OsKind::Linux, SECS),
+            ),
+            (
+                "mem",
+                credits.sandbox_tick_cost_raw_micro(0, 1, 0, GpuKind::None, 0, OsKind::Linux, SECS),
+            ),
+            (
+                // Over the free-storage tier, so the storage rate is the only
+                // term that can contribute.
+                "storage",
+                credits.sandbox_tick_cost_raw_micro(
+                    0,
+                    0,
+                    u32::try_from(credits.sandbox_free_storage_gib)
+                        .expect("the default free-storage tier fits in u32")
+                        + 1,
+                    GpuKind::None,
+                    0,
+                    OsKind::Linux,
+                    SECS,
+                ),
+            ),
+        ];
+        for (label, gpu) in [
+            ("gpu_h200", GpuKind::H200),
+            ("gpu_h100", GpuKind::H100),
+            ("gpu_rtx_pro_6000", GpuKind::RtxPro6000),
+            ("gpu_rtx_5090", GpuKind::Rtx5090),
+            ("gpu_rtx_4090", GpuKind::Rtx4090),
+        ] {
+            cases.push((
+                label,
+                credits.sandbox_tick_cost_raw_micro(0, 0, 0, gpu, 1, OsKind::Linux, SECS),
+            ));
+        }
+        // Windows surcharge in isolation: the same 1-vCPU tick must cost strictly
+        // MORE on Windows than on Linux, which is only true if the surcharge rate
+        // is non-zero (a bare `windows` tick also carries the base vCPU rate, so
+        // an absolute `> 0` here would pass with the surcharge zeroed).
+        let linux_vcpu =
+            credits.sandbox_tick_cost_raw_micro(1, 0, 0, GpuKind::None, 0, OsKind::Linux, SECS);
+        let windows_vcpu =
+            credits.sandbox_tick_cost_raw_micro(1, 0, 0, GpuKind::None, 0, OsKind::Windows, SECS);
+        assert!(
+            windows_vcpu > linux_vcpu,
+            "the Windows vCPU surcharge is not being applied ({windows_vcpu} vs {linux_vcpu})"
+        );
+
+        for (label, raw) in cases {
+            assert!(
+                raw > 0,
+                "the {label} rate bills nothing; a 0 here means debit_sandbox_sync \
+                 returns None on that workload, so compute_verdict never sees a \
+                 balance and KillBalance is unreachable"
+            );
+            assert!(
+                credits.sandbox_debit_amount(raw) > 0,
+                "the {label} rate survives the markup as a zero debit"
+            );
+        }
+    }
+
     /// A richly-populated config (providers with multi-account keys, routing with a
     /// tiered fallback chain, a non-default firewall policy, control-plane pricing)
     /// round-trips through TOML with every value preserved.
@@ -3929,5 +5018,676 @@ mod toml_roundtrip_tests {
             18000
         );
         assert_eq!(back.credits.markup_bps, 700);
+    }
+}
+
+#[cfg(test)]
+mod classify_tier_tests {
+    use super::{
+        resolve_classify_model_id, seed_classify_route, ClassifyProviderConfig, FirewallOverlay,
+        InspectorConfig, ModelMapping, ProviderId, ProvidersConfig, RoutingConfig,
+        DEFAULT_CLASSIFY_PORT, DEFAULT_INSPECTOR_MODEL, ENV_CLASSIFY_MODEL_ID,
+    };
+
+    /// Serializes the tests that read the inspector-model **default**, because
+    /// `default_inspector_model` now consults [`ENV_CLASSIFY_MODEL_ID`] and one test
+    /// below sets it. `apps/gateway` has no crate-wide env test lock, so this is the
+    /// lock for this one variable; every test whose expectation depends on it takes
+    /// this guard. (Tests that pass an explicit model, or that exercise the pure
+    /// [`resolve_classify_model_id`], do not need it.)
+    fn lock_classify_model_env() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The profile-aware port a standalone gateway resolves the classify slot to.
+    fn expected_port() -> u16 {
+        crate::profile::port(DEFAULT_CLASSIFY_PORT)
+    }
+
+    /// Resolve `routing` into the REAL router tables (`ModelRouter::new` does the
+    /// same lowering) so the seed assertions close the loop through
+    /// `RoutingTables::route` instead of only inspecting the map. `default_provider`
+    /// is a hosted one on purpose: that is the fall-through that used to leak the
+    /// classifier id upstream.
+    fn tables_for(routing: &RoutingConfig) -> ryu_gw_router::RoutingTables {
+        ryu_gw_router::RoutingTables {
+            model_map: routing
+                .model_map
+                .iter()
+                .map(|(model, mapping)| {
+                    (
+                        model.clone(),
+                        (
+                            mapping.provider.as_str().to_owned(),
+                            mapping.provider_model.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+            builtin_prefixes: ryu_gw_router::builtin_prefixes(),
+            default_provider: "openai".to_owned(),
+            modality_map: std::collections::HashMap::new(),
+            fallback_chain: Vec::new(),
+            provider_tiers: std::collections::HashMap::new(),
+            eval_candidates: Vec::new(),
+            explore_ratio: 0.0,
+        }
+    }
+
+    #[test]
+    fn classify_slot_is_absent_by_default() {
+        // A STANDALONE gateway's state — with no `RYU_CLASSIFY_LLM_URL` published we
+        // must not materialize a slot pointing at a dead port. (On a Core-spawned
+        // gateway the slot is always `Some`: Core publishes the URL unconditionally.)
+        assert!(ProvidersConfig::default().classify.is_none());
+    }
+
+    #[test]
+    fn classify_slot_parses_from_gateway_toml_and_keeps_its_url() {
+        let cfg: ProvidersConfig =
+            toml::from_str("[classify]\nbase_url = \"http://127.0.0.1:9083/v1\"\n")
+                .expect("classify table must parse");
+        assert_eq!(
+            cfg.classify.expect("slot present").base_url,
+            "http://127.0.0.1:9083/v1"
+        );
+    }
+
+    #[test]
+    fn bare_classify_table_defaults_to_the_classify_port_not_ollama() {
+        // Regression guard for the reason `ClassifyProviderConfig` is its own type:
+        // reusing `LocalProviderConfig` would default this to the chat engine's
+        // :11434 and silently run the guardrail classifier against the chat model.
+        let cfg: ProvidersConfig = toml::from_str("[classify]\n").expect("bare table must parse");
+        let base_url = cfg.classify.expect("slot present").base_url;
+        assert_eq!(base_url, format!("http://127.0.0.1:{}/v1", expected_port()));
+        assert!(!base_url.contains("11434"));
+    }
+
+    #[test]
+    fn classify_config_default_url_is_profile_aware() {
+        let c: ClassifyProviderConfig =
+            serde_json::from_value(serde_json::json!({})).expect("empty object parses");
+        assert!(c.base_url.ends_with(&format!("{}/v1", expected_port())));
+    }
+
+    #[test]
+    fn inspector_model_defaults_to_the_classify_tier_classifier() {
+        let _lock = lock_classify_model_env();
+        // "enabled" must mean "working": an empty default made the guardrail
+        // fail open forever while `action` still read Block.
+        assert_eq!(InspectorConfig::default().model, DEFAULT_INSPECTOR_MODEL);
+        let from_wire: InspectorConfig =
+            serde_json::from_value(serde_json::json!({ "enabled": true }))
+                .expect("absent model parses");
+        assert_eq!(from_wire.model, DEFAULT_INSPECTOR_MODEL);
+    }
+
+    #[test]
+    fn blank_inspector_model_resolves_to_the_default() {
+        let _lock = lock_classify_model_env();
+        // The UI / `PUT /v1/config` send an explicit "" when an operator clears the
+        // box — the case `#[serde(default)]` alone does NOT cover.
+        for blank in ["", "   "] {
+            let cfg: InspectorConfig =
+                serde_json::from_value(serde_json::json!({ "enabled": true, "model": blank }))
+                    .expect("blank model parses");
+            assert_eq!(
+                cfg.model, DEFAULT_INSPECTOR_MODEL,
+                "blank {blank:?} must resolve to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_inspector_model_is_never_overridden() {
+        let cfg: InspectorConfig =
+            serde_json::from_value(serde_json::json!({ "model": "openrouter/auto" }))
+                .expect("explicit model parses");
+        assert_eq!(cfg.model, "openrouter/auto");
+    }
+
+    #[test]
+    fn firewall_overlay_inspector_inherits_the_resolved_model() {
+        let _lock = lock_classify_model_env();
+        // Overlays are cloned wholesale into the resolved config by
+        // `firewall/resolve.rs`, so the normalization has to hold on this path too
+        // — otherwise an org/agent overlay reintroduces the empty model.
+        let ov: FirewallOverlay = serde_json::from_value(serde_json::json!({
+            "inspector": { "enabled": true, "model": "" }
+        }))
+        .expect("overlay parses");
+        assert_eq!(
+            ov.inspector.expect("inspector present").model,
+            DEFAULT_INSPECTOR_MODEL
+        );
+    }
+
+    /// Anchors Core's lazy-start predicate from the crate that owns the default.
+    ///
+    /// `apps/core/src/sidecar/gateway.rs::patch_selects_classify_tier` decides
+    /// whether to spawn a 241 MB llama-server from the SERIALIZED firewall section,
+    /// and it must decline on a fresh node. Two properties of `FirewallConfig`'s
+    /// default make that safe, and both would be invisible to Core if they changed:
+    /// the inspector is off, and there is not one enabled evaluator binding (an
+    /// enabled binding is Core's third arm, because `EvaluatorImpl::LlmJudge` borrows
+    /// `inspector.model` regardless of `inspector.enabled`). Core's own negative test
+    /// hand-builds this shape; this is the assertion that keeps the shape honest.
+    #[test]
+    fn default_firewall_section_selects_nothing_for_cores_lazy_start() {
+        // The model assertion below reads the published-id env var.
+        let _lock = lock_classify_model_env();
+        let wire = serde_json::to_value(super::FirewallConfig::default())
+            .expect("firewall config serializes");
+        assert_eq!(
+            wire["inspector"]["enabled"],
+            serde_json::json!(false),
+            "the inspector must default OFF, or every firewall push spawns the tier"
+        );
+        assert_eq!(
+            wire["evaluators"],
+            serde_json::json!([]),
+            "no evaluator binding may ship enabled — one would arm Core's judge arm on \
+             every firewall push"
+        );
+        // …and the model IS the classify id, which is precisely why the enablement
+        // flags above are the only thing standing between a checkbox save and a
+        // resident llama-server.
+        assert_eq!(
+            wire["inspector"]["model"],
+            serde_json::json!(super::classify_model_id())
+        );
+    }
+
+    // ── Registry-swappable classifier id (the published-id seam) ─────────────
+
+    #[test]
+    fn published_classify_id_wins_and_blank_falls_back() {
+        // Core pushes `RYU_CLASSIFY_MODEL_ID` unconditionally, so a blank value has
+        // to read as "not published" — never as an empty model id, which is the very
+        // failure `de_inspector_model` exists to prevent.
+        assert_eq!(
+            resolve_classify_model_id(Some("my-tiny-classifier")),
+            "my-tiny-classifier"
+        );
+        assert_eq!(
+            resolve_classify_model_id(Some("  my-tiny-classifier  ")),
+            "my-tiny-classifier"
+        );
+        for absent in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                resolve_classify_model_id(absent),
+                DEFAULT_INSPECTOR_MODEL,
+                "{absent:?} must fall back to the compile-time default"
+            );
+        }
+    }
+
+    #[test]
+    fn published_classify_id_becomes_the_inspector_default() {
+        // The WIRING assertion: `default_inspector_model` must actually consult the
+        // published id, not just have a resolver available next to it.
+        let _lock = lock_classify_model_env();
+        let prev = std::env::var(ENV_CLASSIFY_MODEL_ID).ok();
+        std::env::set_var(ENV_CLASSIFY_MODEL_ID, "my-tiny-classifier");
+        let default_model = InspectorConfig::default().model;
+        let blanked: InspectorConfig =
+            serde_json::from_value(serde_json::json!({ "enabled": true, "model": "" }))
+                .expect("blank model parses");
+        match prev {
+            Some(v) => std::env::set_var(ENV_CLASSIFY_MODEL_ID, v),
+            None => std::env::remove_var(ENV_CLASSIFY_MODEL_ID),
+        }
+        assert_eq!(default_model, "my-tiny-classifier");
+        assert_eq!(blanked.model, "my-tiny-classifier");
+    }
+
+    /// The end-to-end assertion the original seam was missing: an overridden
+    /// classifier id must be **routable**, not merely readable. Before the seed,
+    /// `route("my-tiny-classifier")` matched no map and no builtin prefix and fell
+    /// through to `default_provider` — so the guardrail classifier id was shipped to
+    /// a hosted provider, 400'd, and the inspector failed open in silence.
+    #[test]
+    fn seeded_classify_route_makes_an_overridden_id_routable() {
+        let mut routing = RoutingConfig::default();
+        seed_classify_route(&mut routing, "my-tiny-classifier");
+        assert_eq!(
+            routing.model_map["my-tiny-classifier"].provider.as_str(),
+            "classify"
+        );
+        // Close the loop through the real router tables.
+        assert_eq!(
+            tables_for(&routing).route("my-tiny-classifier").0,
+            "classify"
+        );
+    }
+
+    #[test]
+    fn seeded_classify_route_defends_the_default_id_from_a_user_gemma_prefix() {
+        // `route` runs the user `model_map` (exact, then longest prefix) BEFORE the
+        // builtin table, so `gemma` → `openrouter` used to capture the default
+        // classifier and bill the guardrail to a paid provider. The exact seed wins
+        // step 1, ahead of that prefix scan.
+        let mut routing = RoutingConfig::default();
+        routing.model_map.insert(
+            "gemma".to_owned(),
+            ModelMapping {
+                provider: ProviderId::from("openrouter"),
+                provider_model: None,
+            },
+        );
+        seed_classify_route(&mut routing, DEFAULT_INSPECTOR_MODEL);
+        let tables = tables_for(&routing);
+        assert_eq!(tables.route(DEFAULT_INSPECTOR_MODEL).0, "classify");
+        // A normal gemma chat model still follows the operator's mapping.
+        assert_eq!(tables.route("gemma-3-12b-it").0, "openrouter");
+    }
+
+    #[test]
+    fn seeded_classify_route_never_overwrites_an_explicit_operator_entry() {
+        let mut routing = RoutingConfig::default();
+        routing.model_map.insert(
+            DEFAULT_INSPECTOR_MODEL.to_owned(),
+            ModelMapping {
+                provider: ProviderId::from("local"),
+                provider_model: None,
+            },
+        );
+        let marked = seed_classify_route(&mut routing, DEFAULT_INSPECTOR_MODEL);
+        assert_eq!(
+            routing.model_map[DEFAULT_INSPECTOR_MODEL].provider.as_str(),
+            "local",
+            "an explicit exact mapping is a deliberate operator choice"
+        );
+        assert!(
+            marked.is_none(),
+            "a row we did not insert must never be reported as ours to strip"
+        );
+        // A blank id is a no-op, never a `"" → classify` row.
+        let before = routing.model_map.len();
+        assert!(seed_classify_route(&mut routing, "   ").is_none());
+        assert_eq!(routing.model_map.len(), before);
+    }
+
+    // ── The seeded row is DERIVED: routable in memory, absent from the file ──────
+    //
+    // `GET /v1/config` renders `routing.model_map` as the desktop's hand-authored
+    // "Model mappings" list with per-row delete buttons, so a seeded row read as an
+    // entry the operator never wrote AND could not delete (the delete PUT dropped it
+    // from the file; the next `load()` seeded it straight back). These close the loop
+    // from the config layer; `api::config`'s tests cover the served view and the PUT.
+
+    /// How many `model_map` rows point at the classify provider. Asserted instead of
+    /// looking up `classify_model_id()` on purpose: another test in this binary
+    /// temporarily sets `RYU_CLASSIFY_MODEL_ID`, so *which* id got seeded is not
+    /// stable across a parallel run — but "a row pointing at `classify` exists" is,
+    /// and it is the stronger claim anyway.
+    fn classify_rows(routing: &RoutingConfig) -> Vec<&String> {
+        let mut rows: Vec<&String> = routing
+            .model_map
+            .iter()
+            .filter(|(_, mapping)| mapping.provider.as_str() == "classify")
+            .map(|(model, _)| model)
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn load_seeds_a_routable_classify_row_that_save_never_persists() {
+        let guard = super::test_config_path::ConfigPathGuard::isolated("seed-not-persisted");
+        // An operator's own mapping, so the assertions also prove the strip is
+        // surgical rather than a `model_map` wipe.
+        std::fs::write(
+            guard.path(),
+            "[routing.model_map.\"claude-3-5-sonnet\"]\nprovider = \"anthropic\"\n",
+        )
+        .expect("seed gateway.toml");
+
+        let loaded = super::GatewayConfig::load().expect("load the seeded file");
+
+        // In memory: exactly one classify row, it is marked as ours, and it ROUTES.
+        // The id is read from the marker rather than recomputed, so a parallel test
+        // flipping `RYU_CLASSIFY_MODEL_ID` cannot make this assert the wrong key.
+        let seeded_id = loaded
+            .seeded_classify_model
+            .clone()
+            .expect("load must mark the row it seeded");
+        assert_eq!(classify_rows(&loaded.routing), vec![&seeded_id]);
+        assert_eq!(
+            tables_for(&loaded.routing).route(&seeded_id).0,
+            "classify",
+            "the seed's whole purpose is that the classifier id resolves to the tier"
+        );
+
+        loaded.save().expect("persist the loaded config");
+
+        // On disk: the operator's row, and no classify row at all.
+        let text = std::fs::read_to_string(guard.path()).expect("gateway.toml written");
+        let on_disk: super::GatewayConfig = toml::from_str(&text).expect("re-parse");
+        assert_eq!(
+            on_disk.routing.model_map["claude-3-5-sonnet"]
+                .provider
+                .as_str(),
+            "anthropic",
+            "the operator's own mapping must survive"
+        );
+        assert!(
+            classify_rows(&on_disk.routing).is_empty(),
+            "a derived row must never reach the file: there it looks operator-authored \
+             forever and outlives the id it was seeded for — got {:?}",
+            classify_rows(&on_disk.routing)
+        );
+
+        // …and the next load re-seeds, so nothing was lost by not persisting it.
+        let reloaded = super::GatewayConfig::load().expect("reload");
+        assert_eq!(classify_rows(&reloaded.routing).len(), 1);
+    }
+
+    #[test]
+    fn a_classify_row_already_in_the_file_is_treated_as_the_operators_and_kept() {
+        // The migration case a marker-based strip must not get wrong: a node whose
+        // `gateway.toml` ALREADY carries `<classify id> → classify`, either because a
+        // pre-fix gateway persisted the seed or because the operator wrote it. `load`'s
+        // `or_insert` finds it, marks nothing, and `save` must leave it alone —
+        // otherwise the fix silently edits hand-authored files. Such a row is
+        // deletable by the ordinary read-modify-write PUT (nothing re-adds it under
+        // that exact id unless it IS the current classify id, in which case the row is
+        // simply re-seeded in memory and stripped from the view again).
+        let guard = super::test_config_path::ConfigPathGuard::isolated("preexisting-row");
+        std::fs::write(
+            guard.path(),
+            "[routing.model_map.\"my-own-classifier\"]\nprovider = \"classify\"\n",
+        )
+        .expect("seed gateway.toml");
+
+        let loaded = super::GatewayConfig::load().expect("load");
+        assert!(
+            loaded.routing.model_map.contains_key("my-own-classifier"),
+            "the operator's classify row must be loaded"
+        );
+        assert_ne!(
+            loaded.seeded_classify_model.as_deref(),
+            Some("my-own-classifier"),
+            "a row that came from the file is never claimed by the seed"
+        );
+        loaded.save().expect("save");
+
+        let text = std::fs::read_to_string(guard.path()).expect("written");
+        let on_disk: super::GatewayConfig = toml::from_str(&text).expect("re-parse");
+        assert_eq!(
+            on_disk.routing.model_map["my-own-classifier"]
+                .provider
+                .as_str(),
+            "classify",
+            "a classify row that came from the FILE is the operator's, not ours to strip"
+        );
+    }
+
+    #[test]
+    fn strip_leaves_a_seeded_row_that_was_since_replaced() {
+        // The marker says "we inserted this key"; it does not license deleting whatever
+        // value happens to live there later. If something re-pointed the mapping after
+        // the seed ran, that value is somebody's choice.
+        let mut cfg = super::GatewayConfig::default();
+        cfg.seeded_classify_model = seed_classify_route(&mut cfg.routing, DEFAULT_INSPECTOR_MODEL);
+        assert_eq!(
+            cfg.seeded_classify_model.as_deref(),
+            Some(DEFAULT_INSPECTOR_MODEL)
+        );
+        cfg.routing.model_map.insert(
+            DEFAULT_INSPECTOR_MODEL.to_owned(),
+            ModelMapping {
+                provider: ProviderId::from("local"),
+                provider_model: None,
+            },
+        );
+
+        let clean = cfg.without_derived_values();
+
+        assert_eq!(
+            clean.routing.model_map[DEFAULT_INSPECTOR_MODEL]
+                .provider
+                .as_str(),
+            "local"
+        );
+        assert!(
+            clean.seeded_classify_model.is_none(),
+            "the marker is consumed, so a second strip cannot delete a later row"
+        );
+    }
+
+    #[test]
+    fn seeded_classify_marker_never_crosses_the_wire() {
+        // The marker is provenance, not config: it must not appear in `gateway.toml`,
+        // must not be settable by a `PUT /v1/config` body, and must not survive a
+        // round-trip (else a client could ask us to delete one of its own rows).
+        let mut cfg = super::GatewayConfig::default();
+        cfg.seeded_classify_model = seed_classify_route(&mut cfg.routing, DEFAULT_INSPECTOR_MODEL);
+
+        let toml_text = toml::to_string_pretty(&cfg).expect("serialize config");
+        assert!(!toml_text.contains("seeded_classify_model"), "{toml_text}");
+        let json = serde_json::to_value(&cfg).expect("serialize config as json");
+        assert!(json.get("seeded_classify_model").is_none());
+
+        let injected: super::GatewayConfig = serde_json::from_value(serde_json::json!({
+            "seeded_classify_model": DEFAULT_INSPECTOR_MODEL,
+            "routing": { "model_map": { DEFAULT_INSPECTOR_MODEL: { "provider": "classify" } } }
+        }))
+        .expect("config patch parses");
+        assert!(
+            injected.seeded_classify_model.is_none(),
+            "a PUT body must not be able to mark an operator row as strippable"
+        );
+    }
+
+    // ── `[providers.classify]` is the STANDALONE setting; Core's env wins the slot ──
+
+    #[test]
+    fn cores_published_classify_url_wins_the_file_table() {
+        // The precedence half of the cross-process contract (see the env overlay in
+        // `load`): Core publishes `RYU_CLASSIFY_LLM_URL` on every spawn, so on a
+        // Core-spawned node the URL the gateway dials for `classify` is always the one
+        // Core computed — which is what lets Core gate its 300-400 MB lazy sidecar
+        // start on that URL's locality without reading this file.
+        //
+        // This test mutates `RYU_CLASSIFY_LLM_URL`, which is process-global. The
+        // config-path guard is what makes that safe: the only reader is
+        // `GatewayConfig::load`, and every test that reaches `load` holds this same
+        // lock, so no other test can be observing the variable while it is swapped.
+        let guard = super::test_config_path::ConfigPathGuard::isolated("classify-url");
+        let authored = "[providers.classify]\nbase_url = \"http://small-model.internal:9999/v1\"\n";
+        std::fs::write(guard.path(), authored).expect("seed gateway.toml");
+        let prior = std::env::var_os("RYU_CLASSIFY_LLM_URL");
+        std::env::set_var("RYU_CLASSIFY_LLM_URL", "http://127.0.0.1:8083/v1");
+
+        // 1. File table + env ⇒ the env wins the LIVE slot, and the file's value is
+        //    captured for the strip (asserted in the persistence test below).
+        let with_file = super::GatewayConfig::load().expect("load");
+
+        // 2. No table + env ⇒ the env registers the tier, as it always did.
+        std::fs::write(guard.path(), "bind = \"127.0.0.1:7981\"\n").expect("rewrite gateway.toml");
+        let without_table = super::GatewayConfig::load().map(|c| c.providers.classify);
+
+        // 3. No table + BLANK env ⇒ "not published": the slot stays empty and the tier
+        //    fails open, rather than registering an unusable "" URL.
+        std::env::set_var("RYU_CLASSIFY_LLM_URL", "   ");
+        let blank_env_no_table = super::GatewayConfig::load().map(|c| c.providers.classify);
+
+        // 4. File table + BLANK env ⇒ the standalone case the field exists for. Nothing
+        //    overwrites it, including a bare table, which keeps this type's own
+        //    profile-aware default (never Ollama's `:11434`).
+        std::fs::write(guard.path(), authored).expect("rewrite gateway.toml");
+        let blank_env_with_table = super::GatewayConfig::load().expect("load");
+        std::fs::write(guard.path(), "[providers.classify]\n").expect("rewrite gateway.toml");
+        let blank_env_bare_table = super::GatewayConfig::load().map(|c| c.providers.classify);
+
+        match prior {
+            Some(v) => std::env::set_var("RYU_CLASSIFY_LLM_URL", v),
+            None => std::env::remove_var("RYU_CLASSIFY_LLM_URL"),
+        }
+
+        assert_eq!(
+            with_file
+                .providers
+                .classify
+                .as_ref()
+                .expect("slot present")
+                .base_url,
+            "http://127.0.0.1:8083/v1",
+            "Core's published URL must win the live slot — the gateway has to dial the \
+             tier Core decided on, because that is the only URL Core can gate its lazy \
+             start against"
+        );
+        assert!(
+            with_file.env_injected_classify_provider,
+            "the overwritten slot must be marked derived"
+        );
+        assert_eq!(
+            with_file
+                .file_classify_provider
+                .as_ref()
+                .expect("the file's table is captured, not discarded")
+                .base_url,
+            "http://small-model.internal:9999/v1",
+        );
+        assert_eq!(
+            without_table.expect("load").expect("slot present").base_url,
+            "http://127.0.0.1:8083/v1",
+            "with no table, Core's published URL is what registers the tier"
+        );
+        assert!(
+            blank_env_no_table.expect("load").is_none(),
+            "a blank env must leave the tier unregistered (fail open), not register \"\""
+        );
+        assert_eq!(
+            blank_env_with_table
+                .providers
+                .classify
+                .as_ref()
+                .expect("slot present")
+                .base_url,
+            "http://small-model.internal:9999/v1",
+            "on a STANDALONE gateway (no published URL) the file setting is what takes \
+             effect — that is the scope this field has"
+        );
+        assert!(
+            !blank_env_with_table.env_injected_classify_provider,
+            "a file-authored table with no env is not derived"
+        );
+        assert_eq!(
+            blank_env_bare_table
+                .expect("load")
+                .expect("slot present")
+                .base_url,
+            format!("http://127.0.0.1:{}/v1", expected_port()),
+            "a bare table keeps the classify default, not Ollama's port"
+        );
+    }
+
+    #[test]
+    fn an_env_injected_classify_slot_is_never_written_back_and_never_eats_the_file() {
+        // Two failure modes at once, both on the `save()` path, because env-wins makes
+        // them the SAME code path:
+        //
+        // 1. No file table: every provider slot serializes out on `save()`, so the first
+        //    save on a Core-spawned node would freeze Core's computed, profile-scoped
+        //    loopback URL (`:8083` release, `:9083` dev) into `gateway.toml` as an
+        //    operator-authored-looking table — stale on the next profile/port change,
+        //    and live the moment something other than Core starts the gateway.
+        // 2. WITH a file table: the strip used to blank the slot, which was safe only
+        //    while the file BEAT the env (a file table then never set the marker).
+        //    Under env-wins the live value is Core's, so a blanking strip would delete
+        //    the operator's own `[providers.classify]` from their file on the next
+        //    `PUT`-triggered save. It must RESTORE, not clear.
+        let guard = super::test_config_path::ConfigPathGuard::isolated("classify-env-save");
+        std::fs::write(guard.path(), "bind = \"127.0.0.1:7981\"\n").expect("seed gateway.toml");
+        let prior = std::env::var_os("RYU_CLASSIFY_LLM_URL");
+        std::env::set_var("RYU_CLASSIFY_LLM_URL", "http://127.0.0.1:8083/v1");
+
+        let loaded = super::GatewayConfig::load().expect("load");
+        // In memory the tier IS registered — the strip must not cost the running
+        // process its classify provider.
+        assert_eq!(
+            loaded
+                .providers
+                .classify
+                .as_ref()
+                .expect("env fills the slot")
+                .base_url,
+            "http://127.0.0.1:8083/v1"
+        );
+        assert!(loaded.env_injected_classify_provider);
+        loaded.save().expect("save");
+
+        let text = std::fs::read_to_string(guard.path()).expect("gateway.toml written");
+        let on_disk: super::GatewayConfig = toml::from_str(&text).expect("re-parse");
+        // …and the next load still registers the tier from the env.
+        let after_save = super::GatewayConfig::load().expect("reload");
+
+        // Now the operator's own table, which the env overwrites in memory and which a
+        // save must nevertheless leave on disk untouched.
+        std::fs::write(
+            guard.path(),
+            "[providers.classify]\nbase_url = \"http://small-model.internal:9999/v1\"\n",
+        )
+        .expect("rewrite gateway.toml");
+        let authored = super::GatewayConfig::load().expect("load authored");
+        assert!(
+            authored.env_injected_classify_provider,
+            "under env-wins the marker is set even when the file HAD a table — which is \
+             exactly why the strip has to restore rather than clear"
+        );
+        // The strip is idempotent: `api::config::persisted_config` runs it, then the
+        // resulting config is what `save()` strips again. Model both hops.
+        let via_persisted_read = authored.without_derived_values();
+        via_persisted_read.save().expect("save authored");
+        let authored_text = std::fs::read_to_string(guard.path()).expect("written");
+        let authored_on_disk: super::GatewayConfig =
+            toml::from_str(&authored_text).expect("re-parse authored");
+
+        match prior {
+            Some(v) => std::env::set_var("RYU_CLASSIFY_LLM_URL", v),
+            None => std::env::remove_var("RYU_CLASSIFY_LLM_URL"),
+        }
+
+        assert!(
+            on_disk.providers.classify.is_none(),
+            "a derived provider slot must not be persisted as a file setting: {text}"
+        );
+        assert!(
+            !text.contains("[providers.classify]"),
+            "not even as a bare table: {text}"
+        );
+        assert_eq!(
+            after_save
+                .providers
+                .classify
+                .expect("env still fills the slot")
+                .base_url,
+            "http://127.0.0.1:8083/v1",
+            "saving must leave Core's published URL in charge of the slot"
+        );
+        assert_eq!(
+            via_persisted_read
+                .providers
+                .classify
+                .as_ref()
+                .expect("the file's table is restored, not dropped")
+                .base_url,
+            "http://small-model.internal:9999/v1",
+            "the strip restores what the file said — a `None` here is the data-loss bug"
+        );
+        assert_eq!(
+            authored_on_disk
+                .providers
+                .classify
+                .expect("authored table survives")
+                .base_url,
+            "http://small-model.internal:9999/v1",
+            "the operator's own table must survive a save, even though the env \
+             overwrote it in memory"
+        );
     }
 }

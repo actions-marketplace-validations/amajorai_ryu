@@ -560,27 +560,26 @@ function MotionNavigationMenuContent({
 	return (
 		<AnimatePresence custom={context.direction} initial={false}>
 			{isOpen && (
-				<motion.div
-					animate="active"
-					className={cn(
-						"absolute top-full left-0 z-50 mt-1.5 rounded-2xl border border-border/60 bg-muted/60 p-2 pr-2.5 text-popover-foreground shadow-lg backdrop-blur-xl",
-						className
-					)}
-					custom={context.direction}
-					data-slot="navigation-menu-content"
-					exit="exit"
-					initial="initial"
-					key={value}
-					transition={context.spring}
-					variants={contentVariants}
-				>
-					<MotionNavigationMenuContentInner
-						highlightClassName={highlightClassName}
-						innerClassName={innerClassName}
+				<div className="absolute top-full left-0 z-50 mt-1.5 overflow-hidden rounded-2xl border border-border/60 bg-muted/60 shadow-lg backdrop-blur-xl">
+					<motion.div
+						animate="active"
+						className={cn("p-2 pr-2.5 text-popover-foreground", className)}
+						custom={context.direction}
+						data-slot="navigation-menu-content"
+						exit="exit"
+						initial="initial"
+						key={value}
+						transition={context.spring}
+						variants={contentVariants}
 					>
-						{children}
-					</MotionNavigationMenuContentInner>
-				</motion.div>
+						<MotionNavigationMenuContentInner
+							highlightClassName={highlightClassName}
+							innerClassName={innerClassName}
+						>
+							{children}
+						</MotionNavigationMenuContentInner>
+					</motion.div>
+				</div>
 			)}
 		</AnimatePresence>
 	);
@@ -679,40 +678,44 @@ function MotionNavigationMenuViewport({
 					opacity: activeContent ? 1 : 0,
 					scale: activeContent ? 1 : 0.95,
 				}}
-				className={cn(
-					"relative mt-1.5 overflow-hidden rounded-2xl border border-border/60 bg-muted/60 text-popover-foreground shadow-lg backdrop-blur-xl",
-					className
-				)}
-				data-slot="navigation-menu-viewport"
+				className="relative mt-1.5 overflow-hidden"
 				initial={false}
 				transition={context?.spring}
 			>
-				<AnimatePresence
-					custom={context?.direction ?? 1}
-					initial={false}
-					mode="popLayout"
-				>
-					{activeContent && context?.activeValue && (
-						<motion.div
-							animate="active"
-							className={cn("p-2 pr-2.5", activeContent.className)}
-							custom={context.direction}
-							data-slot="navigation-menu-content"
-							exit="exit"
-							initial="initial"
-							key={context.activeValue}
-							transition={context.spring}
-							variants={contentVariants}
-						>
-							<MotionNavigationMenuContentInner
-								highlightClassName={activeContent.highlightClassName}
-								innerClassName={activeContent.innerClassName}
-							>
-								{activeContent.children}
-							</MotionNavigationMenuContentInner>
-						</motion.div>
+				<div
+					className={cn(
+						"rounded-2xl border border-border/60 bg-muted/60 text-popover-foreground shadow-lg backdrop-blur-xl",
+						className
 					)}
-				</AnimatePresence>
+					data-slot="navigation-menu-viewport"
+				>
+					<AnimatePresence
+						custom={context?.direction ?? 1}
+						initial={false}
+						mode="popLayout"
+					>
+						{activeContent && context?.activeValue && (
+							<motion.div
+								animate="active"
+								className={cn("p-2 pr-2.5", activeContent.className)}
+								custom={context.direction}
+								data-slot="navigation-menu-content"
+								exit="exit"
+								initial="initial"
+								key={context.activeValue}
+								transition={context.spring}
+								variants={contentVariants}
+							>
+								<MotionNavigationMenuContentInner
+									highlightClassName={activeContent.highlightClassName}
+									innerClassName={activeContent.innerClassName}
+								>
+									{activeContent.children}
+								</MotionNavigationMenuContentInner>
+							</motion.div>
+						)}
+					</AnimatePresence>
+				</div>
 			</motion.div>
 
 			<div
@@ -721,6 +724,12 @@ function MotionNavigationMenuViewport({
 				data-slot="navigation-menu-measure"
 				ref={measureRef}
 			>
+				{/* The measure copy renders the SAME tree as the visible one, wrapper
+				    included. Rendering `children` bare threw "useHighlight must be used
+				    within a HighlightProvider" the moment a menu opened, because
+				    MotionNavigationMenuLink is a HighlightItem and only
+				    MotionNavigationMenuContentInner supplies that provider. Keeping the
+				    wrapper also keeps the measured box identical to the rendered one. */}
 				{activeContent && (
 					<div className={cn("p-2 pr-2.5", activeContent.className)}>
 						<MotionNavigationMenuContentInner

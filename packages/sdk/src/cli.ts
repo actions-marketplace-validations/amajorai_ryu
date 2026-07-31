@@ -96,7 +96,80 @@ function loadManifest(dir: string): LoadedManifest {
 		const message = first?.message ?? "validation failed";
 		exitError(`manifest.json validation failed at '${field}': ${message}`);
 	}
-	return result.data;
+	return inlineCodeFiles(result.data, dir);
+}
+
+/** Directories a `code_file` may name — mirrors Rust's `CODE_FILE_DIRS`. */
+const CODE_FILE_DIRS = ["hooks", "adapters"];
+const CODE_FILE_PATH = /^(hooks|adapters)\/[A-Za-z0-9_][A-Za-z0-9._-]*\.m?js$/;
+
+/**
+ * Read one `code_file` and return its contents, or exit with a clear error.
+ *
+ * The path is joined onto the plugin directory, so it is validated against the
+ * same flat allowlist Core enforces (`<hooks|adapters>/<name>.js`, no traversal)
+ * rather than trusted.
+ */
+function readCodeFile(dir: string, rel: string, label: string): string {
+	if (!CODE_FILE_PATH.test(rel)) {
+		exitError(
+			`${label}: code_file '${rel}' must be exactly '<${CODE_FILE_DIRS.join("|")}>/<name>.js' with no traversal`
+		);
+	}
+	const path = join(dir, rel);
+	let body: string;
+	try {
+		body = readFileSync(path, "utf8");
+	} catch (err) {
+		exitError(`${label}: could not read code_file '${rel}': ${String(err)}`);
+	}
+	if (!body.trim()) {
+		exitError(`${label}: code_file '${rel}' is empty`);
+	}
+	return body;
+}
+
+/**
+ * Replace every `code_file` reference with the file's contents — the source form
+ * becoming the wire form.
+ *
+ * `code_file` exists so a plugin's sandboxed JS lives in real, reviewable `.js`
+ * files instead of a one-line escaped JSON string. But the BUNDLE must stay
+ * self-contained and, for a marketplace plugin, the Gateway signs the manifest
+ * verbatim — so inlining here is what keeps the entire hook/adapter body inside the
+ * signed surface. A published bundle that still carried `code_file` would be a new
+ * unsigned-code carriage channel, which is exactly what this must not become.
+ */
+function inlineCodeFiles(
+	manifest: LoadedManifest,
+	dir: string
+): LoadedManifest {
+	const out = manifest as LoadedManifest & {
+		contributes?: { turn_hooks?: Record<string, unknown>[] };
+		provides?: {
+			tools?: Record<string, { adapter?: Record<string, unknown> }>;
+		}[];
+	};
+
+	for (const hook of out.contributes?.turn_hooks ?? []) {
+		const rel = hook.code_file;
+		if (typeof rel === "string") {
+			hook.code = readCodeFile(dir, rel, `turn hook '${String(hook.id)}'`);
+			hook.code_file = undefined;
+		}
+	}
+
+	for (const entry of out.provides ?? []) {
+		for (const [verb, binding] of Object.entries(entry.tools ?? {})) {
+			const rel = binding.adapter?.code_file;
+			if (binding.adapter && typeof rel === "string") {
+				binding.adapter.code = readCodeFile(dir, rel, `adapter '${verb}'`);
+				binding.adapter.code_file = undefined;
+			}
+		}
+	}
+
+	return out;
 }
 
 // ── pack command ──────────────────────────────────────────────────────────────

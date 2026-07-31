@@ -1,8 +1,10 @@
 import { toast } from "@ryu/ui/components/sileo";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { getActiveUserId, useSession } from "@/lib/auth-client.ts";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
+import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	streamUserNotifications,
@@ -13,7 +15,13 @@ import { useActiveNode } from "./useActiveNode.ts";
 const RECONNECT_DELAY_MS = 2000;
 
 /** Raise a native OS notification (best-effort; requests permission once). When
- *  the ping carries a notification id, tapping it deep-links to the Inbox. */
+ *  the ping carries a notification id, tapping it deep-links to the Inbox — but only
+ *  if `onOpen` decides, at CLICK time, that some enabled app still owns that path;
+ *  otherwise the click only focuses the window rather than opening a tab that can
+ *  only say "App not enabled". Deciding at click time rather than at notify time
+ *  matters in both directions: a ping that arrives before the contributions feed has
+ *  loaded is still clickable once it lands, and a notification left on screen across
+ *  an uninstall stops leading anywhere. */
 function osNotify(event: UserNotificationEvent, onOpen: () => void): void {
 	if (typeof Notification === "undefined") {
 		return;
@@ -68,6 +76,16 @@ export function useNotificationEvents(): void {
 	const meId = session?.user?.id ?? getActiveUserId() ?? null;
 	const qc = useQueryClient();
 	const { openTab } = useTabsContext();
+	// The Inbox is an app surface (`com.ryu.approvals`, default-OFF), so the deep
+	// link only exists while some enabled app claims the path. Held in a ref, not a
+	// dependency: the contributions feed resolves after first paint and again on every
+	// enable/disable, and tearing the notification stream down and reconnecting it
+	// because a *click target* changed would drop pings for the reconnect window. The
+	// ref is read inside the click handler, so an early ping is not frozen as
+	// un-clickable just because the feed had not loaded when it arrived.
+	const inboxOwner = useCompanionAlias(APPROVALS_ALIAS);
+	const inboxOwnerRef = useRef(inboxOwner);
+	inboxOwnerRef.current = inboxOwner;
 
 	useEffect(() => {
 		if (!meId) {
@@ -84,7 +102,11 @@ export function useNotificationEvents(): void {
 					? toast.error
 					: toast.info;
 			notify({ title: event.title, description: event.body ?? undefined });
-			osNotify(event, () => openTab("/inbox"));
+			osNotify(event, () => {
+				if (inboxOwnerRef.current) {
+					openTab("/inbox");
+				}
+			});
 			Promise.resolve(
 				qc.invalidateQueries({ queryKey: ["notifications"] })
 			).catch(() => undefined);

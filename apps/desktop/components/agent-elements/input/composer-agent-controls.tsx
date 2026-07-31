@@ -41,8 +41,10 @@ import {
 import { AUTO_AGENT_ID } from "@/components/agent-elements/input/universal-picker-body.tsx";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
 import { useUniversalPicker } from "@/components/agent-elements/input/use-universal-picker.ts";
+import type { InputBarInfoBar } from "@/components/agent-elements/input-bar.tsx";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
 import { useAgentCapabilities } from "@/src/hooks/useAgentCapabilities.ts";
+import { useRoutingAdvice } from "@/src/hooks/useRoutingAdvice.ts";
 import {
 	engineForAgent,
 	getAgentIcon,
@@ -145,6 +147,15 @@ export interface ComposerAgentControlsConfig {
 	/** Live agent registry (drives both the picker options and ACP detection). */
 	agents: AgentSummary[];
 	/**
+	 * True when sending would OPEN a conversation rather than continue one (an
+	 * empty thread, the launchpad). Only affects the threshold-fallback notice:
+	 * a rule that swaps the whole agent applies at a conversation start only,
+	 * because an ACP agent owns its own session state. Defaults to false, the
+	 * conservative read — the notice then says "new conversations will start on
+	 * X" instead of promising a switch to this thread.
+	 */
+	atConversationStart?: boolean;
+	/**
 	 * Compact single-row composer (used once a chat has history). When true the
 	 * whole cluster moves to the composer's RIGHT (`rightActions`), to the left of
 	 * the mic/send, and `leftActions` is `null` so only the "+" stays on the left.
@@ -203,7 +214,24 @@ export interface ComposerAgentControlsConfig {
  * `rightActions` is `null`: model selection lives in the settings menu.
  */
 export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
+	/**
+	 * The threshold-fallback notice for the turn about to be sent, ready to spread
+	 * into `InputBar`'s `infoBar` prop — "Ryu credit is at $3.10 (under your $5.00
+	 * rule) — running this turn on gpt-5-mini."
+	 *
+	 * It lives HERE, next to the agent/model pickers, for the same reason the
+	 * `UsageBar` does: every composer surface derives it from this one hook, so
+	 * the dock and the launchpad cannot silently ship a composer that swaps a
+	 * model without saying so. `undefined` when there is nothing to report, which
+	 * is the case on any node with no rules configured.
+	 */
+	infoBar: InputBarInfoBar | undefined;
 	leftActions: ReactNode;
+	/**
+	 * Re-ask Core for the fallback verdict. A host calls this right after sending
+	 * a turn, so the bar reflects the headroom that turn just consumed.
+	 */
+	refreshRoutingAdvice: () => void;
 	rightActions: ReactNode;
 	/**
 	 * The universal picker body (Ryu (providers nested) · External Agents),
@@ -221,6 +249,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 } {
 	const {
 		agents,
+		atConversationStart = false,
 		teams = [],
 		agentId,
 		teamId = null,
@@ -246,6 +275,28 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// Pass the selected model so GGUF detection (vision/mmproj, template tools)
 	// tracks the composer's model pick, not just the agent's bound slot.
 	const { capabilities } = useAgentCapabilities(agentId, model);
+
+	// Threshold fallback: what Core would actually run this turn, given how much
+	// Ryu credit / provider balance / subscription window is left. Derived here
+	// so every composer surface reports it identically — see the `infoBar` note on
+	// this hook's return type.
+	const { advice, refresh: refreshRoutingAdvice } = useRoutingAdvice(
+		agentId,
+		model,
+		atConversationStart
+	);
+	const infoBar = useMemo<InputBarInfoBar | undefined>(() => {
+		if (!advice?.reason) {
+			return undefined;
+		}
+		return {
+			// A swap already happened to the turn; a warning is a heads-up. Both are
+			// informational — neither is an error, so neither takes the destructive
+			// red wash the composer reserves for failures.
+			title: advice.severity === "swap" ? "Fallback applied" : "Running low",
+			description: advice.reason,
+		};
+	}, [advice?.reason, advice?.severity]);
 
 	const handleModeChange = (next: string) => {
 		if (next === CREATE_AGENT_MODE) {
@@ -403,7 +454,14 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 				{settingsMenu}
 			</div>
 		);
-		return { leftActions: null, rightActions, sections, renderBody };
+		return {
+			infoBar,
+			leftActions: null,
+			refreshRoutingAdvice,
+			rightActions,
+			sections,
+			renderBody,
+		};
 	}
 
 	const leftActions = (
@@ -417,5 +475,12 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		</div>
 	);
 
-	return { leftActions, rightActions: null, sections, renderBody };
+	return {
+		infoBar,
+		leftActions,
+		refreshRoutingAdvice,
+		rightActions: null,
+		sections,
+		renderBody,
+	};
 }

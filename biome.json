@@ -35,6 +35,8 @@
       "!**/.source",
       "!**/convex/_generated",
       "!crates/core/kernel-contracts/schemas",
+      "!plugins-store/*/hooks",
+      "!plugins-store/*/adapters",
       "!registry/registry.json",
       "!apps/core/Python",
       "!apps/fumadocs",

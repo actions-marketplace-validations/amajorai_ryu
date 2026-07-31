@@ -98,6 +98,7 @@ import {
 	BEARER_SOURCE_NONE,
 	fetchMeshPeers,
 	fetchWebhookIngressStatus,
+	ingressLabel,
 	type WebhookIngressStatus,
 } from "@/src/lib/api/mesh.ts";
 import {
@@ -2318,8 +2319,13 @@ function MeshSection({
 				)}
 			</div>
 			{ingress?.up && ingress.kind && (
+				// Through `ingressLabel`, not raw: Core serializes this as
+				// `IngressKind::as_str()`, which is kebab-case (`own-relay`,
+				// `tailscale-funnel`), and rendering that verbatim showed the wire
+				// value in the UI. The same helper backs the Integrations tab picker,
+				// so the two surfaces name a backend identically.
 				<p className="px-2 pb-0.5 text-[10px] text-muted-foreground/60">
-					Ingress: {ingress.kind}
+					Ingress: {ingressLabel(ingress.kind)}
 				</p>
 			)}
 			{peerList.length > 0 && (

@@ -753,6 +753,11 @@ impl ApprovalEngine {
                 // exactly once and does not re-raise an approval (infinite loop).
                 let result = registry
                     .call_tool_with_identity_no_gate(
+                        // The approval row carries the call, not the agent card that
+                        // raised it, so per-agent record state (the skill allowlist)
+                        // is unavailable here and degrades to unscoped — the exact
+                        // behaviour this path already had.
+                        None,
                         tool_id,
                         arguments.clone(),
                         allowlist.as_deref(),

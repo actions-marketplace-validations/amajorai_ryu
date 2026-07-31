@@ -1,9 +1,6 @@
 "use client";
 
-import {
-	DiaText,
-	type DiaTextRevealProps,
-} from "@ryu/ui/components/dia-text.tsx";
+import { ChromaticTextReveal } from "@ryu/ui/components/motion/chromatic-text-reveal";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { landingHeadlineClass } from "./landing-typography.ts";
@@ -25,7 +22,10 @@ type SectionTitleProps = {
 	as?: "h1" | "h2";
 	size?: SectionTitleSize;
 	className?: string;
-} & Pick<DiaTextRevealProps, "colors" | "delay" | "duration">;
+	colors?: string[];
+	delay?: number;
+	duration?: number;
+};
 
 export function SectionTitle({
 	title,
@@ -37,16 +37,22 @@ export function SectionTitle({
 	delay = 0,
 	duration = 1.35,
 }: SectionTitleProps) {
+	const lastSpaceIndex = title.lastIndexOf(" ");
+	const prefix = lastSpaceIndex === -1 ? "" : title.slice(0, lastSpaceIndex);
+	const lastWord =
+		lastSpaceIndex === -1 ? title : title.slice(lastSpaceIndex + 1);
+
 	return (
 		<Tag className={cn(sectionTitleSizes[size], className)}>
-			<DiaText
+			<ChromaticTextReveal
 				colors={colors}
 				delay={delay}
 				duration={duration}
+				loop={false}
 				once
-				text={title}
-				textColor="currentColor"
-				triggerOnView
+				prefix={prefix}
+				startOnView
+				words={[lastWord]}
 			/>
 			{suffix}
 		</Tag>

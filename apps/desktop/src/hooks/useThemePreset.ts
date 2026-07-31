@@ -48,6 +48,18 @@ export function applyWindowRadius(radius: number) {
 // Base unit (in rem) all Tailwind v4 spacing utilities derive from. Mirrors the
 // `--spacing` value in apps/desktop/src/index.css; acts as a global UI zoom.
 export const DEFAULT_SPACING = 0.24;
+// True browser-style UI scale (Chrome/Electron zoom). Applied as the CSS `zoom`
+// property on the root element, so it scales EVERYTHING — text, spacing, images,
+// canvas — with reflow, unlike `--spacing` which only rescales spacing-derived
+// sizes. 1 = 100%.
+export const DEFAULT_SCALE = 1;
+export const SCALE_MIN = 0.5;
+export const SCALE_MAX = 2;
+export const SCALE_STEP = 0.05;
+
+function applyScale(value: number) {
+	document.documentElement.style.zoom = String(value);
+}
 // Card inner padding (in rem). Mirrors the nova `--card-spacing` default of
 // `--spacing(4)` at the default zoom (0.24rem * 4). Drives the `--card-pad`
 // override consumed by the Card component in packages/ui; the small variant
@@ -130,6 +142,9 @@ export function initTheme() {
 	const spacing = Number(
 		localStorage.getItem(STORAGE_KEYS.spacing) ?? DEFAULT_SPACING
 	);
+	const scale = Number(
+		localStorage.getItem(STORAGE_KEYS.scale) ?? String(DEFAULT_SCALE)
+	);
 	const storedCardSpacing = localStorage.getItem(STORAGE_KEYS.cardSpacing);
 	const chatWidth = Number(
 		localStorage.getItem(STORAGE_KEYS.chatWidth) ?? DEFAULT_CHAT_WIDTH
@@ -147,6 +162,7 @@ export function initTheme() {
 	document.documentElement.style.setProperty("--radius", `${radius}rem`);
 	applyWindowRadius(radius);
 	document.documentElement.style.setProperty("--spacing", `${spacing}rem`);
+	applyScale(scale);
 	// Only override card padding when the user has set it; otherwise the Card's
 	// own fallback (calc(var(--spacing) * 4)) keeps it tracking the zoom slider.
 	if (storedCardSpacing) {
@@ -236,6 +252,11 @@ export function setRadius(value: number) {
 export function setSpacing(value: number) {
 	localStorage.setItem(STORAGE_KEYS.spacing, String(value));
 	document.documentElement.style.setProperty("--spacing", `${value}rem`);
+}
+
+export function setScale(value: number) {
+	localStorage.setItem(STORAGE_KEYS.scale, String(value));
+	applyScale(value);
 }
 
 export function setCardSpacing(value: number) {

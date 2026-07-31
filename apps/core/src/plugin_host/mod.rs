@@ -1012,22 +1012,39 @@ mod tests {
             .clone()
     }
 
-    /// Read a specific hook's JS from a fixture file WITHOUT going through
-    /// `BUILTIN_MANIFESTS`. Lets a fixture be tested while staying UN-registered as
+    /// Read a specific hook's JS from a package manifest WITHOUT going through
+    /// `BUILTIN_MANIFESTS`. Lets a plugin be tested while staying UN-registered as
     /// a builtin (so e.g. the tool-firewall never makes the hot tool-dispatch path
     /// pay a lookup on installs that didn't opt in). Picks the hook by `hook_id`.
-    fn fixture_hook_from_file(file: &str, hook_id: &str) -> String {
-        let path = format!("src/plugin_manifest/fixtures/{file}");
-        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let manifest: crate::plugin_manifest::PluginManifest =
-            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+    ///
+    /// Reads `plugins-store/<plugin>/manifest.json` — the single source of truth.
+    /// There is no longer a `plugin_manifest/fixtures/<plugin>.manifest.json` copy to
+    /// read: Core `include_str!`s the package manifests directly. Anchored at
+    /// `CARGO_MANIFEST_DIR` rather than the CWD so the path does not depend on where
+    /// the test runner was invoked from.
+    ///
+    /// The hook body lives in `hooks/<name>.js` next to the manifest, so this
+    /// hydrates from the package directory — the same resolution the loader performs
+    /// for any on-disk plugin. A bare `serde_json::from_str` here would yield an
+    /// empty `code` and the test would silently assert against nothing.
+    fn fixture_hook_from_file(plugin: &str, hook_id: &str) -> String {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins-store")
+            .join(plugin);
+        let path = dir.join("manifest.json");
+        let display = path.display().to_string();
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {display}: {e}"));
+        let mut manifest: crate::plugin_manifest::PluginManifest =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {display}: {e}"));
+        crate::plugin_manifest::hydrate_manifest_code_files(&mut manifest, Some(&dir))
+            .unwrap_or_else(|e| panic!("hydrate {display}: {e}"));
         manifest
             .contributes
             .expect("contributes")
             .turn_hooks
             .into_iter()
             .find(|h| h.id == hook_id)
-            .unwrap_or_else(|| panic!("hook {hook_id} in {file}"))
+            .unwrap_or_else(|| panic!("hook {hook_id} in {plugin}"))
             .code
     }
 
@@ -1430,7 +1447,7 @@ mod tests {
             return;
         }
         // PreToolUse: a destructive command in the tool args → Deny.
-        let code = fixture_hook_from_file("tool-firewall.manifest.json", "tool-firewall.pre");
+        let code = fixture_hook_from_file("tool-firewall", "tool-firewall.pre");
         let ctx = HookContext {
             tool_name: Some("bash".into()),
             tool_input: Some(serde_json::json!({ "command": "rm -rf /" })),
@@ -1449,7 +1466,7 @@ mod tests {
             return;
         }
         // PreToolUse: a safe command → None (allow).
-        let code = fixture_hook_from_file("tool-firewall.manifest.json", "tool-firewall.pre");
+        let code = fixture_hook_from_file("tool-firewall", "tool-firewall.pre");
         let ctx = HookContext {
             tool_name: Some("bash".into()),
             tool_input: Some(serde_json::json!({ "command": "ls -la" })),
@@ -1465,7 +1482,7 @@ mod tests {
             return;
         }
         // PostToolUse: reads tool_output (observation).
-        let code = fixture_hook_from_file("tool-firewall.manifest.json", "tool-firewall.post");
+        let code = fixture_hook_from_file("tool-firewall", "tool-firewall.post");
         let ctx = HookContext {
             tool_name: Some("web_fetch".into()),
             tool_output: Some(serde_json::json!({ "status": 200 })),
@@ -1484,8 +1501,7 @@ mod tests {
             return;
         }
         // subagent_stop reads ctx.output + ctx.event.
-        let code =
-            fixture_hook_from_file("hook-observers.manifest.json", "observers.subagent-stop");
+        let code = fixture_hook_from_file("hook-observers", "observers.subagent-stop");
         let ctx = HookContext {
             output: Some("did the thing".into()),
             event: Some(serde_json::json!({ "id": "task-7" })),
@@ -1501,7 +1517,7 @@ mod tests {
             other => panic!("expected Note, got {other:?}"),
         }
         // notification reads ctx.event.title.
-        let code = fixture_hook_from_file("hook-observers.manifest.json", "observers.notification");
+        let code = fixture_hook_from_file("hook-observers", "observers.notification");
         let ctx = HookContext {
             event: Some(serde_json::json!({ "title": "Price dropped" })),
             ..Default::default()

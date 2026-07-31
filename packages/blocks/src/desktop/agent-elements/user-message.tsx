@@ -411,7 +411,10 @@ export const UserMessage = memo(function UserMessage({
 		<Avatar className="size-8 shrink-0 rounded-full">
 			<AvatarImage src={author.avatar} />
 			<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
-				<DitherAvatar className="size-full" name={author.name || "ryu"} />
+				<DitherAvatar
+					className="size-full"
+					name={author.id || author.name || "ryu"}
+				/>
 			</AvatarFallback>
 		</Avatar>
 	) : null;

@@ -85,7 +85,22 @@ pub struct ResolvedOrg {
     pub managed_inference: bool,
     /// Remaining credit budget in micro-USD, or `None` when the org has no
     /// managed budget cap. `Some(b)` with `b <= 0` means the wallet is exhausted.
+    ///
+    /// This is the TOTAL spendable balance — subscription + top-up + pool-
+    /// restricted grants. It stays the number every legacy reader trusts; the two
+    /// fields below decompose it for pool-aware gating without redefining it.
     pub remaining_budget_micro_usd: Option<i64>,
+    /// The part of [`Self::remaining_budget_micro_usd`] spendable on ANY pool
+    /// (subscription + top-up buckets). `None` ⇒ the control plane predates pool
+    /// segregation, and [`crate::pipeline`] falls back to treating the whole
+    /// balance as unrestricted — i.e. exactly today's behavior.
+    pub unrestricted_budget_micro_usd: Option<i64>,
+    /// Remaining POOL-RESTRICTED grant money, keyed by credit-pool id
+    /// (`cloudflare` / `bedrock` / …, see [`crate::credit_pools`]). A pool absent
+    /// from the map has no grant money left, which is indistinguishable from
+    /// never having had any — deliberately, since both mean "this pool funds
+    /// nothing". Empty ⇒ pool-blind behavior.
+    pub pool_budgets_micro_usd: std::collections::HashMap<String, i64>,
     /// The org's resolved effective policy (allowlist / locked guardrails / regions).
     pub policy: EffectivePolicy,
 }
@@ -104,6 +119,23 @@ struct ResolveResponse {
     /// Remaining credit budget in micro-USD (`null` when uncapped).
     #[serde(default)]
     remaining_budget_micro_usd: Option<i64>,
+    /// Wire: `unrestrictedBudgetMicroUsd`. The subscription + top-up part of the
+    /// balance — money spendable against any pool. Absent on a control plane that
+    /// predates pool segregation, which is why it is `Option` + `serde(default)`
+    /// rather than a bare `i64`: `Some(0)` ("no unrestricted money") and `None`
+    /// ("this control plane cannot tell me") must not collapse into each other,
+    /// or an old control plane would gate every pooled request to death.
+    #[serde(default)]
+    unrestricted_budget_micro_usd: Option<i64>,
+    /// Wire: `poolBudgetsMicroUsd`, a `{ poolId: microUsd }` object.
+    ///
+    /// TRAP: the struct-level `rename_all = "camelCase"` renames FIELDS, not map
+    /// KEYS. Pool ids therefore travel verbatim, so `CREDIT_POOL_IDS` in
+    /// `packages/auth/src/lib/credit-pools.ts` and the pool column of
+    /// [`crate::credit_pools`] must be the same literal strings — a casing
+    /// mismatch would silently zero every pool budget rather than error.
+    #[serde(default)]
+    pool_budgets_micro_usd: std::collections::HashMap<String, i64>,
     /// Monthly credit pool in micro-USD (carried for parity; not gated on here).
     #[serde(default)]
     #[allow(dead_code)]
@@ -132,6 +164,8 @@ impl ResolveResponse {
             org_id: self.organization.id,
             managed_inference: self.managed_inference,
             remaining_budget_micro_usd: self.remaining_budget_micro_usd,
+            unrestricted_budget_micro_usd: self.unrestricted_budget_micro_usd,
+            pool_budgets_micro_usd: self.pool_budgets_micro_usd,
             policy: EffectivePolicy {
                 locked_guardrails: self.policy.rules.locked_guardrails,
                 approved_models: self.policy.rules.approved_models,
@@ -303,6 +337,41 @@ mod tests {
         assert!(!resolved.managed_inference);
         assert_eq!(resolved.remaining_budget_micro_usd, None);
         assert!(resolved.policy.approved_models.is_empty());
+        // A pre-pool-segregation control plane omits both pool fields entirely;
+        // the gateway must read that as "cannot tell me", not as "zero".
+        assert_eq!(resolved.unrestricted_budget_micro_usd, None);
+        assert!(resolved.pool_budgets_micro_usd.is_empty());
+    }
+
+    #[test]
+    fn parses_pool_segregated_budget_fields() {
+        // The shape the control plane emits alongside the total: the unrestricted
+        // decomposition plus per-pool restricted grant remainders.
+        let body = serde_json::json!({
+            "organization": { "id": "o3" },
+            "policy": { "rules": {} },
+            "managedInference": true,
+            "remainingBudgetMicroUsd": 52_000_000,
+            "unrestrictedBudgetMicroUsd": 2_000_000,
+            "poolBudgetsMicroUsd": { "bedrock": 50_000_000, "cloudflare": 0 }
+        });
+        let resolved: ResolvedOrg = serde_json::from_value::<ResolveResponse>(body)
+            .unwrap()
+            .into_resolved();
+        assert_eq!(resolved.remaining_budget_micro_usd, Some(52_000_000));
+        assert_eq!(resolved.unrestricted_budget_micro_usd, Some(2_000_000));
+        // Map KEYS survive `rename_all = "camelCase"` verbatim — that rename
+        // applies to struct fields only. If this ever starts failing with
+        // `bedrock` missing, the control plane changed the pool id, not the
+        // casing convention.
+        assert_eq!(
+            resolved.pool_budgets_micro_usd.get("bedrock").copied(),
+            Some(50_000_000)
+        );
+        assert_eq!(
+            resolved.pool_budgets_micro_usd.get("cloudflare").copied(),
+            Some(0)
+        );
     }
 
     #[test]

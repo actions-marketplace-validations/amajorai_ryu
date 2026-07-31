@@ -289,6 +289,8 @@ fn channel_context(channel_name: &str) -> RequestContext {
         // Channel/bot traffic is not a dynamically-resolved managed tenant.
         managed_inference: false,
         remaining_budget_micro_usd: None,
+        unrestricted_budget_micro_usd: None,
+        pool_budgets_micro_usd: std::collections::HashMap::new(),
         resolved_policy: None,
     }
 }

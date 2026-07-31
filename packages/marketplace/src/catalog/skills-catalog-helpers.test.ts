@@ -9,6 +9,7 @@ import {
 	formatDateLabel,
 	isMarkdownFile,
 	resolveSkillKey,
+	skillAuthoringEnabled,
 } from "./skills-catalog-section.tsx";
 import type { SkillCard } from "./types.ts";
 
@@ -23,6 +24,34 @@ function card(over: Partial<SkillCard> = {}): SkillCard {
 		...over,
 	};
 }
+
+describe("skillAuthoringEnabled", () => {
+	const navigate = () => undefined;
+
+	test("a read-only host (no navigate) cannot author", () => {
+		expect(skillAuthoringEnabled({})).toBe(false);
+		expect(skillAuthoringEnabled({ canAuthorSkills: true })).toBe(false);
+	});
+
+	test("navigate alone authors — hosts with no notion of app enablement", () => {
+		expect(skillAuthoringEnabled({ navigate })).toBe(true);
+	});
+
+	// The regression this helper exists for: desktop ALWAYS has `navigate`, and the
+	// editor app (`com.ryu.skill-editor`) ships default-OFF, so New/Edit rendered on
+	// a fresh install and every click opened a tab reading "App not enabled".
+	test("navigate with the editor app disabled cannot author", () => {
+		expect(skillAuthoringEnabled({ canAuthorSkills: false, navigate })).toBe(
+			false
+		);
+	});
+
+	test("navigate with the editor app enabled authors", () => {
+		expect(skillAuthoringEnabled({ canAuthorSkills: true, navigate })).toBe(
+			true
+		);
+	});
+});
 
 describe("formatCount", () => {
 	test("millions render as N.NM", () => {

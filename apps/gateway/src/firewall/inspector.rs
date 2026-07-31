@@ -28,6 +28,37 @@ use crate::router::RouterBackend;
 /// Cap the text sent to the inspector so a huge paste stays cheap and bounded.
 const MAX_INSPECT_CHARS: usize = 4000;
 
+/// What to say when `provider.complete` fails, chosen by which provider was routed.
+///
+/// The two failures are operationally different and used to look identical. On a
+/// Ryu-spawned gateway the classify slot is ALWAYS registered — Core publishes
+/// `RYU_CLASSIFY_LLM_URL` unconditionally in `gateway_spawn_env` and does not gate it
+/// on the sidecar being installed or running (see `providers/mod.rs`, which documents
+/// the same shape). So a cold tier is not "provider not configured": it is a live slot
+/// whose `llama-server` is not listening, i.e. a connection-refused `ProviderError`
+/// down this arm — byte-for-byte the same log an upstream 500 from OpenAI produced.
+/// One is fixed by starting a local sidecar, the other by looking at a vendor's status
+/// page, and the operator could not tell which they had.
+///
+/// Split out as a pure fn because `tracing` output is not assertable: the branch is
+/// the behaviour, so the branch is what the test pins (the same shape as
+/// `sidecar::gateway::classify_start_allowed_for` in Core).
+///
+/// Note the *reason* stays coarse on purpose — this arm cannot distinguish
+/// connection-refused from a 500 returned BY the classify sidecar, because
+/// `ProviderError` does not carry that structure. Naming the tier plus emitting
+/// `provider`/`model` fields is what makes the two cases separable in a log search;
+/// claiming certainty about which one it is would be the false-doc trap this comment
+/// exists to avoid.
+fn provider_failure_message(provider: &str) -> &'static str {
+    if provider == crate::config::CLASSIFY_PROVIDER_ID {
+        "inspector: the local classify tier did not answer — its llama-server is \
+         probably not running (this is NOT an upstream error); failing open (allow)"
+    } else {
+        "inspector: provider call failed; failing open (allow)"
+    }
+}
+
 /// The inspector's structured verdict.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InspectorVerdict {
@@ -173,11 +204,22 @@ async fn run_inspection(
     let resp = match tokio::time::timeout(Duration::from_millis(timeout_ms), fut).await {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            warn!(error = %e, "inspector: provider call failed; failing open (allow)");
+            warn!(
+                provider = decision.provider.as_str(),
+                model = %decision.model,
+                error = %e,
+                "{}",
+                provider_failure_message(decision.provider.as_str())
+            );
             return InspectorVerdict::allow();
         }
         Err(_) => {
-            warn!(timeout_ms, "inspector: timed out; failing open (allow)");
+            warn!(
+                timeout_ms,
+                provider = decision.provider.as_str(),
+                model = %decision.model,
+                "inspector: timed out; failing open (allow)"
+            );
             return InspectorVerdict::allow();
         }
     };
@@ -300,6 +342,48 @@ mod tests {
     /// exercises the inspector's fail-open path without any network I/O.
     fn empty_providers() -> ProviderRegistry {
         ProviderRegistry::new(&ProvidersConfig::default(), Arc::new(ProviderQuotas::new()))
+    }
+
+    /// A cold local classify tier and a broken upstream must not produce the same
+    /// log line — that is the whole point of the branch.
+    ///
+    /// Both messages are also checked for the shared fail-open suffix, because a
+    /// reader who greps for "failing open" to audit unscanned traffic must still find
+    /// the classify case.
+    #[test]
+    fn a_cold_classify_tier_reads_differently_from_an_upstream_failure() {
+        let classify = provider_failure_message(crate::config::CLASSIFY_PROVIDER_ID);
+        let upstream = provider_failure_message("openai");
+
+        assert_ne!(
+            classify, upstream,
+            "an operator must be able to tell 'the local classifier is not running' \
+             from 'the provider returned an error'"
+        );
+        assert!(
+            classify.contains("classify tier"),
+            "the classify message must name the tier: {classify}"
+        );
+        assert!(
+            !upstream.contains("classify"),
+            "a non-classify provider must not be described as the classify tier: {upstream}"
+        );
+        for msg in [classify, upstream] {
+            assert!(
+                msg.contains("failing open (allow)"),
+                "both arms fail open and both must say so: {msg}"
+            );
+        }
+
+        // Every other provider id takes the generic arm — the branch keys on the ONE
+        // registry id, never on a substring or a guess.
+        for provider in ["anthropic", "local", "openrouter", "", "classifier"] {
+            assert_eq!(
+                provider_failure_message(provider),
+                upstream,
+                "'{provider}' is not the classify tier"
+            );
+        }
     }
 
     #[test]

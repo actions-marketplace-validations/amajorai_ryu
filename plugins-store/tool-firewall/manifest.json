@@ -1,0 +1,24 @@
+{
+  "id": "com.ryuhq.tool-firewall",
+  "name": "Tool Firewall",
+  "version": "1.0.0",
+  "runnables": [],
+  "permission_grants": [],
+  "activation_events": ["*"],
+  "contributes": {
+    "turn_hooks": [
+      {
+        "id": "tool-firewall.pre",
+        "on": "pre_tool_use",
+        "match": { "tools": ["*"] },
+        "code_file": "hooks/pre.js"
+      },
+      {
+        "id": "tool-firewall.post",
+        "on": "post_tool_use",
+        "match": { "tools": ["*"] },
+        "code_file": "hooks/post.js"
+      }
+    ]
+  }
+}

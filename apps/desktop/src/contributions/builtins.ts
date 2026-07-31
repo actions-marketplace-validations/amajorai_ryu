@@ -43,9 +43,8 @@
 // resolves. Kept as JSX-free `createElement` calls so the file is `.ts` (no
 // `.tsx`) and carries no JSX-runtime assumptions.
 
-import { createElement, useMemo } from "react";
+import { createElement } from "react";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
-import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { WHITEBOARD_PLUGIN_ID } from "@/src/lib/whiteboard/app.ts";
 import AgentEditPage from "@/src/pages/AgentEditPage.tsx";
 import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
@@ -67,8 +66,13 @@ import SpaceDocEditorPage from "@/src/pages/SpaceDocEditorPage.tsx";
 import SpacesPage from "@/src/pages/SpacesPage.tsx";
 import StorePage from "@/src/pages/StorePage.tsx";
 import WorkflowsPage from "@/src/pages/WorkflowsPage.tsx";
-import { resolveCompanionAlias, topLevelAlias } from "./companion-alias.ts";
+import {
+	APPROVALS_ALIAS,
+	SKILL_EDITOR_ALIAS,
+	topLevelAlias,
+} from "./companion-alias.ts";
 import { contributionRegistry, type RouteTab } from "./registry.ts";
+import { useCompanionAlias } from "./use-companion-alias.ts";
 
 // /channels/:id — manage a channel bot ("new" opens create mode).
 const CHANNEL_DETAIL = /^\/channels\/[^/]+$/;
@@ -138,13 +142,7 @@ function CompanionAliasRoute({
 	alias: string;
 	mountContext?: unknown;
 }) {
-	const contributions = usePluginContributions();
-	const { companions, sidebar_buttons: buttons } = contributions;
-	const companionId = useMemo(
-		() =>
-			resolveCompanionAlias({ companions, sidebar_buttons: buttons }, alias),
-		[companions, buttons, alias]
-	);
+	const companionId = useCompanionAlias(alias);
 	if (!companionId) {
 		// NOT `null`. A blank tab is the one outcome worse than a hardcoded route:
 		// most apps ship default-OFF, so on a fresh install the palette's "Inbox"
@@ -161,21 +159,13 @@ function CompanionAliasRoute({
 const companionAlias = (alias: string, mountContext?: unknown) =>
 	createElement(CompanionAliasRoute, { alias, mountContext });
 
-// The two legacy paths no app can derive from its own id, so the shell has to spell
-// them out. Both name a PATH, never a companion id, so they still go through
-// `resolveCompanionAlias` and still blank out when their app is disabled — and both
-// disappear the moment the owning manifest claims the path itself (a
-// `sidebar_buttons[].target`-style route claim; see the manifest follow-up).
-//
-/** The short path the SKILL.md editor app answers to (its companion id slug).
- *  `/skills/new` and `/skills/:id/edit` are shell VERB routes — "author a skill",
- *  not "open an app" — and `/skills` belongs to the skills store, so neither can be
- *  derived from its own path. */
-const SKILL_EDITOR_ALIAS = "/skill-editor";
-/** The short path the approvals app answers to. `/inbox` is the historic name of the
- *  same surface (pending HITL approvals + notifications + quest check-offs + Shadow's
- *  suggestions) and is still linked from the sidebar, the palette and InboxCenter. */
-const APPROVALS_ALIAS = "/approvals";
+// SKILL_EDITOR_ALIAS + APPROVALS_ALIAS — the two legacy paths no app can derive from
+// its own id — moved to `companion-alias.ts`, because the surfaces that decide whether
+// to OFFER these paths (the sidebar footer's Inbox tray, an OS notification's click
+// target) need the same strings and must resolve them against the same feed. Both
+// still name a PATH, never a companion id, so they blank out when their app is
+// disabled — and both disappear the moment the owning manifest claims the path itself
+// (a `sidebar_buttons[].target`-style route claim; see the manifest follow-up).
 
 let seeded = false;
 

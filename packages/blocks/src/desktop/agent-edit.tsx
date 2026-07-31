@@ -67,6 +67,7 @@ import { Textarea } from "@ryu/ui/components/textarea";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+import { GuidedSetup } from "./guided-setup.tsx";
 import {
 	SettingsCard,
 	SettingsGroup,
@@ -2429,7 +2430,21 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	// Single tab strip for the whole editor: the config sections plus the
 	// folded-in Prompt Studio / Evals / Calendar views. Controlled so the
 	// "Open Prompt Studio" shortcut can switch tabs programmatically.
-	const [activeTab, setActiveTab] = useState("model");
+	// Opens on Behavior — what the agent does is the first question, not which
+	// engine serves it.
+	const [activeTab, setActiveTab] = useState("behavior");
+	// New agents start in the guided flow; "Set it up myself" drops the guide and
+	// reveals the same panels as tabs.
+	const [guided, setGuided] = useState(true);
+	// The desktop reuses one tab per route, so this component can go from editing a
+	// saved agent to creating a fresh one without remounting. Re-arm the guide on
+	// that transition, or the second "New agent" silently opens the tabbed editor
+	// because someone escaped the guide an hour ago.
+	useEffect(() => {
+		if (isNew) {
+			setGuided(true);
+		}
+	}, [isNew]);
 
 	const showTimeField =
 		schedulePhrase === "daily" ||
@@ -2437,6 +2452,1108 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		schedulePhrase === "weekends";
 	const modelLabel =
 		engineOptions.find((option) => option.id === chatModel)?.label ?? chatModel;
+
+	// ── Panels ───────────────────────────────────────────────────────────────────
+	// Each panel is built once and then placed twice: into the tab strip below
+	// (editing an existing agent) and into the guided steps (creating a new one).
+	// Same nodes, same state — only the framing differs.
+
+	const modelPanel = (
+		<>
+			{/* 2. Model & provider */}
+			<SettingsSection
+				caption="The engine and model used for all chat turns."
+				title="Model & provider"
+			>
+				<SettingsGroup>
+					<SettingsItem
+						actions={
+							engineOptions.length === 0 ? (
+								<span className="text-muted-foreground text-xs">
+									No options installed yet.
+								</span>
+							) : (
+								<Select
+									disabled={chatSlotDisabled}
+									items={engineOptions.map((opt) => ({
+										value: opt.id,
+										label: opt.label,
+									}))}
+									onValueChange={(v) => onChatModelChange?.(v ?? "")}
+									value={chatModel}
+								>
+									<SelectTrigger
+										className="h-8 w-64 flex-shrink-0 text-sm"
+										id="slot-chat-model"
+									>
+										<SelectValue placeholder="Select chat model" />
+									</SelectTrigger>
+									<SelectContent>
+										{engineOptions.map((opt) => (
+											<SelectItem key={opt.id} value={opt.id}>
+												{opt.label}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							)
+						}
+						title="Chat model"
+					/>
+					{onAddMoreAgentProviders ? (
+						<Button
+							className="h-auto w-full justify-start gap-2 rounded-none px-3.5 py-2.5 font-normal text-sm"
+							onClick={onAddMoreAgentProviders}
+							type="button"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-4" icon={Add01Icon} />
+							Add more agent providers
+						</Button>
+					) : null}
+				</SettingsGroup>
+			</SettingsSection>
+
+			{showAcpCommand ? (
+				<SettingsSection
+					caption={
+						<>
+							Type the command that launches your agent on this computer. For
+							example: <code>goose acp</code>, <code>opencode acp</code>, or{" "}
+							<code>npx -y my-agent --acp</code>.
+						</>
+					}
+					title="Command to start your agent"
+				>
+					<SettingsCard>
+						<label className="sr-only" htmlFor="acp-command">
+							Command to start your agent
+						</label>
+						<input
+							className="w-full rounded-lg border bg-card px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+							disabled={isLocked}
+							id="acp-command"
+							onChange={(e) => onAcpCommandChange?.(e.target.value)}
+							placeholder="goose acp"
+							spellCheck={false}
+							value={acpCommand}
+						/>
+					</SettingsCard>
+				</SettingsSection>
+			) : null}
+
+			{launchConfig}
+			{piConfig}
+			{claudeConfig}
+			{codexConfig}
+			{gatewayRoutingConfig}
+			{acpSessionPanel}
+		</>
+	);
+
+	const triggersPanel = (
+		<>
+			{/* 3. Trigger — schedule + Composio event triggers */}
+			<SettingsSection
+				caption="Run this agent automatically on a schedule."
+				title="Schedule"
+			>
+				<SettingsGroup>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={scheduleEnabled}
+								disabled={isLocked}
+								id="schedule-toggle"
+								onCheckedChange={onScheduleEnabledChange}
+							/>
+						}
+						title="Run on a schedule"
+					/>
+					{scheduleEnabled ? (
+						<SettingsItem
+							actions={
+								<Select
+									disabled={isLocked}
+									items={SCHEDULE_PHRASE_ITEMS}
+									onValueChange={(v) => onSchedulePhraseChange?.(v ?? "")}
+									value={schedulePhrase}
+								>
+									<SelectTrigger
+										className="h-8 w-44 flex-shrink-0 text-sm"
+										id="schedule-phrase"
+									>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										{SCHEDULE_PHRASE_ITEMS.map((opt) => (
+											<SelectItem key={opt.value} value={opt.value}>
+												{opt.label}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							}
+							title="Frequency"
+						/>
+					) : null}
+					{scheduleEnabled && showTimeField ? (
+						<SettingsItem
+							actions={
+								<Input
+									aria-label="Time"
+									className="h-8 w-32"
+									disabled={isLocked}
+									id="daily-time"
+									onChange={(e) => onDailyTimeChange?.(e.target.value)}
+									type="time"
+									value={dailyTime}
+								/>
+							}
+							title="Time"
+						/>
+					) : null}
+					{scheduleEnabled && schedulePhrase === "weekly" ? (
+						<SettingsItem
+							actions={
+								<Select
+									disabled={isLocked}
+									items={WEEKDAYS.map((d) => ({
+										value: d,
+										label: d.charAt(0).toUpperCase() + d.slice(1),
+									}))}
+									onValueChange={(v) => onWeeklyDayChange?.(v ?? "")}
+									value={weeklyDay}
+								>
+									<SelectTrigger
+										className="h-8 w-36 flex-shrink-0 text-sm"
+										id="weekly-day"
+									>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										{WEEKDAYS.map((d) => (
+											<SelectItem key={d} value={d}>
+												{d.charAt(0).toUpperCase() + d.slice(1)}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							}
+							title="Day"
+						/>
+					) : null}
+					{scheduleEnabled && schedulePhrase === "weekly" ? (
+						<SettingsItem
+							actions={
+								<Input
+									aria-label="Time"
+									className="h-8 w-32"
+									disabled={isLocked}
+									id="weekly-time"
+									onChange={(e) => onWeeklyTimeChange?.(e.target.value)}
+									type="time"
+									value={weeklyTime}
+								/>
+							}
+							title="Time"
+						/>
+					) : null}
+					{scheduleEnabled && schedulePhrase === "custom" ? (
+						<SettingsItem
+							actions={
+								<Input
+									aria-label="Cron expression"
+									className="h-8 w-44 font-mono"
+									disabled={isLocked}
+									id="custom-cron"
+									onChange={(e) => onCustomCronChange?.(e.target.value)}
+									placeholder="e.g. 0 9 * * 1-5"
+									value={customCron}
+								/>
+							}
+							description="Standard 5-field cron: minute hour day month weekday."
+							title="Cron expression"
+						/>
+					) : null}
+				</SettingsGroup>
+			</SettingsSection>
+
+			{showComposioTriggers ? (
+				<SettingsSection
+					caption="Fire this agent when a Composio event arrives (a new Slack message, a GitHub commit, …)."
+					title="Event triggers"
+				>
+					<SettingsCard className="flex flex-col gap-3">
+						{triggerSubs.length > 0 ? (
+							<div className="flex flex-col gap-1.5">
+								{triggerSubs.map((sub) => (
+									<div className="flex items-center gap-2 text-sm" key={sub.id}>
+										<HugeiconsIcon
+											className="size-3.5 text-muted-foreground"
+											icon={Clock01Icon}
+										/>
+										<span className="min-w-0 flex-1 truncate">
+											{sub.triggerSlug}
+											<span className="text-muted-foreground text-xs">
+												{" "}
+												({sub.toolkit})
+											</span>
+										</span>
+										<Button
+											aria-label="Remove trigger"
+											onClick={() => onDeleteTrigger?.(sub.id)}
+											size="icon-sm"
+											variant="ghost"
+										>
+											<HugeiconsIcon className="size-4" icon={Delete01Icon} />
+										</Button>
+									</div>
+								))}
+							</div>
+						) : null}
+
+						{composioToolkit ? (
+							<>
+								<div className="flex flex-col gap-1.5">
+									<Label htmlFor="composio-trigger">Trigger event</Label>
+									<Select
+										disabled={isLocked}
+										items={composioTriggers.map((t) => ({
+											value: t.name,
+											label: t.displayName,
+										}))}
+										onValueChange={(v) => onTriggerSlugChange?.(v ?? "")}
+										value={triggerSlug}
+									>
+										<SelectTrigger className="w-full" id="composio-trigger">
+											<SelectValue placeholder="Pick a trigger event" />
+										</SelectTrigger>
+										<SelectContent>
+											{composioTriggers.map((t) => (
+												<SelectItem key={t.name} value={t.name}>
+													{t.displayName}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								</div>
+								<div className="flex flex-col gap-1.5">
+									<Label htmlFor="composio-account">Account to watch</Label>
+									<Input
+										disabled={isLocked}
+										id="composio-account"
+										onChange={(e) =>
+											onConnectedAccountIdChange?.(e.target.value)
+										}
+										placeholder="Paste the account id from your Composio dashboard"
+										value={connectedAccountId}
+									/>
+									<p className="text-muted-foreground text-xs">
+										The id of the account whose events should start this agent.
+										You'll find it in your Composio dashboard.
+									</p>
+								</div>
+								{triggerError ? (
+									<p className="text-destructive text-xs">{triggerError}</p>
+								) : null}
+								<Button
+									className="self-start"
+									disabled={isLocked || subscribing}
+									onClick={onSubscribeTrigger}
+									size="sm"
+									variant="outline"
+								>
+									{subscribing ? (
+										<Spinner className="size-3" />
+									) : (
+										<HugeiconsIcon className="size-4" icon={Add01Icon} />
+									)}
+									Add trigger
+								</Button>
+							</>
+						) : (
+							<p className="text-muted-foreground text-xs">
+								Pick an integration under Connections first.
+							</p>
+						)}
+					</SettingsCard>
+				</SettingsSection>
+			) : null}
+		</>
+	);
+
+	const toolsPanel = (
+		<>
+			{/* Capabilities (tools / thinking / vision) — gates the controls below. */}
+			{capabilitiesPanel}
+			{/* 4. Tools — MCP tools + Skills */}
+			<SettingsSection
+				caption="The MCP tools this agent may call."
+				headerAction={
+					selectedTools.size > 0 ? (
+						<Badge variant="secondary">{selectedTools.size}</Badge>
+					) : undefined
+				}
+				title="Tools"
+			>
+				<SettingsCard className="flex flex-col gap-2">
+					{toolsLoading ? (
+						<div className="flex items-center gap-2 text-muted-foreground text-xs">
+							<Spinner className="size-3" />
+							Loading tools…
+						</div>
+					) : null}
+					{!toolsLoading && tools.length === 0 ? (
+						<p className="text-muted-foreground text-sm">
+							No tools available. Install MCP servers to add tools.
+						</p>
+					) : null}
+					{!toolsLoading && tools.length > 0 ? (
+						<div className="flex flex-col gap-2">
+							{tools.map((toolName) => {
+								const checkId = `tool-${toolName}`;
+								return (
+									<div className="flex items-center gap-3" key={toolName}>
+										<Checkbox
+											checked={selectedTools.has(toolName)}
+											disabled={isLocked}
+											id={checkId}
+											onCheckedChange={() => onToggleTool?.(toolName)}
+										/>
+										<Label
+											className="cursor-pointer font-normal text-sm"
+											htmlFor={checkId}
+										>
+											{toolName}
+										</Label>
+									</div>
+								);
+							})}
+						</div>
+					) : null}
+				</SettingsCard>
+			</SettingsSection>
+
+			<SettingsSection
+				caption="Limit this agent to specific skills. Leave all unchecked to allow every enabled skill."
+				headerAction={
+					selectedSkills.size > 0 ? (
+						<Badge variant="secondary">{selectedSkills.size}</Badge>
+					) : undefined
+				}
+				title="Skills"
+			>
+				<SettingsCard className="flex flex-col gap-2">
+					{skillsLoading ? (
+						<div className="flex items-center gap-2 text-muted-foreground text-xs">
+							<Spinner className="size-3" />
+							Loading skills…
+						</div>
+					) : null}
+					{!skillsLoading && skills.length === 0 ? (
+						<p className="text-muted-foreground text-sm">
+							No Skills installed. Browse and install from the Skills page.
+						</p>
+					) : null}
+					{!skillsLoading && skills.length > 0 ? (
+						<div className="flex flex-col gap-2">
+							{skills.map((skill) => {
+								const checkId = `skill-${skill.id}`;
+								return (
+									<div className="flex items-start gap-3" key={skill.id}>
+										<Checkbox
+											checked={selectedSkills.has(skill.id)}
+											disabled={isLocked}
+											id={checkId}
+											onCheckedChange={() => onToggleSkill?.(skill.id)}
+										/>
+										<Label
+											className="cursor-pointer font-normal text-sm"
+											htmlFor={checkId}
+										>
+											<span className="font-medium">{skill.name}</span>
+											{skill.enabled ? null : (
+												<span className="ml-1.5 text-muted-foreground text-xs">
+													(disabled globally)
+												</span>
+											)}
+											{skill.description ? (
+												<span className="block text-muted-foreground text-xs">
+													{skill.description}
+												</span>
+											) : null}
+										</Label>
+									</div>
+								);
+							})}
+						</div>
+					) : null}
+				</SettingsCard>
+			</SettingsSection>
+
+			{/* What the agent may read and remember. Grouped with tools and skills
+			    because "what it can do" and "what it knows" are one question to a
+			    user — it used to be buried under Advanced. */}
+			<MemorySpacesCard
+				disabled={isLocked}
+				memoryReadLevels={memoryReadLevels}
+				memorySpaceIds={memorySpaceIds}
+				memoryWriteEnabled={memoryWriteEnabled}
+				onMemoryWriteEnabledChange={onMemoryWriteEnabledChange}
+				onToggleMemoryReadLevel={onToggleMemoryReadLevel}
+				onToggleMemorySpace={onToggleMemorySpace}
+				spaces={spaces}
+			/>
+		</>
+	);
+
+	const connectionsPanel = (
+		<>
+			{/* 5. Connections — Composio actions + Identities + Channels */}
+			<SettingsSection
+				caption={
+					composioConfigured
+						? "Attach third-party actions (sending email, creating issues, …) from your connected integrations."
+						: "Add a Composio API key in Gateway → API keys, then connect accounts in Marketplace → Connections, to attach actions like sending email or creating issues."
+				}
+				headerAction={
+					selectedComposio.size > 0 ? (
+						<Badge variant="secondary">{selectedComposio.size}</Badge>
+					) : undefined
+				}
+				title="Connections"
+			>
+				{composioConfigured ? (
+					<SettingsCard className="flex flex-col gap-3">
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="composio-toolkit">Integration</Label>
+							<Select
+								disabled={isLocked}
+								items={composioToolkitItems.map((t) => ({
+									value: t.id,
+									label: t.label,
+								}))}
+								onValueChange={(v) => onComposioToolkitChange?.(v ?? null)}
+								value={composioToolkit ?? ""}
+							>
+								<SelectTrigger className="w-full" id="composio-toolkit">
+									<SelectValue placeholder="Pick an integration (Gmail, GitHub, …)" />
+								</SelectTrigger>
+								<SelectContent>
+									{composioToolkitItems.map((t) => (
+										<SelectItem key={t.id} value={t.id}>
+											{t.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						</div>
+
+						{composioToolkit ? (
+							<div className="flex flex-col gap-2">
+								{composioActions.length > 0 && !composioActionsLoading ? (
+									<div className="flex items-center justify-between">
+										<span className="text-muted-foreground text-xs">
+											{composioActions.every((a) =>
+												selectedComposio.has(a.name)
+											)
+												? "All tools enabled"
+												: `${
+														composioActions.filter((a) =>
+															selectedComposio.has(a.name)
+														).length
+													} of ${composioActions.length} selected`}
+										</span>
+										<div className="flex gap-2">
+											<Button
+												disabled={
+													isLocked ||
+													composioActions.every((a) =>
+														selectedComposio.has(a.name)
+													)
+												}
+												onClick={() => onSelectAllComposio?.()}
+												size="sm"
+												type="button"
+												variant="outline"
+											>
+												All tools
+											</Button>
+											<Button
+												disabled={
+													isLocked ||
+													!composioActions.some((a) =>
+														selectedComposio.has(a.name)
+													)
+												}
+												onClick={() => onClearComposio?.()}
+												size="sm"
+												type="button"
+												variant="ghost"
+											>
+												Clear
+											</Button>
+										</div>
+									</div>
+								) : null}
+								{composioActionsLoading ? (
+									<div className="flex items-center gap-2 text-muted-foreground text-xs">
+										<Spinner className="size-3" />
+										Loading actions…
+									</div>
+								) : null}
+								{!composioActionsLoading && composioActions.length === 0 ? (
+									<p className="text-muted-foreground text-sm">
+										No actions found for this integration.
+									</p>
+								) : null}
+								{!composioActionsLoading && composioActions.length > 0
+									? composioActions.map((action) => {
+											const checkId = `composio-${action.name}`;
+											return (
+												<div
+													className="flex items-start gap-3"
+													key={action.name}
+												>
+													<Checkbox
+														checked={selectedComposio.has(action.name)}
+														disabled={isLocked}
+														id={checkId}
+														onCheckedChange={() =>
+															onToggleComposio?.(action.name)
+														}
+													/>
+													<Label
+														className="cursor-pointer font-normal text-sm"
+														htmlFor={checkId}
+													>
+														<span className="font-medium">
+															{action.displayName}
+														</span>
+														{action.description ? (
+															<span className="block text-muted-foreground text-xs">
+																{action.description}
+															</span>
+														) : null}
+													</Label>
+												</div>
+											);
+										})
+									: null}
+							</div>
+						) : null}
+
+						{selectedComposio.size > 0 ? (
+							<div className="flex flex-wrap gap-1.5 border-t pt-3">
+								{Array.from(selectedComposio).map((cname) => (
+									<Badge className="gap-1" key={cname} variant="outline">
+										{cname}
+										<button
+											aria-label={`Remove ${cname}`}
+											className="text-muted-foreground hover:text-foreground"
+											disabled={isLocked}
+											onClick={() => onToggleComposio?.(cname)}
+											type="button"
+										>
+											×
+										</button>
+									</Badge>
+								))}
+							</div>
+						) : null}
+					</SettingsCard>
+				) : null}
+			</SettingsSection>
+
+			{identityPanel}
+			{channelsPanel}
+		</>
+	);
+
+	const rulesSection = (
+		<>
+			{/* 6. Rules */}
+			<SettingsSection
+				caption="Short, always-on directives folded into this agent's instructions."
+				title="Rules"
+			>
+				<SettingsCard className="flex flex-col gap-2">
+					{rules.map((rule, index) => (
+						<div
+							className="flex items-center gap-2"
+							// biome-ignore lint/suspicious/noArrayIndexKey: rules are positional and edited in place
+							key={`rule-${index}`}
+						>
+							<Input
+								disabled={isLocked}
+								onChange={(e) => onRuleChange?.(index, e.target.value)}
+								placeholder="e.g. Always cite your sources"
+								value={rule}
+							/>
+							<Button
+								aria-label="Remove rule"
+								disabled={isLocked}
+								onClick={() => onRemoveRule?.(index)}
+								size="icon-sm"
+								variant="ghost"
+							>
+								<HugeiconsIcon className="size-4" icon={Delete01Icon} />
+							</Button>
+						</div>
+					))}
+					<Button
+						className="self-start"
+						disabled={isLocked}
+						onClick={onAddRule}
+						size="sm"
+						variant="outline"
+					>
+						<HugeiconsIcon className="size-4" icon={Add01Icon} />
+						Add rule
+					</Button>
+				</SettingsCard>
+			</SettingsSection>
+		</>
+	);
+
+	const behaviorPanel = (
+		<>
+			{/* 7. Instructions — the output: prompt + personality */}
+			<SettingsSection
+				caption="Describe how this agent should behave, what it should avoid, and how it should respond."
+				headerAction={
+					isNew ? undefined : (
+						<button
+							className="cursor-pointer font-medium text-muted-foreground text-xs underline-offset-2 hover:text-foreground hover:underline"
+							onClick={() =>
+								promptStudioPanel
+									? setActiveTab("prompt-studio")
+									: onOpenPromptStudio?.()
+							}
+							type="button"
+						>
+							Open Prompt Studio
+						</button>
+					)
+				}
+				title="Instructions"
+			>
+				<SettingsCard>
+					{instructionsEditor ?? (
+						<Textarea
+							className="min-h-32"
+							disabled={isLocked}
+							id="agent-prompt"
+							readOnly={isLocked}
+							value={systemPrompt}
+						/>
+					)}
+				</SettingsCard>
+			</SettingsSection>
+
+			<SettingsSection title="Personality & tone">
+				<SettingsGroup>
+					<SettingsItem
+						actions={
+							<Input
+								className="h-8 w-56"
+								disabled={isLocked}
+								id="persona-display-name"
+								onChange={(e) => onPersonaDisplayNameChange?.(e.target.value)}
+								placeholder="e.g. Aria"
+								value={personaDisplayName}
+							/>
+						}
+						title="Display name"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								disabled={isLocked}
+								items={toneOptions}
+								onValueChange={(v) => onToneChange?.(v ?? "")}
+								value={tone}
+							>
+								<SelectTrigger
+									className="h-8 w-56 flex-shrink-0 text-sm"
+									id="persona-tone"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{toneOptions.map((opt) => (
+										<SelectItem key={opt.value} value={opt.value}>
+											{opt.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						title="Tone"
+					/>
+					{tone === "custom" ? (
+						<SettingsItem
+							actions={
+								<Input
+									className="h-8 w-64"
+									disabled={isLocked}
+									id="persona-custom-tone"
+									onChange={(e) => onCustomToneChange?.(e.target.value)}
+									placeholder="e.g. Concise and technical, with a dry wit"
+									value={customTone}
+								/>
+							}
+							title="Custom tone"
+						/>
+					) : null}
+				</SettingsGroup>
+			</SettingsSection>
+
+			{/* Always-on directives read as part of "how it behaves", so they sit
+			    with the instructions instead of owning a tab of their own. */}
+			{rulesSection}
+		</>
+	);
+
+	const advancedPanel = (
+		<>
+			{/* Advanced — collapsible-style group at the bottom */}
+			<section aria-label="Advanced" className="flex flex-col gap-5">
+				<button
+					className="-mx-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-muted/50"
+					onClick={onToggleMoreSlots}
+					type="button"
+				>
+					<span className="font-semibold text-sm">Advanced slots</span>
+					<Badge className="text-[10px]" variant="secondary">
+						Coming soon
+					</Badge>
+					<span className="ml-auto text-muted-foreground">
+						<HugeiconsIcon
+							className="size-4"
+							icon={moreSlotsOpen ? ArrowDown01Icon : ArrowRight01Icon}
+						/>
+					</span>
+				</button>
+
+				{moreSlotsOpen ? (
+					<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+						<SettingsCard>
+							<SlotCard
+								available={false}
+								description="Speech-to-text model for voice input."
+								id="stt"
+								label="Speech-to-text"
+								options={[]}
+								value=""
+							/>
+						</SettingsCard>
+						<SettingsCard>
+							<SlotCard
+								available={false}
+								description="Text-to-speech model for voice output."
+								id="tts"
+								label="Text-to-speech"
+								options={[]}
+								value=""
+							/>
+						</SettingsCard>
+						<SettingsCard>
+							<SlotCard
+								available={false}
+								description="Image generation model for visual tasks."
+								id="image-model"
+								label="Image model"
+								options={[]}
+								value=""
+							/>
+						</SettingsCard>
+						<SettingsCard>
+							<SlotCard
+								available={false}
+								description="Gateway policy ref for firewall, PII filtering, and budget."
+								id="policy"
+								label="Gateway policy"
+								options={[]}
+								value=""
+							/>
+						</SettingsCard>
+					</div>
+				) : null}
+
+				{advancedInference}
+				{connectPanel}
+				{byoaPanel}
+			</section>
+		</>
+	);
+
+	// Name + picture + description. In the tabbed editor these live in the profile
+	// header; the guided flow needs them as a first step of their own.
+	const basicsPanel = (
+		<SettingsSection
+			caption="You can change any of this later."
+			title="Name & picture"
+		>
+			<SettingsCard className="flex items-center gap-4">
+				<div className="relative flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-full border bg-card">
+					{agentIcon ?? <RyuLogo className="text-foreground" size="28px" />}
+				</div>
+				<div className="flex min-w-0 flex-1 flex-col gap-2">
+					<Label className="sr-only" htmlFor="guided-agent-name">
+						Name
+					</Label>
+					<Input
+						disabled={isLocked}
+						id="guided-agent-name"
+						onChange={(e) => onNameChange?.(e.target.value)}
+						placeholder="Name your agent"
+						value={name}
+					/>
+					<Label className="sr-only" htmlFor="guided-agent-description">
+						Description
+					</Label>
+					<Input
+						disabled={isLocked}
+						id="guided-agent-description"
+						onChange={(e) => onDescriptionChange?.(e.target.value)}
+						placeholder="What is it for? e.g. Drafts replies to support email"
+						value={description ?? ""}
+					/>
+				</div>
+			</SettingsCard>
+		</SettingsSection>
+	);
+
+	// Evals / Calendar / History are all read-only views of what the agent has
+	// already done, so they share one "Activity" tab with an inner strip instead
+	// of spending three pills of the top-level tab bar.
+	const activityViews: { content: ReactNode; id: string; label: string }[] = [];
+	if (evalsPanel) {
+		activityViews.push({
+			content: evalsPanel,
+			id: "evals",
+			label: "Quality tests",
+		});
+	}
+	if (historyPanel) {
+		activityViews.push({
+			content: historyPanel,
+			id: "history",
+			label: "Run history",
+		});
+	}
+	if (calendarPanel) {
+		activityViews.push({
+			content: calendarPanel,
+			id: "calendar",
+			label: "Calendar",
+		});
+	}
+
+	const activityPanel =
+		activityViews.length > 0 ? (
+			<Tabs className="gap-4" defaultValue={activityViews[0].id}>
+				<TabsList variant="line">
+					{activityViews.map((view) => (
+						<TabsTrigger key={view.id} value={view.id}>
+							{view.label}
+						</TabsTrigger>
+					))}
+				</TabsList>
+				{activityViews.map((view) => (
+					<TabsContent
+						className="flex flex-col gap-5"
+						key={view.id}
+						value={view.id}
+					>
+						{view.content}
+					</TabsContent>
+				))}
+			</Tabs>
+		) : null;
+
+	// Seven groups, each answering one question a person actually has, with the
+	// answer spelled out under the strip. This replaces an eleven-pill row whose
+	// labels (Model · Trigger · Tools · Connections · Rules · Instructions ·
+	// Advanced · Prompt Studio · Evals · Calendar · History) gave no hint which
+	// one held the setting you were looking for.
+	const editorTabs: {
+		content: ReactNode;
+		hint: string;
+		id: string;
+		label: string;
+	}[] = [
+		{
+			content: behaviorPanel,
+			hint: "What this agent does, how it answers, and the rules it always follows.",
+			id: "behavior",
+			label: "Behavior",
+		},
+		{
+			content: modelPanel,
+			hint: "Which AI runs this agent.",
+			id: "model",
+			label: "Model",
+		},
+		{
+			content: toolsPanel,
+			hint: "What it is allowed to use, and what it is allowed to read and remember.",
+			id: "tools",
+			label: "Tools & knowledge",
+		},
+		{
+			content: connectionsPanel,
+			hint: "Apps it acts through, the accounts it acts as, and where you can reach it.",
+			id: "connections",
+			label: "Connections",
+		},
+		{
+			content: triggersPanel,
+			hint: "When it should run on its own, without you asking.",
+			id: "triggers",
+			label: "Triggers",
+		},
+		...(activityPanel
+			? [
+					{
+						content: activityPanel,
+						hint: "What this agent has done, and how well it scored.",
+						id: "activity",
+						label: "Activity",
+					},
+				]
+			: []),
+		...(promptStudioPanel
+			? [
+					{
+						content: promptStudioPanel,
+						hint: "Write and version the full instructions with the editor.",
+						id: "prompt-studio",
+						label: "Prompt Studio",
+					},
+				]
+			: []),
+		{
+			content: advancedPanel,
+			hint: "Sampling, extra model slots, and bring-your-own-agent wiring. Safe to ignore.",
+			id: "advanced",
+			label: "Advanced",
+		},
+	];
+
+	const activeHint = editorTabs.find((tab) => tab.id === activeTab)?.hint ?? "";
+
+	const actions = (
+		<>
+			{formError ? (
+				<p className="text-destructive text-sm">{formError}</p>
+			) : null}
+
+			<div className="flex gap-2">
+				{/* An unsaved agent is created, not "saved" — this footer is reachable
+				    with isNew still true via "Set it up myself". */}
+				{isNew ? (
+					<>
+						<Button disabled={saveDisabled} onClick={onCreateAndChat}>
+							{saving ? <Spinner /> : null}
+							Create &amp; chat
+						</Button>
+						<Button disabled={saveDisabled} onClick={onSave} variant="ghost">
+							Save
+						</Button>
+					</>
+				) : (
+					<Button disabled={saveDisabled} onClick={onSave}>
+						{saving ? <Spinner /> : null}
+						Save changes
+					</Button>
+				)}
+				<Button onClick={onCancel} variant="ghost">
+					Cancel
+				</Button>
+			</div>
+
+			{isLocked ? (
+				<p className="text-muted-foreground text-xs">
+					This agent is locked. Unlock it to make changes.
+				</p>
+			) : null}
+		</>
+	);
+
+	// A brand-new agent starts in the guided flow: four named steps over the same
+	// panels, so nobody has to guess which of seven tabs is mandatory. "Set it up
+	// myself" drops straight into the full editor for anyone who'd rather browse.
+	if (isNew && guided) {
+		return (
+			<GuidedSetup
+				busy={saving}
+				error={formError}
+				finishDisabled={saveDisabled}
+				finishLabel="Create & chat"
+				footnote={
+					<p className="text-muted-foreground text-xs">
+						Every step is optional except the name — you can come back and
+						change all of it after the agent exists.
+					</p>
+				}
+				header={
+					<div className="flex flex-col gap-1">
+						<h1 className="font-semibold text-xl">Create an agent</h1>
+						<p className="text-muted-foreground text-sm">
+							Four steps. Nothing here is permanent.
+						</p>
+					</div>
+				}
+				onCancel={onCancel}
+				onFinish={() => onCreateAndChat?.()}
+				onSkip={() => setGuided(false)}
+				secondaryFinish={{
+					label: "Create without chatting",
+					onClick: () => onSave?.(),
+				}}
+				steps={[
+					{
+						blockedReason: name.trim()
+							? null
+							: "Give your agent a name to continue.",
+						content: basicsPanel,
+						hint: "Give it a name you'll recognise in a list, and a line about what it's for.",
+						id: "basics",
+						label: "Basics",
+						title: "Name your agent",
+					},
+					{
+						blockedReason:
+							engineOptions.length > 0 && !chatModel
+								? "Pick a model to continue."
+								: null,
+						content: modelPanel,
+						hint: "This is the AI that does the thinking. You can swap it later at any time.",
+						id: "model",
+						label: "Model",
+						title: "Pick the model",
+					},
+					{
+						content: behaviorPanel,
+						hint: "Tell it what to do, in your own words. Rules are short lines it must always follow.",
+						id: "behavior",
+						label: "Behavior",
+						title: "Say how it should behave",
+					},
+					{
+						content: toolsPanel,
+						hint: "Tick only what it needs. You can add more once you see how it works.",
+						id: "abilities",
+						label: "Abilities",
+						title: "Choose what it can use",
+					},
+				]}
+			/>
+		);
+	}
 
 	return (
 		<div className="mx-auto w-full max-w-5xl">
@@ -2460,913 +3577,33 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 					selectedTools={selectedTools}
 				/>
 
-				<Tabs className="gap-4" onValueChange={setActiveTab} value={activeTab}>
+				<Tabs className="gap-3" onValueChange={setActiveTab} value={activeTab}>
 					<TabsList className="flex-wrap" variant="pills">
-						<TabsTrigger value="model">Model</TabsTrigger>
-						<TabsTrigger value="trigger">Trigger</TabsTrigger>
-						<TabsTrigger value="tools">Tools</TabsTrigger>
-						<TabsTrigger value="connections">Connections</TabsTrigger>
-						<TabsTrigger value="rules">Rules</TabsTrigger>
-						<TabsTrigger value="instructions">Instructions</TabsTrigger>
-						<TabsTrigger value="advanced">Advanced</TabsTrigger>
-						{promptStudioPanel ? (
-							<TabsTrigger value="prompt-studio">Prompt Studio</TabsTrigger>
-						) : null}
-						{evalsPanel ? <TabsTrigger value="evals">Evals</TabsTrigger> : null}
-						{calendarPanel ? (
-							<TabsTrigger value="calendar">Calendar</TabsTrigger>
-						) : null}
-						{historyPanel ? (
-							<TabsTrigger value="history">History</TabsTrigger>
-						) : null}
+						{editorTabs.map((tab) => (
+							<TabsTrigger key={tab.id} value={tab.id}>
+								{tab.label}
+							</TabsTrigger>
+						))}
 					</TabsList>
 
-					<TabsContent className="flex flex-col gap-6" value="model">
-						{/* 2. Model & provider */}
-						<SettingsSection
-							caption="The engine and model used for all chat turns."
-							title="Model & provider"
-						>
-							<SettingsGroup>
-								<SettingsItem
-									actions={
-										engineOptions.length === 0 ? (
-											<span className="text-muted-foreground text-xs">
-												No options installed yet.
-											</span>
-										) : (
-											<Select
-												disabled={chatSlotDisabled}
-												items={engineOptions.map((opt) => ({
-													value: opt.id,
-													label: opt.label,
-												}))}
-												onValueChange={(v) => onChatModelChange?.(v ?? "")}
-												value={chatModel}
-											>
-												<SelectTrigger
-													className="h-8 w-64 flex-shrink-0 text-sm"
-													id="slot-chat-model"
-												>
-													<SelectValue placeholder="Select chat model" />
-												</SelectTrigger>
-												<SelectContent>
-													{engineOptions.map((opt) => (
-														<SelectItem key={opt.id} value={opt.id}>
-															{opt.label}
-														</SelectItem>
-													))}
-												</SelectContent>
-											</Select>
-										)
-									}
-									title="Chat model"
-								/>
-								{onAddMoreAgentProviders ? (
-									<Button
-										className="h-auto w-full justify-start gap-2 rounded-none px-3.5 py-2.5 font-normal text-sm"
-										onClick={onAddMoreAgentProviders}
-										type="button"
-										variant="ghost"
-									>
-										<HugeiconsIcon className="size-4" icon={Add01Icon} />
-										Add more agent providers
-									</Button>
-								) : null}
-							</SettingsGroup>
-						</SettingsSection>
-
-						{showAcpCommand ? (
-							<SettingsSection
-								caption={
-									<>
-										Type the command that launches your agent on this computer.
-										For example: <code>goose acp</code>,{" "}
-										<code>opencode acp</code>, or{" "}
-										<code>npx -y my-agent --acp</code>.
-									</>
-								}
-								title="Command to start your agent"
-							>
-								<SettingsCard>
-									<label className="sr-only" htmlFor="acp-command">
-										Command to start your agent
-									</label>
-									<input
-										className="w-full rounded-lg border bg-card px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
-										disabled={isLocked}
-										id="acp-command"
-										onChange={(e) => onAcpCommandChange?.(e.target.value)}
-										placeholder="goose acp"
-										spellCheck={false}
-										value={acpCommand}
-									/>
-								</SettingsCard>
-							</SettingsSection>
-						) : null}
-
-						{launchConfig}
-						{piConfig}
-						{claudeConfig}
-						{codexConfig}
-						{gatewayRoutingConfig}
-						{acpSessionPanel}
-					</TabsContent>
-
-					<TabsContent className="flex flex-col gap-6" value="trigger">
-						{/* 3. Trigger — schedule + Composio event triggers */}
-						<SettingsSection
-							caption="Run this agent automatically on a schedule."
-							title="Schedule"
-						>
-							<SettingsGroup>
-								<SettingsItem
-									actions={
-										<Switch
-											checked={scheduleEnabled}
-											disabled={isLocked}
-											id="schedule-toggle"
-											onCheckedChange={onScheduleEnabledChange}
-										/>
-									}
-									title="Run on a schedule"
-								/>
-								{scheduleEnabled ? (
-									<SettingsItem
-										actions={
-											<Select
-												disabled={isLocked}
-												items={SCHEDULE_PHRASE_ITEMS}
-												onValueChange={(v) => onSchedulePhraseChange?.(v ?? "")}
-												value={schedulePhrase}
-											>
-												<SelectTrigger
-													className="h-8 w-44 flex-shrink-0 text-sm"
-													id="schedule-phrase"
-												>
-													<SelectValue />
-												</SelectTrigger>
-												<SelectContent>
-													{SCHEDULE_PHRASE_ITEMS.map((opt) => (
-														<SelectItem key={opt.value} value={opt.value}>
-															{opt.label}
-														</SelectItem>
-													))}
-												</SelectContent>
-											</Select>
-										}
-										title="Frequency"
-									/>
-								) : null}
-								{scheduleEnabled && showTimeField ? (
-									<SettingsItem
-										actions={
-											<Input
-												aria-label="Time"
-												className="h-8 w-32"
-												disabled={isLocked}
-												id="daily-time"
-												onChange={(e) => onDailyTimeChange?.(e.target.value)}
-												type="time"
-												value={dailyTime}
-											/>
-										}
-										title="Time"
-									/>
-								) : null}
-								{scheduleEnabled && schedulePhrase === "weekly" ? (
-									<SettingsItem
-										actions={
-											<Select
-												disabled={isLocked}
-												items={WEEKDAYS.map((d) => ({
-													value: d,
-													label: d.charAt(0).toUpperCase() + d.slice(1),
-												}))}
-												onValueChange={(v) => onWeeklyDayChange?.(v ?? "")}
-												value={weeklyDay}
-											>
-												<SelectTrigger
-													className="h-8 w-36 flex-shrink-0 text-sm"
-													id="weekly-day"
-												>
-													<SelectValue />
-												</SelectTrigger>
-												<SelectContent>
-													{WEEKDAYS.map((d) => (
-														<SelectItem key={d} value={d}>
-															{d.charAt(0).toUpperCase() + d.slice(1)}
-														</SelectItem>
-													))}
-												</SelectContent>
-											</Select>
-										}
-										title="Day"
-									/>
-								) : null}
-								{scheduleEnabled && schedulePhrase === "weekly" ? (
-									<SettingsItem
-										actions={
-											<Input
-												aria-label="Time"
-												className="h-8 w-32"
-												disabled={isLocked}
-												id="weekly-time"
-												onChange={(e) => onWeeklyTimeChange?.(e.target.value)}
-												type="time"
-												value={weeklyTime}
-											/>
-										}
-										title="Time"
-									/>
-								) : null}
-								{scheduleEnabled && schedulePhrase === "custom" ? (
-									<SettingsItem
-										actions={
-											<Input
-												aria-label="Cron expression"
-												className="h-8 w-44 font-mono"
-												disabled={isLocked}
-												id="custom-cron"
-												onChange={(e) => onCustomCronChange?.(e.target.value)}
-												placeholder="e.g. 0 9 * * 1-5"
-												value={customCron}
-											/>
-										}
-										description="Standard 5-field cron: minute hour day month weekday."
-										title="Cron expression"
-									/>
-								) : null}
-							</SettingsGroup>
-						</SettingsSection>
-
-						{showComposioTriggers ? (
-							<SettingsSection
-								caption="Fire this agent when a Composio event arrives (a new Slack message, a GitHub commit, …)."
-								title="Event triggers"
-							>
-								<SettingsCard className="flex flex-col gap-3">
-									{triggerSubs.length > 0 ? (
-										<div className="flex flex-col gap-1.5">
-											{triggerSubs.map((sub) => (
-												<div
-													className="flex items-center gap-2 text-sm"
-													key={sub.id}
-												>
-													<HugeiconsIcon
-														className="size-3.5 text-muted-foreground"
-														icon={Clock01Icon}
-													/>
-													<span className="min-w-0 flex-1 truncate">
-														{sub.triggerSlug}
-														<span className="text-muted-foreground text-xs">
-															{" "}
-															({sub.toolkit})
-														</span>
-													</span>
-													<Button
-														aria-label="Remove trigger"
-														onClick={() => onDeleteTrigger?.(sub.id)}
-														size="icon-sm"
-														variant="ghost"
-													>
-														<HugeiconsIcon
-															className="size-4"
-															icon={Delete01Icon}
-														/>
-													</Button>
-												</div>
-											))}
-										</div>
-									) : null}
-
-									{composioToolkit ? (
-										<>
-											<div className="flex flex-col gap-1.5">
-												<Label htmlFor="composio-trigger">Trigger event</Label>
-												<Select
-													disabled={isLocked}
-													items={composioTriggers.map((t) => ({
-														value: t.name,
-														label: t.displayName,
-													}))}
-													onValueChange={(v) => onTriggerSlugChange?.(v ?? "")}
-													value={triggerSlug}
-												>
-													<SelectTrigger
-														className="w-full"
-														id="composio-trigger"
-													>
-														<SelectValue placeholder="Pick a trigger event" />
-													</SelectTrigger>
-													<SelectContent>
-														{composioTriggers.map((t) => (
-															<SelectItem key={t.name} value={t.name}>
-																{t.displayName}
-															</SelectItem>
-														))}
-													</SelectContent>
-												</Select>
-											</div>
-											<div className="flex flex-col gap-1.5">
-												<Label htmlFor="composio-account">
-													Account to watch
-												</Label>
-												<Input
-													disabled={isLocked}
-													id="composio-account"
-													onChange={(e) =>
-														onConnectedAccountIdChange?.(e.target.value)
-													}
-													placeholder="Paste the account id from your Composio dashboard"
-													value={connectedAccountId}
-												/>
-												<p className="text-muted-foreground text-xs">
-													The id of the account whose events should start this
-													agent. You'll find it in your Composio dashboard.
-												</p>
-											</div>
-											{triggerError ? (
-												<p className="text-destructive text-xs">
-													{triggerError}
-												</p>
-											) : null}
-											<Button
-												className="self-start"
-												disabled={isLocked || subscribing}
-												onClick={onSubscribeTrigger}
-												size="sm"
-												variant="outline"
-											>
-												{subscribing ? (
-													<Spinner className="size-3" />
-												) : (
-													<HugeiconsIcon className="size-4" icon={Add01Icon} />
-												)}
-												Add trigger
-											</Button>
-										</>
-									) : (
-										<p className="text-muted-foreground text-xs">
-											Pick an integration under Connections first.
-										</p>
-									)}
-								</SettingsCard>
-							</SettingsSection>
-						) : null}
-					</TabsContent>
-
-					<TabsContent className="flex flex-col gap-6" value="tools">
-						{/* Capabilities (tools / thinking / vision) — gates the controls below. */}
-						{capabilitiesPanel}
-						{/* 4. Tools — MCP tools + Skills */}
-						<SettingsSection
-							caption="The MCP tools this agent may call."
-							headerAction={
-								selectedTools.size > 0 ? (
-									<Badge variant="secondary">{selectedTools.size}</Badge>
-								) : undefined
-							}
-							title="Tools"
-						>
-							<SettingsCard className="flex flex-col gap-2">
-								{toolsLoading ? (
-									<div className="flex items-center gap-2 text-muted-foreground text-xs">
-										<Spinner className="size-3" />
-										Loading tools…
-									</div>
-								) : null}
-								{!toolsLoading && tools.length === 0 ? (
-									<p className="text-muted-foreground text-sm">
-										No tools available. Install MCP servers to add tools.
-									</p>
-								) : null}
-								{!toolsLoading && tools.length > 0 ? (
-									<div className="flex flex-col gap-2">
-										{tools.map((toolName) => {
-											const checkId = `tool-${toolName}`;
-											return (
-												<div className="flex items-center gap-3" key={toolName}>
-													<Checkbox
-														checked={selectedTools.has(toolName)}
-														disabled={isLocked}
-														id={checkId}
-														onCheckedChange={() => onToggleTool?.(toolName)}
-													/>
-													<Label
-														className="cursor-pointer font-normal text-sm"
-														htmlFor={checkId}
-													>
-														{toolName}
-													</Label>
-												</div>
-											);
-										})}
-									</div>
-								) : null}
-							</SettingsCard>
-						</SettingsSection>
-
-						<SettingsSection
-							caption="Limit this agent to specific skills. Leave all unchecked to allow every enabled skill."
-							headerAction={
-								selectedSkills.size > 0 ? (
-									<Badge variant="secondary">{selectedSkills.size}</Badge>
-								) : undefined
-							}
-							title="Skills"
-						>
-							<SettingsCard className="flex flex-col gap-2">
-								{skillsLoading ? (
-									<div className="flex items-center gap-2 text-muted-foreground text-xs">
-										<Spinner className="size-3" />
-										Loading skills…
-									</div>
-								) : null}
-								{!skillsLoading && skills.length === 0 ? (
-									<p className="text-muted-foreground text-sm">
-										No Skills installed. Browse and install from the Skills
-										page.
-									</p>
-								) : null}
-								{!skillsLoading && skills.length > 0 ? (
-									<div className="flex flex-col gap-2">
-										{skills.map((skill) => {
-											const checkId = `skill-${skill.id}`;
-											return (
-												<div className="flex items-start gap-3" key={skill.id}>
-													<Checkbox
-														checked={selectedSkills.has(skill.id)}
-														disabled={isLocked}
-														id={checkId}
-														onCheckedChange={() => onToggleSkill?.(skill.id)}
-													/>
-													<Label
-														className="cursor-pointer font-normal text-sm"
-														htmlFor={checkId}
-													>
-														<span className="font-medium">{skill.name}</span>
-														{skill.enabled ? null : (
-															<span className="ml-1.5 text-muted-foreground text-xs">
-																(disabled globally)
-															</span>
-														)}
-														{skill.description ? (
-															<span className="block text-muted-foreground text-xs">
-																{skill.description}
-															</span>
-														) : null}
-													</Label>
-												</div>
-											);
-										})}
-									</div>
-								) : null}
-							</SettingsCard>
-						</SettingsSection>
-					</TabsContent>
-
-					<TabsContent className="flex flex-col gap-6" value="connections">
-						{/* 5. Connections — Composio actions + Identities + Channels */}
-						<SettingsSection
-							caption={
-								composioConfigured
-									? "Attach third-party actions (sending email, creating issues, …) from your connected integrations."
-									: "Add a Composio API key in Gateway → Keys, then connect accounts in Marketplace → Connections, to attach actions like sending email or creating issues."
-							}
-							headerAction={
-								selectedComposio.size > 0 ? (
-									<Badge variant="secondary">{selectedComposio.size}</Badge>
-								) : undefined
-							}
-							title="Connections"
-						>
-							{composioConfigured ? (
-								<SettingsCard className="flex flex-col gap-3">
-									<div className="flex flex-col gap-1.5">
-										<Label htmlFor="composio-toolkit">Integration</Label>
-										<Select
-											disabled={isLocked}
-											items={composioToolkitItems.map((t) => ({
-												value: t.id,
-												label: t.label,
-											}))}
-											onValueChange={(v) =>
-												onComposioToolkitChange?.(v ?? null)
-											}
-											value={composioToolkit ?? ""}
-										>
-											<SelectTrigger className="w-full" id="composio-toolkit">
-												<SelectValue placeholder="Pick an integration (Gmail, GitHub, …)" />
-											</SelectTrigger>
-											<SelectContent>
-												{composioToolkitItems.map((t) => (
-													<SelectItem key={t.id} value={t.id}>
-														{t.label}
-													</SelectItem>
-												))}
-											</SelectContent>
-										</Select>
-									</div>
-
-									{composioToolkit ? (
-										<div className="flex flex-col gap-2">
-											{composioActions.length > 0 && !composioActionsLoading ? (
-												<div className="flex items-center justify-between">
-													<span className="text-muted-foreground text-xs">
-														{composioActions.every((a) =>
-															selectedComposio.has(a.name)
-														)
-															? "All tools enabled"
-															: `${
-																	composioActions.filter((a) =>
-																		selectedComposio.has(a.name)
-																	).length
-																} of ${composioActions.length} selected`}
-													</span>
-													<div className="flex gap-2">
-														<Button
-															disabled={
-																isLocked ||
-																composioActions.every((a) =>
-																	selectedComposio.has(a.name)
-																)
-															}
-															onClick={() => onSelectAllComposio?.()}
-															size="sm"
-															type="button"
-															variant="outline"
-														>
-															All tools
-														</Button>
-														<Button
-															disabled={
-																isLocked ||
-																!composioActions.some((a) =>
-																	selectedComposio.has(a.name)
-																)
-															}
-															onClick={() => onClearComposio?.()}
-															size="sm"
-															type="button"
-															variant="ghost"
-														>
-															Clear
-														</Button>
-													</div>
-												</div>
-											) : null}
-											{composioActionsLoading ? (
-												<div className="flex items-center gap-2 text-muted-foreground text-xs">
-													<Spinner className="size-3" />
-													Loading actions…
-												</div>
-											) : null}
-											{!composioActionsLoading &&
-											composioActions.length === 0 ? (
-												<p className="text-muted-foreground text-sm">
-													No actions found for this integration.
-												</p>
-											) : null}
-											{!composioActionsLoading && composioActions.length > 0
-												? composioActions.map((action) => {
-														const checkId = `composio-${action.name}`;
-														return (
-															<div
-																className="flex items-start gap-3"
-																key={action.name}
-															>
-																<Checkbox
-																	checked={selectedComposio.has(action.name)}
-																	disabled={isLocked}
-																	id={checkId}
-																	onCheckedChange={() =>
-																		onToggleComposio?.(action.name)
-																	}
-																/>
-																<Label
-																	className="cursor-pointer font-normal text-sm"
-																	htmlFor={checkId}
-																>
-																	<span className="font-medium">
-																		{action.displayName}
-																	</span>
-																	{action.description ? (
-																		<span className="block text-muted-foreground text-xs">
-																			{action.description}
-																		</span>
-																	) : null}
-																</Label>
-															</div>
-														);
-													})
-												: null}
-										</div>
-									) : null}
-
-									{selectedComposio.size > 0 ? (
-										<div className="flex flex-wrap gap-1.5 border-t pt-3">
-											{Array.from(selectedComposio).map((cname) => (
-												<Badge className="gap-1" key={cname} variant="outline">
-													{cname}
-													<button
-														aria-label={`Remove ${cname}`}
-														className="text-muted-foreground hover:text-foreground"
-														disabled={isLocked}
-														onClick={() => onToggleComposio?.(cname)}
-														type="button"
-													>
-														×
-													</button>
-												</Badge>
-											))}
-										</div>
-									) : null}
-								</SettingsCard>
-							) : null}
-						</SettingsSection>
-
-						{identityPanel}
-						{channelsPanel}
-					</TabsContent>
-
-					<TabsContent className="flex flex-col gap-6" value="rules">
-						{/* 6. Rules */}
-						<SettingsSection
-							caption="Short, always-on directives folded into this agent's instructions."
-							title="Rules"
-						>
-							<SettingsCard className="flex flex-col gap-2">
-								{rules.map((rule, index) => (
-									<div
-										className="flex items-center gap-2"
-										// biome-ignore lint/suspicious/noArrayIndexKey: rules are positional and edited in place
-										key={`rule-${index}`}
-									>
-										<Input
-											disabled={isLocked}
-											onChange={(e) => onRuleChange?.(index, e.target.value)}
-											placeholder="e.g. Always cite your sources"
-											value={rule}
-										/>
-										<Button
-											aria-label="Remove rule"
-											disabled={isLocked}
-											onClick={() => onRemoveRule?.(index)}
-											size="icon-sm"
-											variant="ghost"
-										>
-											<HugeiconsIcon className="size-4" icon={Delete01Icon} />
-										</Button>
-									</div>
-								))}
-								<Button
-									className="self-start"
-									disabled={isLocked}
-									onClick={onAddRule}
-									size="sm"
-									variant="outline"
-								>
-									<HugeiconsIcon className="size-4" icon={Add01Icon} />
-									Add rule
-								</Button>
-							</SettingsCard>
-						</SettingsSection>
-					</TabsContent>
-
-					<TabsContent className="flex flex-col gap-6" value="instructions">
-						{/* 7. Instructions — the output: prompt + personality */}
-						<SettingsSection
-							caption="Describe how this agent should behave, what it should avoid, and how it should respond."
-							headerAction={
-								isNew ? undefined : (
-									<button
-										className="cursor-pointer font-medium text-muted-foreground text-xs underline-offset-2 hover:text-foreground hover:underline"
-										onClick={() =>
-											promptStudioPanel
-												? setActiveTab("prompt-studio")
-												: onOpenPromptStudio?.()
-										}
-										type="button"
-									>
-										Open Prompt Studio
-									</button>
-								)
-							}
-							title="Instructions"
-						>
-							<SettingsCard>
-								{instructionsEditor ?? (
-									<Textarea
-										className="min-h-32"
-										disabled={isLocked}
-										id="agent-prompt"
-										readOnly={isLocked}
-										value={systemPrompt}
-									/>
-								)}
-							</SettingsCard>
-						</SettingsSection>
-
-						<SettingsSection title="Personality & tone">
-							<SettingsGroup>
-								<SettingsItem
-									actions={
-										<Input
-											className="h-8 w-56"
-											disabled={isLocked}
-											id="persona-display-name"
-											onChange={(e) =>
-												onPersonaDisplayNameChange?.(e.target.value)
-											}
-											placeholder="e.g. Aria"
-											value={personaDisplayName}
-										/>
-									}
-									title="Display name"
-								/>
-								<SettingsItem
-									actions={
-										<Select
-											disabled={isLocked}
-											items={toneOptions}
-											onValueChange={(v) => onToneChange?.(v ?? "")}
-											value={tone}
-										>
-											<SelectTrigger
-												className="h-8 w-56 flex-shrink-0 text-sm"
-												id="persona-tone"
-											>
-												<SelectValue />
-											</SelectTrigger>
-											<SelectContent>
-												{toneOptions.map((opt) => (
-													<SelectItem key={opt.value} value={opt.value}>
-														{opt.label}
-													</SelectItem>
-												))}
-											</SelectContent>
-										</Select>
-									}
-									title="Tone"
-								/>
-								{tone === "custom" ? (
-									<SettingsItem
-										actions={
-											<Input
-												className="h-8 w-64"
-												disabled={isLocked}
-												id="persona-custom-tone"
-												onChange={(e) => onCustomToneChange?.(e.target.value)}
-												placeholder="e.g. Concise and technical, with a dry wit"
-												value={customTone}
-											/>
-										}
-										title="Custom tone"
-									/>
-								) : null}
-							</SettingsGroup>
-						</SettingsSection>
-					</TabsContent>
-
-					<TabsContent className="flex flex-col gap-6" value="advanced">
-						{/* Advanced — collapsible-style group at the bottom */}
-						<section aria-label="Advanced" className="flex flex-col gap-5">
-							<MemorySpacesCard
-								disabled={isLocked}
-								memoryReadLevels={memoryReadLevels}
-								memorySpaceIds={memorySpaceIds}
-								memoryWriteEnabled={memoryWriteEnabled}
-								onMemoryWriteEnabledChange={onMemoryWriteEnabledChange}
-								onToggleMemoryReadLevel={onToggleMemoryReadLevel}
-								onToggleMemorySpace={onToggleMemorySpace}
-								spaces={spaces}
-							/>
-
-							<button
-								className="-mx-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-muted/50"
-								onClick={onToggleMoreSlots}
-								type="button"
-							>
-								<span className="font-semibold text-sm">Advanced slots</span>
-								<Badge className="text-[10px]" variant="secondary">
-									Coming soon
-								</Badge>
-								<span className="ml-auto text-muted-foreground">
-									<HugeiconsIcon
-										className="size-4"
-										icon={moreSlotsOpen ? ArrowDown01Icon : ArrowRight01Icon}
-									/>
-								</span>
-							</button>
-
-							{moreSlotsOpen ? (
-								<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-									<SettingsCard>
-										<SlotCard
-											available={false}
-											description="Speech-to-text model for voice input."
-											id="stt"
-											label="Speech-to-text"
-											options={[]}
-											value=""
-										/>
-									</SettingsCard>
-									<SettingsCard>
-										<SlotCard
-											available={false}
-											description="Text-to-speech model for voice output."
-											id="tts"
-											label="Text-to-speech"
-											options={[]}
-											value=""
-										/>
-									</SettingsCard>
-									<SettingsCard>
-										<SlotCard
-											available={false}
-											description="Image generation model for visual tasks."
-											id="image-model"
-											label="Image model"
-											options={[]}
-											value=""
-										/>
-									</SettingsCard>
-									<SettingsCard>
-										<SlotCard
-											available={false}
-											description="Gateway policy ref for firewall, PII filtering, and budget."
-											id="policy"
-											label="Gateway policy"
-											options={[]}
-											value=""
-										/>
-									</SettingsCard>
-								</div>
-							) : null}
-
-							{advancedInference}
-							{connectPanel}
-							{byoaPanel}
-						</section>
-					</TabsContent>
-
-					{promptStudioPanel ? (
-						<TabsContent className="flex flex-col gap-5" value="prompt-studio">
-							{promptStudioPanel}
-						</TabsContent>
+					{/* One line telling you what this group holds — the cheapest fix for
+					    "I can't find the setting I need". */}
+					{activeHint ? (
+						<p className="px-1 text-muted-foreground text-xs">{activeHint}</p>
 					) : null}
 
-					{evalsPanel ? (
-						<TabsContent className="flex flex-col gap-5" value="evals">
-							{evalsPanel}
+					{editorTabs.map((tab) => (
+						<TabsContent
+							className="flex flex-col gap-6 pt-1"
+							key={tab.id}
+							value={tab.id}
+						>
+							{tab.content}
 						</TabsContent>
-					) : null}
-
-					{calendarPanel ? (
-						<TabsContent className="flex flex-col gap-5" value="calendar">
-							{calendarPanel}
-						</TabsContent>
-					) : null}
-
-					{historyPanel ? (
-						<TabsContent className="flex flex-col gap-5" value="history">
-							{historyPanel}
-						</TabsContent>
-					) : null}
+					))}
 				</Tabs>
 
-				{formError ? (
-					<p className="text-destructive text-sm">{formError}</p>
-				) : null}
-
-				<div className="flex gap-2">
-					{isNew ? (
-						<>
-							<Button disabled={saveDisabled} onClick={onCreateAndChat}>
-								{saving ? <Spinner /> : null}
-								Create &amp; chat
-							</Button>
-							<Button disabled={saveDisabled} onClick={onSave} variant="ghost">
-								Save
-							</Button>
-						</>
-					) : (
-						<Button disabled={saveDisabled} onClick={onSave}>
-							{saving ? <Spinner /> : null}
-							Save changes
-						</Button>
-					)}
-					<Button onClick={onCancel} variant="ghost">
-						Cancel
-					</Button>
-				</div>
-
-				{isLocked ? (
-					<p className="text-muted-foreground text-xs">
-						This agent is locked. Unlock it to make changes.
-					</p>
-				) : null}
+				{actions}
 			</div>
 		</div>
 	);

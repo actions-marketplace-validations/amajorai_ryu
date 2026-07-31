@@ -1,10 +1,12 @@
-// apps/desktop/src/lib/api/spaces.ts
+// packages/core-client/src/spaces.ts
 //
 // Typed client for Core's Spaces / RAG endpoints (`/api/spaces`). A Space is a
 // named document collection backed by a sqlite-vec vector store; documents are
-// ingested (chunked + embedded) and searched via KNN. Consumed by the spaces
-// page through the `useSpaces` hook. Wire shapes mirror the Core handlers in
-// `apps/core/src/server/{mod,spaces}.rs` (snake_case on the wire).
+// ingested (chunked + embedded) and searched by whichever retrieval algorithm
+// the Space is set to — vector KNN or entity-graph traversal — after which hits
+// are link-expanded and neurally reranked. See {@link searchSpace}. Wire shapes
+// mirror the Core handlers in `apps/core/src/server/{mod,spaces}.rs`
+// (snake_case on the wire).
 
 import { type ApiTarget, request } from "./client.ts";
 
@@ -38,7 +40,21 @@ export interface SpaceDocument {
 export interface SpaceMatch {
 	chunkId: string;
 	content: string;
-	/** Squared L2 distance from the query vector (smaller is closer). */
+	/**
+	 * **Do not rank on this field, and do not read magnitudes off it.** It used to
+	 * be documented as "squared L2 distance from the query vector", which is only
+	 * ever true of one of the three ways a chunk can end up in this array:
+	 *
+	 * - a vector-mode KNN hit carries its real `vec0` distance (smaller is closer);
+	 * - a graph-mode traversal hit is assigned the constant `0.0`;
+	 * - a chunk pulled in by `[[page]]`-link expansion (which runs in **both**
+	 *   modes) is assigned the constant `1.0`.
+	 *
+	 * The last two are placeholders, not measurements. On top of that Core's bge
+	 * reranker re-orders the survivors **without rewriting `distance`**, so array
+	 * order — not this number — is the ranking. Sorting by `distance` un-does the
+	 * rerank; averaging or thresholding it mixes a metric with two constants.
+	 */
 	distance: number;
 	documentId: string;
 }
@@ -372,7 +388,33 @@ export async function setEmbeddingModel(
 	await request(target, "/api/embeddings/model", { method: "POST", body });
 }
 
-/** Run a KNN similarity search within a Space, returning ranked chunk matches. */
+/**
+ * Search a single Space, returning ranked chunk matches.
+ *
+ * **Not necessarily a KNN search** — as this comment used to say. Core's
+ * `search_ext` (`crates/core/spaces/src/lib.rs`) reads the Space's stored
+ * `retrieval_mode` and branches: `vector` runs a nearest-neighbour search over
+ * the `vec0` index, `graph` runs entity-matching plus a BFS traversal of the
+ * Space's co-occurrence graph. A graph Space can therefore answer a multi-hop
+ * question ("who at Acme is in Paris") that no single nearest-neighbour lookup
+ * answers. Anything that describes this call to a user — or to a model, via an
+ * MCP tool description — must not promise vector semantics.
+ *
+ * **The graph branch is bounded, and the bounds are lossy.** It walks at most 3
+ * hops and caps each hop's frontier at 512 entities, because the edges are
+ * co-occurrence (every pair of entities in a chunk is joined), so an unbounded
+ * hop-2 frontier is most of the Space. Core's own doc states that a chunk whose
+ * only path runs through a truncated frontier entity stops being reachable, and
+ * traversal also stops as soon as `limit` chunks are collected. Graph results
+ * are therefore neither a superset of vector results nor exhaustive: never
+ * present an empty result as "this Space contains nothing about X".
+ *
+ * **Both branches are then post-processed**, so the returned chunks are not only
+ * the retrieval hits: `[[page]]`-link expansion pulls in chunks from linked
+ * documents (fail-open), a tenancy filter drops documents the caller may not
+ * read, and a bge cross-encoder reranker re-orders what survives. See
+ * {@link SpaceMatch.distance} for what that does to the score field.
+ */
 export async function searchSpace(
 	target: ApiTarget,
 	spaceId: string,

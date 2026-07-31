@@ -19,6 +19,103 @@ use crate::schema::{self, RunnableEntry};
 /// prevents pathological filesystem paths and absurdly long directory names.
 pub const MAX_PLUGIN_ID_LEN: usize = 128;
 
+/// The ONLY directories a manifest `code_file` may name, one segment deep.
+///
+/// Deliberately a closed, flat allowlist rather than a free-form relative path.
+/// Two things depend on it being provably flat: the path is joined onto a plugin
+/// directory (so it is a traversal sink, like [`validate_plugin_id`]), and
+/// `tools/mirror-public.sh` vendors these files into the published tree with a
+/// literal `plugins-store/*/<dir>/*.js` glob. A nested layout would make that
+/// glob *accidentally* rather than provably sufficient, and the miss would first
+/// surface as a public-tree compile failure after publication.
+pub const CODE_FILE_DIRS: &[&str] = &["hooks", "adapters"];
+
+/// Largest sandboxed-JS file a manifest may reference, in bytes. Generous for a
+/// hook body (the largest first-party one is ~6 KB) and small enough that a
+/// resolver cannot be pointed at something enormous.
+pub const MAX_CODE_FILE_BYTES: usize = 256 * 1024;
+
+/// Validate a manifest `code_file` path: exactly `<dir>/<name>.js`, where `<dir>`
+/// is one of [`CODE_FILE_DIRS`].
+///
+/// The path is resolved against a plugin's own directory, so this is the
+/// load-time gate that keeps a malicious manifest from reading outside it. Same
+/// posture as [`validate_plugin_id`]: an ASCII allowlist, not an escape blocklist,
+/// because `\` is a path separator on Windows and a drive-qualified or absolute
+/// component silently replaces the base in `PathBuf::join`.
+pub fn validate_code_file_path(rel: &str) -> Result<(), String> {
+    if rel.is_empty() {
+        return Err("code_file must not be empty".to_string());
+    }
+    let mut segments = rel.split('/');
+    let (Some(dir), Some(file), None) = (segments.next(), segments.next(), segments.next()) else {
+        return Err(format!(
+            "code_file '{rel}' must be exactly '<dir>/<name>.js' (allowed dirs: {})",
+            CODE_FILE_DIRS.join(", ")
+        ));
+    };
+    if !CODE_FILE_DIRS.contains(&dir) {
+        return Err(format!(
+            "code_file '{rel}' must live under one of: {}",
+            CODE_FILE_DIRS.join(", ")
+        ));
+    }
+    if !(file.ends_with(".js") || file.ends_with(".mjs")) {
+        return Err(format!("code_file '{rel}' must name a .js or .mjs file"));
+    }
+    let stem_ok = file
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+    if !stem_ok {
+        return Err(format!(
+            "code_file '{rel}' contains illegal characters (allowed: a-z A-Z 0-9 . - _)"
+        ));
+    }
+    if file.contains("..") || file.starts_with('.') {
+        return Err(format!(
+            "code_file '{rel}' must not traverse or start with '.'"
+        ));
+    }
+    Ok(())
+}
+
+/// Hydrate one code-bearing node: enforce exactly-one-of `code`/`code_file`,
+/// resolve the path, move the contents into `code`, and clear `code_file` so the
+/// hydrated manifest is byte-indistinguishable from an inline one.
+fn hydrate_one(
+    label: &str,
+    code: &mut String,
+    code_file: &mut Option<String>,
+    resolve: &mut impl FnMut(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    let has_inline = !code.trim().is_empty();
+    let Some(rel) = code_file.clone() else {
+        if has_inline {
+            return Ok(());
+        }
+        return Err(format!("{label} declares neither 'code' nor 'code_file'"));
+    };
+    if has_inline {
+        return Err(format!(
+            "{label} declares both 'code' and 'code_file' ('{rel}') — exactly one is allowed"
+        ));
+    }
+    validate_code_file_path(&rel).map_err(|e| format!("{label}: {e}"))?;
+    let body = resolve(&rel).map_err(|e| format!("{label}: cannot resolve code_file: {e}"))?;
+    if body.len() > MAX_CODE_FILE_BYTES {
+        return Err(format!(
+            "{label}: code_file '{rel}' is {} bytes (max {MAX_CODE_FILE_BYTES})",
+            body.len()
+        ));
+    }
+    if body.trim().is_empty() {
+        return Err(format!("{label}: code_file '{rel}' is empty"));
+    }
+    *code = body;
+    *code_file = None;
+    Ok(())
+}
+
 /// Validate an app `id` for use as both an identity key **and** a filesystem
 /// directory name under the apps dir.
 ///
@@ -515,6 +612,160 @@ impl PluginManifest {
         Ok(manifest)
     }
 
+    /// [`Self::parse_and_validate`] for a manifest that may declare its sandboxed
+    /// JS as `code_file` paths instead of inline `code` — the form every
+    /// first-party plugin under `plugins-store/` uses.
+    ///
+    /// `resolve` maps one plugin-root-relative path to that file's contents; the
+    /// caller owns the I/O (this crate is pure data), so a built-in plugin can
+    /// resolve from a compiled-in table while an on-disk plugin reads its own
+    /// directory. Hydration runs BEFORE validation, so the manifest a caller gets
+    /// back is always in the runtime-ready form: `code` populated, `code_file`
+    /// cleared.
+    pub fn parse_and_validate_with_code(
+        raw: &str,
+        resolve: impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<Self, String> {
+        let mut manifest: Self =
+            serde_json::from_str(raw).map_err(|e| format!("JSON parse error: {e}"))?;
+        manifest.hydrate_code_files(resolve)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Every plugin-root-relative `code_file` path this manifest declares, in walk
+    /// order. Empty once the manifest has been hydrated.
+    ///
+    /// Exists so a packaging/mirroring step can enumerate the files a plugin's
+    /// manifest depends on without duplicating the walk.
+    pub fn code_file_refs(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(contributes) = &self.contributes {
+            for hook in &contributes.turn_hooks {
+                if let Some(rel) = hook.code_file.as_deref() {
+                    out.push(rel.to_string());
+                }
+            }
+        }
+        for entry in &self.provides {
+            for binding in entry.tools.values() {
+                if let Some(rel) = binding
+                    .adapter
+                    .as_ref()
+                    .and_then(|a| a.code_file.as_deref())
+                {
+                    out.push(rel.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Replace every `code_file` reference with the file's contents, in place.
+    ///
+    /// # The invariant this encodes
+    ///
+    /// `code_file` is the **source** form and `code` is the **wire** form. A plugin
+    /// is authored with its sandboxed JS in real `.js` files — readable, lintable,
+    /// diffable, and auditable for malware — while everything downstream of parsing
+    /// (Core's `plugin_host`, the capability facade, the Gateway-signed marketplace
+    /// bundle `ryu pack` emits) keeps seeing the single inline `code` string it
+    /// always saw. That is deliberate and must not be "helpfully" relaxed: inlining
+    /// at pack time is what keeps the whole hook/adapter body INSIDE the signed
+    /// surface, so no new unsigned-code carriage channel is introduced by letting
+    /// authors use files.
+    ///
+    /// # Fail-closed
+    ///
+    /// A code-bearing node must declare **exactly one** of `code` / `code_file`,
+    /// and an unresolvable `code_file` is a hard error. Neither ever degrades to an
+    /// empty body: a hook that silently becomes a no-op is the exact failure this
+    /// whole seam has to avoid, since nothing downstream can tell an empty hook
+    /// from a hook that chose to do nothing.
+    pub fn hydrate_code_files(
+        &mut self,
+        mut resolve: impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<(), String> {
+        let plugin = self.id.clone();
+        if let Some(contributes) = &mut self.contributes {
+            for hook in &mut contributes.turn_hooks {
+                let label = format!("plugin '{plugin}' turn hook '{}'", hook.id);
+                hydrate_one(&label, &mut hook.code, &mut hook.code_file, &mut resolve)?;
+            }
+        }
+        for entry in &mut self.provides {
+            let capability = entry.capability.clone();
+            for (verb, binding) in &mut entry.tools {
+                let Some(adapter) = binding.adapter.as_mut() else {
+                    continue;
+                };
+                let label =
+                    format!("plugin '{plugin}' capability '{capability}' adapter '{verb}'");
+                hydrate_one(
+                    &label,
+                    &mut adapter.code,
+                    &mut adapter.code_file,
+                    &mut resolve,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a manifest that is not in the runtime-ready code form: a residual
+    /// `code_file` (parsed without a resolver — see
+    /// [`Self::parse_and_validate_with_code`]) or an empty `code` body.
+    ///
+    /// Both are loud failures on purpose. The alternative — parse, leave `code`
+    /// empty, and let the sandbox run nothing — is indistinguishable at every read
+    /// site from a hook that legitimately did nothing.
+    ///
+    /// Called by [`Self::validate`], and separately by the **install ingest** paths
+    /// (install-from-URL, install-from-local-bundle, install-from-marketplace).
+    /// Those deserialize a `PluginManifest` straight off the wire without running
+    /// the full [`Self::validate`] superset, and they persist ONLY the manifest —
+    /// no sibling `.js` files — so a `code_file` arriving there could never be
+    /// resolved afterwards. `ryu pack` inlines it before publishing precisely so it
+    /// never does; this is the gate that makes that a contract instead of a habit.
+    pub fn validate_code_sources(&self) -> Result<(), String> {
+        let check = |label: &str, code: &str, code_file: Option<&str>| -> Result<(), String> {
+            if let Some(rel) = code_file {
+                return Err(format!(
+                    "{label} still declares code_file '{rel}' — the manifest was parsed \
+                     without a code resolver (use PluginManifest::parse_and_validate_with_code)"
+                ));
+            }
+            if code.trim().is_empty() {
+                return Err(format!("{label} declares neither 'code' nor 'code_file'"));
+            }
+            Ok(())
+        };
+        if let Some(contributes) = &self.contributes {
+            for hook in &contributes.turn_hooks {
+                check(
+                    &format!("plugin '{}' turn hook '{}'", self.id, hook.id),
+                    &hook.code,
+                    hook.code_file.as_deref(),
+                )?;
+            }
+        }
+        for entry in &self.provides {
+            for (verb, binding) in &entry.tools {
+                if let Some(adapter) = binding.adapter.as_ref() {
+                    check(
+                        &format!(
+                            "plugin '{}' capability '{}' adapter '{verb}'",
+                            self.id, entry.capability
+                        ),
+                        &adapter.code,
+                        adapter.code_file.as_deref(),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Validate this manifest's id, version, and every Runnable entry.
     pub fn validate(&self) -> Result<(), String> {
         validate_plugin_id(&self.id)?;
@@ -529,6 +780,7 @@ impl PluginManifest {
         }
         self.validate_capabilities()?;
         self.validate_surface_commands()?;
+        self.validate_code_sources()?;
         if let Some(contributes) = &self.contributes {
             contributes
                 .validate_settings_contributions()
@@ -1470,6 +1722,13 @@ fn default_widget_display_mode() -> String {
 /// capability bridge: `host.sideModel`, `host.storage`, `host.log`) in scope; it
 /// returns a directive (`{kind:"none"}` | `{kind:"note",text}` |
 /// `{kind:"continue",text}`). See Core's `plugin_host`.
+///
+/// The body is authored as a **file** ([`code_file`]) and hydrated into [`code`]
+/// at parse time — see [`PluginManifest::hydrate_code_files`] for why the two
+/// fields are a source-form/wire-form pair rather than alternatives.
+///
+/// [`code`]: Self::code
+/// [`code_file`]: Self::code_file
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnHookContribution {
     /// Stable id for this hook (for logging/audit), unique within the plugin.
@@ -1477,7 +1736,18 @@ pub struct TurnHookContribution {
     /// The turn boundary this hook fires on. Today only `"post_assistant_turn"`.
     pub on: String,
     /// The JS hook body executed in the sandbox (returns a directive).
+    ///
+    /// Empty in a **source** manifest that declares [`Self::code_file`] instead;
+    /// [`PluginManifest::hydrate_code_files`] fills it in before any consumer sees
+    /// the manifest, and [`PluginManifest::validate`] refuses a manifest where it
+    /// is still empty. Every read site therefore keeps reading exactly this field.
+    #[serde(default)]
     pub code: String,
+    /// Path to the file holding the hook body, relative to the plugin root
+    /// (`hooks/<name>.js`) — the authoring form. Mutually exclusive with
+    /// [`Self::code`]; see [`PluginManifest::hydrate_code_files`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_file: Option<String>,
     /// Optional cheap pre-gate. When present, Core's `plugin_host` evaluates it
     /// in Rust **before** spawning the sandbox, so an idle hook (e.g. double-check
     /// with its toggle off, or goal with no active condition) costs a flag/prefix
@@ -2506,7 +2776,18 @@ pub struct CapabilityAdapter {
     /// The adapter body. Evaluated as the tail of a sandbox program that has already
     /// bound `input`, `defaults`, `callTool` and `callNamed`; it `return`s the
     /// canonical result.
+    ///
+    /// Empty in a **source** manifest that declares [`Self::code_file`] instead;
+    /// [`PluginManifest::hydrate_code_files`] fills it in at parse time and
+    /// [`PluginManifest::validate`] refuses a manifest where it is still empty.
+    #[serde(default)]
     pub code: String,
+
+    /// Path to the file holding the adapter body, relative to the plugin root
+    /// (`adapters/<verb>.js`) — the authoring form. Mutually exclusive with
+    /// [`Self::code`]; see [`PluginManifest::hydrate_code_files`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_file: Option<String>,
 
     /// ADDITIONAL provider tool ids this adapter may call, beyond
     /// [`CapabilityToolBinding::tool`], reachable from the body as
@@ -2953,6 +3234,195 @@ mod tests {
         ] {
             assert!(validate_plugin_id(bad).is_err(), "'{bad}' must be rejected");
         }
+    }
+
+    // ── code_file hydration ──────────────────────────────────────────────────
+
+    /// A manifest with one turn hook and one capability adapter, both declaring
+    /// their body by `code_file`.
+    fn code_file_manifest() -> &'static str {
+        r#"{
+            "id": "com.example.hooks",
+            "name": "Hooks",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "turn_hooks": [
+                    { "id": "h.one", "on": "post_assistant_turn", "code_file": "hooks/one.js" }
+                ]
+            },
+            "provides": [
+                {
+                    "capability": "web.search",
+                    "version": "1.0.0",
+                    "tools": {
+                        "web__search": {
+                            "tool": "x__search",
+                            "adapter": { "code_file": "adapters/web__search.js" }
+                        }
+                    }
+                }
+            ]
+        }"#
+    }
+
+    #[test]
+    fn hydration_fills_code_and_clears_code_file() {
+        let m = PluginManifest::parse_and_validate_with_code(code_file_manifest(), |rel| {
+            Ok(format!("// {rel}\nreturn null;\n"))
+        })
+        .expect("hydrates");
+
+        let hook = &m.contributes.as_ref().unwrap().turn_hooks[0];
+        assert_eq!(hook.code, "// hooks/one.js\nreturn null;\n");
+        assert!(
+            hook.code_file.is_none(),
+            "code_file must be cleared so the hydrated manifest is indistinguishable from an \
+             inline one and every read site keeps reading `code`"
+        );
+        let adapter = m.provides[0].tools["web__search"].adapter.as_ref().unwrap();
+        assert_eq!(adapter.code, "// adapters/web__search.js\nreturn null;\n");
+        assert!(adapter.code_file.is_none());
+    }
+
+    #[test]
+    fn code_file_refs_lists_both_nodes_then_empties_after_hydration() {
+        let mut m: PluginManifest = serde_json::from_str(code_file_manifest()).unwrap();
+        assert_eq!(
+            m.code_file_refs(),
+            vec![
+                "hooks/one.js".to_string(),
+                "adapters/web__search.js".to_string()
+            ]
+        );
+        m.hydrate_code_files(|_| Ok("return null;".to_string()))
+            .expect("hydrates");
+        assert!(m.code_file_refs().is_empty());
+    }
+
+    /// Parsing a `code_file` manifest WITHOUT a resolver must fail loudly. The
+    /// alternative — `code` left empty and the sandbox running nothing — is
+    /// indistinguishable at every read site from a hook that chose to do nothing.
+    #[test]
+    fn parse_without_a_resolver_rejects_a_code_file_manifest() {
+        let err = PluginManifest::parse_and_validate(code_file_manifest()).unwrap_err();
+        assert!(
+            err.contains("code_file") && err.contains("parse_and_validate_with_code"),
+            "error must name the missing resolver: {err}"
+        );
+    }
+
+    #[test]
+    fn declaring_both_code_and_code_file_is_rejected() {
+        let raw = r#"{
+            "id": "com.example.both",
+            "name": "Both",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "turn_hooks": [{
+                    "id": "h.one", "on": "post_assistant_turn",
+                    "code": "return null;", "code_file": "hooks/one.js"
+                }]
+            }
+        }"#;
+        let err = PluginManifest::parse_and_validate_with_code(raw, |_| {
+            Ok("return null;".to_string())
+        })
+        .unwrap_err();
+        assert!(err.contains("exactly one is allowed"), "got: {err}");
+    }
+
+    #[test]
+    fn declaring_neither_code_nor_code_file_is_rejected() {
+        let raw = r#"{
+            "id": "com.example.neither",
+            "name": "Neither",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "turn_hooks": [{ "id": "h.one", "on": "post_assistant_turn" }]
+            }
+        }"#;
+        let err = PluginManifest::parse_and_validate_with_code(raw, |_| {
+            Ok("return null;".to_string())
+        })
+        .unwrap_err();
+        assert!(err.contains("declares neither"), "got: {err}");
+    }
+
+    #[test]
+    fn an_unresolvable_code_file_is_an_error_not_an_empty_body() {
+        let err = PluginManifest::parse_and_validate_with_code(code_file_manifest(), |rel| {
+            Err(format!("no such file: {rel}"))
+        })
+        .unwrap_err();
+        assert!(err.contains("cannot resolve code_file"), "got: {err}");
+    }
+
+    #[test]
+    fn an_empty_code_file_is_an_error() {
+        let err =
+            PluginManifest::parse_and_validate_with_code(code_file_manifest(), |_| {
+                Ok("   \n".to_string())
+            })
+            .unwrap_err();
+        assert!(err.contains("is empty"), "got: {err}");
+    }
+
+    /// The path is joined onto a plugin's own directory, so it is a traversal sink.
+    /// Windows matters here: `\` is a separator and a drive-qualified component
+    /// silently replaces the base in `PathBuf::join`.
+    #[test]
+    fn code_file_path_allowlist_rejects_traversal_and_stray_dirs() {
+        assert!(validate_code_file_path("hooks/one.js").is_ok());
+        assert!(validate_code_file_path("adapters/web__search.mjs").is_ok());
+        for bad in [
+            "",
+            "one.js",                      // no dir segment
+            "hooks/nested/one.js",         // not flat: breaks the mirror's glob
+            "src/one.js",                  // dir not in CODE_FILE_DIRS
+            "hooks/../../../etc/passwd",
+            "../hooks/one.js",
+            "/etc/passwd",
+            "hooks\\one.js",               // Windows separator
+            "C:/hooks/one.js",
+            "hooks/one.txt",               // not JS
+            "hooks/.hidden.js",
+            "hooks/one.js.js/../x.js",
+        ] {
+            assert!(
+                validate_code_file_path(bad).is_err(),
+                "'{bad}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_code_file_is_rejected() {
+        let big = "x".repeat(MAX_CODE_FILE_BYTES + 1);
+        let err = PluginManifest::parse_and_validate_with_code(code_file_manifest(), |_| {
+            Ok(big.clone())
+        })
+        .unwrap_err();
+        assert!(err.contains("max"), "got: {err}");
+    }
+
+    #[test]
+    fn an_inline_only_manifest_still_parses_without_a_resolver() {
+        let raw = r#"{
+            "id": "com.example.inline",
+            "name": "Inline",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "turn_hooks": [{
+                    "id": "h.one", "on": "post_assistant_turn", "code": "return null;"
+                }]
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw).expect("inline form is still valid");
+        assert_eq!(m.contributes.unwrap().turn_hooks[0].code, "return null;");
     }
 
     #[test]

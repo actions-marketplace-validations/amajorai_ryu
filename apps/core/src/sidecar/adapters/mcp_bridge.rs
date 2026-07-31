@@ -228,20 +228,35 @@ impl agent_client_protocol::ConnectTo<agent_client_protocol::role::mcp::Client>
     }
 }
 
-/// Build the locked `tool_search` function-tool schema (Contract 3, byte-identical
-/// to the gateway plane). Returned as a JSON object so `list_tools` can unwrap the
-/// `function.parameters` map for rmcp `Tool::new`.
+/// Build the locked `tool_search` function-tool schema (Contract 3), the twin of
+/// the gateway plane's `tools::tool_search_def`. Returned as a JSON object so
+/// `list_tools` can unwrap the `function.parameters` map for rmcp `Tool::new`.
+///
+/// The two copies are kept in sync by hand. The `kind` enum advertises the full
+/// set [`ToolKind::parse_filter`] honors — including `core-api`, `command` and
+/// `skill`, the planes `ToolKind` grew after both copies were first written. Both
+/// copies previously advertised only the original four, which hid those planes
+/// from every agent on this (ACP) plane: an agent cannot ask for a filter it is
+/// never told exists, so `core-api`/`command` tools were reachable only by an
+/// unfiltered search that had to out-rank every MCP tool to surface them.
+///
+/// Advertising a value Core does NOT honor would be the worse bug in the other
+/// direction: [`ToolKind::parse_filter`] maps anything unrecognized to `None` =
+/// "no filter" (see `dispatch_tool_search` below, which feeds its result
+/// straight to `McpRegistry::search_scoped`), so the model would believe it filtered and
+/// get every plane back. The enum here is therefore exactly `parse_filter`'s
+/// accepted set plus the `any` sentinel, and a test asserts that.
 fn tool_search_def() -> Value {
     json!({
         "type": "function",
         "function": {
             "name": "tool_search",
-            "description": "Search the available tool catalog for tools that can accomplish a task. Returns a ranked list of tool descriptors (id, name, description). Call this FIRST when you need a capability not already provided as a tool, then call the returned tool by its exact id (or describe it for its argument schema).",
+            "description": "Search the available catalog for tools AND Agent Skills that can accomplish a task. Returns a ranked list of descriptors (id, name, description, kind). Call this FIRST when you need a capability not already provided as a tool. A row whose kind is 'skill' is instruction text, not a function: do NOT call its id — pass the part after the 'skills__' prefix to skills__load and follow what it returns. Every other kind is called directly by its exact id (or describe it first for its argument schema).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Natural-language description of the capability you need (e.g. 'send a slack message')." },
-                    "kind": { "type": "string", "enum": ["mcp", "builtin", "composio", "app", "any"], "description": "Optional filter by tool source plane. 'any' (default) searches all.", "default": "any" },
+                    "kind": { "type": "string", "enum": ["mcp", "builtin", "composio", "app", "core-api", "command", "skill", "any"], "description": "Optional filter by source plane. 'skill' returns only Agent Skills. 'any' (default) searches all.", "default": "any" },
                     "limit": { "type": "integer", "description": "Max results.", "default": 8, "minimum": 1, "maximum": 25 }
                 },
                 "required": ["query"]
@@ -386,6 +401,33 @@ impl RyuMcpHandler {
         tools
     }
 
+    /// The bound agent's per-agent **skill** allowlist (`AgentRecord.skills`).
+    ///
+    /// A different list from `self.allowlist`, which is the TOOL allowlist
+    /// `call_tool` enforces. Resolved here so `tool_search` scopes Agent-Skill rows
+    /// exactly as `skills__search` / `skills__load` do on this plane — otherwise the
+    /// merged catalog would list skills this agent's own `skills__load` refuses.
+    ///
+    /// Fail-open to the empty list — which `SkillRegistry::enabled_for` defines as
+    /// "all enabled" — on every degraded path (no agent store wired, unknown id,
+    /// store error), matching `McpRegistry::call_tool_with_identity_no_gate`'s
+    /// resolution of the same list for the same reason: a skill is instruction text
+    /// with no secrets, so this list scopes an agent to its own skills rather than
+    /// acting as a confidentiality boundary, and failing closed would strip skills
+    /// from callers that legitimately had them.
+    async fn skills_allowlist(&self) -> Vec<String> {
+        match self.mcp.agent_store.as_ref() {
+            Some(store) => store
+                .get(&self.agent_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|rec| rec.skills)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
     /// Dispatch the `tool_search` meta-tool. Returns the bridge envelope
     /// `{ "results": [ToolDescriptor] }` (distinct from the HTTP route's
     /// `{object,data}` shape).
@@ -403,7 +445,14 @@ impl RyuMcpHandler {
             .and_then(Value::as_u64)
             .map(|n| (n as usize).clamp(1, TOOL_SEARCH_MAX_LIMIT))
             .unwrap_or(TOOL_SEARCH_DEFAULT_LIMIT);
-        let results = self.mcp.search(query, kind, limit).await;
+        // `search_scoped`, not `search`: the merged catalog carries Agent-Skill rows,
+        // and this plane knows which agent is asking, so it can apply that agent's
+        // skill allowlist instead of showing it skills it cannot load.
+        let skills_allowlist = self.skills_allowlist().await;
+        let results = self
+            .mcp
+            .search_scoped(query, kind, limit, &skills_allowlist)
+            .await;
         Ok(json!({ "results": results }))
     }
 
@@ -411,7 +460,12 @@ impl RyuMcpHandler {
     /// an error when the id is unknown).
     async fn dispatch_describe(&self, args: &Value) -> Result<Value, McpError> {
         let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
-        match self.mcp.describe(id).await {
+        // `describe_scoped`, for the same reason `dispatch_tool_search` is scoped:
+        // otherwise an agent could recover the name + description of a skill this
+        // plane's search just withheld from it, simply by guessing `skills__<slug>`.
+        // Only the skill branch is affected — tool descriptions are unchanged.
+        let skills_allowlist = self.skills_allowlist().await;
+        match self.mcp.describe_scoped(id, &skills_allowlist).await {
             Some(d) => serde_json::to_value(d).map_err(|e| {
                 McpError::new(rmcp::model::ErrorCode::INTERNAL_ERROR, e.to_string(), None)
             }),
@@ -854,6 +908,72 @@ mod tests {
         Arc::new(McpRegistry::empty())
     }
 
+    /// The `kind` filter advertised to ACP agents must be exactly the set
+    /// [`ToolKind::parse_filter`] honors, plus the `any` sentinel.
+    ///
+    /// Both directions are bugs, so both are asserted. Advertising **less** hides
+    /// a whole tool plane from the agent — this is what `core-api` and `command`
+    /// were, on this plane, until the enum was widened. Advertising **more** is
+    /// worse: `parse_filter` maps an unrecognized value to `None` = "no filter",
+    /// so the model would be told a filter exists, use it, and silently get every
+    /// plane back.
+    ///
+    /// Direction 2 enumerates [`ToolKind`]'s variants through [`filter_wire_name`],
+    /// whose wildcard-free `match` makes a new Core plane a **compile** error here
+    /// rather than a test that quietly keeps passing.
+    #[test]
+    fn advertised_kind_filter_matches_cores_parse_filter_set() {
+        let def = tool_search_def();
+        let kinds = def["function"]["parameters"]["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("kind enum must be an array")
+            .iter()
+            .map(|v| v.as_str().expect("kind enum entries are strings"))
+            .collect::<Vec<_>>();
+
+        for kind in &kinds {
+            if *kind == "any" {
+                // The documented sentinel: parse_filter maps it to "no filter".
+                assert_eq!(ToolKind::parse_filter(kind), None, "'any' means no filter");
+                continue;
+            }
+            assert!(
+                ToolKind::parse_filter(kind).is_some(),
+                "advertised kind '{kind}' is not honored by ToolKind::parse_filter — \
+                 the model would filter and silently get every plane back"
+            );
+        }
+
+        // Direction 2: nothing parse_filter honors may be missing, or that plane is
+        // invisible to every agent on the ACP plane. Enumerated from
+        // `ToolKind::ALL` — the enum's own list — never from a list copied into this
+        // file, which is what made the previous version of this loop unable to
+        // notice a new plane at all.
+        for kind in ToolKind::ALL.iter().copied() {
+            let wire = kind.wire_name();
+            assert_eq!(
+                ToolKind::parse_filter(wire),
+                Some(kind),
+                "'{wire}' must be the wire spelling of {kind:?}"
+            );
+            assert!(
+                kinds.contains(&wire),
+                "'{wire}' is filterable in Core but not advertised to the ACP agent; \
+                 the gateway twin (apps/gateway/src/tools/mod.rs::tool_search_def) \
+                 advertises it"
+            );
+        }
+        assert_eq!(
+            kinds.len(),
+            ToolKind::ALL.len() + 1,
+            "exactly every ToolKind plus the 'any' sentinel: {kinds:?}"
+        );
+        assert_eq!(
+            def["function"]["parameters"]["properties"]["kind"]["default"], "any",
+            "'any' stays the default so an agent that omits `kind` searches all planes"
+        );
+    }
+
     /// Build a handler directly (mirrors `build_ryu_mcp_server`'s wiring) so we can
     /// exercise `list_tools` / `call_tool` without the ACP duplex transport.
     async fn handler(
@@ -1169,6 +1289,63 @@ mod tests {
         assert!(
             out.get("results").and_then(Value::as_array).is_some(),
             "envelope must carry a `results` array: {out}"
+        );
+    }
+
+    /// The ACP plane gets the same one door: an Agent Skill is ranked alongside
+    /// tools and its row names its plane, so the agent can tell it must load rather
+    /// than call. With no agent store wired the skill allowlist resolves empty,
+    /// which `enabled_for` defines as "every enabled skill".
+    #[tokio::test]
+    async fn tool_search_surfaces_agent_skills_with_their_kind() {
+        let skills = ryu_skills::SkillRegistry::empty();
+        skills.replace_for_test(vec![ryu_skills::SkillRecord {
+            id: "merge-conflicts".into(),
+            name: "Resolve merge conflicts".into(),
+            description: Some("resolve a git merge conflict safely".into()),
+            instructions: "## Purpose\nresolve".into(),
+            allowed_tools: vec![],
+            enabled: true,
+            always_on: false,
+        }]);
+        let mcp = Arc::new(McpRegistry::empty().with_skills(skills));
+        let h = handler(Arc::clone(&mcp), None, vec![]).await;
+
+        // Discoverable ≠ offered. Skills are merged at SEARCH time only, so the
+        // agent's tool list — the set of functions it may emit a call for — must not
+        // contain one, unrestricted allowlist and all.
+        let offered = names_of(&h.build_tool_list());
+        assert!(
+            !offered.iter().any(|n| n.starts_with("skills__merge")),
+            "a skill must never be offered as a callable function: {offered:?}"
+        );
+
+        let out = h
+            .dispatch_tool_search(&json!({ "query": "merge conflict", "limit": 5 }))
+            .await
+            .expect("tool_search");
+        let row = out["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .find(|r| r["id"] == json!("skills__merge-conflicts"))
+            .cloned()
+            .unwrap_or_else(|| panic!("skill missing from the ACP catalog: {out}"));
+        assert_eq!(row["kind"], json!("skill"), "{row}");
+
+        // `describe` on that row points at the loader and offers no arguments.
+        let described = h
+            .dispatch_describe(&json!({ "id": "skills__merge-conflicts" }))
+            .await
+            .expect("describe");
+        assert_eq!(described["kind"], json!("skill"), "{described}");
+        assert_eq!(described["args"], json!([]), "{described}");
+        assert!(
+            described["description"]
+                .as_str()
+                .expect("description")
+                .contains("skills__load"),
+            "{described}"
         );
     }
 

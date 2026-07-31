@@ -931,11 +931,18 @@ mod tests {
         // through the same helper the process cache uses; the cache itself is a
         // `OnceLock`, so we exercise the policy with the parsed value directly
         // rather than mutating process env from a parallel test.
-        assert_eq!(parse_grant_allowlist_env(""), None, "blank ⇒ built-in default");
+        assert_eq!(
+            parse_grant_allowlist_env(""),
+            None,
+            "blank ⇒ built-in default"
+        );
         assert_eq!(parse_grant_allowlist_env("   \n"), None);
         let parsed = parse_grant_allowlist_env("sidecar:process, mcp.tools\nmemory.read")
             .expect("non-blank value parses");
-        assert_eq!(parsed, scopes(&["sidecar:process", "mcp.tools", "memory.read"]));
+        assert_eq!(
+            parsed,
+            scopes(&["sidecar:process", "mcp.tools", "memory.read"])
+        );
 
         // An override CAN approve a reserved scope the built-in default refuses —
         // that is the point of an operator escape hatch, and it stays explicit
@@ -1051,27 +1058,58 @@ mod tests {
     /// test's skip-if-absent posture.
     #[test]
     fn every_builtin_fixture_grant_is_allowlisted() {
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("core")
-            .join("src")
-            .join("plugin_manifest")
-            .join("fixtures");
-        let Ok(entries) = std::fs::read_dir(&fixtures) else {
-            // Vendored gateway without sibling `apps/core` — nothing to check.
+        // Built-in manifests live in TWO homes and BOTH must be scanned. The packaged
+        // ones moved to `apps-store/<x>/manifest.json` / `plugins-store/<x>/manifest.json`
+        // (Core `include_str!`s them directly; the duplicate fixture copies are gone),
+        // leaving only the ~13 Core-only manifests in `fixtures/`.
+        //
+        // Scanning `fixtures/` alone would still PASS — on 13 files instead of 71 —
+        // because every remaining orphan happens to carry an allowlisted grant block.
+        // That is a silent 58-manifest hole in a grant check, which is precisely what
+        // the `checked_files > 0` guard below cannot catch. Hence both roots.
+        let gateway = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut manifest_paths: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(gateway.join("../core/src/plugin_manifest/fixtures"))
+        {
+            manifest_paths.extend(entries.flatten().map(|e| e.path()).filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".manifest.json"))
+            }));
+        }
+        for root in ["apps-store", "plugins-store"] {
+            if let Ok(entries) = std::fs::read_dir(gateway.join("../..").join(root)) {
+                manifest_paths.extend(
+                    entries
+                        .flatten()
+                        .map(|e| e.path().join("manifest.json"))
+                        .filter(|p| p.is_file()),
+                );
+            }
+        }
+        if manifest_paths.is_empty() {
+            // Vendored gateway without sibling `apps/core` or package roots.
             return;
-        };
+        }
+        manifest_paths.sort();
 
         let mut checked_files = 0;
         let mut checked_grants = 0;
         let mut failures: Vec<String> = Vec::new();
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".manifest.json") {
-                continue; // skip .ui.html and anything else
-            }
+        for path in manifest_paths {
+            // Name the OWNING package (`plugins-store/exa/manifest.json` -> `exa`), not
+            // the bare `manifest.json`, so a failure message still identifies the app.
+            let name = if path.file_name().and_then(|n| n.to_str()) == Some("manifest.json") {
+                path.parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| format!("{}.manifest.json", n.to_string_lossy()))
+                    .unwrap_or_else(|| path.display().to_string())
+            } else {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string())
+            };
             if name == "sample.manifest.json" {
                 continue; // test-only demo, not seeded (see doc comment)
             }

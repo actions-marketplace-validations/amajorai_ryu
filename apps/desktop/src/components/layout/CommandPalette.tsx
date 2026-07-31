@@ -1,6 +1,5 @@
 import {
 	Add01Icon,
-	AiBrain01Icon,
 	ArrowRight01Icon,
 	BotIcon,
 	ComputerIcon,
@@ -90,6 +89,16 @@ type SettingsSection =
  * default-OFF) and pointed at a shell alias route rather than the seam route the
  * companion mints. Same reasoning, and the same fix, as the sidebar's
  * `CHROME_ORDER`: the App declares itself; the shell does not enumerate Apps.
+ *
+ * Inbox and Memory were the last two survivors of that rule, and both were live
+ * dead ends: `com.ryu.approvals` and `com.ryu.memory` are BOTH absent from Core's
+ * `CORE_DEFAULT_ON`, so on a fresh install "Inbox" opened a tab reading "App not
+ * enabled" and "Memory" opened a Memory Library whose `/api/memory` reads 503
+ * behind the same app gate. Neither needs a row here: an enabled approvals app is
+ * listed by the companion loop, and an enabled memory app contributes a
+ * `sidebar_buttons` entry targeting `/library/memory` that the contributed-button
+ * loop lists. Note the dedupe below reads `navTargets` — while a target sat in
+ * NAV_ITEMS the shell's dumb copy actively SUPPRESSED the app's own declaration.
  */
 const NAV_ITEMS = [
 	{ to: "/chat", label: "Chat", icon: Add01Icon },
@@ -98,11 +107,9 @@ const NAV_ITEMS = [
 	{ to: "/models", label: "Models", icon: Package01Icon },
 	{ to: "/skills", label: "Skills", icon: PuzzleIcon },
 	{ to: "/library/space", label: "Spaces", icon: ArrowRight01Icon },
-	{ to: "/library/memory", label: "Memory", icon: AiBrain01Icon },
 	{ to: "/tools", label: "Tools", icon: ArrowRight01Icon },
 	{ to: "/library/workflow", label: "Workflows", icon: ArrowRight01Icon },
 	{ to: "/review", label: "Weekly review", icon: ArrowRight01Icon },
-	{ to: "/inbox", label: "Inbox", icon: ArrowRight01Icon },
 ] as const;
 
 const MAX_CHAT_RESULTS = 30;

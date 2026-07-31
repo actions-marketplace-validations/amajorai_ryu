@@ -1084,15 +1084,26 @@ impl SharedBudgetState {
 // The flag is the steady-state truth (`balanceMicroUsd <= 0`), so a later top-up
 // debit response self-heals it back to allowed.
 
-/// Cache of which org wallets are currently empty (balance ≤ 0).
+/// Cache of which org wallets are currently empty (balance ≤ 0), plus the last
+/// balance actually observed.
 ///
 /// Keyed by org id. A missing entry means "not empty" (allowed). Cheap to read
 /// on the hot path; written best-effort by the debit hook after each metered
 /// call. Lives only in memory — a restart clears it, and the next debit
 /// repopulates it; the durable truth is the control-plane ledger.
+///
+/// The empty *flag* is what gates a request; the *balance* exists because
+/// "empty or not" cannot answer a threshold question. Core's fallback rules are
+/// written in dollars ("under $5 use the cheap model"), and this cache is the
+/// only place inside the node where the authoritative figure lands — the debit
+/// response carries it on every metered call. A fail-closed debit failure sets
+/// the flag WITHOUT inventing a balance: we know the org must be gated, we do
+/// not know what it holds, and reporting a made-up number would fire a
+/// dollar-threshold rule on a transport error.
 #[derive(Default)]
 pub struct WalletState {
     empty: DashMap<String, bool>,
+    balance_micro_usd: DashMap<String, i64>,
 }
 
 impl WalletState {
@@ -1110,6 +1121,34 @@ impl WalletState {
     /// budget gate; reflects the most recent debit response for that org.
     pub fn is_org_empty(&self, org_id: &str) -> bool {
         self.empty.get(org_id).map(|v| *v).unwrap_or(false)
+    }
+
+    /// Record the authoritative balance the control plane just reported, and
+    /// derive the empty flag from it — the two can then never disagree.
+    pub fn set_org_balance(&self, org_id: &str, balance_micro_usd: i64) {
+        self.balance_micro_usd
+            .insert(org_id.to_string(), balance_micro_usd);
+        self.set_org_empty(org_id, balance_micro_usd <= 0);
+    }
+
+    /// The last observed balance for an org, or `None` when no debit has
+    /// resolved one on this node yet. `None` means *unknown*, never zero.
+    pub fn org_balance_micro_usd(&self, org_id: &str) -> Option<i64> {
+        self.balance_micro_usd.get(org_id).map(|v| *v)
+    }
+
+    /// The single balance to report when the caller names no org.
+    ///
+    /// A node is a one-org place in practice (Core resolves exactly one org for
+    /// its metered calls), so the common case is a single entry and returning it
+    /// lets Core ask without knowing an org id it has no other use for. With
+    /// more than one org cached, refuse rather than guess: picking an arbitrary
+    /// wallet would silently answer a threshold rule with the wrong balance.
+    pub fn sole_balance_micro_usd(&self) -> Option<i64> {
+        if self.balance_micro_usd.len() != 1 {
+            return None;
+        }
+        self.balance_micro_usd.iter().next().map(|e| *e.value())
     }
 }
 
@@ -1140,6 +1179,40 @@ mod wallet_state_tests {
         w.set_org_empty("org_1", true);
         assert!(w.is_org_empty("org_1"));
         assert!(!w.is_org_empty("org_2"));
+    }
+
+    #[test]
+    fn balance_is_unknown_until_a_debit_reports_one() {
+        let w = WalletState::default();
+        assert_eq!(w.org_balance_micro_usd("org_1"), None);
+        // A fail-closed debit failure gates the org but must NOT invent a figure.
+        w.set_org_empty("org_1", true);
+        assert!(w.is_org_empty("org_1"));
+        assert_eq!(w.org_balance_micro_usd("org_1"), None);
+    }
+
+    #[test]
+    fn setting_a_balance_derives_the_empty_flag() {
+        let w = WalletState::default();
+        w.set_org_balance("org_1", 4_200_000);
+        assert_eq!(w.org_balance_micro_usd("org_1"), Some(4_200_000));
+        assert!(!w.is_org_empty("org_1"));
+        w.set_org_balance("org_1", 0);
+        assert!(w.is_org_empty("org_1"));
+        // A top-up self-heals both.
+        w.set_org_balance("org_1", 10_000_000);
+        assert!(!w.is_org_empty("org_1"));
+        assert_eq!(w.org_balance_micro_usd("org_1"), Some(10_000_000));
+    }
+
+    #[test]
+    fn sole_balance_refuses_to_guess_between_orgs() {
+        let w = WalletState::default();
+        assert_eq!(w.sole_balance_micro_usd(), None);
+        w.set_org_balance("org_1", 1_000_000);
+        assert_eq!(w.sole_balance_micro_usd(), Some(1_000_000));
+        w.set_org_balance("org_2", 9_000_000);
+        assert_eq!(w.sole_balance_micro_usd(), None);
     }
 }
 

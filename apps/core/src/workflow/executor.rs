@@ -1346,6 +1346,10 @@ async fn run_prompt(
 /// `## Skill: <name>` framing the chat injector uses ([`crate::skills`]), so a
 /// skill behaves the same whether it is injected into a chat turn or driven as a
 /// workflow step. Fails clearly when the skill is not installed.
+///
+/// Everything decidable without a network call lives in [`compose_skill_prompt`];
+/// this function is the registry read plus the model call, so the two failure arms
+/// are unit-testable without a gateway or a `~/.claude/skills` directory.
 async fn run_skill(
     skill_id: &str,
     agent_id: Option<&str>,
@@ -1356,16 +1360,63 @@ async fn run_skill(
     let record = ryu_skills::SkillRegistry::load()
         .list_all()
         .into_iter()
-        .find(|s| s.id == skill_id)
-        .ok_or_else(|| format!("skill node: skill '{skill_id}' is not installed"))?;
+        .find(|s| s.id == skill_id);
+    let composed = compose_skill_prompt(skill_id, record, task)?;
+    run_prompt(&composed, agent_id, run_id, node_id).await
+}
 
-    // Compose the skill body as the leading context, then the resolved task —
-    // the same block shape the chat/ACP injectors build from a skill record.
-    let composed = format!(
+/// Resolve a looked-up skill record into the prompt a `Skill` node runs, or the
+/// node failure explaining why there is nothing to run.
+///
+/// The composed text reuses the same `## Skill: <name>` framing the chat/ACP
+/// injectors build from a record, so a skill behaves the same whether it is injected
+/// into a turn or driven as a workflow step.
+///
+/// ## Why there are *two* failure arms
+///
+/// A [`ryu_skills::SkillRecord`] can be present and still have nothing to run:
+/// `register_app_skill` stores `instructions: String::new()` for a plugin that
+/// contributes a `RunnableKind::Skill` (its `SkillConfig` is `skill_id`-only — the
+/// real body only exists once the skill is materialised on disk), and a
+/// front-matter-only `SKILL.md` parses to an empty body too (the only parse error is
+/// a missing `name`). Without the [`ryu_skills::SkillRecord::is_loadable`] check,
+/// such a record composed to `"## Skill: <name>\n\n\n<task>"` — a heading with
+/// nothing under it — and the node reported **success**. That is the
+/// healthy-status-for-a-thing-that-is-not-there shape the predicate exists to stop,
+/// and a workflow is the worst place for it: the run continues and downstream nodes
+/// consume output produced without the instructions the author picked the node for.
+///
+/// The five model-facing surfaces (`skills__search`, `skills__load`, the merged tool
+/// catalog, and the two injected blocks) apply the same predicate as a *filter*.
+/// This one is not a discovery surface — a human wrote the id into the node, nothing
+/// offered it — so it diagnoses instead of hiding. And `is_loadable` is checked after
+/// the lookup rather than folded into it, so the two states stay distinguishable:
+/// "you named a skill this node does not have" and "the skill is registered here but
+/// its body was never installed" need different fixes, and collapsing them into the
+/// not-installed message would send an operator hunting for a skill that is in fact
+/// sitting right there in their library.
+///
+/// The caller reads `list_all()`, not `enabled_for` — deliberate and unchanged: a
+/// workflow node names one specific skill, so global enablement and the per-agent
+/// allowlist (both of which scope what a *model* may discover) do not gate it.
+fn compose_skill_prompt(
+    skill_id: &str,
+    record: Option<ryu_skills::SkillRecord>,
+    task: &str,
+) -> Result<String, String> {
+    let record =
+        record.ok_or_else(|| format!("skill node: skill '{skill_id}' is not installed"))?;
+    if !record.is_loadable() {
+        return Err(format!(
+            "skill node: skill '{skill_id}' is registered on this node but has no \
+             instructions installed, so there is nothing to run. If a plugin \
+             contributes it, the body arrives when the skill is materialised on disk."
+        ));
+    }
+    Ok(format!(
         "## Skill: {}\n{}\n\n{}",
         record.name, record.instructions, task
-    );
-    run_prompt(&composed, agent_id, run_id, node_id).await
+    ))
 }
 
 /// Execute a `Plugin` node: resolve the installed plugin's manifest, find the
@@ -3613,5 +3664,72 @@ mod tests {
             err.contains("not installed"),
             "error should name the missing skill: {err}"
         );
+    }
+
+    /// A record for [`compose_skill_prompt`]'s three cases, parameterised only on
+    /// the field the predicate reads.
+    fn skill_record(id: &str, instructions: &str) -> ryu_skills::SkillRecord {
+        ryu_skills::SkillRecord {
+            id: id.to_owned(),
+            name: "Deploy Helper".to_owned(),
+            description: Some("ships things".to_owned()),
+            instructions: instructions.to_owned(),
+            allowed_tools: Vec::new(),
+            enabled: true,
+            always_on: false,
+        }
+    }
+
+    /// The regression this pins: a registered-but-body-less skill used to compose
+    /// `"## Skill: Deploy Helper\n\n\n<task>"` and the node reported SUCCESS, so the
+    /// run continued and downstream nodes consumed output produced without the
+    /// instructions the author picked the node for.
+    ///
+    /// Both the plugin-contributed shape (`register_app_skill` writes
+    /// `instructions: String::new()`) and the disk shape (a front-matter-only
+    /// `SKILL.md`, whose body `parse_skill_md` leaves empty — whitespace-only after
+    /// the delimiter) land here, which is why the assertion covers both spellings of
+    /// "no body" rather than just the empty string.
+    #[test]
+    fn a_body_less_skill_fails_the_node_instead_of_running_an_empty_prompt() {
+        for empty in ["", "   \n\n\t"] {
+            let err = compose_skill_prompt(
+                "app__deploy",
+                Some(skill_record("app__deploy", empty)),
+                "ship it",
+            )
+            .expect_err("a body-less skill must fail the node");
+            assert!(
+                err.contains("app__deploy") && err.contains("no instructions installed"),
+                "the failure must name the skill and the actual cause: {err}"
+            );
+            // Distinguishable from the missing-skill arm on purpose: the two need
+            // different fixes, and this one is IN the user's library.
+            assert!(
+                !err.contains("is not installed"),
+                "must not be reported as a missing skill: {err}"
+            );
+        }
+    }
+
+    /// The other two arms, so the guard cannot be "fixed" by failing everything.
+    #[test]
+    fn compose_skill_prompt_runs_a_real_body_and_names_a_missing_skill() {
+        let composed = compose_skill_prompt(
+            "deploy",
+            Some(skill_record("deploy", "Step 1. Check CI.")),
+            "ship it",
+        )
+        .expect("a skill with a body must compose");
+        // The `## Skill: <name>` framing is shared with the chat/ACP injectors —
+        // a skill must read the same whether injected or driven as a node.
+        assert_eq!(
+            composed,
+            "## Skill: Deploy Helper\nStep 1. Check CI.\n\nship it"
+        );
+
+        let err = compose_skill_prompt("nope", None, "ship it")
+            .expect_err("an absent record must fail the node");
+        assert!(err.contains("'nope' is not installed"), "{err}");
     }
 }

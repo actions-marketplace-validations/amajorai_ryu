@@ -149,7 +149,9 @@ pub fn record(model: InstalledModel) -> anyhow::Result<()> {
 /// format = GGUF) — see [`parse_active_pref`]. When set and the weights are
 /// present on disk, the resolved engine serves the selection instead of the
 /// registry default; this is how a deep link / "Use this model" action switches
-/// the served model at runtime without recompiling or editing `registry.json`.
+/// the served model at runtime without recompiling or restarting with a different
+/// `RYU_LOCAL_CHAT_MODEL_ID` (the registry default is env-only — `registry.json`
+/// carries no `local_chat_model_*` key).
 /// Empty or absent means "use the registry default" (nothing hardcoded, fully
 /// swappable).
 pub const ACTIVE_MODEL_PREF: &str = "local-chat-model";

@@ -271,7 +271,7 @@ fn slug(path: &str) -> String {
 // ── Catalog surface (search / describe) ───────────────────────────────────────
 
 /// Every CoreApi tool as a [`ToolDescriptor`] for the unified catalog. Merged
-/// into `McpRegistry::search`'s `builtins` so it ranks with everything else.
+/// into `McpRegistry::search_scoped`'s `builtins` so it ranks with everything else.
 pub fn descriptors() -> Vec<ToolDescriptor> {
     routes()
         .iter()

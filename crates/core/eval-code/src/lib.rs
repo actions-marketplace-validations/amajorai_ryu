@@ -11,11 +11,27 @@
 //!   ([`ryu_tool_exec::run_eval_js`]). We do NOT weaken the tool-exec sandbox.
 //! - **Python** — routed through the swappable [`ryu_sandbox`] crate's
 //!   command-backend abstraction (deny-all caps, stdin = payload JSON) when a
-//!   command-capable backend (docker/daytona/…) is configured **and** live;
-//!   otherwise a bare host-`python` subprocess fallback (mirrors the Deno spawn:
-//!   `env_clear` + scrub + `kill_on_drop` + deadline) — explicitly **not**
-//!   isolated, logged as such. If python is unavailable at all, the evaluator is
-//!   honestly reported as `executed:false` rather than faked.
+//!   command-capable backend (docker/daytona/…) is configured **and** live.
+//!   When none is, a release build **refuses** the evaluator
+//!   (`executed:false`) rather than running user python on the host; the bare
+//!   host-`python` subprocess is opt-in only
+//!   ([`ENV_ALLOW_UNSANDBOXED_PYTHON`]) and every outcome it produces is tagged
+//!   [`UNSANDBOXED_DETAIL_TAG`] on the wire. If python is unavailable at all, the
+//!   evaluator is honestly reported as `executed:false` rather than faked.
+//!
+//! **Why the python arm is fail-closed.** The default sandbox backend is
+//! `wasmtime`, which is a WASM-*module* runner — `build_command_backend` rejects
+//! it outright — so "no command-capable backend" is not an edge case, it is the
+//! out-of-the-box configuration of every node that has not installed docker or
+//! configured daytona. The old code answered that by executing the user's python
+//! on the host behind a single `tracing::warn!`, i.e. the shipped default was
+//! "arbitrary code, no isolation, no notice". Guardrails elsewhere in the tree
+//! fail *open* because availability wins; executing code is the inverse case, and
+//! the tree already draws that line the same way
+//! (`plugins::lifecycle::stub_may_approve` refuses arbitrary-code-execution
+//! grants in release builds even when the stub seam is on). The JS arm has always
+//! behaved this way — no Deno ⇒ `skipped`, never a host fallback — so this makes
+//! the two languages agree.
 //!
 //! **Core-vs-Gateway placement:** code execution is a *Core* capability, so the
 //! Gateway's offline eval runner (`POST /v1/evals/run`) marks `Code` evaluators
@@ -120,6 +136,12 @@ pub struct CodeEvalOutcome {
     pub executed: bool,
     /// Failure/skip reason, when `executed == false`.
     pub error: Option<String>,
+    /// `true` when this outcome came from the opt-in un-sandboxed host-python
+    /// fallback. Kept as its own field rather than baked into `detail` so the
+    /// evaluator's own `detail` stays verbatim for callers; [`Self::display_detail`]
+    /// folds [`UNSANDBOXED_DETAIL_TAG`] in for the wire, which is where a human
+    /// reads it.
+    pub unsandboxed: bool,
 }
 
 impl CodeEvalOutcome {
@@ -132,6 +154,7 @@ impl CodeEvalOutcome {
             detail: d.clone(),
             executed: false,
             error: Some(d),
+            unsandboxed: false,
         }
     }
 
@@ -144,6 +167,7 @@ impl CodeEvalOutcome {
             detail: String::new(),
             executed: false,
             error: Some(e),
+            unsandboxed: false,
         }
     }
 
@@ -171,16 +195,36 @@ impl CodeEvalOutcome {
             detail,
             executed: true,
             error: None,
+            unsandboxed: false,
         }
     }
 
+    /// Mark an outcome as having come from the un-sandboxed host-python fallback.
+    /// Applied to whatever the subprocess produced (score, failure, or timeout) so
+    /// the tag cannot be lost on the error paths.
+    fn marked_unsandboxed(mut self) -> Self {
+        self.unsandboxed = true;
+        self
+    }
+
     /// The `detail` string to surface on the wire `EvaluatorScore` (folds any
-    /// error in so a skip/failure is legible, not silent).
+    /// error in so a skip/failure is legible, not silent — and prefixes
+    /// [`UNSANDBOXED_DETAIL_TAG`] when the score was produced without isolation,
+    /// so "this number came from code we ran on the host" is visible next to the
+    /// number rather than buried in a log line nobody reads).
     fn display_detail(&self) -> String {
-        match (&self.error, self.detail.is_empty()) {
+        let base = match (&self.error, self.detail.is_empty()) {
             (Some(e), true) => e.clone(),
             (Some(e), false) => format!("{}: {}", self.detail, e),
             (None, _) => self.detail.clone(),
+        };
+        if !self.unsandboxed {
+            return base;
+        }
+        if base.is_empty() {
+            UNSANDBOXED_DETAIL_TAG.to_owned()
+        } else {
+            format!("{UNSANDBOXED_DETAIL_TAG} {base}")
         }
     }
 }
@@ -218,6 +262,75 @@ async fn run_js(_source: &str, _payload: &Value, _timeout: Duration) -> CodeEval
 
 // ── Python ─────────────────────────────────────────────────────────────────────
 
+/// Env var that opts a node **into** running python code evaluators as a bare
+/// host subprocess when no command-capable sandbox backend is live. Truthy values:
+/// `1`/`true`/`yes`/`on` (case-insensitive); anything else, including unset, keeps
+/// the fail-closed default.
+///
+/// This is a deliberate escape hatch, not a config knob to reach for: setting it
+/// means "user-authored python from an eval request may execute on this host with
+/// the host's filesystem and network". The alternative — install docker or point
+/// `RYU_SANDBOX_BACKEND`/the sandbox picker at daytona — is the supported path.
+pub const ENV_ALLOW_UNSANDBOXED_PYTHON: &str = "RYU_EVAL_ALLOW_UNSANDBOXED_PYTHON";
+
+/// Prefix stamped onto the wire `detail` of every score the un-sandboxed host
+/// fallback produced (see [`CodeEvalOutcome::display_detail`]).
+pub const UNSANDBOXED_DETAIL_TAG: &str = "[unsandboxed: host python]";
+
+/// What to do when no command-capable sandbox backend is live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostFallback {
+    /// Refuse the evaluator, reporting this reason as an `executed:false` skip.
+    Refuse(String),
+    /// Run it on the host, tagged [`UNSANDBOXED_DETAIL_TAG`].
+    AllowUnsandboxed,
+}
+
+/// Parse the [`ENV_ALLOW_UNSANDBOXED_PYTHON`] opt-in. Split out from the env read
+/// so the truthy set is pinned by a test rather than by whatever the host
+/// environment happens to hold.
+fn unsandboxed_opt_in(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// The refuse-or-allow rule, split out so it is testable on its own.
+/// [`host_fallback`] itself cannot be meaningfully asserted from this crate's test
+/// suite: it is gated on `cfg!(debug_assertions)`, which is always true under
+/// `cargo test`, so the fallback always looks allowed there and a test would pass
+/// whether or not the release build refuses. Testing the rule directly is what
+/// actually pins the posture. (Same shape, and the same reason, as
+/// `apps/core::plugins::lifecycle::is_arbitrary_code_execution_grant`.)
+fn host_fallback_rule(backend_name: &str, opted_in: bool, debug_build: bool) -> HostFallback {
+    if opted_in || debug_build {
+        return HostFallback::AllowUnsandboxed;
+    }
+    HostFallback::Refuse(format!(
+        "python code evaluators need a command-capable sandbox backend (docker/daytona); the \
+         configured backend '{backend_name}' cannot run commands, and this evaluator was refused \
+         rather than executed unsandboxed on the host. Configure docker/daytona, or set \
+         {ENV_ALLOW_UNSANDBOXED_PYTHON}=1 to accept the un-sandboxed host fallback."
+    ))
+}
+
+/// [`host_fallback_rule`] against the live environment.
+///
+/// Debug builds always allow the fallback: this crate's own python runtime tests
+/// (`tests.rs`) drive `run_code_evaluator` with no sandbox configured and must keep
+/// exercising the subprocess executor, and the integration harness runs unshipped
+/// debug binaries. Release builds — everything a user installs — refuse unless the
+/// operator opted in.
+fn host_fallback(backend_name: &str) -> HostFallback {
+    let raw = std::env::var(ENV_ALLOW_UNSANDBOXED_PYTHON).ok();
+    host_fallback_rule(
+        backend_name,
+        unsandboxed_opt_in(raw.as_deref()),
+        cfg!(debug_assertions),
+    )
+}
+
 async fn run_python(source: &str, payload: &Value, timeout: Duration) -> CodeEvalOutcome {
     use ryu_sandbox::{build_command_backend, configured_backend, detect_backend, ExecSpec};
 
@@ -246,7 +359,21 @@ async fn run_python(source: &str, payload: &Value, timeout: Duration) -> CodeEva
         }
     }
 
-    // Fallback: bare host subprocess — NOT sandbox-isolated. Honest + logged.
+    // No live command-capable backend. This is the DEFAULT configuration, not an
+    // edge case: `wasmtime` (the built-in default backend) runs WASM modules, so
+    // `build_command_backend` rejects it and we land here on any node without
+    // docker/daytona. Refuse unless the operator opted in — see `host_fallback`.
+    if let HostFallback::Refuse(reason) = host_fallback(backend.as_str()) {
+        tracing::warn!(
+            backend = backend.as_str(),
+            "refused a python code evaluator: no command-capable sandbox backend is live and the \
+             un-sandboxed host fallback is not enabled ({ENV_ALLOW_UNSANDBOXED_PYTHON})"
+        );
+        return CodeEvalOutcome::skipped(reason);
+    }
+
+    // Opted in (or a debug build): bare host subprocess — NOT sandbox-isolated.
+    // Logged AND tagged onto the outcome, so the score itself carries the notice.
     if !python_on_path() {
         return CodeEvalOutcome::skipped(
             "python is unavailable on PATH and no command-capable sandbox backend is configured; python evaluator skipped",
@@ -256,7 +383,9 @@ async fn run_python(source: &str, payload: &Value, timeout: Duration) -> CodeEva
         "running a python code evaluator via a bare host subprocess (NOT sandbox-isolated); \
          configure a command-capable sandbox backend (docker/daytona) for real isolation"
     );
-    run_python_subprocess(&script, &payload_bytes, timeout).await
+    run_python_subprocess(&script, &payload_bytes, timeout)
+        .await
+        .marked_unsandboxed()
 }
 
 /// Wrap the user python: read the payload JSON from stdin, bind `ctx` +
@@ -604,3 +733,82 @@ fn reaggregate(block: &mut Value, specs: &[CodeEvaluatorSpec]) {
 
 #[cfg(test)]
 mod tests;
+
+/// Tests for the python sandbox posture. Separate from `tests.rs` because these
+/// pin the *release* decision, which `cargo test` (a debug build) can never take:
+/// they assert the pure rule, never `host_fallback` itself.
+#[cfg(test)]
+mod sandbox_posture_tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_truthy_values_opt_into_the_unsandboxed_fallback() {
+        for yes in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(unsandboxed_opt_in(Some(yes)), "{yes:?} should opt in");
+        }
+        for no in ["", "0", "false", "no", "off", "maybe"] {
+            assert!(!unsandboxed_opt_in(Some(no)), "{no:?} must not opt in");
+        }
+        assert!(!unsandboxed_opt_in(None), "unset must not opt in");
+    }
+
+    #[test]
+    fn release_build_without_opt_in_refuses_and_says_how_to_proceed() {
+        let decision = host_fallback_rule("wasmtime", false, false);
+        let HostFallback::Refuse(reason) = decision else {
+            panic!("a release build with no live command sandbox must refuse: {decision:?}");
+        };
+        assert!(
+            reason.contains("wasmtime"),
+            "the refusal must name the configured backend: {reason}"
+        );
+        assert!(
+            reason.contains(ENV_ALLOW_UNSANDBOXED_PYTHON) && reason.contains("docker"),
+            "the refusal must name both remedies: {reason}"
+        );
+    }
+
+    #[test]
+    fn opt_in_or_debug_build_allows_the_host_fallback() {
+        assert_eq!(
+            host_fallback_rule("wasmtime", true, false),
+            HostFallback::AllowUnsandboxed,
+            "an explicit opt-in must be honoured in a release build"
+        );
+        assert_eq!(
+            host_fallback_rule("wasmtime", false, true),
+            HostFallback::AllowUnsandboxed,
+            "debug builds keep the fallback so the python runtime tests still run it"
+        );
+    }
+
+    #[test]
+    fn unsandboxed_scores_are_tagged_on_the_wire_but_keep_their_own_detail() {
+        let scored = CodeEvalOutcome::from_return(&json!({ "score": 1.0, "detail": "nope" }))
+            .marked_unsandboxed();
+        assert_eq!(scored.detail, "nope", "the evaluator's detail stays verbatim");
+        assert_eq!(
+            scored.display_detail(),
+            format!("{UNSANDBOXED_DETAIL_TAG} nope"),
+            "the wire detail must announce the missing isolation"
+        );
+
+        // A sandboxed score is never tagged, and neither is the refusal skip.
+        let sandboxed = CodeEvalOutcome::from_return(&json!({ "score": 1.0, "detail": "nope" }));
+        assert_eq!(sandboxed.display_detail(), "nope");
+        let HostFallback::Refuse(reason) = host_fallback_rule("wasmtime", false, false) else {
+            unreachable!("covered above")
+        };
+        let refused = CodeEvalOutcome::skipped(reason);
+        assert!(!refused.unsandboxed);
+        assert!(!refused.display_detail().contains(UNSANDBOXED_DETAIL_TAG));
+    }
+
+    #[test]
+    fn a_failed_unsandboxed_run_is_still_tagged() {
+        // The tag rides on the outcome, not on the happy path: a timeout or a
+        // non-zero exit from host python must still say it was un-sandboxed.
+        let failed = CodeEvalOutcome::failed("python subprocess error: boom").marked_unsandboxed();
+        assert!(failed.display_detail().starts_with(UNSANDBOXED_DETAIL_TAG));
+    }
+}

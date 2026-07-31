@@ -4,7 +4,16 @@
 //! where the CLI keeps the same JSON blob instead of an on-disk file — and calls
 //! `GET https://api.anthropic.com/api/oauth/usage` — the same endpoint Claude
 //! Code's own `/usage` uses — then maps `five_hour` / `seven_day` /
-//! `seven_day_sonnet` / `extra_usage` into normalized windows.
+//! `extra_usage` and the model-scoped `limits[]` windows into normalized meters.
+//!
+//! Anthropic moved the per-model weekly windows off the legacy top-level
+//! `seven_day_<model>` keys (which now come back null) and into a `limits` array
+//! whose `kind: "weekly_scoped"` entries name their model in
+//! `scope.model.display_name`. So the array is the primary path — which makes the
+//! per-model labels *data* ("Sonnet", "Opus", "Fable", whatever ships next)
+//! rather than a closed set baked into this file — and the legacy
+//! `seven_day_sonnet` key stays as a fallback for accounts still served the old
+//! shape.
 //!
 //! The endpoint shape + required `anthropic-beta: oauth-2025-04-20` header were
 //! reconstructed from the openusage reference implementation; verify against one
@@ -15,8 +24,15 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use super::{
-    http_client, read_file, reason_for_status, UsageSnapshot, UsageUnavailable, UsageWindow,
+    clamp_percent, http_client, read_file, reason_for_status, retry_after_seconds, UsageMeter,
+    UsageSnapshot, UsageUnavailable, UsageValue, UsageValueKind, UsageWindow,
 };
+
+/// The 5-hour session window, in seconds — reported to the client so it can label
+/// the meter from the data rather than from the English label.
+const SESSION_WINDOW_SECS: i64 = 5 * 60 * 60;
+/// The 7-day window, in seconds.
+const WEEKLY_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
@@ -189,48 +205,108 @@ pub(super) async fn fetch(agent_id: &str) -> UsageSnapshot {
         Err(_) => return unavailable(UsageUnavailable::Error),
     };
     if !resp.status().is_success() {
-        return unavailable(reason_for_status(resp.status()));
+        let reason = reason_for_status(resp.status());
+        let retry_after = retry_after_seconds(resp.headers());
+        let mut snapshot = unavailable(reason);
+        snapshot.retry_after_seconds = retry_after;
+        return snapshot;
     }
     let Ok(body) = resp.json::<serde_json::Value>().await else {
         return unavailable(UsageUnavailable::Error);
     };
 
-    let mut windows = Vec::new();
-    if let Some(w) = window(&body, "five_hour", "Session") {
-        windows.push(w);
+    let mut snapshot = UsageSnapshot::available(agent_id, "claude", plan);
+
+    if let Some(w) = window(&body, "five_hour", "Session", SESSION_WINDOW_SECS) {
+        snapshot.windows.push(w);
     }
-    if let Some(w) = window(&body, "seven_day", "Weekly") {
-        windows.push(w);
+    if let Some(w) = window(&body, "seven_day", "Weekly", WEEKLY_WINDOW_SECS) {
+        snapshot.windows.push(w);
     }
-    if let Some(w) = window(&body, "seven_day_sonnet", "Sonnet weekly") {
-        windows.push(w);
+    // Per-model weekly windows: the `limits[]` array is where Anthropic reports
+    // them now, so it wins; the legacy `seven_day_sonnet` key is only consulted
+    // when the array yielded nothing (an account still on the old shape).
+    let scoped = scoped_weekly_windows(&body);
+    if scoped.is_empty() {
+        if let Some(w) = window(&body, "seven_day_sonnet", "Sonnet", WEEKLY_WINDOW_SECS) {
+            snapshot.windows.push(w);
+        }
+    } else {
+        snapshot.windows.extend(scoped);
     }
 
-    UsageSnapshot {
-        agent_id: agent_id.to_string(),
-        engine: "claude".to_string(),
-        available: true,
-        plan,
-        reason: None,
-        windows,
-        extra_usage_usd: extra_usage_usd(&body),
+    snapshot.extra_usage_usd = extra_usage_usd(&body);
+    if let Some(meter) = extra_usage_meter(&body) {
+        snapshot.meters.push(meter);
     }
+
+    snapshot
 }
 
 /// Map one `{ utilization, resets_at }` object into a normalized window.
 /// `utilization` is already a 0–100 percent.
-fn window(body: &serde_json::Value, key: &str, label: &str) -> Option<UsageWindow> {
+fn window(
+    body: &serde_json::Value,
+    key: &str,
+    label: &str,
+    window_seconds: i64,
+) -> Option<UsageWindow> {
     let obj = body.get(key)?;
     let used_percent = obj.get("utilization").and_then(serde_json::Value::as_f64)?;
     Some(UsageWindow {
         label: label.to_string(),
-        used_percent,
-        resets_at: obj
-            .get("resets_at")
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
+        used_percent: clamp_percent(used_percent),
+        resets_at: resets_at(obj),
+        window_seconds: Some(window_seconds),
+        model: None,
     })
+}
+
+/// A window object's `resets_at`, when it carries a non-empty one.
+fn resets_at(obj: &serde_json::Value) -> Option<String> {
+    obj.get("resets_at")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The model-scoped weekly windows from the `limits` array: every entry with
+/// `kind: "weekly_scoped"` becomes its own meter labelled with the model's
+/// `scope.model.display_name` ("Sonnet", "Opus", "Fable", …), so a model
+/// Anthropic adds later shows up without a code change. `percent` is 0–100.
+///
+/// An entry missing its display name or percent is skipped rather than dropping
+/// its valid siblings.
+fn scoped_weekly_windows(body: &serde_json::Value) -> Vec<UsageWindow> {
+    let Some(limits) = body.get("limits").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    limits
+        .iter()
+        .filter(|entry| {
+            entry.get("kind").and_then(serde_json::Value::as_str) == Some("weekly_scoped")
+        })
+        .filter_map(|entry| {
+            let label = entry
+                .get("scope")
+                .and_then(|scope| scope.get("model"))
+                .and_then(|model| model.get("display_name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())?;
+            let used_percent = entry.get("percent").and_then(serde_json::Value::as_f64)?;
+            Some(UsageWindow {
+                label: label.to_string(),
+                used_percent: clamp_percent(used_percent),
+                resets_at: resets_at(entry),
+                window_seconds: Some(WEEKLY_WINDOW_SECS),
+                // The display name IS the model, so a client can hang this quota
+                // off the right model row without guessing from the label.
+                model: Some(label.to_string()),
+            })
+        })
+        .collect()
 }
 
 /// Monthly pay-as-you-go "extra usage" dollars spent, when enabled. `used_credits`
@@ -244,6 +320,31 @@ fn extra_usage_usd(body: &serde_json::Value) -> Option<f64> {
         .get("used_credits")
         .and_then(serde_json::Value::as_f64)?;
     Some(cents / 100.0)
+}
+
+/// The extra-usage row: dollars spent this month and, when the plan carries a
+/// `monthly_limit`, the cap they run against — so the client can show "$3 of $25"
+/// instead of a bare number. Both figures are cents upstream.
+fn extra_usage_meter(body: &serde_json::Value) -> Option<UsageMeter> {
+    let used = extra_usage_usd(body)?;
+    let mut values = vec![UsageValue::new(
+        used,
+        UsageValueKind::Dollars,
+        Some("spent"),
+    )];
+    if let Some(limit) = body
+        .get("extra_usage")
+        .and_then(|obj| obj.get("monthly_limit"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|cents| cents.is_finite() && *cents > 0.0)
+    {
+        values.push(UsageValue::new(
+            limit / 100.0,
+            UsageValueKind::Dollars,
+            Some("cap"),
+        ));
+    }
+    Some(UsageMeter::new("Extra usage", values))
 }
 
 /// "Max" + " 20x" → "Max 20x". Title-case the subscription, append the numeric
@@ -268,21 +369,11 @@ fn format_plan(subscription_type: Option<&str>, rate_limit_tier: Option<&str>) -
     }
 }
 
-/// Lowercase-then-capitalize each whitespace/underscore-separated word.
+/// Lowercase-then-capitalize each whitespace/underscore-separated word. Thin
+/// wrapper over the crate-shared helper so every vendor's plan label is cased the
+/// same way.
 fn title_case(s: &str) -> String {
-    s.split(|c: char| c.is_whitespace() || c == '_')
-        .filter(|w| !w.is_empty())
-        .map(|w| {
-            let mut chars = w.chars();
-            match chars.next() {
-                Some(first) => {
-                    first.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
-                }
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    super::title_case(s, &[' ', '\t', '\n', '_'])
 }
 
 #[cfg(test)]
@@ -343,10 +434,7 @@ mod tests {
         // A bare "x" segment (len == 1) is filtered out => base only.
         assert_eq!(format_plan(Some("pro"), Some("x")).as_deref(), Some("Pro"));
         // Non-numeric prefix before x is rejected => base only.
-        assert_eq!(
-            format_plan(Some("pro"), Some("ax")).as_deref(),
-            Some("Pro")
-        );
+        assert_eq!(format_plan(Some("pro"), Some("ax")).as_deref(), Some("Pro"));
     }
 
     #[test]
@@ -360,25 +448,93 @@ mod tests {
         let body = serde_json::json!({
             "five_hour": { "utilization": 42.5, "resets_at": "2026-07-23T05:00:00Z" }
         });
-        let w = window(&body, "five_hour", "Session").unwrap();
+        let w = window(&body, "five_hour", "Session", SESSION_WINDOW_SECS).unwrap();
         assert_eq!(w.label, "Session");
         assert_eq!(w.used_percent, 42.5);
         assert_eq!(w.resets_at.as_deref(), Some("2026-07-23T05:00:00Z"));
+        assert_eq!(w.window_seconds, Some(SESSION_WINDOW_SECS));
+        // The account-wide windows are NOT model-scoped.
+        assert!(w.model.is_none());
     }
 
     #[test]
     fn window_empty_resets_at_is_dropped() {
         let body = serde_json::json!({ "k": { "utilization": 3.0, "resets_at": "" } });
-        let w = window(&body, "k", "L").unwrap();
+        let w = window(&body, "k", "L", WEEKLY_WINDOW_SECS).unwrap();
         assert!(w.resets_at.is_none());
     }
 
     #[test]
     fn window_none_without_utilization() {
         let body = serde_json::json!({ "k": { "resets_at": "x" } });
-        assert!(window(&body, "k", "L").is_none());
+        assert!(window(&body, "k", "L", WEEKLY_WINDOW_SECS).is_none());
         // Missing key entirely.
-        assert!(window(&body, "absent", "L").is_none());
+        assert!(window(&body, "absent", "L", WEEKLY_WINDOW_SECS).is_none());
+    }
+
+    // ── model-scoped weekly limits (the `limits[]` array) ────────────────────
+
+    #[test]
+    fn scoped_weekly_windows_label_from_the_model_display_name() {
+        let body = serde_json::json!({ "limits": [
+            { "kind": "weekly_scoped", "percent": 12.0, "resets_at": "2026-08-01T00:00:00Z",
+              "scope": { "model": { "display_name": "Sonnet" } } },
+            { "kind": "weekly_scoped", "percent": 88.0,
+              "scope": { "model": { "display_name": "Opus" } } },
+            // A non-scoped entry, and a scoped one missing its percent: skipped
+            // without discarding the valid siblings.
+            { "kind": "five_hour", "percent": 5.0, "scope": { "model": { "display_name": "X" } } },
+            { "kind": "weekly_scoped", "scope": { "model": { "display_name": "Fable" } } }
+        ]});
+        let windows = scoped_weekly_windows(&body);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Sonnet");
+        assert_eq!(windows[0].used_percent, 12.0);
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-08-01T00:00:00Z")
+        );
+        assert_eq!(windows[0].window_seconds, Some(WEEKLY_WINDOW_SECS));
+        // Scoped windows name their model so a client can attach the quota to the
+        // right model row instead of inferring it from the label.
+        assert_eq!(windows[0].model.as_deref(), Some("Sonnet"));
+        // A model Anthropic adds later needs no code change here.
+        assert_eq!(windows[1].label, "Opus");
+        assert_eq!(windows[1].used_percent, 88.0);
+    }
+
+    #[test]
+    fn scoped_weekly_windows_empty_without_a_usable_array() {
+        assert!(scoped_weekly_windows(&serde_json::json!({})).is_empty());
+        assert!(scoped_weekly_windows(&serde_json::json!({ "limits": {} })).is_empty());
+        // Scoped entry with a blank display name → nothing to label it with.
+        let blank = serde_json::json!({ "limits": [
+            { "kind": "weekly_scoped", "percent": 1.0, "scope": { "model": { "display_name": " " } } }
+        ]});
+        assert!(scoped_weekly_windows(&blank).is_empty());
+    }
+
+    #[test]
+    fn extra_usage_meter_carries_the_monthly_cap_when_there_is_one() {
+        let capped = serde_json::json!({
+            "extra_usage": { "is_enabled": true, "used_credits": 250, "monthly_limit": 2500 }
+        });
+        let meter = extra_usage_meter(&capped).expect("meter");
+        assert_eq!(meter.label, "Extra usage");
+        assert_eq!(meter.values.len(), 2);
+        assert_eq!(meter.values[0].number, 2.5);
+        assert_eq!(meter.values[0].unit.as_deref(), Some("spent"));
+        assert_eq!(meter.values[1].number, 25.0);
+        assert_eq!(meter.values[1].unit.as_deref(), Some("cap"));
+
+        // Uncapped: spend alone, no fabricated denominator.
+        let uncapped = serde_json::json!({
+            "extra_usage": { "is_enabled": true, "used_credits": 250, "monthly_limit": 0 }
+        });
+        assert_eq!(extra_usage_meter(&uncapped).unwrap().values.len(), 1);
+        // Disabled extra usage has no row at all.
+        let disabled = serde_json::json!({ "extra_usage": { "is_enabled": false } });
+        assert!(extra_usage_meter(&disabled).is_none());
     }
 
     #[test]
@@ -395,8 +551,7 @@ mod tests {
             "extra_usage": { "is_enabled": false, "used_credits": 250 }
         });
         assert_eq!(extra_usage_usd(&disabled), None);
-        let no_credits =
-            serde_json::json!({ "extra_usage": { "is_enabled": true } });
+        let no_credits = serde_json::json!({ "extra_usage": { "is_enabled": true } });
         assert_eq!(extra_usage_usd(&no_credits), None);
         assert_eq!(extra_usage_usd(&serde_json::json!({})), None);
     }
@@ -525,7 +680,9 @@ mod tests {
         );
         assert_eq!(snap.windows[1].label, "Weekly");
         assert!(snap.windows[1].resets_at.is_none());
-        assert_eq!(snap.windows[2].label, "Sonnet weekly");
+        // The legacy `seven_day_sonnet` fallback: this fixture carries no
+        // `limits[]` array, so the old key is what supplies the Sonnet meter.
+        assert_eq!(snap.windows[2].label, "Sonnet");
         clear_env();
     }
 

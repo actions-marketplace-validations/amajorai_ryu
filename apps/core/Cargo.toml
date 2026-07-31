@@ -1,6 +1,6 @@
 [package]
 name = "ryu-core"
-version = "0.0.14"
+version = "0.0.15"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -47,6 +47,11 @@ bzip2 = "0.5"
 tar = "0.4"
 zip = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
+# IANA zone database, so a cron schedule can be evaluated in the user's own
+# wall-clock time instead of UTC. A fixed offset would drift an hour twice a
+# year across DST — the exact failure a "fire at 05:00 local" schedule cannot
+# tolerate. See `scheduler::cron::CronSchedule::matches_in`.
+chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 sqlite-vec = "=0.1.6"
 humantime = "2"
@@ -516,9 +521,9 @@ tracing-opentelemetry = "0.33"
 # transport matches the tree's existing reqwest (no second TLS stack pulled).
 sentry = { version = "0.34", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "native-tls"] }
 
-# transcribe-rs (the git-only ONNX Runtime dep) is no longer a direct Core dep: the
-# parakeet STT engine moved to `ryu-stt` and the Silero VAD engine moved to
-# `ryu-vad`, each carrying its own copy at the same git rev behind its own feature.
+# transcribe-rs (the ONNX Runtime dep) is no longer a direct Core dep: the parakeet
+# STT engine moved to `ryu-stt` and the Silero VAD engine moved to `ryu-vad`, each
+# carrying its own copy at the same version behind its own feature.
 # Core reaches both only through those crates' forwarded features (`voice-parakeet`
 # / `voice-vad`), so nothing in `apps/core/src` uses `transcribe_rs` directly.
 
@@ -554,14 +559,24 @@ winapi = { version = "0.3", features = ["winuser"] }
 # gated to this linux-only target block. See the comment beside them.)
 
 [features]
-# Programmatic tool calling (PTC, #476). `tool-exec-deno` is the default
-# backend: a Deno subprocess (no crate dep — Deno is on PATH), deny-by-default
-# permissions, real process isolation. `tool-exec-quickjs` is an off-by-default
-# in-process backend gated until a `quickjs_smoke` probe passes on Windows.
-# `tool-exec-securexec` (rivet secure-exec, V8 isolate) and `tool-exec-justbash`
-# (just-bash in-memory shell) are off-by-default alternative PTC backends:
-# registered/selectable but gated as stubs until their Node/Bun runtime + stdio
-# tool-bridge harness land (same posture as tool-exec-quickjs).
+# Programmatic tool calling (PTC, #476). TWO backends exist, not four:
+# `tool-exec-deno` (the default) — a Deno subprocess (no crate dep — Deno is on
+# PATH), deny-by-default permissions, real process isolation; and
+# `tool-exec-securexec` (rivet secure-exec, V8 isolate) — off by default,
+# forwarding to `ryu-tool-exec/tool-exec-securexec`, which really does gate code
+# (`securexec_backend.rs`, behind a `securexec_available()` probe).
+#
+# There were two more here, `tool-exec-quickjs = []` (in-process rquickjs) and
+# `tool-exec-justbash = []` (just-bash in-memory shell), documented as
+# "registered/selectable but gated as stubs". They were neither: grepping
+# `quickjs`/`justbash` across `apps/core/src` and `crates/` matched nothing but
+# this comment, so both features gated ZERO code — `--features tool-exec-quickjs`
+# produced a binary byte-identical to the default while implying a sandbox
+# choice, and the empty declarations were the only thing making the PTC seam look
+# four-wide. Deleted. Re-add one only in the same change as the code it gates.
+# (`apps/fumadocs/content/docs/core/{sandbox,programmatic-tool-calling}.mdx` used to
+# describe rquickjs as an available flag; both were corrected in the same wave, so the
+# published docs now name `tool-exec-securexec` as the one alternative backend.)
 default = ["tool-exec-deno"]
 tool-exec-deno = ["ryu-tool-exec/tool-exec-deno", "ryu-eval-code/tool-exec-deno"]
 # Deep-research is now OUT-OF-PROCESS: the `ryu-research` sidecar serves `/api/research/*`
@@ -600,20 +615,77 @@ tool-exec-deno = ["ryu-tool-exec/tool-exec-deno", "ryu-eval-code/tool-exec-deno"
 # out-of-process `com.ryu.mail` app — `crates/ryu-mail` spawned by the generic
 # sidecar loader, `/api/mail/*` served via `public_mount`. `mail-parser` moved
 # to that crate.)
-tool-exec-quickjs = []
 tool-exec-securexec = ["ryu-tool-exec/tool-exec-securexec"]
-tool-exec-justbash = []
-# Off in `default` on purpose (spike 0188: keep `cargo test`/CI lean). The dev
-# and release binaries the user actually runs DO enable it — see the `dev`/
-# `dev:watch`/`build` scripts in apps/core/package.json — so the shipped app has
-# the default WASM sandbox compiled in and `detect_backend("wasmtime")` is true.
+
+# ── The three "off in default, ON in every shipped binary" features ───────────
+# `sandbox-wasmtime` + `voice-parakeet` + `voice-vad` are off in `default` on
+# purpose (spike 0188): a `cargo test`/`cargo check` run then pulls neither
+# wasmtime/cranelift nor ONNX Runtime, which is minutes of CI time per job.
+#
+# Off in `default` does NOT mean off in the product. Every binary a human runs
+# must carry all three, and SEVEN build sites are responsible for passing
+# `--features sandbox-wasmtime,voice-parakeet,voice-vad`. In THIS repo:
+#   1. apps/core/package.json     — `dev`, `dev:watch`, `build`
+#   2. .github/workflows/release.yml — the `binaries` job (published assets: what
+#      the desktop's `core/install.rs` downloads AND the one-liner installer)
+#   3. scripts/release/release-local.sh — `build_binaries`
+#   4. Dockerfile                 — the builder stage (every deploy button)
+# And in `mirror/overlay/.github/workflows/`, which is published INTO the public
+# `amajorai/ryu` repo and therefore builds Core with the public tree's own copies
+# of `crates/core/{sandbox,stt,vad}` (all three are mirrored wholesale, so the
+# features resolve there):
+#   5. release.yml — the `build` job; fires on a `v*` tag pushed directly to the
+#      public repo. Rare, but it uploads with `--clobber`, so it can OVERWRITE a
+#      correctly-featured asset that `mirror-releases.yml` copied under that tag.
+#   6. nightly.yml — the `build` job. Runs DAILY on the public repo.
+#   7. canary.yml  — the `build` job. Runs on EVERY push to public main.
+# (6) and (7) are not hypothetical: `apps/core/src/update/mod.rs` has first-class
+# channel support, so a node on the nightly or canary channel installs exactly
+# what those two jobs produce.
+# Adding a feature to this list means adding it to all seven. The list was
+# verified EXHAUSTIVE by a tree-wide grep for `cargo build` across
+# `.github/ mirror/ scripts/ tools/ Dockerfile* apps/core/{package.json,scripts}`;
+# the other hits build something else (the SDK cdylib, satellite app backends, the
+# gateway image) or build Core in DEBUG for checks-only jobs that publish nothing
+# — `mirror/overlay/.github/workflows/ci.yml` and `scripts/integration-tests.sh`.
+# That second pair is a knowingly-lean Core: the headless integration suite
+# therefore exercises a binary with no WASM sandbox. Deliberate (it keeps the
+# suite fast, same rationale as `default`), and stated here so nobody reads suite
+# coverage as coverage of the shipped configuration.
+#
+# This comment used to say only (1) mattered — "the dev and release binaries the
+# user actually runs DO enable it — see the dev/dev:watch/build scripts in
+# apps/core/package.json". Half true, and the false half was the shipping half:
+# (2)…(7) each ran a bare `cargo build --release`, so every Core a user
+# ever downloaded had NO WASM sandbox (`detect_backend("wasmtime")` false), NO
+# parakeet inference (STT silently fell back to whisper) and NO Silero VAD, while
+# every developer had all three and could not reproduce any of it. It was then
+# corrected to "FOUR build sites", which was the same defect one layer down: (5),
+# (6) and (7) were still bare, so the enumeration a reader would trust to be
+# exhaustive silently excluded the two channels that publish most often.
+#
+# (2), (5), (6) and (7) now assert the resolved feature graph after the build —
+# they read cargo's own `bin-ryu-core.json` fingerprint — so a dropped flag fails
+# the release instead of shipping a lean binary that lies about its capabilities.
+# The fingerprint PATH differs between the two repos and the assertions differ
+# with it: here the build is a workspace member, so it is
+# `target/release/.fingerprint/*/bin-ryu-core.json`; the public mirror ships NO
+# root Cargo.toml (every manifest is its own workspace), so there it is
+# `apps/core/target/release/.fingerprint/*/bin-ryu-core.json`. (5)–(7) also drop
+# any restored fingerprint before building, because those jobs use
+# Swatinem/rust-cache and an assertion that might be grading last week's artifact
+# is not an assertion. If you touch that assertion, note that it must match the
+# fingerprint's `features` key SPECIFICALLY: the same file also carries
+# `declared_features`, which lists all three names on a completely featureless
+# build. The first version of the check grepped the whole file and was therefore
+# vacuous. Each site's step comment carries the full argument.
 sandbox-wasmtime = ["dep:wasmtime", "dep:wasmtime-wasi", "ryu-sandbox/sandbox-wasmtime"]
 # Parakeet STT inference (the default STT engine). The in-process ONNX engine now
 # lives in the extracted `ryu-stt` crate; this feature forwards to the crate's own
-# `voice-parakeet` (which pulls transcribe-rs/once_cell there). Off in Cargo
-# `default` on purpose (keep `cargo test`/CI lean, same posture as
-# `sandbox-wasmtime`); the shipped dev/release binaries enable it via the
-# package.json scripts.
+# `voice-parakeet` (which pulls transcribe-rs/once_cell there). Without it the
+# parakeet sidecar refuses to start and reports `Unhealthy` naming this feature
+# (it used to report "Running" and 500 every transcription), and
+# `default_stt_engine()` resolves to whisper.
 voice-parakeet = ["ryu-stt/voice-parakeet"]
 # Neural VAD for voice mode (the default). The endpointing/barge-in state machine
 # + an energy-based probability backend are always compiled (voice mode works
@@ -622,9 +694,12 @@ voice-parakeet = ["ryu-stt/voice-parakeet"]
 # for parakeet). NOTE: the original plan was TEN VAD, but its ONNX model is not
 # usable standalone — its feature extraction lives in a closed precompiled native
 # lib — so Silero (fully open) is used instead. Off in Cargo `default` on purpose
-# (keep `cargo test`/CI lean, same posture as `sandbox-wasmtime`/`voice-parakeet`);
-# the shipped dev/release binaries enable it via the package.json scripts. Any
-# inference error falls back per-hop to the always-compiled energy VAD.
+# (see the shipped-feature-set block above — all SEVEN build sites enable it; do
+# not restate the count here without re-reading that block, this line said "four"
+# for one round after the block itself was corrected to seven, which is the same
+# stale-enumeration defect the block above narrates). Any inference error falls
+# back per-hop to the always-compiled energy VAD, so this is the one of the three
+# whose absence degrades quietly *by design*.
 voice-vad = ["ryu-vad/voice-vad"]
 
 [dev-dependencies]

@@ -4,11 +4,12 @@
 // / skills). Supplies the Core-node-scoped data hooks, the install-progress
 // button, the app Markdown renderer, and Tauri's `openExternal` through the
 // CatalogHost seam. `navigate` deep-links into a new tab, which the shared Skills
-// section uses to unlock its SKILL.md authoring UI, and the Models section uses
-// for the "Fine-tune this model" handoff. The hook functions the host carries are
-// stable module refs, so the section's `host.use*Catalog(...)` call resolves to
-// the same hook every render (rules of hooks); only `navigate` re-keys the
-// memoized host. Web mounts its own read-only host with `install: null`.
+// section pairs with `canAuthorSkills` to unlock its SKILL.md authoring UI, and the
+// Models section uses for the "Fine-tune this model" handoff. The hook functions the
+// host carries are stable module refs, so the section's `host.use*Catalog(...)` call
+// resolves to the same hook every render (rules of hooks); only `navigate` and the
+// authoring bit re-key the memoized host. Web mounts its own read-only host with
+// `install: null`.
 
 import { Markdown } from "@ryu/blocks/desktop/agent-elements/markdown";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
@@ -25,6 +26,8 @@ import { type ReactNode, useCallback, useMemo } from "react";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { ActiveModelControl } from "@/src/components/store/ActiveModelControl.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { SKILL_EDITOR_ALIAS } from "@/src/contributions/companion-alias.ts";
+import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAppsCatalog } from "@/src/hooks/useAppsCatalog.ts";
 import { useModelCatalog } from "@/src/hooks/useModelCatalog.ts";
@@ -93,8 +96,17 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 		[openTab]
 	);
 
+	// Whether the SKILL.md editor app is live. `navigate` alone only proves desktop
+	// CAN open a tab; `com.ryu.skill-editor` ships default-OFF, so without this the
+	// Skills section rendered New/Edit on every card and each opened "App not
+	// enabled". Read from the live contributions feed — the same source the
+	// `/skills/new` + `/skills/:id/edit` routes mount from — so the button and the
+	// page it opens can never disagree.
+	const skillEditorOwner = useCompanionAlias(SKILL_EDITOR_ALIAS);
+
 	const host = useMemo<CatalogHost>(
 		() => ({
+			canAuthorSkills: skillEditorOwner !== null,
 			install: { InstallButton: DesktopInstallButton },
 			Markdown,
 			navigate,
@@ -111,7 +123,7 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			ActiveModelControl,
 			fitStyle,
 		}),
-		[navigate]
+		[navigate, skillEditorOwner]
 	);
 
 	return <CatalogHostProvider host={host}>{children}</CatalogHostProvider>;

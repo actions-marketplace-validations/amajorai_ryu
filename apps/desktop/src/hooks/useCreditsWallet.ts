@@ -28,6 +28,7 @@ import {
 	hasCreditsAuth,
 	type LedgerEntry,
 } from "@/src/lib/api/credits.ts";
+import { type GrantPoolBalance, useCreditGrants } from "./useCreditGrants.ts";
 import { useWalletStream } from "./useWalletStream.ts";
 
 interface UseCreditsWallet {
@@ -37,6 +38,12 @@ interface UseCreditsWallet {
 	entitlement: Entitlement | null;
 	/** The classified error (auth / no_org / billing / unknown), or null. */
 	error: CreditsError | null;
+	/**
+	 * Pool-restricted grant balances, empty when the account holds none. These
+	 * DECOMPOSE `wallet.balanceMicroUsd` (the wallet's `grantBalanceMicroUsd`
+	 * bucket is already part of the total) — never add them to it.
+	 */
+	grantPools: GrantPoolBalance[];
 	ledger: LedgerEntry[];
 	loading: boolean;
 	refresh: () => Promise<void>;
@@ -56,6 +63,10 @@ export function useCreditsWallet(): UseCreditsWallet {
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<CreditsError | null>(null);
 	const authed = hasCreditsAuth();
+	// Grants ride their own cached query rather than this hook's manual refresh:
+	// the composer picker needs the same data with a different lifecycle, and a
+	// missing/failed grants route must never delay or fail the wallet load.
+	const { pools: grantPools } = useCreditGrants();
 
 	const refresh = useCallback(async () => {
 		if (!hasCreditsAuth()) {
@@ -131,6 +142,7 @@ export function useCreditsWallet(): UseCreditsWallet {
 		wallet,
 		ledger,
 		entitlement,
+		grantPools,
 		walletEmpty,
 		loading,
 		error,

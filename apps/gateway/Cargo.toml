@@ -1,6 +1,6 @@
 [package]
 name = "ryu-gateway"
-version = "0.0.14"
+version = "0.0.15"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -145,3 +145,14 @@ sentry = { version = "0.34", default-features = false, features = ["backtrace", 
 # WAT → wasm compilation for the wasm-policy test guests (proof + malicious-guest
 # fixtures authored inline as `.wat`, no wasm32 toolchain / committed binary blob).
 wat = "1"
+# TESTS ONLY (deliberately not a runtime dependency). Core owns the `ToolKind` enum
+# and `parse_filter`, the authority on which `tool_search` kind filters actually do
+# something; `tools/mod.rs` advertises that set to the model and `tools/
+# catalog_client.rs` mirrors the enum by hand. Both drift silently when Core grows a
+# variant, so `advertised_kind_filter_matches_cores_parse_filter_set` asserts against
+# the real type instead of a copied list — the same thing Core's own ACP twin
+# (`sidecar/adapters/mcp_bridge.rs`) does. The crate is a leaf primitive with ZERO
+# dependency on `apps/core` (serde + async-trait only), so this buys the check
+# without coupling the gateway's runtime to Core, and `apps/gateway` is not a
+# published crate (see tools/publish-crates.sh) so the path-only dep is inert there.
+ryu-tool-registry = { path = "../../crates/core/tool-registry" }

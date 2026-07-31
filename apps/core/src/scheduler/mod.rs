@@ -48,6 +48,10 @@ struct SchedulerInner {
     last_fired: tokio::sync::Mutex<std::collections::HashMap<String, DateTime<Utc>>>,
     /// Bounds how many fired jobs run concurrently (see [`MAX_CONCURRENT_JOBS`]).
     permits: Arc<tokio::sync::Semaphore>,
+    /// Installed-App state, used only to resolve `ScheduledJob::owner_app`.
+    /// `None` in headless/test contexts that never opened the store — jobs then
+    /// tick unconditionally, which is the pre-existing behaviour.
+    apps: Option<crate::plugins::PluginStore>,
 }
 
 impl Scheduler {
@@ -56,8 +60,21 @@ impl Scheduler {
             inner: Arc::new(SchedulerInner {
                 last_fired: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_JOBS)),
+                apps: None,
             }),
         }
+    }
+
+    /// Attach the installed-App store so `owner_app` jobs can be gated on their
+    /// App still being enabled. Called once at startup; without it every job
+    /// ticks, App-owned or not.
+    pub fn with_apps(mut self, apps: crate::plugins::PluginStore) -> Self {
+        self.inner = Arc::new(SchedulerInner {
+            last_fired: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_JOBS)),
+            apps: Some(apps),
+        });
+        self
     }
 
     /// Spawn the background tick loop. Returns immediately; the loop runs until
@@ -95,8 +112,37 @@ impl Scheduler {
             if !job.enabled {
                 continue;
             }
+            if !self.owner_app_enabled(&job).await {
+                continue;
+            }
             if self.is_due(&job, now).await {
                 self.fire(job, now).await;
+            }
+        }
+    }
+
+    /// True when `job` may fire given its owning App's state.
+    ///
+    /// A job with no `owner_app` is Core's or the desktop's and always passes.
+    /// An App-owned job passes only while that App is installed AND enabled, so
+    /// turning an App off stops the automations it created — the same
+    /// expectation a user has of every other thing an App does. Fails **open**
+    /// on a store error: a transient SQLite failure must not silently strand
+    /// every App-owned automation on the node.
+    async fn owner_app_enabled(&self, job: &ScheduledJob) -> bool {
+        let Some(app_id) = job.owner_app.as_deref() else {
+            return true;
+        };
+        let Some(apps) = self.inner.apps.as_ref() else {
+            return true;
+        };
+        match apps.get(app_id).await {
+            Ok(Some(rec)) => rec.enabled,
+            // Uninstalled: its jobs are dead, not merely paused.
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!("scheduler: could not resolve owner app '{app_id}': {e:#}");
+                true
             }
         }
     }
@@ -106,19 +152,40 @@ impl Scheduler {
     async fn is_due(&self, job: &ScheduledJob, now: DateTime<Utc>) -> bool {
         let last = self.inner.last_fired.lock().await.get(&job.id).copied();
         match &job.schedule {
-            Schedule::Cron { expr } => {
+            Schedule::Cron { expr, tz } => {
                 let Ok(schedule) = CronSchedule::parse(expr) else {
                     return false;
                 };
-                if !schedule.matches(now) {
+                // An unparseable zone is treated as "never due" rather than
+                // silently falling back to UTC: firing a 05:00-local job at
+                // 05:00 UTC is a wrong answer wearing a right answer's clothes,
+                // and the create-job validator already rejects bad zones, so
+                // reaching here means the file was hand-edited.
+                let zone = match tz.as_deref() {
+                    Some(name) => match cron::parse_tz(name) {
+                        Ok(tz) => Some(tz),
+                        Err(e) => {
+                            tracing::warn!("scheduler: job '{}' has a bad time zone: {e}", job.id);
+                            return false;
+                        }
+                    },
+                    None => None,
+                };
+                let matched = match zone {
+                    Some(tz) => schedule.matches_in(now, tz),
+                    None => schedule.matches(now),
+                };
+                if !matched {
                     return false;
                 }
-                // Only fire once per matching minute.
+                // Only fire once per matching minute. Compared in the schedule's
+                // own zone so the autumn repeated hour is one slot, not two.
+                let slot = |t: DateTime<Utc>| match zone {
+                    Some(tz) => t.with_timezone(&tz).format("%Y%m%d%H%M").to_string(),
+                    None => t.format("%Y%m%d%H%M").to_string(),
+                };
                 match last {
-                    Some(prev) => {
-                        prev.format("%Y%m%d%H%M").to_string()
-                            != now.format("%Y%m%d%H%M").to_string()
-                    }
+                    Some(prev) => slot(prev) != slot(now),
                     None => true,
                 }
             }
@@ -215,7 +282,10 @@ impl Scheduler {
                     // Feed an agent-job failure to the self-healing loop (best-effort,
                     // fire-and-forget so it never delays recording the outcome). Only
                     // agent jobs map to a corrected-prompt re-run.
-                    if let JobTarget::Agent { agent_id, prompt } = &job.target {
+                    if let JobTarget::Agent {
+                        agent_id, prompt, ..
+                    } = &job.target
+                    {
                         let src = format!("job:{}", job.id);
                         let agent_id = agent_id.clone();
                         let prompt = prompt.clone();
@@ -355,7 +425,11 @@ pub(crate) async fn run_target(target: &JobTarget) -> Result<Option<String>, Str
             }
             Ok(plan.job_id)
         }
-        JobTarget::Agent { agent_id, prompt } => {
+        JobTarget::Agent {
+            agent_id,
+            prompt,
+            model,
+        } => {
             // Route directly through the global agent runner so the *configured*
             // agent handles the prompt via the real chat path (its engine binding,
             // gateway routing, tools, persona). Returns the synthetic run id for
@@ -365,7 +439,12 @@ pub(crate) async fn run_target(target: &JobTarget) -> Result<Option<String>, Str
             let run_id = format!("agentrun_{}", uuid::Uuid::new_v4().simple());
             if let Some(runner) = crate::sidecar::agent_runner::global_agent_runner() {
                 runner
-                    .run(Some(agent_id.clone()), run_id.clone(), prompt.clone())
+                    .run_with_model(
+                        Some(agent_id.clone()),
+                        run_id.clone(),
+                        prompt.clone(),
+                        model.clone(),
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 return Ok(Some(run_id));
@@ -426,9 +505,11 @@ mod tests {
             target: JobTarget::Agent {
                 agent_id: "plain".to_string(),
                 prompt: "hi".to_string(),
+                model: None,
             },
             enabled: true,
             require_approval: false,
+            owner_app: None,
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
             last_run_at: None,

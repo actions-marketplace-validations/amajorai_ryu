@@ -76,7 +76,9 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
     },
     // Browser is the workspace's real-Chromium sidecar (an Electron GUI app,
     // `browser` sidecar on :7993) that backs the workspace "Browser" tab. A core
-    // built-in: installed-by-default and uninstall-protected (see CORE_DEFAULT_ON).
+    // built-in and therefore uninstall-protected (`is_builtin`), but NOT
+    // installed-by-default: no release publishes a spawnable `ryu-browser-<os>-<arch>`
+    // asset yet, so it is opt-in from the Store (see the note in `CORE_DEFAULT_ON`).
     // Cross-platform Electron, runs locally on the node.
     SystemPlugin {
         manifest_id: BROWSER_PLUGIN_ID,
@@ -87,8 +89,11 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
 ];
 
 /// The Browser app's plugin id — the workspace's real-Chromium sidecar that backs
-/// the "Browser" workspace tab. A core built-in (see [`SYSTEM_PLUGINS`] /
-/// [`CORE_DEFAULT_ON`]): seeded enabled on a fresh install and non-uninstallable.
+/// the "Browser" workspace tab. A core built-in (see [`SYSTEM_PLUGINS`]) and so
+/// non-uninstallable, but **opt-in**: deliberately absent from [`CORE_DEFAULT_ON`]
+/// until a release publishes an installable sidecar binary (the WHY is documented at
+/// that absence). While it is disabled the desktop's Browser tab keeps its sandboxed
+/// iframe fallback, which works.
 pub const BROWSER_PLUGIN_ID: &str = "com.ryu.browser";
 
 /// The Spaces app's plugin id — the document store + RAG index other apps write
@@ -175,6 +180,10 @@ pub const RECIPES_PLUGIN_ID: &str = "com.ryu.recipes";
 /// `public_mount` mechanism — there is no hand-coded Rust proxy. Default-on so the
 /// externally-committed inbound-webhook URL resolves out of the box.
 pub const MAIL_PLUGIN_ID: &str = "com.ryu.mail";
+/// The Warmup app — an opt-in companion that schedules a keep-alive ping to each
+/// subscription agent so its rolling usage window is already open. Named here
+/// because [`crate::plugins::seed`] needs the id for its `ui_code` seed row.
+pub const WARMUP_PLUGIN_ID: &str = "com.ryu.warmup";
 
 /// The RAG capability app's plugin id — the default in-process embeddings+retrieval
 /// provider. Declares `provides:[rag]` + `requires:[engines]`, so the capability
@@ -301,10 +310,18 @@ pub const VOICE_PLUGIN_ID: &str = "com.ryu.voice";
 pub const MEDIA_PLUGIN_ID: &str = "com.ryu.media";
 
 /// The Memory app's plugin id — the `/api/memory` + `/api/memory/:id` long-term memory
-/// CRUD surface (the Memory Library). Governance-shell leaf: default-on, no `requires`.
-/// Gate-only (the `MemoryStore` is a `ServerState` field), so it is NOT behind a cargo
-/// feature. The gate covers ONLY the HTTP CRUD surface; the in-process chat auto-recall
-/// path is kernel and never HTTP-loops back through `/api/memory`.
+/// CRUD surface (the Memory Library). Governance-shell leaf, no `requires`. Gate-only
+/// (the `MemoryStore` is a `ServerState` field), so it is NOT behind a cargo feature.
+/// The gate covers ONLY the HTTP CRUD surface; the in-process chat auto-recall path is
+/// kernel and never HTTP-loops back through `/api/memory`.
+///
+/// **default-OFF**: absent from [`CORE_DEFAULT_ON`]. This doc used to say "default-on",
+/// which is what made it worth writing down — the HTTP surface is gated, so on a fresh
+/// install `/api/memory` 503s and the Memory Library has nothing to show. The clients
+/// no longer offer a route into it regardless of this bit (the app contributes its own
+/// `sidebar_buttons` entry only while enabled, and the desktop palette's hardcoded
+/// Memory row — which additionally suppressed that contribution — is gone), so flipping
+/// this is a product call about what a fresh install ships, not a correctness fix.
 pub const MEMORY_PLUGIN_ID: &str = "com.ryu.memory";
 
 /// The Layers app's plugin id — a settings-only governance shell for the swappable
@@ -418,7 +435,8 @@ pub const CORE_PLUGINS: &[&str] = &[
     // firecrawl) stay Community + opt-in, because each is BYOK-only and would ship
     // a tool that can do nothing until the user pastes a key.
     "exa",
-    // Workspace real-Chromium browser sidecar — core built-in, default-on.
+    // Workspace real-Chromium browser sidecar — core built-in, installable from the
+    // Store but NOT default-on (no publishable sidecar asset; see `CORE_DEFAULT_ON`).
     BROWSER_PLUGIN_ID,
     "firewall",
     "routing",
@@ -446,13 +464,16 @@ pub const CORE_PLUGINS: &[&str] = &[
     // model before it is sent. Reverse-DNS id (matches its manifest + composer flag).
     "com.ryuhq.auto-expand",
     // The Whiteboard app — a full-page Companion (`ui_format:"html"`) that owns its
-    // Space documents via `spaces:docs`. Default-on; `plugins::seed` gives it its
-    // approved grants + `ui_code` HTML blob. Replaces the built-in whiteboard editor.
+    // Space documents via `spaces:docs`. NOT default-on, and (unlike the other opt-in
+    // companions) not pre-installed either: `seed::NOT_PRE_INSTALLED` keeps a fresh
+    // store free of its record, and `lifecycle::install_app` attaches the compiled-in
+    // `ui_code` HTML blob when the user installs it from the Store, at which point
+    // `enable_app` gets its grants approved through the Gateway like any other app.
     "com.ryu.whiteboard",
     // The Canvas app — a full-page Companion (`ui_format:"html"`) that owns its Space
     // documents via `spaces:docs` and drives generation nodes through the window.ryu
-    // media/agent bridge. Default-on; `plugins::seed` gives it its approved
-    // grants + `ui_code` HTML blob. Replaces the built-in creative-canvas board.
+    // media/agent bridge. Same posture as Whiteboard above: opt-in AND
+    // not-pre-installed (`seed::NOT_PRE_INSTALLED`).
     "com.ryu.canvas",
     // The Fine-tuning app — a full-page Companion (`ui_format:"html"`) that drives
     // Core's fine-tune orchestration via `finetune:runs` and owns its Unsloth Python
@@ -530,8 +551,10 @@ pub const CORE_PLUGINS: &[&str] = &[
     // so the companion is present on every fresh install. No `requires` edge.
     WEBHOOKS_PLUGIN_ID,
     // W7 frontend extraction: the activity feed page became a sandboxed companion app.
-    // Not a route gate (the `/api/activity` read stays ungated) — Core-tier + default-on
-    // so the companion is present on every fresh install. No `requires` edge.
+    // Not a route gate (the `/api/activity` read stays ungated). Core-tier but
+    // **default-OFF** — see the `NOTE (default-off apps)` block below, which is the
+    // binding statement; this comment used to claim default-on and was simply wrong
+    // (the id is absent from [`CORE_DEFAULT_ON`]). No `requires` edge.
     ACTIVITY_PLUGIN_ID,
     // W7 frontend extraction: the calendar page became a sandboxed companion app.
     // Not a route gate (the `/heartbeat/jobs` + `/workflows` + `/api/agents` reads stay
@@ -540,13 +563,18 @@ pub const CORE_PLUGINS: &[&str] = &[
     CALENDAR_PLUGIN_ID,
     // W7 frontend extraction: the timeline page became a sandboxed companion app.
     // Not a route gate (Shadow's device-local `/timeline` + `/journal` + `/frame` live
-    // on the Shadow sidecar :3030, not the Core router) — Core-tier + default-on so the
-    // companion is present on every fresh install. No `requires` edge.
+    // on the Shadow sidecar :3030, not the Core router). Core-tier but **default-OFF**
+    // — see the `NOTE (default-off apps)` block below; this comment used to claim
+    // default-on and was wrong (absent from [`CORE_DEFAULT_ON`]). No `requires` edge.
     TIMELINE_PLUGIN_ID,
     // W7 frontend extraction: the SKILL.md editor became a sandboxed companion app.
-    // Not a route gate (`/api/skills` authoring endpoints stay ungated) — Core-tier +
-    // default-on so the `/skills/new` + `/skills/:id/edit` routes resolve on every fresh
-    // install. No `requires` edge.
+    // Not a route gate (`/api/skills` authoring endpoints stay ungated). Core-tier but
+    // **default-OFF** — see the `NOTE (default-off apps)` block below. This comment used
+    // to claim default-on *because* `/skills/new` + `/skills/:id/edit` had to resolve on
+    // a fresh install; they do not, and the claim was never true (absent from
+    // [`CORE_DEFAULT_ON`]). The clients no longer depend on it either: the Skills catalog
+    // hides its New/Edit affordances unless an enabled app answers the editor path, so
+    // authoring is opt-in from the Store rather than a dead button. No `requires` edge.
     SKILL_EDITOR_PLUGIN_ID,
 ];
 
@@ -577,15 +605,27 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // process runs through its own sidecar/MCP lifecycle; enabling the record just
     // makes it a first-class, governed, disable-able App. The pure sidecar-backed
     // ones (ghost/agentbrowser) declare no runnables, so seeding never double-lists
-    // their tools. `spider`, `shadow` and `com.ryu.browser` are the declarative
-    // exceptions whose fixtures CARRY tool runnables as the sole owner: spider a
-    // `command` crawl tool; shadow four `http` tools reaching the Shadow sidecar
-    // through Core's `/api/shadow/*` proxy (its native `sidecar/mcp` providers were
-    // deleted); and browser seven `http` tools reaching its Electron sidecar through
-    // the generic ext-proxy, which is what gives the swappable `browser.control`
-    // layer registry tool ids to bind its verbs to. Seeding the record enabled is
-    // exactly what surfaces those tools — no double-listing, since nothing else
-    // owns them.
+    // their tools. `spider` and `shadow` are the declarative exceptions whose
+    // manifests CARRY tool runnables as the sole owner: spider a `command` crawl
+    // tool, shadow four `http` tools reaching the Shadow sidecar through Core's
+    // `/api/shadow/*` proxy (its native `sidecar/mcp` providers were deleted).
+    // Seeding the record enabled is exactly what surfaces those tools — no
+    // double-listing, since nothing else owns them. (`com.ryu.browser` carries the
+    // same shape — seven `http` runnables that give `browser.control` registry tool
+    // ids to bind to — but is NOT seeded; see the note below its former entry.)
+    //
+    // CAVEAT this list cannot fix on its own: seeding is what surfaces those tools,
+    // so a default-on app whose PROCESS cannot start ships tools that fail on every
+    // call. `ghost` and `shadow` are in that state today — neither has a public
+    // release repo (see `sidecar/tools/ghost/downloader.rs`), so `computer__*` /
+    // `ghost__*` / the four shadow `http` tools are offered and then die on spawn.
+    // Removing them from here is NOT the fix (ghost is the `"default": true` provider
+    // of `computer.control`, and its tools are a headline capability): the fix is CI
+    // publishing `ghost-<os>-<arch>` / `shadow-<os>-<arch>`. Until then Core at least
+    // reports the cause instead of a bare 502 — see
+    // `manifest_sidecar::missing_sidecar_binary_reports`, which covers manifest
+    // `local` sidecars; ghost/shadow are built-in `impl Sidecar`s with their own
+    // downloaders and are NOT covered by that record.
     "ghost",
     "shadow",
     "spider",
@@ -605,10 +645,40 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // `RYU_EXA_API_KEY` is set (see fixtures/exa.manifest.json). Every other
     // search provider is BYOK-only and stays opt-in.
     "exa",
-    // Workspace browser sidecar — default-on so the "Browser" workspace tab uses
-    // the real-Chromium sidecar out of the box (not the fallback iframe). Being
-    // default-on also makes it uninstall-protected (`is_uninstall_protected`).
-    BROWSER_PLUGIN_ID,
+    // NOTE: com.ryu.browser is deliberately NOT default-on, and this is the one
+    // membership decision here that is driven by RELEASE reality rather than product
+    // taste. It was default-on ("so the Browser tab uses the real-Chromium sidecar out
+    // of the box, not the fallback iframe") — but no release publishes a binary the
+    // sidecar loader can install. Its `local` sidecar declares `command:
+    // "ryu-browser"`, which `manifest_sidecar::ensure_local_sidecar_present` resolves
+    // to the release asset `ryu-browser-<os>-<arch>` (`update::platform_tag()`, e.g.
+    // `ryu-browser-macos-aarch64`, no extension, directly spawnable). What the
+    // browser job actually uploads is electron-builder's
+    // `ryu-browser-mac-arm64.zip`/`.dmg` — a different name AND a non-spawnable
+    // bundle. So on every fresh install the app was seeded ENABLED, the desktop's
+    // `BrowserTabPanel` feature-detected it and switched off the working iframe
+    // fallback, and the panel then showed "Browser sidecar unreachable (502)"
+    // permanently. Default-OFF restores the honest fallback: the tab works, and the
+    // Store is the one place that offers the sidecar.
+    //
+    // Consequences, both intentional:
+    //  - `browser.control` (whose ONLY provider is this app) has zero enabled
+    //    providers on a fresh install, so its 7 `http` tool runnables are not offered
+    //    to agents. That is strictly better than offering tools whose every call dies
+    //    on spawn, and agents still browse via `agentbrowser`/`spider`, which are
+    //    default-on and DO ship. This is the deliberate exception to the exa /
+    //    markitdown argument above (seed a provider so the capability is non-empty):
+    //    that argument only holds for a provider that can actually run.
+    //  - Uninstall-protection is UNCHANGED: browser is in `SYSTEM_PLUGINS`, so
+    //    `is_uninstall_protected` still returns true via its `is_builtin` branch (it
+    //    never depended on the default-on branch here).
+    //
+    // Re-add this line the moment the release publishes an installable, spawnable
+    // asset under the `platform_tag()` name. For an Electron bundle that means moving
+    // the manifest sidecar from `local` to `binary` (which supports `archive` +
+    // `binary_name` extraction), not renaming the zip — macOS cannot ship an Electron
+    // app as one executable file.
+    //
     // NOTE: com.ryu.mail is intentionally NOT default-on. It is sidecar-only now
     // (the in-process path was deleted, Track C). The release now builds + ships the
     // `ryu-mail` binary alongside the other 10 sidecar bins (see
@@ -661,6 +731,15 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // they stay installable + enable-able from the Store (still in CORE_PLUGINS), but a
     // fresh install ships them OFF so the sidebar/App surface isn't pre-loaded with
     // every feature.
+    //
+    // Default-off is TWO postures, not one. The rest of that list is pre-installed
+    // (a disabled record exists on a fresh store, because it is what carries their
+    // compiled-in companion bundle), so the Store lists them under *Installed*.
+    // `whiteboard` + `canvas` go further — `seed::NOT_PRE_INSTALLED` gives them no
+    // record at all, so the Store lists them as available and an uninstall sticks.
+    // That is only possible because `lifecycle::install_app` sources the compiled-in
+    // bundle at install time; promoting another app into that posture is one line in
+    // `NOT_PRE_INSTALLED` and needs nothing else.
     // Spaces stays default-on (it is a shared dependency, not a leaf feature).
     SPACES_PLUGIN_ID,
     // The five leaf-feature sidecar Apps (each serves `/api/<feature>/*` out-of-process
@@ -1159,7 +1238,14 @@ mod tests {
     }
 
     /// Spaces stays default-on; Meetings is now OPT-IN (default-off). A fresh seed
-    /// enables Spaces but must NOT install Meetings — enabling it is a Store action.
+    /// enables Spaces but must NOT **enable** Meetings — enabling it is a Store
+    /// action.
+    ///
+    /// The seed *does* write a DISABLED Meetings record carrying its compiled-in
+    /// companion `ui_code` (`seed::seed_companion_ui`), which is what makes the
+    /// Store's Enable mount a real UI instead of a blank frame. So record presence
+    /// is not the assertion — `enabled` is. Nothing spawns off a disabled record:
+    /// every `app_store.list()` consumer filters on `enabled`.
     #[tokio::test]
     async fn the_real_seed_enables_spaces_but_leaves_meetings_optin() {
         use crate::plugins::PluginStore;
@@ -1177,8 +1263,13 @@ mod tests {
         assert!(spaces.enabled, "Spaces must be seeded ENABLED");
 
         assert!(
-            store.get(MEETINGS_PLUGIN_ID).await.unwrap().is_none(),
-            "Meetings is opt-in (default-off) — the seed must not install it"
+            !store
+                .get(MEETINGS_PLUGIN_ID)
+                .await
+                .unwrap()
+                .expect("seed::seed_companion_ui seeds a DISABLED meetings record (its bundle)")
+                .enabled,
+            "Meetings is opt-in (default-off) — the seed must not ENABLE it"
         );
     }
 
@@ -1302,7 +1393,11 @@ mod tests {
         );
 
         // Spaces is enabled; its former default-on dependents (meetings/whiteboard/
-        // canvas) are now opt-in, so the seed must NOT install them.
+        // canvas) are now opt-in, so the seed must NOT enable them. Meetings still gets
+        // a disabled record carrying the compiled-in companion `ui_code`
+        // (`seed::seed_companion_ui`) — see the sibling Meetings test. Whiteboard and
+        // Canvas get NO record at all (`seed::NOT_PRE_INSTALLED`): their bundle comes
+        // from `lifecycle::install_app` when the user installs them from the Store.
         let store = PluginStore::open_in_memory().unwrap();
         crate::plugins::seed::seed_default_on(&store, &manifests).await;
         assert!(
@@ -1314,10 +1409,20 @@ mod tests {
                 .enabled,
             "Spaces must be seeded ENABLED"
         );
-        for id in [MEETINGS_PLUGIN_ID, WHITEBOARD_PLUGIN_ID, CANVAS_PLUGIN_ID] {
+        assert!(
+            !store
+                .get(MEETINGS_PLUGIN_ID)
+                .await
+                .unwrap()
+                .expect("seed::seed_companion_ui seeds a DISABLED record (its bundle)")
+                .enabled,
+            "'{MEETINGS_PLUGIN_ID}' is opt-in (default-off) — the seed must not ENABLE it"
+        );
+        for id in [WHITEBOARD_PLUGIN_ID, CANVAS_PLUGIN_ID] {
             assert!(
                 store.get(id).await.unwrap().is_none(),
-                "'{id}' is opt-in (default-off) — the seed must not install it"
+                "'{id}' is not-pre-installed — the seed must write no record for it, let alone \
+                 an enabled one"
             );
         }
     }
@@ -1628,6 +1733,34 @@ mod tests {
                 assert!(seen.insert(*id), "'{id}' appears more than once in {label}");
             }
         }
+    }
+
+    /// The Browser app must stay INSTALLABLE but never auto-seeded: no release
+    /// publishes the `ryu-browser-<os>-<arch>` asset its `local` sidecar resolves, and
+    /// a seeded-enabled record makes the desktop drop its working iframe fallback for
+    /// a panel that 502s forever. Re-adding it to `CORE_DEFAULT_ON` without shipping
+    /// that asset re-breaks the Browser tab on every fresh install, so the invariant is
+    /// pinned here. Uninstall-protection must be unaffected (it comes from
+    /// `SYSTEM_PLUGINS`/`is_builtin`, not from being default-on).
+    #[test]
+    fn browser_is_installable_but_not_seeded_until_its_sidecar_ships() {
+        assert!(
+            CORE_PLUGINS.contains(&BROWSER_PLUGIN_ID),
+            "browser must stay Core-tier + installable from the Store"
+        );
+        assert!(
+            !CORE_DEFAULT_ON.contains(&BROWSER_PLUGIN_ID),
+            "browser must NOT be default-on while no release publishes a spawnable \
+             ryu-browser binary — a seeded record turns the workspace Browser tab into \
+             a permanent 'sidecar unreachable (502)'"
+        );
+        assert!(!is_default_on(BROWSER_PLUGIN_ID));
+        // Still a SYSTEM plugin, so protection is unchanged by the line removal.
+        assert!(is_builtin(BROWSER_PLUGIN_ID));
+        assert!(
+            is_uninstall_protected(BROWSER_PLUGIN_ID),
+            "browser is uninstall-protected via is_builtin, independently of default-on"
+        );
     }
 
     #[test]

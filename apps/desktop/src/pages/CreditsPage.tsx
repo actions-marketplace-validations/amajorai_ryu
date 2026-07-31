@@ -12,7 +12,12 @@
 // button. Everything degrades cleanly when not signed in, when there is no active
 // org, or when billing is not configured.
 
-import { type CreditLedgerRow, CreditsView } from "@ryu/blocks/desktop/credits";
+import { CREDIT_POOLS, type CreditPoolTier } from "@ryu/auth/lib/credit-pools";
+import {
+	type CreditGrantPoolView,
+	type CreditLedgerRow,
+	CreditsView,
+} from "@ryu/blocks/desktop/credits";
 import { useCallback, useMemo, useState } from "react";
 import { sileo } from "sileo";
 import { FRONTEND_URL } from "@/lib/auth-client.ts";
@@ -39,6 +44,43 @@ const PLAN_LABELS: Record<string, string> = {
 
 const LEDGER_PAGE_SIZE = 10;
 
+/**
+ * What a pool's granted credit buys, in the user's language.
+ *
+ * Written HERE and not read from `CreditPool.description`, which is explicitly
+ * operator-facing and names the vendor behind each pool (Cloudflare, Llama, AWS
+ * Bedrock, Claude). The pool catalog's headline invariant is that a user never
+ * sees a provider — the pool's `label` plus a capability phrase is the whole
+ * vocabulary. An unrecognized pool id gets no phrase at all rather than a
+ * guessed one; the label and the amount are still truthful on their own.
+ *
+ * The residual `default` tier is deliberately absent. It has no capability story
+ * to tell — and the obvious phrase ("any model Ryu offers") would be a lie about
+ * money: a grant against that pool is restricted to its own supply exactly like
+ * every other grant.
+ */
+const POOL_SPENDABLE_ON: Partial<Record<CreditPoolTier, string>> = {
+	free: "Fast, everyday models",
+	frontier: "The most capable models",
+};
+
+/** `null` for a missing or unparseable timestamp — a grant with no readable
+ *  expiry renders as one with no expiry, never as "Invalid Date". */
+function formatExpiry(iso: string | null): string | null {
+	if (!iso) {
+		return null;
+	}
+	const at = new Date(iso);
+	if (Number.isNaN(at.getTime())) {
+		return null;
+	}
+	return `Expires ${at.toLocaleDateString(undefined, {
+		year: "numeric",
+		month: "short",
+		day: "numeric",
+	})}`;
+}
+
 /** Where a solo user goes to create or pick an organization. */
 const ORGANIZATIONS_URL = `${FRONTEND_URL.replace(/\/$/, "")}/organizations`;
 
@@ -47,6 +89,7 @@ export default function CreditsPage() {
 		wallet,
 		ledger,
 		entitlement,
+		grantPools,
 		walletEmpty,
 		loading,
 		error,
@@ -129,6 +172,28 @@ export default function CreditsPage() {
 		}));
 	}, [ledger, safeLedgerPage]);
 
+	// The server owns the pool label (it may know pools this build does not); the
+	// local catalog only contributes the capability phrase, and contributes
+	// nothing when the id is unknown here.
+	//
+	// The label doubles as the row key when the id is unknown, and that is sound
+	// rather than lucky: the server AGGREGATES a wallet's grants by pool label
+	// (`remainingByPool` in `readMyCampaigns`), so a label appears at most once in
+	// a response.
+	const grantPoolViews = useMemo<CreditGrantPoolView[]>(
+		() =>
+			grantPools.map((pool) => ({
+				id: pool.poolId ?? pool.label,
+				label: pool.label,
+				remainingMicroUsd: pool.remainingMicroUsd,
+				spendableOn: pool.poolId
+					? POOL_SPENDABLE_ON[CREDIT_POOLS[pool.poolId].tier]
+					: undefined,
+				expiresAtLabel: formatExpiry(pool.expiresAt),
+			})),
+		[grantPools]
+	);
+
 	const noOrgMessage =
 		error !== null && (error as CreditsError).kind === "no_org"
 			? error.message
@@ -154,6 +219,7 @@ export default function CreditsPage() {
 					: null
 			}
 			errorMessage={error ? error.message : null}
+			grantPools={grantPoolViews}
 			ledger={pagedLedger}
 			ledgerPage={safeLedgerPage}
 			loading={loading}

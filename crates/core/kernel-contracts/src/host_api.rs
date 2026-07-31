@@ -753,6 +753,33 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // Warmup — the `com.ryu.warmup` companion schedules a keep-alive ping to each
+    // subscription agent so its rolling usage window is already open. `detect`
+    // reads agents + their usage windows + advertised models; `list`/`apply`
+    // read and replace the app's own scheduler jobs; `runNow` fires one ping
+    // outside the schedule.
+    m(
+        "warmup.detect",
+        "warmup.crud",
+        Some("warmup:crud"),
+        false,
+        true,
+    ),
+    m("warmup.list", "warmup.crud", Some("warmup:crud"), false, true),
+    m(
+        "warmup.apply",
+        "warmup.crud",
+        Some("warmup:crud"),
+        false,
+        true,
+    ),
+    m(
+        "warmup.runNow",
+        "warmup.crud",
+        Some("warmup:crud"),
+        false,
+        true,
+    ),
     m(
         "learning.config",
         "learning.crud",

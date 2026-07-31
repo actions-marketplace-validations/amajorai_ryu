@@ -84,12 +84,31 @@ impl AgentRunner {
         conversation_id: String,
         text: String,
     ) -> anyhow::Result<String> {
+        self.run_with_model(agent_id, conversation_id, text, None)
+            .await
+    }
+
+    /// [`run`](Self::run) with the turn's model pinned.
+    ///
+    /// `model` rides the same per-turn channel the composer's model picker uses
+    /// (`ChatStreamRequest::acp_model`), so it overrides the agent's configured
+    /// model for this one turn without persisting anything. `None` is exactly
+    /// [`run`](Self::run). Callers use this when the errand is cheaper than the
+    /// agent's usual model — a scheduled keep-alive ping, say.
+    pub async fn run_with_model(
+        &self,
+        agent_id: Option<String>,
+        conversation_id: String,
+        text: String,
+        model: Option<String>,
+    ) -> anyhow::Result<String> {
         run_text_turn(
             conversation_id,
             agent_id,
             text,
             None,
             false,
+            model,
             Arc::clone(&self.registry),
             self.conversations.clone(),
             self.agent_store.clone(),
@@ -129,6 +148,8 @@ impl AgentRunner {
             true,
             cwd,
             isolate,
+            None,
+            // A coordinator worker runs its own agent's configured model.
             None,
             Arc::clone(&self.registry),
             self.conversations.clone(),

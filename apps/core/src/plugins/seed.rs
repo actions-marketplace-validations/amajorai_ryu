@@ -52,6 +52,11 @@ pub struct SeedSpec {
     /// companions need theirs to drive Spaces/media/finetune from their frames).
     pub grants: &'static [&'static str],
     /// Prebuilt companion UI bundle, when the plugin ships one.
+    ///
+    /// Seeded for EVERY companion in this table, default-on or not: the default-on
+    /// loop writes it alongside the enable, and [`seed_companion_ui`] writes it onto
+    /// a disabled record for the opt-in ones (nothing else in the system sources a
+    /// built-in's bundle — see that function's docs).
     pub ui_code: Option<&'static str>,
 }
 
@@ -59,17 +64,26 @@ pub struct SeedSpec {
 /// a prebuilt `ui_code` bundle. Everything else in [`CORE_DEFAULT_ON`] seeds with
 /// empty grants and no UI code (unchanged from the pre-graph behaviour).
 ///
-/// The three companions need a UI bundle + the grants their sandboxed frames use.
-/// `meetings` needs only a grant: it ships no frame (its code is in-crate), but it
-/// really does write Space documents, so its approved grants must match the
-/// `permission_grants` its manifest declares — otherwise the record would claim
-/// less than the app does.
-fn seed_overrides() -> [SeedSpec; 15] {
+/// The companions need a UI bundle + the grants their sandboxed frames use.
+/// A row that ships no frame (`ui_code: None`, e.g. `recipes`) is here purely for
+/// its grants: it really does drive the host over a kernel capability, so its
+/// approved grants must match the `permission_grants` its manifest declares —
+/// otherwise the record would claim less than the app does.
+///
+/// # This table is the ONE list of compiled-in companion bundles
+///
+/// Most rows are default-on (`default_on_specs` looks them up by
+/// [`CORE_DEFAULT_ON`] id), but membership here is deliberately NOT limited to the
+/// default-on set: [`seed_companion_ui`] derives the opt-in companions from this
+/// same table, so a row is all it takes for a companion — default-on or opt-in — to
+/// receive its bundle. Adding a 16th companion to a second list is what caused the
+/// bug that function's docs describe; there is no second list.
+fn seed_overrides() -> [SeedSpec; 17] {
     use crate::plugin_manifest::{
         ACTIVITY_UI_HTML, APPROVALS_UI_HTML, CALENDAR_UI_HTML, CANVAS_PLUGIN_ID, CANVAS_UI_HTML,
-        FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, LEARNING_UI_HTML, MEETINGS_UI_HTML, MONITORS_UI_HTML,
-        QUESTS_UI_HTML, SKILL_EDITOR_UI_HTML, TIMELINE_UI_HTML, WEBHOOKS_UI_HTML,
-        WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
+        FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, LEARNING_UI_HTML, MAIL_UI_HTML, MEETINGS_UI_HTML,
+        MONITORS_UI_HTML, QUESTS_UI_HTML, SKILL_EDITOR_UI_HTML, TIMELINE_UI_HTML, WARMUP_UI_HTML,
+        WEBHOOKS_UI_HTML, WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
     };
     [
         SeedSpec {
@@ -271,6 +285,30 @@ fn seed_overrides() -> [SeedSpec; 15] {
             grants: &["ghost:record"],
             ui_code: None,
         },
+        SeedSpec {
+            id: crate::plugins::builtins::MAIL_PLUGIN_ID,
+            // Mail is OPT-IN by product choice (an unconfigured inbox should not
+            // surface on a fresh install — see `CORE_DEFAULT_ON`), so this row's
+            // `grants` are inert today: `default_on_specs` never looks it up (mail is
+            // not in `CORE_DEFAULT_ON`) and the opt-in pass writes only `ui_code`,
+            // leaving `enable_app` to persist the Gateway-approved set. They are
+            // recorded anyway, and mirror the manifest's `permission_grants` exactly,
+            // so a future promotion into the default-on set is correct by
+            // construction rather than by remembering to fill this in.
+            grants: &["mail:crud"],
+            ui_code: Some(MAIL_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::WARMUP_PLUGIN_ID,
+            // Warmup is OPT-IN by product choice: it spends the user's subscription
+            // usage on their behalf, on a schedule, which is not a thing to switch on
+            // for someone. Like mail's row above, `grants` is inert while the app is
+            // outside `CORE_DEFAULT_ON` (the opt-in pass writes only `ui_code`), but
+            // mirrors the manifest's `permission_grants` so a promotion would be
+            // correct by construction.
+            grants: &["warmup:crud"],
+            ui_code: Some(WARMUP_UI_HTML),
+        },
     ]
 }
 
@@ -370,6 +408,10 @@ pub fn seed_order(
 /// One-time and user-respecting: a plugin with ANY existing record (enabled OR
 /// disabled) is left alone, so a user who disables a default-on plugin keeps it
 /// disabled across restarts.
+///
+/// Then runs [`seed_companion_ui`], which carries the compiled-in companion bundles
+/// the loop below cannot reach: the opt-in companions (no default-on record at all)
+/// and any existing record whose `ui_code` is missing.
 pub async fn seed_default_on(store: &PluginStore, manifests: &[PluginManifest]) {
     let specs = default_on_specs();
     let (ordered, skipped) = seed_order(&specs, manifests);
@@ -425,79 +467,204 @@ pub async fn seed_default_on(store: &PluginStore, manifests: &[PluginManifest]) 
         }
     }
 
-    seed_optin_companion_ui(store, manifests).await;
+    seed_companion_ui(store, manifests).await;
 }
 
-/// One opt-in built-in companion and its prebuilt UI bundle. See
-/// [`seed_optin_companion_ui`] for why these are seeded but NOT enabled.
-struct OptinCompanionUi {
-    id: &'static str,
-    ui_code: &'static str,
+/// Every built-in companion that ships a compiled-in `ui_code` bundle, derived from
+/// [`seed_overrides`] — the ONE table — so a newly added companion cannot be
+/// forgotten here. See [`seed_companion_ui`] for what is done with them.
+///
+/// `pub(crate)` for one more reader: `plugin_manifest`'s
+/// `companion_ui_fixtures_exist_and_are_nontrivial` size guard drives its loop off
+/// this list instead of a hand-copied one, which is how `SKILL_EDITOR_UI_HTML` had
+/// gone unguarded — the const existed, the table carried it, the guard's 14-row copy
+/// did not.
+pub(crate) fn companion_ui_specs() -> Vec<SeedSpec> {
+    seed_overrides()
+        .into_iter()
+        .filter(|s| s.ui_code.is_some())
+        .collect()
 }
 
-/// Seed the `ui_code` of **opt-in** (non-default-on) built-in companions onto a
-/// **disabled** record on a fresh install.
+/// The compiled-in companion bundle for a built-in id, or `None` if it ships none.
 ///
-/// # Why this exists
-///
-/// Every *default-on* companion gets its `ui_code` from [`seed_overrides`] (applied
-/// by the loop above). Mail is the first **opt-in** built-in companion: it must NOT
-/// be default-on — one `com.ryu.mail` manifest owns both the companion runnable AND
-/// the `ryu-mail` sidecar, whose binary is not yet shipped, so a default-on entry
-/// would fail its health check on every fresh install (see
-/// [`crate::plugins::builtins::CORE_DEFAULT_ON`]). But nothing else seeds a built-in
-/// companion's `ui_code`: neither `install_app` nor `enable_app` sources it, and the
-/// `*_UI_HTML` consts are wired only into `seed_overrides`. So without this, enabling
-/// mail from the store would leave `ui_code = None` and the companion would mount as
-/// "no runnable UI".
-///
-/// This seeds the bundle onto a **disabled** record (no `set_enabled`), so the app
-/// stays opt-in — no sidecar spawn on a fresh install — yet its UI is present the
-/// moment the user enables it (`enable_app` only flips the enabled bit + validates
-/// grants; the `ui_code` is already there).
-///
-/// User-respecting: a plugin with ANY existing record is skipped, exactly like
-/// [`seed_default_on`].
-async fn seed_optin_companion_ui(store: &PluginStore, manifests: &[PluginManifest]) {
-    let companions = [OptinCompanionUi {
-        id: crate::plugins::builtins::MAIL_PLUGIN_ID,
-        ui_code: crate::plugin_manifest::MAIL_UI_HTML,
-    }];
+/// The lookup that decouples "a built-in's bundle exists" from "the seed wrote a
+/// record for it". [`seed_companion_ui`] used to be the ONLY reader of
+/// [`companion_ui_specs`], which is why a built-in had to be pre-seeded to be
+/// enable-able at all; [`crate::plugins::lifecycle::install_app`] now reads it too,
+/// so the Store's own Install carries the bundle and pre-seeding becomes optional
+/// per app (see [`NOT_PRE_INSTALLED`]).
+pub(crate) fn compiled_in_ui_code(id: &str) -> Option<&'static str> {
+    companion_ui_specs()
+        .into_iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.ui_code)
+}
 
-    for c in &companions {
-        match store.get(c.id).await {
-            // A record exists (enabled or disabled) — the user's choice wins.
-            Ok(Some(_)) => continue,
-            Ok(None) => {}
+/// Built-in companions that ship a compiled-in bundle but must NOT be pre-seeded
+/// into the store at all — not installed, not disabled-and-installed, absent.
+///
+/// # Why this list exists (and why it is not just "default-off")
+///
+/// Default-off already meant "nothing spawns". It did NOT mean "absent": every
+/// opt-in companion still got a DISABLED record from [`seed_companion_ui`], purely
+/// so its bundle had somewhere to live, and the Store therefore listed it under
+/// *Installed* on a fresh machine with an uninstall that the next boot silently
+/// undid. For a leaf feature nobody asked for, "Installed (off)" is still
+/// pre-loaded surface — which is the posture `CORE_DEFAULT_ON`'s default-off note
+/// set out to avoid.
+///
+/// The reason it could not simply be dropped before is now gone:
+/// [`crate::plugins::lifecycle::install_app`] sources the compiled-in bundle at
+/// INSTALL time via [`compiled_in_ui_code`], so `Install` → `Enable` from the Store
+/// mounts a real UI with no seeded record. Grants follow the ordinary path too —
+/// `enable_app` validates each app's own `permission_grants` through the Gateway and
+/// persists the approved set, which for these two is byte-identical to the `grants`
+/// their [`seed_overrides`] rows hardcode (the Gateway's capability grammar allows
+/// `spaces:docs` / `media:*` / `hook:*` / `core:list_agents` for their owners).
+///
+/// Membership is a PRODUCT decision — "should a fresh install list this app as
+/// installed?" — so it stays a hand-maintained list, not a derived one. Uninstall
+/// protection is unaffected: `is_uninstall_protected` keys off `SYSTEM_PLUGINS` /
+/// default-on, and neither id is in either, so the Store could already uninstall
+/// them; this is what makes that uninstall STICK across a reboot.
+pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
+    // Two Space-document boards. Both are pure leaf features (a Space owns the
+    // documents; nothing in Core reads their records), so an install that never
+    // opens one has no reason to carry them.
+    crate::plugin_manifest::WHITEBOARD_PLUGIN_ID,
+    crate::plugin_manifest::CANVAS_PLUGIN_ID,
+];
+
+/// Make sure every built-in companion's compiled-in `ui_code` bundle actually
+/// reaches its record: seeded onto a **disabled** record for the opt-in ones, and
+/// back-filled onto any existing record that is missing it.
+///
+/// # Why this exists — nothing else sources a built-in's bundle
+///
+/// The `*_UI_HTML` consts are wired ONLY into [`seed_overrides`]. `enable_app` only
+/// flips the enabled bit and persists grants; `update_app` does call `set_ui_code`,
+/// but it is reached only from the update handler, which sources the bundle from a
+/// *verified marketplace descriptor* — a built-in has none. And
+/// `GET /api/plugins/:id/ui-bundle` has no compiled-in fallback (404 "plugin has no
+/// UI bundle"). So a companion whose record carries no `ui_code` reports
+/// `has_ui: false` in the contributions payload and mounts as "this app has no
+/// interface" — for the opt-in companions there is nothing behind it either, because
+/// the native pages they replaced were deleted in the W7 extraction.
+///
+/// `install_app` USED to be part of that list (a semver check plus `store.insert`,
+/// no `ui_code`), which is why every opt-in companion had to be pre-seeded here to
+/// be enable-able at all. It now reads [`compiled_in_ui_code`], so the Store's own
+/// Install carries the bundle — that is what makes [`NOT_PRE_INSTALLED`] possible.
+/// This pass remains the carriage for every OTHER opt-in companion (they are still
+/// pre-seeded, so their Enable never routes through an install).
+///
+/// The default-on loop above covers the default-on companions on a fresh install.
+/// This pass covers the two cases it cannot:
+///
+/// 1. **Opt-in companions** (`ui_code` row NOT in [`CORE_DEFAULT_ON`] and NOT in
+///    [`NOT_PRE_INSTALLED`] — mail plus finetune/meetings/monitors/workflows/quests/
+///    approvals/activity/timeline/skill-editor). The bundle is written onto a
+///    **disabled** record: the app stays opt-in (nothing spawns on a fresh install)
+///    yet its UI is already present the moment the user enables it from the Store.
+///    For these ids that is still the ONLY thing that makes Enable work, because
+///    their Enable path is `enable_app` (they are already installed, so it never
+///    routes through `install_app`, which is where the bundle would otherwise come
+///    from).
+/// 2. **Any existing record with no bundle** — the upgrade case. The seed loop leaves
+///    every existing record alone (`Ok(Some(_)) => continue`, so the user's choice
+///    wins), which means a record written BEFORE its app carried a companion runnable
+///    — every wave-2 governance shell that the W7 extraction later upgraded in place
+///    — never receives one. Filling it is not a policy decision the user can have an
+///    opinion about: `ui_code` is build content, not user state, and no user-facing
+///    path ever sets it to NULL (`set_ui_code(_, None)` has no caller outside tests).
+///    So this runs on every boot rather than behind a schema-version gate, and it
+///    only ever FILLS a gap — an existing bundle is never overwritten, and `enabled`
+///    / `approved_grants` are never touched.
+///
+/// # What it deliberately does NOT do
+///
+/// - Nothing is enabled. `set_enabled` is never called here.
+/// - A default-on companion with NO record is skipped: either the loop above just
+///   created it (so we take the fill branch instead), or [`seed_order`] fail-closed
+///   SKIPPED it because its `requires` is unsatisfiable — and conjuring a record for
+///   a plugin the graph refused would undo that refusal.
+///
+/// One known cosmetic consequence, unchanged from the mail-only version this
+/// generalizes: uninstalling an opt-in companion removes its record, and the next
+/// boot re-seeds a **disabled** one, so the Store shows it installed-but-off again.
+/// Nothing runs, and the record is what the ui-bundle carriage hangs off. The
+/// [`NOT_PRE_INSTALLED`] ids are the exception — their uninstall sticks, which is
+/// half the reason that list exists.
+async fn seed_companion_ui(store: &PluginStore, manifests: &[PluginManifest]) {
+    for spec in companion_ui_specs() {
+        let Some(ui_code) = spec.ui_code else {
+            continue;
+        };
+        let id = spec.id;
+
+        let existing = match store.get(id).await {
+            Ok(existing) => existing,
             Err(e) => {
-                tracing::warn!("opt-in companion seed: lookup '{}' failed: {e}", c.id);
+                tracing::warn!("companion ui seed: lookup '{id}' failed: {e}");
                 continue;
             }
+        };
+
+        if existing.is_some() {
+            // Case 2: fill a missing bundle, never overwrite one, never touch the
+            // enabled bit or the approved grants.
+            match store.has_ui_code(id).await {
+                Ok(false) => match store.set_ui_code(id, Some(ui_code)).await {
+                    Ok(_) => tracing::info!(
+                        "companion ui seed: back-filled the compiled-in ui_code for '{id}' \
+                         (its record predates the companion bundle, so it would have mounted \
+                         as \"no interface\"); enabled state and grants untouched"
+                    ),
+                    Err(e) => tracing::warn!("companion ui seed: set_ui_code '{id}' failed: {e}"),
+                },
+                Ok(true) => {}
+                Err(e) => tracing::warn!("companion ui seed: ui_code lookup '{id}' failed: {e}"),
+            }
+            continue;
+        }
+
+        // No record. The default-on loop owns those ids (including its fail-closed
+        // skip), so only an opt-in companion is seeded from here.
+        if CORE_DEFAULT_ON.contains(&id) {
+            continue;
+        }
+
+        // …and not even every opt-in companion: the ids in `NOT_PRE_INSTALLED` must
+        // stay ABSENT on a fresh install (and stay absent after an uninstall). This
+        // is safe only because `lifecycle::install_app` now sources the same
+        // compiled-in bundle at install time — the Store's Install → Enable carries
+        // it. Reached only on the no-record path, so the case-2 back-fill above
+        // still repairs an EXISTING record for a user who already enabled one.
+        if NOT_PRE_INSTALLED.contains(&id) {
+            continue;
         }
 
         let Some(version) = manifests
             .iter()
-            .find(|m| m.id == c.id)
+            .find(|m| m.id == id)
             .map(|m| m.version.clone())
         else {
             continue;
         };
 
-        if let Err(e) = store.insert(c.id, &version).await {
-            tracing::warn!("opt-in companion seed: insert '{}' failed: {e}", c.id);
+        if let Err(e) = store.insert(id, &version).await {
+            tracing::warn!("companion ui seed: insert '{id}' failed: {e}");
             continue;
         }
-        if let Err(e) = store.set_ui_code(c.id, Some(c.ui_code)).await {
-            tracing::warn!("opt-in companion seed: set_ui_code '{}' failed: {e}", c.id);
+        if let Err(e) = store.set_ui_code(id, Some(ui_code)).await {
+            tracing::warn!("companion ui seed: set_ui_code '{id}' failed: {e}");
             continue;
         }
         // Deliberately NOT enabled — the app stays opt-in (no sidecar spawn on a
         // fresh install); the seeded `ui_code` makes `enable_app` mount the
         // companion whenever the user turns it on.
-        tracing::info!(
-            "opt-in companion seed: seeded ui_code for '{}' (disabled)",
-            c.id
-        );
+        tracing::info!("companion ui seed: seeded ui_code for '{id}' (disabled, opt-in)");
     }
 }
 
@@ -514,7 +681,9 @@ async fn seed_optin_companion_ui(store: &PluginStore, manifests: &[PluginManifes
 /// - v1: backfill host-api grants onto pre-existing records ([`backfill_host_api_grants`]).
 /// - v2: re-enable the Learning app's record so its consent switches are reachable
 ///   again ([`restore_learning_consent_surface`]).
-const STORE_SCHEMA_VERSION: i64 = 2;
+/// - v3: drop the seed-artifact records for the [`NOT_PRE_INSTALLED`] apps, but only
+///   where they were never enabled ([`unseed_not_pre_installed`]).
+const STORE_SCHEMA_VERSION: i64 = 3;
 
 /// One-time data migrations for ALREADY-INSTALLED stores.
 ///
@@ -558,6 +727,11 @@ const STORE_SCHEMA_VERSION: i64 = 2;
 /// - v1 [`backfill_host_api_grants`] — the host-callback grant repair described above.
 /// - v2 [`restore_learning_consent_surface`] — re-enable `com.ryu.learning`, whose
 ///   record now owns the consent switches for a capture path the kernel runs anyway.
+/// - v3 [`unseed_not_pre_installed`] — remove the never-enabled records that the old
+///   unconditional companion-ui pre-seed wrote for the [`NOT_PRE_INSTALLED`] apps.
+///   The seed change alone only fixes FRESH installs (the loop leaves every existing
+///   record alone), so without this step every current machine keeps listing
+///   Whiteboard/Canvas as installed forever.
 pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginManifest]) {
     let current = match store.schema_version().await {
         Ok(v) => v,
@@ -575,6 +749,9 @@ pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginMan
     }
     if current < 2 {
         restore_learning_consent_surface(store).await;
+    }
+    if current < 3 {
+        unseed_not_pre_installed(store).await;
     }
 
     if let Err(e) = store.set_schema_version(STORE_SCHEMA_VERSION).await {
@@ -721,10 +898,15 @@ async fn restore_learning_consent_surface(store: &PluginStore) {
 
     // A record written during the default-OFF era has NO `ui_code`: nothing but
     // `seed_overrides` sources a built-in's companion bundle (neither `install_app`
-    // nor `enable_app` does — that is the whole reason `seed_optin_companion_ui`
-    // exists), and the default-on seed loop skipped this record. Enabling without it
-    // would trade a missing switch for a companion that mounts as "no runnable UI".
+    // nor `enable_app` does — that is the whole reason [`seed_companion_ui`] exists),
+    // and the default-on seed loop skipped this record. Enabling without it would
+    // trade a missing switch for a companion that mounts as "no runnable UI".
     // Only ever FILLS a gap; a record that already has a bundle is left alone.
+    //
+    // Kept even though `seed_companion_ui` now back-fills every companion record on
+    // every boot: `main.rs` runs the seed BEFORE the migrations, so in practice this
+    // finds the bundle already there and no-ops — but the repair this migration owes
+    // its user must not depend on the ORDER of two independent boot steps.
     if let Some(ui_code) = spec.ui_code {
         match store.has_ui_code(id).await {
             Ok(false) => {
@@ -755,6 +937,62 @@ async fn restore_learning_consent_surface(store: &PluginStore) {
              never gated on this record)"
         ),
         Err(e) => tracing::warn!("store migration v2: enabling '{id}' failed: {e}"),
+    }
+}
+
+/// **v3** — un-seed the [`NOT_PRE_INSTALLED`] apps on stores that already carry the
+/// record the old unconditional pre-seed wrote.
+///
+/// # Why the seed change is not enough on its own
+///
+/// [`seed_default_on`] / [`seed_companion_ui`] leave every EXISTING record alone —
+/// that is the "user's choice wins" rule, and it is right. But it means dropping the
+/// pre-seed only ever fixes machines that have not booted yet: every current install
+/// keeps a `com.ryu.whiteboard` / `com.ryu.canvas` row forever, and the Store keeps
+/// listing them as installed. This step is what makes the change reach them.
+///
+/// # Why removing the record loses nothing
+///
+/// The record holds no user state: `ui_code` is build content (re-attached by
+/// `lifecycle::install_app` from the compiled-in const), `approved_grants` is
+/// re-derived by `enable_app` from the manifest, and the app's actual content — the
+/// Space documents its board renders — lives in Spaces and is never touched here. So
+/// the worst case for a user who WANTED it is one click in the Store, and the app
+/// re-installs with an identical record.
+///
+/// # The one line it will not cross
+///
+/// **An ENABLED record is never removed.** Enabled is the one bit that can only have
+/// come from a deliberate act (nothing ever seeded these two enabled — see
+/// `the_real_seed_enables_spaces_and_leaves_its_space_owning_apps_optin`), and
+/// removing it would delete a working app out from under someone mid-use. Same shape
+/// as v1/v2's refusal to override a later user decision.
+///
+/// Once per install, like every step here: a user who installs Whiteboard AFTER this
+/// migration keeps it, because the version gate has already passed.
+async fn unseed_not_pre_installed(store: &PluginStore) {
+    for id in NOT_PRE_INSTALLED {
+        match store.get(id).await {
+            // Never installed — the fresh-install case, already correct.
+            Ok(None) => continue,
+            // The user turned it on. Their choice, and the app is in use.
+            Ok(Some(record)) if record.enabled => {
+                tracing::info!(
+                    "store migration v3: keeping '{id}' — it is ENABLED, so the record is a \
+                     deliberate choice, not the pre-seed artifact this step removes"
+                );
+            }
+            Ok(Some(_)) => match store.remove(id).await {
+                Ok(_) => tracing::info!(
+                    "store migration v3: removed the never-enabled '{id}' record (the old \
+                     companion-ui pre-seed wrote it so the app's compiled-in bundle had a home; \
+                     `lifecycle::install_app` now attaches that bundle at install time, so the \
+                     app is fully available from the Store without being pre-installed)"
+                ),
+                Err(e) => tracing::warn!("store migration v3: removing '{id}' failed: {e}"),
+            },
+            Err(e) => tracing::warn!("store migration v3: lookup '{id}' failed: {e}"),
+        }
     }
 }
 
@@ -1010,6 +1248,89 @@ mod migration_tests {
 
         assert!(store.get(RECIPES).await.unwrap().is_none());
     }
+
+    /// **v3** — the upgrade case the seed change cannot reach on its own: every
+    /// existing install carries the disabled `com.ryu.whiteboard` / `com.ryu.canvas`
+    /// record the old pre-seed wrote, and `seed_default_on` leaves existing records
+    /// alone by design. Without this step the change ships as fresh-installs-only.
+    #[tokio::test]
+    async fn v3_removes_the_never_enabled_pre_seed_records() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        // The pre-upgrade state the old `seed_companion_ui` produced: installed,
+        // disabled, carrying the compiled-in bundle.
+        for id in NOT_PRE_INSTALLED {
+            store.insert(id, "1.0.0").await.unwrap();
+            store
+                .set_ui_code(id, Some("<html>bundle</html>"))
+                .await
+                .unwrap();
+        }
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        for id in NOT_PRE_INSTALLED {
+            assert!(
+                store.get(id).await.unwrap().is_none(),
+                "'{id}' was a never-enabled pre-seed artifact — v3 must remove it"
+            );
+        }
+    }
+
+    /// The line v3 will not cross. `enabled` can only have come from a deliberate act
+    /// (nothing ever seeded these two enabled), so removing the record would delete a
+    /// working app out from under someone mid-use — the same "never override a later
+    /// user decision" rule v1 and v2 are built on.
+    #[tokio::test]
+    async fn v3_never_removes_an_enabled_record() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        let id = NOT_PRE_INSTALLED[0];
+        store.insert(id, "1.0.0").await.unwrap();
+        store
+            .set_enabled(id, &["spaces:docs".to_owned()])
+            .await
+            .unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        let record = store
+            .get(id)
+            .await
+            .unwrap()
+            .expect("an ENABLED record must survive v3");
+        assert!(record.enabled, "and must stay enabled");
+        assert_eq!(
+            record.approved_grants,
+            vec!["spaces:docs".to_owned()],
+            "its grants must be untouched"
+        );
+    }
+
+    /// Once per install, like every other step: a user who installs Whiteboard AFTER
+    /// the migration ran must keep it. A v3 that re-ran on every boot would make the
+    /// app un-installable-by-Store, which is strictly worse than the pre-install it
+    /// replaces.
+    #[tokio::test]
+    async fn v3_does_not_re_run_and_uninstall_a_later_install() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        // The user installs it afterwards, from the Store, and leaves it off.
+        let id = NOT_PRE_INSTALLED[0];
+        store.insert(id, "1.0.0").await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        assert!(
+            store.get(id).await.unwrap().is_some(),
+            "'{id}' was installed AFTER v3 ran — the version gate must stop v3 from removing it"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1179,13 +1500,15 @@ mod tests {
                 crate::plugins::builtins::WEBHOOKS_PLUGIN_ID,
                 crate::plugins::builtins::CALENDAR_PLUGIN_ID,
             ],
-            "only the companions that STAY default-on ship a prebuilt UI bundle, in \
-             CORE_DEFAULT_ON order. The other companion apps (whiteboard/canvas/finetune/ \
-             meetings/quests/approvals/monitors/workflows/activity/timeline/skill-editor) \
-             are opt-in (default-off), so they leave the default-on seed even though their \
-             SeedSpec overrides still carry ui_code (inert until enabled). `learning` is \
-             back in the set: it owns the consent switches for a capture path the kernel \
-             runs regardless of the record (see CORE_DEFAULT_ON)"
+            "only the companions that STAY default-on ship their prebuilt UI bundle via \
+             the default-on seed, in CORE_DEFAULT_ON order. The other companion apps \
+             (whiteboard/canvas/finetune/meetings/quests/approvals/monitors/workflows/ \
+             activity/timeline/skill-editor, plus mail) are opt-in (default-off), so they \
+             leave the default-on seed — their SeedSpec `ui_code` is carried by \
+             `seed_companion_ui` instead, onto a DISABLED record, which is what makes \
+             enabling one from the Store mount a real UI. `learning` is back in the set: \
+             it owns the consent switches for a capture path the kernel runs regardless \
+             of the record (see CORE_DEFAULT_ON)"
         );
         // Non-companion Core plugins seed with EMPTY grants, exactly as the generic
         // loop did before this module existed.
@@ -1261,6 +1584,311 @@ mod tests {
             ui.len() > 10_000 && ui.contains('<'),
             "mail ui_code must be the real inlined companion bundle, got {} bytes",
             ui.len()
+        );
+    }
+
+    /// THE A3 regression, generalized from the mail case above: ELEVEN default-off
+    /// built-in companions carried a real, size-guarded `ui_code` in `seed_overrides`
+    /// that NOTHING ever wrote — the only opt-in carriage was a hardcoded
+    /// one-element array holding mail, and neither `install_app` nor `enable_app`
+    /// sources a bundle. Enabling any of them from the Store therefore mounted
+    /// "this app has no interface" (the contributions payload's `has_ui` reads
+    /// `has_ui_code`), with the native pages they replaced already deleted.
+    ///
+    /// Drives the REAL `seed_default_on` over the REAL manifest set and asserts the
+    /// end state for EVERY pre-seeded opt-in companion: a record, DISABLED (still
+    /// opt-in, no spawn on a fresh install), carrying its bundle — which is exactly
+    /// what makes the Store's Enable (`enable_app`, which only flips the bit) mount a
+    /// real UI.
+    ///
+    /// The [`NOT_PRE_INSTALLED`] ids are deliberately excluded: they get NO record at
+    /// all now, and their bundle arrives from `lifecycle::install_app` instead. The
+    /// sibling `not_pre_installed_apps_get_no_record_but_stay_fully_installable` owns
+    /// that end state, so the A3 guard here is not weakened — it is re-pointed.
+    #[tokio::test]
+    async fn the_real_seed_seeds_every_optin_companion_ui_code_but_leaves_them_disabled() {
+        use crate::plugins::builtins::{
+            ACTIVITY_PLUGIN_ID, APPROVALS_PLUGIN_ID, MAIL_PLUGIN_ID, MEETINGS_PLUGIN_ID,
+            MONITORS_PLUGIN_ID, QUESTS_PLUGIN_ID, SKILL_EDITOR_PLUGIN_ID, TIMELINE_PLUGIN_ID,
+            WORKFLOWS_PLUGIN_ID,
+        };
+
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        seed_default_on(&store, &manifests).await;
+
+        let optin: Vec<&str> = companion_ui_specs()
+            .into_iter()
+            .map(|s| s.id)
+            .filter(|id| !CORE_DEFAULT_ON.contains(id) && !NOT_PRE_INSTALLED.contains(id))
+            .collect();
+
+        // Non-vacuous, and named: the nine still-pre-seeded default-off companions
+        // plus mail. If a companion legitimately moves into CORE_DEFAULT_ON it leaves
+        // this list — and then the default-on loop carries its bundle, which the
+        // sibling `default_on_specs_cover_core_default_on_exactly` pins. Whiteboard and
+        // Canvas are absent BY DESIGN (`NOT_PRE_INSTALLED`).
+        for id in [
+            MAIL_PLUGIN_ID,
+            crate::plugin_manifest::FINETUNE_PLUGIN_ID,
+            MEETINGS_PLUGIN_ID,
+            MONITORS_PLUGIN_ID,
+            WORKFLOWS_PLUGIN_ID,
+            QUESTS_PLUGIN_ID,
+            APPROVALS_PLUGIN_ID,
+            ACTIVITY_PLUGIN_ID,
+            TIMELINE_PLUGIN_ID,
+            SKILL_EDITOR_PLUGIN_ID,
+        ] {
+            assert!(
+                optin.contains(&id),
+                "'{id}' ships a compiled-in companion bundle and is default-off, so it must \
+                 be in the opt-in carriage list, got {optin:?}"
+            );
+        }
+
+        for id in optin {
+            let record = store
+                .get(id)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("the seed must install a '{id}' record (disabled)"));
+            assert!(
+                !record.enabled,
+                "'{id}' must stay opt-in (DISABLED) — seeding its UI must not turn it on"
+            );
+            assert!(
+                record.approved_grants.is_empty(),
+                "'{id}' is not enabled, so no grants may be persisted (the Gateway approves \
+                 them at enable), got {:?}",
+                record.approved_grants
+            );
+            let ui = store.get_ui_code(id).await.unwrap().unwrap_or_else(|| {
+                panic!(
+                    "'{id}' must carry its compiled-in ui_code so enabling it from the Store \
+                     mounts a real UI instead of \"this app has no interface\""
+                )
+            });
+            assert!(
+                ui.len() > 10_000 && ui.contains('<'),
+                "'{id}' ui_code must be the real inlined companion bundle, got {} bytes",
+                ui.len()
+            );
+        }
+    }
+
+    /// The end state for the [`NOT_PRE_INSTALLED`] apps, and the reason dropping the
+    /// pre-seed is safe rather than a regression: a fresh store has NO record for
+    /// them (so the Store lists them as available, not "Installed (off)"), and the
+    /// ordinary `install_app` carries the compiled-in bundle so a one-click Install
+    /// lands the exact record the pre-seed used to write.
+    ///
+    /// Both halves matter. Asserting only the absence would pass just as well for the
+    /// broken version of this change — the one where the pre-seed is gone, nothing
+    /// replaces it, and enabling the app from the Store mounts "this app has no
+    /// interface" (the A3 regression the sibling test above exists for). The install
+    /// leg is what proves the carriage moved instead of disappearing.
+    #[tokio::test]
+    async fn not_pre_installed_apps_get_no_record_but_stay_fully_installable() {
+        use crate::plugin_manifest::{CANVAS_PLUGIN_ID, WHITEBOARD_PLUGIN_ID};
+
+        // Non-vacuous, and pinned by name: this is a product decision, so a silent
+        // emptying of the list must fail here rather than quietly re-pre-install.
+        for id in [WHITEBOARD_PLUGIN_ID, CANVAS_PLUGIN_ID] {
+            assert!(
+                NOT_PRE_INSTALLED.contains(&id),
+                "'{id}' must be in NOT_PRE_INSTALLED"
+            );
+            assert!(
+                !CORE_DEFAULT_ON.contains(&id),
+                "'{id}' cannot be default-on AND not-pre-installed"
+            );
+        }
+
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        seed_default_on(&store, &manifests).await;
+
+        for id in NOT_PRE_INSTALLED {
+            assert!(
+                store.get(id).await.unwrap().is_none(),
+                "'{id}' must NOT be pre-installed by the seed — a fresh install must carry no \
+                 record for it at all"
+            );
+
+            // …and the Store's Install must still deliver a mountable app.
+            let manifest = manifests
+                .iter()
+                .find(|m| m.id == *id)
+                .unwrap_or_else(|| panic!("'{id}' must be a compiled-in built-in manifest"));
+            crate::plugins::lifecycle::install_app(&store, manifest)
+                .await
+                .unwrap();
+
+            let record = store.get(id).await.unwrap().expect("installed");
+            assert!(
+                !record.enabled,
+                "install must leave '{id}' DISABLED — Enable is a separate, Gateway-validated \
+                 step"
+            );
+            let ui = store.get_ui_code(id).await.unwrap().unwrap_or_else(|| {
+                panic!(
+                    "installing '{id}' must attach its compiled-in companion bundle, or enabling \
+                     it mounts \"this app has no interface\""
+                )
+            });
+            assert!(
+                ui.len() > 10_000 && ui.contains('<'),
+                "'{id}' ui_code must be the real inlined companion bundle, got {} bytes",
+                ui.len()
+            );
+        }
+    }
+
+    /// A second boot must not undo the first: `seed_companion_ui` runs on EVERY boot
+    /// (it is the case-2 back-fill path), so the skip has to hold for a store that
+    /// already exists, not just an empty one. The bug this forbids is the same one the
+    /// old code's own doc note describes — uninstall, reboot, and it is back.
+    #[tokio::test]
+    async fn a_reboot_never_re_pre_installs_a_not_pre_installed_app() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        seed_default_on(&store, &manifests).await;
+        seed_default_on(&store, &manifests).await;
+        seed_default_on(&store, &manifests).await;
+
+        for id in NOT_PRE_INSTALLED {
+            assert!(
+                store.get(id).await.unwrap().is_none(),
+                "'{id}' came back on a later boot — an uninstall must survive a restart"
+            );
+        }
+    }
+
+    /// The case-2 back-fill must keep working for a user who DID enable one of these:
+    /// the skip is only on the record-CREATION branch, so an existing record whose
+    /// bundle is missing is still repaired. Getting this wrong would strand exactly
+    /// the users who use the feature.
+    #[tokio::test]
+    async fn an_existing_record_for_a_not_pre_installed_app_still_gets_its_bundle() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        let id = NOT_PRE_INSTALLED[0];
+        // A pre-upgrade record with no bundle (`store.insert` writes none).
+        store.insert(id, "1.0.0").await.unwrap();
+        store
+            .set_enabled(id, &["spaces:docs".to_owned()])
+            .await
+            .unwrap();
+
+        seed_default_on(&store, &manifests).await;
+
+        assert!(
+            store.has_ui_code(id).await.unwrap(),
+            "'{id}' has an existing record, so the companion-ui back-fill must still fill its \
+             missing bundle"
+        );
+        assert!(
+            store.get(id).await.unwrap().unwrap().enabled,
+            "the back-fill must never touch the enabled bit"
+        );
+    }
+
+    /// The carriage list is DERIVED from `seed_overrides`, never a second hardcoded
+    /// array — that duplication is what left eleven companions with an unreachable
+    /// bundle. A 17th companion row therefore needs no second edit: it is picked up
+    /// by the default-on loop (if default-on) or by `seed_companion_ui` (if not), and
+    /// this asserts both halves are non-empty so neither branch can rot unnoticed.
+    #[test]
+    fn the_companion_bundle_carriage_is_derived_from_the_one_table() {
+        let with_ui: Vec<&str> = seed_overrides()
+            .iter()
+            .filter(|s| s.ui_code.is_some())
+            .map(|s| s.id)
+            .collect();
+        assert!(
+            !with_ui.is_empty(),
+            "seed_overrides must carry compiled-in companion bundles"
+        );
+        let carried: Vec<&str> = companion_ui_specs().into_iter().map(|s| s.id).collect();
+        assert_eq!(
+            carried, with_ui,
+            "every seed_overrides row with a ui_code must be carried, in table order"
+        );
+        assert!(
+            carried.iter().any(|id| CORE_DEFAULT_ON.contains(id)),
+            "some companions are default-on (their bundle rides the enable loop)"
+        );
+        assert!(
+            carried.iter().any(|id| !CORE_DEFAULT_ON.contains(id)),
+            "some companions are opt-in (their bundle rides seed_companion_ui)"
+        );
+    }
+
+    /// The UPGRADE half of the repair. Several of these apps began life as wave-2
+    /// route-gate governance shells and only gained a companion runnable in the W7
+    /// extraction, so a pre-existing install carries a record written before any
+    /// bundle existed — and the seed loop leaves every existing record alone
+    /// (`Ok(Some(_)) => continue`), which is right for enable/disable and wrong for
+    /// build content. Filling it must not disturb one bit of user state.
+    #[tokio::test]
+    async fn a_pre_existing_record_without_a_bundle_is_filled_without_touching_user_state() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+        let id = crate::plugins::builtins::QUESTS_PLUGIN_ID;
+
+        // The pre-upgrade state: installed + enabled with its grant, no ui_code.
+        store.insert(id, "1.0.0").await.unwrap();
+        store
+            .set_enabled(id, &["quests:crud".to_owned()])
+            .await
+            .unwrap();
+        assert!(!store.has_ui_code(id).await.unwrap());
+
+        seed_default_on(&store, &manifests).await;
+
+        let ui =
+            store.get_ui_code(id).await.unwrap().expect(
+                "a record predating the bundle must be back-filled, not left mounting empty",
+            );
+        assert!(ui.len() > 10_000 && ui.contains('<'));
+        let record = store.get(id).await.unwrap().unwrap();
+        assert!(record.enabled, "the fill must not disturb enabled state");
+        assert_eq!(
+            record.approved_grants,
+            vec!["quests:crud".to_owned()],
+            "the fill must not rewrite approved grants"
+        );
+        assert_eq!(
+            record.version, "1.0.0",
+            "the fill must not silently re-version the record"
+        );
+    }
+
+    /// Only ever FILLS a gap. A record that already carries a bundle keeps it —
+    /// otherwise every boot would clobber whatever the update lifecycle installed
+    /// (`update_app` is the one other `set_ui_code` writer) with the compiled-in
+    /// build, which is a downgrade dressed up as a repair.
+    #[tokio::test]
+    async fn an_existing_companion_bundle_is_never_overwritten() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+        let id = crate::plugins::builtins::QUESTS_PLUGIN_ID;
+        const SENTINEL: &str = "<!-- installed by the update lifecycle -->";
+
+        store.insert(id, "1.0.0").await.unwrap();
+        store.set_ui_code(id, Some(SENTINEL)).await.unwrap();
+
+        seed_default_on(&store, &manifests).await;
+
+        assert_eq!(
+            store.get_ui_code(id).await.unwrap().as_deref(),
+            Some(SENTINEL),
+            "a stored bundle must never be overwritten by the compiled-in one"
         );
     }
 }

@@ -16,13 +16,32 @@ import { type ApiTarget, apiUrl, makeHeaders, request } from "./client.ts";
 
 /** How a job is scheduled: a cron expression or a fixed interval. */
 export type Schedule =
-	| { kind: "cron"; expr: string }
+	| {
+			kind: "cron";
+			expr: string;
+			/**
+			 * IANA zone the expression is read in (`"Europe/Lisbon"`). Absent means
+			 * UTC, which is how every schedule behaved before zones existed — so a
+			 * wall-clock time chosen by a human ("05:00") must carry one, or it
+			 * drifts an hour at each DST transition.
+			 */
+			tz?: string | null;
+	  }
 	| { kind: "every"; interval: string };
 
 /** What a job runs when it fires: a workflow or a one-shot agent prompt. */
 export type JobTarget =
 	| { type: "workflow"; workflowId: string; input?: Record<string, string> }
-	| { type: "agent"; agentId: string; prompt: string };
+	| {
+			type: "agent";
+			agentId: string;
+			/**
+			 * Pins the model for this turn only, as the composer's picker does.
+			 * Absent runs the agent on its configured model.
+			 */
+			model?: string | null;
+			prompt: string;
+	  };
 
 /** Outcome of a single recorded job execution. */
 export type ExecOutcome = "success" | "failure";
@@ -45,6 +64,12 @@ export interface ScheduledJob {
 	lastOutcome: ExecOutcome | null;
 	lastRunAt: string | null;
 	name: string;
+	/**
+	 * Manifest id of the App that created this job, when one did. Core's tick
+	 * loop refuses to fire an App-owned job while that App is disabled, so this
+	 * is also what makes "turn the App off" stop its automations.
+	 */
+	ownerApp: string | null;
 	requireApproval: boolean;
 	schedule: Schedule;
 	/**
@@ -62,6 +87,8 @@ export interface ScheduledJob {
 export interface JobInput {
 	enabled: boolean;
 	name: string;
+	/** Manifest id of the App creating this job; omit for Core/desktop jobs. */
+	ownerApp?: string | null;
 	requireApproval?: boolean;
 	schedule: Schedule;
 	target: JobTarget;
@@ -73,6 +100,7 @@ interface ScheduleWire {
 	expr?: string;
 	interval?: string;
 	kind: "cron" | "every";
+	tz?: string | null;
 }
 
 // Core also serializes internal targets ("monitor", "quest", "identity_health",
@@ -80,6 +108,7 @@ interface ScheduleWire {
 interface TargetWire {
 	agent_id?: string;
 	input?: Record<string, string>;
+	model?: string | null;
 	prompt?: string;
 	type: string;
 	workflow_id?: string;
@@ -109,6 +138,7 @@ interface JobWire {
 	last_outcome?: ExecOutcome | null;
 	last_run_at?: string | null;
 	name: string;
+	owner_app?: string | null;
 	require_approval?: boolean;
 	schedule: ScheduleWire;
 	target: TargetWire;
@@ -117,7 +147,7 @@ interface JobWire {
 
 function toSchedule(s: ScheduleWire): Schedule {
 	if (s.kind === "cron") {
-		return { kind: "cron", expr: s.expr ?? "" };
+		return { kind: "cron", expr: s.expr ?? "", tz: s.tz ?? null };
 	}
 	return { kind: "every", interval: s.interval ?? "" };
 }
@@ -130,7 +160,12 @@ function toTarget(t: TargetWire): JobTarget {
 			input: t.input,
 		};
 	}
-	return { type: "agent", agentId: t.agent_id ?? "", prompt: t.prompt ?? "" };
+	return {
+		type: "agent",
+		agentId: t.agent_id ?? "",
+		prompt: t.prompt ?? "",
+		model: t.model ?? null,
+	};
 }
 
 function toRecord(r: ExecRecordWire): ExecRecord {
@@ -152,6 +187,7 @@ function toJob(j: JobWire): ScheduledJob {
 		target: toTarget(j.target),
 		enabled: j.enabled ?? true,
 		requireApproval: j.require_approval ?? false,
+		ownerApp: j.owner_app ?? null,
 		createdAt: j.created_at,
 		updatedAt: j.updated_at,
 		lastRunAt: j.last_run_at ?? null,
@@ -162,7 +198,11 @@ function toJob(j: JobWire): ScheduledJob {
 
 function toScheduleBody(s: Schedule): Record<string, unknown> {
 	if (s.kind === "cron") {
-		return { kind: "cron", expr: s.expr };
+		// Omitted rather than sent as null when absent, so a zoneless job's body
+		// is byte-identical to what it was before zones existed.
+		return s.tz
+			? { kind: "cron", expr: s.expr, tz: s.tz }
+			: { kind: "cron", expr: s.expr };
 	}
 	return { kind: "every", interval: s.interval };
 }
@@ -175,7 +215,39 @@ function toTargetBody(t: JobTarget): Record<string, unknown> {
 			input: t.input ?? {},
 		};
 	}
-	return { type: "agent", agent_id: t.agentId, prompt: t.prompt };
+	return t.model
+		? {
+				type: "agent",
+				agent_id: t.agentId,
+				prompt: t.prompt,
+				model: t.model,
+			}
+		: { type: "agent", agent_id: t.agentId, prompt: t.prompt };
+}
+
+/**
+ * Run a scheduled job now, outside its schedule
+ * (`POST /heartbeat/jobs/:id/run`).
+ *
+ * Core answers 200 for both outcomes — the request succeeded either way; what
+ * differs is whether the *job* did. A failed run therefore throws with Core's
+ * own error message rather than being reported as a successful call.
+ */
+export async function runJobNow(
+	target: ApiTarget,
+	id: string
+): Promise<string | null> {
+	const json = await request<{
+		error?: string;
+		run_id?: string | null;
+		success?: boolean;
+	}>(target, `/heartbeat/jobs/${encodeURIComponent(id)}/run`, {
+		method: "POST",
+	});
+	if (json.success === false) {
+		throw new Error(json.error ?? "The job failed to run.");
+	}
+	return json.run_id ?? null;
 }
 
 /** List all scheduled jobs on the active node. */
@@ -204,6 +276,7 @@ export async function createJob(
 			target: toTargetBody(input.target),
 			enabled: input.enabled,
 			require_approval: input.requireApproval ?? false,
+			...(input.ownerApp ? { owner_app: input.ownerApp } : {}),
 		}),
 	});
 	const text = await resp.text();

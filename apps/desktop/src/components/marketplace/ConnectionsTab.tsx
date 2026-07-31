@@ -192,7 +192,7 @@ function KeyMissingState() {
 				<EmptyTitle>Add your Composio key to connect accounts</EmptyTitle>
 				<EmptyDescription>
 					Connections are powered by Composio. Add your Composio API key in
-					Gateway → Keys, then your available integrations appear here.
+					Gateway → API keys, then your available integrations appear here.
 				</EmptyDescription>
 			</EmptyHeader>
 		</Empty>

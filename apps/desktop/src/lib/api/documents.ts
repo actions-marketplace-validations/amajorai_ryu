@@ -1,20 +1,51 @@
 // apps/desktop/src/lib/api/documents.ts
 //
-// Client for Core's `document.parse` facade (`/api/documents/parse*`) — the ONE
-// document-extraction path. Composer attachments call it through
+// Client for Core's `document.parse` facade (`/api/documents/parse*`) — the only
+// extraction path a CLIENT may use. Composer attachments call it through
 // `lib/composer/attachments.ts`; nothing else should re-implement extraction.
+//
+// "Only for a client" is the precise claim. The facade also has a typed in-process
+// API (`submit_blob` / `job_outcome` / `builtin_parse`), and that — not these routes
+// — is what carries Space and chat uploads today: `crate::space_file_index` calls it
+// directly when a file is stored. So a document reaching an index without any HTTP
+// request below being made is normal, not a second extraction path.
 //
 // Submit → poll, never one long request: the bound provider is a lazy sidecar whose
 // activity guard drops when response headers arrive, so a single long-lived parse
 // request can be reaped mid-flight. Core mirrors that contract, and so does this.
+//
+// # Which routes here are real
+//
+// Exactly one of the three parse routes is registered in Core today:
+// `GET /api/documents/parse/capability`. {@link submitParse} / {@link fetchParseJob}
+// (and so {@link parseDocument}) address handlers that COMPILE but are deliberately
+// not in Core's route table, because their only consumer — `stageComposerFiles` in
+// `lib/composer/attachments.ts` — is itself imported by no surface yet. They are
+// kept, not deleted: they are the client half of a contract Core already implements,
+// and the change that mounts the composer seam mounts both ends at once. Until then,
+// calling them 404s. See `apps/core/src/document_parse.rs`'s module doc.
+//
+// There is no `/api/document-parse/*` pair, and there never was. This module used to
+// document and fetch `GET /api/document-parse/backends` + `POST /api/document-parse/backend`
+// as if Core served them; `grep -rn "document-parse" apps/core/src` matched a single
+// doc comment. The panel that read them therefore reported "no document parser is
+// enabled on this node" while markitdown was installed, enabled and bound — a fetch
+// that fails is not a fact about the node. The backend view is now composed from the
+// GENERIC capability layer (`./capability-layers.ts` → `/api/capabilities` and
+// `/api/capabilities/bindings`), which is where every other hot-swappable layer reads
+// and writes, and which is what the removed doc comment already claimed these routes
+// were "a thin view of".
 
 import {
-	ApiError,
-	type ApiTarget,
-	apiUrl,
-	identityHeaders,
-	request,
-} from "./client.ts";
+	CapabilityBindingConflictError,
+	type CapabilityLayer,
+	type CapabilityProvider,
+	clearCapabilityBinding,
+	describeBindingFailure,
+	fetchCapabilityLayers,
+	setCapabilityBinding,
+} from "./capability-layers.ts";
+import { ApiError, type ApiTarget, apiUrl, identityHeaders } from "./client.ts";
 
 /** What this node can extract text from, right now. */
 export interface ParseCapability {
@@ -231,15 +262,19 @@ export async function parseDocument(
 //
 // The extractor is a CAPABILITY, not a Rust trait: several apps can provide
 // `document.parse` at once and Core resolves one with
-// `user override > sole provider > declared default > lowest id`. These two
-// routes are the thin, capability-filtered view of that (`/api/capabilities`
-// serves every layer) plus the write that persists the override half — the SAME
-// preference `PUT /api/capabilities/bindings` writes, so the two never disagree.
+// `user override > sole provider > declared default > lowest id`. So the backend
+// view is one row of the GENERIC capability read model, not a private endpoint:
+// this section is a `document.parse` filter over `./capability-layers.ts`, which
+// owns the transport, the typed 409, and the read-merge-write that keeps a
+// single-layer change from wiping every other layer's override.
 //
-// Both are deliberately OUTSIDE the Spaces AppGate: the bound provider serves
-// chat attachments too, so a node with Spaces turned off must still be able to
-// see and pick a backend. Neither wakes a sidecar — this is pure metadata, safe
-// to call on a settings mount.
+// Deliberately OUTSIDE the Spaces AppGate: the bound provider serves chat
+// attachments too, so a node with Spaces turned off must still be able to see and
+// pick a backend. Nothing here wakes a sidecar — this is pure metadata, safe to
+// call on a settings mount.
+
+/** The capability name. One string, mirroring Core's `CAP_DOCUMENT_PARSE`. */
+export const DOCUMENT_PARSE_CAPABILITY = "document.parse";
 
 /** One `document.parse` provider app. */
 export interface ParseBackend {
@@ -251,7 +286,7 @@ export interface ParseBackend {
 	version: string;
 }
 
-/** `GET /api/document-parse/backends` — installed backends and the bound one. */
+/** The installed backends and the bound one — `/api/capabilities`, filtered. */
 export interface ParseBackendList {
 	/** Installed but NOT enabled. Rendered as "enable it", never hidden: every
 	 *  heavy backend ships opt-in, so hiding these leaves a node looking as if
@@ -259,9 +294,6 @@ export interface ParseBackendList {
 	available: ParseBackend[];
 	/** The provider serving parses right now, or null when only the floor is. */
 	bound: string | null;
-	/** Extensions Core reads with NO provider at all. This is why "no backend
-	 *  installed" is not the same as "this node cannot read anything". */
-	builtinExtensions: string[];
 	/** True when the binding comes from an explicit override, not the auto-pick. */
 	overridden: boolean;
 	/** Every ENABLED candidate. */
@@ -271,79 +303,104 @@ export interface ParseBackendList {
 	selectable: boolean;
 }
 
-interface ParseBackendWire {
-	id: string;
-	is_default?: boolean;
-	name?: string;
-	version?: string;
-}
-
-interface ParseBackendListWire {
-	available?: ParseBackendWire[];
-	bound?: string | null;
-	builtin_extensions?: string[];
-	overridden?: boolean;
-	providers?: ParseBackendWire[];
-	selectable?: boolean;
-}
-
-function toBackend(p: ParseBackendWire): ParseBackend {
+/**
+ * A capability-layer provider narrowed to what a parser picker renders.
+ *
+ * `servesVerbs` / `target` are dropped on purpose rather than passed through:
+ * `document.parse` has no facade verbs (Core calls the provider's HTTP sidecar
+ * directly, see `document_parse.rs`) and no machine target, so surfacing either
+ * here would put a permanently-false qualifier on every row.
+ */
+function toBackend(p: CapabilityProvider): ParseBackend {
 	return {
 		id: p.id,
-		name: p.name ?? p.id,
-		version: p.version ?? "",
-		isDefault: p.is_default ?? false,
+		isDefault: p.isDefault,
+		name: p.name,
+		version: p.version,
 	};
 }
 
-/** `GET /api/document-parse/backends`. */
-export async function fetchParseBackends(
-	target: ApiTarget,
-	signal?: AbortSignal
-): Promise<ParseBackendList> {
-	const wire = await request<ParseBackendListWire>(
-		target,
-		"/api/document-parse/backends",
-		{ signal }
-	);
+/** The `document.parse` layer as this module's shape, or the empty view. */
+function toBackendList(layer: CapabilityLayer | undefined): ParseBackendList {
 	return {
-		bound: wire.bound ?? null,
-		overridden: wire.overridden ?? false,
-		selectable: wire.selectable ?? false,
-		providers: (wire.providers ?? []).map(toBackend),
-		available: (wire.available ?? []).map(toBackend),
-		builtinExtensions: wire.builtin_extensions ?? [],
+		available: (layer?.available ?? []).map(toBackend),
+		bound: layer?.bound ?? null,
+		overridden: layer?.overridden ?? false,
+		providers: (layer?.providers ?? []).map(toBackend),
+		selectable: layer?.selectable ?? false,
 	};
 }
 
 /**
- * `POST /api/document-parse/backend` — pick the backend, or pass `null` to clear
- * the override and fall back to the declared default.
+ * The `document.parse` row of `GET /api/capabilities`.
+ *
+ * A node with no parsing app at all returns no such row, which is why the miss is
+ * an EMPTY view rather than a throw: "nothing provides this yet" is a state the
+ * panel renders (with the built-in floor and a pointer at the Store), not an error.
+ * A transport failure still throws — the caller must be able to tell "this node has
+ * no parser" from "this node did not answer", because rendering the second as the
+ * first is the exact misreport this function was written to end.
+ */
+export async function fetchParseBackends(
+	target: ApiTarget
+): Promise<ParseBackendList> {
+	const model = await fetchCapabilityLayers(target);
+	return toBackendList(
+		model.capabilities.find((c) => c.capability === DOCUMENT_PARSE_CAPABILITY)
+	);
+}
+
+/**
+ * Pick the backend, or pass `null` to clear the override and fall back to Core's
+ * automatic pick.
+ *
+ * Both halves go through `./capability-layers.ts` so the write is merged into the
+ * existing override map and serialized against every other layer's write: the
+ * endpoint REPLACES the map, and a `document.parse`-only PUT would silently reset
+ * the node's `web.search`, `memory` and `computer.control` picks.
  *
  * Documents already parsed by the previous backend KEEP their old text: swapping
  * does not silently re-extract a node's history. Re-parsing is the deliberate
  * second step (`reparseSpace` / `reparseDocument` in `./spaces.ts`).
+ *
+ * Throws `CapabilityBindingConflictError` on Core's 409 — see
+ * {@link describeApiRefusal}, which renders it with the blocking plugin intact.
  */
 export async function setParseBackend(
 	target: ApiTarget,
 	backendId: string | null
 ): Promise<void> {
-	await request(target, "/api/document-parse/backend", {
-		method: "POST",
-		body: { backend_id: backendId },
-	});
+	if (backendId === null) {
+		await clearCapabilityBinding(target, DOCUMENT_PARSE_CAPABILITY);
+		return;
+	}
+	await setCapabilityBinding(target, DOCUMENT_PARSE_CAPABILITY, backendId);
 }
 
 /**
- * The reason a Core call was refused, preferring Core's own `{error}` body over
- * the generic `"<path> failed: <status>"` that `ApiError.message` carries.
+ * The reason a Core call was refused, in a form that keeps the parts that say
+ * WHAT broke.
  *
- * Without this, a refused backend swap — the 409 that names which enabled app the
- * change would leave unbound — reaches the user as
- * `/api/document-parse/backend failed: 409`. That is the opaque-failure class
- * this whole feature exists to end, reproduced in its own error path.
+ * Three error shapes reach this one toast, and the flattest handling loses the
+ * useful field in two of them:
+ *
+ * - `CapabilityBindingConflictError` — Core's 409 on a refused binding change,
+ *   carrying the enabled `plugin` the change would leave unbound and the stable
+ *   `binding_error` code. Delegated to `describeBindingFailure` so a refusal is
+ *   worded identically here and in the node layer menu; `error.message` alone
+ *   would drop both fields.
+ * - `ApiError` — a generic Core refusal whose body has `{error}`. Its own
+ *   `.message` is the opaque `"<path> failed: <status>"`, so the server message
+ *   wins.
+ * - anything else — transport. Its message is all there is.
+ *
+ * The opaque-failure class this whole feature exists to end is exactly what a
+ * bare `String(error)` would reproduce in the feature's own error path.
  */
 export function describeApiRefusal(error: unknown): string | undefined {
+	if (error instanceof CapabilityBindingConflictError) {
+		return describeBindingFailure(error, "this parser");
+	}
 	if (error instanceof ApiError) {
 		return error.serverMessage ?? error.message;
 	}

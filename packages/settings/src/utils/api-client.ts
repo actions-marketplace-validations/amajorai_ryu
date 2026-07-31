@@ -101,6 +101,48 @@ export interface ReferralProgram {
 	status: "active";
 }
 
+/**
+ * Where one referred friend has got to. `activated` is the in-flight state — the
+ * friend qualified and the reward is being minted — and is deliberately distinct
+ * from `pending`, which is still waiting on them. `denied` is terminal.
+ */
+export type CreditReferralState = "activated" | "denied" | "paid" | "pending";
+
+export interface CreditReferralReferee {
+	/** Face value of the reward, in MICRO-USD. Null until the reward is paid. */
+	amountMicroUsd: number | null;
+	deniedReason: string | null;
+	id: string;
+	joinedAt: string;
+	/** The friend, masked — a share link is public, so the address is not ours. */
+	label: string;
+	paidAt: string | null;
+	state: CreditReferralState;
+}
+
+/**
+ * The CREDIT half of the referral program — Ryu credits from the donated pool,
+ * paid once a referred friend becomes a paying customer. Every amount here is
+ * MICRO-USD (1_000_000 = $1), NOT the minor units the cash commission side uses.
+ */
+export interface CreditReferralDashboard {
+	cap: {
+		capMicroUsd: number;
+		/** Lifetime credits earned (micro-USD). Monotonic — never a balance. */
+		earnedMicroUsd: number;
+		paidCount: number;
+		/** Null when uncapped; a `0` ceiling means no limit, not no headroom. */
+		remainingMicroUsd: number | null;
+		uncapped: boolean;
+	};
+	referrals: CreditReferralReferee[];
+	/** Null on either side when that campaign is closed or unusable. */
+	reward: {
+		refereeMicroUsd: number | null;
+		referrerMicroUsd: number | null;
+	};
+}
+
 export type OnboardingStatus = "none" | "pending" | "active" | "restricted";
 
 export interface CommissionRule {
@@ -352,6 +394,11 @@ export const settingsApi = {
 	referrals: {
 		get(): Promise<ReferralProgram> {
 			return fetchApi("/api/referrals");
+		},
+
+		/** The credit half of the program — see {@link CreditReferralDashboard}. */
+		credits(): Promise<CreditReferralDashboard> {
+			return fetchApi("/api/referrals/credits");
 		},
 	},
 

@@ -54,6 +54,7 @@ pub mod shadow_proxy;
 /// Provider/model selection lives in [`crate::rag_host`] (the single resolver);
 /// this alias keeps the many `retrieval::`-qualified reference sites unchanged.
 pub use ryu_rag as retrieval;
+pub mod routing_api;
 pub mod spaces;
 pub mod sync;
 pub mod usage_api;
@@ -2693,12 +2694,17 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/media/:file", get(media::serve_media))
         // User uploads → Uploads system space (ungated kernel storage, twin of
         // `/api/media/*`). Chat / editor / `ui.uploadFile` all land here.
+        // Same declaration mechanism as `/api/spaces/:id/files` below: the limit and
+        // the sentence a rejection prints come from one `BodyLimit`. Was a bare
+        // `DefaultBodyLimit::max(uploads::MAX_UPLOAD_BYTES)`, which enforced the right
+        // number but answered an over-limit body with an unexplained 413.
         .route(
             "/api/uploads",
-            post(uploads::upload_file).layer(axum::extract::DefaultBodyLimit::max(
-                uploads::MAX_UPLOAD_BYTES,
-            )),
+            uploads::UPLOADS_BODY_LIMIT.apply(post(uploads::upload_file)),
         )
+        // The ceilings above, as data — so a settings panel prints a number it fetched
+        // instead of one it mirrored by hand.
+        .route("/api/uploads/limits", get(uploads::upload_limits))
         .route("/api/uploads/:id", get(uploads::serve_upload))
         // ── Autoresearch data path (`/api/research/*`) is served out-of-process by
         // the `ryu-research` sidecar via the manifest `public_mount` — no in-process
@@ -2855,6 +2861,24 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // The layer picker's read model: every capability, its candidate providers,
         // and which one is currently selected.
         .route("/api/capabilities", get(list_capabilities))
+        // What the BOUND `document.parse` backend can read right now — its formats,
+        // its missing native tools, and the byte ceiling it enforces.
+        //
+        // Registered HERE and not in `spaces_routes` on purpose: the same bound
+        // provider serves chat attachments, so a node with the Spaces app disabled
+        // must still be able to answer "can this machine read a PDF?". It is the
+        // sole data source for the desktop's Document parsing panel and for the
+        // composer's file-picker `accept` list; while it was unregistered the panel
+        // read `null` and silently rendered neither.
+        //
+        // Its two siblings (`POST /api/documents/parse`, `GET .../parse/jobs/:id`)
+        // are deliberately NOT registered — their consumer seam exists but no
+        // surface imports it yet. See `crate::document_parse`'s module doc, which
+        // also records that the POST needs its own `DefaultBodyLimit`.
+        .route(
+            "/api/documents/parse/capability",
+            get(crate::document_parse::parse_capability),
+        )
         // ── Email transport (BYO SMTP sink config + test send) ──────────────
         .route(
             "/api/email/transport",
@@ -2875,6 +2899,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // ── Scheduled jobs / heartbeat ──────────────────────────────────────
         .route("/heartbeat/jobs", get(list_jobs).post(create_job))
         .route("/heartbeat/jobs/:id", get(get_job).delete(delete_job))
+        .route("/heartbeat/jobs/:id/run", post(run_job_now))
         // Connected-client presence (the "who's on this node" surface). Read by
         // the desktop NodeSelector; populated by `track_connection` below.
         .route("/api/connections", get(list_connections))
@@ -2982,6 +3007,14 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/spaces", get(list_spaces).post(create_space))
         .route("/api/spaces/:id", axum::routing::delete(delete_space))
+        // Changing the retrieval mode (and rebuilding the entity graph so the change
+        // takes effect) is a POST to a scoped sub-path, mirroring `:id/icon` above
+        // rather than introducing a PATCH: the process CORS layer's `allow_methods`
+        // (GET/POST/PUT/DELETE/OPTIONS) does not include PATCH, so a PATCH route
+        // would fail preflight from every browser-hosted surface — a route that
+        // exists and cannot be called. Registered above the `route_layer` below so
+        // it stays inside the Spaces AppGate.
+        .route("/api/spaces/:id/retrieval-mode", post(set_retrieval_mode))
         .route("/api/spaces/:id/icon", post(set_space_icon))
         .route(
             "/api/spaces/:id/documents",
@@ -2990,7 +3023,15 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
         .route("/api/spaces/:id/pages", post(create_page))
         .route("/api/spaces/:id/databases", post(create_database))
         .route("/api/spaces/:id/whiteboards", post(create_whiteboard))
-        .route("/api/spaces/:id/files", post(create_file))
+        // The body limit is DECLARED here, not inherited: a route with no
+        // `DefaultBodyLimit` silently caps at axum's implicit 2 MiB, which is how this
+        // route came to enforce ~1.5 MiB of file while its handler checked 200 MiB.
+        // `SPACE_FILE_BODY_LIMIT` carries the base64 wire ceiling AND the message a
+        // rejection prints, so neither can drift from the other.
+        .route(
+            "/api/spaces/:id/files",
+            uploads::SPACE_FILE_BODY_LIMIT.apply(post(create_file)),
+        )
         .route("/api/spaces/:id/documents/:doc_id/blob", get(get_file_blob))
         .route(
             "/api/spaces/:id/documents/:doc_id",
@@ -3001,6 +3042,13 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
         .route(
             "/api/spaces/:id/documents/:doc_id/icon",
             post(set_document_icon),
+        )
+        // Was this file's TEXT indexed, or only its filename? See
+        // [`crate::space_file_index`] — a silent descriptor-only fallback is the
+        // failure this route exists to make visible.
+        .route(
+            "/api/spaces/:id/documents/:doc_id/index",
+            get(get_document_index_status),
         )
         // Page version history (Prompt-Studio-style, server-backed).
         .route(
@@ -3161,6 +3209,17 @@ fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
         //    from the CLI's own local OAuth token, à la CodexBar/openusage).
         //    Backs the chat "usage bar"; Claude + Codex in v1. ──
         .route("/api/agents/:id/usage", get(usage_api::agent_usage))
+        .route(
+            "/api/providers/:id/credits",
+            get(usage_api::provider_credits),
+        )
+        // ── Threshold-driven model fallback: the node's rule list, and the
+        //    per-turn verdict the composer's info bar renders. ──
+        .route("/api/routing/advice", get(routing_api::advice))
+        .route(
+            "/api/routing/policy",
+            get(routing_api::get_policy).put(routing_api::put_policy),
+        )
         // ── Per-agent capabilities (tools / reasoning / vision), Jan-style.
         //    GET resolves auto-detection + overrides; PUT persists overrides. ──
         .route(
@@ -3866,6 +3925,13 @@ async fn set_preference(
             // No gateway respawn needed — the map is read on Core's spawn path.
             if key == crate::agent_routing::AGENT_GATEWAY_ROUTING_PREF_KEY {
                 crate::agent_routing::set_from_json(&body.value);
+            }
+            // Per-agent MCP tool bridge: keep the in-process map in sync so the
+            // next ACP session for the changed agent is built with (or without)
+            // Ryu's bridge. A SEPARATE key from the gateway-routing one above —
+            // writing egress must never move the tool gate, and vice versa.
+            if key == crate::agent_routing::AGENT_TOOL_BRIDGE_PREF_KEY {
+                crate::agent_routing::set_bridge_from_json(&body.value);
             }
             // Per-agent Plane A model-routing overrides (spec §1): keep the
             // in-process map in sync so the next forwarded chat injects (or omits)
@@ -8760,6 +8826,14 @@ async fn install_app_from_url(
             }
         };
 
+    // Sandboxed JS must arrive INLINE here. Only the manifest is persisted by this
+    // path — never the sibling `hooks/*.js` / `adapters/*.js` a `code_file` names —
+    // so accepting one would install a hook whose body can never be resolved, and an
+    // empty body is indistinguishable from a hook that chose to do nothing.
+    if let Err(e) = manifest.validate_code_sources() {
+        return json_error(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
+
     // Validate the app id BEFORE it is ever used as a filesystem path component
     // (see `apps_dir().join(&manifest.id)` below). A crafted id like
     // "../../etc/x" or an absolute/drive-qualified path would otherwise escape
@@ -8869,6 +8943,13 @@ async fn install_app_bundle(
                 );
             }
         };
+
+    // A bundle must be SELF-CONTAINED: `ryu pack` inlines every `code_file` into
+    // `code`, so one surviving here means the bundle was hand-assembled or built by
+    // a stale packer, and the hook body it names is not in the bundle at all.
+    if let Err(e) = manifest.validate_code_sources() {
+        return json_error(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
 
     // Corruption self-check (advisory, NOT a trust boundary): a LOCAL bundle
     // carries no gateway signature, so this is not the marketplace integrity gate.
@@ -9405,6 +9486,14 @@ async fn resolve_plugin_from_catalog(
                     continue;
                 }
             };
+        // The signed surface must carry the sandbox JS itself. `ryu publish` inlines
+        // every `code_file` before signing, which is what puts the whole hook body
+        // INSIDE the signature; a `code_file` here would name a file that no signed
+        // payload contains and that nothing downstream can fetch.
+        if let Err(e) = manifest.validate_code_sources() {
+            remember((StatusCode::UNPROCESSABLE_ENTITY, e));
+            continue;
+        }
         let ui_code = descriptor
             .raw
             .get("ui_code")
@@ -10387,6 +10476,11 @@ pub async fn fire_activation_event(state: &ServerState, event: &str) {
         // Same tier + approved-`mcp:server` gate as the enable path: the boot
         // re-register spawns exactly the same declared commands, so it must not be
         // the door that skips the check.
+        //
+        // This is also the seam that RE-PROBES for a declared command that was missing
+        // last time (`register_manifest_mcp_servers` skips a declaration whose binary
+        // cannot be resolved, and remembers nothing): install the binary, restart Core,
+        // and the server comes back. Nothing re-probes mid-process.
         if event == "onStartup" {
             crate::sidecar::mcp::register_manifest_mcp_servers(
                 &state.mcp,
@@ -16944,11 +17038,134 @@ async fn call_mcp_tool(
 
 // ── Unified tool catalog: search + describe (#474) ───────────────────────────
 
+/// The **skill** allowlist to scope a catalog search by — `AgentRecord.skills`
+/// for `agent`, or the empty list.
+///
+/// Empty is not "deny": [`ryu_skills::SkillRegistry::enabled_for`] defines an
+/// empty allowlist as *every enabled skill*. So this fails **open** on every
+/// degraded path — no `?agent=`, an id no row matches, a store error — which is
+/// deliberate and matches the convention the `skills` provider already documents
+/// where it resolves the same field for `skills__load`
+/// (`sidecar/mcp/mod.rs`). A skill is instruction text with no secrets; the list
+/// keeps an agent focused on its own skills rather than guarding a confidence.
+/// Failing closed would silently strip skills from the agent-less callers
+/// (workflows, monitors, the approval engine) that legitimately have all of them.
+///
+/// This is **not** `AcpAgentRegistry::allowlist_for`, which is the env-derived
+/// *tool* allowlist and a different list entirely — see [`tools_search`].
+async fn agent_skill_allowlist(store: &AgentStore, agent: Option<&str>) -> Vec<String> {
+    let Some(id) = agent else {
+        return Vec::new();
+    };
+    store
+        .get(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|rec| rec.skills)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tool_search_scope_tests {
+    use super::agent_skill_allowlist;
+    use crate::agents::{AgentStore, CreateAgent};
+    use crate::sidecar::adapters::AcpAgentRegistry;
+
+    /// Build a `CreateAgent` through serde: the struct has no `Default` and every
+    /// field but `name` is `#[serde(default)]`, so this is the supported way to
+    /// name only the field under test.
+    fn new_agent(name: &str, skills: &[&str]) -> CreateAgent {
+        serde_json::from_value(serde_json::json!({ "name": name, "skills": skills }))
+            .expect("CreateAgent literal")
+    }
+
+    #[tokio::test]
+    async fn the_search_scope_is_the_agents_own_skill_list_not_its_tool_list() {
+        let registry = AcpAgentRegistry::new();
+        let store = AgentStore::open_in_memory(&registry).expect("in-memory agent store");
+        let scoped = store
+            .create(new_agent("scoped", &["pdf", "xlsx"]))
+            .await
+            .expect("create scoped agent");
+        let unscoped = store
+            .create(new_agent("unscoped", &[]))
+            .await
+            .expect("create unscoped agent");
+
+        // The scoped agent's own two skills — the value threaded into
+        // `search_scoped`, which is what keeps `tool_search` from listing every
+        // enabled skill on the node to an agent that was given two.
+        assert_eq!(
+            agent_skill_allowlist(&store, Some(&scoped.id)).await,
+            vec!["pdf".to_owned(), "xlsx".to_owned()]
+        );
+
+        // An agent that was deliberately given no allowlist keeps seeing all of
+        // them: empty means "every enabled skill", so this is the same answer as
+        // the agent-less default and NOT a denial.
+        assert!(agent_skill_allowlist(&store, Some(&unscoped.id))
+            .await
+            .is_empty());
+
+        // Degraded paths fail open, both of them.
+        assert!(agent_skill_allowlist(&store, None).await.is_empty());
+        assert!(agent_skill_allowlist(&store, Some("agent_does_not_exist"))
+            .await
+            .is_empty());
+
+        // The two lists are not interchangeable: the env-derived TOOL allowlist
+        // this handler also consults knows nothing about these skills. Pinned so a
+        // future "simplification" that collapses them fails here.
+        assert!(
+            registry.allowlist_for(&scoped.id).is_none(),
+            "no RYU_MCP_ALLOWLIST* is set in this test process, so the tool \
+             allowlist narrows nothing — it could never have scoped the skills"
+        );
+    }
+}
+
 /// `GET /api/tools/search?q=&kind=&limit=&agent=` — search the unified tool
 /// catalog (MCP + built-ins + Composio + plugin tools + Core self-API). `kind` ∈
 /// `mcp|builtin|composio|app|core-api|any` (default `any`). `agent` narrows
 /// results to the agent's allowlist. Returns
 /// `{ "object":"list", "data":[ToolDescriptor] }`.
+///
+/// ## `?agent=` narrows on TWO different lists
+///
+/// They are genuinely different lists and neither substitutes for the other:
+///
+/// - the **tool** allowlist — `AcpAgentRegistry::allowlist_for`, derived from
+///   `RYU_MCP_ALLOWLIST_<AGENT>` / `RYU_MCP_ALLOWLIST`, applied *after* ranking
+///   via `ToolDescriptor::matches_allowlist`. It returns `None` when neither
+///   variable is set, which is the stock case, so on most nodes it narrows
+///   nothing;
+/// - the **skill** allowlist — `AgentRecord.skills`, threaded *into* the search so
+///   [`crate::sidecar::mcp::McpRegistry::search_scoped`] merges only the skills
+///   this agent may load. Same field, same store the `skills` provider reads when
+///   it serves `skills__load` (`sidecar/mcp/mod.rs`, the `skills_allowlist` block).
+///
+/// Before the skill half existed, an agent scoped to two skills got every enabled
+/// skill on the node back from `tool_search`: the tool allowlist does not gate
+/// individual skills (its `Skill` arm gates reaching the `skills` *server*) and on
+/// a stock node it was `None` anyway. `skills__load` still refused the bodies, so
+/// what leaked was the L1 row — id, name, description — for skills the agent was
+/// deliberately not given. That reached two planes, because the gateway's
+/// openai-compat tool loop calls this same route with `?agent=`
+/// (`apps/gateway/src/tools/catalog_client.rs`, `ToolSearchClient::search`).
+///
+/// On that second plane the id is only present when the gateway was called by a
+/// `trusted_forwarder` key — otherwise `pipeline`'s `eff_agent_id` is `None`, no
+/// `?agent=` is sent, and this route behaves exactly as it does for any agent-less
+/// caller. When it IS present it is `adapters::route_openai_stream`'s
+/// `effective_agent_id`, the same value Core hands `resolve_binding` →
+/// `agent_store.get(id)` to build that turn's skill *injection* allowlist. Same id,
+/// same store, same field as [`agent_skill_allowlist`] — so discovery and injection
+/// cannot disagree about which skills the agent has.
+///
+/// Agent-less callers are unchanged: no `?agent=` ⇒ empty allowlist ⇒ every
+/// enabled skill, which is what `SkillRegistry::enabled_for` defines an empty list
+/// to mean and what `skills__search` has always done for workflows and monitors.
 #[utoipa::path(
     get,
     path = "/api/tools/search",
@@ -16987,7 +17204,15 @@ async fn tools_search(
     } else {
         limit
     };
-    let mut results = state.mcp.search(query, kind, fetch).await;
+    // Resolved before the search, because it changes which rows the merge
+    // produces rather than filtering rows afterwards.
+    let skills_allowlist =
+        agent_skill_allowlist(&state.agent_store, agent.map(String::as_str)).await;
+
+    let mut results = state
+        .mcp
+        .search_scoped(query, kind, fetch, &skills_allowlist)
+        .await;
     if let Some(agent) = agent {
         if let Some(allow) = state.agents.allowlist_for(agent) {
             // Match the execution gate (id || name || server for MCP/built-ins,
@@ -17365,13 +17590,36 @@ struct SetIngressBackendBody {
 /// persisted to the `webhook.ingress.backend` pref. The change takes effect on
 /// the next Core start (the ingress is built once at startup). Rejects an unknown
 /// backend with 400.
+///
+/// ## Two selections that used to succeed and then do nothing
+///
+/// Both are the same defect: the pref was written, `ok: true` came back, and the
+/// node behaved as if nothing had been asked for.
+///
+/// 1. **`own-relay` with no public URL.** Nothing here read
+///    `webhook.ingress.url`, so the backend could be selected with nothing to
+///    publish. `OwnRelaySource` does not complain until Core next starts, and the
+///    GET keeps reporting `own-relay` in the meantime. See
+///    [`crate::webhook_ingress::own_relay_rejection`].
+/// 2. **Any kind while `RYU_WEBHOOK_INGRESS_URL` is set.**
+///    `ryu_webhook_ingress::configured_kind` resolves that variable to
+///    `OwnRelay` *before* consulting the pref, so a Cloudflared selection was
+///    persisted, acknowledged, and then permanently overridden. See
+///    [`crate::webhook_ingress::env_pinned_kind`].
+///
+/// Both gates run only on this POST. No already-persisted value is re-validated
+/// and no read path was changed, so a node that is running today keeps running.
 #[utoipa::path(
     post,
     path = "/api/webhook-ingress/backend",
     tag = "Nodes",
     summary = "Set the active webhook ingress backend",
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 400, description = "Unknown backend, or an `own-relay` selection with no usable public URL"),
+        (status = 409, description = "The environment pins the backend to `own-relay`; the requested kind could not take effect"),
+    )
 )]
 async fn webhook_ingress_set_backend(
     State(state): State<ServerState>,
@@ -17383,6 +17631,50 @@ async fn webhook_ingress_set_backend(
             return json_error(StatusCode::BAD_REQUEST, e.to_string());
         }
     };
+
+    let env_url = crate::webhook_ingress::own_relay_url_env();
+
+    // Gate 1 — the environment pins the kind. 409 (not 400): the request is
+    // well-formed and would be valid on this node tomorrow; it conflicts with the
+    // node's current state. The message names the variable, because unsetting it
+    // is the only way to make the requested kind reachable.
+    if let Some(pinned) = crate::webhook_ingress::env_pinned_kind(env_url.as_deref()) {
+        if pinned != kind {
+            return json_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "the {env} environment variable pins this node's webhook ingress to \
+                     '{pinned}', so selecting '{want}' would be recorded but never take \
+                     effect. Unset {env} to choose a backend from here.",
+                    env = crate::webhook_ingress::OWN_RELAY_URL_ENV,
+                    pinned = pinned.as_str(),
+                    want = kind.as_str(),
+                ),
+            );
+        }
+    }
+
+    // Gate 2 — own-relay needs somewhere to publish. Read through the same
+    // env→pref precedence `OwnRelaySource::new` uses, so this cannot disagree with
+    // what the backend will actually resolve at start.
+    if kind == crate::webhook_ingress::IngressKind::OwnRelay {
+        // A pref-store read failure is treated as "no URL configured" — the same
+        // direction `from_prefs` already fails in (`prefs.get(..).ok().flatten()`),
+        // and the safe one: refusing tells the operator to check the setting,
+        // whereas accepting would persist the selection this gate exists to stop.
+        let url_pref = state
+            .preferences
+            .get(crate::webhook_ingress::INGRESS_URL_PREF)
+            .await
+            .ok()
+            .flatten();
+        let base =
+            crate::webhook_ingress::resolve_own_relay_base(env_url.as_deref(), url_pref.as_deref());
+        if let Some(why) = crate::webhook_ingress::own_relay_rejection(base.as_deref()) {
+            return json_error(StatusCode::BAD_REQUEST, why);
+        }
+    }
+
     match state
         .preferences
         .set(crate::webhook_ingress::INGRESS_BACKEND_PREF, kind.as_str())
@@ -17460,6 +17752,193 @@ async fn sandbox_status() -> Json<serde_json::Value> {
 struct CreateSpaceBody {
     name: String,
     description: Option<String>,
+    /// Which retrieval algorithm this Space uses: `"vector"` (default) or
+    /// `"graph"`. Optional — omitting it keeps every existing client on exactly the
+    /// behaviour it had, falling through to the node-wide `rag_strategy` default,
+    /// which itself defaults to `"vector"`.
+    ///
+    /// Typed as `Option<String>` rather than `Option<RetrievalMode>` on purpose: a
+    /// serde enum would make an unknown spelling a 422 from the extractor with an
+    /// opaque body. Parsing it by hand ([`spaces::RetrievalMode::parse`]) lets an
+    /// unknown value come back as a 400 that names the accepted spellings — the
+    /// alternative, a lenient parse, would create a *vector* Space for a caller who
+    /// typed `"graphrag"` and report success.
+    #[serde(default)]
+    retrieval_mode: Option<String>,
+}
+
+/// Resolve the [`spaces::RetrievalMode`] a new Space should be stamped with.
+///
+/// Precedence (see [`crate::registry::ProviderRegistry::resolve_rag_strategy`]):
+/// the request's `retrieval_mode` wins; an absent or empty one falls through to the
+/// node-wide `rag_strategy` (`RYU_RAG_STRATEGY` / `registry.json`); that falls
+/// through to `"vector"`.
+///
+/// Two failure shapes, deliberately different:
+/// - A bad value from the **caller** is an `Err(message)` → 400. The caller is
+///   present and can be told.
+/// - A bad value from the **operator's** env/JSON cannot fail the request (the
+///   caller did nothing wrong), so it warns loudly and uses `Vector`. Silently
+///   honouring a typo as "graph" is impossible; silently creating a vector Space
+///   *without* the warning is the defect this branch avoids.
+fn resolve_new_space_mode(requested: Option<&str>) -> Result<spaces::RetrievalMode, String> {
+    // `load()`, not `from_env()`. `from_env` is `from_file_path(None)`, and
+    // `None.and_then(RegistryFile::load)` is `None` — it opens no file, ever. Built
+    // that way, `registry.json {"rag_strategy":"graph"}` was silently inert while
+    // this function's own docstring, the resolver's, and the desktop client all
+    // promised it worked; only `RYU_RAG_STRATEGY` did anything. `load()` is the
+    // constructor the rest of Core's config-reading paths use
+    // (`list_agents`, `list_agent_catalog`, `main.rs`, `sidecar::onboarding`).
+    //
+    // Cost is one small file read per Space creation — a human-rate operation that
+    // already does a DB insert — and the upside is that an operator editing
+    // `registry.json` does not have to restart Core to be believed.
+    let registry = crate::registry::ProviderRegistry::load();
+    // `resolve_rag_strategy` treats `Some("")` as absent, so this flag matches its
+    // notion of "the caller named a mode" exactly.
+    let from_caller = requested.is_some_and(|r| !r.is_empty());
+    decide_new_space_mode(registry.resolve_rag_strategy(requested), from_caller)
+}
+
+/// The decision half of [`resolve_new_space_mode`], split out so the mapping from a
+/// resolved string to a [`spaces::RetrievalMode`] (and to the two different failure
+/// shapes) can be exhaustively tested without touching process env.
+///
+/// The split originally existed because env mutation here would race
+/// `registry::tests`, which mutate the same vars under their own lock. That reason
+/// no longer applies: `registry::lock_registry_env` is `pub(crate)` under
+/// `cfg(test)` precisely so the test below can take *that* lock and drive the whole
+/// composition. Keep both levels of test — this one for the branch matrix, the
+/// env-driven one for the wiring — because a pure-function test cannot notice the
+/// handler building its registry with a constructor that reads no file.
+///
+/// `resolved` is whatever `resolve_rag_strategy` returned; `from_caller` says
+/// whether that string came from the request body rather than the node config.
+fn decide_new_space_mode(
+    resolved: &str,
+    from_caller: bool,
+) -> Result<spaces::RetrievalMode, String> {
+    if let Some(mode) = spaces::RetrievalMode::parse(resolved) {
+        return Ok(mode);
+    }
+    if from_caller {
+        return Err(format!(
+            "unknown retrieval_mode {resolved:?}: expected \"vector\" or \"graph\""
+        ));
+    }
+    tracing::warn!(
+        "registry rag_strategy {resolved:?} is not a known retrieval mode \
+         (expected \"vector\" or \"graph\"); creating this Space as \"vector\""
+    );
+    Ok(spaces::RetrievalMode::Vector)
+}
+
+#[cfg(test)]
+mod new_space_retrieval_mode_tests {
+    use super::decide_new_space_mode;
+    use crate::registry::ProviderRegistry;
+    use crate::server::spaces::RetrievalMode;
+
+    /// The composition this handler performs, run against a registry built with no
+    /// env read at all (`ProviderRegistry::default()`), so the assertions are
+    /// hermetic. The env/`registry.json` half of the precedence is pinned in
+    /// `registry::tests` where the env lock lives.
+    #[test]
+    fn body_mode_wins_and_absent_falls_back_to_the_node_default() {
+        let reg = ProviderRegistry::default();
+
+        // Absent ⇒ node default ⇒ "vector". This is the backward-compatibility
+        // guarantee: every client that never heard of `retrieval_mode` keeps
+        // getting exactly the Space it got before.
+        assert_eq!(
+            decide_new_space_mode(reg.resolve_rag_strategy(None), false),
+            Ok(RetrievalMode::Vector)
+        );
+        // Empty string is "absent", not a mode named nothing.
+        assert_eq!(
+            decide_new_space_mode(reg.resolve_rag_strategy(Some("")), false),
+            Ok(RetrievalMode::Vector)
+        );
+        // Explicit values reach the store verbatim — this is what makes graph mode
+        // reachable at all from HTTP.
+        assert_eq!(
+            decide_new_space_mode(reg.resolve_rag_strategy(Some("graph")), true),
+            Ok(RetrievalMode::Graph)
+        );
+        assert_eq!(
+            decide_new_space_mode(reg.resolve_rag_strategy(Some("vector")), true),
+            Ok(RetrievalMode::Vector)
+        );
+    }
+
+    /// A caller typo is a 400 that names the value and the accepted spellings —
+    /// never a silently-vector Space. Case matters: the column and the wire form are
+    /// lowercase, so `"Graph"` is a typo, not a synonym.
+    #[test]
+    fn a_caller_typo_is_rejected_rather_than_degraded() {
+        for bad in ["graphrag", "Graph", "GRAPH", "knn", "vector "] {
+            let err = decide_new_space_mode(bad, true)
+                .expect_err("an unknown caller-supplied mode must be rejected");
+            assert!(err.contains(bad), "error must name the bad value: {err}");
+            assert!(err.contains("vector") && err.contains("graph"));
+        }
+    }
+
+    /// An operator typo in `RYU_RAG_STRATEGY` / `registry.json` cannot fail a
+    /// request the caller made correctly, so it degrades to vector — but loudly
+    /// (`tracing::warn!`), never silently. Pinned so nobody "simplifies" the two
+    /// branches into one lenient parse.
+    #[test]
+    fn an_operator_typo_degrades_to_vector_instead_of_failing_the_request() {
+        assert_eq!(
+            decide_new_space_mode("graphrag", false),
+            Ok(RetrievalMode::Vector)
+        );
+    }
+
+    /// The end-to-end wiring: a `registry.json` on disk reaches the mode a new Space
+    /// is stamped with, through [`resolve_new_space_mode`] — the function
+    /// `create_space` actually calls.
+    ///
+    /// Every other test in this module drives `decide_new_space_mode`, the pure half,
+    /// and every test in `registry::tests` drives `ProviderRegistry` directly. Their
+    /// *composition* — "the handler builds its registry with a constructor that reads
+    /// the file" — was covered by nothing, which is exactly where the bug lived:
+    /// `from_env()` opens no file, so the file half of the knob was dead while three
+    /// docstrings and the desktop client advertised it. This test is the one that
+    /// fails if someone swaps the constructor back.
+    ///
+    /// `RYU_REGISTRY_PATH` must be *set*, not merely cleared: unset means
+    /// `~/.ryu/registry.json`, i.e. the developer's real config. And the lock comes
+    /// from `registry` rather than being a local one, because these are the same
+    /// process-global vars `registry::tests` mutates.
+    #[test]
+    fn registry_file_rag_strategy_reaches_space_creation() {
+        use super::resolve_new_space_mode;
+
+        let _lock = crate::registry::lock_registry_env();
+        let _g = crate::registry::RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, r#"{"rag_strategy":"graph"}"#).expect("write registry.json");
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        // No `retrieval_mode` in the request body ⇒ the node-wide file default wins.
+        assert_eq!(resolve_new_space_mode(None), Ok(RetrievalMode::Graph));
+        // …and an empty one is still "absent".
+        assert_eq!(resolve_new_space_mode(Some("")), Ok(RetrievalMode::Graph));
+        // A caller who names a mode still overrides the node default, in the
+        // direction that would otherwise be invisible: file says graph, body says
+        // vector, body wins.
+        assert_eq!(
+            resolve_new_space_mode(Some("vector")),
+            Ok(RetrievalMode::Vector)
+        );
+
+        // Env still outranks the file on the production path too.
+        std::env::set_var("RYU_RAG_STRATEGY", "vector");
+        assert_eq!(resolve_new_space_mode(None), Ok(RetrievalMode::Vector));
+    }
 }
 
 #[utoipa::path(
@@ -17491,16 +17970,24 @@ async fn create_space(
     if body.name.trim().is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "name is required".to_owned());
     }
+    let mode = match resolve_new_space_mode(body.retrieval_mode.as_deref()) {
+        Ok(mode) => mode,
+        Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
+    };
     match state
         .spaces
-        .create_space(
+        .create_space_with_mode(
             body.name.trim(),
             body.description.as_deref(),
+            mode,
             &spaces::owner_of(&caller_tenancy(&caller)),
         )
         .await
     {
-        Ok(id) => Json(json!({ "id": id })).into_response(),
+        // Echo the resolved mode: the caller may have omitted the field and picked
+        // up the node default, so "what did I actually get" must not require a
+        // follow-up GET.
+        Ok(id) => Json(json!({ "id": id, "retrieval_mode": mode.as_str() })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -17627,6 +18114,177 @@ async fn set_space_icon(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct SetRetrievalModeBody {
+    /// The retrieval algorithm to switch to: `"vector"` or `"graph"`. Required —
+    /// this route exists only to change the mode, so an absent field is a 400
+    /// rather than a silent no-op success.
+    retrieval_mode: Option<String>,
+}
+
+/// `POST /api/spaces/:id/retrieval-mode` — change an existing Space's retrieval mode.
+///
+/// **The switch is not a metadata edit, and this route does not pretend it is.**
+/// Graph extraction is gated on the mode at ingest, so a Space built in vector mode
+/// has no entity graph at all. Flipping only the column would route its searches at
+/// an empty graph: the Space would return nothing while reporting
+/// `retrieval_mode: "graph"`. So [`spaces::SpaceStore::set_retrieval_mode`] rebuilds
+/// the graph from the chunks already on disk, in the same transaction as the column
+/// write, and the response reports what was built (`chunks_scanned`, `graph_nodes`,
+/// `graph_edges`) so the outcome is stated rather than assumed.
+///
+/// A rebuild is *possible* at all — without re-embedding — because entity
+/// extraction is deterministic offline co-occurrence: no embedder, no model call,
+/// no network, so the graph is a pure function of the chunk text already on disk.
+/// Chunk *vectors* are never touched, which is why toggling back and forth is safe.
+/// That is the determinism argument, and it is the whole of it: it says the rebuild
+/// is reproducible, **not** that it is cheap.
+///
+/// # This is a long, blocking, uncancellable operation. Callers must treat it as one.
+///
+/// The doc here used to call the rebuild "affordable inline". Both halves were
+/// wrong. It is not inline — [`spaces::SpaceStore::set_retrieval_mode`] runs the
+/// whole transaction on `tokio::task::spawn_blocking` precisely because it is not
+/// affordable on a runtime worker — and "affordable" was asserted, never measured.
+/// What the measurement found:
+///
+/// - The cost is not the extractor, it is the quadratic edge fan-out it feeds:
+///   `O(chunks × entities²)`. Ordinary English prose yields ≈57 distinct entities
+///   per ~1,000-character chunk, and each chunk emits `n·(n−1)` directed edge rows.
+/// - Entities per chunk are bounded by the chunk size; **chunk count is not
+///   bounded** — it is whatever the Space happens to hold, and this route hands
+///   over every chunk in it from one click.
+/// - On an on-disk db (what a real Space is) that lands at tens of seconds to
+///   minutes for a Space in the low thousands of chunks, and per-chunk cost *rises*
+///   with size rather than staying flat.
+///
+/// The measured table, the exact row counts, its error bars and the command to
+/// re-derive it live on `ryu_spaces::build_graph_for_chunks`. They are deliberately
+/// not copied here: two copies of a measured number drift, and the copy is always
+/// the stale one.
+///
+/// Three consequences a client of this route has to surface, not swallow:
+///
+/// - **A no-op re-assert is not a no-op.** Posting `"graph"` to a Space that is
+///   already `"graph"` returns `changed: false` and still performs a *full*
+///   rebuild — that is the only graph-repair path there is. It is frequently the
+///   most expensive call this endpoint makes, so rendering `changed: false` as
+///   "nothing happened" misinforms the user.
+/// - **The Space is unavailable for the duration** — and so is every other Space,
+///   since one connection serves them all and its mutex is held across the whole
+///   transaction. `spawn_blocking` moved *who* waits off the runtime worker; it did
+///   not make anything concurrent.
+/// - **The call is uncancellable.** A client disconnect or request timeout drops
+///   the response, not the work: the blocking task runs to completion regardless.
+///   Expect the HTTP call to time out on a large Space while the node is still busy,
+///   and do not retry into it.
+///
+/// Switching to `"vector"` drops the graph rows instead (nothing maintains them in
+/// vector mode, so keeping them would leave a graph that rots as documents change).
+/// That direction skips the chunk scan and the fan-out entirely — it is two
+/// `DELETE`s — but it is not instant either, and nobody has measured it: the rows it
+/// deletes are the millions the rebuild wrote, plus their two indexes. Assume the
+/// same "long, blocking, uncancellable" contract above; it is merely the cheaper of
+/// the two directions, not a cheap one.
+#[utoipa::path(
+    post,
+    path = "/api/spaces/{id}/retrieval-mode",
+    tag = "Spaces",
+    summary = "Change a space's retrieval mode (rebuilds its entity graph)",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn set_retrieval_mode(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SetRetrievalModeBody>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.write".to_owned(),
+        );
+    }
+    // Per-resource ACL: changing retrieval mode rewrites THIS space's graph, so it
+    // is a write on this resource — not merely a caller who holds `space.write`
+    // somewhere. Same gate as `set_space_icon`/`delete_space`; without it a member
+    // of a bound node could re-mode a colleague's private Space.
+    if let Err(resp) = require_resource_write(
+        spaces::space_access_meta(&state.spaces, &id).await,
+        caller.as_ref(),
+        "space not found",
+    ) {
+        return resp;
+    }
+    let Some(requested) = body.retrieval_mode.as_deref().filter(|s| !s.is_empty()) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "retrieval_mode is required: \"vector\" or \"graph\"".to_owned(),
+        );
+    };
+    // Strict parse: unlike creation there is no node-wide default to fall back to
+    // here — the Space already has a mode, and quietly leaving it alone (or quietly
+    // resetting it to vector) on a typo is exactly the silent-no-op this route was
+    // added to eliminate.
+    let Some(mode) = spaces::RetrievalMode::parse(requested) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!("unknown retrieval_mode {requested:?}: expected \"vector\" or \"graph\""),
+        );
+    };
+    match state.spaces.set_retrieval_mode(&id, mode).await {
+        Ok(Some(change)) => Json(json!({
+            "success": true,
+            "retrieval_mode": change.mode.as_str(),
+            "previous_retrieval_mode": change.previous.as_str(),
+            "changed": change.changed,
+            "graph_rebuilt": change.graph_rebuilt,
+            "chunks_scanned": change.chunks_scanned,
+            "graph_nodes": change.graph_nodes,
+            "graph_edges": change.graph_edges,
+            // Say out loud what the rebuild does and does not cover, so nobody
+            // infers that a mode switch also re-embedded or re-parsed anything.
+            "note": if change.graph_rebuilt {
+                "Entity graph rebuilt from the chunks already stored in this Space. \
+                 Chunk vectors were not re-embedded."
+            } else {
+                "Entity graph dropped; nothing maintains it in vector mode. \
+                 Switching back to graph rebuilds it. Chunk vectors are unchanged."
+            },
+        }))
+        .into_response(),
+        Ok(None) => json_error(StatusCode::NOT_FOUND, "space not found".to_owned()),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `GET /api/spaces/:id/documents` — the Space's documents, each **file** row
+/// carrying its content-extraction state under `index`.
+///
+/// The `index` object is `FileIndexRecord::to_json` — byte-identical to what the
+/// create responses and `…/documents/:doc_id/index` return, so a client needs one
+/// reader for all three. It is attached **only** to `kind = 'file'` rows: a page,
+/// database or whiteboard is re-chunked from its own source on every save, so the
+/// question does not apply to it and answering anyway would be a fresh overclaim.
+///
+/// Joined in one pass ([`crate::space_file_index::attach_index_states`]) rather than
+/// left to the client. It is a two-store join — the rows come from `ryu-spaces`, the
+/// state from Core's own `space-file-index.db` — and the desktop was paying one HTTP
+/// request per file row to render a searchability badge, against a Space (Uploads)
+/// whose length is bounded by nothing.
+///
+/// The join runs **after** `caller_doc_filter`, so state is attached only to rows
+/// this caller was already permitted to see; it adds no ACL of its own because the
+/// list's own filter is the check.
 #[utoipa::path(
     get,
     path = "/api/spaces/{id}/documents",
@@ -17658,7 +18316,22 @@ async fn list_documents(
         .list_documents(&id, caller_doc_filter(&caller))
         .await
     {
-        Ok(documents) => Json(json!({ "space_id": id, "documents": documents })).into_response(),
+        Ok(documents) => {
+            // Serialize first, then decorate: `spaces::Document` has no index field
+            // and must not grow one (the crate has zero dependency on `apps/core`,
+            // which is what keeps parser provenance out of its schema). A failure to
+            // serialize the rows is not survivable, but it is also not a reason to
+            // lose the list — fall back to the undecorated payload.
+            let mut rows = match serde_json::to_value(&documents) {
+                Ok(serde_json::Value::Array(rows)) => rows,
+                other => {
+                    tracing::warn!("list_documents: unexpected document encoding: {other:?}");
+                    return Json(json!({ "space_id": id, "documents": documents })).into_response();
+                }
+            };
+            crate::space_file_index::attach_index_states(&mut rows).await;
+            Json(json!({ "space_id": id, "documents": rows })).into_response()
+        }
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -18042,9 +18715,17 @@ async fn create_whiteboard(
     }
 }
 
-/// Max decoded size for a single uploaded file artifact (200 MiB). Bounds memory
-/// on the create path; larger assets should stream via a future chunked upload.
-const MAX_FILE_BYTES: usize = 200 * 1024 * 1024;
+/// Max decoded size for a single uploaded file artifact. Bounds memory on the create
+/// path; larger assets should stream via a future chunked upload.
+///
+/// **Defined as [`uploads::MAX_UPLOAD_BYTES`] (32 MiB), not as a number of its own.**
+/// It used to read `200 * 1024 * 1024`, and that figure was wrong twice: the route is
+/// reached through a base64 JSON body, so the ceiling a client could actually hit was
+/// ~1.5 MiB (axum's implicit 2 MiB body limit, no explicit layer, minus the 4/3
+/// expansion) — and 200 MiB was nonetheless what the desktop settings panel printed as
+/// "Maximum file in a Space". See [`uploads::SPACE_FILE_BODY_LIMIT`] for the alignment
+/// and why the fix went down to 32 MiB rather than up to 200.
+const MAX_FILE_BYTES: usize = uploads::MAX_UPLOAD_BYTES;
 
 #[derive(serde::Deserialize)]
 struct CreateFileBody {
@@ -18102,6 +18783,18 @@ async fn create_file(
         .filter(|m| !m.is_empty())
         .unwrap_or("application/octet-stream");
     use base64::Engine as _;
+    // Refuse from the ENCODED length first, so an oversize upload is rejected without
+    // ever allocating the decode buffer it was trying to make us allocate. The LOWER
+    // bound is the right one to test: it cannot refuse a file that would have fit (see
+    // `decoded_len_lower_bound` — the upper bound rejects a file of exactly the limit),
+    // and the exact check below still enforces the boundary.
+    if uploads::decoded_len_lower_bound(body.data_base64.len()) > MAX_FILE_BYTES {
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            uploads::SPACE_FILE_BODY_LIMIT
+                .too_large_message(uploads::Observed::BodyBytes(body.data_base64.len())),
+        );
+    }
     let bytes = match base64::engine::general_purpose::STANDARD.decode(body.data_base64.as_bytes())
     {
         Ok(b) => b,
@@ -18109,27 +18802,35 @@ async fn create_file(
             return json_error(StatusCode::BAD_REQUEST, format!("invalid base64: {e}"));
         }
     };
+    // The exact check. Reached for a file in the narrow band the wire limit's envelope
+    // slack admits (see `JSON_ENVELOPE_SLACK_BYTES`), which is why this is not dead
+    // code behind the layer — and why a near-miss file gets the precise message.
     if bytes.len() > MAX_FILE_BYTES {
         return json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
-            format!("file exceeds {MAX_FILE_BYTES} byte limit"),
+            uploads::SPACE_FILE_BODY_LIMIT
+                .too_large_message(uploads::Observed::FileBytes(bytes.len())),
         );
     }
-    match state
-        .spaces
-        .create_file(
-            &id,
-            title,
-            &bytes,
-            mime,
-            &spaces::owner_of(&caller_tenancy(&caller)),
-        )
-        .await
+    // Shared ingest path (see [`crate::space_file_index`]): the bytes are stored AND
+    // their text is extracted through the `document.parse` facade, so the document is
+    // retrievable by its contents rather than only by its filename. Extraction can
+    // never fail this call — `index` carries what happened to it.
+    match crate::space_file_index::create_file_indexed(
+        &state,
+        &id,
+        title,
+        &bytes,
+        mime,
+        &spaces::owner_of(&caller_tenancy(&caller)),
+    )
+    .await
     {
-        Ok(document_id) => Json(json!({
-            "id": document_id,
+        Ok(created) => Json(json!({
+            "id": created.document_id,
             "mime": mime,
             "byte_size": bytes.len(),
+            "index": created.index.to_json(),
         }))
         .into_response(),
         Err(e) => {
@@ -18460,9 +19161,68 @@ async fn delete_document(
         return resp;
     }
     match state.spaces.delete_document(&doc_id).await {
-        Ok(removed) => Json(json!({ "success": true, "removed": removed })).into_response(),
+        Ok(removed) => {
+            // The content-index status lives Core-side (see
+            // [`crate::space_file_index::FileIndexStore`]) and `delete_document` is in
+            // the spaces crate, which cannot call back into Core. Clearing it here
+            // covers the user-facing delete; best-effort, because a stranded status
+            // row must never fail a delete that already succeeded.
+            if removed {
+                crate::space_file_index::forget(&doc_id).await;
+            }
+            Json(json!({ "success": true, "removed": removed })).into_response()
+        }
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+/// `GET /api/spaces/:id/documents/:doc_id/index` — did this file's CONTENTS get
+/// indexed, and if not, why?
+///
+/// The client-visible half of the failure posture in [`crate::space_file_index`].
+/// A file whose text could not be extracted is still stored and still findable by
+/// its filename; without this route that degradation is invisible, and a user who
+/// believes their PDF is searchable when it is not is exactly the defect this
+/// program exists to remove. Gated on `space.read` + the per-document ACL, like
+/// every other read of a document's substance.
+///
+/// `state` is one of `pending` / `indexed` / `skipped` / `failed`, plus
+/// `unattempted` for a document stored before extraction existed — deliberately
+/// distinct from `skipped`: nobody looked, as opposed to nobody could read it.
+#[utoipa::path(
+    get,
+    path = "/api/spaces/{id}/documents/{doc_id}/index",
+    tag = "Spaces",
+    summary = "Content-extraction status for a file document",
+    params(("id" = String, Path), ("doc_id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_document_index_status(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path((_id, doc_id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_READ,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.read".to_owned(),
+        );
+    }
+    if let Err(resp) = require_resource_read(
+        spaces::doc_access_meta(&state.spaces, &doc_id).await,
+        caller.as_ref(),
+        "document not found",
+    ) {
+        return resp;
+    }
+    Json(crate::space_file_index::status_json(&doc_id).await).into_response()
 }
 
 /// `GET /api/spaces/:id/documents/:doc_id/versions` — list saved versions
@@ -21972,10 +22732,17 @@ async fn sidecar_status(State(state): State<ServerState>) -> Json<serde_json::Va
     // - `node_runtime`: which JS runtime a `SidecarProcess::Node` backend would
     //   resolve on PATH (`"bun"` preferred, else `"node"`, else `null`), so a
     //   status reader knows whether node-backed plugins can spawn at all.
+    // - `missing_binaries`: every `Local`-kind manifest sidecar whose bytes could
+    //   not be installed, with the exact release asset this platform wanted. An
+    //   unpublished asset is a permanent 502 through the ext-proxy that is
+    //   indistinguishable from "the app crashed" and from "lazily scaled to zero";
+    //   this is the only surface that can tell them apart. Empty on a healthy host
+    //   (each success path clears its own entry), so any entry is actionable.
     Json(json!({
         "sidecars": state.manager.statuses(),
         "native_permissions": state.manager.native_sidecar_permissions(),
         "node_runtime": resolved_node_runtime_kind(),
+        "missing_binaries": crate::sidecar::manifest_sidecar::missing_sidecar_binary_reports(),
     }))
 }
 
@@ -23788,7 +24555,10 @@ async fn gateway_set_provider(
 scores each dataset case against those built-in/LLM-judge evaluators and returns per-evaluator \
 scores + aggregates. A separate OPTIONAL `code_evaluators: [{ id, lang, source }]` field (lang = \
 \"js\" | \"python\") is stripped before forwarding: Core runs those user functions locally (JS in \
-the deny-all Deno sandbox, Python via the sandbox backend or a host fallback) and merges the real \
+the deny-all Deno sandbox, Python in the configured sandbox backend). A Python case is REFUSED \
+with `executed:false` when no command-capable sandbox is available, rather than falling back to \
+the host — running untrusted code unsandboxed is opt-in only, via \
+`RYU_EVAL_ALLOW_UNSANDBOXED_PYTHON`, and any such result is tagged on the wire. Core merges the real \
 `executed:true` scores into each case's `evaluators` array, re-aggregating the affected ids. A \
 request without either field behaves exactly as before.",
     request_body = serde_json::Value,
@@ -24811,6 +25581,11 @@ struct CreateJobBody {
     /// running (raises an inbox request). Off by default.
     #[serde(default)]
     require_approval: bool,
+    /// Manifest id of the App creating this job, when one is. Recorded so the
+    /// tick loop can stop the job while its App is disabled — see
+    /// [`crate::scheduler::store::ScheduledJob::owner_app`].
+    #[serde(default)]
+    owner_app: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -24819,12 +25594,23 @@ fn default_enabled() -> bool {
 
 async fn create_job(Json(body): Json<CreateJobBody>) -> (StatusCode, Json<serde_json::Value>) {
     // Validate the schedule up front so a broken cron is never persisted.
-    if let crate::scheduler::store::Schedule::Cron { expr } = &body.schedule {
+    if let crate::scheduler::store::Schedule::Cron { expr, tz } = &body.schedule {
         if let Err(e) = crate::scheduler::cron::CronSchedule::parse(expr) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "success": false, "error": e })),
             );
+        }
+        // Reject an unknown zone here rather than at tick time: a job that
+        // parses but never fires is the worst outcome for a schedule, because
+        // nothing reports it.
+        if let Some(name) = tz {
+            if let Err(e) = crate::scheduler::cron::parse_tz(name) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "success": false, "error": e })),
+                );
+            }
         }
     }
     if let crate::scheduler::store::Schedule::Every { interval } = &body.schedule {
@@ -24846,6 +25632,7 @@ async fn create_job(Json(body): Json<CreateJobBody>) -> (StatusCode, Json<serde_
         target: body.target,
         enabled: body.enabled,
         require_approval: body.require_approval,
+        owner_app: body.owner_app.filter(|s| !s.trim().is_empty()),
         created_at: now.clone(),
         updated_at: now,
         last_run_at: None,
@@ -24896,6 +25683,79 @@ async fn delete_job(
             Json(json!({ "success": false, "error": e.to_string() })),
         ),
     }
+}
+
+/// `POST /heartbeat/jobs/:id/run` — run a scheduled job now, off-schedule.
+///
+/// The "does this actually work" affordance every automation surface wants, and
+/// the only honest one: it runs the *saved* job through the same
+/// [`crate::scheduler::run_target`] the tick loop uses, so what it proves is what
+/// will happen when the schedule fires — not an approximation assembled by the
+/// caller. The outcome is recorded in the job's history exactly as a scheduled
+/// run is, which is why a manual run shows up alongside the automatic ones.
+///
+/// Deliberately ignores `enabled` and `require_approval`: this IS the human
+/// acting, so gating it on a schedule flag or on an approval the same human
+/// would immediately grant would only be ceremony. It respects nothing about
+/// *when* the job would have run, only *what* it runs.
+#[utoipa::path(
+    post,
+    path = "/heartbeat/jobs/{id}/run",
+    tag = "Core",
+    summary = "Run a scheduled job now",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn run_job_now(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Ok(mut job) = crate::scheduler::store::load_job(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "job not found" })),
+        );
+    };
+
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let result = crate::scheduler::run_target(&job.target).await;
+    let finished_at = chrono::Utc::now().to_rfc3339();
+
+    let (record, response) = match result {
+        Ok(run_id) => (
+            crate::scheduler::store::ExecRecord {
+                started_at,
+                finished_at,
+                outcome: crate::scheduler::store::ExecOutcome::Success,
+                run_id: run_id.clone(),
+                error: None,
+            },
+            (
+                StatusCode::OK,
+                Json(json!({ "success": true, "run_id": run_id })),
+            ),
+        ),
+        Err(error) => (
+            crate::scheduler::store::ExecRecord {
+                started_at,
+                finished_at,
+                outcome: crate::scheduler::store::ExecOutcome::Failure,
+                run_id: None,
+                error: Some(error.clone()),
+            },
+            // 200 with `success: false`, not a 5xx: the request was served
+            // correctly and the *job* failed. The caller renders the message.
+            (
+                StatusCode::OK,
+                Json(json!({ "success": false, "error": error })),
+            ),
+        ),
+    };
+
+    job.record_execution(record);
+    if let Err(e) = crate::scheduler::store::save_job(&job) {
+        tracing::error!("failed to persist job '{}' after a manual run: {e}", job.id);
+    }
+    response
 }
 
 #[utoipa::path(

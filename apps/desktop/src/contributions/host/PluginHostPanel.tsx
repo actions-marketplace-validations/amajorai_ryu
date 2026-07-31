@@ -160,6 +160,12 @@ import {
 	listTtsEngines,
 } from "@/src/lib/api/voice.ts";
 import {
+	applyWarmupJobs,
+	detectWarmupAgents,
+	listWarmupJobs,
+	runWarmupJobNow,
+} from "@/src/lib/api/warmup.ts";
+import {
 	fetchWebhookIngressStatus,
 	fetchWebhooks,
 } from "@/src/lib/api/webhooks.ts";
@@ -1023,6 +1029,24 @@ export function PluginHostPanel({
 				>,
 			calendarCreateAutomation: (args) =>
 				createScheduledAgentWorkflow(toTarget(node), args),
+			// Warmup — the com.ryu.warmup companion keeps subscription usage windows
+			// open by scheduling a keep-alive ping per agent. Host-direct (the monitors
+			// pattern): the host holds the node token and drives `/api/agents` (+ its
+			// `/usage` and `/acp-config` reads) and `/heartbeat/jobs`, forwarding Core's
+			// shapes verbatim over the bridge (warmup:crud). Both mutating verbs are
+			// scoped to jobs stamped `ownerApp: com.ryu.warmup`, so the grant can never
+			// reach an automation another app or Core owns.
+			warmupDetect: () =>
+				detectWarmupAgents(toTarget(node)) as unknown as Promise<{
+					agents: Record<string, unknown>[];
+					tz: string;
+				}>,
+			warmupList: () =>
+				listWarmupJobs(toTarget(node)) as unknown as Promise<
+					Record<string, unknown>[]
+				>,
+			warmupApply: (jobs) => applyWarmupJobs(toTarget(node), jobs),
+			warmupRunNow: ({ jobId }) => runWarmupJobNow(toTarget(node), jobId),
 			// Learning — the com.ryu.learning companion renders the read-only
 			// continual-learning surface. Host-direct (the monitors pattern): the host
 			// holds the node token and calls the existing `/api/learn/config` (config),

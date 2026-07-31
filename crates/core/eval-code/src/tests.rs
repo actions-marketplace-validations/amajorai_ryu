@@ -149,6 +149,7 @@ fn insert_replaces_placeholder_and_preserves_category() {
             detail: "ok".to_owned(),
             executed: true,
             error: None,
+            unsandboxed: false,
         },
     );
     let evs = case["evaluators"].as_array().unwrap();
@@ -171,6 +172,7 @@ fn insert_without_placeholder_defaults_category_custom() {
             detail: String::new(),
             executed: true,
             error: None,
+            unsandboxed: false,
         },
     );
     assert_eq!(case["evaluators"][0]["category"], "custom");

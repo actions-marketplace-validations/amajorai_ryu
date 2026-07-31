@@ -368,6 +368,69 @@ export interface ModelMapping {
 }
 
 /**
+ * The request modalities the gateway router knows about — the wire form of
+ * `Modality` (`apps/gateway/src/config.rs`, `#[serde(rename_all = "lowercase")]`,
+ * so these are the variant names lowercased) and the exact key set of
+ * `routing.modality_map`.
+ *
+ * NOT a guessed list: `gateway.test.ts` parses the Rust enum and asserts this
+ * tuple matches it variant-for-variant. A key the Rust side does not know
+ * deserializes to nothing and the setting is silently ignored, which is the
+ * whole defect class this editor exists to close.
+ */
+export const MODALITIES = ["chat", "image", "tts", "stt", "video"] as const;
+
+/** One of {@link MODALITIES}. */
+export type Modality = (typeof MODALITIES)[number];
+
+/**
+ * A single modality → provider mapping entry, mirroring `ModalityMapping`
+ * (`apps/gateway/src/config.rs`).
+ *
+ * `provider` is a `ProviderId` — a newtype over `String`, i.e. an OPEN registry
+ * id, not the closed {@link ProviderKind} union. It is typed `string` on purpose:
+ * the media providers this map exists to select (`fal`, `replicate`, `modal`)
+ * are registered in `apps/gateway/src/providers/mod.rs` but are deliberately
+ * absent from `ProviderKind`, which only covers the chat-capable passthroughs.
+ * Narrowing this to `ProviderKind` would make the map unable to name the very
+ * providers it was built for.
+ */
+export interface ModalityMapping {
+	/**
+	 * Model id to send to the provider. Absent ⇒ the caller's own `model` field
+	 * is forwarded unchanged (`crates/gateway/router/src/lib.rs`:
+	 * `mapping_model.clone().unwrap_or_else(|| requested_model.to_string())`).
+	 *
+	 * Note the consequence for the save path: `Some("")` is NOT the same as
+	 * absent — an empty string is forwarded as the literal model name. Blank
+	 * input must therefore be OMITTED, never sent as `""`. See
+	 * {@link withModalityMapping}.
+	 */
+	model?: string | null;
+	provider: string;
+}
+
+/**
+ * Eval-driven (A/B) routing across candidate providers, mirroring
+ * `EvalRoutingConfig` (`apps/gateway/src/config.rs`).
+ *
+ * Declared here for one reason only: `PUT /v1/config { routing }` replaces the
+ * routing section WHOLESALE (`api/config.rs`: `updated_config.routing =
+ * routing.clone()`), and every `RoutingConfig` field is `#[serde(default)]`, so
+ * a field the desktop never round-trips is a field the desktop erases. There is
+ * no editor for it and there should not be one — the desktop's job is to carry
+ * it through untouched.
+ */
+export interface EvalRoutingConfig {
+	/** Candidate provider ids traffic is split across. */
+	candidates: string[];
+	/** Master switch. Off by default. */
+	enabled: boolean;
+	/** Fraction of eligible traffic reserved for non-leader candidates. Default 0.2. */
+	explore_ratio: number;
+}
+
+/**
  * How the matching rule is chosen for a smart-routing decision. Shared vocabulary
  * across both routing planes (model routing here, agent routing in Core):
  * - `llm`: a cheap classifier model reads the message and picks a rule.
@@ -420,8 +483,30 @@ export interface SmartRoutingConfig {
 export interface GatewayRoutingConfig {
 	/** Provider to use when no model-map entry matches. */
 	default_provider: ProviderKind;
+	/**
+	 * Eval-driven (A/B) routing. Optional on the wire — a gateway whose
+	 * `RoutingView` predates this field omits it. Round-trip only; no editor.
+	 */
+	eval_routing?: EvalRoutingConfig;
 	/** Ordered fallback chain used when the primary provider is unavailable. */
 	fallback_chain: ProviderKind[];
+	/**
+	 * Per-modality provider/model overrides, consulted BEFORE the model map for
+	 * any non-chat request (`crates/gateway/router/src/lib.rs::route_modality`).
+	 * A modality with no entry falls through to ordinary model routing and
+	 * therefore to `default_provider`.
+	 *
+	 * `Partial<Record<…>>` because absence is the meaningful state: the gateway
+	 * serializes a `HashMap<Modality, ModalityMapping>`, so only configured
+	 * modalities appear as keys.
+	 *
+	 * Optional on the wire for a load-bearing reason — see
+	 * {@link routingViewIncludesModalityMap}. Do NOT coalesce this to `{}` in
+	 * {@link fetchGatewayConfig}: "this gateway never served the field" and "this
+	 * gateway says the map is empty" must stay distinguishable, because a save
+	 * built from the first case silently wipes a working map.
+	 */
+	modality_map?: Partial<Record<Modality, ModalityMapping>>;
 	/** Static model-to-provider mappings (exact or prefix match). */
 	model_map: Record<string, ModelMapping>;
 	/**
@@ -437,6 +522,61 @@ export interface GatewayRoutingConfig {
 
 /** The three policy values the gateway firewall accepts (snake_case wire form). */
 export type GatewayFirewallPolicy = "block" | "warn_and_continue" | "sanitize";
+
+/**
+ * The alert tiers, ASCENDING in severity — the wire form of the gateway's
+ * `AlertTier` (`crates/gateway/contracts/src/lib.rs`, `rename_all = "lowercase"`,
+ * so these are the variant names lowercased).
+ *
+ * Order is load-bearing, not cosmetic. The gateway takes the `max` tier across
+ * every rule a request matched (`pipeline/mod.rs`, `max_tier`) before it stamps
+ * the alert header, and the Rust enum derives `Ord` from its declaration order
+ * for exactly that reason. A UI that offered these in a different order would
+ * still save correct values, but the mirror test below compares this array to the
+ * Rust declaration order so the two can never diverge unnoticed.
+ *
+ * ORTHOGONAL to enforcement (`GatewayFirewallPolicy` / {@link BudgetAction}):
+ * enforcement decides what happens to the request, the tier decides who is told.
+ */
+export const ALERT_TIERS = ["silent", "warn", "fanout", "email"] as const;
+
+/**
+ * Notification fan-out tier for a matched policy rule. Derived from
+ * {@link ALERT_TIERS} so the union and the ordered list cannot drift apart.
+ *
+ * What each tier actually delivers, read out of Core's `dispatch`
+ * (`apps/core/src/policy_alerts/mod.rs`) — the only place the tier is turned into
+ * sinks. Note that Core does not import the gateway's `AlertTier`; that module
+ * declares its own mirror of the enum, so "the Rust type" is two types that agree
+ * only on their wire strings (see the mirror warning on the gateway enum).
+ *
+ * - `silent` — nothing. The default, so every pre-existing config is silent.
+ * - `warn` — the in-app desktop notification only (Core publishes that SSE event
+ *   for any delivered alert, before it matches on the tier), no external sink.
+ * - `fanout` — `targets.targets`: webhook / Telegram / Expo push.
+ * - `email` — `targets.emails` over the node's BYO SMTP transport. It REPLACES
+ *   the fan-out channels rather than adding to them: Core's match arms are
+ *   exclusive, so an `email` rule does not also hit the webhook. Do not describe
+ *   `email` as "fanout plus email" in UI copy — `AlertTier`'s own doc comment
+ *   used to say that and now says the same thing this comment does.
+ *
+ * Every tier above `silent` needs delivery targets configured on the node
+ * ("Email & alerts"); with none, a raised tier still delivers nothing but the
+ * in-app notification.
+ *
+ * The chain between the two processes, traced end to end so the UI copy is not
+ * promising a delivery nobody performs: gateway reads the tier off the firewall /
+ * budget config → `PolicyAlert` → `x-ryu-policy-alert` on the response (the 403
+ * path via `GatewayError::into_response`, the allow path via the response
+ * extension + the `stamp_policy_alert` map_response layer in
+ * `apps/gateway/src/api/mod.rs`) → Core's `dispatch_from_headers`, called from the
+ * three response heads that may have been gateway-fronted
+ * (`apps/core/src/sidecar/adapters/mod.rs`, and two in `server/widgets.rs`) →
+ * `policy_alerts::dispatch` on a spawned task. A gateway client that is NOT Core (a
+ * raw `/v1/chat/completions` caller) receives the header and does nothing with it;
+ * delivery is Core's half.
+ */
+export type GatewayAlertTier = (typeof ALERT_TIERS)[number];
 
 /**
  * Which built-in category a custom firewall pattern is merged into. Mirrors the
@@ -459,11 +599,268 @@ export interface CustomPattern {
 /** What the LLM inspector scans for (mirrors gateway `InspectorMode`). */
 export type InspectorMode = "injection" | "dlp" | "both";
 
+// ── Local classify tier ───────────────────────────────────────────────────────
+//
+// Core runs a lazy `llama.cpp` sidecar dedicated to classification-shaped work
+// (guardrail inspection, smart-routing rule picking, LLM-judge evaluators) so
+// those cheap per-turn calls never contend with the chat engine or burn a paid
+// provider's tokens. The gateway exposes it as the `classify` provider, and the
+// router's builtin prefix table maps the `gemma-3-270m` model prefix onto it.
+//
+// The desktop binds no port of its own to that tier. All it needs is to (a) name
+// the sidecar when reading `/api/sidecar/status`, (b) offer the model id as a
+// picker value, and (c) ask whether the tier can actually SERVE right now — two
+// independent facts (a registered process manager, and a weights file on disk)
+// which the derivation below folds into one {@link ClassifyTierState}. All of it
+// lives here, beside the config types whose model fields consume it, rather than
+// in a new module.
+
+/**
+ * Name of the Core sidecar serving the local classify tier — mirrors its Rust
+ * `Sidecar::name()`, which is the key `/api/sidecar/status` reports it under.
+ * The sidecar is LAZY (deliberately absent from Core's `startup_order`):
+ * "registered but not running" is its normal resting state, not a fault — which
+ * is why this key alone cannot report the tier's health, and
+ * {@link deriveClassifyTierState} crosses it with a weights probe to tell a lazy
+ * idle apart from a sidecar that can never start.
+ */
+export const CLASSIFY_SIDECAR_NAME = "llamacpp-classify";
+
+/**
+ * Model id of the local classify tier (Gemma 3 270M, QAT Q4_0). Routable
+ * through the gateway because the router maps the `gemma-3-270m` prefix to the
+ * `classify` provider — see the ORDER-IS-LOAD-BEARING note in
+ * `crates/gateway/router/src/lib.rs`, which keeps that prefix above the generic
+ * `gemma` → `local` row. Legal value for any "cheap model" field
+ * (`inspector.model`, `smart_routing.classifier_model`), and the gateway's own
+ * `DEFAULT_INSPECTOR_MODEL` — which is the gateway's COMPILE-TIME fallback: a
+ * Core-spawned gateway prefers the id Core publishes as `RYU_CLASSIFY_MODEL_ID`
+ * (`classify_model_id()`), and that is the one seam this constant cannot follow.
+ * See the KNOWN LIMIT on {@link fetchClassifyWeightsPresent}.
+ */
+export const CLASSIFY_MODEL_ID = "gemma-3-270m-it-qat-Q4_0";
+
+/**
+ * The router's builtin model prefix for the classify provider. Any model id
+ * starting with this is served by the local classify sidecar and by nothing
+ * else, which is what lets a client ask "will this model need the local tier?"
+ * without enumerating quant variants.
+ */
+export const CLASSIFY_MODEL_PREFIX = "gemma-3-270m";
+
+/**
+ * Live state of the local classify tier on one node.
+ *
+ * - `unknown` — nothing has answered yet (or a probe failed, e.g. an older Core
+ *   without `/api/models/installed`). Renders as nothing: an unreachable node
+ *   already says so elsewhere, and guessing "broken" would flash a false alarm
+ *   on every dialog open.
+ * - `absent` — Core answered `/api/sidecar/status` but does not register the
+ *   sidecar at all. Current Core registers the manager unconditionally
+ *   (`apps/core/src/main.rs`) and `SidecarManager::statuses` deliberately emits
+ *   every registered sidecar that is NOT in `startup_order`, so the key is
+ *   always present there — this variant only reaches an older Core (or a build
+ *   without the manager), which is exactly the node where the tier genuinely
+ *   does not exist.
+ * - `unweighted` — the sidecar is registered but its GGUF is not on disk, so it
+ *   CANNOT start: `classify.rs` bails "classifier model not found" at
+ *   `weight_path().exists()` and logs it at `debug`. This is the live failure the
+ *   whole status row exists for, because the onboarding download that fetches
+ *   those weights is deliberately non-fatal (`install_local_stack` records a
+ *   warning and moves on), so a node can sit here indefinitely while every other
+ *   signal reads healthy.
+ * - `idle` — registered, weights present, no resident process. The NORMAL resting
+ *   state: the sidecar is lazy (deliberately not in `startup_order`) and starts
+ *   on the first classification, so `idle` must never read as broken.
+ * - `running` — holding a resident process right now.
+ */
+export type ClassifyTierState =
+	| "absent"
+	| "idle"
+	| "running"
+	| "unknown"
+	| "unweighted";
+
+/**
+ * Fold the two independent probes into a {@link ClassifyTierState}.
+ *
+ * `undefined` means "not answered / probe failed" for BOTH inputs, and the whole
+ * sidecar map is taken rather than one pre-read boolean on purpose: a bare
+ * `running: boolean | undefined` cannot distinguish "Core says the sidecar isn't
+ * registered" from "the status call hasn't answered", and collapsing those two
+ * into `absent` is precisely the kind of confident-but-wrong claim this state
+ * machine exists to prevent. Taking the map makes the distinction unfakeable.
+ *
+ * Order is load-bearing:
+ *
+ *  1. no status ⇒ `unknown`.
+ *  2. status without our key ⇒ `absent` — the weights are irrelevant on a Core
+ *     that cannot serve them.
+ *  3. `running` ⇒ `running` WITHOUT consulting the weights probe. A resident
+ *     process proves the weights exist (the start path bails otherwise), so a
+ *     transient failure of the weights endpoint must not downgrade a
+ *     demonstrably-working tier.
+ *  4. otherwise the weights decide, and an unresolved probe is `unknown` rather
+ *     than either happy answer.
+ */
+export function deriveClassifyTierState({
+	sidecarStatus,
+	weightsPresent,
+}: {
+	/** `/api/sidecar/status` as a name→running map; `undefined` = unanswered. */
+	sidecarStatus: Record<string, boolean> | undefined;
+	/** {@link fetchClassifyWeightsPresent}; `undefined` = unanswered/failed. */
+	weightsPresent: boolean | undefined;
+}): ClassifyTierState {
+	if (sidecarStatus === undefined) {
+		return "unknown";
+	}
+	const running = sidecarStatus[CLASSIFY_SIDECAR_NAME];
+	if (running === undefined) {
+		return "absent";
+	}
+	if (running) {
+		return "running";
+	}
+	if (weightsPresent === undefined) {
+		return "unknown";
+	}
+	return weightsPresent ? "idle" : "unweighted";
+}
+
+/**
+ * Whether the tier can serve a classification on this node. `false` for both
+ * failure states AND for `unknown`, so nothing offers the tier's model id as a
+ * one-click value before the node has confirmed it can honour it.
+ */
+export function classifyTierServable(state: ClassifyTierState): boolean {
+	return state === "idle" || state === "running";
+}
+
+/**
+ * Whether a configured "cheap model" value points at the local classify tier on
+ * a node that is KNOWN not to serve it — the shared gate for the two cards that
+ * warn about it. `unknown` deliberately does not qualify: an unanswered probe
+ * must not raise an alarm.
+ *
+ * The check is a property of the node crossed with the model id, and nothing
+ * else in either card can reveal it: both consumers fail OPEN by design (the
+ * inspector treats an errored inspection as not-flagged; smart routing keeps the
+ * originally requested model), so the UI would otherwise report a guardrail that
+ * is on, shows `Block`, and allows every turn.
+ */
+export function classifyTierCannotServeModel(
+	state: ClassifyTierState,
+	model: string
+): boolean {
+	if (state !== "absent" && state !== "unweighted") {
+		return false;
+	}
+	return model.trim().startsWith(CLASSIFY_MODEL_PREFIX);
+}
+
+/**
+ * Badge + hint for every resolvable tier state, plus — for the two states that
+ * cannot serve — the `reason` clause each card composes its own consequence
+ * onto (the inspector allows the turn; smart routing keeps the requested model).
+ */
+export const CLASSIFY_TIER_COPY: Record<
+	Exclude<ClassifyTierState, "unknown">,
+	{ badge: string; hint: string; reason?: string }
+> = {
+	running: {
+		badge: "Local classifier running",
+		hint: "Gemma 3 270M is loaded on this node — classification costs nothing and leaves no data.",
+	},
+	idle: {
+		badge: "Local classifier ready",
+		hint: "Gemma 3 270M is downloaded on this node; it starts on the first classification.",
+	},
+	unweighted: {
+		badge: "Local classifier not downloaded",
+		// Says "the weights this node's Core defaults to" rather than "the weights",
+		// because that is exactly what the probe measured: an operator who pointed
+		// the registry at a different id has other weights we cannot see.
+		//
+		// It used to end "…so it can never start", and both halves of that were
+		// wrong: it overstated a recoverable state AND withheld the one-step remedy.
+		// Core's boot spawns `install_local_stack` UNCONDITIONALLY
+		// (apps/core/src/main.rs, the "Auto-install the local inference stack" block)
+		// and that routine re-attempts the classifier GGUF every time
+		// (apps/core/src/sidecar/onboarding.rs — the `classifier_gguf_installed`
+		// step), so a restart genuinely retries the download. "Usually" is
+		// load-bearing and not hedging: that step is gated on the llama.cpp BINARY
+		// having installed, and a download that keeps failing is failing for a reason
+		// (network, disk, a bad mirror) that only Core's log can name — so the copy
+		// promises a retry, never a fix.
+		hint: "This node registers the classify sidecar but not the Gemma 3 270M weights its Core defaults to, so it cannot start yet. Core retries the download every time it starts, so restarting Core is usually enough; if it keeps failing, Core's log says why.",
+		// Stays a mid-sentence CLAUSE: both cards compose their own consequence onto
+		// it ("…, but {reason} — so the call will fail…"), so it cannot grow a second
+		// sentence. The remedy therefore lives in `hint`, which
+		// `ClassifyTierNote` renders on both cards beside the badge.
+		reason:
+			"this node has not finished downloading the classifier weights (Gemma 3 270M) yet",
+	},
+	absent: {
+		badge: "No local classifier",
+		hint: "This node's Core does not provide the local classify tier — pick a hosted model instead.",
+		reason: "this node's Core does not provide that tier",
+	},
+};
+
+/**
+ * Whether the classify tier's WEIGHTS are on this node's disk.
+ *
+ * Reads Core's `/api/models/installed`, whose `load_present()` drops any record
+ * whose file is gone — the same `~/.ryu/models/<stem>.gguf` existence check
+ * `classify.rs` bails on, so this answers exactly the question "will the sidecar
+ * start?". Matched on the EXACT id, never the prefix: a user who installs
+ * another `gemma-3-270m` quant as a chat model would otherwise make this report
+ * ready while the sidecar still bails on the missing default quant.
+ *
+ * A Core endpoint in the gateway client because it exists solely to judge the
+ * gateway's two "cheap model" fields. Deliberately not `listInstalledModels`
+ * from `./models.ts`: that one returns `[]` on any error by design, and an empty
+ * list is indistinguishable from "the endpoint is missing" — which would render
+ * an older Core as a hard "weights missing" alarm. This one THROWS so the caller
+ * can stay `unknown`.
+ *
+ * KNOWN LIMIT: an operator who overrides Core's registry id
+ * (`RYU_LOCAL_CLASSIFIER_MODEL_ID`, republished to the gateway as
+ * `RYU_CLASSIFY_MODEL_ID`) serves a different stem, and this probe would report
+ * its own default missing. There is no Core route that publishes the resolved
+ * registry id, and the gateway config cannot stand in for one: the exact
+ * `<classify id>` → `classify` row `seed_classify_route` inserts is DERIVED, and the
+ * gateway strips it from everything that leaves the process — both `GET /v1/config`
+ * and its own `save()`, via `GatewayConfig::without_derived_values`
+ * (apps/gateway/src/config.rs). So a served `routing.model_map` carries a classify
+ * mapping only when an operator hand-wrote one, and reading it would report either
+ * nothing or that operator's possibly-superseded alias as "current" — and calling a
+ * tier ready that cannot start is the exact failure this probe exists to catch. So
+ * the limit is
+ * accepted in the pessimistic direction: an overridden node shows a "not
+ * downloaded" badge it does not deserve. It stays a badge and not a warning unless
+ * the override is to another quant of the SAME model, since
+ * {@link classifyTierCannotServeModel} only judges ids under
+ * {@link CLASSIFY_MODEL_PREFIX} and a coherent override points both the registry
+ * and the config at an id outside it.
+ */
+export async function fetchClassifyWeightsPresent(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<boolean> {
+	const json = await request<{ models?: { stem?: string }[] }>(
+		target,
+		"/api/models/installed",
+		{ signal }
+	);
+	return (json.models ?? []).some((m) => m.stem === CLASSIFY_MODEL_ID);
+}
+
 /**
  * The swappable cheap-LLM traffic inspector (mirrors gateway `InspectorConfig`).
  * A detection *method* orthogonal to `policy` (the *action*). Opt-in and
- * fail-open. `model` is a plain id resolved through the gateway router, so it
- * stays swappable — empty string means "use the gateway's default model".
+ * fail-open.
  */
 export interface InspectorConfig {
 	/** Action taken when the inspector flags a turn (reuses the firewall policy). */
@@ -474,20 +871,71 @@ export interface InspectorConfig {
 	min_chars: number;
 	/** What the inspector looks for. */
 	mode: InspectorMode;
-	/** Model id used for inspection. Empty ⇒ the gateway's default model. */
+	/**
+	 * Model id used for inspection, resolved through the gateway router so it
+	 * stays swappable.
+	 *
+	 * A blank value is NOT harmless, and the earlier claim here ("never
+	 * meaningfully empty") was the round-2 mistake this doc now exists to prevent.
+	 * The gateway does resolve a blank to {@link CLASSIFY_MODEL_ID} at
+	 * DESERIALIZATION (`de_inspector_model`, apps/gateway/src/config.rs) — but that
+	 * runs in the GATEWAY process, strictly downstream of a save. A desktop save
+	 * goes to Core's `PUT /api/gateway/config`, and Core inspects the raw JSON body
+	 * on the way through (`gateway_put_config` → `push_config` →
+	 * `maybe_start_classify_tier`, apps/core/src/sidecar/gateway.rs) to decide
+	 * whether to start the `llamacpp-classify` sidecar the classify id routes to.
+	 * That predicate USED to return false for an empty model, so a blank on the wire
+	 * meant "do not start the local classifier" — after which the gateway resolved
+	 * the blank to that very classifier and called a provider nothing was listening
+	 * on, and the inspector failed open. Core now treats blank-and-enabled as a
+	 * selection as well (`inspector_model_resolves_to_tier`, inside
+	 * `patch_selects_classify_tier` — a deliberate mirror of `de_inspector_model` on
+	 * Core's side of the process boundary), so a blank is no longer silently fatal
+	 * against a CURRENT Core.
+	 *
+	 * {@link withResolvedInspectorModels} still writes a concrete id on every save,
+	 * for the two reasons that outlive that fix: `PUT /api/gateway/config` is a
+	 * generic proxy, so the Core on the far side is whatever version the node runs
+	 * (an older one still declines a blank), and what gets persisted should equal
+	 * what the card displays. Neither half is redundant — Core's covers every other
+	 * client of that proxy, this one covers every Core version.
+	 */
 	model: string;
 	/** Per-inspection timeout in milliseconds; on timeout the request is allowed. */
 	timeout_ms: number;
 }
 
-/** Default (disabled) inspector config used when the gateway omits one. */
+/**
+ * Default (disabled) inspector config used when the gateway omits one.
+ *
+ * MIRRORS `impl Default for InspectorConfig` (apps/gateway/src/config.rs). Two
+ * fields drifted from it and both drifts were silent:
+ *
+ * - `action` said `warn_and_continue`; the Rust default is `FirewallPolicy`'s
+ *   `#[default]`, which is `Block` — an injection match is not meaningfully
+ *   redactable, so blocking is the only action that actually stops it. A mirror
+ *   that is strictly WEAKER than the enforced default is the dangerous
+ *   direction to drift in.
+ * - `model` said `""`. That used to match Rust, but the gateway now defaults it
+ *   to the classify-tier classifier (and resolves a blank back to it as it reads
+ *   the wire, in its OWN process — which is downstream of Core's start decision, so
+ *   the gateway's resolution ALONE never made a blank safe to send; see
+ *   {@link InspectorConfig.model} for which half of that is fixed where),
+ *   precisely so that "inspector enabled" cannot mean "inspector silently never
+ *   runs".
+ *
+ * Both were inert while the gateway always serializes `inspector` — the `??`
+ * fallbacks in `normalizeConfig` and `InspectorCard` never fired — which is
+ * exactly why they went unnoticed; the first response that omits the section
+ * would have shown, and then saved back, the wrong values.
+ */
 export const DEFAULT_INSPECTOR: InspectorConfig = {
 	enabled: false,
-	model: "",
+	model: CLASSIFY_MODEL_ID,
 	mode: "both",
 	min_chars: 40,
 	timeout_ms: 1500,
-	action: "warn_and_continue",
+	action: "block",
 };
 
 /**
@@ -666,6 +1114,14 @@ export async function fetchEvaluators(
 /** Firewall config shape (mirrors gateway FirewallConfig exactly). */
 export interface GatewayFirewallConfig {
 	/**
+	 * Notification fan-out tier when the firewall matches — orthogonal to
+	 * `policy`, which is the enforcement action. Optional on the wire (older
+	 * gateways omit it and the Rust field is `#[serde(default)]`); treat
+	 * `undefined` as `"silent"`. {@link fetchGatewayConfig} coalesces it so the
+	 * card always has a concrete value to bind a Select to.
+	 */
+	alert?: GatewayAlertTier;
+	/**
 	 * User-defined patterns merged on top of the curated built-in sets. Optional
 	 * on the wire: older gateways omit it, so treat `undefined` as `[]`.
 	 */
@@ -710,6 +1166,40 @@ export interface GatewayFirewallConfig {
  * a field so a narrower scope can only tighten it. Wire keys are snake_case.
  */
 export interface GatewayFirewallOverlay {
+	/**
+	 * Per-scope alert tier. `null`/`undefined` inherits the broader scope's tier.
+	 *
+	 * The gateway half is in place: `FirewallOverlay.alert: Option<AlertTier>`
+	 * (`apps/gateway/src/config.rs`) plus its arm in `apply_overlay`
+	 * (`apps/gateway/src/firewall/resolve.rs`). An earlier revision of this comment
+	 * described both as pending and concluded several things from their absence;
+	 * all of that is superseded, and the two conclusions worth correcting by name:
+	 *
+	 * LOCKABLE — yes. The `apply_overlay` arm honours a lock via `louder_alert` =
+	 * `max` over `AlertTier`'s ascending-severity `Ord`, so with `"alert"` in a
+	 * broader scope's `locked_fields` a narrower scope may only RAISE the tier.
+	 * `"alert"` is a canonical name on `FirewallConfig::locked_fields`, and
+	 * `GuardrailAlertRow` offers the node-scope toggle. It is not in
+	 * `default_firewall_locked_fields`: a notification dial is not a protection
+	 * dial, so it starts unlocked.
+	 *
+	 * COVERAGE — partial, and the boundary is NOT inbound-vs-outbound. Enumerated
+	 * from the `firewall_policy_alert` call sites in `apps/gateway/src/pipeline/mod.rs`:
+	 *
+	 * - Scope-aware, via `state.resolved_scanner(ctx)` → `scanner.config()`:
+	 *   `pre_process` (inbound text), `apply_inline_input_evaluators`, and
+	 *   `apply_inline_output_evaluators` — the last of which raises OUTBOUND blocks,
+	 *   so an org/agent tier does govern those.
+	 * - Node-base only, via `state.with_firewall(|fw| … fw.config() …)`: `run`'s
+	 *   stage-9 outbound response scan, `run_multimodal`'s inbound scan, and
+	 *   `submit_video_job`'s inbound scan. An overlay tier is ignored at all three;
+	 *   the node tier fires.
+	 *
+	 * So UI copy must not promise that an org/agent tier governs image or video
+	 * requests, nor that it is powerless on outbound. Only the node scope covers
+	 * all six sites. Widening the three is a `pipeline/mod.rs` change.
+	 */
+	alert?: GatewayAlertTier | null;
 	custom_patterns?: CustomPattern[];
 	enabled?: boolean | null;
 	/**
@@ -743,12 +1233,79 @@ export type BudgetAction = "notify" | "downgrade" | "restrict" | "stop";
 export interface BudgetRule {
 	/** Action taken once limit is reached. */
 	action: BudgetAction;
+	/**
+	 * Notification fan-out tier when this rule matches — orthogonal to `action`.
+	 * Optional on the wire (`#[serde(default)]` in Rust); `undefined` = `silent`.
+	 * Always write it through {@link buildBudgetRule}: a rule object assembled by
+	 * hand from a form used to drop this field, which silently demoted an
+	 * operator's `email` rule to `silent` on the next edit-and-save.
+	 */
+	alert?: GatewayAlertTier;
 	/** Model to route to when action = downgrade. */
 	downgrade_to?: string | null;
 	/** Lifetime token cap (input + output combined). 0 = unlimited. */
 	limit: number;
 	/** Max tokens cap when action = restrict. Defaults to 256 on the gateway. */
 	restrict_max_tokens?: number;
+}
+
+/** Loose scalars a budget form holds, before {@link buildBudgetRule} tightens them. */
+export interface BudgetRuleInput {
+	action: BudgetAction;
+	/** Omitted ⇒ `silent`, matching the Rust `#[serde(default)]`. */
+	alert?: GatewayAlertTier;
+	/** Raw model id; trimmed, and only kept when `action === "downgrade"`. */
+	downgradeTo?: string | null;
+	limit: number;
+	/**
+	 * Raw cap, as typed. Only kept when `action === "restrict"` AND it parses to a
+	 * positive integer — otherwise omitted so the gateway applies its own 256.
+	 */
+	restrictMaxTokens?: number | string | null;
+}
+
+/**
+ * The ONE place a {@link BudgetRule} is assembled for the wire.
+ *
+ * It exists because the same object literal was being built in three places in
+ * `GatewayDialog.tsx` (the add dialogs' `formToRule`, `BudgetScopeSection`'s
+ * duplicate of it, and `SessionBudgetEditor.handleSave`), each carrying only
+ * `limit`/`action`/`downgrade_to`/`restrict_max_tokens`. Since `PUT /v1/config`
+ * REPLACES the whole `BudgetConfig`, every one of those was a wipe of any field
+ * they did not name — which is how `alert` stayed pinned at `silent` no matter
+ * what an operator configured. Constructing rules anywhere else re-opens that.
+ *
+ * `alert` is always emitted, even at `silent`: the value the card shows and the
+ * value on the wire then agree, and `silent` is the Rust default anyway, so this
+ * is not a behaviour change for pre-existing rules.
+ *
+ * Pure and total — no throwing. Bad numbers are dropped rather than rejected,
+ * mirroring what the dialogs already did (the dialogs validate `limit`
+ * themselves; this only refuses to put junk on the wire).
+ */
+export function buildBudgetRule(input: BudgetRuleInput): BudgetRule {
+	const rule: BudgetRule = {
+		limit: input.limit,
+		action: input.action,
+		alert: input.alert ?? "silent",
+	};
+	const downgradeTo = (input.downgradeTo ?? "").trim();
+	if (input.action === "downgrade" && downgradeTo !== "") {
+		rule.downgrade_to = downgradeTo;
+	}
+	if (input.action === "restrict" && input.restrictMaxTokens != null) {
+		const raw =
+			typeof input.restrictMaxTokens === "string"
+				? input.restrictMaxTokens.trim()
+				: input.restrictMaxTokens;
+		if (raw !== "") {
+			const cap = Number(raw);
+			if (Number.isInteger(cap) && cap > 0) {
+				rule.restrict_max_tokens = cap;
+			}
+		}
+	}
+	return rule;
 }
 
 /**
@@ -767,10 +1324,17 @@ export interface GatewayBudgetConfig {
 	users: Record<string, BudgetRule>;
 }
 
-/** Default (off) per-session budget rule used when the gateway omits one. */
+/**
+ * Default (off) per-session budget rule used when the gateway omits one.
+ *
+ * `alert: "silent"` matches `impl Default for SessionBudgetConfig`
+ * (`crates/gateway/budget/src/lib.rs`), which initialises `AlertTier::default()`
+ * — so this fallback cannot claim a tier the gateway would not have.
+ */
 export const DEFAULT_SESSION_BUDGET: BudgetRule = {
 	limit: 0,
 	action: "notify",
+	alert: "silent",
 	downgrade_to: null,
 	restrict_max_tokens: 256,
 };
@@ -865,12 +1429,143 @@ export const DEFAULT_SMART_ROUTING: SmartRoutingConfig = {
 	timeout_ms: 4000,
 };
 
+/**
+ * Shape used only when a 2xx arrives with no `routing` section at all. It
+ * deliberately omits `modality_map` / `eval_routing` / `smart_routing`: this
+ * object stands in for "the gateway told us nothing", and manufacturing a
+ * section here would assert something about the node that was never observed.
+ *
+ * `smart_routing` used to be listed here (and coalesced again in
+ * {@link fetchGatewayConfig}), which contradicted the paragraph above and cost
+ * the caller the one distinction that matters — see
+ * {@link routingViewIncludesSmartRouting}.
+ */
 const DEFAULT_ROUTING: GatewayRoutingConfig = {
 	default_provider: "openai",
 	model_map: {},
 	fallback_chain: [],
-	smart_routing: DEFAULT_SMART_ROUTING,
 };
+
+/**
+ * Whether this gateway's `GET /v1/config` actually reported `routing.modality_map`.
+ *
+ * Read this before offering a modality editor, and read the reason carefully —
+ * it is not defensive typing.
+ *
+ * `PUT /v1/config { routing }` assigns the section wholesale
+ * (`apps/gateway/src/api/config.rs`: `updated_config.routing = routing.clone()`)
+ * and `RoutingConfig::modality_map` is `#[serde(default)]`. So a PUT body that
+ * OMITS `modality_map` deserializes to an empty map and replaces whatever was on
+ * disk — omission and `{}` erase identically. There is no clobber guard on
+ * `routing` (the one documented on `custom_evaluators` does not cover it).
+ *
+ * Consequence: against a gateway old enough that its `RoutingView` has no
+ * `modality_map` field, the desktop cannot round-trip what it cannot see, and
+ * ANY routing save from this app wipes a hand-written `[routing.modality_map]`
+ * in `gateway.toml`. That is the A7 defect, and on such a node it is not
+ * fixable from here — only reportable. Hence a presence check rather than
+ * `?? {}`: the two states demand different UI, and coalescing hides the one
+ * that destroys data.
+ *
+ * A gateway that DOES serve the field always emits the key (an empty
+ * `HashMap` serializes as `{}`), so presence is an exact test.
+ */
+export function routingViewIncludesModalityMap(
+	routing: GatewayRoutingConfig
+): boolean {
+	return "modality_map" in routing;
+}
+
+/**
+ * Whether this gateway's `GET /v1/config` actually reported
+ * `routing.smart_routing`.
+ *
+ * The same presence test as {@link routingViewIncludesModalityMap}, and for the
+ * same structural reason: `PUT /v1/config { routing }` assigns the section
+ * wholesale and `RoutingConfig::smart_routing` is `#[serde(default)]`
+ * (`apps/gateway/src/config.rs`), so a PUT body that omits it deserializes to
+ * `SmartRoutingConfig::default()` and replaces whatever was on disk. Omission
+ * and an explicit default erase identically; against a gateway too old to serve
+ * the field this is not fixable from here, only reportable.
+ *
+ * ## Why it needed its own predicate rather than a `??` default
+ *
+ * `fetchGatewayConfig` used to coalesce the field to
+ * {@link DEFAULT_SMART_ROUTING}, which is exactly the move the modality-map work
+ * ruled out for itself. The coalesce is worse here than it is for
+ * `modality_map`, not milder: an unserved map coalesces to `{}` (nothing
+ * claimed), whereas an unserved `smart_routing` coalesces to a *concrete*
+ * `enabled: false` — a fabricated "classifier routing is off" that the desktop
+ * then spreads back on the next save of any other routing field. That is the
+ * healthy-status-for-a-dead-thing shape inverted: the card reports a setting the
+ * node never told it about, and saving something unrelated turns the operator's
+ * hand-written `[routing.smart_routing]` off.
+ *
+ * A gateway that DOES serve the field always emits the key (`SmartRoutingConfig`
+ * is a plain struct on `RoutingView`, not an `Option`), so presence is an exact
+ * test.
+ *
+ * ## Consumed by `SmartRoutingCard` (`GatewayDialog.tsx`)
+ *
+ * The card keeps a three-state `served` (`null` = not loaded, so a healthy
+ * gateway does not flash a data-loss warning during its first fetch). When it is
+ * `false` the card disables every control and says on screen that the switch
+ * reads off because nothing was reported, not because routing is off.
+ *
+ * `cfg.routing.smart_routing ?? DEFAULT_SMART_ROUTING` survives at the load edge
+ * and that is deliberate: a Switch or Select bound to `undefined` goes
+ * uncontrolled. It is a *rendering* stand-in only — `served` carries the truth,
+ * and `handleSave` refuses on anything but `served === true`, re-testing this
+ * predicate against the freshly re-fetched config (the gateway can restart, or be
+ * swapped for an older build, between mount and save) rather than trusting the
+ * flag from mount.
+ */
+export function routingViewIncludesSmartRouting(
+	routing: GatewayRoutingConfig
+): boolean {
+	return "smart_routing" in routing;
+}
+
+/**
+ * Read-modify-write one `routing.modality_map` row, returning the FULL routing
+ * object to PUT.
+ *
+ * Spread-based on purpose. Because `put_config` replaces the routing section
+ * wholesale, every sibling field — `eval_routing`, `smart_routing`,
+ * `provider_tiers`, `model_map`, and anything a newer gateway serves that this
+ * TS interface has not learned about yet — has to ride along untouched. Spread
+ * carries unknown keys; an object literal built field-by-field would not, and
+ * that is exactly how `modality_map` came to be erased in the first place.
+ *
+ * @param routing The routing object as returned by a FRESH `GET` (never a stale
+ *   snapshot — the gateway persists routing without updating its startup
+ *   snapshot, so an old read spreads old values back over the file).
+ * @param modality Which row to author.
+ * @param mapping `null` clears the row so the modality falls back to ordinary
+ *   model routing. Otherwise the provider id, plus a model that is OMITTED when
+ *   blank — `Some("")` would be forwarded to the provider as a literal empty
+ *   model name (`router/src/lib.rs` only substitutes the caller's model for
+ *   `None`), whereas an absent key means "forward the caller's own model".
+ */
+export function withModalityMapping(
+	routing: GatewayRoutingConfig,
+	modality: Modality,
+	mapping: { model?: string; provider: string } | null
+): GatewayRoutingConfig {
+	const next: Partial<Record<Modality, ModalityMapping>> = {
+		...(routing.modality_map ?? {}),
+	};
+	if (mapping === null) {
+		delete next[modality];
+	} else {
+		const model = mapping.model?.trim() ?? "";
+		next[modality] = {
+			provider: mapping.provider.trim(),
+			...(model ? { model } : {}),
+		};
+	}
+	return { ...routing, modality_map: next };
+}
 
 /**
  * Fetch the gateway's current config (redacted) via Core's proxy
@@ -898,12 +1593,21 @@ export async function fetchGatewayConfig(
 			agents: budgets.agents ?? {},
 			session: budgets.session ?? DEFAULT_SESSION_BUDGET,
 		},
-		routing: {
-			...routing,
-			smart_routing: routing.smart_routing ?? DEFAULT_SMART_ROUTING,
-		},
+		// Passed through EXACTLY as served — no `smart_routing` (or `modality_map`,
+		// or `eval_routing`) default folded in. Coalescing here would erase the
+		// difference between "the gateway does not serve this section" and "it
+		// serves it, switched off", and because the PUT replaces `routing`
+		// wholesale the manufactured section rides back out on the next save of
+		// anything else in the card. See {@link routingViewIncludesSmartRouting};
+		// consumers that need a value to bind a control to coalesce at their own
+		// edge, where they can also say which state they are in.
+		routing,
 		firewall: {
 			...firewall,
+			// Coalesced for the same reason as the three below: the guardrails card
+			// binds a Select straight to this, and a `value={undefined}` Select renders
+			// as an uncontrolled placeholder — which would then save an omitted tier.
+			alert: firewall.alert ?? "silent",
 			custom_patterns: firewall.custom_patterns ?? [],
 			inspector: firewall.inspector ?? { ...DEFAULT_INSPECTOR },
 			locked_fields: firewall.locked_fields ?? [],
@@ -914,10 +1618,130 @@ export async function fetchGatewayConfig(
 }
 
 /**
+ * Write a concrete id into any `inspector` whose `model` is blank/whitespace.
+ *
+ * Generic over the two shapes that carry an inspector — the node base
+ * ({@link GatewayFirewallConfig}, `inspector?: InspectorConfig`) and an overlay
+ * ({@link GatewayFirewallOverlay}, `inspector?: InspectorConfig | null`, where
+ * `null` means "inherit, do not override"). A nullish inspector is returned
+ * untouched, so "inherit" can never be turned into an override.
+ *
+ * Returns the SAME object when nothing needs changing; callers rely on identity to
+ * avoid cloning a React draft that is already fine.
+ *
+ * `model` is typed `string`, but it is read defensively because this runs on a
+ * transport path fed by whatever the gateway serialized: an inspector object
+ * without the key would otherwise throw inside a save handler.
+ */
+function withResolvedInspectorModel<
+	T extends { inspector?: InspectorConfig | null },
+>(section: T): T {
+	const inspector = section.inspector;
+	if (!inspector) {
+		return section;
+	}
+	const model =
+		typeof inspector.model === "string" ? inspector.model.trim() : "";
+	if (model !== "") {
+		return section;
+	}
+	return { ...section, inspector: { ...inspector, model: CLASSIFY_MODEL_ID } };
+}
+
+/** {@link withResolvedInspectorModel} across one overlay store, identity-preserving. */
+function withResolvedOverlayStore(
+	store: Record<string, GatewayFirewallOverlay>
+): Record<string, GatewayFirewallOverlay> {
+	let changed = false;
+	const next: Record<string, GatewayFirewallOverlay> = {};
+	for (const [id, overlay] of Object.entries(store)) {
+		const resolved = withResolvedInspectorModel(overlay);
+		next[id] = resolved;
+		changed ||= resolved !== overlay;
+	}
+	return changed ? next : store;
+}
+
+/**
+ * Normalize a config patch so no `inspector.model` reaches the wire blank.
+ *
+ * WHY this is a transport concern and not a form concern. A blank model was never
+ * the harmless "use the default" it reads as. The save travels desktop → Core
+ * `PUT /api/gateway/config` → gateway `PUT /v1/config`, and Core reads the raw JSON
+ * as it passes (`push_config` → `maybe_start_classify_tier` →
+ * `patch_selects_classify_tier`, apps/core/src/sidecar/gateway.rs) to decide whether
+ * to start `llamacpp-classify`. That predicate used to bail on an empty model, so a
+ * blank meant "do not start the local classifier" — and THEN the gateway's
+ * `de_inspector_model` resolved the same blank to the classify id and routed it at
+ * the `classify` provider, whose port had nothing behind it. The inspector failed
+ * open: the card said enabled, the action said Block, every turn was allowed. It
+ * self-corrected only on a SECOND save, because that one carried the model the first
+ * had persisted.
+ *
+ * Core's half of that bug is now fixed too (blank-and-enabled selects the tier), so
+ * on a current node this function is NOT what makes the sidecar start. What it still
+ * buys, and why it belongs on the transport rather than being deleted as redundant:
+ * `PUT /api/gateway/config` is a generic authenticated proxy, so the Core on the far
+ * side is whatever version that node runs — an older one still declines a blank —
+ * and writing a concrete id keeps what is PERSISTED equal to what the card displays.
+ * The two halves are deliberately asymmetric: Core's covers every other client of
+ * that proxy, this one covers every Core version.
+ *
+ * The value written is {@link CLASSIFY_MODEL_ID}, which is byte-identical to what
+ * the "Use it" button and {@link DEFAULT_INSPECTOR} already write, so this
+ * introduces no divergence the UI did not already have — including the documented
+ * KNOWN LIMIT on {@link fetchClassifyWeightsPresent} (a node whose registry id is
+ * overridden resolves a different id inside the gateway; both ids still reach the
+ * one `classify` provider via the router's builtin `gemma-3-270m` prefix).
+ *
+ * Overlay stores are normalized too, but for a NARROWER reason: Core's predicate
+ * only ever reads `/firewall/inspector/model` at the top level, so an overlay-only
+ * inspector never starts the sidecar regardless. Normalizing them keeps what is
+ * persisted equal to what the card displays; it does not buy a sidecar start.
+ *
+ * Pure and exported for the tests: a patch with no firewall sections comes back
+ * unchanged (by identity), and no input object is ever mutated — these patches are
+ * React draft state.
+ */
+export function withResolvedInspectorModels(
+	patch: GatewayConfigPatch
+): GatewayConfigPatch {
+	const firewall = patch.firewall
+		? withResolvedInspectorModel(patch.firewall)
+		: undefined;
+	const orgOverlays = patch.firewall_org_overlays
+		? withResolvedOverlayStore(patch.firewall_org_overlays)
+		: undefined;
+	const agentOverlays = patch.firewall_agent_overlays
+		? withResolvedOverlayStore(patch.firewall_agent_overlays)
+		: undefined;
+	const changed =
+		(firewall !== undefined && firewall !== patch.firewall) ||
+		(orgOverlays !== undefined &&
+			orgOverlays !== patch.firewall_org_overlays) ||
+		(agentOverlays !== undefined &&
+			agentOverlays !== patch.firewall_agent_overlays);
+	if (!changed) {
+		return patch;
+	}
+	return {
+		...patch,
+		...(firewall ? { firewall } : {}),
+		...(orgOverlays ? { firewall_org_overlays: orgOverlays } : {}),
+		...(agentOverlays ? { firewall_agent_overlays: agentOverlays } : {}),
+	};
+}
+
+/**
  * Apply a partial config change to the gateway via Core's proxy
- * (`PUT /api/gateway/config`). Core forwards the body verbatim to the gateway's
+ * (`PUT /api/gateway/config`). Core forwards the body to the gateway's
  * `PUT /v1/config`, which accepts firewall, budgets, auth, and routing. Provider
  * credentials are environment-variable-only and cannot be set here.
+ *
+ * "Forwards" is not "ignores": Core inspects the body first to lazily start the
+ * classify sidecar, which is why every patch passes through
+ * {@link withResolvedInspectorModels} here — the one seam every firewall save in
+ * the app funnels into — rather than at each card's save handler.
  *
  * Rejects on Core-unreachable or a non-2xx relay from the gateway.
  */
@@ -928,7 +1752,7 @@ export async function updateGatewayConfig(
 ): Promise<{ ok: boolean }> {
 	return request<{ ok: boolean }>(target, "/api/gateway/config", {
 		method: "PUT",
-		body: patch,
+		body: withResolvedInspectorModels(patch),
 		signal,
 	});
 }

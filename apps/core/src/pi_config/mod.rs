@@ -443,10 +443,18 @@ fn apply_cache_compat(id: &str, entry: &mut Value) {
 }
 
 /// The zero-key default model for the managed Pi in Gateway-routed mode: the
-/// registry's local llama.cpp chat model (swappable via `RYU_LOCAL_CHAT_MODEL_ID`
-/// / `registry.json`, never hardcoded here). The gateway's built-in prefix rules
+/// registry's local llama.cpp chat model (swappable via `RYU_LOCAL_CHAT_MODEL_ID`,
+/// never hardcoded here). The gateway's built-in prefix rules
 /// route `gemma*`-style ids to its `local` provider (the llama.cpp sidecar), so a
 /// fresh install with no API keys gets a working model out of the box.
+///
+/// The doc used to say "or `registry.json`", and that was the last half-live field
+/// in the registry: this `load()` honoured the file key while the onboarding
+/// downloader and `llamacpp::{mod,process}` (`from_env()`) did not, so an operator
+/// who set it made the managed Pi declare a model id that llama.cpp was not serving.
+/// The file key is now deleted, which is what makes `load()` here and `from_env()`
+/// there return the same id by construction — so this call site is correct as it
+/// stands and needs no change.
 pub fn default_gateway_model() -> String {
     crate::registry::ProviderRegistry::load()
         .local_chat_model
@@ -552,6 +560,48 @@ fn pi_mcp_extension_path() -> PathBuf {
 /// Core's MCP tools — including widget-bearing ones (Apps-SDK / MCP apps), which
 /// Pi otherwise cannot reach (it advertises no MCP-server support, so Core's
 /// in-process bridge is skipped for it).
+///
+/// **This is the flagship agent's ONLY road to Ryu's tools.** Verified against
+/// `pi-acp@0.0.33` on 2026-07-31: its `initialize` reports
+/// `mcpCapabilities { http: false, sse: false }`, and `session/new` stores
+/// `params.mcpServers` on a session field that nothing in the bundle ever reads.
+/// So the in-process bridge is not merely skipped by Core's own guard — it would
+/// be accepted and silently discarded if Core sent it. The full evidence, and why
+/// the guard is a spawn-string match rather than a capability read, is in
+/// `sidecar::adapters::acp::acp_bridge_supported`; the three-way classification
+/// (`bridge` / `pi-extension` / `none`) is `acp::RyuToolAccess`.
+///
+/// ## Why writing a config file is legitimate HERE
+///
+/// `crate::exec_approval` refuses on principle to install filesystem hooks into
+/// an agent's config (Claude's `settings.json`, Codex's `config.toml`), because
+/// doing so costs either a folder-trust supply-chain hole (widening
+/// `settingSources` to `project`/`local`) or a subscription-credential migration
+/// (relocating `CLAUDE_CONFIG_DIR`) — and the ACP `request_permission` seam
+/// already governs every agent uniformly at no such cost.
+///
+/// Neither cost is paid here, and the difference is the *directory*, not the
+/// technique. That refusal is about writing into the **user's own** config dirs.
+/// [`config_dir`] is Ryu's ISOLATED dir (`~/.ryu/pi-agent`), created by Core, read
+/// by no Pi the user launches themselves, and reachable only by a process Core
+/// spawns with `PI_CODING_AGENT_DIR` pointed at it. Nothing here widens a trust
+/// scope, relocates a credential, or changes what the user's own `pi` does. And
+/// unlike a hook, this file adds no governance path of its own: every tool the
+/// extension can invoke goes back out through Core's `/api/mcp/tools/call`, which
+/// applies the same per-agent allowlist the in-process bridge does.
+///
+/// ## Why bare `acp:pi` deliberately gets nothing
+///
+/// The symmetrical move — shipping this extension into the user's `~/.pi` so the
+/// `acp:pi` agent (and any custom agent bound to that engine) also gets Ryu
+/// tools — is exactly the line above that must not be crossed. It would mean Core
+/// writing executable code into a config directory the user owns and shares with
+/// their own Pi sessions, which then loads on every unrelated `pi` invocation.
+/// That is `exec_approval`'s objection with the costs it names actually incurred.
+/// So bare `acp:pi` reaches no Ryu tools at all, by design; the flagship `ryu`
+/// agent is the supported way to use Pi with Ryu's tools, and
+/// `run_acp_instance` now WARNs when it spawns such an instance so the state is
+/// at least visible rather than silent.
 ///
 /// Idempotent: the extension source is (re)written only when it differs (so an
 /// engine update ships the current bridge without needless disk churn), and the
@@ -1650,6 +1700,48 @@ fn model_overrides(models: &Value, id: &str) -> Value {
 
 /// The catalog of supported providers + thinking levels, with per-provider
 /// `configured` and `suggestedModels` so the desktop can render a picker.
+/// The API key stored for one provider, in the same priority order
+/// [`provider_configured`] reports on: the `auth.json` api-key credential, then
+/// the provider's auth env var, then a custom provider's `models.json` `apiKey`.
+///
+/// SERVER-SIDE ONLY. This is how the `GET /api/providers/:id/credits` handler
+/// hands a key to the credit reader, which needs it for one `Authorization`
+/// header. It must never reach a response body — the whole point of keeping key
+/// resolution here (rather than giving `ryu-usage` a credential seam) is that the
+/// one caller is a handler that returns a normalized snapshot and nothing else.
+pub fn provider_api_key(id: &str) -> Option<String> {
+    if let Some(meta) = provider_meta(id) {
+        // A subscription (OAuth) provider has no api key to read; its auth.json
+        // entry is an oauth blob, and handing that to a billing endpoint would be
+        // both wrong and a credential leak into the wrong vendor.
+        if meta.auth_kind == "subscription" {
+            return None;
+        }
+        if !meta.auth_key.is_empty() {
+            if let Some(key) = auth_key_value(meta.auth_key) {
+                return Some(key);
+            }
+        }
+        if !meta.auth_env.is_empty() {
+            if let Ok(key) = std::env::var(meta.auth_env) {
+                let trimmed = key.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        return None;
+    }
+    // Custom (user-added) provider: its key lives inline in models.json.
+    read_models()["providers"]
+        .get(id)
+        .and_then(|p| p.get("apiKey"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 pub fn catalog() -> Value {
     let custom_ids = custom_provider_ids();
     let active = active_provider_id_from(&read_settings());
@@ -2316,8 +2408,25 @@ mod tests {
     use super::*;
 
     /// Point the config dir at a temp location for the duration of a test.
+    ///
+    /// Takes the **registry** env lock as well as the pi-config one. Several of
+    /// these tests reach `default_gateway_model()` → `ProviderRegistry::load()`,
+    /// which reads the process-global `RYU_LOCAL_CHAT_MODEL_*` /
+    /// `RYU_REGISTRY_PATH` vars that `registry::tests` mutate transiently under
+    /// *their* lock. Without this, `gateway_patch_upgrades_bare_default_model_metadata`
+    /// — which calls `default_gateway_model()` twice, once to build the entry and
+    /// once inside `ensure_gateway_models_json` — can read two different ids across
+    /// a concurrent `RYU_LOCAL_CHAT_MODEL_ID` override and fail its `"Gemma 4 E2B IT
+    /// Q4_K_M"` assertion. A cross-module flake, not a bug in either test.
+    ///
+    /// Lock order is pi-config → registry, and it is the only order taken anywhere:
+    /// `registry::tests` never acquire the pi-config lock, and `sidecar::adapters`'
+    /// two pi-config users acquire nothing else. Keep it that way — the inverse
+    /// order in any new test deadlocks the whole suite, which is far worse than the
+    /// flake this closes.
     fn with_temp_dir<F: FnOnce()>(f: F) {
         let _guard = lock_pi_config_test_env();
+        let _registry_guard = crate::registry::lock_registry_env();
         let dir = std::env::temp_dir().join(format!("ryu-pi-config-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         std::env::set_var("RYU_PI_AGENT_DIR", &dir);

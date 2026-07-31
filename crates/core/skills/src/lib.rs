@@ -135,6 +135,19 @@ const ENV_SKILLS_DISCLOSURE: &str = "RYU_SKILLS_DISCLOSURE";
 
 /// Max L1 index entries injected before the model is told to use `skills__search`
 /// instead of relying on the inline list.
+///
+/// **The cut is id-alphabetical, and that bias is permanent.** Sorting the scan
+/// ([`scan_skill_dir_opts`]) bought determinism, not fairness: on a node with more
+/// than `SKILL_INDEX_CAP` enabled on-demand skills the excluded ones are the
+/// alphabetically-last ones on every turn, and an author can buy their way into the
+/// index with an `a-` prefix. Accepted, because the alternatives are worse: a
+/// query-ranked cut busts the prompt cache every turn (see
+/// [`SkillRegistry::progressive_block`]), and a rotating/random cut makes the
+/// injected prefix differ between two identical turns — the same cache cost plus
+/// irreproducible behaviour. Nothing is *lost* by the cut either: the trailing
+/// "...and N more" line points at `skills__search`, which ranks over every enabled
+/// skill regardless of index position, so the bias costs a skill its free mention,
+/// never its reachability.
 pub const SKILL_INDEX_CAP: usize = 20;
 
 static PROGRESSIVE_DISCLOSURE: OnceLock<AtomicBool> = OnceLock::new();
@@ -250,6 +263,72 @@ pub struct SkillRecord {
     /// disclosure (see [`SkillRegistry::progressive_block`]). Default `false`.
     #[serde(default)]
     pub always_on: bool,
+}
+
+impl SkillRecord {
+    /// Whether this record has an instruction body to serve.
+    ///
+    /// A record with an empty `instructions` is *advertisable but not loadable*: it
+    /// carries identity metadata and nothing to inject. Two things produce that
+    /// shape, and neither is a bug:
+    ///
+    /// 1. [`SkillRegistry::register_app_skill`] — a plugin contributing a
+    ///    `RunnableKind::Skill` registers `instructions: String::new()`, because the
+    ///    plugin's `SkillConfig` is `skill_id`-only; the real body only exists once
+    ///    the skill is materialised on disk.
+    /// 2. [`parse_skill_md`] — a `SKILL.md` that is front-matter only (or that never
+    ///    closes its front-matter) parses to an empty body; the *only* parse error is
+    ///    a missing `name`. So the disk half can produce one too.
+    ///
+    /// The predicate is therefore about the **body, full stop** — not about the
+    /// `app__` prefix and not about where the record came from. A plugin skill
+    /// genuinely materialised on disk parses into a record with a real body and
+    /// passes here (and disk records precede the `app_skills` bag in
+    /// [`SkillRegistry::enabled`], so the disk copy is the one every lookup finds).
+    ///
+    /// **This is the one rule for every surface that offers a skill**, and they must
+    /// keep agreeing: advertising a skill whose load returns nothing is the
+    /// healthy-status-for-a-thing-that-is-not-there defect, and it is *louder* on the
+    /// injected surfaces than on the searched ones, because the injected index tells
+    /// the model in so many words to call `skills__load` with the id.
+    ///
+    /// | Surface | Where the rule is applied |
+    /// |---|---|
+    /// | progressive-disclosure L1 index | [`SkillRegistry::progressive_block`], via [`SkillRegistry::loadable_for`] |
+    /// | always-on / full-body injection | [`SkillRegistry::progressive_block`] and [`SkillRegistry::skill_block`], via [`SkillRegistry::loadable_for`] |
+    /// | `skills__search` | `do_search` in `apps/core/src/sidecar/mcp/skills_tool.rs` |
+    /// | `skills__load` | `do_load` in the same module — the one surface that must still **see** the record, so it can refuse it by name rather than answering `ok:true` with an empty body |
+    /// | merged tool catalog (`tool_search` list + resolve) | `apps/core/src/sidecar/mcp/catalog.rs` |
+    /// | workflow `Skill` node | `compose_skill_prompt` in `apps/core/src/workflow/executor.rs` |
+    ///
+    /// That last row is NOT a discovery surface — a human wrote the id into the
+    /// node, nothing offered it — so the "advertises what the loader refuses"
+    /// defect does not apply to it. It applies the predicate for the sibling
+    /// reason: composing `## Skill: <name>\n` with an empty body would run the node
+    /// on nothing and report success. `compose_skill_prompt` returns `Err` instead,
+    /// and keeps that arm textually distinct from its "is not installed" arm,
+    /// because "no such skill" and "registered here but its body was never
+    /// installed" need different fixes. (This row was a stated exception while
+    /// `run_skill` still had the defect; it is now closed, and closed by *calling
+    /// this method* rather than by re-deriving the rule.)
+    ///
+    /// One consumer of [`SkillRegistry::list_all`] remains deliberately **outside**
+    /// the rule: `GET /api/skills` (`api::list_skills`) is the skills-library
+    /// **inventory**. It must keep showing a plugin's contribution before the body
+    /// exists — otherwise enabling a plugin would make its skill vanish from the UI
+    /// while the plugin claims to provide it. Inventory and offer legitimately
+    /// differ.
+    ///
+    /// It lives on the record, in this Core-independent crate, rather than in the
+    /// Core-side MCP module where it was first written: the rule is a property of the
+    /// record, and this crate owns both the type and producer (1). The block builders
+    /// below cannot call into `apps/core`, so leaving it there would have forced a
+    /// second spelling of the same rule — which is exactly the drift that let the
+    /// injected index keep advertising what `skills__load` had started refusing.
+    /// `skills_tool::is_loadable` is now a delegate to this method.
+    pub fn is_loadable(&self) -> bool {
+        !self.instructions.trim().is_empty()
+    }
 }
 
 // ── Parsing ────────────────────────────────────────────────────────────────────
@@ -419,9 +498,68 @@ pub fn scan_all_skill_dirs() -> Vec<InstalledSkillPath> {
     found
 }
 
+/// Resolve `id` to the one `SKILL.md` every consumer would load for it, or `None`
+/// when the id is free across the **whole** namespace.
+///
+/// This is the existence predicate a *writer* needs, and it is deliberately not
+/// `<write root>/<id>/SKILL.md`.exists(). The write target
+/// ([`SkillRegistry::skills_dir`]) is only root **one** of the namespace, and within
+/// a root the directory layout beats the legacy flat `<id>.md` form (see
+/// [`scan_skill_dir_opts`]). So creating `<write root>/<id>/SKILL.md` for an id that
+/// already resolves *anywhere* does not add an id — it takes one over:
+/// [`scan_all_skill_dirs`] hands the winning entry to [`SkillRegistry::reload`], and
+/// from there `enabled`/`enabled_for`/`skill_block`/`progressive_block`, the
+/// `skills__search`/`skills__load` tools and the skills library all serve the new
+/// bytes under the old id. The shadowed file survives on disk but is unreachable,
+/// which for every consumer equals an overwrite.
+///
+/// Membership does not depend on root order — an id either appears in some root's
+/// scan or it does not — so this answers "is the id taken?" identically to
+/// [`scan_all_skill_dirs`]. Root order only decides *which* path comes back, and it
+/// is the same first-root-wins order that function dedupes by, so the returned path
+/// is the entry `reload()` would actually read.
+pub fn resolve_skill_md(id: &str) -> Option<PathBuf> {
+    resolve_skill_md_in(&skills_scan_roots(), id)
+}
+
+/// The root-explicit half of [`resolve_skill_md`].
+///
+/// Split out so first-root-wins and the dirs-only rule for the vendor-neutral root
+/// are testable against temp roots instead of the developer's real `$HOME`. The two
+/// standard roots are *not* individually env-overridable: `RYU_SKILLS_DIR` collapses
+/// [`skills_scan_roots`] to a single root rather than redirecting root two, so a test
+/// that only redirected the second root would scan the real `~/.claude/skills` as
+/// root one.
+fn resolve_skill_md_in(roots: &[(PathBuf, bool)], id: &str) -> Option<PathBuf> {
+    roots.iter().find_map(|(dir, include_flat)| {
+        scan_skill_dir_opts(dir, *include_flat)
+            .into_iter()
+            .find(|s| s.id == id)
+            .map(|s| s.skill_md)
+    })
+}
+
 /// Scan a single `dir`. When `include_flat_md` is false, legacy flat `<id>.md`
 /// files are ignored and only `<id>/SKILL.md` directories are treated as skills
 /// (the rule for the vendor-neutral `~/.agents/skills` root).
+///
+/// **The result is sorted by id.** `read_dir` yields entries in whatever order the
+/// filesystem enumerates them (inode/hash order on ext4/APFS, creation order on
+/// others) — stable on one machine, arbitrary across machines, and free to change
+/// when a skill is added or removed. That order propagated all the way into
+/// [`SkillRegistry::progressive_block`], which injects only the first
+/// [`SKILL_INDEX_CAP`] on-demand skills: with more than 20 enabled skills, *which*
+/// 20 the model could see was effectively arbitrary and could shift between runs.
+///
+/// This is the single choke point for that: [`scan_skill_dir`] and
+/// [`scan_all_skill_dirs`] both funnel through here, so every disk-derived
+/// consumer — the registry's `reload()` and `skills_catalog`'s installed-view,
+/// which never goes through [`SkillRegistry`] at all — inherits the ordering from
+/// one place. Sorting happens after the flat merge; the "directory form beats
+/// legacy flat form" rule is established by the `seen` set, not by position, so it
+/// survives the sort. [`scan_all_skill_dirs`] deliberately does *not* re-sort the
+/// merged result: root-1-then-root-2 is already deterministic, and a global sort
+/// would blur the "first root wins" story for no gain.
 fn scan_skill_dir_opts(dir: &Path, include_flat_md: bool) -> Vec<InstalledSkillPath> {
     let mut found: Vec<InstalledSkillPath> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -481,6 +619,9 @@ fn scan_skill_dir_opts(dir: &Path, include_flat_md: bool) -> Vec<InstalledSkillP
             found.push(f);
         }
     }
+    // Deterministic visibility (see the doc-comment): ids are unique within a root,
+    // so this is a total order with no tie-break needed.
+    found.sort_by(|a, b| a.id.cmp(&b.id));
     found
 }
 
@@ -775,6 +916,12 @@ impl SkillRegistry {
         if let Ok(mut skills) = self.app_skills.write() {
             skills.retain(|s| s.id != id);
             skills.push(record);
+            // Second, independent order source. [`Self::enabled`] is disk-skills ++
+            // this bag, and the `SKILL_INDEX_CAP` cut in `progressive_block` can land
+            // inside the bag — whose natural order is *plugin-enable order*, which
+            // varies with startup scheduling. Sorting the scanner (the disk half)
+            // cannot cover this half, so the bag sorts itself on every insert.
+            skills.sort_by(|a, b| a.id.cmp(&b.id));
         }
     }
 
@@ -849,13 +996,53 @@ impl SkillRegistry {
             .collect()
     }
 
+    /// [`Self::enabled_for`] narrowed to the records that actually have something to
+    /// serve ([`SkillRecord::is_loadable`]) — the **injection scope**.
+    ///
+    /// Deliberately a separate step rather than a filter inside `enabled_for`:
+    /// `skills__load` resolves against `enabled_for` and *must still see* a body-less
+    /// record, so it can refuse it by name ("registered by a plugin but its
+    /// instructions are not installed on this node yet") instead of falling into the
+    /// deliberately indistinguishable "no enabled skill with id" branch that exists to
+    /// stop allowlist enumeration. Filtering one level down would have turned an
+    /// honest diagnostic back into a shrug. So the cut lands here, at the two block
+    /// builders, and Core's `skills_tool`/`catalog` doors apply the same
+    /// [`SkillRecord::is_loadable`] predicate at their own edges.
+    ///
+    /// Private on purpose. Core cannot be switched onto this helper from here
+    /// (`catalog.rs` and `skills_tool.rs` filter their own iterators), and a `pub`
+    /// helper that only half the callers use would re-create the two-spellings
+    /// problem at the API level. The shared thing is the *predicate*, not the sweep.
+    ///
+    /// **This widens when both block builders return `None`** — a registry whose only
+    /// enabled skills are body-less now answers `None` where it used to answer an
+    /// empty block. That is only safe because every consumer already treats `None` as
+    /// "this turn has no skills" rather than as an error: the ACP arm of
+    /// `adapters::route_agent_stream` leaves `long_term_system` untouched (covered by
+    /// `acp_no_skill_block_leaves_preamble_unchanged`), and
+    /// [`Self::inject_into_messages_filtered`] returns an empty id list without
+    /// touching the messages. `has_enabled()` — which *would* now disagree with the
+    /// blocks — has no production caller; it is test-only today.
+    fn loadable_for(&self, allowlist: &[String]) -> Vec<SkillRecord> {
+        self.enabled_for(allowlist)
+            .into_iter()
+            .filter(SkillRecord::is_loadable)
+            .collect()
+    }
+
     /// Build the combined skill-instruction block for an allowlist.
     ///
     /// Returns `(header_text, injected_ids)`, or `None` when nothing applies.
     /// Used by both the openai-compat injector and the ACP-prompt seam so the two
     /// planes share one source of truth for what a given agent's skill text is.
+    ///
+    /// Scoped by [`Self::loadable_for`], not `enabled_for`: a body-less record used to
+    /// contribute a `## Skill: <name>` heading with nothing under it — a section that
+    /// costs prompt tokens and teaches the model that this skill has no content.
+    /// `injected_ids` (the `x-ryu-skill-ids` attribution) shrinks with it, which is
+    /// the point: attribution should list what was actually injected.
     pub fn skill_block(&self, allowlist: &[String]) -> Option<(String, Vec<String>)> {
-        let active = self.enabled_for(allowlist);
+        let active = self.loadable_for(allowlist);
         if active.is_empty() {
             return None;
         }
@@ -880,8 +1067,28 @@ impl SkillRegistry {
     /// Only meaningful where the turn has a tool loop (ACP plane); callers on a
     /// no-tool path must use [`Self::skill_block`] instead so skills aren't
     /// silently unreachable.
+    ///
+    /// **Deliberately NOT query-aware.** Ranking the L1 index against the user's
+    /// message would obviously pick better than 20 skills, and it is still the
+    /// wrong trade: this output is folded into `long_term_system` (see the ACP arm
+    /// of `adapters::route_agent_stream`), i.e. it becomes the *system prefix* of
+    /// every ACP turn. A query-dependent prefix changes on every message and busts
+    /// the provider prompt cache each turn — paying full uncached input price on
+    /// the largest, most repeated part of the request to reorder a list the model
+    /// can already search. Query-aware selection belongs in the `skills__search`
+    /// tool, which is per-call and caches nothing. What this function owes the
+    /// caller instead is *determinism*: see [`scan_skill_dir_opts`].
+    ///
+    /// **Scoped by [`Self::loadable_for`], not `enabled_for`.** This is the loudest
+    /// discovery surface there is: every id it lists arrives under a sentence telling
+    /// the model to call `skills__load` with that id "before acting". Listing a
+    /// body-less record here therefore *instructs* the model to make a call that
+    /// `do_load` now refuses — a wasted round the model cannot avoid, on the one
+    /// surface it cannot opt out of. (An `always_on` body-less record was worse still:
+    /// it injected an empty `## Skill:` section outright.) The `SKILL_INDEX_CAP` cut
+    /// below now also spends its 20 slots only on skills that can actually be loaded.
     pub fn progressive_block(&self, allowlist: &[String]) -> Option<(String, Vec<String>)> {
-        let active = self.enabled_for(allowlist);
+        let active = self.loadable_for(allowlist);
         if active.is_empty() {
             return None;
         }
@@ -1018,6 +1225,54 @@ allowed-tools:
 Always begin every response with "Hello!".
 "#;
 
+    /// Holds [`SKILLS_ENV_LOCK`] and restores `RYU_SKILLS_DIR` /
+    /// `RYU_SKILLS_ACTIVE_FILE` to whatever they were, on drop.
+    ///
+    /// Both vars are process-global and three test modules (`skills`,
+    /// `skills_catalog::from_source`, `sidecar::mcp::skills_tool`) point them at
+    /// their own tempdirs, so a test that sets them must serialize on the lock *and*
+    /// put back exactly what it found rather than blindly `remove_var`-ing an outer
+    /// override it did not set.
+    ///
+    /// Restoring in `Drop` instead of at the end of the test body is the load-bearing
+    /// part: a panic mid-test — a failed assertion, an `expect` on a registry block —
+    /// skips trailing cleanup and leaves the vars pointing at a tempdir that is being
+    /// deleted, which then surfaces as a flake in whichever *unrelated* test runs
+    /// next in this binary. Same class of bug that `skills_catalog::plugin_skills`
+    /// hit, and the same reason `skills_tool`'s `AuthorEnv` cleans up in `Drop`.
+    /// `unwrap_or_else(into_inner)` matches the siblings: a poisoned lock means some
+    /// other test panicked, which must not cascade.
+    struct SkillsEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev_dir: Option<std::ffi::OsString>,
+        prev_active: Option<std::ffi::OsString>,
+    }
+
+    impl SkillsEnvGuard {
+        fn new() -> Self {
+            let lock = SKILLS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            Self {
+                _lock: lock,
+                prev_dir: std::env::var_os("RYU_SKILLS_DIR"),
+                prev_active: std::env::var_os("RYU_SKILLS_ACTIVE_FILE"),
+            }
+        }
+    }
+
+    impl Drop for SkillsEnvGuard {
+        fn drop(&mut self) {
+            for (key, prev) in [
+                ("RYU_SKILLS_DIR", self.prev_dir.take()),
+                ("RYU_SKILLS_ACTIVE_FILE", self.prev_active.take()),
+            ] {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     const MINIMAL_SKILL_MD: &str = r#"---
 name: "Minimal Skill"
 ---
@@ -1030,10 +1285,10 @@ Do something minimal.
     fn register_app_skill_is_listable_and_enabled() {
         // Hold the env lock and point RYU_SKILLS_DIR at an empty tempdir so the
         // `reload()` below reads zero disk skills (never the real ~/.claude/skills),
-        // leaving only the one app-contributed skill.
-        let _env = SKILLS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // leaving only the one app-contributed skill. The guard restores the var even
+        // if an assertion below panics.
+        let _env = SkillsEnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("RYU_SKILLS_DIR");
         std::env::set_var("RYU_SKILLS_DIR", dir.path());
 
         let reg = SkillRegistry::empty();
@@ -1056,11 +1311,6 @@ Do something minimal.
             1,
             "reload must not drop app-contributed skills"
         );
-
-        match prev {
-            Some(v) => std::env::set_var("RYU_SKILLS_DIR", v),
-            None => std::env::remove_var("RYU_SKILLS_DIR"),
-        }
     }
 
     #[test]
@@ -1354,6 +1604,114 @@ Do something minimal.
         assert!(registry.progressive_block(&[]).is_none());
     }
 
+    /// A body-less record must not be advertised by either injected block, and must
+    /// not eat an `always_on` slot — while its loadable siblings are untouched.
+    ///
+    /// Both shapes appear here because both producers are real (see
+    /// [`SkillRecord::is_loadable`]): `hollow` is a front-matter-only `SKILL.md`
+    /// (the disk producer) and it is `always-on`, which is the case
+    /// `register_app_skill` cannot construct because it hardcodes `always_on: false`.
+    /// Before this rule reached the block builders, `hollow` injected a literal
+    /// `## Skill: Hollow` heading with nothing under it and claimed an
+    /// `x-ryu-skill-ids` attribution for text that was never sent.
+    #[test]
+    fn a_body_less_record_is_in_neither_injected_block() {
+        let hollow = parse_skill_md(
+            "hollow",
+            "---\nname: \"Hollow\"\ndescription: \"promises nothing\"\nalways-on: true\n---\n",
+        )
+        .unwrap();
+        assert_eq!(
+            hollow.instructions, "",
+            "front-matter only parses to no body"
+        );
+        assert!(!hollow.is_loadable());
+
+        let real = parse_skill_md(
+            "real",
+            "---\nname: \"Real\"\ndescription: \"does a thing\"\n---\nReal body.",
+        )
+        .unwrap();
+        assert!(real.is_loadable());
+
+        let registry = registry_of(vec![hollow, real]);
+
+        // `enabled_for` is deliberately unfiltered: `skills__load` resolves against it
+        // so it can refuse a body-less id by name. Only the blocks narrow.
+        assert_eq!(registry.enabled_for(&[]).len(), 2);
+
+        let (progressive, injected) = registry.progressive_block(&[]).expect("a block");
+        assert!(
+            !progressive.contains("Hollow"),
+            "a body-less record must not be named in the L1 index or injected \
+             always-on: {progressive}"
+        );
+        assert!(
+            injected.is_empty(),
+            "nothing was injected, so nothing may be attributed: {injected:?}"
+        );
+        assert!(
+            progressive.contains("- real — Real: does a thing"),
+            "the loadable sibling is still indexed: {progressive}"
+        );
+
+        let (full, ids) = registry.skill_block(&[]).expect("a block");
+        assert!(!full.contains("Hollow"), "{full}");
+        assert!(full.contains("Real body."), "{full}");
+        assert_eq!(ids, vec!["real".to_owned()]);
+    }
+
+    /// A plugin-contributed record with nothing behind it yet is invisible to both
+    /// blocks — including when it is the only skill, where the blocks must say "no
+    /// skills" rather than emit an empty section.
+    ///
+    /// It stays listable and `has_enabled()`-true on purpose: `GET /api/skills`
+    /// (`api::list_skills` → [`Self::list_all`]) is the skills-library inventory and
+    /// must keep showing the plugin's contribution, and `skills__load` must still
+    /// find it to explain why it cannot be loaded. Only the injected surfaces filter,
+    /// so the user-visible inventory and the model-visible offer legitimately differ —
+    /// which is why the assertions below pin *both* sides.
+    #[test]
+    fn a_body_less_app_skill_is_advertised_by_no_block() {
+        let reg = SkillRegistry::empty();
+        reg.register_app_skill(
+            "app__summarize".to_owned(),
+            "Summarize".to_owned(),
+            Some("App-registered skill (skill_id: summarize)".to_owned()),
+        );
+
+        assert_eq!(reg.list_all().len(), 1, "still listable in the library");
+        assert!(reg.has_enabled(), "the app bag is untouched");
+        assert_eq!(
+            reg.enabled_for(&[]).len(),
+            1,
+            "`load` must still see it to refuse it by name"
+        );
+
+        assert!(
+            reg.progressive_block(&[]).is_none(),
+            "an index of only-unloadable skills is worse than no index"
+        );
+        assert!(reg.skill_block(&[]).is_none());
+
+        // The same id, materialised on disk, is a normal skill again — the rule is
+        // about the body, not about the `app__` prefix.
+        let materialised = parse_skill_md(
+            "app__summarize",
+            "---\nname: \"Summarize\"\ndescription: \"summarize a thread\"\n---\nSummarize it.",
+        )
+        .unwrap();
+        let with_disk = registry_of(vec![materialised]);
+        let (text, _) = with_disk.progressive_block(&[]).expect("a block");
+        assert!(
+            text.contains("- app__summarize — Summarize: summarize a thread"),
+            "{text}"
+        );
+        let (full, ids) = with_disk.skill_block(&[]).expect("a block");
+        assert!(full.contains("Summarize it."), "{full}");
+        assert_eq!(ids, vec!["app__summarize".to_owned()]);
+    }
+
     #[test]
     fn scan_finds_standard_and_legacy_layouts() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1395,6 +1753,77 @@ Do something minimal.
     }
 
     #[test]
+    fn scan_is_sorted_by_id_regardless_of_creation_order() {
+        // Create the dirs in reverse-alphabetical order so a scanner that just
+        // echoed `read_dir` would very likely come back unsorted on a filesystem
+        // that enumerates by creation order. The mixed flat/dir set also proves the
+        // sort happens after the flat entries are merged in, not before.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for id in ["zeta", "mid", "alpha"] {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!("---\nname: {id}\n---\nbody")).unwrap();
+        }
+        std::fs::write(root.join("nova.md"), "---\nname: Nova\n---\nbody").unwrap();
+
+        let ids: Vec<String> = scan_skill_dir(root).into_iter().map(|s| s.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "alpha".to_owned(),
+                "mid".to_owned(),
+                "nova".to_owned(),
+                "zeta".to_owned()
+            ],
+            "scan must return a stable id-sorted order, not filesystem order"
+        );
+    }
+
+    #[test]
+    fn progressive_index_cut_is_stable_across_reloads() {
+        // The defect this guards: `progressive_block` shows only the first
+        // SKILL_INDEX_CAP on-demand skills, so an unsorted scan made *which* skills
+        // the model can see depend on filesystem enumeration order. With a sorted
+        // scan the cut is the alphabetically-first CAP ids, every time.
+        // Save/restore via the guard, not a trailing `remove_var`: the `expect("block")`
+        // calls below can panic, and a bare removal on the happy path only would leak
+        // both vars into every later test in this binary.
+        let _env = SkillsEnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let active = tmp.path().join("active.json");
+        // More skills than the index cap, created in an order unrelated to their ids.
+        let total = SKILL_INDEX_CAP + 5;
+        let mut ids: Vec<String> = (0..total).map(|i| format!("skill-{i:03}")).collect();
+        for id in ids.iter().rev() {
+            let dir = tmp.path().join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!("---\nname: {id}\n---\nbody")).unwrap();
+        }
+        ids.sort();
+        std::fs::write(&active, serde_json::to_string(&ids).unwrap()).unwrap();
+        std::env::set_var("RYU_SKILLS_DIR", tmp.path());
+        std::env::set_var("RYU_SKILLS_ACTIVE_FILE", &active);
+
+        let registry = SkillRegistry::empty();
+        registry.reload();
+        let (first, _) = registry.progressive_block(&[]).expect("block");
+        registry.reload();
+        let (second, _) = registry.progressive_block(&[]).expect("block");
+
+        assert_eq!(first, second, "the injected index must be reload-stable");
+        for id in ids.iter().take(SKILL_INDEX_CAP) {
+            assert!(first.contains(id), "expected {id} in the index:\n{first}");
+        }
+        for id in ids.iter().skip(SKILL_INDEX_CAP) {
+            assert!(
+                !first.contains(id),
+                "{id} sorts past the cap and must not be indexed:\n{first}"
+            );
+        }
+    }
+
+    #[test]
     fn scan_missing_dir_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("nope");
@@ -1432,6 +1861,104 @@ Do something minimal.
             .collect();
         both.sort();
         assert_eq!(both, vec!["delta".to_owned(), "gamma".to_owned()]);
+    }
+
+    /// The namespace predicate `skills__author` guards creates with.
+    ///
+    /// Root-explicit on purpose: the two standard roots are not individually
+    /// env-overridable (`RYU_SKILLS_DIR` collapses the list to one root), and the only
+    /// other lever — `$HOME`, which `dirs::home_dir` reads first on unix — is resolved
+    /// by ~20 other `ryu-core` call sites in the same multi-threaded test binary, so
+    /// pointing it at a tempdir would be a flake vector for unrelated tests. Passing
+    /// roots in covers the two behaviours that make the write path's `dest.exists()`
+    /// wrong: an id owned only by root two is still taken, and within a root the
+    /// directory form beats a legacy flat `<id>.md`.
+    #[test]
+    fn resolve_skill_md_spans_every_root_and_both_layouts() {
+        let one = tempfile::tempdir().unwrap();
+        let two = tempfile::tempdir().unwrap();
+
+        let write_dir_skill = |root: &std::path::Path, id: &str| {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "---\nname: X\n---\nbody").unwrap();
+            dir.join("SKILL.md")
+        };
+
+        // Root one (flat honoured): a shared id, a flat-only id, and an id that
+        // exists in both layouts.
+        let shared_one = write_dir_skill(one.path(), "shared");
+        std::fs::write(one.path().join("flat.md"), "---\nname: F\n---\nb").unwrap();
+        let dup_dir = write_dir_skill(one.path(), "dup");
+        std::fs::write(one.path().join("dup.md"), "---\nname: D\n---\nb").unwrap();
+
+        // Root two (dirs only, mirroring `~/.agents/skills`): the same shared id plus
+        // one it alone owns, and a flat file that is not a skill there.
+        write_dir_skill(two.path(), "shared");
+        write_dir_skill(two.path(), "ecosystem");
+        std::fs::write(two.path().join("agents-flat.md"), "---\nname: A\n---\nb").unwrap();
+
+        let roots = vec![
+            (one.path().to_path_buf(), true),
+            (two.path().to_path_buf(), false),
+        ];
+
+        assert_eq!(
+            resolve_skill_md_in(&roots, "shared").as_deref(),
+            Some(shared_one.as_path()),
+            "first root wins, so root one's file is what loads"
+        );
+        assert!(
+            resolve_skill_md_in(&roots, "ecosystem").is_some(),
+            "an id owned only by the second root is still taken: writing it into root \
+             one would shadow it"
+        );
+        assert_eq!(
+            resolve_skill_md_in(&roots, "flat").as_deref(),
+            Some(one.path().join("flat.md").as_path()),
+            "the legacy flat layout takes an id too"
+        );
+        assert_eq!(
+            resolve_skill_md_in(&roots, "dup").as_deref(),
+            Some(dup_dir.as_path()),
+            "within a root the directory form beats the flat file"
+        );
+        assert!(
+            resolve_skill_md_in(&roots, "agents-flat").is_none(),
+            "a flat .md under the dirs-only root is not a skill, so its id is free"
+        );
+        assert!(resolve_skill_md_in(&roots, "nobody").is_none());
+
+        // Membership must agree with the deduped scan every consumer reads.
+        let mut scanned: Vec<String> = roots
+            .iter()
+            .flat_map(|(d, flat)| scan_skill_dir_opts(d, *flat))
+            .map(|s| s.id)
+            .collect();
+        scanned.sort();
+        scanned.dedup();
+        for id in &scanned {
+            assert!(
+                resolve_skill_md_in(&roots, id).is_some(),
+                "every scanned id must resolve: {id}"
+            );
+        }
+    }
+
+    /// The public entry point honours the `RYU_SKILLS_DIR` override, i.e. the single
+    /// root a test/installer node runs with is the namespace there.
+    #[test]
+    fn resolve_skill_md_honours_the_single_root_override() {
+        let _env = SkillsEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("solo.md"), "---\nname: S\n---\nb").unwrap();
+        std::env::set_var("RYU_SKILLS_DIR", dir.path());
+
+        assert_eq!(
+            resolve_skill_md("solo").as_deref(),
+            Some(dir.path().join("solo.md").as_path())
+        );
+        assert!(resolve_skill_md("absent").is_none());
     }
 
     #[test]

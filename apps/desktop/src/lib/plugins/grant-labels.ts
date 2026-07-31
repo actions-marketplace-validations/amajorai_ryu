@@ -75,6 +75,11 @@ const GRANT_META: Record<string, GrantMeta> = {
 		label: "Access your contacts",
 		description: "Read your contacts.",
 	},
+	warmup: {
+		label: "Schedule keep-alive pings",
+		description:
+			"See which agents you have and what their usage limits say, and schedule its own short messages to them.",
+	},
 };
 
 const GRANT_SEPARATORS = /[._:\-/]+/g;

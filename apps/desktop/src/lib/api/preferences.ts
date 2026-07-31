@@ -1170,6 +1170,125 @@ export function setAutoRecallEnabled(
 	return setPreference(target, AUTO_RECALL_ENABLED_PREF_KEY, String(enabled));
 }
 
+/**
+ * Fallback top-k used when the pref holds nothing usable. Mirrors Core's
+ * `AUTO_RECALL_DEFAULT_TOP_K` (`apps/core/src/server/mod.rs`), which is what a
+ * turn actually uses when the key is unset.
+ *
+ * CAVEAT worth knowing before trusting this number: Core's resolution order is
+ * pref → `RYU_AUTO_RECALL_TOP_K` env → this default (`resolve_auto_recall_top_k`).
+ * With the pref unset and that env var exported, turns use the env value, not 5.
+ * The desktop cannot read the node's environment, so the UI shows this as the
+ * value it will WRITE, never as a readout of what the node is currently using.
+ */
+export const AUTO_RECALL_DEFAULT_TOP_K = 5;
+/** Smallest top-k the UI offers. Core rejects 0 (falls back to the default). */
+export const AUTO_RECALL_MIN_TOP_K = 1;
+/**
+ * Largest top-k the UI WRITES. Core imposes no ceiling of its own; this is a UI
+ * bound matching the retrieval tools' own `top_k` maximum, so the control cannot
+ * dial in a value that would bury the prompt in recalled snippets.
+ *
+ * Applied on write only. A larger value set another way (the docs tell readers
+ * to `curl` these keys) reads back unchanged, because showing 50 while the node
+ * injects 200 would be a readout of a value the node does not have.
+ */
+export const AUTO_RECALL_MAX_TOP_K = 50;
+
+/**
+ * The grammar `str::parse::<usize>()` accepts: an OPTIONAL leading `+`, then
+ * ASCII digits, and nothing else. Top-level so it is compiled once.
+ *
+ * The `+` is the part this file used to get wrong, so it is spelled out here
+ * rather than left to memory. Checked against `rustc`, not recalled:
+ *
+ * ```text
+ * "+5"   -> Ok(5)                 "5.9"  -> Err(InvalidDigit)
+ * "0005" -> Ok(5)                 "-0"   -> Err(InvalidDigit)  // usize: no `-`
+ * "+0"   -> Ok(0)                 "+ 5"  -> Err(InvalidDigit)
+ * "0"    -> Ok(0)                 "++5"  -> Err(InvalidDigit)
+ *                                 "5_0"  -> Err(InvalidDigit)
+ *                                 "٥"    -> Err(InvalidDigit)  // ASCII only
+ * ```
+ *
+ * JS `\d` is ASCII-only, which is why non-ASCII digits need no extra guard —
+ * a Unicode-aware class here would be LOOSER than Rust, not tighter.
+ */
+const RUST_USIZE_RE = /^\+?\d+$/;
+
+/**
+ * `str::parse::<usize>()` in TypeScript. `null` means "Rust's parse errors on
+ * this", which is every mirror below's cue to use Core's fallback. PURE.
+ *
+ * The caller must trim first — Rust rejects surrounding whitespace, and every
+ * Core call site trims before parsing, so a trimmed string is the shared input
+ * both sides actually see.
+ *
+ * Where this deliberately stops short of Rust: `PosOverflow`. Rust rejects
+ * anything above `usize::MAX` (2^64 − 1, on every target Ryu ships). This
+ * returns `null` only once the digit run is long enough that `parseInt`
+ * saturates to `Infinity` (~1e309); between 2^64 and there it returns a
+ * number Core would have refused. Two reasons that gap stays open: a JS number
+ * cannot represent integers past 2^53 exactly, so agreement up there is not
+ * reachable in the first place; and no token budget, reply reserve or recall
+ * top-k comes within nine orders of magnitude of the boundary. The enumeration
+ * is exhaustive rather than tidy on purpose — a mirror whose doc claims more
+ * fidelity than its code has is the exact defect this helper was extracted to
+ * close.
+ */
+function parseRustUsize(trimmed: string): number | null {
+	if (!RUST_USIZE_RE.test(trimmed)) {
+		return null;
+	}
+	const parsed = Number.parseInt(trimmed, 10);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Coerce a raw `auto-recall-top-k` pref value exactly the way Core does. PURE,
+ * so the contract is testable without a node.
+ *
+ * Core (`resolve_auto_recall_top_k`) is
+ * `s.trim().parse::<usize>().ok().filter(|n| *n > 0)` with a fallback to
+ * {@link AUTO_RECALL_DEFAULT_TOP_K} — no upper bound. Anything that parse
+ * rejects (a float, a `-`, trailing junk — but NOT a leading `+`, which Rust
+ * accepts; see {@link RUST_USIZE_RE}) and anything ≤ 0 becomes the default.
+ * This does NOT clamp: it reports what the node is using.
+ */
+export function coerceAutoRecallTopK(raw: string | null): number {
+	// `Number.parseInt("5.9")` is 5 and `parseInt("5abc")` is 5, but Rust's
+	// `str::parse::<usize>()` rejects both — hence the shared grammar check.
+	const parsed = parseRustUsize((raw ?? "").trim());
+	return parsed !== null && parsed > 0 ? parsed : AUTO_RECALL_DEFAULT_TOP_K;
+}
+
+/** Read the auto-recall top-k. Falls back to Core's default (5) when unusable. */
+export async function getAutoRecallTopK(target: ApiTarget): Promise<number> {
+	return coerceAutoRecallTopK(
+		await getPreference(target, AUTO_RECALL_TOP_K_PREF_KEY)
+	);
+}
+
+/**
+ * Persist the auto-recall top-k, clamped to the offered range. Stored raw (a
+ * bare integer string) because Core parses the value with `str::parse::<usize>`
+ * — a JSON-wrapped number would fail that parse and silently mean "default".
+ */
+export function setAutoRecallTopK(
+	target: ApiTarget,
+	topK: number
+): Promise<boolean> {
+	const clamped = Math.min(
+		Math.max(Math.round(topK), AUTO_RECALL_MIN_TOP_K),
+		AUTO_RECALL_MAX_TOP_K
+	);
+	return setPreference(
+		target,
+		AUTO_RECALL_TOP_K_PREF_KEY,
+		String(Number.isFinite(clamped) ? clamped : AUTO_RECALL_DEFAULT_TOP_K)
+	);
+}
+
 // --- Continual learning (consent gate) --------------------------------------
 // Global opt-in for turning conversations into learning data (the MetaClaw-style
 // loop: experience buffer -> PRM scoring -> skill synthesis -> reward-filtered
@@ -1256,6 +1375,54 @@ export function setSkillsProgressive(
 		SKILLS_DISCLOSURE_PREF_KEY,
 		progressive ? "progressive" : "full"
 	);
+}
+
+// --- Tool / skill search ranker ---------------------------------------------
+// Which strategy ranks the unified tool catalog's search results, and — since
+// the skills tool reuses the same registry — the agent's skill search too.
+// Stored raw under `tools.active_ranker`, the key `ryu_tool_registry`'s
+// `RANKER_PREF_KEY` names (crates/core/tool-registry/src/lib.rs).
+//
+// Core's `ToolRanker::from_pref` matches the trimmed, lowercased literal
+// "semantic" and treats EVERY other value — including junk and an unset key —
+// as BM25, so an unknown value degrades to the lexical default rather than
+// erroring. `semantic` additionally needs a reachable embedder: `run_search`
+// builds one only when the ranker is Semantic, and `ToolRanker::rank` falls
+// back to BM25 ordering when that embedder returns nothing. So picking Semantic
+// on a node with no embedder changes results back to BM25 order — it does not
+// fail the search. The UI says so rather than implying semantic is guaranteed.
+
+export const TOOL_RANKER_PREF_KEY = "tools.active_ranker";
+
+/** The two rankers Core implements. Anything else resolves to `bm25`. */
+export type ToolRankerId = "bm25" | "semantic";
+
+/**
+ * Coerce a raw `tools.active_ranker` value the way Core does. PURE.
+ *
+ * Mirrors `ToolRanker::from_pref`: trim + lowercase, then only the exact
+ * literal "semantic" selects semantic ranking; everything else (unset,
+ * "BM25", "Semantic ", a typo) is BM25.
+ */
+export function coerceToolRanker(raw: string | null): ToolRankerId {
+	return (raw ?? "").trim().toLowerCase() === "semantic" ? "semantic" : "bm25";
+}
+
+/** Read the active tool/skill search ranker. Defaults to BM25 (matches Core). */
+export async function getToolRanker(target: ApiTarget): Promise<ToolRankerId> {
+	return coerceToolRanker(await getPreference(target, TOOL_RANKER_PREF_KEY));
+}
+
+/**
+ * Persist the active ranker. Written lowercase and unwrapped because Core
+ * compares against the bare literal "semantic" — a JSON-quoted `"semantic"`
+ * would silently select BM25.
+ */
+export function setToolRanker(
+	target: ApiTarget,
+	ranker: ToolRankerId
+): Promise<boolean> {
+	return setPreference(target, TOOL_RANKER_PREF_KEY, ranker);
 }
 
 // --- Side-model config (goal judge + double-check) --------------------------
@@ -1405,6 +1572,260 @@ export function setChatRenameEnabled(
 	enabled: boolean
 ): Promise<boolean> {
 	return setPreference(target, AUTO_TITLE_ENABLED_PREF_KEY, String(enabled));
+}
+
+// --- Conversation context window --------------------------------------------
+// App-level bounding of the history sent each turn
+// (`apps/core/src/sidecar/adapters/context_window.rs`, resolved by
+// `server::resolve_context_window`). OFF by default: with no budget set, Ryu
+// sends the full thread and the engine's own context shift handles overflow —
+// and Ryu never emits `n_keep`, so that shift can evict the system prompt.
+// Setting a budget is what buys the guarantee that every `system` message (base
+// prompt, injected memory, skills) survives, plus the option to summarize the
+// turns that fall out instead of dropping them.
+//
+// Five keys, all read per turn:
+//   `context.max-tokens`        total budget: ""/"0"/"off" = off, "auto", or a
+//                               positive integer
+//   `context.max-output-tokens` tokens held back for the reply (Core default 1024)
+//   `context.auto-compact`      summarize dropped turns instead of dropping them
+//   `context.compact-model`     summarizer model (blank = inherit, see below)
+//   `context.compact-effort`    summarizer reasoning effort
+//
+// The keys are stored raw (bare strings), because Core parses them with
+// `str::parse` / literal comparison; a JSON-wrapped value reads as "unset".
+//
+// SAME ENV CAVEAT as auto-recall's top-k: `resolve_context_window` reads the
+// pref first and falls back to `RYU_CONTEXT_MAX_TOKENS` only when the pref is
+// UNSET, so on a node with that variable exported the card reads "Off" while
+// trimming is live. The flip side is what makes the Off option trustworthy:
+// writing "off" makes the pref `Some`, which takes the env fallback out of play.
+
+export const CONTEXT_MAX_TOKENS_PREF_KEY = "context.max-tokens";
+export const CONTEXT_MAX_OUTPUT_PREF_KEY = "context.max-output-tokens";
+export const CONTEXT_AUTO_COMPACT_PREF_KEY = "context.auto-compact";
+export const CONTEXT_COMPACT_MODEL_PREF_KEY = "context.compact-model";
+export const CONTEXT_COMPACT_EFFORT_PREF_KEY = "context.compact-effort";
+
+/** Reply reserve Core applies when `context.max-output-tokens` is unset. */
+export const CONTEXT_DEFAULT_OUTPUT_RESERVE = 1024;
+/**
+ * Flat margin Core subtracts for skill text injected downstream of the trim
+ * (`SKILLS_RESERVE` in `context_window.rs`). Mirrored here only so the card can
+ * show the history budget a chosen pair actually leaves.
+ */
+export const CONTEXT_SKILLS_RESERVE = 512;
+
+/**
+ * Smallest total budget the UI offers.
+ *
+ * Not arbitrary: Core's `input_budget()` is
+ * `max_tokens − reserve_output − system_tokens − SKILLS_RESERVE`, all
+ * saturating, and `window_count()` always keeps at least the newest turn even
+ * when it alone exceeds the budget. So a tiny budget does not error — it
+ * silently degrades every turn to "system block + your last message", which is
+ * indistinguishable from an assistant that has lost its memory. The floor plus
+ * {@link contextHistoryBudget}'s live readout keep that state out of reach.
+ */
+export const CONTEXT_MIN_BUDGET_TOKENS = 2048;
+/** Ceiling for a hand-typed budget — above any shipping model's window. */
+export const CONTEXT_MAX_BUDGET_TOKENS = 2_000_000;
+/** Bounds for the reply reserve, for the same reason as the budget floor. */
+export const CONTEXT_MIN_OUTPUT_RESERVE = 128;
+export const CONTEXT_MAX_OUTPUT_RESERVE = 32_768;
+
+/**
+ * The stored `context.max-tokens` setting.
+ *
+ * `auto` is a stored *setting*, not a resolved budget: Core turns it into a
+ * number by reading the model's `ctx_size` from its per-model launch config
+ * (`preferences.get_launch_config(model).ctx_size`) and, when that is unset or
+ * zero, `parse_context_budget` returns `None` — the feature stays off. That
+ * launch config is written only by the per-model Engine/Hardware editor, so
+ * `auto` does nothing until someone sets a context size for the model in use.
+ * The card labels the option with that precondition instead of implying it
+ * always applies.
+ */
+export type ContextBudget =
+	| { kind: "auto" }
+	| { kind: "off" }
+	| { kind: "tokens"; tokens: number };
+
+/**
+ * Coerce a raw `context.max-tokens` value into the stored setting. PURE.
+ *
+ * Mirrors Core's `parse_context_budget` for everything the desktop can know:
+ * ""/"0"/"off" (any case) is off, "auto" is auto, a positive integer is that
+ * budget, and anything unparseable is off — matching Rust's `str::parse::<usize>`
+ * rejection of floats, `-` signs and trailing junk, and its ACCEPTANCE of a
+ * leading `+` ({@link parseRustUsize}). The literal-"0" check runs before the
+ * parse exactly as Core's does, so `+0` reaches the parse and lands on off
+ * through the `> 0` filter — same answer, same route.
+ *
+ * That `+` matters beyond pedantry, and the dependency runs outward: the docs
+ * tell operators to set these keys with `curl`, so `context.max-tokens=+8000`
+ * is a value Core honours. While this rejected it, MemoryTab's card showed Off
+ * for a node that was budgeting 8000 — and its "a blur that changed nothing
+ * writes nothing" guards (`parsed === budget.tokens`, `parsed === reserve` in
+ * ContextWindowSection) compare against THIS function's output, so they could
+ * not recognise the stored value either and a stray focus would overwrite it.
+ * Those guards start working because the mirror got faithful; they were never
+ * wrong on their own.
+ */
+export function parseContextBudget(raw: string | null): ContextBudget {
+	const value = (raw ?? "").trim();
+	if (value === "" || value === "0" || value.toLowerCase() === "off") {
+		return { kind: "off" };
+	}
+	if (value.toLowerCase() === "auto") {
+		return { kind: "auto" };
+	}
+	const tokens = parseRustUsize(value);
+	return tokens !== null && tokens > 0
+		? { kind: "tokens", tokens }
+		: { kind: "off" };
+}
+
+/** Serialize a budget back to the exact literals Core's parser accepts. */
+export function formatContextBudget(budget: ContextBudget): string {
+	if (budget.kind === "off") {
+		return "off";
+	}
+	if (budget.kind === "auto") {
+		return "auto";
+	}
+	const clamped = Math.min(
+		Math.max(Math.round(budget.tokens), CONTEXT_MIN_BUDGET_TOKENS),
+		CONTEXT_MAX_BUDGET_TOKENS
+	);
+	return String(clamped);
+}
+
+/**
+ * Tokens left for conversation history once the reply reserve and the skills
+ * margin are taken out of `maxTokens`. PURE mirror of the first two subtractions
+ * in Core's `ContextWindowConfig::input_budget`.
+ *
+ * Deliberately NOT the whole formula: Core also subtracts the system block
+ * (`system_tokens` + any client-sent `system` rows), which is per-turn and
+ * unknowable here. So this is the CEILING on the history budget, not a
+ * prediction — the card words it that way.
+ */
+export function contextHistoryBudget(
+	maxTokens: number,
+	reserveOutput: number
+): number {
+	return Math.max(0, maxTokens - reserveOutput - CONTEXT_SKILLS_RESERVE);
+}
+
+/** Read the stored context budget. Off when unset or unparseable (matches Core). */
+export async function getContextBudget(
+	target: ApiTarget
+): Promise<ContextBudget> {
+	return parseContextBudget(
+		await getPreference(target, CONTEXT_MAX_TOKENS_PREF_KEY)
+	);
+}
+
+/** Persist the context budget (raw "off" / "auto" / a clamped integer). */
+export function setContextBudget(
+	target: ApiTarget,
+	budget: ContextBudget
+): Promise<boolean> {
+	return setPreference(
+		target,
+		CONTEXT_MAX_TOKENS_PREF_KEY,
+		formatContextBudget(budget)
+	);
+}
+
+/**
+ * Coerce a raw `context.max-output-tokens` value exactly the way Core does.
+ * PURE.
+ *
+ * Core is `v.trim().parse::<usize>().ok()` with `.unwrap_or(1024)`: any value
+ * that parse accepts is used — INCLUDING `0`, which leaves the reply no room,
+ * and including a leading `+` ({@link parseRustUsize}) — and only a parse
+ * failure or an unset key falls back to 1024. This reports that, unclamped, so
+ * the field shows what the node is actually reserving; the offered range is
+ * enforced in {@link setContextOutputReserve} instead.
+ */
+export function coerceContextOutputReserve(raw: string | null): number {
+	const parsed = parseRustUsize((raw ?? "").trim());
+	return parsed === null ? CONTEXT_DEFAULT_OUTPUT_RESERVE : parsed;
+}
+
+/** Read the reply reserve. Falls back to Core's 1024 when unset/unusable. */
+export async function getContextOutputReserve(
+	target: ApiTarget
+): Promise<number> {
+	return coerceContextOutputReserve(
+		await getPreference(target, CONTEXT_MAX_OUTPUT_PREF_KEY)
+	);
+}
+
+/** Persist the reply reserve, clamped to the offered range (raw integer). */
+export function setContextOutputReserve(
+	target: ApiTarget,
+	tokens: number
+): Promise<boolean> {
+	const clamped = Number.isFinite(tokens)
+		? Math.min(
+				Math.max(Math.round(tokens), CONTEXT_MIN_OUTPUT_RESERVE),
+				CONTEXT_MAX_OUTPUT_RESERVE
+			)
+		: CONTEXT_DEFAULT_OUTPUT_RESERVE;
+	return setPreference(target, CONTEXT_MAX_OUTPUT_PREF_KEY, String(clamped));
+}
+
+/** Read whether dropped turns are summarized instead of dropped. Default OFF. */
+export async function getContextAutoCompact(
+	target: ApiTarget
+): Promise<boolean> {
+	return parsePrefBool(
+		await getPreference(target, CONTEXT_AUTO_COMPACT_PREF_KEY),
+		false
+	);
+}
+
+/** Persist the auto-compact flag (raw "true"/"false"). */
+export function setContextAutoCompact(
+	target: ApiTarget,
+	enabled: boolean
+): Promise<boolean> {
+	return setPreference(target, CONTEXT_AUTO_COMPACT_PREF_KEY, String(enabled));
+}
+
+/**
+ * Read the summarizer's {model, effort} (provider is not persisted).
+ *
+ * Blank does NOT mean "the model you are chatting with". Core resolves this
+ * through `agent_selection::resolve_side_model`, so the chain is: this key →
+ * the node-wide default agent/model selection → and only if neither names a
+ * usable model, the turn's own chat model. The card's caption states that order.
+ */
+export function getContextCompactConfig(
+	target: ApiTarget
+): Promise<SideModelConfig> {
+	return getSideModelConfig(target, {
+		model: CONTEXT_COMPACT_MODEL_PREF_KEY,
+		effort: CONTEXT_COMPACT_EFFORT_PREF_KEY,
+	});
+}
+
+/** Write the summarizer's {model, effort}. Empty model = inherit (see above). */
+export function setContextCompactConfig(
+	target: ApiTarget,
+	cfg: SideModelConfig
+): Promise<boolean> {
+	return setSideModelConfig(
+		target,
+		{
+			model: CONTEXT_COMPACT_MODEL_PREF_KEY,
+			effort: CONTEXT_COMPACT_EFFORT_PREF_KEY,
+		},
+		cfg
+	);
 }
 
 // --- Meeting notes generator ------------------------------------------------
@@ -1759,6 +2180,158 @@ export async function setAgentGatewayRouting(
 	);
 }
 
+/**
+ * Read-merge-write MANY agent ids into one of the per-agent flag maps in a
+ * SINGLE round trip.
+ *
+ * Why this exists rather than looping {@link setAgentGatewayRouting}: both maps
+ * live under ONE preference key holding one JSON blob, and each single-agent
+ * setter is a read → mutate → write. Calling it N times concurrently is a
+ * classic lost update — every call reads the same pre-write blob, and the last
+ * write wins, so a bulk action over five agents can persist one. Calling it N
+ * times *sequentially* is correct but is N round trips and leaves a partially
+ * applied map behind if the user closes the dialog halfway, which is worse than
+ * either outcome for a control that is meant to say "all of them, now".
+ *
+ * Returns `true` when the node holds the requested entries afterwards —
+ * including the no-op case where every entry already had its target value, which
+ * writes nothing rather than churning the blob.
+ */
+async function mergeAgentFlagMap(
+	target: ApiTarget,
+	key: string,
+	entries: Readonly<Record<string, boolean>>
+): Promise<boolean> {
+	const raw = await getPreference(target, key);
+	const map = parseAgentGatewayMap(raw);
+	let changed = false;
+	for (const [agentId, enabled] of Object.entries(entries)) {
+		if (map[agentId] !== enabled) {
+			map[agentId] = enabled;
+			changed = true;
+		}
+	}
+	if (!changed) {
+		return true;
+	}
+	return setPreference(target, key, JSON.stringify(map));
+}
+
+/**
+ * Batched {@link setAgentGatewayRouting} — one read, one merge, one write.
+ *
+ * **No caller, deliberately kept, and dangerous to wire carelessly.** This writes the
+ * EGRESS key: enabling it for an agent moves that agent's model traffic — and for a
+ * subscription agent, its credential — through the gateway. Its twin
+ * {@link setAgentToolBridgeMany} writes the tool-bridge key and carries none of that
+ * weight, and the two differ by one identifier.
+ *
+ * The bulk "give every agent Ryu's tools" button sits beside the egress column in the
+ * agent settings UI. If a future edit points that button here, it will silently flip
+ * billing for every installed agent and no type error will say so. Any bulk egress
+ * change must show the user what it will do per agent first — that is why the tools
+ * bulk action returns a plan (`egressUntouched: true`) instead of writing directly.
+ */
+export function setAgentGatewayRoutingMany(
+	target: ApiTarget,
+	entries: Readonly<Record<string, boolean>>
+): Promise<boolean> {
+	return mergeAgentFlagMap(target, AGENT_GATEWAY_ROUTING_PREF_KEY, entries);
+}
+
+// --- Per-agent MCP tool bridge ------------------------------------------------
+//
+// ── What this gates, and why it is NOT the key above ──────────────────────────
+// `agent-gateway-routing` (above) decides whether Core injects OPENAI_BASE_URL +
+// OPENAI_API_KEY into an agent's spawn command — that is MODEL EGRESS. Turning it
+// on changes which endpoint a subscription credential is presented to and which
+// ledger the spend lands on, which is exactly why it defaults OFF and why a bulk
+// action must never flip it for you.
+//
+// This key gates something with no credential implication at all: whether Core
+// injects its own in-process MCP server (`build_ryu_mcp_server`) into the agent's
+// ACP session, so the agent can call Ryu's tools through the allowlist-gated
+// `call_tool` path. Nothing leaves the machine that would not otherwise; the
+// allowlist and the interactive permission prompt still gate every call. An agent
+// without it is not "safer", it is just unable to do anything Ryu offers — which
+// is why the default here is ON while the default above stays OFF.
+//
+// ── CROSS-TRACK CONTRACT, verified against Core rather than assumed ───────────
+// Every clause below was read out of `apps/core/src/agent_routing/mod.rs` and its
+// two wiring sites, not inferred from the desktop side:
+//
+//   key    : "agent-tool-bridge" — `agent_routing::AGENT_TOOL_BRIDGE_PREF_KEY`
+//   value  : a JSON object of agent id → boolean, the same shape and the same
+//            truthy coercions as `agent-gateway-routing`
+//   default: ON. `agent_routing::is_tool_bridge_enabled` returns `unwrap_or(true)`,
+//            and an unreadable entry ALSO falls back to `true` (its parse arm
+//            comments "must not be taken as an opt-out"). Only an explicit
+//            `false` withholds the bridge. This is the one place the two keys
+//            deliberately disagree, and it is the whole point: an installed ACP
+//            agent has Ryu's tools out of the box.
+//   seeded : `apps/core/src/main.rs` at startup, and `server/mod.rs`'s preference
+//            PUT handler on change — so a write here takes effect on this node
+//            without a Core restart.
+//   read at: `acp::acp_tool_bridge_enabled(spawn_cmd, agent_id)`, which ANDs this
+//            preference with a transport guard (`!spawn_cmd.contains("pi-acp")`).
+//            The transport half is FIRST and short-circuits, so a pi-acp agent is
+//            answered without consulting this map at all.
+//
+// That last clause is why the desktop must not render this key as the whole
+// answer: `agent-tool-bridge` is necessary but not sufficient. `agent-egress.ts`
+// mirrors the transport guard and reports those agents as inert rather than
+// printing the preference value over an agent Core will never bridge.
+//
+// Because a MISSING entry genuinely means ON in Core, the desktop reports a
+// missing entry as ON too — it is a fact here, not an optimistic default. Keep
+// those two statements welded: if Core's default ever flips, this must flip in
+// the same change or the UI starts reporting tools that are not there.
+
+/**
+ * The preference key Core must read for the tool bridge. Pinned by
+ * `preferences.test.ts` so a rename on either side fails a test instead of
+ * silently rendering a dead switch.
+ */
+export const AGENT_TOOL_BRIDGE_PREF_KEY = "agent-tool-bridge";
+
+/**
+ * The value the bulk action writes and the value Core must assume for an agent
+ * with no entry. ON, unlike {@link DEFAULT_AGENT_GATEWAY_ROUTING} — see the
+ * section comment for why the two defaults are opposite on purpose.
+ */
+export const DEFAULT_AGENT_TOOL_BRIDGE = true;
+
+/**
+ * Read the full per-agent tool-bridge map. Deliberately returns the RAW map
+ * (missing ids stay missing) rather than folding in the default, because
+ * "no entry" and "explicitly off" are different facts to the UI above it.
+ */
+export async function getAgentToolBridgeMap(
+	target: ApiTarget
+): Promise<Record<string, boolean>> {
+	const raw = await getPreference(target, AGENT_TOOL_BRIDGE_PREF_KEY);
+	return parseAgentGatewayMap(raw);
+}
+
+/** Toggle the tool bridge for a single agent id (read-merge-write the map). */
+export function setAgentToolBridge(
+	target: ApiTarget,
+	agentId: string,
+	enabled: boolean
+): Promise<boolean> {
+	return mergeAgentFlagMap(target, AGENT_TOOL_BRIDGE_PREF_KEY, {
+		[agentId]: enabled,
+	});
+}
+
+/** Batched {@link setAgentToolBridge} — one read, one merge, one write. */
+export function setAgentToolBridgeMany(
+	target: ApiTarget,
+	entries: Readonly<Record<string, boolean>>
+): Promise<boolean> {
+	return mergeAgentFlagMap(target, AGENT_TOOL_BRIDGE_PREF_KEY, entries);
+}
+
 // --- Agent-auto routing (Plane B — pick which agent serves the turn) ---------
 // The universal picker's "Auto" row (sentinel agent id `auto`) resolves the real
 // agent per-turn in Core. This preference holds the rules Core resolves against —
@@ -2104,7 +2677,20 @@ export function setSupportAccessLocalEnabled(
 	);
 }
 
-/** Read the local support-access hard expiry (unix ms; 0 = no expiry set). */
+/**
+ * Read the local support-access hard expiry (unix ms; 0 = no expiry set).
+ *
+ * Deliberately NOT the `usize` mirror {@link parseRustUsize}: Core reads this
+ * key with `s.trim().parse::<i64>()` (`privacy::support_access_local`), a
+ * SIGNED parse, so the grammars differ. `Number()` is looser than either —
+ * `1e3` and `5.9` read as 1000 and 5.9 here while Core's parse errors and
+ * `.unwrap_or(0)` treats the grant as never-expiring. Left as-is because the
+ * divergence only shows for values this UI cannot produce (the setter writes
+ * `Math.max(0, Math.round(...))`), and both sides agree on everything it can.
+ * Not "impossible", though — anyone can `PUT /api/preferences/{key}`, and the
+ * docs tell operators to do exactly that; if this ever grows a control that
+ * renders the expiry as authoritative, close the gap the same way.
+ */
 export async function getSupportAccessLocalExpiry(
 	target: ApiTarget
 ): Promise<number> {

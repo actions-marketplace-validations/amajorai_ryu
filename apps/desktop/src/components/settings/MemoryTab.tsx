@@ -14,6 +14,15 @@ import {
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { Input } from "@ryu/ui/components/input";
+import { Label } from "@ryu/ui/components/label";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select";
+import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
@@ -28,10 +37,31 @@ import {
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
+	AUTO_RECALL_MAX_TOP_K,
+	AUTO_RECALL_MIN_TOP_K,
+	CONTEXT_MAX_OUTPUT_RESERVE,
+	CONTEXT_MIN_BUDGET_TOKENS,
+	CONTEXT_MIN_OUTPUT_RESERVE,
+	type ContextBudget,
+	contextHistoryBudget,
 	getAutoRecallEnabled,
+	getAutoRecallTopK,
+	getContextAutoCompact,
+	getContextBudget,
+	getContextCompactConfig,
+	getContextOutputReserve,
 	getSkillsProgressive,
+	getToolRanker,
+	type SideModelConfig,
 	setAutoRecallEnabled,
+	setAutoRecallTopK,
+	setContextAutoCompact,
+	setContextBudget,
+	setContextCompactConfig,
+	setContextOutputReserve,
 	setSkillsProgressive,
+	setToolRanker,
+	type ToolRankerId,
 } from "@/src/lib/api/preferences.ts";
 import {
 	indexChunk,
@@ -40,6 +70,7 @@ import {
 	type SpaceSummary,
 	searchRetrieval,
 } from "@/src/lib/api/retrieval.ts";
+import { SideModelPicker } from "./shared/SideModelPicker.tsx";
 import {
 	SettingsCard,
 	SettingsGroup,
@@ -56,6 +87,406 @@ function sourceLabel(chunk: ScoredChunk, spaces: SpaceSummary[]): string {
 	}
 	const space = spaces.find((s) => s.id === chunk.spaceId);
 	return space ? `Space · ${space.name}` : "Space";
+}
+
+/**
+ * Run a preference write and surface a failure. The node is the only store for
+ * these values, so a write that silently fails would leave the control showing a
+ * setting the node never received — exactly the "settable value that cannot take
+ * effect" this tab exists to avoid.
+ */
+function persist(write: Promise<boolean>, what: string): void {
+	const failed = () => {
+		toast.error({
+			title: `Couldn't save ${what}`,
+			description: "Your change wasn't saved. Please try again.",
+		});
+	};
+	write
+		.then((ok) => {
+			if (!ok) {
+				failed();
+			}
+		})
+		.catch(failed);
+}
+
+// ── Conversation context window ──────────────────────────────────────────────
+// One card for the five `context.*` preferences Core reads per turn. Off by
+// default in Core, and every control below the budget select is inert while the
+// budget is off (`resolve_context_window` returns before reading them), so they
+// render disabled rather than pretending to be live.
+
+/** Budgets offered as one-click presets, in tokens. */
+const CONTEXT_PRESETS = [4096, 8192, 16_384, 32_768, 65_536, 131_072];
+/** Sentinel select values (Base UI Select is unreliable with empty strings). */
+const BUDGET_OFF = "off";
+const BUDGET_AUTO = "auto";
+const BUDGET_CUSTOM = "custom";
+/** Seed for a Custom pick made from Off/Auto, where there is no current number. */
+const CUSTOM_SEED_TOKENS = 8192;
+
+const BUDGET_ITEMS = [
+	{ value: BUDGET_OFF, label: "Off — send the whole conversation" },
+	{
+		value: BUDGET_AUTO,
+		label: "Auto — needs a context size set for the model",
+	},
+	...CONTEXT_PRESETS.map((n) => ({
+		value: String(n),
+		label: `${n.toLocaleString()} tokens`,
+	})),
+	{ value: BUDGET_CUSTOM, label: "Custom…" },
+];
+
+const RANKER_ITEMS: { value: ToolRankerId; label: string }[] = [
+	{ value: "bm25", label: "Keyword (BM25)" },
+	{ value: "semantic", label: "Meaning (embeddings)" },
+];
+
+function ContextWindowSection({ target }: { target: ApiTarget }) {
+	const [budget, setBudget] = useState<ContextBudget>({ kind: "off" });
+	// A Custom pick is sticky: the number input stays open even when the typed
+	// value happens to equal a preset, so the field doesn't vanish mid-edit.
+	const [customOpen, setCustomOpen] = useState(false);
+	const [customText, setCustomText] = useState(String(CUSTOM_SEED_TOKENS));
+	const [reserve, setReserve] = useState(0);
+	const [reserveText, setReserveText] = useState("");
+	const [autoCompact, setAutoCompact] = useState(false);
+	const [compactModel, setCompactModel] = useState<SideModelConfig>({
+		provider: "",
+		model: "",
+		effort: "",
+	});
+
+	useEffect(() => {
+		let cancelled = false;
+		Promise.all([
+			getContextBudget(target),
+			getContextOutputReserve(target),
+			getContextAutoCompact(target),
+			getContextCompactConfig(target),
+		])
+			.then(([storedBudget, storedReserve, compact, model]) => {
+				if (cancelled) {
+					return;
+				}
+				setBudget(storedBudget);
+				if (storedBudget.kind === "tokens") {
+					setCustomText(String(storedBudget.tokens));
+					setCustomOpen(!CONTEXT_PRESETS.includes(storedBudget.tokens));
+				}
+				setReserve(storedReserve);
+				setReserveText(String(storedReserve));
+				setAutoCompact(compact);
+				setCompactModel(model);
+			})
+			.catch(() => {
+				// Unreachable node: the defaults above already show "off", which is
+				// what an unconfigured node does. Nothing is written on mount.
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [target]);
+
+	const saveBudget = useCallback(
+		(next: ContextBudget) => {
+			setBudget(next);
+			persist(setContextBudget(target, next), "the context budget");
+		},
+		[target]
+	);
+
+	// Base UI's Select can emit `null` (a cleared selection); there is no "no
+	// budget" state distinct from Off, so a null is simply ignored.
+	const handleBudgetSelect = useCallback(
+		(value: string | null) => {
+			if (value === null) {
+				return;
+			}
+			if (value === BUDGET_CUSTOM) {
+				setCustomOpen(true);
+				const seed =
+					budget.kind === "tokens" ? budget.tokens : CUSTOM_SEED_TOKENS;
+				setCustomText(String(seed));
+				saveBudget({ kind: "tokens", tokens: seed });
+				return;
+			}
+			setCustomOpen(false);
+			if (value === BUDGET_OFF) {
+				saveBudget({ kind: "off" });
+				return;
+			}
+			if (value === BUDGET_AUTO) {
+				saveBudget({ kind: "auto" });
+				return;
+			}
+			saveBudget({ kind: "tokens", tokens: Number.parseInt(value, 10) });
+		},
+		[budget, saveBudget]
+	);
+
+	// Typing is free-form; the clamp lands on blur so a half-typed "1" doesn't
+	// snap to the floor under the cursor.
+	const commitCustom = useCallback(() => {
+		const parsed = Number.parseInt(customText.trim(), 10);
+		if (!Number.isFinite(parsed)) {
+			setCustomText(
+				budget.kind === "tokens"
+					? String(budget.tokens)
+					: String(CUSTOM_SEED_TOKENS)
+			);
+			return;
+		}
+		// Same rule as the reply reserve: a blur that changed nothing writes
+		// nothing, so a budget stored below this floor by other means is not
+		// rewritten behind the user's back.
+		if (budget.kind === "tokens" && parsed === budget.tokens) {
+			setCustomText(String(parsed));
+			return;
+		}
+		const clamped = Math.max(parsed, CONTEXT_MIN_BUDGET_TOKENS);
+		setCustomText(String(clamped));
+		saveBudget({ kind: "tokens", tokens: clamped });
+	}, [budget, customText, saveBudget]);
+
+	const commitReserve = useCallback(() => {
+		const parsed = Number.parseInt(reserveText.trim(), 10);
+		if (!Number.isFinite(parsed)) {
+			setReserveText(String(reserve));
+			return;
+		}
+		// A blur with no edit must not write: the node's stored value can sit
+		// outside the range this control offers (nothing stops `PUT
+		// /api/preferences/context.max-output-tokens`), and clamping it on a
+		// stray focus would silently rewrite a setting the user never touched.
+		if (parsed === reserve) {
+			setReserveText(String(parsed));
+			return;
+		}
+		const clamped = Math.min(
+			Math.max(parsed, CONTEXT_MIN_OUTPUT_RESERVE),
+			CONTEXT_MAX_OUTPUT_RESERVE
+		);
+		setReserve(clamped);
+		setReserveText(String(clamped));
+		persist(setContextOutputReserve(target, clamped), "the reply reserve");
+	}, [reserve, reserveText, target]);
+
+	const handleAutoCompact = useCallback(
+		(next: boolean) => {
+			setAutoCompact(next);
+			persist(setContextAutoCompact(target, next), "auto-compact");
+		},
+		[target]
+	);
+
+	const handleCompactModel = useCallback(
+		(next: SideModelConfig) => {
+			setCompactModel(next);
+			persist(setContextCompactConfig(target, next), "the summarizer model");
+		},
+		[target]
+	);
+
+	const off = budget.kind === "off";
+	const selectValue = (() => {
+		if (customOpen) {
+			return BUDGET_CUSTOM;
+		}
+		if (budget.kind === "tokens") {
+			return String(budget.tokens);
+		}
+		return budget.kind === "auto" ? BUDGET_AUTO : BUDGET_OFF;
+	})();
+	const historyCeiling =
+		budget.kind === "tokens"
+			? contextHistoryBudget(budget.tokens, reserve)
+			: null;
+
+	return (
+		<SettingsSection
+			caption="Off by default. With a budget set, Ryu keeps the newest turns that fit and always keeps the system prompt — your instructions, recalled memory and skills — which the engine's own overflow handling can otherwise drop. Everything below the budget is ignored while it is off."
+			title="Conversation context"
+		>
+			<SettingsCard className="space-y-4">
+				<div className="space-y-1.5">
+					<Label htmlFor="context-budget">Context budget</Label>
+					<Select
+						items={BUDGET_ITEMS}
+						onValueChange={handleBudgetSelect}
+						value={selectValue}
+					>
+						<SelectTrigger className="h-9 w-full text-sm" id="context-budget">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{BUDGET_ITEMS.map((item) => (
+								<SelectItem key={item.value} value={item.value}>
+									{item.label}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+					<p className="text-muted-foreground text-xs">
+						Total tokens per turn, request plus reply. <strong>Auto</strong>{" "}
+						reuses the “Context size” saved for the model in an agent's engine
+						settings, which only local engines offer. A model without one — any
+						cloud model, and any local model you haven't set it on — keeps
+						sending the whole conversation, so pick a number if you are unsure.
+					</p>
+				</div>
+
+				{customOpen ? (
+					<div className="space-y-1.5">
+						<Label htmlFor="context-budget-custom">
+							Custom budget (tokens)
+						</Label>
+						<Input
+							className="h-9"
+							id="context-budget-custom"
+							inputMode="numeric"
+							onBlur={commitCustom}
+							onChange={(e: ChangeEvent<HTMLInputElement>) =>
+								setCustomText(e.target.value)
+							}
+							value={customText}
+						/>
+						<p className="text-muted-foreground text-xs">
+							Minimum {CONTEXT_MIN_BUDGET_TOKENS.toLocaleString()}. Below that
+							there is no room left for history and every turn would be sent
+							with just your last message.
+						</p>
+					</div>
+				) : null}
+
+				<div className="space-y-1.5">
+					<Label htmlFor="context-reserve">
+						Reserved for the reply (tokens)
+					</Label>
+					<Input
+						className="h-9"
+						disabled={off}
+						id="context-reserve"
+						inputMode="numeric"
+						onBlur={commitReserve}
+						onChange={(e: ChangeEvent<HTMLInputElement>) =>
+							setReserveText(e.target.value)
+						}
+						value={reserveText}
+					/>
+					<p className="text-muted-foreground text-xs">
+						Held back from the budget so the answer has room.{" "}
+						{historyCeiling === null
+							? "Applies once a budget is set."
+							: `Leaves at most ${historyCeiling.toLocaleString()} tokens for history — less once your system prompt, recalled memory and skills are counted.`}
+					</p>
+				</div>
+
+				<div className="flex items-center justify-between gap-3">
+					<Label htmlFor="context-auto-compact">
+						Summarize older turns instead of dropping them
+					</Label>
+					<Switch
+						checked={autoCompact}
+						disabled={off}
+						id="context-auto-compact"
+						onCheckedChange={handleAutoCompact}
+					/>
+				</div>
+				<p className="text-muted-foreground text-xs">
+					Turns that fall outside the budget are sent to the model below for a
+					short summary, added to the conversation as an “Earlier conversation
+					summary” note. Costs one extra model call whenever the window
+					overflows.
+				</p>
+
+				{autoCompact && !off ? (
+					<SideModelPicker
+						onChange={handleCompactModel}
+						target={target}
+						value={compactModel}
+					/>
+				) : null}
+				{autoCompact && !off ? (
+					<p className="text-muted-foreground text-xs">
+						Leave the model blank to use this node's default agent or model; if
+						no default is set, the summary is written by whichever model you are
+						chatting with.
+					</p>
+				) : null}
+			</SettingsCard>
+		</SettingsSection>
+	);
+}
+
+// ── Tool / skill search ranking ──────────────────────────────────────────────
+// `tools.active_ranker` picks how the unified tool catalog — and the skill
+// search that reuses it — orders results. It lives here rather than beside a
+// catalog-source picker because the desktop has no tool-catalog source selector,
+// and this is the tab that already owns how skills reach the model.
+
+function ToolRankerSection({ target }: { target: ApiTarget }) {
+	const [ranker, setRanker] = useState<ToolRankerId>("bm25");
+
+	useEffect(() => {
+		let cancelled = false;
+		getToolRanker(target)
+			.then((value) => {
+				if (!cancelled) {
+					setRanker(value);
+				}
+			})
+			.catch(() => {
+				// Leaves the BM25 default showing, which is what Core uses when the
+				// pref is unreadable.
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [target]);
+
+	const handleChange = useCallback(
+		(value: ToolRankerId | null) => {
+			// Mirrors Core's `ToolRanker::from_pref`: only the exact "semantic"
+			// selects semantic ranking, so a cleared selection means BM25 — the
+			// same thing an unset preference means.
+			const next: ToolRankerId = value === "semantic" ? "semantic" : "bm25";
+			setRanker(next);
+			persist(setToolRanker(target, next), "the search ranking");
+		},
+		[target]
+	);
+
+	return (
+		<SettingsSection
+			caption="How Ryu picks which tools and skills to offer the model for a given request. Keyword matching is the default and needs nothing installed. Meaning-based ranking compares your request to each tool or skill using the embedding model this node is configured with — where no embedding model is reachable it quietly falls back to keyword order rather than failing the search."
+			title="Tool and skill search"
+		>
+			<SettingsCard>
+				<div className="space-y-1.5">
+					<Label htmlFor="tool-ranker">Ranking</Label>
+					<Select
+						items={RANKER_ITEMS}
+						onValueChange={handleChange}
+						value={ranker}
+					>
+						<SelectTrigger className="h-9 w-full text-sm" id="tool-ranker">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{RANKER_ITEMS.map((item) => (
+								<SelectItem key={item.value} value={item.value}>
+									{item.label}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				</div>
+			</SettingsCard>
+		</SettingsSection>
+	);
 }
 
 export function MemoryTab() {
@@ -104,6 +535,47 @@ export function MemoryTab() {
 		},
 		[target]
 	);
+
+	// How many recalled snippets are injected per turn (`auto-recall-top-k`).
+	// Kept as text while editing and clamped on blur, like the context inputs.
+	// The displayed number is what this control WRITES: Core reads the pref
+	// first but falls back to `RYU_AUTO_RECALL_TOP_K` when the pref is unset,
+	// and the desktop cannot see the node's environment.
+	const [topKText, setTopKText] = useState("");
+	// The value currently stored on the node, so a blur that changed nothing can
+	// be told apart from an edit. Core accepts any positive integer here, so a
+	// stored value can legitimately sit above the range this control offers.
+	const [topKSaved, setTopKSaved] = useState<number | null>(null);
+	useEffect(() => {
+		let cancelled = false;
+		getAutoRecallTopK(target).then((value) => {
+			if (!cancelled) {
+				setTopKSaved(value);
+				setTopKText(String(value));
+			}
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [target]);
+	const commitTopK = useCallback(() => {
+		const parsed = Number.parseInt(topKText.trim(), 10);
+		if (!Number.isFinite(parsed)) {
+			setTopKText(topKSaved === null ? "" : String(topKSaved));
+			return;
+		}
+		if (parsed === topKSaved) {
+			setTopKText(String(parsed));
+			return;
+		}
+		const clamped = Math.min(
+			Math.max(parsed, AUTO_RECALL_MIN_TOP_K),
+			AUTO_RECALL_MAX_TOP_K
+		);
+		setTopKSaved(clamped);
+		setTopKText(String(clamped));
+		persist(setAutoRecallTopK(target, clamped), "the recall limit");
+	}, [target, topKSaved, topKText]);
 
 	// Skills disclosure: progressive (default) injects only an L1 skill index and
 	// loads full bodies on demand via the `skills__load` tool, saving context on
@@ -245,8 +717,29 @@ export function MemoryTab() {
 						}
 						title="Automatically recall relevant context"
 					/>
+					<SettingsItem
+						actions={
+							<Input
+								aria-label="Snippets recalled per reply"
+								className="h-8 w-20 text-right"
+								// Nothing is recalled at all while the switch above is off, so
+								// this limit would be a number that cannot take effect.
+								disabled={!autoRecall}
+								inputMode="numeric"
+								onBlur={commitTopK}
+								onChange={(e: ChangeEvent<HTMLInputElement>) =>
+									setTopKText(e.target.value)
+								}
+								value={topKText}
+							/>
+						}
+						description={`How many snippets from memory and past chats are added to a reply. Lower this if replies feel cluttered with old context; raise it for better recall on long-running work. This control writes ${AUTO_RECALL_MIN_TOP_K}–${AUTO_RECALL_MAX_TOP_K}; a larger number set outside the app is shown as-is and left alone until you change it.`}
+						title="Snippets per reply"
+					/>
 				</SettingsGroup>
 			</SettingsSection>
+
+			<ContextWindowSection target={target} />
 
 			<SettingsSection
 				caption="On by default. Instead of giving the model every enabled skill's full instructions on every reply, Ryu shares a short list and the agent loads a skill's full instructions on demand when relevant — saving context on smaller local models. Only agents that run tools (the default Ryu agent) load on demand; others always get full instructions. Turn off to always include full skill instructions."
@@ -265,6 +758,8 @@ export function MemoryTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+
+			<ToolRankerSection target={target} />
 
 			<SettingsSection
 				caption="Run a similarity search across long-term memory and indexed Space documents. Results are ranked by relevance score."

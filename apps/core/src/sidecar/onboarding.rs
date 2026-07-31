@@ -28,6 +28,34 @@ impl SetupStatus {
     }
 }
 
+/// The sidecars that SHARE `llamacpp`'s `llama-server` binary and therefore have no
+/// install step of their own: installing (or re-seeding) `llamacpp` is what makes
+/// each of them startable.
+///
+/// This list is load-bearing, not bookkeeping. `SidecarManager::start_sidecar`
+/// refuses anything absent from the installed set, and none of these three is in
+/// `startup_order`, so a name missing here can only ever fail its lazy start with
+/// `"'<name>' is not installed"` at `debug!` level — a feature that is silently and
+/// permanently dead on every node. `llamacpp-rerank` was exactly that: neural
+/// reranking of Spaces RAG could never start anywhere, because the Spaces search path
+/// lazily starts it but nothing marked it installed. Both writers of the installed set
+/// ([`SetupManager::install_local_stack`] on a fresh install and
+/// [`SetupManager::seed_installed_from_disk`] on every restart) consume this one list
+/// so the two can never drift again.
+const LLAMACPP_DERIVED_SIDECARS: &[&str] = &[
+    // Embeddings server — auto-starts (it IS in `startup_order`), serves the nomic
+    // GGUF for real semantic RAG.
+    "llamacpp-embed",
+    // Reranker server — lazily started by the Spaces search path.
+    "llamacpp-rerank",
+    // Classify tier — lazily started by Core's gateway config-push path. Spelled
+    // from the sidecar's own const, not a literal: this list is the installed-set
+    // gate, so a name that drifts from `Sidecar::name()` makes every lazy start fail
+    // `"'…' is not installed"` and the guardrail dies silently (both consumers fail
+    // open). The const is the only spelling any of the three sites now uses.
+    crate::sidecar::providers::llamacpp::classify::CLASSIFY_SIDECAR_NAME,
+];
+
 /// Outcome of the `install_local_stack` routine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalStackStatus {
@@ -45,6 +73,14 @@ pub struct LocalStackStatus {
     /// stays off by default (not in `startup_order`) — lazily started on first
     /// Space search — so this reflects "downloaded and ready", not "running".
     pub reranker_gguf_installed: bool,
+    /// True if the 270M classifier GGUF is present. Downloaded here (like the
+    /// reranker) so the `llamacpp-classify` server can serve it as the cheap
+    /// classify tier; the server never downloads it. The server stays off by
+    /// default (not in `startup_order`) — lazily started when a pushed gateway
+    /// config selects the tier — so this reflects "downloaded and ready", not
+    /// "running". Deliberately NOT part of [`LocalStackStatus::is_ready`]: a
+    /// classifier download failure must never gate chat.
+    pub classifier_gguf_installed: bool,
     /// True if the whisper.cpp voice (STT) engine + its default GGML model are
     /// present. Voice is an opt-in sidecar (not in `startup_order`), so this
     /// reflects "downloaded and ready to start", not "running".
@@ -117,9 +153,13 @@ impl SetupManager {
     /// Seeding from `versions.json` reproduces a clean, non-racing boot.
     ///
     /// `names` are the sidecars to consider (the startup order). Each is marked
-    /// installed when `versions.json` records a version for it. `llamacpp-embed`
-    /// shares the `llama-server` binary with `llamacpp`, so its presence is
-    /// derived from `llamacpp` (mirroring [`Self::install_local_stack`]).
+    /// installed when `versions.json` records a version for it. The
+    /// [`LLAMACPP_DERIVED_SIDECARS`] share the `llama-server` binary with `llamacpp`,
+    /// so their presence is derived from `llamacpp` (mirroring
+    /// [`Self::install_local_stack`]) — two of the three are not in `names` at all
+    /// (never in `startup_order`, so they must not auto-start), so without the
+    /// derivation a Core restart would leave their lazy starts permanently
+    /// "not installed".
     pub async fn seed_installed_from_disk(&self, names: &[String]) {
         let store = crate::sidecar::download_manager::VersionStore::load();
         let mut status = self.status.write().await;
@@ -132,9 +172,9 @@ impl SetupManager {
             }
         }
         if store.versions.contains_key("llamacpp") {
-            status
-                .installed_sidecars
-                .insert("llamacpp-embed".to_string());
+            for derived in LLAMACPP_DERIVED_SIDECARS {
+                status.installed_sidecars.insert((*derived).to_string());
+            }
         }
     }
 
@@ -390,7 +430,16 @@ impl SetupManager {
     /// stack is unavailable.
     ///
     /// Both steps read their URLs and checksums from [`ModelRegistry::from_env`] so
-    /// the bundled model is swappable without recompiling.
+    /// the bundled model is swappable without recompiling —
+    /// `RYU_LOCAL_{CHAT,EMBED,RERANKER,CLASSIFIER}_MODEL_{ID,URL,SHA256}`, env-only.
+    ///
+    /// `from_env` is the right constructor here precisely *because* those triples
+    /// have no `registry.json` key: this function is the moment that writes
+    /// `~/.ryu/models/<id>.gguf`, and a llama.cpp sidecar reads the same id back at
+    /// serve time arbitrarily later. A per-call file read would let an operator edit
+    /// the id between those two moments, leaving the sidecar hunting a weight nobody
+    /// downloaded and blaming this function in the error. See
+    /// `registry::LocalModelEntry`.
     pub async fn install_local_stack(
         &self,
         downloads: &crate::downloads::DownloadCenter,
@@ -402,11 +451,18 @@ impl SetupManager {
         let llamacpp_installed = match LlamaCppDownloader::new().ensure_installed(downloads).await {
             Ok(()) => {
                 self.mark_installed("llamacpp").await;
-                // The embeddings sidecar shares this same `llama-server` binary,
-                // so installing it here makes `llamacpp-embed` eligible to
-                // auto-start (`start_all` skips sidecars not marked installed).
-                // It downloads its own nomic GGUF on first start.
-                self.mark_installed("llamacpp-embed").await;
+                // Every sidecar that shares this same `llama-server` binary becomes
+                // startable with it. `llamacpp-embed` is in `startup_order`, so this
+                // makes it eligible to auto-start (`start_all` skips sidecars not
+                // marked installed); `llamacpp-rerank` and `llamacpp-classify` are
+                // not, so this never auto-starts them — but `start_sidecar` refuses
+                // anything absent from the installed set, so without the mark their
+                // lazy starts (Spaces search / the gateway config push) could only
+                // ever fail "not installed". Each downloads no binary of its own; the
+                // GGUFs they serve come from the steps below.
+                for derived in LLAMACPP_DERIVED_SIDECARS {
+                    self.mark_installed(derived).await;
+                }
                 tracing::info!("onboarding: llama.cpp binary installed");
                 true
             }
@@ -601,6 +657,80 @@ impl SetupManager {
         } else {
             warnings.push(
                 "reranker GGUF download skipped because llama.cpp binary was not installed"
+                    .to_owned(),
+            );
+            false
+        };
+
+        // Step 3.6 — 270M classifier GGUF (downloaded here, like the reranker).
+        //
+        // Same posture as every other bundled default: unconditional, sequential,
+        // non-fatal. `install_local_stack` runs on a background task, so nothing
+        // here blocks Core's HTTP API or the desktop; and at ~241 MB this step adds
+        // roughly half of what the reranker (~438 MB) directly before it already
+        // costs, after every chat-critical download has completed. The
+        // `llamacpp-classify` server only *serves* this file (it never downloads),
+        // and stays off by default — Core's gateway config-push path lazily starts
+        // it when a pushed config selects the classify tier.
+        //
+        // Non-fatal, but be precise about WHAT degrades — the earlier claim that a
+        // failure leaves the inspector "resolving to the gateway's default model,
+        // which is the behaviour that existed before this tier" is no longer true.
+        // The gateway now defaults `inspector.model` to the classify id
+        // (`de_inspector_model`) and routes that id to the `classify` provider, so
+        // without this file the guardrail's model has nowhere to run: the sidecar
+        // cannot start, the provider call is refused, and the inspector /
+        // smart-routing classifier / LLM-judge evaluators FAIL OPEN — traffic is
+        // allowed unscanned. Degraded, never broken, and never blocking chat, but the
+        // degradation is "no guardrail verdict", not "a different model".
+        let classifier_gguf_installed = if llamacpp_installed {
+            let id = registry.local_classifier_model.id.clone();
+            match downloads
+                .download_blocking(crate::model_catalog::gguf_download_spec(
+                    &registry.local_classifier_model.id,
+                    &registry.local_classifier_model.weight_url,
+                    &registry.local_classifier_model.sha256,
+                    &format!("{id} (classifier model)"),
+                ))
+                .await
+            {
+                Ok(path) => {
+                    self.mark_installed(&format!("gguf:{id}")).await;
+                    if let Err(e) = crate::model_catalog::record_default_download(
+                        &id,
+                        &registry.local_classifier_model.weight_url,
+                        None,
+                        None,
+                    ) {
+                        tracing::warn!("recording classifier model provenance failed: {e:#}");
+                    }
+                    tracing::info!(
+                        "onboarding: classifier GGUF {} installed at {}",
+                        id,
+                        path.display()
+                    );
+                    true
+                }
+                Err(e) => {
+                    // Surfaced to the user in `warnings`, so it has to say what
+                    // actually happens: the guardrail does not run at all (it fails
+                    // OPEN and traffic is allowed), rather than running on some other
+                    // model. `inspector.model` IS this id and routes to the `classify`
+                    // provider the missing weights would have served.
+                    let msg = format!(
+                        "classifier GGUF {id} download failed — the firewall inspector, \
+                         smart-routing classifier and LLM-judge evaluators cannot run and \
+                         will fail open (traffic allowed unscanned) until it is \
+                         downloaded: {e:#}"
+                    );
+                    tracing::warn!("{}", msg);
+                    warnings.push(msg);
+                    false
+                }
+            }
+        } else {
+            warnings.push(
+                "classifier GGUF download skipped because llama.cpp binary was not installed"
                     .to_owned(),
             );
             false
@@ -805,6 +935,7 @@ impl SetupManager {
             gguf_installed,
             embed_gguf_installed,
             reranker_gguf_installed,
+            classifier_gguf_installed,
             whisper_installed,
             parakeet_installed,
             vad_installed,
@@ -843,6 +974,7 @@ mod onboarding_tests {
             gguf_installed: false,
             embed_gguf_installed: false,
             reranker_gguf_installed: false,
+            classifier_gguf_installed: false,
             whisper_installed: false,
             parakeet_installed: false,
             vad_installed: false,
@@ -885,6 +1017,7 @@ mod onboarding_tests {
             sdcpp_installed: true,
             embed_gguf_installed: true,
             reranker_gguf_installed: true,
+            classifier_gguf_installed: true,
             ..blank_status()
         };
         assert!(!extras.is_ready());
@@ -921,6 +1054,45 @@ mod onboarding_tests {
         mgr.mark_installed("llamacpp").await;
         assert!(mgr.is_installed("llamacpp").await);
         assert!(!mgr.is_installed("whispercpp").await);
+    }
+
+    /// `llamacpp-rerank` was absent from BOTH writers of the installed set, and
+    /// `start_sidecar` refuses anything not in it — so the lazy start on the Spaces
+    /// search path could only ever fail `"not installed"` at `debug!`, meaning neural
+    /// reranking of Spaces RAG had never worked on any node. The list is the fix, so
+    /// the list is what is pinned: a name dropped from it silently kills that
+    /// sidecar's only start path.
+    #[tokio::test]
+    async fn llamacpp_derived_sidecars_are_all_startable_once_llamacpp_is() {
+        assert!(
+            LLAMACPP_DERIVED_SIDECARS.contains(&"llamacpp-rerank"),
+            "rerank shares the llama-server binary and has no other install step"
+        );
+        assert!(LLAMACPP_DERIVED_SIDECARS.contains(&"llamacpp-embed"));
+        // Asserted against the SIDECAR'S OWN CONST, and additionally against what
+        // `Sidecar::name()` returns. A literal here would pass while the list and the
+        // sidecar disagreed, which is precisely the `"not installed"` dead-lazy-start
+        // failure this test exists to catch.
+        assert!(LLAMACPP_DERIVED_SIDECARS
+            .contains(&crate::sidecar::providers::llamacpp::classify::CLASSIFY_SIDECAR_NAME));
+        assert!(
+            LLAMACPP_DERIVED_SIDECARS.contains(&crate::sidecar::Sidecar::name(
+                &crate::sidecar::providers::llamacpp::classify::LlamaCppClassifyManager::new()
+            ))
+        );
+
+        // The install path's marking loop, exercised without a DownloadCenter or disk.
+        let mgr = SetupManager::new();
+        mgr.mark_installed("llamacpp").await;
+        for derived in LLAMACPP_DERIVED_SIDECARS {
+            mgr.mark_installed(derived).await;
+        }
+        for derived in LLAMACPP_DERIVED_SIDECARS {
+            assert!(
+                mgr.is_installed(derived).await,
+                "{derived} must be installed once llamacpp is, or start_sidecar refuses it"
+            );
+        }
     }
 
     #[tokio::test]

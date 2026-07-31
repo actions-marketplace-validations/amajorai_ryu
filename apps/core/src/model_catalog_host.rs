@@ -53,6 +53,13 @@ impl ModelCatalogHost for CoreModelCatalogHost {
     }
 
     fn default_model_repos(&self) -> DefaultModelRepos {
+        // `from_env` is correct rather than lazy: this reads only
+        // `local_chat_model` / `local_embed_model`, neither of which has a
+        // `registry.json` key, so `load()` would return identical values while
+        // implying a file layer that does not exist. Both are swapped with
+        // `RYU_LOCAL_{CHAT,EMBED}_MODEL_{ID,URL}` — and must resolve to the same id
+        // the onboarding downloader fetched and llama.cpp serves, which is exactly
+        // what freezing them per process buys (see `registry::LocalModelEntry`).
         let reg = crate::registry::ModelRegistry::from_env();
         [&reg.local_chat_model, &reg.local_embed_model]
             .into_iter()

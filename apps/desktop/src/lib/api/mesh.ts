@@ -41,7 +41,15 @@ export interface MeshStatus {
 	backendState: string;
 	/** Control-plane server URL, when known. */
 	controlServer: string | null;
-	/** Mesh opted-in at all (`RYU_MESH_ENABLED` truthy). */
+	/**
+	 * Mesh opted-in at all. Core's `ryu_mesh::is_enabled()` reads ONLY the
+	 * `RYU_MESH_ENABLED` env var (default false) — there is no pref and no client
+	 * path that sets it, so on a normal desktop install this is always `false`.
+	 * That makes it the one honest gate for every mesh-dependent surface: if it is
+	 * false, the mesh daemon does not run and nothing that configures it can take
+	 * effect. Defaults to `false` in {@link normalizeMeshStatus} so an older Core
+	 * that omits the field also reads as "not relevant".
+	 */
 	enabled: boolean;
 	/** This node's MagicDNS name (trailing dot stripped), or null. */
 	magicDnsName: string | null;
@@ -234,7 +242,13 @@ export async function fetchMeshPeers(
 
 /** Normalized webhook-ingress status (`GET /api/webhook-ingress/status`). */
 export interface WebhookIngressStatus {
-	/** Backend selector, e.g. "ryu_relay" | "tailscale_funnel" | "cloudflared". */
+	/**
+	 * Backend selector in Core's kebab wire form — `"ryu-relay"` |
+	 * `"tailscale-funnel"` | `"cloudflared"` | `"own-relay"`. Core emits
+	 * `IngressKind::as_str()` here exactly as it does on
+	 * `/api/webhook-ingress/backend`; render it through {@link ingressLabel}
+	 * rather than as-is.
+	 */
 	kind: string;
 	/** Resolved public URL, or null when not yet established. */
 	publicUrl: string | null;
@@ -289,6 +303,71 @@ interface RawIngressBackendConfig {
 }
 
 /**
+ * The canonical wire form of the BYO ("bring your own public URL") backend.
+ *
+ * Core's `IngressKind` serializes **kebab-case** (`IngressKind::as_str()` in
+ * `crates/core/webhook-ingress/src/lib.rs`), and `as_str()` is the only spelling
+ * `GET /api/webhook-ingress/backend` ever emits — for both `backend` and every
+ * entry of `available`.
+ */
+export const INGRESS_KIND_OWN_RELAY = "own-relay";
+
+/**
+ * The Core pref holding the BYO public base URL that `own-relay` needs
+ * (`ryu_webhook_ingress::INGRESS_URL_PREF`). Core reads it raw — `prefs.get(key)`
+ * → `Option<String>` handed straight to `from_prefs` — so the client writes the
+ * bare URL string, exactly like `mesh-login-server`. No JSON encoding.
+ */
+export const INGRESS_URL_PREF = "webhook.ingress.url";
+
+/**
+ * Whether `kind` is the BYO backend, i.e. the one that cannot produce a public
+ * URL on its own and therefore requires {@link INGRESS_URL_PREF} (or the
+ * `RYU_WEBHOOK_INGRESS_URL` env override) to be set.
+ *
+ * Comparison is separator- and case-insensitive because Core's `FromStr` accepts
+ * the `ownrelay` alias as well as the canonical `own-relay`; only the canonical
+ * form is emitted today, but a pref written by hand may hold the alias.
+ */
+export function isOwnRelayKind(kind: string): boolean {
+	return kind.trim().toLowerCase().replaceAll(/[-_]/g, "") === "ownrelay";
+}
+
+/**
+ * Friendly labels for the ingress backend kinds Core emits.
+ *
+ * The keys MUST stay byte-identical to `IngressKind::as_str()` (kebab-case). They
+ * were snake_case until 2026-07 and every label except `cloudflared` silently
+ * fell through to {@link ingressLabel}'s title-caser, rendering "Own-relay" —
+ * proof the own-relay path had never been exercised end to end.
+ */
+export const INGRESS_LABELS: Record<string, string> = {
+	"ryu-relay": "Ryu Relay (managed)",
+	"tailscale-funnel": "Tailscale Funnel",
+	cloudflared: "Cloudflare Tunnel",
+	"own-relay": "Self-hosted relay",
+};
+
+/**
+ * Label for an ingress backend kind. Falls back to a title-cased form for any
+ * kind not in {@link INGRESS_LABELS}, so a backend added in Core still renders
+ * sensibly without a desktop change. The fallback splits on BOTH `-` and `_`:
+ * Core emits kebab-case, and splitting on `_` alone is what made every
+ * multi-word kind render with a stray hyphen.
+ */
+export function ingressLabel(kind: string): string {
+	const known = INGRESS_LABELS[kind];
+	if (known) {
+		return known;
+	}
+	return kind
+		.split(/[-_]/)
+		.filter((part) => part.length > 0)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(" ");
+}
+
+/**
  * Fetch the configured webhook-ingress backend and the list of choices
  * (`GET /api/webhook-ingress/backend`). Throws on non-2xx (incl. 404 on an
  * older Core without the plane) so the caller can hide the picker.
@@ -313,7 +392,22 @@ export async function fetchIngressBackend(
  * Select the active webhook-ingress backend
  * (`POST /api/webhook-ingress/backend`). The change is persisted to a pref and
  * takes effect on the NEXT Core start — the ingress is built once at startup —
- * so the UI must say "applies on restart". Rejects an unknown backend with 400.
+ * so the UI must say "applies on restart".
+ *
+ * Throws (via `request`'s `ApiError`) on three rejections, each carrying an
+ * actionable message in the body's `error` field that callers should surface
+ * verbatim rather than replacing with their own text:
+ *
+ * - **400**, unknown backend;
+ * - **400**, `own-relay` selected while neither `webhook.ingress.url` nor
+ *   `RYU_WEBHOOK_INGRESS_URL` holds a usable absolute URL — the selection would
+ *   have been saved and reported as live with nothing able to receive a webhook;
+ * - **409**, `RYU_WEBHOOK_INGRESS_URL` is set in the node's environment, which
+ *   pins the backend to `own-relay`; any other kind would be persisted and then
+ *   permanently overridden.
+ *
+ * A caller must NOT treat a resolved promise as "the URL is configured" — the
+ * 409 case means the env supplies one this client cannot read.
  */
 export async function setIngressBackend(
 	target: ApiTarget,

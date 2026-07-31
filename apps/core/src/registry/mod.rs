@@ -17,6 +17,119 @@
 //! 2. `~/.ryu/registry.json` field (or `$RYU_REGISTRY_PATH`)
 //! 3. Built-in literal constant (last-resort fallback, documented below)
 //!
+//! # Which constructor you use decides whether layer 2 exists at all
+//!
+//! The chain above is what [`ProviderRegistry::load`] does. It is **not** what
+//! [`ProviderRegistry::from_env`] does: that constructor passes `None` down to
+//! `from_file_path`, so no file is ever opened and the chain collapses to
+//! *env → literal*. Both constructors still have production callers.
+//!
+//! That used to make "is this `registry.json` field live?" a question with a
+//! per-call-site answer, and several fields were live in one subsystem and dead in
+//! another. **That is no longer true, and must not become true again.** The file
+//! schema is now exactly the set of fields every one of whose consumers uses
+//! [`load`](ProviderRegistry::load); every field any `from_env()` consumer reads has
+//! had its file key *deleted*, so the two constructors cannot disagree about
+//! anything. See `from_env_and_load_agree_on_every_field_a_from_env_consumer_reads`
+//! for the guard that keeps it that way.
+//!
+//! ## The rule that decides which column a field lands in
+//!
+//! Not "is a per-call file read cheap?" — it always is. The question is
+//! **coherence**: does one consumer of this field produce a durable artifact that a
+//! *later, different* consumer must match?
+//!
+//! - **No artifact ⇒ convert the call site to `load()`.** `rag_strategy` is read
+//!   once per Space creation and stamped straight into the row; `reranker_model` /
+//!   `reranker_base_url` / `graph_extraction_model` are read once, at store open, and
+//!   nothing on disk encodes the previous answer. A mutable file re-read cannot
+//!   desync anything.
+//! - **An artifact ⇒ delete the file key, leave it env-only.** The nine
+//!   `local_*_model_{id,url,sha256}` values name a GGUF that
+//!   `sidecar::onboarding::install_local_stack` *downloads* at boot and a llama.cpp
+//!   sidecar *serves* arbitrarily later; the artifact is `~/.ryu/models/<id>.gguf`.
+//!   The three `embed_*` values decide the vector space of `spaces.db`,
+//!   `retrieval.db` and `message-embeddings.db`; the artifact is the stored vectors
+//!   (and, for `embed_dims`, the fixed width of the `chunk_vectors` vec0 table,
+//!   which `SpaceStore::open_at` does **not** reconcile — only the separate
+//!   embedding-model *preference* path triggers `apply_embedder_change` →
+//!   `reindex_all`). Making those file-backed does not fix a dead knob; it builds a
+//!   live corruption path.
+//!
+//! `embed_model` on its own looks convertible — every store tags each row with its
+//! `embed_model` and filters search to the current one, so a swap merely hides old
+//! content until a reindex. It is env-only anyway because it cannot be split from
+//! its companions: a file-settable model id with an env-only `embed_dims` lets an
+//! operator select a 1024-dim model that still declares 768 and fails at insert, and
+//! a file-settable `embed_base_url` repoints the server *without* changing the model
+//! id the per-row filter keys on — incommensurable vectors under one tag, silently.
+//!
+//! ## The resulting schema
+//!
+//! - **File-backed (all consumers on `load()`):** `default_agent_id`
+//!   (`server::list_agents` / `list_agent_catalog`, `main.rs` first-start install,
+//!   `sidecar::onboarding`); `default_llm_base_url` / `default_llm_model` /
+//!   `providers` (`sidecar::adapters`); `rag_strategy` (`server::create_space` via
+//!   `resolve_new_space_mode`); `reranker_model` / `reranker_base_url` /
+//!   `graph_extraction_model` (`server::spaces::open_default` and
+//!   `rag_host::open_retrieval_store`, both through [`crate::rag_host::retrieval_registry`]).
+//!   `reranker_base_url` carries a profile asterisk — it is file-backed on the
+//!   release profile and env-shadowed on every other one; see the `RYU_PROFILE`
+//!   section below.
+//! - **Env-only (no file key at all):** the three `embed_*` values, all nine
+//!   `local_*_model_*` values (chat, embed, rerank, classify). Swap them with the
+//!   matching `RYU_*` variable.
+//!
+//! Nothing is "settable but ignored" any more *on the release profile*, which is why
+//! there is no longer a boot-time warning listing divergent fields. On any other
+//! profile there is exactly one exception, and it is not a bug — see below.
+//!
+//! # `RYU_PROFILE` shadows part of this chain (the "I set it and nothing happened" case)
+//!
+//! [`crate::profile::apply_env_defaults`] runs at the top of `main` and seeds
+//! profile-derived defaults into the process environment for every **non-release**
+//! profile (`bun dev` defaults to `dev`; the release profile is an early-return
+//! no-op). It only sets a variable the operator left unset, so an explicit export
+//! still wins — but layer 1 of the precedence chain above is *env*, and the file is
+//! layer 2. A variable Core seeded for you therefore outranks your `registry.json`
+//! exactly as one you exported would.
+//!
+//! Of the eight variables `apply_env_defaults` seeds, **two** name a field of this
+//! registry — and they are shadowed to different degrees, only one of which is a
+//! setting the operator loses:
+//!
+//! - `RYU_EMBED_BASE_URL` → [`ProviderRegistry::embed_base_url`]. **Not a shadow.**
+//!   That field has no `registry.json` key, so the seed has no file layer to
+//!   outrank; it only replaces the built-in literal `:8081` with the profile's
+//!   `:9081`, which is the whole point — that is where the profile's own
+//!   `llamacpp-embed` listens.
+//! - `RYU_RERANKER_BASE_URL` → [`ProviderRegistry::reranker_base_url`]. **A real
+//!   shadow**, and the only one: the sole file-backed key in this schema whose env
+//!   twin the profile sets. `reranker_base_url` in `registry.json` therefore cannot
+//!   take effect for any developer on `dev` — correct under env > file, live on
+//!   release, inert everywhere else. It also flips the *other* reranker from local
+//!   to remote; see [`crate::rag_host::reranker_from_registry`].
+//!
+//! That is the complete set. The other six seeds (`RYU_BIND`, `RYU_GATEWAY_URL`,
+//! `GATEWAY_CONFIG`, `RYU_SHADOW_URL`, `RYU_RESEARCH_UPSTREAM`, and `RYU_DIR` —
+//! which names no field but relocates the *file*, see below) leave this schema
+//! alone. `registry_env_keys_shadowed_by_the_profile_defaults` re-derives the
+//! intersection from `profile.rs`'s own source and fails if a future seed lands on
+//! another registry key — because the failure mode of that edit is a `registry.json`
+//! key that goes quietly dead for everyone running a dev stack, with no error
+//! anywhere.
+//!
+//! ## Second-order: the file the chain reads is itself profile-relative
+//!
+//! [`registry_path`] falls back to `crate::paths::ryu_dir()`, and
+//! `paths::default_ryu_dir()` is suffixed by the profile (`.ryu{suffix}`) *on its
+//! own* — `RYU_DIR` being seeded merely pins that answer for child processes, it is
+//! not the cause, so unsetting `RYU_DIR` does not restore `~/.ryu` under `dev`.
+//! (`paths::resolve` also consults a data-dir pointer file between the env var and
+//! that default.) So on the `dev` profile every key in this schema is read from
+//! `~/.ryu-dev/registry.json`. Editing `~/.ryu/registry.json` and seeing nothing
+//! change is the expected outcome, not a dead key.
+//!
 //! # API keys
 //! API keys are intentionally **not** stored in `registry.json`. Keep them in
 //! environment variables (`RYU_DEFAULT_LLM_API_KEY` / `OPENAI_API_KEY`).
@@ -92,13 +205,41 @@ pub const DEFAULT_LOCAL_RERANKER_MODEL_URL: &str =
 /// Override via `RYU_LOCAL_RERANKER_MODEL_SHA256` (empty string skips verification).
 pub const DEFAULT_LOCAL_RERANKER_MODEL_SHA256: &str =
     "e186a244ed455b4ab66ec64339ce7427a6ae13f5c0b5e544de96e50f0f8b3673";
+
+/// Default local **classifier** model id (storage key + filename stem in
+/// `~/.ryu/models/`).
+///
+/// Gemma 3 270M IT, QAT Q4_0 (the `ggml-org` conversion) — a 270M
+/// instruction-tuned model, ~241 MB, CPU-friendly and publicly reachable without
+/// HF authentication. Served by the `llamacpp-classify` sidecar as the cheap
+/// **classify tier**.
+///
+/// This exists because the gateway's two guardrail consumers — the firewall's
+/// cheap-LLM inspector (`firewall.inspector.model`) and smart routing's
+/// `classifier_model` — used to resolve any `gemma-*` selection to the gateway's
+/// `local` provider, whose single base URL is the **resident chat engine**. One
+/// llama-server serves exactly one model, so picking a 270M classifier there
+/// silently ran the guardrail on the user's full-size chat model. There was no
+/// small model to point at; this is it.
+pub const DEFAULT_LOCAL_CLASSIFIER_MODEL_ID: &str = "gemma-3-270m-it-qat-Q4_0";
+
+/// Default local classifier weight URL. Override via `RYU_LOCAL_CLASSIFIER_MODEL_URL`.
+pub const DEFAULT_LOCAL_CLASSIFIER_MODEL_URL: &str =
+    "https://huggingface.co/ggml-org/gemma-3-270m-it-qat-GGUF/resolve/main/gemma-3-270m-it-qat-Q4_0.gguf";
+
+/// SHA-256 of the default classifier GGUF (241 410 624 bytes; verified reachable
+/// without HF authentication). Override via `RYU_LOCAL_CLASSIFIER_MODEL_SHA256`
+/// (empty string skips verification).
+pub const DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256: &str =
+    "3626e245220ca4a1c5911eb4010b3ecb7bdbf5bc53c79403c21355354d1e2dc6";
 /// Last-resort fallback: default chat provider base URL.
 pub const DEFAULT_LLM_BASE_URL: &str = "https://api.openai.com";
 /// Last-resort fallback: default chat model id.
 pub const DEFAULT_LLM_MODEL: &str = "gpt-4o-mini";
 /// Last-resort fallback: RAG strategy (vector | graph). Selects which retrieval
-/// algorithm is used when a Space does not carry its own `retrieval_mode` column
-/// value (e.g. older Spaces created before the GraphRAG unit).
+/// algorithm a **newly created** Space is stamped with when the creator does not
+/// name one — see [`ProviderRegistry::resolve_rag_strategy`] for why the node-wide
+/// default is a creation-time input and not a query-time fallback.
 pub const DEFAULT_RAG_STRATEGY: &str = "vector";
 /// Last-resort fallback: graph entity-extraction model id. The built-in
 /// deterministic extractor needs no model, but this config hook exists so
@@ -153,23 +294,51 @@ pub struct ProviderEntry {
     pub base_url: String,
 }
 
-/// A strategy entry: named algorithm/approach for a pipeline step.
-///
-/// Examples: `{ id: "rag_strategy", value: "vector" }`,
-/// `{ id: "rag_strategy", value: "graphrag" }`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StrategyEntry {
-    /// Stable identifier for the pipeline step (e.g. `"rag_strategy"`).
-    pub id: String,
-    /// Chosen algorithm/value for that step.
-    pub value: String,
-}
+// NOTE: there was a `StrategyEntry` type and a `strategies: Vec<StrategyEntry>`
+// field here. Both are gone. Nothing ever read an entry's `value` — the array was
+// parsed, stored, and then only *counted* (`main.rs` logged `strategies_count`), so
+// it was a settable value that could not take effect, plus a boot line advertising
+// it. Worse, the type's own example was `{ id: "rag_strategy", value: "graphrag" }`,
+// which names the same key as the live top-level `rag_strategy` field: an operator
+// following it wrote `{"strategies":[{"id":"rag_strategy","value":"graph"}]}`, got a
+// file that parsed cleanly, and every Space was still created as `vector`. The live
+// knob is the top-level `"rag_strategy"` key — see
+// [`ProviderRegistry::resolve_rag_strategy`]. Do not re-add a forward-looking schema
+// slot with no reader; add the reader first.
 
 /// Entry for a local GGUF weight file (chat model downloaded for llama.cpp).
 ///
-/// The download URL and expected SHA-256 are read from the registry so the
-/// bundled model is swappable via env vars (or `registry.json`) without recompiling.
+/// The download URL and expected SHA-256 are read from the registry so the bundled
+/// model is swappable without recompiling.
 /// Zero-setup headline: the default URL is publicly accessible without any API key.
+///
+/// # Swappable via `RYU_LOCAL_*_MODEL_{ID,URL,SHA256}` env vars **only**
+///
+/// `RegistryFile` deliberately carries no `local_*_model_*` key — not for chat, not
+/// for embed, not for rerank, not for classify. Writing one into `registry.json`
+/// parses (serde ignores unknown fields) and changes nothing, by design; the env var
+/// is the swap seam.
+///
+/// The keys used to exist, and that was the bug. `sidecar::onboarding`
+/// (which resolves the URL + SHA-256 to *fetch*) and every
+/// `sidecar::providers::llamacpp` process launcher (which resolves `weight_path()`
+/// to *serve*) build with [`ProviderRegistry::from_env`], so an operator who
+/// redirected `local_chat_model_url` in the file still downloaded the built-in
+/// weight, with no error — a settable value that could not take effect.
+///
+/// They were deleted rather than wired up because these three triples are the
+/// textbook artifact case (see the module header). The download happens once, in a
+/// background task at boot; the serve happens arbitrarily later, when a sidecar is
+/// lazily started; `model_catalog_host::default_model_repos` and
+/// `server::get_active_model` *report* the id to clients later still. A mutable file
+/// re-read per call lets an operator desync those moments mid-session: the sidecar
+/// looks for a GGUF nobody downloaded, refuses to start, and the error blames
+/// onboarding. Freezing the answer per process — which is what `from_env` does —
+/// makes all of them agree by construction.
+///
+/// Fixing it "properly" therefore means unifying the consumers onto ONE
+/// process-lifetime resolution first (a `OnceLock`, or a value threaded from boot),
+/// not sprinkling `load()` calls. Until someone does that, do not re-add the keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalModelEntry {
     /// Model identifier used to name the file in `~/.ryu/models/` and in the
@@ -197,6 +366,21 @@ impl LocalModelEntry {
 /// Raw JSON shape of `~/.ryu/registry.json` (or `$RYU_REGISTRY_PATH`).
 /// All fields are optional so a partial file is always valid — missing fields
 /// fall through to env vars, then to built-in literals.
+///
+/// # Every field here is read by consumers that all use [`ProviderRegistry::load`]
+///
+/// That is the invariant, not a coincidence, and it is what makes the per-field
+/// "or `registry.json`" phrasing elsewhere in this module true rather than
+/// aspirational. Adding a key whose consumers build with
+/// [`ProviderRegistry::from_env`] re-creates the exact defect this schema was
+/// trimmed to remove: a value an operator can set, that parses, and that nothing
+/// reads. `from_env_and_load_agree_on_every_field_a_from_env_consumer_reads` fails
+/// if you do.
+///
+/// Deliberately **not** `deny_unknown_fields`: an operator whose file still carries
+/// one of the deleted keys must keep booting (the key is inert, exactly as it
+/// effectively was before), not have the whole file fail to parse and fail open to
+/// defaults — which would silently discard the keys that *do* work.
 #[derive(Debug, Default, Deserialize)]
 struct RegistryFile {
     /// Default chat provider base URL (overridden by `RYU_DEFAULT_LLM_BASE_URL`).
@@ -205,61 +389,47 @@ struct RegistryFile {
     /// Default chat model id (overridden by `RYU_DEFAULT_LLM_MODEL`).
     #[serde(default)]
     default_llm_model: Option<String>,
-    /// Embedding model id (overridden by `RYU_EMBED_MODEL`).
-    #[serde(default)]
-    embed_model: Option<String>,
-    /// Embedding output dimensionality (overridden by `RYU_EMBED_DIMS`).
-    #[serde(default)]
-    embed_dims: Option<usize>,
-    /// Embeddings endpoint base URL (overridden by `RYU_EMBED_BASE_URL`).
-    #[serde(default)]
-    embed_base_url: Option<String>,
-    /// Local embedding model id for the bundled GGUF (overridden by `RYU_LOCAL_EMBED_MODEL_ID`).
-    #[serde(default)]
-    local_embed_model_id: Option<String>,
-    /// Local embedding model weight URL (overridden by `RYU_LOCAL_EMBED_MODEL_URL`).
-    #[serde(default)]
-    local_embed_model_url: Option<String>,
-    /// Local embedding model SHA-256 (overridden by `RYU_LOCAL_EMBED_MODEL_SHA256`).
-    #[serde(default)]
-    local_embed_model_sha256: Option<String>,
-    /// Reranker model id (overridden by `RYU_RERANKER_MODEL`).
+    // NOTE: there is deliberately no `embed_model` / `embed_dims` /
+    // `embed_base_url` here, and no `local_{chat,embed,reranker,classifier}_model_*`
+    // triple. All twelve are env-only; the module header carries the artifact
+    // argument, and the per-field docs on [`ProviderRegistry::embedder`],
+    // [`LocalModelEntry`] and [`ProviderRegistry::local_classifier_model`] carry the
+    // specifics. Every one of them was previously a parsed key that no consumer
+    // could see, because their consumers build with [`ProviderRegistry::from_env`].
+    // Do not re-add one without first converting ALL of that field's consumers to a
+    // value resolved ONCE per process — several independent `load()` calls at
+    // several different moments is strictly worse than the env-only they replace.
+    /// Reranker model id (overridden by `RYU_RERANKER_MODEL`). Read once, at
+    /// `rag_host::open_retrieval_store`; reranking persists nothing, so there is no
+    /// artifact a later read could desync from.
+    ///
+    /// "Read" is not "observed": of the two places `open_retrieval_store` puts this
+    /// value, only one is a behaviour. See [`ProviderRegistry::reranker`] for the
+    /// accounting — the short version is that it names the model in the outbound
+    /// `/rerank` request *when the retrieval reranker is remote at all*, and is
+    /// otherwise carried unread.
     #[serde(default)]
     reranker_model: Option<String>,
-    /// Reranker endpoint base URL (overridden by `RYU_RERANKER_BASE_URL`).
+    /// Reranker endpoint base URL (overridden by `RYU_RERANKER_BASE_URL`). Read by
+    /// `rag_host::reranker_local_server` — see [`ProviderRegistry::reranker_base_url`]
+    /// for which reranker that is and which one ignores it.
+    ///
+    /// Inert on every non-release profile: `profile::apply_env_defaults` seeds
+    /// `RYU_RERANKER_BASE_URL` itself, and env outranks file. See the `RYU_PROFILE`
+    /// section of the module header.
     #[serde(default)]
     reranker_base_url: Option<String>,
-    /// Local reranker model id for the bundled GGUF (overridden by `RYU_LOCAL_RERANKER_MODEL_ID`).
-    #[serde(default)]
-    local_reranker_model_id: Option<String>,
-    /// Local reranker model weight URL (overridden by `RYU_LOCAL_RERANKER_MODEL_URL`).
-    #[serde(default)]
-    local_reranker_model_url: Option<String>,
-    /// Local reranker model SHA-256 (overridden by `RYU_LOCAL_RERANKER_MODEL_SHA256`).
-    #[serde(default)]
-    local_reranker_model_sha256: Option<String>,
     /// Default RAG strategy: "vector" | "graph". Overridden by `RYU_RAG_STRATEGY`.
     /// Per-Space `retrieval_mode` column takes precedence over this global default.
     #[serde(default)]
     rag_strategy: Option<String>,
     /// Graph entity-extraction model id (overridden by `RYU_GRAPH_EXTRACTION_MODEL`).
+    /// Read once, at `server::spaces::open_default`, and held by the store.
     #[serde(default)]
     graph_extraction_model: Option<String>,
-    /// Local chat model id for the bundled GGUF (overridden by `RYU_LOCAL_CHAT_MODEL_ID`).
-    #[serde(default)]
-    local_chat_model_id: Option<String>,
-    /// Local chat model weight URL (overridden by `RYU_LOCAL_CHAT_MODEL_URL`).
-    #[serde(default)]
-    local_chat_model_url: Option<String>,
-    /// Local chat model SHA-256 (overridden by `RYU_LOCAL_CHAT_MODEL_SHA256`).
-    #[serde(default)]
-    local_chat_model_sha256: Option<String>,
     /// Named provider entries (supplemental; not used by built-in routing yet).
     #[serde(default)]
     providers: Vec<ProviderEntry>,
-    /// Named strategy entries (supplemental).
-    #[serde(default)]
-    strategies: Vec<StrategyEntry>,
     /// Default agent id to auto-install + enable on first start (U041).
     /// Overridden by `RYU_DEFAULT_AGENT` env var.
     #[serde(default)]
@@ -302,43 +472,205 @@ pub struct ProviderRegistry {
     pub default_llm_model: String,
 
     // ── RAG models ────────────────────────────────────────────────────────────
-    /// Embedding model used for RAG (Spaces + retrieval).
+    /// Embedding model used for RAG (Spaces + retrieval): id and output dims.
+    ///
+    /// # Env-only (`RYU_EMBED_MODEL` / `RYU_EMBED_DIMS`). No `registry.json` key.
+    ///
+    /// Five consumers read this at two classes of moment — the three stores opened
+    /// once at boot (`server::spaces::open_default` → `spaces.db`,
+    /// `rag_host::open_retrieval_store` → `retrieval.db`,
+    /// `search_host::open_default_message_index` → `message-embeddings.db`) and two
+    /// per-use rankers (`tool_registry_host`, `agent_routing::auto`). The artifact is
+    /// the stored vectors, and for `dims` specifically the fixed width of the
+    /// `chunk_vectors` vec0 table.
+    ///
+    /// `dims` is the one that makes this env-only rather than convertible.
+    /// `SpaceStore::open_at` runs `CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors
+    /// … float[dims]` and does **not** reconcile a width that no longer matches —
+    /// only `apply_embedder_change` → `reindex_all` does, and that fires solely from
+    /// the separate embedding-model *preference* path. A file-settable `dims` would
+    /// therefore let one edit break every Space insert on the next boot, with the
+    /// store reporting healthy. `id` cannot be split from it (a 1024-dim model
+    /// declared at 768 fails at insert), and `embed_base_url` cannot either (see its
+    /// own doc). So the whole trio stays on env, where changing it is at least a
+    /// deliberate act at the same layer as `RYU_LOCAL_EMBED_MODEL_ID`, which selects
+    /// the GGUF actually being served.
     pub embedder: ModelEntry,
     /// Base URL of the OpenAI-compatible embeddings endpoint (no `/v1` suffix).
     /// Defaults to the local `llamacpp-embed` server; `RYU_EMBED_BASE_URL` overrides.
+    ///
+    /// **Env-only, no `registry.json` key** — and for a sharper reason than
+    /// [`Self::embedder`]. Every store tags each row with its `embed_model` and
+    /// filters search to the current one, so a *model* swap merely hides old content
+    /// until a reindex. Repointing the base URL changes which server answers while
+    /// leaving that tag unchanged, so vectors from two different backends land under
+    /// one id and are compared as though commensurable. No error, just worse results.
     pub embed_base_url: String,
     /// Local embedding model: the GGUF weight served by the dedicated llama.cpp
-    /// `--embeddings` instance for zero-setup semantic RAG. Swappable via env or
-    /// `registry.json` like the chat model.
+    /// `--embeddings` instance for zero-setup semantic RAG. Swappable via
+    /// `RYU_LOCAL_EMBED_MODEL_{ID,URL,SHA256}` **only** — `registry.json` has no key
+    /// for it, because `sidecar::onboarding` downloads the weight and
+    /// `llamacpp::embed` serves it at a different moment. See [`LocalModelEntry`].
     pub local_embed_model: LocalModelEntry,
     /// Reranker model used to re-score top-K retrieval candidates.
+    ///
+    /// File-backed (`reranker_model`), read once by
+    /// [`crate::rag_host::open_retrieval_store`] through
+    /// [`crate::rag_host::retrieval_registry`] (`load()`). Reranking is a pure
+    /// scoring call that persists nothing, so there is no artifact for a later read
+    /// to desync from — that is what makes it *convertible*, not what makes it
+    /// observable.
+    ///
+    /// # Exactly one branch observes it — not two
+    ///
+    /// `open_retrieval_store` puts this value in two places, and only the first is a
+    /// behaviour:
+    ///
+    /// 1. **The remote branch of [`crate::rag_host::reranker_from_registry`].** When
+    ///    `RYU_RERANKER_BASE_URL` is set, this id becomes `Reranker::Remote { model }`
+    ///    and is sent as `"model"` in the `POST {base}/rerank` body. That is the
+    ///    entire observable effect of the `reranker_model` key. The env var is the
+    ///    only switch — unset ⇒ `Reranker::Local`, which ignores the id — so on the
+    ///    **release** profile this branch is opt-in and off by default, while on
+    ///    every **non-release** profile it is unconditionally on, because
+    ///    `profile::apply_env_defaults` sets that variable. The key is thus *more*
+    ///    live for a developer on `dev` than for a user on release.
+    /// 2. **`RetrievalStore`'s `reranker_model_id` field**, passed as the id the
+    ///    store "reports". Nothing reports it: `RetrievalStore::reranker_model_id()`
+    ///    (`crates/core/rag/src/lib.rs`) has no caller in this workspace outside that
+    ///    crate's own unit test, and neither does its symmetric twin
+    ///    `embedder_model_id()`. They are public accessors on the published
+    ///    `ryu-rag` crate — API surface for an out-of-workspace consumer, not a live
+    ///    read — so do not describe this field as "the id the store reports"; nothing
+    ///    downstream of Core surfaces it.
+    ///
+    /// It is also **not** the id the Spaces reranker uses.
+    /// [`crate::rag_host::reranker_local_server`] passes
+    /// [`Self::local_reranker_model`]`.id` — a different field, naming the GGUF the
+    /// `llamacpp-rerank` sidecar actually serves. Setting `reranker_model` expecting
+    /// Space search to change is the mistake this paragraph exists to prevent.
     pub reranker: ModelEntry,
     /// Base URL of the OpenAI-compatible reranker endpoint (no `/v1` suffix).
-    /// Defaults to the local `llamacpp-rerank` server; `RYU_RERANKER_BASE_URL`
-    /// overrides to point at a remote cross-encoder scoring endpoint.
+    /// Defaults to the local `llamacpp-rerank` server.
+    ///
+    /// # Exactly one reader — say which, because the other reranker ignores it
+    ///
+    /// [`crate::rag_host::reranker_local_server`] (the Spaces reranker, built in
+    /// `server::spaces::open_default`) resolves `RYU_RERANKER_BASE_URL` and falls
+    /// back to this field, so `registry.json` reaches it.
+    /// [`crate::rag_host::reranker_from_registry`] (the `retrieval.db` reranker) does
+    /// **not** consult this field at all: it is opt-in remote, keyed solely on
+    /// `RYU_RERANKER_BASE_URL` being set, and stays `Reranker::Local` otherwise.
+    /// That asymmetry is deliberate — routing it through this field would silently
+    /// flip `retrieval.db` from local term-overlap to always-remote against a server
+    /// that is off by default.
+    ///
+    /// # …and on a non-release profile even that one reader cannot see it
+    ///
+    /// [`crate::profile::apply_env_defaults`] unconditionally seeds
+    /// `RYU_RERANKER_BASE_URL` to the profile's shifted rerank port (`:9082` on
+    /// `dev`) for every profile except `release`, and `reranker_local_server` prefers
+    /// the env var over this field. `registry.json`'s `reranker_base_url` therefore
+    /// takes effect **only on the release profile** — which is to say: not for any
+    /// developer running `bun dev`, whose default profile is `dev`. This is correct
+    /// under the documented env > file precedence and the key is genuinely live in
+    /// release; it is called out because "I set `reranker_base_url` and nothing
+    /// happened" has a profile answer, not a wiring answer. Export the variable
+    /// yourself (an explicit value beats the seed) or run `RYU_PROFILE=release`.
+    ///
+    /// It is the **only** file-backed key in this schema with that asterisk; the
+    /// module header's `RYU_PROFILE` section carries the whole set and the guard test
+    /// that keeps it complete.
     pub reranker_base_url: String,
     /// Local reranker model: the GGUF cross-encoder served by the dedicated
     /// llama.cpp `--reranking` instance for zero-setup neural reranking of Spaces
-    /// RAG. Swappable via env or `registry.json` like the embedding model.
+    /// RAG. Swappable via `RYU_LOCAL_RERANKER_MODEL_{ID,URL,SHA256}` **only** —
+    /// `registry.json` has no key for it, because `sidecar::onboarding` downloads the
+    /// weight and `llamacpp::rerank` serves it at a different moment (its lazy start
+    /// on first Space search, arbitrarily later). See [`LocalModelEntry`].
     pub local_reranker_model: LocalModelEntry,
+    /// Local classifier model: the small GGUF served by the dedicated
+    /// `llamacpp-classify` llama.cpp instance as the cheap **classify tier** the
+    /// gateway's firewall inspector and smart-routing classifier route to. Not a
+    /// RAG model — it lives beside the other local-model entries because it is the
+    /// same kind of swappable, onboarding-downloaded GGUF default.
+    ///
+    /// # Env-only. `registry.json` has no key for this, on purpose.
+    ///
+    /// Swap it with `RYU_LOCAL_CLASSIFIER_MODEL_{ID,URL,SHA256}`. There is no
+    /// `local_classifier_model_*` field in [`RegistryFile`], so the file cannot
+    /// configure it — and unlike the other env-only entries here, that is a design
+    /// decision rather than a `from_env()` call site nobody has converted yet. It
+    /// previously *had* those keys while no consumer called [`load`], which is the
+    /// worst of both: a settable key that did nothing.
+    ///
+    /// The reason it must not become file-backed by simply converting its callers:
+    /// this triple is read by **three consumers at three different moments in one
+    /// process lifetime**, and they must agree or the tier breaks.
+    ///
+    /// 1. `sidecar::onboarding::install_local_stack` — downloads the GGUF to
+    ///    `~/.ryu/models/<id>.gguf`, once, from a background task at boot.
+    /// 2. `sidecar::gateway::classify_model_id` — publishes the id to the gateway
+    ///    (`RYU_CLASSIFY_MODEL_ID`) at gateway spawn, *and* re-resolves it on every
+    ///    `PUT /v1/config` push to decide whether the pushed config selects this
+    ///    tier (`patch_selects_classify_tier`).
+    /// 3. `llamacpp::classify` — resolves `weight_path()` when that push lazily
+    ///    starts the sidecar, arbitrarily long after (1).
+    ///
+    /// `from_env()` freezes the answer for the whole process, so all three agree by
+    /// construction. `load()` re-reads a mutable file per call, so an operator
+    /// editing `registry.json` mid-session would make (2) publish and route an id
+    /// whose weight (1) never downloaded; (3) then bails on a missing path, the
+    /// tier never starts, and the firewall inspector / smart-routing classifier /
+    /// LLM-judge evaluators **fail open** — traffic passes unscanned. Silent, and
+    /// security-relevant.
+    ///
+    /// Contrast `rag_strategy`, which *was* correctly converted to [`load`]: it is
+    /// read once per request and immediately stamped into a `spaces` row, so it has
+    /// no cross-moment coherence requirement to violate. Same-shaped knob, different
+    /// consumption pattern, different correct answer. Making this one file-backed
+    /// needs the three consumers unified onto one process-lifetime resolution first
+    /// (a `OnceLock`, or a value threaded from boot) — not three `load()` calls.
+    ///
+    /// This field was the first to be resolved that way. The other three local-model
+    /// triples have since joined it on the same argument; see [`LocalModelEntry`].
+    pub local_classifier_model: LocalModelEntry,
     /// Default RAG strategy for Spaces that have no per-Space `retrieval_mode`
     /// set. One of `"vector"` or `"graph"`. Defaults to `"vector"`.
+    /// File-backed (`rag_strategy`) and live — `server::create_space` uses [`load`].
     pub rag_strategy: String,
-    /// Graph entity-extraction model id. The built-in `"local-cooccurrence"`
-    /// extractor runs offline; set this to a remote model id to use an LLM.
+    /// Graph entity-extraction model id.
+    ///
+    /// **Recorded, not yet consumed.** The value is read from the file and carried
+    /// into `SpaceStore`, but nothing branches on it: `extract_entities` takes only
+    /// `&str` and always runs the built-in offline co-occurrence extractor, and
+    /// `SpaceStore::graph_extraction_model_id()` has no production caller. Setting
+    /// this to a remote model id does **not** switch extraction to an LLM — that is
+    /// a future hook, and the field on `SpaceStore` says the same.
+    ///
+    /// Reaching the struct is not the same as taking effect. Do not describe this as
+    /// live until something reads it; a settable value that changes no behaviour is
+    /// the defect this module's per-field audit exists to prevent.
     pub graph_extraction_model: String,
 
     // ── Local inference stack ─────────────────────────────────────────────────
     /// Default local chat model: the GGUF weight served by llama.cpp for zero-setup
-    /// no-key chat. Overridable via env or `registry.json` so users can swap to any
-    /// GGUF they prefer without recompiling.
+    /// no-key chat. Swappable via `RYU_LOCAL_CHAT_MODEL_{ID,URL,SHA256}` so users can
+    /// swap to any GGUF they prefer without recompiling.
+    ///
+    /// **Env-only; `registry.json` has no key for it.** It used to have one, which
+    /// made this the worst field in the registry: honoured by `pi_config` (`load()`)
+    /// and ignored by `sidecar::onboarding` (downloads the weight),
+    /// `llamacpp::{mod,process}` (serves it), `model_catalog_host` and
+    /// `get_active_model` (report it) — so setting it made the managed Pi declare a
+    /// model id that llama.cpp was not serving. Deleting the key is what makes
+    /// `pi_config`'s `load()` and everyone else's `from_env()` agree by construction.
+    /// See [`LocalModelEntry`].
     pub local_chat_model: LocalModelEntry,
 
     // ── Supplemental entries ─────────────────────────────────────────────────
     /// Named provider entries loaded from the file (supplemental).
     pub providers: Vec<ProviderEntry>,
-    /// Named strategy entries loaded from the file (supplemental).
-    pub strategies: Vec<StrategyEntry>,
 
     // ── Default agent (U041) ─────────────────────────────────────────────────
     /// Agent id that is auto-installed + enabled on first Core start.
@@ -361,8 +693,16 @@ impl ProviderRegistry {
         Self::from_file_path(path.as_deref())
     }
 
-    /// Load from an explicit file path (useful for tests). Pass `None` to skip
-    /// file loading and use only env vars + built-in literals.
+    /// Load from an explicit file path. **No production caller uses this** — it is
+    /// a test/injection helper only.
+    ///
+    /// That matters when writing tests: a test that proves "`registry.json` field X
+    /// takes effect" by calling `from_file` proves nothing about production, because
+    /// production reaches the file through [`load`](Self::load) →
+    /// [`registry_path`] → `$RYU_REGISTRY_PATH` / `~/.ryu/registry.json`. A test of
+    /// that shape passed for `rag_strategy` while the shipped path read no file at
+    /// all. Prove file-backed behaviour with `load()` + a `RYU_REGISTRY_PATH`
+    /// override instead (see `rag_strategy_reads_registry_file_via_load`).
     pub fn from_file(path: &std::path::Path) -> Self {
         Self::from_file_path(Some(path))
     }
@@ -385,32 +725,33 @@ impl ProviderRegistry {
             file.default_llm_model,
             DEFAULT_LLM_MODEL,
         );
-        let embed_id =
-            env_or_file_or_literal("RYU_EMBED_MODEL", file.embed_model, DEFAULT_EMBED_MODEL);
+        // Embedding trio: env → literal, with `None` where every other file-backed
+        // field passes `file.*`. The vector space of three on-disk indexes hangs off
+        // these, and `SpaceStore::open_at` does not reconcile a changed vec0 width —
+        // see [`ProviderRegistry::embedder`] and [`ProviderRegistry::embed_base_url`].
+        let embed_id = env_or_file_or_literal("RYU_EMBED_MODEL", None, DEFAULT_EMBED_MODEL);
         let embed_dims = std::env::var("RYU_EMBED_DIMS")
             .ok()
             .filter(|s| !s.is_empty())
             .and_then(|s| s.parse::<usize>().ok())
-            .or(file.embed_dims)
             .unwrap_or(DEFAULT_EMBED_DIMS);
-        let embed_base_url = env_or_file_or_literal(
-            "RYU_EMBED_BASE_URL",
-            file.embed_base_url,
-            DEFAULT_EMBED_BASE_URL,
-        );
+        let embed_base_url =
+            env_or_file_or_literal("RYU_EMBED_BASE_URL", None, DEFAULT_EMBED_BASE_URL);
+        // Local GGUF triples (embed / rerank / chat / classify): env → literal, no
+        // file layer. One consumer downloads the weight, another serves it much
+        // later — see [`LocalModelEntry`].
         let embed_model_id = env_or_file_or_literal(
             "RYU_LOCAL_EMBED_MODEL_ID",
-            file.local_embed_model_id,
+            None,
             DEFAULT_LOCAL_EMBED_MODEL_ID,
         );
         let embed_model_url = env_or_file_or_literal(
             "RYU_LOCAL_EMBED_MODEL_URL",
-            file.local_embed_model_url,
+            None,
             DEFAULT_LOCAL_EMBED_MODEL_URL,
         );
         let embed_model_sha256 = std::env::var("RYU_LOCAL_EMBED_MODEL_SHA256")
             .ok()
-            .or(file.local_embed_model_sha256)
             .unwrap_or_else(|| DEFAULT_LOCAL_EMBED_MODEL_SHA256.to_owned());
         let reranker_id = env_or_file_or_literal(
             "RYU_RERANKER_MODEL",
@@ -424,18 +765,30 @@ impl ProviderRegistry {
         );
         let reranker_model_id = env_or_file_or_literal(
             "RYU_LOCAL_RERANKER_MODEL_ID",
-            file.local_reranker_model_id,
+            None,
             DEFAULT_LOCAL_RERANKER_MODEL_ID,
         );
         let reranker_model_url = env_or_file_or_literal(
             "RYU_LOCAL_RERANKER_MODEL_URL",
-            file.local_reranker_model_url,
+            None,
             DEFAULT_LOCAL_RERANKER_MODEL_URL,
         );
         let reranker_model_sha256 = std::env::var("RYU_LOCAL_RERANKER_MODEL_SHA256")
             .ok()
-            .or(file.local_reranker_model_sha256)
             .unwrap_or_else(|| DEFAULT_LOCAL_RERANKER_MODEL_SHA256.to_owned());
+        let classifier_model_id = env_or_file_or_literal(
+            "RYU_LOCAL_CLASSIFIER_MODEL_ID",
+            None,
+            DEFAULT_LOCAL_CLASSIFIER_MODEL_ID,
+        );
+        let classifier_model_url = env_or_file_or_literal(
+            "RYU_LOCAL_CLASSIFIER_MODEL_URL",
+            None,
+            DEFAULT_LOCAL_CLASSIFIER_MODEL_URL,
+        );
+        let classifier_model_sha256 = std::env::var("RYU_LOCAL_CLASSIFIER_MODEL_SHA256")
+            .ok()
+            .unwrap_or_else(|| DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256.to_owned());
         let rag_strategy =
             env_or_file_or_literal("RYU_RAG_STRATEGY", file.rag_strategy, DEFAULT_RAG_STRATEGY);
         let graph_extraction_model = env_or_file_or_literal(
@@ -444,21 +797,17 @@ impl ProviderRegistry {
             DEFAULT_GRAPH_EXTRACTION_MODEL,
         );
 
-        let chat_model_id = env_or_file_or_literal(
-            "RYU_LOCAL_CHAT_MODEL_ID",
-            file.local_chat_model_id,
-            DEFAULT_LOCAL_CHAT_MODEL_ID,
-        );
+        let chat_model_id =
+            env_or_file_or_literal("RYU_LOCAL_CHAT_MODEL_ID", None, DEFAULT_LOCAL_CHAT_MODEL_ID);
         let chat_model_url = env_or_file_or_literal(
             "RYU_LOCAL_CHAT_MODEL_URL",
-            file.local_chat_model_url,
+            None,
             DEFAULT_LOCAL_CHAT_MODEL_URL,
         );
         // SHA256 is special: empty string is a valid value (disables verify), so we
         // preserve it even when empty; the literal default is the known good hash.
         let chat_model_sha256 = std::env::var("RYU_LOCAL_CHAT_MODEL_SHA256")
             .ok()
-            .or(file.local_chat_model_sha256)
             .unwrap_or_else(|| DEFAULT_LOCAL_CHAT_MODEL_SHA256.to_owned());
 
         let default_agent_id =
@@ -487,6 +836,11 @@ impl ProviderRegistry {
                 weight_url: reranker_model_url,
                 sha256: reranker_model_sha256,
             },
+            local_classifier_model: LocalModelEntry {
+                id: classifier_model_id,
+                weight_url: classifier_model_url,
+                sha256: classifier_model_sha256,
+            },
             rag_strategy,
             graph_extraction_model,
             local_chat_model: LocalModelEntry {
@@ -495,7 +849,6 @@ impl ProviderRegistry {
                 sha256: chat_model_sha256,
             },
             providers: file.providers,
-            strategies: file.strategies,
             default_agent_id,
         }
     }
@@ -513,13 +866,51 @@ fn env_or_file_or_literal(env_key: &str, file_val: Option<String>, literal: &str
 }
 
 /// Resolve the registry file path: `$RYU_REGISTRY_PATH` or `~/.ryu/registry.json`.
+///
+/// # Under `cfg(test)` the unset case is a temp path, never `~/.ryu`
+///
+/// [`RegistryEnvGuard`] *clears* `RYU_REGISTRY_PATH`, and in production an unset var
+/// means the operator's real `~/.ryu/registry.json`. Composed, that pointed guarded
+/// tests at the developer's own config file — and worse, it did so for every
+/// [`ProviderRegistry::load`] caller in the crate, including ones in other modules'
+/// tests that never take [`lock_registry_env`] and so could not know to set the var
+/// (`pi_config`'s `default_gateway_model` is the live example).
+///
+/// The per-test discipline "always positively set `RYU_REGISTRY_PATH`" cannot hold
+/// that line: it has to be re-obeyed by every future test, in every module, that
+/// happens to reach a `load()` several calls down. So the fallback itself is made
+/// hermetic — under test the unset case resolves to a path inside the temp dir that
+/// deliberately does not exist, which yields the built-in defaults exactly as a
+/// fresh install does. Setting the var still works and is still the way to prove
+/// file-backed behaviour; it is just no longer load-bearing for isolation.
+///
+/// See [`default_registry_path`] for the two definitions of the unset case.
 fn registry_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("RYU_REGISTRY_PATH") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
         }
     }
-    Some(crate::paths::ryu_dir().join("registry.json"))
+    Some(default_registry_path())
+}
+
+/// Where [`registry_path`] looks when `RYU_REGISTRY_PATH` is unset: the operator's
+/// real config file.
+#[cfg(not(test))]
+fn default_registry_path() -> PathBuf {
+    crate::paths::ryu_dir().join("registry.json")
+}
+
+/// The `cfg(test)` twin of [`default_registry_path`]: a path in the temp dir that is
+/// never created, so an unset `RYU_REGISTRY_PATH` yields the built-in defaults
+/// exactly as a fresh install does — rather than whatever is in the developer's
+/// `~/.ryu`.
+///
+/// The process id keeps concurrent `cargo test` invocations from colliding. Nothing
+/// ever writes here; the point of the path is that it is absent.
+#[cfg(test)]
+fn default_registry_path() -> PathBuf {
+    std::env::temp_dir().join(format!("ryu-registry-absent-{}.json", std::process::id()))
 }
 
 // ── Backward-compat alias (retrieval.rs + existing tests call ModelRegistry) ──
@@ -529,9 +920,42 @@ pub type ModelRegistry = ProviderRegistry;
 
 impl ProviderRegistry {
     /// Backward-compat constructor mirroring the old `ModelRegistry::from_env()`.
-    /// Equivalent to `ProviderRegistry::load()` except it skips file loading and
-    /// reads only env vars + built-in literals. Used by retrieval tests that set
-    /// env vars and expect immediate reflection.
+    /// Equivalent to [`ProviderRegistry::load`] except it skips file loading and
+    /// reads only env vars + built-in literals.
+    ///
+    /// # This is not a test-only constructor
+    ///
+    /// The previous wording here ("used by retrieval tests that set env vars and
+    /// expect immediate reflection") was false and cost a bug: it reads as though
+    /// production always goes through `load()`, so a new call site can pick
+    /// `from_env()` and silently lose the `registry.json` layer. `server::create_space`
+    /// did exactly that — `registry.json {"rag_strategy":"graph"}` was inert while
+    /// three doc comments promised it worked.
+    ///
+    /// # It is now safe *because of what its callers read*, not because it is safe
+    ///
+    /// The remaining production callers are `search_host::CoreSearchEmbedder`,
+    /// `model_catalog_host::default_model_repos`, `sidecar::gateway::classify_model_id`,
+    /// `sidecar::providers::llamacpp` (`mod`/`process`/`embed`/`rerank`/`classify`),
+    /// `sidecar::onboarding::install_local_stack`, and `server::get_active_model`.
+    /// Every one of them reads **only** fields that have no `registry.json` key at
+    /// all — the `embed_*` trio and the four local-GGUF triples — so for them
+    /// `from_env()` and [`load`](Self::load) return identical values and the choice
+    /// of constructor is not observable. That is the invariant, and
+    /// `from_env_and_load_agree_on_every_field_a_from_env_consumer_reads` enforces
+    /// it.
+    ///
+    /// It did not use to hold, and the cost was a class of bug rather than one bug:
+    /// `server::create_space` picked `from_env` and `registry.json {"rag_strategy":
+    /// "graph"}` was inert while three doc comments promised it worked; the embed
+    /// fields were live for the tool ranker and dead for Spaces ingest at the same
+    /// time.
+    ///
+    /// So: prefer [`load`](Self::load) in new code. Reach for `from_env` only when
+    /// the fields you read have no file key (say which, at the call site), or when
+    /// file loading is genuinely unwanted (a test that must not read the operator's
+    /// real `~/.ryu/registry.json`). If you need a field that *is* file-backed, use
+    /// `load()` — do not add a file key for a field this constructor's callers read.
     pub fn from_env() -> Self {
         Self::from_file_path(None)
     }
@@ -589,6 +1013,11 @@ impl Default for ProviderRegistry {
                 weight_url: DEFAULT_LOCAL_RERANKER_MODEL_URL.to_owned(),
                 sha256: DEFAULT_LOCAL_RERANKER_MODEL_SHA256.to_owned(),
             },
+            local_classifier_model: LocalModelEntry {
+                id: DEFAULT_LOCAL_CLASSIFIER_MODEL_ID.to_owned(),
+                weight_url: DEFAULT_LOCAL_CLASSIFIER_MODEL_URL.to_owned(),
+                sha256: DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256.to_owned(),
+            },
             rag_strategy: DEFAULT_RAG_STRATEGY.to_owned(),
             graph_extraction_model: DEFAULT_GRAPH_EXTRACTION_MODEL.to_owned(),
             local_chat_model: LocalModelEntry {
@@ -597,21 +1026,54 @@ impl Default for ProviderRegistry {
                 sha256: DEFAULT_LOCAL_CHAT_MODEL_SHA256.to_owned(),
             },
             providers: Vec::new(),
-            strategies: Vec::new(),
             default_agent_id: DEFAULT_AGENT_ID.to_owned(),
         }
     }
 }
 
 impl ProviderRegistry {
-    /// Resolve the RAG strategy for a given Space.
+    /// Resolve the retrieval strategy to stamp on a Space **at creation time**.
     ///
     /// Priority - highest first:
-    /// 1. Explicit per-Space `retrieval_mode` column value (when `space_mode`
-    ///    is `Some` and not empty)
-    /// 2. Registry default (`rag_strategy` field, driven by `RYU_RAG_STRATEGY`
-    ///    env var or `registry.json` `rag_strategy` key)
-    /// 3. Built-in literal `DEFAULT_RAG_STRATEGY` ("vector")
+    /// 1. The mode the creator asked for (`space_mode`, when `Some` and non-empty) —
+    ///    i.e. `retrieval_mode` on the `POST /api/spaces` body.
+    /// 2. Registry default (`rag_strategy` field: `RYU_RAG_STRATEGY` env var, else
+    ///    the `registry.json` `rag_strategy` key — env wins, see
+    ///    [`env_or_file_or_literal`]). Both halves are only populated when the
+    ///    registry was built with [`ProviderRegistry::load`]; through
+    ///    [`ProviderRegistry::from_env`] the file half does not exist, which is why
+    ///    `server::create_space` calls `load`.
+    /// 3. Built-in literal [`DEFAULT_RAG_STRATEGY`] (`"vector"`), which is what the
+    ///    `rag_strategy` field itself falls back to when neither env nor file set it.
+    ///
+    /// # Why creation time, and not the `space_mode()` search-path fallback
+    ///
+    /// The obvious-looking wiring — consult this at `SpaceStore::space_mode`, so the
+    /// registry default applies to any Space that "has no mode" — cannot work, and
+    /// wiring it there would be actively harmful:
+    ///
+    /// - The `spaces.retrieval_mode` column is `NOT NULL DEFAULT 'vector'`, so every
+    ///   real row already carries a mode. `space_mode` only sees `None` when the
+    ///   Space does not exist. A fallback there is therefore dead code.
+    /// - The only way to make it *not* dead would be to treat the stored `'vector'`
+    ///   as "unset" and let the global override it. Then an operator setting
+    ///   `RYU_RAG_STRATEGY=graph` would flip every pre-existing Space to
+    ///   `graph_search` — against a graph that was never built, because extraction
+    ///   is gated on the mode at ingest. Those Spaces would return *nothing* while
+    ///   reporting healthy. That is the exact defect class this knob is being fixed
+    ///   to avoid.
+    ///
+    /// So the global default is an input to Space *creation*
+    /// (`server::create_space`), and the per-Space column is authoritative
+    /// thereafter — per-Space always wins, because once stamped it is the only value
+    /// the search path reads. Changing an existing Space is an explicit act with an
+    /// explicit consequence: `POST /api/spaces/{id}/retrieval-mode` →
+    /// `SpaceStore::set_retrieval_mode`, which rebuilds the graph so the new mode
+    /// can actually take effect.
+    ///
+    /// The returned string is *not* validated here: it may be an operator typo from
+    /// env/JSON. The caller parses it with `RetrievalMode::parse` and reports the
+    /// bad value rather than silently retrieving with the wrong algorithm.
     pub fn resolve_rag_strategy<'a>(&'a self, space_mode: Option<&'a str>) -> &'a str {
         if let Some(m) = space_mode.filter(|s| !s.is_empty()) {
             return m;
@@ -620,58 +1082,129 @@ impl ProviderRegistry {
     }
 }
 
+// NOTE: `file_fields_their_consumers_ignore` used to live here — a diagnostic that
+// compared `load()` against `from_env()` and let `main.rs` name, at boot, which
+// `registry.json` fields the running system would ignore. It is deleted because it
+// is now structurally dead: every field any `from_env()` consumer reads has had its
+// file key removed, so the two constructors can no longer disagree and the function
+// could only ever return an empty list.
+//
+// A diagnostic that always reports "nothing wrong" is the same defect as the one it
+// was built to expose. The invariant it approximated is now asserted directly by
+// `from_env_and_load_agree_on_every_field_a_from_env_consumer_reads`, which fails at
+// compile-and-test time rather than warning an operator at boot. Do not reinstate
+// the diagnostic; if a future field genuinely needs a split, fix the split.
+
+// ── Test env plumbing (shared across the crate's test modules) ────────────────
+//
+// `apps/core` is one crate, so `registry::tests` and `server::…` tests run in the
+// same process and share `std::env`. The lock and the guard below therefore live
+// at module scope rather than inside `mod tests`: any test anywhere in the crate
+// that builds a registry from env or from `RYU_REGISTRY_PATH` must take the *same*
+// lock, or it races the tests here and reads their transient overrides.
+
+/// Serializes every test that reads or mutates the process-global registry env
+/// vars (consumed by [`ProviderRegistry::from_env`] and, via `RYU_REGISTRY_PATH`,
+/// by [`ProviderRegistry::load`]). cargo runs tests in one process in parallel, so
+/// two such tests can otherwise observe each other's transient overrides.
+/// Poison-tolerant.
+#[cfg(test)]
+static REGISTRY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`REGISTRY_ENV_LOCK`]. `pub(crate)` so `server::mod`'s Space-creation
+/// tests — which drive `resolve_new_space_mode`, and so mutate the very same env
+/// vars — serialize against this module's tests instead of racing them.
+#[cfg(test)]
+pub(crate) fn lock_registry_env() -> std::sync::MutexGuard<'static, ()> {
+    REGISTRY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Snapshot + clear the registry env vars, restoring them on drop so a test that
+/// mutates process env never leaks into the others.
+///
+/// **`RYU_REGISTRY_PATH` is cleared too.** Clearing alone used to be worse than
+/// useless: an unset var meant the operator's real `~/.ryu/registry.json`, so a
+/// guarded `load()` test read the developer's config. That hole is now closed in
+/// [`registry_path`] itself, which resolves the unset case to a nonexistent temp
+/// path under `cfg(test)` — so isolation no longer depends on each test remembering
+/// to set the var, which is what made the hole reachable from other modules' tests.
+///
+/// A test that wants *file-backed* behaviour still sets `RYU_REGISTRY_PATH`
+/// positively, to a written temp file — that is the only way to exercise the file
+/// layer, and it is what `rag_strategy_reads_registry_file_via_load` does.
+#[cfg(test)]
+pub(crate) struct RegistryEnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+#[cfg(test)]
+impl RegistryEnvGuard {
+    pub(crate) fn capture() -> Self {
+        let saved = REGISTRY_ENV
+            .iter()
+            .map(|n| (*n, std::env::var(n).ok()))
+            .collect();
+        for n in REGISTRY_ENV {
+            std::env::remove_var(n);
+        }
+        Self { saved }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RegistryEnvGuard {
+    fn drop(&mut self) {
+        for (n, v) in &self.saved {
+            match v {
+                Some(val) => std::env::set_var(n, val),
+                None => std::env::remove_var(n),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+const REGISTRY_ENV: &[&str] = &[
+    "RYU_EMBED_MODEL",
+    "RYU_EMBED_DIMS",
+    // Listed since the embed trio became env-only: the guard test that asserts
+    // `registry.json` cannot move these has to start from a known-clear baseline, or
+    // a developer's exported `RYU_EMBED_BASE_URL` would make it pass for the wrong
+    // reason (env wins over file in BOTH constructors, so a set var hides a
+    // reinstated file key).
+    "RYU_EMBED_BASE_URL",
+    "RYU_RERANKER_MODEL",
+    "RYU_RERANKER_BASE_URL",
+    "RYU_GRAPH_EXTRACTION_MODEL",
+    "RYU_DEFAULT_LLM_BASE_URL",
+    "RYU_DEFAULT_LLM_MODEL",
+    "RYU_LOCAL_CHAT_MODEL_ID",
+    "RYU_LOCAL_CHAT_MODEL_URL",
+    "RYU_LOCAL_CHAT_MODEL_SHA256",
+    "RYU_LOCAL_EMBED_MODEL_ID",
+    "RYU_LOCAL_EMBED_MODEL_URL",
+    "RYU_LOCAL_EMBED_MODEL_SHA256",
+    "RYU_LOCAL_RERANKER_MODEL_ID",
+    "RYU_LOCAL_RERANKER_MODEL_URL",
+    "RYU_LOCAL_RERANKER_MODEL_SHA256",
+    "RYU_LOCAL_CLASSIFIER_MODEL_ID",
+    "RYU_LOCAL_CLASSIFIER_MODEL_URL",
+    "RYU_LOCAL_CLASSIFIER_MODEL_SHA256",
+    "RYU_DEFAULT_AGENT",
+    // Listed so the `resolve_rag_strategy` precedence tests below are hermetic:
+    // this knob now has a production consumer (`server::create_space`), so a
+    // leaked value would change what mode a Space is created with.
+    "RYU_RAG_STRATEGY",
+    // The file half of the same knob. Cleared here so nothing inherits a stray
+    // override; the cleared state is safe because `registry_path` resolves an unset
+    // var to a nonexistent temp path under `cfg(test)` rather than to the operator's
+    // real `~/.ryu/registry.json`.
+    "RYU_REGISTRY_PATH",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serializes every test that reads or mutates the process-global registry
-    /// env vars (all consumed by `ProviderRegistry::from_env`). cargo runs tests
-    /// in one process in parallel, so two `from_env` tests can otherwise read each
-    /// other's transient overrides. Poison-tolerant.
-    static REGISTRY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    fn lock_registry_env() -> std::sync::MutexGuard<'static, ()> {
-        REGISTRY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    const REGISTRY_ENV: &[&str] = &[
-        "RYU_EMBED_MODEL",
-        "RYU_EMBED_DIMS",
-        "RYU_RERANKER_MODEL",
-        "RYU_DEFAULT_LLM_BASE_URL",
-        "RYU_DEFAULT_LLM_MODEL",
-        "RYU_LOCAL_CHAT_MODEL_ID",
-        "RYU_LOCAL_CHAT_MODEL_URL",
-        "RYU_LOCAL_CHAT_MODEL_SHA256",
-        "RYU_DEFAULT_AGENT",
-    ];
-
-    /// Snapshot + clear the registry env vars, restoring them on drop so a test
-    /// that mutates process env never leaks into the others.
-    struct RegistryEnvGuard {
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-    impl RegistryEnvGuard {
-        fn capture() -> Self {
-            let saved = REGISTRY_ENV
-                .iter()
-                .map(|n| (*n, std::env::var(n).ok()))
-                .collect();
-            for n in REGISTRY_ENV {
-                std::env::remove_var(n);
-            }
-            Self { saved }
-        }
-    }
-    impl Drop for RegistryEnvGuard {
-        fn drop(&mut self) {
-            for (n, v) in &self.saved {
-                match v {
-                    Some(val) => std::env::set_var(n, val),
-                    None => std::env::remove_var(n),
-                }
-            }
-        }
-    }
 
     #[test]
     fn defaults_are_spec_models() {
@@ -746,6 +1279,130 @@ mod tests {
         assert_eq!(reg.local_chat_model.sha256, "abc123");
     }
 
+    /// The classify tier's model must resolve to the pinned 270M GGUF out of the
+    /// box: this is the whole point of the tier — without a *small* default the
+    /// firewall inspector and the routing classifier fall back to the user's
+    /// full-size resident chat model.
+    #[test]
+    fn default_local_classifier_model_is_the_270m_gemma() {
+        let reg = ProviderRegistry::default();
+        assert_eq!(
+            reg.local_classifier_model.id,
+            DEFAULT_LOCAL_CLASSIFIER_MODEL_ID
+        );
+        assert_eq!(reg.local_classifier_model.id, "gemma-3-270m-it-qat-Q4_0");
+        // The router's builtin prefix rule (`gemma-3-270m` → `classify`) matches on
+        // the LOWERCASED model string, so the default id must carry that prefix or
+        // a classify selection would route back to the chat engine.
+        assert!(reg
+            .local_classifier_model
+            .id
+            .to_lowercase()
+            .starts_with("gemma-3-270m"));
+        assert_eq!(
+            reg.local_classifier_model.weight_url,
+            DEFAULT_LOCAL_CLASSIFIER_MODEL_URL
+        );
+        assert!(!reg.local_classifier_model.sha256.is_empty());
+        // Distinct from the chat model — sharing the id would collide on the same
+        // `~/.ryu/models/<id>.gguf` path.
+        assert_ne!(reg.local_classifier_model.id, reg.local_chat_model.id);
+        let path = reg.local_classifier_model.weight_path();
+        assert!(path.to_string_lossy().contains("models"));
+        assert!(path.to_string_lossy().ends_with(".gguf"));
+    }
+
+    #[test]
+    fn classifier_model_reads_env_overrides() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        // Unset ⇒ the built-in literals.
+        let reg = ProviderRegistry::from_env();
+        assert_eq!(
+            reg.local_classifier_model.id,
+            DEFAULT_LOCAL_CLASSIFIER_MODEL_ID
+        );
+        assert_eq!(
+            reg.local_classifier_model.sha256,
+            DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256
+        );
+
+        std::env::set_var("RYU_LOCAL_CLASSIFIER_MODEL_ID", "my-tiny-classifier");
+        std::env::set_var(
+            "RYU_LOCAL_CLASSIFIER_MODEL_URL",
+            "https://example.com/tiny.gguf",
+        );
+        // Empty SHA is a valid value (it disables verification) and must survive.
+        std::env::set_var("RYU_LOCAL_CLASSIFIER_MODEL_SHA256", "");
+        let reg = ProviderRegistry::from_env();
+        assert_eq!(reg.local_classifier_model.id, "my-tiny-classifier");
+        assert_eq!(
+            reg.local_classifier_model.weight_url,
+            "https://example.com/tiny.gguf"
+        );
+        assert_eq!(reg.local_classifier_model.sha256, "");
+    }
+
+    /// The classify tier is **env-only, on purpose**: `registry.json` has no
+    /// `local_classifier_model_*` key, so writing one is inert — and now visibly so,
+    /// rather than parsing into a value no consumer would ever read.
+    ///
+    /// This test is the inverse of the one it replaces. That one
+    /// (`from_file_reads_classifier_model_override`) asserted the file half worked,
+    /// and it passed — through `from_file`, which no production code calls — while
+    /// all three real consumers (`sidecar::gateway::classify_model_id`,
+    /// `llamacpp::classify`, `sidecar::onboarding::install_local_stack`) built with
+    /// `from_env()` and could not see the file. A green test over a settable-but-dead
+    /// key is exactly the silence this round exists to remove.
+    ///
+    /// The key was deleted rather than wired up because the three consumers resolve
+    /// at three different moments in one process and must agree — see
+    /// [`ProviderRegistry::local_classifier_model`] for why `load()` would let a
+    /// mid-session file edit fail the firewall inspector open.
+    ///
+    /// Asserted through `load()`, the constructor with the file layer: if the file
+    /// cannot reach it *there*, it cannot reach it anywhere.
+    #[test]
+    fn classifier_model_is_env_only_and_ignores_registry_file() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        // Also sets `rag_strategy`, whose file half IS live, so this proves the file
+        // was read and parsed — not that the whole load silently failed.
+        std::fs::write(
+            &path,
+            r#"{"local_classifier_model_id":"file-classifier","local_classifier_model_url":"https://example.com/file.gguf","local_classifier_model_sha256":"deadbeef","rag_strategy":"graph"}"#,
+        )
+        .unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(
+            reg.rag_strategy, "graph",
+            "precondition: the file must actually have been read"
+        );
+        assert_eq!(
+            reg.local_classifier_model.id, DEFAULT_LOCAL_CLASSIFIER_MODEL_ID,
+            "registry.json must not be able to set the classifier id"
+        );
+        assert_eq!(
+            reg.local_classifier_model.weight_url,
+            DEFAULT_LOCAL_CLASSIFIER_MODEL_URL
+        );
+        assert_eq!(
+            reg.local_classifier_model.sha256,
+            DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256
+        );
+
+        // The env half still works — env-only means env-only, not unconfigurable.
+        std::env::set_var("RYU_LOCAL_CLASSIFIER_MODEL_ID", "env-classifier");
+        assert_eq!(
+            ProviderRegistry::load().local_classifier_model.id,
+            "env-classifier"
+        );
+    }
+
     #[test]
     fn with_models_sets_fields() {
         let reg = ProviderRegistry::with_models("test/embed", 256, "test/reranker");
@@ -758,8 +1415,11 @@ mod tests {
 
     // ── File-backed swap tests (AC3: no recompile, just edit registry.json) ─
 
+    /// Renamed from `from_file_reads_chat_model_override`: it never exercised the
+    /// *chat model* (that is `local_chat_model`, now env-only) — only the default LLM
+    /// provider endpoint and model id, both of which are genuinely file-backed.
     #[test]
-    fn from_file_reads_chat_model_override() {
+    fn from_file_reads_default_llm_provider_override() {
         // env > file precedence, so clear the registry env and serialize against
         // the other from_env/from_file tests to keep the file values authoritative.
         let _lock = lock_registry_env();
@@ -779,41 +1439,292 @@ mod tests {
         assert_eq!(reg.reranker.id, DEFAULT_RERANKER_MODEL);
     }
 
+    /// `reranker_model` IS file-backed — its one consumer
+    /// (`rag_host::open_retrieval_store`, via `retrieval_registry()`) uses `load()`.
+    /// Asserted through `load()` + a real `RYU_REGISTRY_PATH` rather than
+    /// `from_file`, which no production code calls and which therefore proves
+    /// nothing about the shipped path (see [`ProviderRegistry::from_file`]).
     #[test]
-    fn from_file_reads_embed_model_override() {
+    fn reranker_model_reads_registry_file_via_load() {
         let _lock = lock_registry_env();
         let _g = RegistryEnvGuard::capture();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
-        std::fs::write(
-            &path,
-            r#"{"embed_model":"custom/embed-test","embed_dims":512,"reranker_model":"custom/reranker-test"}"#,
-        )
-        .unwrap();
-        let reg = ProviderRegistry::from_file(&path);
-        assert_eq!(reg.embedder.id, "custom/embed-test");
-        assert_eq!(reg.embedder.dims, 512);
-        assert_eq!(reg.reranker.id, "custom/reranker-test");
+        std::fs::write(&path, r#"{"reranker_model":"custom/reranker-test"}"#).unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        assert_eq!(ProviderRegistry::load().reranker.id, "custom/reranker-test");
     }
 
+    /// `reranker_base_url` is file-backed for its ONE reader,
+    /// `rag_host::reranker_local_server` (the Spaces reranker). Pinned through
+    /// `load()` because that is the constructor `server::spaces::open_default` now
+    /// reaches it with.
+    ///
+    /// The guard clears `RYU_RERANKER_BASE_URL`, so the first half of this test is
+    /// the **release** profile. Every other profile has that variable seeded by
+    /// `profile::apply_env_defaults` and therefore behaves like the second half —
+    /// see `profile_seeded_reranker_base_url_shadows_the_file_key`.
     #[test]
-    fn from_file_reads_local_chat_model_override() {
+    fn reranker_base_url_reads_registry_file_via_load() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, r#"{"reranker_base_url":"http://127.0.0.1:9999"}"#).unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        assert_eq!(
+            ProviderRegistry::load().reranker_base_url,
+            "http://127.0.0.1:9999"
+        );
+        // Env still wins over the file, in the conflicting case specifically.
+        std::env::set_var("RYU_RERANKER_BASE_URL", "http://127.0.0.1:8123");
+        assert_eq!(
+            ProviderRegistry::load().reranker_base_url,
+            "http://127.0.0.1:8123"
+        );
+    }
+
+    /// The `dev`-profile configuration of the two knobs `profile::apply_env_defaults`
+    /// seeds, side by side, because they are shadowed to *different* degrees and only
+    /// one of them is a lost setting.
+    ///
+    /// Set both env vars the way `apply_env_defaults` does on any non-release
+    /// profile, and put a conflicting value for each in `registry.json`:
+    ///
+    /// - `reranker_base_url` has a file key, so the seed **outranks a real setting**.
+    ///   An operator who edits `registry.json` on a dev stack sees nothing happen,
+    ///   with no warning anywhere. That is this test's whole point — and why the
+    ///   field doc names the profile.
+    /// - `embed_base_url` has no file key at all, so there is nothing to outrank; the
+    ///   seed only moves the *default* to the profile's shifted port, which is the
+    ///   intended behaviour rather than a shadow.
+    #[test]
+    fn profile_seeded_reranker_base_url_shadows_the_file_key() {
         let _lock = lock_registry_env();
         let _g = RegistryEnvGuard::capture();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
         std::fs::write(
             &path,
-            r#"{"local_chat_model_id":"my-gguf","local_chat_model_url":"https://example.com/my.gguf","local_chat_model_sha256":"deadbeef"}"#,
+            r#"{"reranker_base_url":"http://rerank.internal:8082","embed_base_url":"http://embed.internal:8081"}"#,
         )
         .unwrap();
-        let reg = ProviderRegistry::from_file(&path);
-        assert_eq!(reg.local_chat_model.id, "my-gguf");
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+        // Exactly what `apply_env_defaults` seeds on the `dev` profile (+1000).
+        std::env::set_var("RYU_RERANKER_BASE_URL", "http://127.0.0.1:9082");
+        std::env::set_var("RYU_EMBED_BASE_URL", "http://127.0.0.1:9081");
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(
+            reg.reranker_base_url, "http://127.0.0.1:9082",
+            "the profile's seed outranks a file key the operator actually set"
+        );
+        assert_eq!(reg.embed_base_url, "http://127.0.0.1:9081");
+
+        // …and dropping the seeds (the release profile) hands the file key back —
+        // proving the value above came from the seed, not from the file being unread.
+        std::env::remove_var("RYU_RERANKER_BASE_URL");
+        std::env::remove_var("RYU_EMBED_BASE_URL");
+        let reg = ProviderRegistry::load();
+        assert_eq!(reg.reranker_base_url, "http://rerank.internal:8082");
+        assert_eq!(
+            reg.embed_base_url, DEFAULT_EMBED_BASE_URL,
+            "embed_base_url has no file layer to fall back to — env-only"
+        );
+    }
+
+    /// Re-derive, from `profile.rs`'s own source, the set of registry env vars that
+    /// `profile::apply_env_defaults` seeds — i.e. the keys where a non-release
+    /// profile silently occupies layer 1 of the env > file > literal chain.
+    ///
+    /// A hand-copied list here would be a list that rots. The failure mode it would
+    /// rot into is specific and silent: adding one `set_if_unset` row in `profile.rs`
+    /// for, say, `RYU_DEFAULT_LLM_MODEL` would make that `registry.json` key dead for
+    /// every developer running `bun dev`, with nothing anywhere reporting it. So this
+    /// parses the seeds out of the source instead and fails when the intersection
+    /// changes, forcing the module header's table to be updated in the same commit.
+    ///
+    /// `include_str!` with a literal path on purpose: `tools/mirror-public.sh` step 3b
+    /// greps literal include paths and refuses to publish a tree where one does not
+    /// resolve, and a computed path would bypass that gate.
+    #[test]
+    fn registry_env_keys_shadowed_by_the_profile_defaults() {
+        const PROFILE_SRC: &str = include_str!("../profile.rs");
+
+        // Strip line comments FIRST, for two reasons. `profile.rs`'s module header
+        // *names* both of the keys below in prose, so the obvious cheaper test —
+        // substring-search the raw file for each key — would stay green after
+        // someone deleted the seeding entirely. And a commented-out `set_if_unset(…)`
+        // must not count as a live seed here either. Renaming the helper's own
+        // definition keeps `fn set_if_unset(` from parsing as a ninth call site.
+        let code = PROFILE_SRC
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("fn set_if_unset(", "fn seeder_definition(");
+
+        // Split on the call token rather than matching a line: five of the eight
+        // seeds are multi-line, so a line-scoped regex would see only three of them
+        // — and would miss both of the keys this test exists to track.
+        let call_sites: Vec<&str> = code.split("set_if_unset(").skip(1).collect();
+        assert_eq!(
+            call_sites.len(),
+            8,
+            "apply_env_defaults changed shape; re-read it and update the module header table"
+        );
+
+        // First string literal in each call = the env key. One seed passes a const
+        // (`crate::paths::RYU_DIR_ENV`) and so yields nothing here; that is fine
+        // because `RYU_DIR` is not a registry key — but if this count ever exceeds
+        // one, a NEW const-keyed seed exists and this test must be taught to resolve
+        // it rather than skip it.
+        let mut seeded: Vec<&str> = Vec::new();
+        let mut const_keyed = 0usize;
+        for site in call_sites {
+            match site
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split_once('"'))
+            {
+                Some((key, _)) => seeded.push(key),
+                None => const_keyed += 1,
+            }
+        }
+        assert_eq!(const_keyed, 1, "only RYU_DIR is seeded through a const");
+        assert!(
+            seeded.contains(&"RYU_BIND"),
+            "sanity: parsed the literals, got {seeded:?}"
+        );
+
+        let mut shadowed: Vec<&str> = REGISTRY_ENV
+            .iter()
+            .copied()
+            .filter(|k| seeded.contains(k))
+            .collect();
+        shadowed.sort_unstable();
+        assert_eq!(
+            shadowed,
+            ["RYU_EMBED_BASE_URL", "RYU_RERANKER_BASE_URL"],
+            "the set of registry keys a non-release profile occupies changed — update \
+             the `RYU_PROFILE` table in this module's header and the field docs it \
+             points at, then change this expectation"
+        );
+    }
+
+    /// `graph_extraction_model` is file-backed and live: `server::spaces::open_default`
+    /// reads it once through `retrieval_registry()` and hands it to `SpaceStore`.
+    /// Until this round the `crates/core/spaces` module header advertised the
+    /// `registry.json` key while the only consumer built with `from_env()`.
+    #[test]
+    fn graph_extraction_model_reads_registry_file_via_load() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"graph_extraction_model":"acme/entity-extractor"}"#,
+        )
+        .unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(reg.graph_extraction_model, "acme/entity-extractor");
+        assert_eq!(reg.graph_extraction_model_id(), "acme/entity-extractor");
+    }
+
+    /// The embed trio is **env-only**: `registry.json` cannot set the model id, the
+    /// dims, or the endpoint.
+    ///
+    /// This is the inverse of the test it replaces (`from_file_reads_embed_model_override`),
+    /// which asserted the file half worked — and passed, through `from_file`, while
+    /// `server::spaces::open_default`, `rag_host::open_retrieval_store` and
+    /// `search_host` all built with `from_env()` and could not see it. A green test
+    /// over a settable-but-dead key buys silence.
+    ///
+    /// The keys were deleted rather than wired up because `embed_dims` fixes the
+    /// width of the `chunk_vectors` vec0 table and `SpaceStore::open_at` does not
+    /// reconcile a mismatch; the id cannot be split from the dims, and the base URL
+    /// repoints the backend without changing the tag the per-row filter keys on. See
+    /// [`ProviderRegistry::embedder`].
+    #[test]
+    fn embed_trio_is_env_only_and_ignores_registry_file() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        // `rag_strategy` is included as a positive control: its file half IS live, so
+        // it proves the file was found and parsed rather than silently skipped.
+        std::fs::write(
+            &path,
+            r#"{"embed_model":"file/embed-xl","embed_dims":1024,"embed_base_url":"http://127.0.0.1:9990","rag_strategy":"graph"}"#,
+        )
+        .unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(
+            reg.rag_strategy, "graph",
+            "precondition: the file must actually have been read"
+        );
+        assert_eq!(reg.embedder.id, DEFAULT_EMBED_MODEL);
+        assert_eq!(reg.embedder.dims, DEFAULT_EMBED_DIMS);
+        assert_eq!(reg.embed_base_url, DEFAULT_EMBED_BASE_URL);
+
+        // Env-only means env-only, not unconfigurable.
+        std::env::set_var("RYU_EMBED_MODEL", "env/embed-xl");
+        std::env::set_var("RYU_EMBED_DIMS", "1024");
+        std::env::set_var("RYU_EMBED_BASE_URL", "http://127.0.0.1:9991");
+        let reg = ProviderRegistry::load();
+        assert_eq!(reg.embedder.id, "env/embed-xl");
+        assert_eq!(reg.embedder.dims, 1024);
+        assert_eq!(reg.embed_base_url, "http://127.0.0.1:9991");
+    }
+
+    /// All four local-GGUF triples are **env-only**. `local_chat_model` is the one
+    /// that most needs pinning: its key was the last half-live field in the schema —
+    /// honoured by `pi_config` (`load()`) and ignored by the onboarding downloader,
+    /// `llamacpp::{mod,process}`, `model_catalog_host` and `get_active_model`
+    /// (`from_env()`), so setting it made the managed Pi declare a model id that
+    /// llama.cpp was not serving. Deleting the key is what makes those two
+    /// constructors agree.
+    #[test]
+    fn local_model_triples_are_env_only_and_ignore_registry_file() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "local_chat_model_id":"file-chat","local_chat_model_url":"https://example.com/chat.gguf","local_chat_model_sha256":"deadbeef",
+              "local_embed_model_id":"file-embed","local_embed_model_url":"https://example.com/embed.gguf","local_embed_model_sha256":"deadbeef",
+              "local_reranker_model_id":"file-rerank","local_reranker_model_url":"https://example.com/rerank.gguf","local_reranker_model_sha256":"deadbeef",
+              "rag_strategy":"graph"
+            }"#,
+        )
+        .unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(
+            reg.rag_strategy, "graph",
+            "precondition: the file must actually have been read"
+        );
+        assert_eq!(reg.local_chat_model.id, DEFAULT_LOCAL_CHAT_MODEL_ID);
         assert_eq!(
             reg.local_chat_model.weight_url,
-            "https://example.com/my.gguf"
+            DEFAULT_LOCAL_CHAT_MODEL_URL
         );
-        assert_eq!(reg.local_chat_model.sha256, "deadbeef");
+        assert_eq!(reg.local_chat_model.sha256, DEFAULT_LOCAL_CHAT_MODEL_SHA256);
+        assert_eq!(reg.local_embed_model.id, DEFAULT_LOCAL_EMBED_MODEL_ID);
+        assert_eq!(reg.local_reranker_model.id, DEFAULT_LOCAL_RERANKER_MODEL_ID);
+
+        // The env half still works.
+        std::env::set_var("RYU_LOCAL_CHAT_MODEL_ID", "env-chat");
+        assert_eq!(ProviderRegistry::load().local_chat_model.id, "env-chat");
     }
 
     #[test]
@@ -842,8 +1753,15 @@ mod tests {
         assert_eq!(reg.default_llm_model, DEFAULT_LLM_MODEL);
     }
 
+    /// `providers` is loaded and consumed (`sidecar::adapters`, `load()`).
+    ///
+    /// The `strategies` array that used to be asserted here is gone: nothing ever
+    /// read an entry's `value`, so it was a settable value that could not take
+    /// effect, and this assertion was the green test over it. A `strategies` key in
+    /// an existing operator's file now parses to nothing (serde ignores unknown
+    /// fields), which is what it effectively did before.
     #[test]
-    fn provider_and_strategy_entries_are_loaded() {
+    fn provider_entries_are_loaded() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
         std::fs::write(
@@ -857,8 +1775,34 @@ mod tests {
         let reg = ProviderRegistry::from_file(&path);
         assert_eq!(reg.providers.len(), 1);
         assert_eq!(reg.providers[0].id, "my-provider");
-        assert_eq!(reg.strategies.len(), 1);
-        assert_eq!(reg.strategies[0].value, "graphrag");
+    }
+
+    /// A file carrying only deleted keys must still parse and still yield the
+    /// built-in defaults — `RegistryFile` is deliberately not `deny_unknown_fields`.
+    ///
+    /// This is the upgrade path: an operator whose `registry.json` still sets
+    /// `embed_model` / `local_chat_model_url` / `strategies` keeps booting with the
+    /// keys that DO work. With `deny_unknown_fields` the whole file would fail to
+    /// parse and `RegistryFile::load` would fail *open* to defaults, silently
+    /// discarding their `default_agent_id` and `rag_strategy` too.
+    #[test]
+    fn a_file_of_only_deleted_keys_still_parses_and_does_not_poison_the_live_ones() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"embed_model":"gone","embed_dims":1024,"local_chat_model_url":"https://example.com/x.gguf","strategies":[{"id":"rag_strategy","value":"graphrag"}],"default_agent_id":"acp:gemini","rag_strategy":"graph"}"#,
+        )
+        .unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(reg.default_agent_id, "acp:gemini");
+        assert_eq!(reg.rag_strategy, "graph");
+        assert_eq!(reg.embedder.id, DEFAULT_EMBED_MODEL);
+        assert_eq!(reg.embedder.dims, DEFAULT_EMBED_DIMS);
     }
 
     // ── Default agent id (U041) ───────────────────────────────────────────────
@@ -897,5 +1841,343 @@ mod tests {
         std::fs::write(&path, r#"{"default_agent_id":"acp:gemini"}"#).unwrap();
         let reg = ProviderRegistry::from_file(&path);
         assert_eq!(reg.default_agent_id, "acp:gemini");
+    }
+
+    // ── `rag_strategy` — the node-wide Space creation default ───────────────────
+    //
+    // These guard the knob that was, until now, advertised in `registry.json` and
+    // `RYU_RAG_STRATEGY` while having zero production callers. Its one consumer is
+    // `server::create_space`; the assertions below pin the precedence that consumer
+    // relies on.
+
+    /// Nothing configured ⇒ the built-in literal. Unchanged behaviour for every
+    /// existing install: a Space created with no `retrieval_mode` is still vector.
+    #[test]
+    fn rag_strategy_defaults_to_vector() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let reg = ProviderRegistry::from_env();
+        assert_eq!(reg.rag_strategy, DEFAULT_RAG_STRATEGY);
+        assert_eq!(reg.resolve_rag_strategy(None), "vector");
+    }
+
+    /// `RYU_RAG_STRATEGY=graph` reaches `resolve_rag_strategy`, which is what makes
+    /// the documented env knob real rather than a no-op.
+    #[test]
+    fn rag_strategy_reads_env_override() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        std::env::set_var("RYU_RAG_STRATEGY", "graph");
+        let reg = ProviderRegistry::from_env();
+        assert_eq!(reg.resolve_rag_strategy(None), "graph");
+    }
+
+    /// `registry.json {"rag_strategy": "graph"}` reaches it too — the second half of
+    /// the documented surface, proved **through the constructor production uses**.
+    ///
+    /// The previous version of this test called `ProviderRegistry::from_file`, which
+    /// no production code calls. It passed for months while the shipped path
+    /// (`server::create_space` → `from_env`) opened no file at all, so the file half
+    /// of the documented knob was inert and a green assertion said otherwise. A test
+    /// over a constructor nothing ships is worse than no test: it buys silence.
+    ///
+    /// Hence `load()` + a real `RYU_REGISTRY_PATH` — the same two hops production
+    /// takes (`load` → `registry_path` → `$RYU_REGISTRY_PATH`). Setting the path is
+    /// also what keeps this hermetic: `RegistryEnvGuard` *clears* the var, and an
+    /// unset var makes `load()` read the operator's real `~/.ryu/registry.json`.
+    #[test]
+    fn rag_strategy_reads_registry_file_via_load() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, r#"{"rag_strategy":"graph"}"#).unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(reg.rag_strategy, "graph");
+        assert_eq!(reg.resolve_rag_strategy(None), "graph");
+    }
+
+    /// Env beats file, which is the direction the module header's precedence chain
+    /// claims (`env_or_file_or_literal`: env → file → literal). Pinned in the
+    /// conflicting case specifically — agreeing values would pass either way and
+    /// prove nothing about the ordering.
+    #[test]
+    fn rag_strategy_env_beats_registry_file() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, r#"{"rag_strategy":"graph"}"#).unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+        std::env::set_var("RYU_RAG_STRATEGY", "vector");
+
+        assert_eq!(
+            ProviderRegistry::load().resolve_rag_strategy(None),
+            "vector"
+        );
+    }
+
+    /// A missing file is fail-open, not a panic or a wedged boot: `load()` on a path
+    /// that does not exist yields the built-in literal. This is the case every
+    /// install without a `registry.json` is in — i.e. almost all of them — so it is
+    /// the behaviour that actually ships.
+    #[test]
+    fn load_falls_back_to_literals_when_the_file_is_absent() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        // Deliberately never created. Pointing at a nonexistent path inside a
+        // tempdir (rather than leaving the var unset) is what stops this test from
+        // reading the developer's real ~/.ryu/registry.json.
+        std::env::set_var("RYU_REGISTRY_PATH", dir.path().join("nope.json"));
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(reg.rag_strategy, DEFAULT_RAG_STRATEGY);
+        assert_eq!(reg.resolve_rag_strategy(None), "vector");
+    }
+
+    /// An unknown value from the file survives verbatim, exactly as an unknown value
+    /// from env does (`rag_strategy_does_not_validate_operator_typos`). The resolver
+    /// must not normalize it away, or `server::create_space` loses its ability to
+    /// warn the operator by name — it would just quietly build a vector Space.
+    #[test]
+    fn rag_strategy_file_typo_survives_to_the_consumer() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, r#"{"rag_strategy":"graphrag"}"#).unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let reg = ProviderRegistry::load();
+        assert_eq!(reg.resolve_rag_strategy(None), "graphrag");
+        assert!(ryu_spaces::RetrievalMode::parse(reg.resolve_rag_strategy(None)).is_none());
+    }
+
+    /// **The guard that replaces the boot-time divergence warning.**
+    ///
+    /// The invariant: `from_env()` and `load()` must return the same value for every
+    /// field any `from_env()` consumer reads. Those consumers are
+    /// `search_host::CoreSearchEmbedder` (embed trio),
+    /// `model_catalog_host::default_model_repos` (chat + embed GGUFs),
+    /// `sidecar::gateway::classify_model_id` and `llamacpp::classify` (classifier
+    /// GGUF), `llamacpp::{mod,process}` and `server::get_active_model` (chat GGUF),
+    /// `llamacpp::embed` (embed GGUF), `llamacpp::rerank` (rerank GGUF), and
+    /// `sidecar::onboarding::install_local_stack` (all four GGUFs). Verified by
+    /// reading each call site, not assumed.
+    ///
+    /// Holding the invariant is what makes the choice of constructor unobservable at
+    /// those sites — and therefore what makes it safe to have deleted
+    /// `file_fields_their_consumers_ignore` and the boot warning that consumed it. A
+    /// runtime diagnostic that can only ever report "nothing wrong" is the same
+    /// defect as the mis-scoped warning it replaced; this test says the same thing
+    /// at build time, and *fails* instead of going quiet.
+    ///
+    /// It feeds `load()` a file that sets every one of the deleted keys, so
+    /// re-adding any of them to `RegistryFile` breaks it immediately. The env guard
+    /// matters here: env wins over file in BOTH constructors, so a stray exported
+    /// `RYU_EMBED_MODEL` would make this pass for the wrong reason.
+    #[test]
+    fn from_env_and_load_agree_on_every_field_a_from_env_consumer_reads() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "embed_model":"file/embed","embed_dims":1024,"embed_base_url":"http://127.0.0.1:9990",
+              "local_chat_model_id":"file-chat","local_chat_model_url":"https://example.com/chat.gguf","local_chat_model_sha256":"aa",
+              "local_embed_model_id":"file-embed","local_embed_model_url":"https://example.com/embed.gguf","local_embed_model_sha256":"bb",
+              "local_reranker_model_id":"file-rerank","local_reranker_model_url":"https://example.com/rerank.gguf","local_reranker_model_sha256":"cc",
+              "local_classifier_model_id":"file-classify","local_classifier_model_url":"https://example.com/classify.gguf","local_classifier_model_sha256":"dd",
+              "rag_strategy":"graph"
+            }"#,
+        )
+        .unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let loaded = ProviderRegistry::load();
+        let env_only = ProviderRegistry::from_env();
+
+        // Precondition, asserted rather than assumed: the file really was found and
+        // parsed. Without this the whole test could pass because `load()` silently
+        // read nothing at all.
+        assert_eq!(
+            loaded.rag_strategy, "graph",
+            "precondition: load() must have read the file"
+        );
+        assert_ne!(
+            env_only.rag_strategy, "graph",
+            "precondition: from_env() must NOT have read the file"
+        );
+
+        assert_eq!(
+            loaded.embedder, env_only.embedder,
+            "embed_model/embed_dims must have no file key: search_host, \
+             spaces::open_default and open_retrieval_store fix the vector space of \
+             three on-disk indexes from them"
+        );
+        assert_eq!(
+            loaded.embed_base_url, env_only.embed_base_url,
+            "embed_base_url must have no file key: it repoints the backend without \
+             changing the embed_model tag the per-row search filter keys on"
+        );
+        assert_eq!(
+            loaded.local_chat_model, env_only.local_chat_model,
+            "local_chat_model must have no file key: onboarding downloads the GGUF \
+             and llamacpp serves it at a different moment"
+        );
+        assert_eq!(
+            loaded.local_embed_model, env_only.local_embed_model,
+            "local_embed_model must have no file key (same download/serve split)"
+        );
+        assert_eq!(
+            loaded.local_reranker_model, env_only.local_reranker_model,
+            "local_reranker_model must have no file key (same download/serve split)"
+        );
+        assert_eq!(
+            loaded.local_classifier_model, env_only.local_classifier_model,
+            "local_classifier_model must have no file key: a mid-session desync \
+             fails the firewall inspector and the routing classifier OPEN"
+        );
+    }
+
+    /// The other direction, so the guard above cannot be satisfied by making
+    /// `load()` stop reading the file altogether: the fields whose consumers all use
+    /// `load()` must still differ between the two constructors when the file sets
+    /// them. If this ever passes vacuously the file layer has died.
+    #[test]
+    fn load_still_beats_from_env_for_the_fields_that_are_file_backed() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"default_llm_model":"file/chat","reranker_model":"file/rerank","reranker_base_url":"http://127.0.0.1:9999","graph_extraction_model":"file/extract","rag_strategy":"graph","default_agent_id":"acp:gemini"}"#,
+        )
+        .unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+
+        let loaded = ProviderRegistry::load();
+        let env_only = ProviderRegistry::from_env();
+        assert_ne!(loaded.default_llm_model, env_only.default_llm_model);
+        assert_ne!(loaded.reranker.id, env_only.reranker.id);
+        assert_ne!(loaded.reranker_base_url, env_only.reranker_base_url);
+        assert_ne!(
+            loaded.graph_extraction_model,
+            env_only.graph_extraction_model
+        );
+        assert_ne!(loaded.rag_strategy, env_only.rag_strategy);
+        assert_ne!(loaded.default_agent_id, env_only.default_agent_id);
+    }
+
+    /// The unset case is hermetic under test: `load()` with no `RYU_REGISTRY_PATH`
+    /// must NOT reach `~/.ryu/registry.json`.
+    ///
+    /// This is the isolation that used to be every individual test's responsibility
+    /// — a responsibility that could not be discharged by tests in other modules
+    /// which reach `load()` several calls down (`pi_config::default_gateway_model`)
+    /// and have no reason to know the var exists. Pinned here rather than left to
+    /// discipline, because the failure mode is a test that passes or fails according
+    /// to what is in the developer's home directory.
+    #[test]
+    fn unset_registry_path_resolves_away_from_the_real_home_config_under_test() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        // The guard has cleared RYU_REGISTRY_PATH — this is exactly the state a test
+        // that forgets to set it is in.
+        let resolved = super::registry_path().expect("a path is always resolved");
+        // Assert the POSITIVE shape first. The two negative assertions below both
+        // pass vacuously on a machine that simply has no `~/.ryu/registry.json` —
+        // which is most dev machines — so on their own they would be no evidence
+        // that the `cfg(test)` fallback fired at all. If `registry` ever stops being
+        // compiled under `cfg(test)` (it is a module of the *bin* target today, and
+        // `src/lib.rs` is empty), this is the assertion that says so out loud
+        // instead of letting the isolation quietly lapse.
+        assert!(
+            resolved.to_string_lossy().contains("ryu-registry-absent-"),
+            "the cfg(test) fallback did not fire — isolation is NOT in effect and \
+             every load() in the crate is reading a real config; got {}",
+            resolved.display()
+        );
+        assert!(
+            !resolved.starts_with(crate::paths::ryu_dir()),
+            "must not resolve into the operator's ~/.ryu; got {}",
+            resolved.display()
+        );
+        assert!(
+            !resolved.exists(),
+            "the temp fallback must be a definitely-absent file so load() yields \
+             built-in defaults; got {}",
+            resolved.display()
+        );
+        // …and the composed behaviour: built-in defaults, no panic.
+        assert_eq!(ProviderRegistry::load().rag_strategy, DEFAULT_RAG_STRATEGY);
+    }
+
+    /// Env beats file for a file-backed field, pinned in the conflicting case. This
+    /// is the half of the precedence chain that makes the module header's
+    /// "1. env, 2. registry.json, 3. literal" true for `reranker_model` specifically
+    /// — the same shape already pinned for `rag_strategy`, kept for a second field so
+    /// a change to [`env_or_file_or_literal`] cannot pass on one example alone.
+    #[test]
+    fn env_beats_the_file_for_a_file_backed_field() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, r#"{"reranker_model":"file/rerank"}"#).unwrap();
+        std::env::set_var("RYU_REGISTRY_PATH", &path);
+        std::env::set_var("RYU_RERANKER_MODEL", "env/rerank");
+
+        assert_eq!(ProviderRegistry::load().reranker.id, "env/rerank");
+    }
+
+    /// **The precedence that matters**: an explicitly requested per-Space mode wins
+    /// over the node-wide default, in BOTH directions. The `graph` default must not
+    /// override a caller asking for `vector`, or the per-Space setting would be the
+    /// one that cannot take effect.
+    #[test]
+    fn explicit_space_mode_beats_registry_default() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        std::env::set_var("RYU_RAG_STRATEGY", "graph");
+        let reg = ProviderRegistry::from_env();
+        assert_eq!(reg.resolve_rag_strategy(Some("vector")), "vector");
+        assert_eq!(reg.resolve_rag_strategy(Some("graph")), "graph");
+
+        std::env::set_var("RYU_RAG_STRATEGY", "vector");
+        let reg = ProviderRegistry::from_env();
+        assert_eq!(reg.resolve_rag_strategy(Some("graph")), "graph");
+    }
+
+    /// An empty string is "absent", not "a mode named nothing" — the HTTP layer
+    /// relies on this so `{"retrieval_mode": ""}` falls back to the node default
+    /// instead of failing a strict parse.
+    #[test]
+    fn empty_space_mode_falls_back_to_registry_default() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        std::env::set_var("RYU_RAG_STRATEGY", "graph");
+        let reg = ProviderRegistry::from_env();
+        assert_eq!(reg.resolve_rag_strategy(Some("")), "graph");
+    }
+
+    /// The resolver is a *string* resolver: it does not validate. An operator typo
+    /// in env/JSON comes back verbatim so the consumer can name the bad value in a
+    /// warning rather than silently creating a vector Space. Pinned because a
+    /// future "helpful" normalization here would hide the typo.
+    #[test]
+    fn rag_strategy_does_not_validate_operator_typos() {
+        let _lock = lock_registry_env();
+        let _g = RegistryEnvGuard::capture();
+        std::env::set_var("RYU_RAG_STRATEGY", "graphrag");
+        let reg = ProviderRegistry::from_env();
+        assert_eq!(reg.resolve_rag_strategy(None), "graphrag");
+        assert!(ryu_spaces::RetrievalMode::parse(reg.resolve_rag_strategy(None)).is_none());
     }
 }

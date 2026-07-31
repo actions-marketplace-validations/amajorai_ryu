@@ -118,7 +118,36 @@ fn resolve_node_runtime(explicit: Option<&str>) -> anyhow::Result<String> {
 
 /// Minimal `which`: the first `PATH` entry containing an executable `program`
 /// (adding the common Windows extensions). Avoids pulling in a crate for one lookup.
-fn which_on_path(program: &str) -> Option<PathBuf> {
+///
+/// `pub(crate)` for `sidecar::mcp::mcp_command_is_present`, which asks the same
+/// question about a manifest-declared MCP server's command. Shared rather than
+/// re-implemented so the two "is this program installed?" answers cannot disagree —
+/// a sidecar reported present and its plugin's MCP server reported missing (or the
+/// reverse) would be unexplainable from either surface.
+///
+/// # Windows: the returned path is spawnable, the bare name may not be
+///
+/// The `cmd`/`bat` extensions matter because that is how Windows ships the runners
+/// this host cares about (`npx`, `bunx`, `pnpm`, an npm-installed `bun` — all
+/// `*.cmd` shims). But **`Command::new("npx")` cannot spawn them.** `std`'s
+/// `resolve_exe` (`library/std/src/sys/process/windows.rs`, verified against the
+/// 1.96 toolchain) does `path.set_extension("exe")` for a bare name with no dot and
+/// never consults `PATHEXT` — appending `.exe` is a `CreateProcessW` rule, PATHEXT is
+/// a `cmd.exe` one. A batch file spawns only when the program string *itself* ends in
+/// `.bat`/`.cmd`, which makes `std` re-target the spawn at `cmd.exe /c`.
+///
+/// So a caller that answers "installed?" with this function and then hands
+/// `Command::new` the *bare name* is wrong on Windows for every `.cmd` shim: probe
+/// passes, spawn `ENOENT`s. Hand it the returned [`PathBuf`] instead. The MCP path
+/// does exactly that in `sidecar::mcp::spawn_program_for`, which every registry spawn
+/// goes through via `McpServerConfig::to_command`.
+///
+/// Not yet true of [`resolve_node_runtime`] above, which returns the bare `"bun"` /
+/// `"node"` string it later spawns (`spawn_clean`) — a latent break for a host whose
+/// only `bun` is an npm `bun.cmd`. Left alone deliberately: it is a separate,
+/// default-off code path (the experimental node extension host) and needs its own
+/// test, not a drive-by.
+pub(crate) fn which_on_path(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let direct = dir.join(program);
@@ -341,6 +370,136 @@ fn record_native_permissions(name: &str, plugin_id: &str) {
                 enforced: false,
             },
         );
+    }
+}
+
+// ── Missing-binary record (WHY a `Local` sidecar has no process) ─────────────────
+//
+// A `Local`-kind sidecar (`ryu-mail`, `ryu-browser`, `ryu-simulator`, …) is a bare
+// `command` whose bytes are fetched on first enable by `ensure_local_sidecar_present`.
+// That fetch is best-effort by design (an optional app must never abort boot), and
+// until this record existed EVERY failure — a release that publishes no
+// `<command>-<os>-<arch>` asset at all, a 404, a checksum mismatch — was swallowed
+// into one `tracing::warn!` and the spawn then ran the bare command that does not
+// exist. Downstream, the ONLY thing a user or a panel could see was the ext-proxy's
+// generic `502 sidecar unreachable`, which is indistinguishable from "the app crashed"
+// and from "the app is lazily scaled to zero". An unpublished asset is a permanent,
+// self-inflicted 502 that reads as a bug in the app.
+//
+// So the reason is now recorded and surfaced through the SAME seam the native-
+// permission record above uses (process-global map + `pub` reader), for the same
+// reason its own comment gives: the writers live here and the manager stores
+// `Arc<dyn Sidecar>` with no downcast, so the status handler cannot ask a sidecar
+// why it is missing. Two consumers:
+//
+//  1. [`ManifestSidecar::health_check`] — turns the flat `Unhealthy("process not
+//     running")` into `Unhealthy("binary not installed: …")`, i.e. it rides
+//     [`HealthStatus`], the reason channel that already exists, rather than a new one.
+//  2. [`missing_sidecar_binary_reports`] — the JSON-ready snapshot served under
+//     `/api/sidecar/status`'s `missing_binaries` key (`server/mod.rs::sidecar_status`,
+//     beside `native_permissions`), so a panel can render "binary not installed"
+//     instead of "502". No `SidecarManager` change was needed — the reader is
+//     free-standing, which is why it can be called straight from the handler.
+
+/// One `Local`-kind manifest sidecar whose binary could not be resolved or installed,
+/// and why. Serialized as-is onto the status plane (see the module note above), so the
+/// field names are wire contract.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MissingSidecarBinary {
+    /// Namespaced sidecar key (`<plugin_id>/<local_name>`) — the same key
+    /// `/api/sidecar/status` reports liveness under, so a reader can join the two.
+    pub name: String,
+    /// The owning plugin id (what a panel offers to disable/reinstall).
+    pub plugin_id: String,
+    /// The bare `command` the manifest declared (e.g. `ryu-browser`).
+    pub command: String,
+    /// The release asset this host would have installed: `<command>-<os>-<arch>[.exe]`
+    /// per [`crate::update::platform_tag`]. Named explicitly because the common cause
+    /// is a release that publishes a DIFFERENT name (or nothing at all) for this
+    /// platform — the operator needs the exact string to fix CI against.
+    pub expected_asset: String,
+    /// Human-readable cause: not published / download failed / dev build with no
+    /// override. Rendered verbatim by a status panel.
+    pub reason: String,
+}
+
+/// Process-global record of every `Local` sidecar whose binary is missing, keyed by
+/// namespaced name. Written by `ensure_local_sidecar_present` (and cleared by it the
+/// moment the binary resolves), read by `health_check` + the status reader.
+fn missing_binary_record(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, MissingSidecarBinary>> {
+    static RECORD: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, MissingSidecarBinary>>,
+    > = std::sync::OnceLock::new();
+    RECORD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Snapshot of every `Local` sidecar whose binary could not be installed, for the
+/// status surface. Empty on a healthy host — an entry exists only while a sidecar's
+/// command genuinely cannot be resolved (each success path clears its own entry), so a
+/// reader can treat any entry as actionable.
+///
+/// The READ half of the seam. Its consumer is the `/api/sidecar/status` handler
+/// (`server/mod.rs::sidecar_status`), which serves this vec under `missing_binaries`.
+/// Do not delete it to silence a dead-code warning: if the handler key ever goes
+/// away, restore the key rather than the reader — losing it puts the 502 back with no
+/// way for any surface to explain it.
+pub fn missing_sidecar_binary_reports() -> Vec<MissingSidecarBinary> {
+    missing_binary_record()
+        .lock()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The recorded missing-binary reason for one namespaced sidecar, if any. `None` for a
+/// sidecar whose binary is present (or that is not `Local`-kind at all) — so a caller
+/// must never infer "binary missing" from a merely stopped process: a `lazy` sidecar
+/// scaled to zero is `running: false` by design and has no entry here.
+fn missing_sidecar_binary_reason(name: &str) -> Option<String> {
+    missing_binary_record()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(name).map(|r| r.reason.clone()))
+}
+
+/// Record that `name`'s binary is missing, with the reason, and log it at `error`
+/// (not `warn`): an app the user just enabled cannot run at all, which is the loudest
+/// class of failure this path has. Idempotent (overwrites the prior entry).
+fn record_missing_sidecar_binary(
+    name: &str,
+    plugin_id: &str,
+    command: &str,
+    expected_asset: &str,
+    reason: String,
+) {
+    tracing::error!(
+        sidecar = %name,
+        plugin_id = %plugin_id,
+        command = %command,
+        expected_asset = %expected_asset,
+        "app sidecar binary is not installed: {reason}"
+    );
+    if let Ok(mut record) = missing_binary_record().lock() {
+        record.insert(
+            name.to_owned(),
+            MissingSidecarBinary {
+                name: name.to_owned(),
+                plugin_id: plugin_id.to_owned(),
+                command: command.to_owned(),
+                expected_asset: expected_asset.to_owned(),
+                reason,
+            },
+        );
+    }
+}
+
+/// Drop `name`'s missing-binary entry. Called from every path that DID resolve a
+/// program, so a sidecar fixed by a later install/override stops reporting a stale
+/// "binary not installed" forever. Also called on uninstall, so a removed sidecar
+/// leaves no entry behind for a name that no longer exists.
+fn clear_missing_sidecar_binary(name: &str) {
+    if let Ok(mut record) = missing_binary_record().lock() {
+        record.remove(name);
     }
 }
 
@@ -812,17 +971,27 @@ async fn fetch_release_sha256(url: &str) -> Option<String> {
 /// `dest.exists()` skip, so enable + boot-reconcile + lazy-wake all converge without
 /// re-downloading.
 ///
+/// Best-effort is NOT silent, though: when every resolution step fails AND the bare
+/// `command` is not on `PATH` either, the reason is recorded against `name` (see
+/// [`record_missing_sidecar_binary`]) so `health_check` and `/api/sidecar/status` can
+/// say "binary not installed: expected `<asset>`" instead of leaving the ext-proxy's
+/// generic `502 sidecar unreachable` as the only symptom. Every path that DOES resolve
+/// a program clears that record first, so a later install/override heals it.
+///
 /// Integrity: verified best-effort against the sibling `<asset>.sha256` the release
 /// publishes (see `fetch_release_sha256`) — present ⇒ `DownloadCenter` fails the
 /// transfer on a mismatch; absent ⇒ download proceeds unverified with a warning
 /// (first-party bins over https, same posture as the old desktop prefetch).
 async fn ensure_local_sidecar_present(
+    name: &str,
+    plugin_id: &str,
     resolved_program: String,
     command: &str,
     downloads: &crate::downloads::DownloadCenter,
 ) -> String {
     // 1. An env override (or any resolved program) that points at a real file wins.
     if std::path::Path::new(&resolved_program).exists() {
+        clear_missing_sidecar_binary(name);
         return resolved_program;
     }
 
@@ -845,13 +1014,27 @@ async fn ensure_local_sidecar_present(
             .ok()
             .is_some_and(|s| s.trim() == current)
     {
+        clear_missing_sidecar_binary(name);
         return dest.to_string_lossy().into_owned();
     }
+
+    // The release asset this host needs — `<command>-<os>-<arch>[.exe]`. Computed
+    // OUTSIDE the download block below (which is release-only) because the recorded
+    // missing-binary reason names it in BOTH build profiles: an operator staring at a
+    // dev box still needs the exact string CI must publish, and it is what makes the
+    // naming contract testable at all (a debug `cargo test` never enters that block).
+    let expected_asset = format!("{command}-{}{ext}", crate::update::platform_tag());
 
     // 3. Fetch it — release builds only. In a debug build the bins are owned by
     //    turbo (`bun dev`) and resolved via `RYU_*_BIN`/PATH, so never auto-download
     //    a release artifact over a locally-built one; fall through to the bare
     //    command and let the spawn surface a missing-binary error as it always has.
+    //
+    // A failure here no longer just warns: it is carried down to the fall-through as
+    // the recorded reason, so "the release publishes no such asset" is reported as
+    // itself instead of as a generic 502 from whatever calls the sidecar later.
+    #[cfg_attr(debug_assertions, allow(unused_mut))]
+    let mut download_error: Option<String> = None;
     #[cfg(not(debug_assertions))]
     {
         let base = std::env::var("RYU_SIDECAR_RELEASE_BASE").unwrap_or_else(|_| {
@@ -860,45 +1043,76 @@ async fn ensure_local_sidecar_present(
                 crate::update::RYU_REPO
             )
         });
-        let asset = format!("{command}-{}{ext}", crate::update::platform_tag());
+        let asset = expected_asset.clone();
         let url = format!("{base}/{asset}");
         if let Err(e) = screen_https(&url).await {
             tracing::warn!("app sidecar '{command}': refusing download url {url}: {e}");
-            return resolved_program;
-        }
-        // Integrity: verify against the sibling `<asset>.sha256` the release publishes.
-        // Best-effort — a missing/unreadable checksum downloads unverified (warned),
-        // matching the old desktop prefetch's warn-and-continue posture; when present,
-        // DownloadCenter fails the transfer on a mismatch.
-        let sha256 = fetch_release_sha256(&url).await;
-        if sha256.is_none() {
-            tracing::warn!(
-                "app sidecar '{command}': no .sha256 published for {asset}; downloading unverified"
-            );
-        }
-        match downloads
-            .download_blocking(crate::downloads::DownloadSpec {
-                kind: crate::downloads::DownloadKind::Other,
-                label: format!("app sidecar: {command}"),
-                url: url.clone(),
-                dest: dest.clone(),
-                sha256,
-                version_record: None,
-            })
-            .await
-        {
-            Ok(path) => {
-                make_executable(&path).await;
-                // Stamp the version so a later Core self-update re-fetches a stale bin.
-                let _ = tokio::fs::write(&marker, &current).await;
-                return path.to_string_lossy().into_owned();
+            download_error = Some(format!("refused download url {url}: {e}"));
+        } else {
+            // Integrity: verify against the sibling `<asset>.sha256` the release
+            // publishes. Best-effort — a missing/unreadable checksum downloads
+            // unverified (warned), matching the old desktop prefetch's
+            // warn-and-continue posture; when present, DownloadCenter fails the
+            // transfer on a mismatch.
+            let sha256 = fetch_release_sha256(&url).await;
+            if sha256.is_none() {
+                tracing::warn!(
+                    "app sidecar '{command}': no .sha256 published for {asset}; \
+                     downloading unverified"
+                );
             }
-            Err(e) => {
-                tracing::warn!("app sidecar '{command}': download from {url} failed: {e}");
+            match downloads
+                .download_blocking(crate::downloads::DownloadSpec {
+                    kind: crate::downloads::DownloadKind::Other,
+                    label: format!("app sidecar: {command}"),
+                    url: url.clone(),
+                    dest: dest.clone(),
+                    sha256,
+                    version_record: None,
+                })
+                .await
+            {
+                Ok(path) => {
+                    make_executable(&path).await;
+                    // Stamp the version so a later Core self-update re-fetches a stale bin.
+                    let _ = tokio::fs::write(&marker, &current).await;
+                    clear_missing_sidecar_binary(name);
+                    return path.to_string_lossy().into_owned();
+                }
+                Err(e) => {
+                    tracing::warn!("app sidecar '{command}': download from {url} failed: {e}");
+                    download_error = Some(format!("download from {url} failed: {e}"));
+                }
             }
         }
     }
 
+    // 4. Nothing resolved. The bare `command` still gets returned (the spawn is the
+    //    authoritative resolver and a dev box legitimately keeps these bins on PATH),
+    //    but if it is not on PATH either, this sidecar CANNOT start and the only
+    //    downstream symptom would be a permanent `502 sidecar unreachable`. Record why.
+    if which_on_path(command).is_some() {
+        clear_missing_sidecar_binary(name);
+        return resolved_program;
+    }
+    let reason = match download_error {
+        Some(err) => format!(
+            "'{expected_asset}' could not be installed into {} — {err}. If the release \
+             publishes no asset by that exact name for this platform, no host can ever \
+             install this sidecar.",
+            dest.display()
+        ),
+        // Debug build (or a release build whose download block was skipped): nothing was
+        // fetched, so say what the host looked for rather than implying a failed transfer.
+        None => format!(
+            "'{command}' is not on PATH, absent from {}, and no `command_env` override \
+             points at it. A dev build never fetches release assets — build the sidecar \
+             locally or set its `command_env`; a release build would install \
+             '{expected_asset}'.",
+            dest.display()
+        ),
+    };
+    record_missing_sidecar_binary(name, plugin_id, command, &expected_asset, reason);
     resolved_program
 }
 
@@ -919,6 +1133,12 @@ pub(crate) async fn remove_local_sidecar_binaries(
         let SidecarProcess::Local(local) = &spec.process else {
             continue;
         };
+        // The sidecar is going away, so any recorded "binary not installed" reason for
+        // it must go too — otherwise the status surface keeps reporting a missing
+        // binary for a name that no longer exists. Unconditional (before the
+        // env-override skip): the record is about resolution, not about ownership of
+        // the bytes.
+        clear_missing_sidecar_binary(&namespaced_name(&manifest.id, &spec.name));
         // Respect an env override — that binary is not ours to remove.
         let env_override = local
             .command_env
@@ -1028,8 +1248,17 @@ impl Sidecar for ManifestSidecar {
                     // enable/wake if it isn't already present (release builds only;
                     // dev resolves it via RYU_*_BIN/PATH). Ties the binary to the app
                     // lifecycle instead of the desktop's old blanket boot-prefetch.
-                    let program =
-                        ensure_local_sidecar_present(program, &local.command, &downloads).await;
+                    // Passing `name`/`plugin_id` in is what lets a resolution failure be
+                    // RECORDED against this sidecar (surfaced by `health_check` +
+                    // `missing_sidecar_binary_reports`) instead of swallowed into a warn.
+                    let program = ensure_local_sidecar_present(
+                        &name,
+                        &plugin_id,
+                        program,
+                        &local.command,
+                        &downloads,
+                    )
+                    .await;
                     let mut env = local.env.clone();
                     // Tell the child which port to bind, profile-shifted, so it binds
                     // the SAME port Core health-checks + proxies to (effective_port).
@@ -1168,6 +1397,11 @@ impl Sidecar for ManifestSidecar {
 
     fn health_check(&self) -> BoxFuture<HealthStatus> {
         let running = self.handle.is_running();
+        // A recorded missing-binary reason, if this sidecar's `command` could not be
+        // resolved at all (see the missing-binary record note above). Read here rather
+        // than inferred from `!running`: a `lazy` sidecar scaled to zero is also not
+        // running, and calling THAT "binary not installed" would be a lie.
+        let missing_binary = missing_sidecar_binary_reason(&self.name);
         let url = self.health_url();
         // Present the minted secret on the probe so a sidecar that gates its health
         // route (defense in depth) still admits Core's own check — closing the
@@ -1181,7 +1415,16 @@ impl Sidecar for ManifestSidecar {
         let registered = Arc::clone(&self.provider_registered);
         Box::pin(async move {
             if !running {
-                return HealthStatus::Unhealthy("process not running".to_owned());
+                // Say WHICH kind of "not running" this is. `binary not installed:` is
+                // the diagnosable case — no process can ever exist on this host until
+                // the bytes arrive — and is what a status panel renders instead of the
+                // ext-proxy's generic 502.
+                return match missing_binary {
+                    Some(reason) => {
+                        HealthStatus::Unhealthy(format!("binary not installed: {reason}"))
+                    }
+                    None => HealthStatus::Unhealthy("process not running".to_owned()),
+                };
             }
             let client = match reqwest::Client::builder().timeout(HEALTH_TIMEOUT).build() {
                 Ok(c) => c,
@@ -1572,5 +1815,154 @@ mod tests {
         let value = serde_json::to_value(found).unwrap();
         assert_eq!(value["enforced"], serde_json::json!(false));
         assert_eq!(value["name"], serde_json::json!(name));
+    }
+
+    // ── Missing app-sidecar binary: recorded + surfaced, never swallowed ──────────
+
+    /// A `Local` sidecar spec for a command that cannot exist on any host.
+    fn local_spec(command: &str) -> SidecarSpec {
+        SidecarSpec {
+            name: "worker".to_owned(),
+            process: SidecarProcess::Local(crate::plugin_manifest::schema::LocalProcessSpec {
+                command: command.to_owned(),
+                command_env: None,
+                port_env: None,
+                args: vec![],
+                env: BTreeMap::new(),
+            }),
+            port: 9098,
+            health_path: "/health".to_owned(),
+            http: None,
+            host_api: None,
+            lazy: false,
+            idle_stop_secs: None,
+            provides_provider: None,
+        }
+    }
+
+    /// The 404-swallowing case, which is what left `com.ryu.browser` showing a
+    /// permanent "502 sidecar unreachable": when nothing resolves the command, the
+    /// reason is RECORDED (not just warned) and it names the exact release asset this
+    /// platform needs, so an operator can diff it against what CI publishes.
+    #[tokio::test]
+    async fn missing_local_sidecar_binary_is_recorded_with_the_expected_release_asset() {
+        let command = format!("ryu-test-absent-{}", uuid::Uuid::new_v4());
+        let name = format!("com.test.absent/{command}");
+        let downloads = crate::downloads::DownloadCenter::with_default_client();
+
+        // Falls through to the bare command (the spawn stays the authoritative
+        // resolver — this hook never turns an optional sidecar into a boot failure).
+        let program = ensure_local_sidecar_present(
+            &name,
+            "com.test.absent",
+            command.clone(),
+            &command,
+            &downloads,
+        )
+        .await;
+        assert_eq!(program, command);
+
+        let reports = missing_sidecar_binary_reports();
+        let found = reports
+            .iter()
+            .find(|r| r.name == name)
+            .expect("an unresolvable command must be recorded, not swallowed");
+        assert_eq!(found.plugin_id, "com.test.absent");
+        assert_eq!(found.command, command);
+        // The asset-name contract: `<command>-<os>-<arch>[.exe]`, byte-identical to
+        // what the release workflow must publish. A mismatch here IS the bug class
+        // this record exists to expose (ryu-browser ships `-mac-arm64.dmg`).
+        let ext = if cfg!(windows) { ".exe" } else { "" };
+        assert_eq!(
+            found.expected_asset,
+            format!("{command}-{}{ext}", crate::update::platform_tag())
+        );
+        assert!(!found.reason.is_empty(), "a record must carry its reason");
+        // Serializes for the status wire (the `/api/sidecar/status` seam).
+        let value = serde_json::to_value(found).unwrap();
+        assert_eq!(value["name"], serde_json::json!(name));
+        assert_eq!(
+            value["expected_asset"],
+            serde_json::json!(found.expected_asset)
+        );
+
+        clear_missing_sidecar_binary(&name);
+    }
+
+    /// A record must never outlive the problem: once the binary resolves (a later
+    /// install, or a `command_env` override pointing at a dev build) the entry is
+    /// dropped, so a healed sidecar stops reporting "binary not installed" forever.
+    #[tokio::test]
+    async fn resolved_local_sidecar_binary_clears_a_stale_missing_record() {
+        let name = format!("com.test.healed-{}/worker", uuid::Uuid::new_v4());
+        record_missing_sidecar_binary(
+            &name,
+            "com.test.healed",
+            "ryu-healed",
+            "ryu-healed-macos-aarch64",
+            "stale".to_owned(),
+        );
+        assert!(missing_sidecar_binary_reason(&name).is_some());
+
+        // An existing file at the resolved program path is step 1 of the resolution
+        // order (an env override or an already-installed bin).
+        let existing = std::env::temp_dir().join(format!("ryu-healed-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&existing, b"#!/bin/sh\n").unwrap();
+        let downloads = crate::downloads::DownloadCenter::with_default_client();
+        let program = ensure_local_sidecar_present(
+            &name,
+            "com.test.healed",
+            existing.to_string_lossy().into_owned(),
+            "ryu-healed",
+            &downloads,
+        )
+        .await;
+
+        assert_eq!(program, existing.to_string_lossy());
+        assert!(
+            missing_sidecar_binary_reason(&name).is_none(),
+            "a resolved binary must clear its stale missing-binary record"
+        );
+        std::fs::remove_file(&existing).ok();
+    }
+
+    /// The surfaced half: `health_check` reports the recorded reason through
+    /// [`HealthStatus::Unhealthy`] — the reason channel that already exists — so a
+    /// stopped sidecar reads as "binary not installed", not the indistinguishable
+    /// "process not running" a crash and a lazy scale-to-zero also produce.
+    #[tokio::test]
+    async fn health_check_says_binary_not_installed_rather_than_process_not_running() {
+        let downloads = crate::downloads::DownloadCenter::with_default_client();
+        let plugin_id = format!("com.test.nobin-{}", uuid::Uuid::new_v4());
+        let sc = ManifestSidecar::new(plugin_id.clone(), local_spec("ryu-test-nobin"), downloads);
+        let name = sc.name().to_owned();
+
+        // No record yet: a not-running sidecar (crashed, or lazily scaled to zero) must
+        // NOT be reported as a missing binary — that would be a lie about the cause.
+        assert!(!sc.is_running());
+        let before = sc.health_check().await;
+        let HealthStatus::Unhealthy(msg) = before else {
+            panic!("a stopped sidecar is Unhealthy");
+        };
+        assert_eq!(msg, "process not running");
+
+        record_missing_sidecar_binary(
+            &name,
+            &plugin_id,
+            "ryu-test-nobin",
+            "ryu-test-nobin-macos-aarch64",
+            "not published for this platform".to_owned(),
+        );
+        let after = sc.health_check().await;
+        let HealthStatus::Unhealthy(msg) = after else {
+            panic!("a sidecar with no binary is Unhealthy");
+        };
+        assert!(
+            msg.starts_with("binary not installed: "),
+            "health must carry the missing-binary reason, got: {msg}"
+        );
+        assert!(msg.contains("not published for this platform"), "{msg}");
+
+        clear_missing_sidecar_binary(&name);
     }
 }

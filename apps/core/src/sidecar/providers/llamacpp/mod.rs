@@ -1,8 +1,10 @@
+pub mod classify;
 pub mod downloader;
 pub mod embed;
 pub mod process;
 pub mod rerank;
 
+pub use classify::LlamaCppClassifyManager;
 pub use downloader::LlamaCppDownloader;
 pub use embed::LlamaCppEmbedManager;
 pub use process::LlamaCppProcess;
@@ -57,9 +59,12 @@ impl Default for LlamaCppManager {
 ///
 /// Precedence: a user-selected active model override stored in preferences
 /// (`ACTIVE_MODEL_PREF`, the local stem of an installed file) when that file is
-/// present on disk, else the registry default (`registry.json`/env). This keeps
-/// the served model a swappable runtime choice — never hardcoded — while still
-/// degrading safely if the override points at a file that was since deleted.
+/// present on disk, else the registry default (`RYU_LOCAL_CHAT_MODEL_ID`, env-only —
+/// `registry.json` has no key for it, because this function resolves the weight at
+/// *serve* time and `sidecar::onboarding` downloaded it at a different moment; see
+/// `registry::LocalModelEntry`). This keeps the served model a swappable runtime
+/// choice — never hardcoded — while still degrading safely if the override points at
+/// a file that was since deleted.
 async fn resolve_active_chat_model(
     registry: &crate::registry::ModelRegistry,
 ) -> (String, std::path::PathBuf) {

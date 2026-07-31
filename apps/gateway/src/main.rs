@@ -9,6 +9,7 @@ mod compression;
 mod concurrency;
 mod config;
 mod crash;
+mod credit_pools;
 mod error;
 mod evals;
 mod evaluators;

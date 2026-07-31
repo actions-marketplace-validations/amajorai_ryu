@@ -34,6 +34,220 @@ pub async fn from_prefs(prefs: &PreferencesStore, server_url: &str) -> Ingress {
     ryu_webhook_ingress::from_prefs(backend.as_deref(), url.as_deref(), server_url)
 }
 
+/// The effective **own-relay** public base, mirroring `OwnRelaySource::new`'s
+/// precedence exactly: the `RYU_WEBHOOK_INGRESS_URL` env override first, then the
+/// `webhook.ingress.url` pref. Both inputs are trimmed and an empty string counts
+/// as absent, because `OwnRelaySource::new` filters empties out of the env value
+/// and `OwnRelaySource::{start,public_url}` treat a whitespace-only `base_url` as
+/// unset. `None` means own-relay has nothing to publish.
+///
+/// Pure — the env value is an argument rather than a read, so this is testable
+/// without touching a process-global that the crate's own tests already contend
+/// for (`crates/core/webhook-ingress/src/lib.rs` serializes on it by hand).
+pub fn resolve_own_relay_base(env_url: Option<&str>, url_pref: Option<&str>) -> Option<String> {
+    [env_url, url_pref]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|v| !v.is_empty())
+        .map(str::to_owned)
+}
+
+/// Why selecting the `own-relay` backend would not produce a reachable webhook
+/// URL, or `None` when it will. The string is the 400 body, so it names the two
+/// places the operator can fix it.
+///
+/// ## Why this is checked at *selection* time
+///
+/// `OwnRelaySource` only errors when something asks it for a URL — at Core start
+/// (`start()`) or when a sender needs the address (`public_url()`). Until then the
+/// selection is persisted and reported back as the live backend, so the picker
+/// reads as configured while nothing can actually deliver a webhook. Refusing the
+/// selection is what turns that into an answer the operator sees at the moment
+/// they can act on it.
+///
+/// ## The scheme check
+///
+/// `join_webhook` (`crates/core/webhook-ingress/src/tunnels.rs`) is
+/// `format!("{}{}", base.trim_end_matches('/'), WEBHOOK_PATH)`. The only thing it
+/// normalises is a trailing slash — it neither validates the base nor prefixes a
+/// scheme onto it. So a base of `example.com` yields
+/// `example.com/api/composio/webhook`, which is not an absolute URL and which no
+/// sender can POST to. `http`/`https` are the only schemes that can be: the value
+/// is handed to remote webhook producers, not dialled by Core.
+///
+/// The trailing-slash trim is orthogonal to this check and neither weakens nor
+/// substitutes for it: `https://x.com/` and `https://x.com` both pass the scheme
+/// gate and both join to the same absolute URL.
+///
+/// Deliberately NOT applied retroactively: nothing re-validates an
+/// already-persisted `webhook.ingress.url`, and nothing re-checks a backend
+/// selected before this existed. This gate runs on the POST that *sets* the
+/// backend and nowhere else, so an operator with a running configuration is never
+/// broken by it.
+pub fn own_relay_rejection(base: Option<&str>) -> Option<String> {
+    let Some(base) = base else {
+        return Some(format!(
+            "own-relay ingress needs a public base URL: set the `{INGRESS_URL_PREF}` \
+             preference (or the {OWN_RELAY_URL_ENV} environment variable) to the \
+             address this node is publicly reachable at, then select this backend again."
+        ));
+    };
+    let lower = base.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Some(format!(
+            "own-relay public base URL '{base}' has no http:// or https:// scheme, so the \
+             webhook address derived from it is not one a sender can POST to. Set \
+             `{INGRESS_URL_PREF}` (or {OWN_RELAY_URL_ENV}) to a full absolute URL."
+        ));
+    }
+    None
+}
+
+/// The [`IngressKind`] the environment **pins**, if any — the kind
+/// [`ryu_webhook_ingress::configured_kind`] will return no matter what the
+/// `webhook.ingress.backend` pref says.
+///
+/// There is exactly one such pin today and this mirrors it rather than restating
+/// it: `configured_kind` returns [`IngressKind::OwnRelay`] whenever
+/// `RYU_WEBHOOK_INGRESS_URL` holds a non-empty value, *before* it looks at the
+/// pref (`crates/core/webhook-ingress/src/lib.rs:169-176` — read, not assumed).
+///
+/// Without this, picking Cloudflared on a node with that variable set persisted a
+/// pref, answered `ok: true`, and then kept reporting `own-relay` forever: a
+/// settable value that cannot take effect. The setter refuses instead.
+///
+/// Pure for the same reason [`resolve_own_relay_base`] is; the caller supplies the
+/// env value.
+pub fn env_pinned_kind(env_url: Option<&str>) -> Option<IngressKind> {
+    let pinned = env_url.map(str::trim).is_some_and(|v| !v.is_empty());
+    pinned.then_some(IngressKind::OwnRelay)
+}
+
+/// Read [`OWN_RELAY_URL_ENV`] the way `OwnRelaySource::new` does: trimmed, with an
+/// empty value treated as unset. The single env read behind the two pure helpers
+/// above, so the handler does not scatter `std::env::var` calls.
+pub fn own_relay_url_env() -> Option<String> {
+    std::env::var(OWN_RELAY_URL_ENV)
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod selection_gate_tests {
+    //! The `POST /api/webhook-ingress/backend` gates, exercised as pure functions.
+    //!
+    //! Kept out of the module's other test mod on purpose: that one is the
+    //! real-wiring canary for the crate extraction and its doc comment says so.
+    //! All but one take the env value as an argument rather than setting
+    //! `RYU_WEBHOOK_INGRESS_URL`, which is process-global. Nothing else in
+    //! `apps/core` reads that variable today (grepped: only these helpers and the
+    //! handler's message text), so the one test that must set it is not racing
+    //! anything at present — [`ENV_LOCK`] is there so that stays true if a second
+    //! writer appears, not because one exists.
+
+    use super::{env_pinned_kind, own_relay_rejection, resolve_own_relay_base, IngressKind};
+
+    #[test]
+    fn own_relay_base_prefers_the_env_override_and_treats_blank_as_absent() {
+        // Precedence mirrors `OwnRelaySource::new`: env first, pref second.
+        assert_eq!(
+            resolve_own_relay_base(Some("https://env.example"), Some("https://pref.example")),
+            Some("https://env.example".to_owned())
+        );
+        assert_eq!(
+            resolve_own_relay_base(None, Some("https://pref.example")),
+            Some("https://pref.example".to_owned())
+        );
+        // Whitespace-only is absent at BOTH positions, not just the env one:
+        // `OwnRelaySource::{start,public_url}` trim before the emptiness check, so
+        // a pref of "  " is a base that errors at start — exactly what this gate
+        // is here to refuse up front.
+        assert_eq!(resolve_own_relay_base(Some("   "), Some("  ")), None);
+        assert_eq!(
+            resolve_own_relay_base(Some("  "), Some(" https://pref.example ")),
+            Some("https://pref.example".to_owned()),
+            "a blank env value falls through to the pref, and the result is trimmed"
+        );
+        assert_eq!(resolve_own_relay_base(None, None), None);
+    }
+
+    #[test]
+    fn own_relay_is_refused_without_a_usable_absolute_url() {
+        // No base at all: the case that used to answer `ok: true`.
+        let why = own_relay_rejection(None).expect("no base must be refused");
+        assert!(why.contains(super::INGRESS_URL_PREF), "{why}");
+        assert!(why.contains(super::OWN_RELAY_URL_ENV), "{why}");
+
+        // Schemeless: `join_webhook` would emit `example.com/api/composio/webhook`.
+        let why = own_relay_rejection(Some("example.com")).expect("schemeless must be refused");
+        assert!(why.contains("example.com"), "{why}");
+        assert!(why.contains("scheme"), "{why}");
+
+        // A scheme Core cannot hand to a remote sender.
+        assert!(own_relay_rejection(Some("ftp://relay.example")).is_some());
+
+        // Accepted, including an uppercase scheme (URL schemes are
+        // case-insensitive, so rejecting HTTPS:// would be a false refusal).
+        assert!(own_relay_rejection(Some("https://relay.example")).is_none());
+        assert!(own_relay_rejection(Some("http://relay.example:8443")).is_none());
+        assert!(own_relay_rejection(Some("HTTPS://relay.example")).is_none());
+    }
+
+    #[test]
+    fn the_env_url_pins_own_relay_and_nothing_else_pins_anything() {
+        assert_eq!(
+            env_pinned_kind(Some("https://relay.example")),
+            Some(IngressKind::OwnRelay)
+        );
+        assert_eq!(env_pinned_kind(None), None);
+        assert_eq!(
+            env_pinned_kind(Some("   ")),
+            None,
+            "a blank value is not a pin — `configured_kind` filters empties out too"
+        );
+    }
+
+    #[test]
+    fn the_pin_agrees_with_the_resolver_it_mirrors() {
+        // The claim `env_pinned_kind` encodes is about a function in another
+        // crate. Assert it against that function rather than restating it, so a
+        // change to `configured_kind`'s precedence fails here instead of leaving
+        // the gate quietly describing behavior that no longer exists.
+        //
+        // Driven through the real resolver with the pref set to a DIFFERENT kind,
+        // which is the whole scenario: `cloudflared` is asked for, `own-relay` is
+        // what the node will use.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let restore = std::env::var(super::OWN_RELAY_URL_ENV).ok();
+        // SAFETY-adjacent: serialized by ENV_LOCK; restored below on every path
+        // because the assertions come after the read.
+        std::env::set_var(super::OWN_RELAY_URL_ENV, "https://pinned.example");
+        let resolved = ryu_webhook_ingress::configured_kind(Some("cloudflared"));
+        match restore {
+            Some(v) => std::env::set_var(super::OWN_RELAY_URL_ENV, v),
+            None => std::env::remove_var(super::OWN_RELAY_URL_ENV),
+        }
+        assert_eq!(
+            resolved,
+            IngressKind::OwnRelay,
+            "the env override still wins over the backend pref; if this fails, \
+             `env_pinned_kind` and the 409 it drives are describing a pin that is gone"
+        );
+        assert_eq!(
+            env_pinned_kind(Some("https://pinned.example")),
+            Some(resolved)
+        );
+    }
+
+    /// Serializes the one test that must touch the process-global env var.
+    /// `crates/core/webhook-ingress` guards the same variable with a lock of its
+    /// own, but that lock is private to that crate and its tests run in a separate
+    /// binary — the two processes cannot contend, and this lock cannot borrow it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
 /// Ensure the ingress subscription is live after a workflow with a `Webhook`
 /// trigger is saved, so its per-workflow URL becomes reachable without a Core
 /// restart. Scoped to the managed **RyuRelay** backend: only the relay needs a

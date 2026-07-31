@@ -14,12 +14,39 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::debug;
 
 use crate::config::CoreProviderConfig;
 
-/// Source plane of a tool — mirror of Core's `ToolKind` (Contract 1). Serialized
-/// lowercase: `mcp|builtin|composio|app`. The gateway never matches on it
-/// directly; it is carried through for logging and synthesis decisions.
+/// Source plane of a catalog entry — mirror of Core's `ToolKind` (Contract 1). Wire
+/// values: `mcp|builtin|composio|app|core-api|command|skill`.
+///
+/// The gateway now reads this field in exactly one place, and it is load-bearing:
+/// [`crate::tools::handle_search`] must not describe-and-inject a
+/// [`ToolKind::Skill`] row as an OpenAI function definition. A skill is instruction
+/// text the model loads with `skills__load`, not a function it calls; injecting one
+/// would hand the model a callable named after a skill, and Core would then have to
+/// refuse a call the gateway invited. The kind is also relayed to the model in the
+/// `tool_search` result so it can tell the two apart.
+///
+/// It is still not an authorization input — execution is gated on the exact
+/// fully-qualified tool id in [`crate::tools::ToolLoopContext::is_allowed`]. So the
+/// injection skip is a UX/correctness guard on top of Core's refusal, not the
+/// security boundary; see `skills_tool`'s "Discovery is unified, execution is not".
+///
+/// [`ToolKind::Unknown`] is the forward-compat catch-all: Core owns this enum
+/// (`crates/core/tool-registry`) and has grown it twice already (`core-api`,
+/// `command`). Before this variant existed, one row of a kind the gateway had
+/// not been taught replaced the **entire** search result with a parse error
+/// (`handle_search` turns an `Err` into `{"error": …}` for the model), so a
+/// single self-API descriptor in the top-`limit` blinded the model to every
+/// other hit — intermittently, since BM25 ranking is query-dependent.
+///
+/// Accepting an unrecognized kind grants nothing: the gateway never uses `kind`
+/// as an authorization input. Execution is gated on the exact fully-qualified
+/// tool id in [`crate::tools::ToolLoopContext::is_allowed`], and search ≠ grant.
+/// So the widest thing a bogus `kind` can do is show the model a tool name it
+/// still cannot call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolKind {
@@ -27,12 +54,47 @@ pub enum ToolKind {
     Builtin,
     Composio,
     App,
+    /// A Core HTTP endpoint (OpenAPI-derived) exposed as an agent-drivable tool.
+    /// Hyphenated on the wire, so it needs an explicit rename (the `lowercase`
+    /// default would be `coreapi`) — matching Core's own rename.
+    #[serde(rename = "core-api")]
+    CoreApi,
+    /// A declarative app tool that execs an allowlisted local CLI.
+    Command,
+    /// An Agent Skill: instruction text, loaded with `skills__load`, never called.
+    Skill,
+    /// Any kind Core adds after this mirror was written.
+    #[serde(other)]
+    Unknown,
 }
 
-/// A tool descriptor returned by `GET /api/tools/search` (Contract 1, consumed
-/// here). The gateway only needs `id`/`name`/`description` to relay to the model
-/// via `tool_search` results; the remaining fields are deserialized for wire
-/// fidelity but not read by the gateway.
+impl ToolKind {
+    /// The wire spelling relayed back to the model in a `tool_search` result.
+    ///
+    /// A kind this mirror has not been taught reports `"unknown"` rather than the
+    /// string Core actually sent: [`serde(other)`] discards the original, and the
+    /// alternative (keeping a raw copy of every row) would buy a label the model
+    /// cannot act on anyway. `"unknown"` is honest about that — what matters to the
+    /// model is that the row is *not* `"skill"`, so it is something it may call.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            ToolKind::Mcp => "mcp",
+            ToolKind::Builtin => "builtin",
+            ToolKind::Composio => "composio",
+            ToolKind::App => "app",
+            ToolKind::CoreApi => "core-api",
+            ToolKind::Command => "command",
+            ToolKind::Skill => "skill",
+            ToolKind::Unknown => "unknown",
+        }
+    }
+}
+
+/// A descriptor returned by `GET /api/tools/search` (Contract 1, consumed here).
+/// The gateway needs `id`/`name`/`description` to relay to the model via
+/// `tool_search` results, plus `kind` to tell a callable tool from an Agent Skill
+/// (see [`ToolKind`]); the remaining fields are deserialized for wire fidelity but
+/// not read by the gateway.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct ToolDescriptor {
@@ -252,9 +314,7 @@ impl CoreCatalog for ToolSearchClient {
             .json()
             .await
             .map_err(|e| format!("tools/search decode failed: {e}"))?;
-        // Contract 1 envelope: { object:"list", data:[ToolDescriptor] }.
-        let data = body.get("data").cloned().unwrap_or_else(|| body.clone());
-        serde_json::from_value(data).map_err(|e| format!("tools/search parse failed: {e}"))
+        descriptors_from_envelope(body)
     }
 
     async fn describe(&self, id: &str) -> Result<DescribedTool, String> {
@@ -330,6 +390,67 @@ impl CoreCatalog for ToolSearchClient {
     }
 }
 
+/// Decode a `GET /api/tools/search` body into descriptors, **row-tolerantly**.
+///
+/// Contract 1 envelope: `{ object:"list", data:[ToolDescriptor] }`; a bare array
+/// is accepted too (some Core builds return one unwrapped).
+///
+/// Two failure modes are deliberately kept apart:
+///
+///  - **The envelope is not a list** (no `data` array and the body itself is not
+///    an array) ⇒ `Err`. That is Core answering 200 with something else entirely
+///    — an error object, an auth failure, a protocol change. Swallowing it as
+///    "no tools found" would make a real outage look like an empty catalog, so
+///    the error string must still reach the model and the logs.
+///  - **A row inside the list does not deserialize** ⇒ drop that row only. One
+///    bad descriptor must never cost the model the whole result list; before
+///    this, a single row of an unmirrored `kind` did exactly that. Rows are
+///    dropped, not defaulted, because a descriptor with no `id` cannot be called
+///    and a descriptor we cannot parse is one we cannot describe either.
+///
+/// Fail-open is safe here for the same reason [`ToolKind::Unknown`] is: nothing
+/// in the gateway authorizes on a descriptor. Execution is gated separately on
+/// the exact tool id.
+fn descriptors_from_envelope(body: Value) -> Result<Vec<ToolDescriptor>, String> {
+    let data = body.get("data").unwrap_or(&body);
+    let Some(rows) = data.as_array() else {
+        return Err(format!(
+            "tools/search parse failed: expected a list, got {}",
+            type_name_of(data)
+        ));
+    };
+    let total = rows.len();
+    let descriptors: Vec<ToolDescriptor> = rows
+        .iter()
+        .filter_map(|row| match serde_json::from_value(row.clone()) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                debug!(error = %e, "tools/search dropped an undecodable descriptor");
+                None
+            }
+        })
+        .collect();
+    if descriptors.len() < total {
+        debug!(
+            dropped = total - descriptors.len(),
+            total, "tools/search dropped undecodable descriptors"
+        );
+    }
+    Ok(descriptors)
+}
+
+/// A human-readable JSON type name, for the not-a-list error above.
+fn type_name_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 /// Map Core's `{ok,output}` / `{ok,error}` envelope to a `Result`.
 pub fn map_core_ok(value: Value) -> Result<Value, String> {
     if value.get("ok").and_then(Value::as_bool) == Some(true) {
@@ -341,5 +462,130 @@ pub fn map_core_ok(value: Value) -> Result<Value, String> {
             .map(str::to_string)
             .unwrap_or_else(|| "tool call failed".to_string());
         Err(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimally-valid search row of a given kind.
+    fn row(id: &str, kind: &str) -> Value {
+        json!({ "id": id, "name": id, "description": "", "kind": kind })
+    }
+
+    /// Every kind Core's `ToolKind` can emit must decode to a **named** mirror
+    /// variant — this is the parity assertion. `core-api` in particular is
+    /// hyphenated on the wire and would otherwise decode as `Unknown`.
+    ///
+    /// Enumerated from Core's own `ToolKind::ALL` (a dev-dependency; the gateway's
+    /// runtime still never links Core) rather than from a list copied into this
+    /// file, so a plane Core grows cannot slip past as `Unknown`. That matters more
+    /// now than it did: [`crate::tools::handle_search`] branches on
+    /// [`ToolKind::Skill`], so a kind that silently degrades to `Unknown` would be
+    /// treated as callable.
+    #[test]
+    fn every_core_tool_kind_decodes_to_a_named_mirror_variant() {
+        for kind in ryu_tool_registry::ToolKind::ALL.iter().copied() {
+            let wire = kind.wire_name();
+            let parsed = descriptors_from_envelope(json!({ "data": [row("s__t", wire)] }))
+                .unwrap_or_else(|e| panic!("kind '{wire}' failed to decode: {e}"));
+            assert_eq!(parsed.len(), 1, "kind '{wire}' was dropped");
+            assert_ne!(
+                parsed[0].kind,
+                ToolKind::Unknown,
+                "kind '{wire}' is a plane Core can emit but this mirror decodes it as \
+                 Unknown — add the variant"
+            );
+            assert_eq!(
+                parsed[0].kind.wire_name(),
+                wire,
+                "kind '{wire}' decoded to a variant that spells itself differently"
+            );
+        }
+        // The one variant that has no Core counterpart, spelled explicitly.
+        let unknown = descriptors_from_envelope(json!({ "data": [row("s__t", "teleportation")] }))
+            .expect("an unmirrored kind still decodes");
+        assert_eq!(unknown[0].kind, ToolKind::Unknown);
+        assert_eq!(unknown[0].kind.wire_name(), "unknown");
+    }
+
+    /// The regression this module exists for: a `core-api` row (self-API
+    /// descriptors are merged into every search unconditionally) and a row of a
+    /// kind that does not exist yet must not cost the model the other results.
+    #[test]
+    fn core_api_and_future_kind_rows_do_not_blank_the_result_list() {
+        let parsed = descriptors_from_envelope(json!({
+            "object": "list",
+            "data": [
+                row("exa__search", "mcp"),
+                row("ryu__list_conversations", "core-api"),
+                row("some__tool", "teleportation"),
+                row("plugin__run", "command"),
+            ],
+        }))
+        .expect("a list of decodable rows must not be an Err");
+        let ids: Vec<&str> = parsed.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "exa__search",
+                "ryu__list_conversations",
+                "some__tool",
+                "plugin__run"
+            ]
+        );
+        // An unmirrored kind is carried, not dropped: it grants nothing (the
+        // gateway authorizes on tool id, never on kind) and dropping it would
+        // hide a callable tool from the model.
+        assert_eq!(parsed[2].kind, ToolKind::Unknown);
+    }
+
+    /// A structurally malformed row (no `id`, wrong-typed `kind`, not even an
+    /// object) is dropped on its own — its neighbours survive.
+    #[test]
+    fn malformed_rows_are_dropped_without_taking_their_neighbours() {
+        let parsed = descriptors_from_envelope(json!({
+            "data": [
+                row("good__one", "mcp"),
+                json!({ "name": "no-id", "kind": "mcp" }),
+                json!({ "id": "bad__kind", "name": "n", "kind": 5 }),
+                Value::String("not even an object".to_string()),
+                row("good__two", "app"),
+            ],
+        }))
+        .expect("malformed rows must not fail the whole parse");
+        let ids: Vec<&str> = parsed.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["good__one", "good__two"]);
+    }
+
+    /// An all-garbage *list* yields an empty catalog, not an error — the model
+    /// gets "no tools found" and can proceed, which is the whole point of the
+    /// row-tolerant parse.
+    #[test]
+    fn an_all_garbage_list_yields_empty_not_err() {
+        let parsed =
+            descriptors_from_envelope(json!({ "data": [1, "x", null, json!({ "q": 1 })] }))
+                .expect("garbage rows must not fail the parse");
+        assert!(parsed.is_empty());
+    }
+
+    /// But a body that is not a list at all still errors. A 200 carrying an
+    /// error object (auth failure, Core protocol change) must stay loud instead
+    /// of masquerading as an empty catalog.
+    #[test]
+    fn a_non_list_envelope_is_still_an_error() {
+        let err = descriptors_from_envelope(json!({ "error": "unauthorized" }))
+            .expect_err("a non-list body must not decode as an empty catalog");
+        assert!(err.contains("expected a list"), "unhelpful error: {err}");
+        assert!(descriptors_from_envelope(json!({ "data": { "id": "x" } })).is_err());
+    }
+
+    /// A bare top-level array (no `data` envelope) is still accepted.
+    #[test]
+    fn a_bare_array_body_decodes_without_the_data_envelope() {
+        let parsed = descriptors_from_envelope(json!([row("a__b", "builtin")]))
+            .expect("a bare array is a valid body");
+        assert_eq!(parsed.len(), 1);
     }
 }

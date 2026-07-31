@@ -257,7 +257,10 @@ impl GithubTopicSource {
         if self.resolve_api_base() != GITHUB_API_BASE {
             return None;
         }
-        self.token.as_deref().map(str::trim).filter(|t| !t.is_empty())
+        self.token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
     }
 
     fn topic(is_app: bool) -> String {
@@ -612,14 +615,26 @@ pub(crate) fn manifest_display_fields(manifest: &Value) -> serde_json::Map<Strin
     let Some(obj) = manifest.as_object() else {
         return out;
     };
-    if let Some(id) = obj.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(id) = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         out.insert("manifestId".to_string(), Value::String(id.to_string()));
     }
-    if let Some(name) = obj.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(name) = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         out.insert("manifestName".to_string(), Value::String(name.to_string()));
     }
     for key in MANIFEST_DISPLAY_KEYS {
-        if let Some(v) = obj.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(v) = obj
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             out.insert(key.to_string(), Value::String(v.to_string()));
         }
     }
@@ -1086,8 +1101,10 @@ mod tests {
 
     #[test]
     fn stale_note_names_the_rate_limit() {
-        assert!(stale_note("https://api.github.com/... returned HTTP 403 Forbidden")
-            .contains("rate limit"));
+        assert!(
+            stale_note("https://api.github.com/... returned HTTP 403 Forbidden")
+                .contains("rate limit")
+        );
         assert!(stale_note("dns error").contains("cached"));
     }
 

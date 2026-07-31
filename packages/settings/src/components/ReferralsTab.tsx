@@ -20,6 +20,7 @@ import { useState } from "react";
 import { sileo } from "sileo";
 import type { CommissionRule } from "../utils/api-client.ts";
 import { settingsApi } from "../utils/api-client.ts";
+import { ReferralCreditsSection } from "./shared/referral-credits-section.tsx";
 
 export interface ReferralsTabProps {
 	onOpenExternal?: (url: string) => Promise<void> | void;
@@ -57,6 +58,50 @@ const DEFAULT_RULE: CommissionRule = {
 	durationMonths: null,
 	fundedBy: "seller",
 };
+
+/**
+ * The cash program's opt-in. It is a CARD, not a gate: credit rewards are
+ * attributed from the share code at sign-up and pay whether or not this is ever
+ * enabled, so an early return here would hide credits the user already earned —
+ * and would make the two rewards look like two unrelated programs.
+ */
+function EnableAffiliateCard({
+	onEnable,
+	pending,
+}: {
+	onEnable: () => void;
+	pending: boolean;
+}) {
+	return (
+		<Card>
+			<CardContent className="space-y-5">
+				<div className="flex items-start gap-3">
+					<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+						<Wallet className="size-5" />
+					</div>
+					<div className="min-w-0 space-y-1">
+						<h3 className="font-semibold text-base">
+							Add cash commission to the same link
+						</h3>
+						<p className="text-muted-foreground text-sm">
+							Your credit rewards are already running. Turn on the affiliate
+							program and the same link also pays you a cash commission when a
+							referred friend subscribes — both rewards, one referral.
+						</p>
+					</div>
+				</div>
+				<Button disabled={pending} onClick={onEnable} type="button">
+					{pending ? (
+						<Spinner className="size-4" />
+					) : (
+						<Gift className="size-4" />
+					)}
+					Enable cash commission
+				</Button>
+			</CardContent>
+		</Card>
+	);
+}
 
 export function ReferralsTab({ onOpenExternal }: ReferralsTabProps) {
 	const queryClient = useQueryClient();
@@ -167,40 +212,6 @@ export function ReferralsTab({ onOpenExternal }: ReferralsTabProps) {
 		);
 	}
 
-	if (!data.enabled) {
-		return (
-			<Card className="overflow-hidden">
-				<CardContent className="space-y-5">
-					<div className="flex items-start gap-3">
-						<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-							<Gift className="size-5" />
-						</div>
-						<div className="min-w-0 space-y-1">
-							<h3 className="font-semibold text-base">Earn with Ryu</h3>
-							<p className="text-muted-foreground text-sm">
-								Refer friends and earn commission when they subscribe. Enable
-								the affiliate program to get your referral link and start
-								tracking earnings.
-							</p>
-						</div>
-					</div>
-					<Button
-						disabled={enableMutation.isPending}
-						onClick={() => enableMutation.mutate()}
-						type="button"
-					>
-						{enableMutation.isPending ? (
-							<Spinner className="size-4" />
-						) : (
-							<Gift className="size-4" />
-						)}
-						Enable affiliate program
-					</Button>
-				</CardContent>
-			</Card>
-		);
-	}
-
 	const { stats, payout } = data;
 	const payoutsActive = payout.onboardingStatus === "active";
 
@@ -215,8 +226,11 @@ export function ReferralsTab({ onOpenExternal }: ReferralsTabProps) {
 						<div className="min-w-0 space-y-1">
 							<h3 className="font-semibold text-base">Your referral link</h3>
 							<p className="text-muted-foreground text-sm">
-								Share this link. You earn commission when someone subscribes
-								through it.
+								One link, two rewards. You earn Ryu credits when a friend who
+								signed up through it becomes a paying customer
+								{data.enabled
+									? ", plus a cash commission on what they subscribe to."
+									: "."}
 							</p>
 						</div>
 					</div>
@@ -239,279 +253,315 @@ export function ReferralsTab({ onOpenExternal }: ReferralsTabProps) {
 				</CardContent>
 			</Card>
 
-			<div className="grid gap-3 sm:grid-cols-3">
-				<Card>
-					<CardContent className="space-y-1 py-4">
-						<p className="text-muted-foreground text-xs uppercase">Pending</p>
-						<p className="font-semibold text-lg">
-							{formatMoney(stats.pendingMinor, stats.currency)}
-						</p>
-					</CardContent>
-				</Card>
-				<Card>
-					<CardContent className="space-y-1 py-4">
-						<p className="text-muted-foreground text-xs uppercase">Approved</p>
-						<p className="font-semibold text-lg">
-							{formatMoney(stats.approvedMinor, stats.currency)}
-						</p>
-					</CardContent>
-				</Card>
-				<Card>
-					<CardContent className="space-y-1 py-4">
-						<p className="text-muted-foreground text-xs uppercase">Paid</p>
-						<p className="font-semibold text-lg">
-							{formatMoney(stats.paidMinor, stats.currency)}
-						</p>
-					</CardContent>
-				</Card>
-			</div>
+			<ReferralCreditsSection />
 
-			<Card>
-				<CardContent className="space-y-4">
-					<div className="flex items-start gap-3">
-						<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-							<Wallet className="size-5" />
+			{data.enabled ? null : (
+				<EnableAffiliateCard
+					onEnable={() => enableMutation.mutate()}
+					pending={enableMutation.isPending}
+				/>
+			)}
+
+			{data.enabled ? (
+				<>
+					<div className="space-y-2">
+						<div className="flex items-center gap-2">
+							<Wallet className="size-4 text-muted-foreground" />
+							<h3 className="font-semibold text-base">Cash commission</h3>
 						</div>
-						<div className="min-w-0 space-y-1">
-							<h3 className="font-semibold text-base">Payout account</h3>
-							<p className="text-muted-foreground text-sm">
-								{payoutsActive
-									? "Your Stripe account is connected and ready to receive payouts."
-									: "Connect a Stripe account to receive your commission payouts."}
-							</p>
+						<p className="text-muted-foreground text-sm">
+							The second half of the same referral: paid in money, not credits,
+							once a referred friend subscribes.
+						</p>
+						<div className="grid gap-3 pt-1 sm:grid-cols-3">
+							<Card>
+								<CardContent className="space-y-1 py-4">
+									<p className="text-muted-foreground text-xs uppercase">
+										Pending
+									</p>
+									<p className="font-semibold text-lg">
+										{formatMoney(stats.pendingMinor, stats.currency)}
+									</p>
+								</CardContent>
+							</Card>
+							<Card>
+								<CardContent className="space-y-1 py-4">
+									<p className="text-muted-foreground text-xs uppercase">
+										Approved
+									</p>
+									<p className="font-semibold text-lg">
+										{formatMoney(stats.approvedMinor, stats.currency)}
+									</p>
+								</CardContent>
+							</Card>
+							<Card>
+								<CardContent className="space-y-1 py-4">
+									<p className="text-muted-foreground text-xs uppercase">
+										Paid
+									</p>
+									<p className="font-semibold text-lg">
+										{formatMoney(stats.paidMinor, stats.currency)}
+									</p>
+								</CardContent>
+							</Card>
 						</div>
 					</div>
 
-					{payoutsActive ? (
-						<div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-							<Badge variant="secondary">Payouts enabled</Badge>
-							<Button
-								className="sm:ml-auto"
-								disabled={payoutMutation.isPending || stats.approvedMinor <= 0}
-								onClick={() => payoutMutation.mutate()}
+					<Card>
+						<CardContent className="space-y-4">
+							<div className="flex items-start gap-3">
+								<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+									<Wallet className="size-5" />
+								</div>
+								<div className="min-w-0 space-y-1">
+									<h3 className="font-semibold text-base">Payout account</h3>
+									<p className="text-muted-foreground text-sm">
+										{payoutsActive
+											? "Your Stripe account is connected and ready to receive payouts."
+											: "Connect a Stripe account to receive your commission payouts."}
+									</p>
+								</div>
+							</div>
+
+							{payoutsActive ? (
+								<div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+									<Badge variant="secondary">Payouts enabled</Badge>
+									<Button
+										className="sm:ml-auto"
+										disabled={
+											payoutMutation.isPending || stats.approvedMinor <= 0
+										}
+										onClick={() => payoutMutation.mutate()}
+										type="button"
+									>
+										{payoutMutation.isPending ? (
+											<Spinner className="size-4" />
+										) : (
+											<Wallet className="size-4" />
+										)}
+										Pay out approved balance
+									</Button>
+								</div>
+							) : (
+								<Button
+									disabled={onboardMutation.isPending}
+									onClick={() => onboardMutation.mutate()}
+									type="button"
+								>
+									{onboardMutation.isPending ? (
+										<Spinner className="size-4" />
+									) : (
+										<Wallet className="size-4" />
+									)}
+									Set up payouts
+								</Button>
+							)}
+						</CardContent>
+					</Card>
+
+					<Card>
+						<CardContent className="space-y-4">
+							<button
+								className="flex w-full items-center justify-between gap-2 text-left"
+								onClick={openEditor}
 								type="button"
 							>
-								{payoutMutation.isPending ? (
-									<Spinner className="size-4" />
-								) : (
-									<Wallet className="size-4" />
-								)}
-								Pay out approved balance
-							</Button>
-						</div>
-					) : (
-						<Button
-							disabled={onboardMutation.isPending}
-							onClick={() => onboardMutation.mutate()}
-							type="button"
-						>
-							{onboardMutation.isPending ? (
-								<Spinner className="size-4" />
-							) : (
-								<Wallet className="size-4" />
-							)}
-							Set up payouts
-						</Button>
-					)}
-				</CardContent>
-			</Card>
-
-			<Card>
-				<CardContent className="space-y-4">
-					<button
-						className="flex w-full items-center justify-between gap-2 text-left"
-						onClick={openEditor}
-						type="button"
-					>
-						<div className="min-w-0">
-							<h3 className="font-semibold text-base">
-								Marketplace default commission
-							</h3>
-							<p className="text-muted-foreground text-sm">
-								The commission applied to your marketplace listings unless
-								overridden per item.
-							</p>
-						</div>
-						<ChevronDown
-							className={`size-4 shrink-0 text-muted-foreground transition-transform ${
-								editorOpen ? "rotate-180" : ""
-							}`}
-						/>
-					</button>
-
-					{editorOpen ? (
-						<div className="space-y-4 border-t pt-4">
-							<div className="grid gap-4 sm:grid-cols-2">
-								<div className="space-y-1.5">
-									<Label htmlFor="commission-type">Type</Label>
-									<Select
-										onValueChange={(value) =>
-											setRule((prev) => ({
-												...prev,
-												type: value as CommissionRule["type"],
-											}))
-										}
-										value={rule.type}
-									>
-										<SelectTrigger className="w-full" id="commission-type">
-											<SelectValue />
-										</SelectTrigger>
-										<SelectContent>
-											<SelectItem value="percent">Percent</SelectItem>
-											<SelectItem value="flat">Flat</SelectItem>
-										</SelectContent>
-									</Select>
+								<div className="min-w-0">
+									<h3 className="font-semibold text-base">
+										Marketplace default commission
+									</h3>
+									<p className="text-muted-foreground text-sm">
+										The commission applied to your marketplace listings unless
+										overridden per item.
+									</p>
 								</div>
-
-								<div className="space-y-1.5">
-									<Label htmlFor="commission-value">
-										{rule.type === "percent"
-											? "Value (basis points)"
-											: "Value (cents)"}
-									</Label>
-									<Input
-										id="commission-value"
-										inputMode="numeric"
-										min={0}
-										onChange={(e) =>
-											setRule((prev) => ({
-												...prev,
-												value: Number(e.target.value) || 0,
-											}))
-										}
-										type="number"
-										value={rule.value}
-									/>
-								</div>
-
-								<div className="space-y-1.5">
-									<Label htmlFor="commission-funded">Funded by</Label>
-									<Select
-										onValueChange={(value) =>
-											setRule((prev) => ({
-												...prev,
-												fundedBy: value as CommissionRule["fundedBy"],
-											}))
-										}
-										value={rule.fundedBy}
-									>
-										<SelectTrigger className="w-full" id="commission-funded">
-											<SelectValue />
-										</SelectTrigger>
-										<SelectContent>
-											<SelectItem value="platform">Platform</SelectItem>
-											<SelectItem value="seller">Seller</SelectItem>
-										</SelectContent>
-									</Select>
-								</div>
-
-								<div className="space-y-1.5">
-									<Label htmlFor="commission-duration">
-										Duration (months, blank = forever)
-									</Label>
-									<Input
-										disabled={!rule.recurring}
-										id="commission-duration"
-										inputMode="numeric"
-										min={1}
-										onChange={(e) =>
-											setRule((prev) => ({
-												...prev,
-												durationMonths:
-													e.target.value === ""
-														? null
-														: Number(e.target.value) || null,
-											}))
-										}
-										placeholder="Forever"
-										type="number"
-										value={rule.durationMonths ?? ""}
-									/>
-								</div>
-							</div>
-
-							<label
-								className="flex cursor-pointer items-center gap-2"
-								htmlFor="commission-recurring"
-							>
-								<Checkbox
-									checked={rule.recurring}
-									id="commission-recurring"
-									onCheckedChange={(checked) =>
-										setRule((prev) => ({
-											...prev,
-											recurring: checked === true,
-											durationMonths:
-												checked === true ? prev.durationMonths : null,
-										}))
-									}
+								<ChevronDown
+									className={`size-4 shrink-0 text-muted-foreground transition-transform ${
+										editorOpen ? "rotate-180" : ""
+									}`}
 								/>
-								<span className="text-sm">Recurring commission</span>
-							</label>
+							</button>
 
-							<div className="flex flex-wrap gap-2">
-								<Button
-									disabled={commissionMutation.isPending}
-									onClick={() => commissionMutation.mutate(rule)}
-									type="button"
-								>
-									{commissionMutation.isPending ? (
-										<Spinner className="size-4" />
-									) : null}
-									Save
-								</Button>
-								<Button
-									disabled={
-										commissionMutation.isPending || !data.defaultCommission
-									}
-									onClick={() => commissionMutation.mutate(null)}
-									type="button"
-									variant="outline"
-								>
-									Clear
-								</Button>
-							</div>
-						</div>
-					) : null}
-				</CardContent>
-			</Card>
+							{editorOpen ? (
+								<div className="space-y-4 border-t pt-4">
+									<div className="grid gap-4 sm:grid-cols-2">
+										<div className="space-y-1.5">
+											<Label htmlFor="commission-type">Type</Label>
+											<Select
+												onValueChange={(value) =>
+													setRule((prev) => ({
+														...prev,
+														type: value as CommissionRule["type"],
+													}))
+												}
+												value={rule.type}
+											>
+												<SelectTrigger className="w-full" id="commission-type">
+													<SelectValue />
+												</SelectTrigger>
+												<SelectContent>
+													<SelectItem value="percent">Percent</SelectItem>
+													<SelectItem value="flat">Flat</SelectItem>
+												</SelectContent>
+											</Select>
+										</div>
 
-			<Card>
-				<CardContent className="space-y-3">
-					<h3 className="font-semibold text-base">Recent commissions</h3>
-					{data.recentCommissions.length === 0 ? (
-						<p className="py-4 text-center text-muted-foreground text-sm">
-							No commissions yet. Share your link to start earning.
-						</p>
-					) : (
-						<div className="space-y-2">
-							{data.recentCommissions.map((commission) => (
-								<div
-									className="flex items-center justify-between gap-3 rounded-lg border p-3"
-									key={commission.id}
-								>
-									<div className="min-w-0">
-										<p className="truncate font-medium text-sm">
-											{commission.sourceType}
-										</p>
-										<p className="text-muted-foreground text-xs">
-											{formatMoney(
-												commission.commissionAmountMinor,
-												commission.currency
-											)}
-										</p>
+										<div className="space-y-1.5">
+											<Label htmlFor="commission-value">
+												{rule.type === "percent"
+													? "Value (basis points)"
+													: "Value (cents)"}
+											</Label>
+											<Input
+												id="commission-value"
+												inputMode="numeric"
+												min={0}
+												onChange={(e) =>
+													setRule((prev) => ({
+														...prev,
+														value: Number(e.target.value) || 0,
+													}))
+												}
+												type="number"
+												value={rule.value}
+											/>
+										</div>
+
+										<div className="space-y-1.5">
+											<Label htmlFor="commission-funded">Funded by</Label>
+											<Select
+												onValueChange={(value) =>
+													setRule((prev) => ({
+														...prev,
+														fundedBy: value as CommissionRule["fundedBy"],
+													}))
+												}
+												value={rule.fundedBy}
+											>
+												<SelectTrigger
+													className="w-full"
+													id="commission-funded"
+												>
+													<SelectValue />
+												</SelectTrigger>
+												<SelectContent>
+													<SelectItem value="platform">Platform</SelectItem>
+													<SelectItem value="seller">Seller</SelectItem>
+												</SelectContent>
+											</Select>
+										</div>
+
+										<div className="space-y-1.5">
+											<Label htmlFor="commission-duration">
+												Duration (months, blank = forever)
+											</Label>
+											<Input
+												disabled={!rule.recurring}
+												id="commission-duration"
+												inputMode="numeric"
+												min={1}
+												onChange={(e) =>
+													setRule((prev) => ({
+														...prev,
+														durationMonths:
+															e.target.value === ""
+																? null
+																: Number(e.target.value) || null,
+													}))
+												}
+												placeholder="Forever"
+												type="number"
+												value={rule.durationMonths ?? ""}
+											/>
+										</div>
 									</div>
-									<Badge
-										variant={STATUS_VARIANTS[commission.status] ?? "outline"}
+
+									<label
+										className="flex cursor-pointer items-center gap-2"
+										htmlFor="commission-recurring"
 									>
-										{commission.status}
-									</Badge>
+										<Checkbox
+											checked={rule.recurring}
+											id="commission-recurring"
+											onCheckedChange={(checked) =>
+												setRule((prev) => ({
+													...prev,
+													recurring: checked === true,
+													durationMonths:
+														checked === true ? prev.durationMonths : null,
+												}))
+											}
+										/>
+										<span className="text-sm">Recurring commission</span>
+									</label>
+
+									<div className="flex flex-wrap gap-2">
+										<Button
+											disabled={commissionMutation.isPending}
+											onClick={() => commissionMutation.mutate(rule)}
+											type="button"
+										>
+											{commissionMutation.isPending ? (
+												<Spinner className="size-4" />
+											) : null}
+											Save
+										</Button>
+										<Button
+											disabled={
+												commissionMutation.isPending || !data.defaultCommission
+											}
+											onClick={() => commissionMutation.mutate(null)}
+											type="button"
+											variant="outline"
+										>
+											Clear
+										</Button>
+									</div>
 								</div>
-							))}
-						</div>
-					)}
-				</CardContent>
-			</Card>
+							) : null}
+						</CardContent>
+					</Card>
+
+					<Card>
+						<CardContent className="space-y-3">
+							<h3 className="font-semibold text-base">Recent commissions</h3>
+							{data.recentCommissions.length === 0 ? (
+								<p className="py-4 text-center text-muted-foreground text-sm">
+									No commissions yet. Share your link to start earning.
+								</p>
+							) : (
+								<div className="space-y-2">
+									{data.recentCommissions.map((commission) => (
+										<div
+											className="flex items-center justify-between gap-3 rounded-lg border p-3"
+											key={commission.id}
+										>
+											<div className="min-w-0">
+												<p className="truncate font-medium text-sm">
+													{commission.sourceType}
+												</p>
+												<p className="text-muted-foreground text-xs">
+													{formatMoney(
+														commission.commissionAmountMinor,
+														commission.currency
+													)}
+												</p>
+											</div>
+											<Badge
+												variant={
+													STATUS_VARIANTS[commission.status] ?? "outline"
+												}
+											>
+												{commission.status}
+											</Badge>
+										</div>
+									))}
+								</div>
+							)}
+						</CardContent>
+					</Card>
+				</>
+			) : null}
 		</div>
 	);
 }

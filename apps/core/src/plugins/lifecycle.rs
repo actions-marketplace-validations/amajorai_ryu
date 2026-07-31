@@ -219,6 +219,27 @@ impl From<anyhow::Error> for UpdateError {
 /// Fails if the app is already installed. Callers that want idempotent
 /// install-or-update should call [`install_app`] then [`update_app`] on
 /// `AlreadyExists`.
+///
+/// # Built-in companions get their compiled-in bundle here
+///
+/// A built-in that ships a companion frame carries it as a compiled-in `*_UI_HTML`
+/// const, and the ONLY thing that ever wrote one onto a record used to be
+/// `plugins::seed` — so every opt-in companion had to be PRE-SEEDED (installed +
+/// disabled) on every fresh install just to have somewhere for its bundle to live,
+/// because `enable_app` only flips a bit and the marketplace `update_app` path needs
+/// a verified descriptor a built-in does not have. That is why the Store listed
+/// leaf-feature apps as "Installed (off)" out of the box, and why uninstalling one
+/// did not survive a reboot.
+///
+/// Sourcing the bundle at INSTALL time removes that coupling: an app can now be
+/// absent from a fresh store and still mount a real UI the moment the user installs
+/// and enables it (see `seed::NOT_PRE_INSTALLED`). Best-effort by construction — a
+/// failed `set_ui_code` must not fail the install (the record is the install; the
+/// bundle is back-fillable and `seed_companion_ui`'s case-2 pass fills it on the next
+/// boot), and a manifest with no compiled-in bundle is the overwhelming common case
+/// and takes the `None` branch. The marketplace install sink
+/// (`persist_installed_plugin`) calls `set_ui_code` with its verified descriptor
+/// bundle AFTER this, so an explicit bundle still wins.
 pub async fn install_app(store: &PluginStore, manifest: &PluginManifest) -> Result<PluginRecord> {
     // Validate semver before persisting (the loader validates it too, but we
     // re-check here so the endpoint never persists a bad version).
@@ -229,10 +250,28 @@ pub async fn install_app(store: &PluginStore, manifest: &PluginManifest) -> Resu
         )
     })?;
 
-    store
+    let record = store
         .insert(&manifest.id, &manifest.version)
         .await
-        .map_err(|e| anyhow::anyhow!("install failed: {e}"))
+        .map_err(|e| anyhow::anyhow!("install failed: {e}"))?;
+
+    if let Some(ui_code) = super::seed::compiled_in_ui_code(&manifest.id) {
+        match store.set_ui_code(&manifest.id, Some(ui_code)).await {
+            Ok(_) => tracing::info!(
+                "install '{}': attached its compiled-in companion bundle ({} bytes)",
+                manifest.id,
+                ui_code.len()
+            ),
+            Err(e) => tracing::warn!(
+                "install '{}': attaching the compiled-in companion bundle failed: {e}. The app \
+                 is installed; its UI will mount as \"no interface\" until the next boot's \
+                 companion-ui back-fill repairs the record.",
+                manifest.id
+            ),
+        }
+    }
+
+    Ok(record)
 }
 
 /// Enable an app **and its dependencies**, in topological order.
@@ -794,10 +833,47 @@ pub async fn uninstall_app(
     // 4. Remove the record (wires the previously-unused PluginStore::remove).
     store.remove(id).await.map_err(UninstallError::Other)?;
 
+    // 5. Delete the scheduler jobs this App created.
+    //
+    // Disabling an App only PAUSES its automations (the tick loop resolves
+    // `owner_app` and skips them), which is right — re-enabling should restore
+    // what you had. Uninstalling is the stronger statement, and scheduler jobs
+    // are files on disk that outlive the record: left behind, they would sit
+    // dormant and then resurrect wholesale the day the App is installed again,
+    // reinstating a schedule the user believed they had removed. Deleted after
+    // the record so a failure here cannot leave an App half-uninstalled.
+    //
+    // This is the same shape as `workflow::triggers::delete_schedule_jobs` on
+    // workflow delete: whoever owns the thing owns the jobs it spawned.
+    remove_owned_scheduler_jobs(id);
+
     Ok(UninstallOutcome {
         removed: id.to_owned(),
         disabled,
     })
+}
+
+/// Delete every scheduled job stamped with `app_id` as its `owner_app`.
+///
+/// Best-effort and never fatal: the App is already uninstalled by the time this
+/// runs, and a job that survives a failed delete is inert anyway — the tick loop
+/// refuses to fire a job whose owning App has no record.
+fn remove_owned_scheduler_jobs(app_id: &str) {
+    for job in crate::scheduler::store::list_jobs() {
+        if job.owner_app.as_deref() != Some(app_id) {
+            continue;
+        }
+        match crate::scheduler::store::delete_job(&job.id) {
+            Ok(_) => tracing::info!(
+                "uninstall '{app_id}': removed its scheduled job '{}'",
+                job.id
+            ),
+            Err(e) => tracing::warn!(
+                "uninstall '{app_id}': could not remove scheduled job '{}': {e}",
+                job.id
+            ),
+        }
+    }
 }
 
 /// Whether a requested update needs the store transition or is a no-op.

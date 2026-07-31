@@ -32,6 +32,7 @@ import type {
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import type {
 	AttachedImage,
+	InputBarInfoBar,
 	InputBarProps,
 } from "@/components/agent-elements/input-bar.tsx";
 import { InputBar } from "@/components/agent-elements/input-bar.tsx";
@@ -3238,13 +3239,22 @@ export default function ChatPage({
 	);
 
 	const {
+		infoBar: composerInfoBar,
 		leftActions: composerLeft,
+		refreshRoutingAdvice,
 		rightActions: composerRight,
 		sections: composerSections,
 		renderBody: composerRenderBody,
 	} = useComposerAgentControls({
 		compact: composerCompact,
 		agents,
+		// An empty thread is a conversation start, which is the only point an
+		// agent-swapping fallback rule may move the whole agent. Mirrors the turn
+		// path's own test (`conversation_id.is_none() || messages.len() <= 1`):
+		// zero RENDERED messages here is the same moment the server sees a single
+		// message — the turn it is about to run.
+		atConversationStart:
+			activeConversationId === null || processedMessages.length === 0,
 		teams,
 		agentId,
 		teamId,
@@ -3275,11 +3285,32 @@ export default function ChatPage({
 			/>
 		) : null;
 
+	// The "check my balance every time I send" half of the threshold fallback.
+	// Bound to the turn LIFECYCLE rather than the submit handler: a send can land
+	// through three paths here (direct, queued, blocked-retry), and the spend a
+	// rule tests only exists once the turn has actually run — so re-asking as the
+	// stream settles back to `ready` is both simpler and more accurate than
+	// firing at keystroke time. Cache-backed in Core, so this is not a vendor
+	// round-trip per message.
+	const wasStreamingRef = useRef(false);
+	useEffect(() => {
+		const streaming = status !== "ready";
+		if (wasStreamingRef.current && !streaming) {
+			refreshRoutingAdvice();
+		}
+		wasStreamingRef.current = streaming;
+	}, [status, refreshRoutingAdvice]);
+
 	const composerControlsRef = useRef<{
+		infoBar: InputBarInfoBar | undefined;
 		left: ReactNode;
 		right: ReactNode;
-	}>({ left: null, right: null });
+	}>({ infoBar: undefined, left: null, right: null });
 	composerControlsRef.current = {
+		// The threshold-fallback notice ("running this turn on X because Y is
+		// low"). Rides the same ref as the other composer controls so the memoized
+		// InputBar picks it up without re-rendering on every advice refetch.
+		infoBar: composerInfoBar,
 		left: composerLeft,
 		// Contributed bar controls sit after the shell's own right-hand controls,
 		// in the one slot the memoized InputBar reads from this ref.
@@ -3396,6 +3427,7 @@ export default function ChatPage({
 					// The "+" dropdown's Temporary-chat toggle row (read fresh from the
 					// ref so gating on rendered messages stays current).
 					ghostControls={ghostControlsRef.current}
+					infoBar={composerControlsRef.current.infoBar}
 					leftActions={composerControlsRef.current.left}
 					mentionSources={mentionSourcesRef.current}
 					onGenerateImage={handleGenerateImage}

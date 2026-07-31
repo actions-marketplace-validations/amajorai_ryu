@@ -387,6 +387,8 @@ fn sync_backing_job(quest_id: &str, title: &str, interval: &str, open: bool) {
         },
         enabled: open,
         require_approval: false,
+        // Core-owned (reconciled by Core itself), not an App-created job.
+        owner_app: None,
         created_at: existing
             .as_ref()
             .map(|j| j.created_at.clone())
@@ -533,6 +535,7 @@ mod tests {
             target,
             enabled: true,
             require_approval: false,
+            owner_app: None,
             created_at: "t".into(),
             updated_at: "t".into(),
             last_run_at: None,

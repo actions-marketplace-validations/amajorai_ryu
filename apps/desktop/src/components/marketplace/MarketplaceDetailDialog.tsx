@@ -770,7 +770,7 @@ function ReviewItem({ review, isOwn }: { review: Review; isOwn: boolean }) {
 				<AvatarFallback className="overflow-hidden bg-transparent p-0">
 					<DitherAvatar
 						className="size-full"
-						name={review.userName ?? "anonymous"}
+						name={review.userId ?? review.userName ?? "anonymous"}
 					/>
 				</AvatarFallback>
 			</Avatar>

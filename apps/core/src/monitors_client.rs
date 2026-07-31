@@ -195,6 +195,8 @@ fn schedule_from_interval(interval: &str) -> Schedule {
     } else {
         Schedule::Cron {
             expr: interval.to_string(),
+            // Monitor intervals are machine cadences, not wall-clock times.
+            tz: None,
         }
     }
 }
@@ -215,6 +217,8 @@ fn sync_backing_job(monitor_id: &str, name: &str, interval: &str, enabled: bool)
         },
         enabled,
         require_approval: false,
+        // Core-owned (reconciled by Core itself), not an App-created job.
+        owner_app: None,
         created_at: existing
             .as_ref()
             .map(|j| j.created_at.clone())

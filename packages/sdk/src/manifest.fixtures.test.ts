@@ -12,15 +12,19 @@
  *      `apps/core/src/plugin_host/mod.rs`);
  *   3. every `match.tools` gate is a well-formed tiny-glob (the shape Core's
  *      `glob_match` treats as a leading/trailing wildcard rather than a literal);
- *   4. the 55 fixtures whose runnables use only SDK-known kinds parse cleanly
+ *   4. every manifest whose runnables use only SDK-known kinds parses cleanly
  *      through `PluginManifestSchema`.
  *
- * The fixture set is read from Core's tree so a new shipped plugin is covered the
- * moment it lands, without touching this file.
+ * The set is read from Core's tree so a new shipped plugin is covered the moment it
+ * lands, without touching this file. It spans BOTH homes: the packaged manifests
+ * live in `apps-store/<x>/manifest.json` and `plugins-store/<x>/manifest.json` (Core
+ * `include_str!`s them from there), and only the ~13 Core-only ones remain under
+ * `apps/core/src/plugin_manifest/fixtures/`. Reading just the fixtures dir would
+ * still pass — on 13 files instead of 71 — so both roots are walked deliberately.
  */
 
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	labelImpersonatesSystemChrome,
@@ -32,10 +36,10 @@ import {
 //
 // Resolve from this file's dir (packages/sdk/src → repo root) so the suite reads
 // the same set whether `bun test` is invoked from the package or the repo root.
-const FIXTURES_DIR = join(
-	import.meta.dir,
-	"../../../apps/core/src/plugin_manifest/fixtures"
-);
+const REPO_ROOT = join(import.meta.dir, "../../..");
+const FIXTURES_DIR = join(REPO_ROOT, "apps/core/src/plugin_manifest/fixtures");
+/** The package roots whose `manifest.json` Core compiles in directly. */
+const PACKAGE_ROOTS = ["apps-store", "plugins-store"];
 
 interface RawManifest {
 	companion?: { label?: unknown };
@@ -50,14 +54,37 @@ interface RawManifest {
 }
 
 function loadFixtures(): Array<{ file: string; manifest: RawManifest }> {
-	const files = readdirSync(FIXTURES_DIR).filter((f) =>
-		f.endsWith(".manifest.json")
-	);
-	return files.map((file) => ({
+	const found: Array<{ file: string; path: string }> = [];
+
+	// 1. Core-only manifests still living beside the crate.
+	for (const f of readdirSync(FIXTURES_DIR)) {
+		if (f.endsWith(".manifest.json")) {
+			found.push({ file: f, path: join(FIXTURES_DIR, f) });
+		}
+	}
+
+	// 2. The packaged manifests, named after their directory so a failure message
+	//    still identifies the app rather than saying "manifest.json".
+	for (const root of PACKAGE_ROOTS) {
+		const rootDir = join(REPO_ROOT, root);
+		let names: string[];
+		try {
+			names = readdirSync(rootDir);
+		} catch {
+			continue; // root not shipped in this tree
+		}
+		for (const name of names) {
+			const path = join(rootDir, name, "manifest.json");
+			if (existsSync(path)) {
+				found.push({ file: `${root}/${name}/manifest.json`, path });
+			}
+		}
+	}
+
+	found.sort((a, b) => a.file.localeCompare(b.file));
+	return found.map(({ file, path }) => ({
 		file,
-		manifest: JSON.parse(
-			readFileSync(join(FIXTURES_DIR, file), "utf8")
-		) as RawManifest,
+		manifest: JSON.parse(readFileSync(path, "utf8")) as RawManifest,
 	}));
 }
 
@@ -161,9 +188,16 @@ function isWellFormedToolGlob(pattern: string): boolean {
 
 describe("fixture discovery", () => {
 	it("finds the full shipped set (guards against a broken path)", () => {
-		// A wrong FIXTURES_DIR would read zero files and every downstream test
-		// would vacuously pass; assert a floor well below the current count (62).
+		// A wrong path would read zero files and every downstream test would
+		// vacuously pass; assert a floor well below the current count (71).
 		expect(FIXTURES.length).toBeGreaterThan(50);
+		// Both homes must contribute. A floor alone cannot catch losing one root:
+		// the packaged manifests are ~58 of the set, so dropping the Core-only dir
+		// still clears 50 while silently skipping `layers`, `memory`, `rag`, … —
+		// and dropping the package roots leaves only 13, which the floor does catch.
+		expect(FIXTURES.some((f) => f.file.includes("plugins-store/"))).toBe(true);
+		expect(FIXTURES.some((f) => f.file.includes("apps-store/"))).toBe(true);
+		expect(FIXTURES.some((f) => !f.file.includes("/"))).toBe(true);
 	});
 });
 
@@ -355,7 +389,12 @@ describe("PluginManifestSchema preserves turn_hook.match", () => {
 	// pins the fix — the gate must survive the parse the CLI applies.
 	it("tool-firewall's match:{tools:['*']} survives the parse", () => {
 		const raw = JSON.parse(
-			readFileSync(join(FIXTURES_DIR, "tool-firewall.manifest.json"), "utf8")
+			// `tool-firewall` is a packaged plugin, so its manifest lives in its
+			// package directory — there is no fixture copy any more.
+			readFileSync(
+				join(REPO_ROOT, "plugins-store/tool-firewall/manifest.json"),
+				"utf8"
+			)
 		);
 		expect(raw.contributes.turn_hooks[0].match).toEqual({ tools: ["*"] });
 

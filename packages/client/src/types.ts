@@ -67,11 +67,25 @@ export interface Space {
 	updatedAt: number;
 }
 
-/** A ranked chunk returned from a Space KNN search. */
+/** A single ranked chunk returned from a Space search. */
 export interface SpaceMatch {
 	chunkId: string;
 	content: string;
-	/** Squared L2 distance from the query vector (smaller is closer). */
+	/**
+	 * **Do not rank on this field, and do not read magnitudes off it.** It used to
+	 * be documented as "squared L2 distance from the query vector", which is only
+	 * ever true of one of the three ways a chunk can end up in this array:
+	 *
+	 * - a vector-mode KNN hit carries its real `vec0` distance (smaller is closer);
+	 * - a graph-mode traversal hit is assigned the constant `0.0`;
+	 * - a chunk pulled in by `[[page]]`-link expansion (which runs in **both**
+	 *   modes) is assigned the constant `1.0`.
+	 *
+	 * The last two are placeholders, not measurements. On top of that Core's bge
+	 * reranker re-orders the survivors **without rewriting `distance`**, so array
+	 * order — not this number — is the ranking. Sorting by `distance` un-does the
+	 * rerank; averaging or thresholding it mixes a metric with two constants.
+	 */
 	distance: number;
 	documentId: string;
 }

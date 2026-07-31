@@ -39,6 +39,7 @@ import {
 	SettingsItem,
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
+import { useProviderCredits } from "@/src/hooks/useProviderCredits.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { GatewayMetrics, ProviderQuota } from "@/src/lib/api/gateway.ts";
 import {
@@ -577,6 +578,84 @@ function AccountKeysDisplay({
 
 // ── Section ──────────────────────────────────────────────────────────────────
 
+/**
+ * Remaining prepaid credit on the BYOK provider keys stored on this node.
+ *
+ * A separate card rather than a column on the quota table above, because the two
+ * are different universes: that table is keyed by GATEWAY provider kinds
+ * (`openai`, `anthropic`, `local`, `core`, …) whose credentials are
+ * environment-variable-only, while these are Pi/BYOK provider ids whose keys live
+ * in Core's own config. Joining them would need an id mapping that doesn't exist
+ * and would silently mismatch.
+ *
+ * Only three providers publish a balance to the key you already hold. The rest is
+ * not an oversight worth hiding: the card says so, because "why is OpenAI not
+ * listed" is otherwise the first question.
+ */
+function ProviderCreditsCard() {
+	return (
+		<SettingsSection
+			caption="Prepaid balance left on the API keys stored on this node. Only OpenAI-compatible vendors that publish a balance to an inference key can be shown — OpenAI and Anthropic expose theirs only to a browser session or a separate admin key, so they cannot appear here."
+			title="API credit balance"
+		>
+			<SettingsGroup>
+				{CREDIT_PROVIDER_IDS.map((id) => (
+					<ProviderCreditsRow key={id} providerId={id} />
+				))}
+			</SettingsGroup>
+		</SettingsSection>
+	);
+}
+
+/** The provider ids Core can read a balance for (mirrors `supportsProviderCredits`). */
+const CREDIT_PROVIDER_IDS = ["openrouter", "deepseek", "moonshot"] as const;
+
+const CREDIT_PROVIDER_LABELS: Record<string, string> = {
+	openrouter: "OpenRouter",
+	deepseek: "DeepSeek",
+	moonshot: "Moonshot / Kimi",
+};
+
+/**
+ * One provider's balance row. Unlike the picker badge (which hides entirely when
+ * there is nothing to show), this surface is a deliberate list, so a row always
+ * renders and states WHY it has no number — on a settings page "no key stored" is
+ * the actionable answer, not noise.
+ */
+function ProviderCreditsRow({ providerId }: { providerId: string }) {
+	// Through the shared hook, not a hand-rolled query: it carries the
+	// supported-provider gate and the poll cadence, and re-typing its query key
+	// here would make the two surfaces share cache only by coincidence.
+	const data = useProviderCredits(providerId);
+	const label = CREDIT_PROVIDER_LABELS[providerId] ?? providerId;
+	const meter = data?.available ? data.meters.at(0) : undefined;
+	const amount = meter?.values.at(0);
+	let value = "Checking…";
+	if (data) {
+		if (amount) {
+			value = `$${amount.number.toFixed(2)} left`;
+		} else if (data.reason === "not_logged_in") {
+			value = "No key stored";
+		} else if (data.reason === "token_expired") {
+			value = "Key rejected";
+		} else if (data.reason === "rate_limited") {
+			value = "Rate limited";
+		} else {
+			value = "Unavailable";
+		}
+	}
+	return (
+		<SettingsItem
+			actions={
+				<span className="text-muted-foreground text-sm tabular-nums">
+					{value}
+				</span>
+			}
+			title={label}
+		/>
+	);
+}
+
 export function UsageCostSection({
 	target,
 	reachable,
@@ -609,6 +688,7 @@ export function UsageCostSection({
 				reachable={reachable}
 				target={target}
 			/>
+			<ProviderCreditsCard />
 			<AccountKeysDisplay reachable={reachable} target={target} />
 		</div>
 	);

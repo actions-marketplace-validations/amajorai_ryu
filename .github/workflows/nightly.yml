@@ -294,7 +294,7 @@ jobs:
         target:
           # core + gateway only. The TUI (shipped as ryu-cli) is Bun, not cargo;
           # app backends build in their own satellite repos.
-          - { asset: ryu-core,       bin: ryu-core,       dir: apps/core }
+          - { asset: ryu-core,       bin: ryu-core,       dir: apps/core,    features: "sandbox-wasmtime,voice-parakeet,voice-vad" }
           - { asset: ryu-gateway,    bin: ryu-gateway,    dir: apps/gateway }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -326,8 +326,85 @@ jobs:
         with:
           workspaces: ${{ matrix.target.dir }}
 
+      # ── Core MUST carry its three shipped-but-not-default features ─────────────
+      #    `sandbox-wasmtime`, `voice-parakeet` and `voice-vad` are off in
+      #    `[features] default` so `cargo test`/`cargo check` stay lean (no
+      #    wasmtime/cranelift, no ONNX Runtime). Off in `default` does NOT mean off
+      #    in the product: this step used to run a bare `cargo build --release`, so
+      #    every `ryu-core` this workflow ever published shipped with NO WASM sandbox
+      #    (`detect_backend("wasmtime")` returns the compile-time feature, so it was
+      #    false), NO parakeet STT inference (silently degrading to whisper) and NO
+      #    Silero VAD. Core's updater has real channel support
+      #    (`apps/core/src/update/mod.rs`), so a node on this channel installs what
+      #    this job produces.
+      #
+      #    The flag lives on the matrix row because `ryu-gateway` declares none of
+      #    these features and `--features` on it would be a hard error. Every build
+      #    site that produces a ryu-core a human runs is enumerated in
+      #    `apps/core/Cargo.toml` just above the `sandbox-wasmtime` declaration;
+      #    adding a feature there means adding it to that list and to every site.
       - name: Build
-        run: cargo build --release --manifest-path ${{ matrix.target.dir }}/Cargo.toml
+        shell: bash
+        run: |
+          set -eu
+          dir="${{ matrix.target.dir }}"
+          features="${{ matrix.target.features }}"
+          # Swatinem/rust-cache restores `target/`, so a fingerprint written by an
+          # earlier (possibly featureless) run can survive into this one. Drop the
+          # ryu-core bin fingerprint first: cargo re-links that single unit and
+          # writes a fresh record, which is what the assert below grades. Without
+          # this the assert could pass on a stale artifact — and an assertion that
+          # might be reading last week's build is not an assertion.
+          find "$dir/target/release/.fingerprint" -name bin-ryu-core.json -delete 2>/dev/null || true
+          if [ -n "$features" ]; then
+            cargo build --release --manifest-path "$dir/Cargo.toml" --features "$features"
+          else
+            cargo build --release --manifest-path "$dir/Cargo.toml"
+          fi
+
+      # ── Feature-set gate. Asserts what cargo actually BUILT (it records each
+      #    unit's resolved feature set in the fingerprint JSON) rather than
+      #    re-resolving with `cargo tree`, which would happily pass its own
+      #    `--features` and go green over a featureless binary.
+      #
+      #    MATCH THE `features` KEY, NOT THE WHOLE FILE. The fingerprint holds two
+      #    lists and only one says what was built:
+      #      "features":"[\"default\", \"tool-exec-deno\"]"
+      #      "declared_features":"[\"default\", \"sandbox-wasmtime\", …]"
+      #    `declared_features` is present verbatim whether or not a feature was
+      #    enabled, so grepping the file as a whole passes unconditionally. The
+      #    leading `"` in the pattern is what keeps it out of `declared_features`
+      #    (whose `features` is preceded by `_`).
+      #
+      #    The feature list is SPLIT OUT OF the matrix row rather than repeated, so
+      #    the gate cannot drift from the flag it is guarding.
+      - name: Assert the shipped feature set was actually built
+        if: matrix.target.features != ''
+        shell: bash
+        run: |
+          set -eu
+          found=0
+          missing=0
+          for fingerprint in $(find "${{ matrix.target.dir }}/target/release/.fingerprint" -name "bin-${{ matrix.target.bin }}.json" 2>/dev/null); do
+            found=$((found + 1))
+            enabled=$(grep -ao '"features":"\[[^]]*\]"' "$fingerprint" | tr -d '\\' || true)
+            if [ -z "$enabled" ]; then
+              echo "::error::could not read the ENABLED feature list out of $fingerprint. Cargo's fingerprint format changed, so this assertion no longer guards the shipped feature set. Fix the check rather than deleting it — and do NOT fall back to grepping the whole file, which matches 'declared_features' and passes on any build."
+              exit 1
+            fi
+            for feature in $(printf '%s' "${{ matrix.target.features }}" | tr ',' ' '); do
+              if ! printf '%s' "$enabled" | grep -qF -- "\"$feature\""; then
+                echo "::error::${{ matrix.target.bin }} was built WITHOUT '$feature' — enabled set per $fingerprint is $enabled. The published binary would ship without it and degrade silently."
+                missing=1
+              fi
+            done
+          done
+          if [ "$found" = "0" ]; then
+            echo "::error::no ${{ matrix.target.bin }} fingerprint under ${{ matrix.target.dir }}/target/release/.fingerprint — cargo's layout changed, so this assertion no longer guards the shipped feature set. Fix the check rather than deleting it."
+            exit 1
+          fi
+          [ "$missing" = "0" ] || exit 1
+          echo "${{ matrix.target.bin }} carries ${{ matrix.target.features }} ($found fingerprint(s) checked)"
 
       - name: Package
         shell: bash

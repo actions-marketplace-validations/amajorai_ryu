@@ -286,6 +286,7 @@ function McpServerList({
 						key={s.id}
 						name={s.name}
 						onClick={() => onSelect(s.id)}
+						seedId={s.id}
 						selected={s.id === selectedId}
 					/>
 				))}

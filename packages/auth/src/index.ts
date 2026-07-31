@@ -54,6 +54,7 @@ import {
 	polarClient,
 	syncPolarCustomer,
 } from "./lib/payments.ts";
+import { runRefereeGrantHook } from "./lib/referral-grant-hook.ts";
 import {
 	ADMIN_ROLE,
 	APPROVED_ROLE,
@@ -781,6 +782,19 @@ export const auth = betterAuth({
 							error
 						);
 					}
+					// The referee's sign-up credit, if they arrived on someone's link.
+					// STRICTLY AFTER the personal organization: the grant lands in an
+					// ORG wallet, so a referee with no membership yet has nowhere to put
+					// it and the money is simply never minted.
+					//
+					// Deliberately UNCONDITIONAL — not gated on `user.referredBy`. The
+					// implementation re-reads the stored code itself (its fast path for
+					// the ~everyone who has none), and the `before` hook may have written
+					// a code this hook's `user` object never carried: a social sign-up
+					// has no request body, so its code comes from the `ryu_ref` cookie.
+					// Swallows its own failures (see `runRefereeGrantHook`), like
+					// `ensurePersonalOrganization` and `syncPolarCustomer` here.
+					await runRefereeGrantHook(user.id);
 				},
 			},
 			update: {

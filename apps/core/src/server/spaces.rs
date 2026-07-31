@@ -32,7 +32,6 @@ use anyhow::Result;
 pub use ryu_spaces::*;
 
 use crate::identity_verify::ResourceTenancy;
-use crate::registry::ModelRegistry;
 use crate::server::conversations::Tenancy;
 use crate::server::preferences::PreferencesStore;
 use ryu_rag::Embedder;
@@ -88,12 +87,20 @@ pub fn background_owner() -> DocOwner {
 }
 
 /// Open (or create) the Spaces store at the default `~/.ryu/spaces.db` path using
-/// the environment-configured model registry — the ServerState field origin.
-/// Resolves the embedder + dims + graph-extraction model + reranker through the
-/// single RAG resolver, uses the default blob root, and runs the tenancy backfill
-/// with the Core-resolved owner.
+/// the node's model registry — the ServerState field origin. Resolves the embedder +
+/// dims + graph-extraction model + reranker through the single RAG resolver, uses
+/// the default blob root, and runs the tenancy backfill with the Core-resolved owner.
+///
+/// Built with [`crate::rag_host::retrieval_registry`] (`ProviderRegistry::load`),
+/// not `from_env`. Two of the values this function pulls — `graph_extraction_model`
+/// and, via `reranker_local_server`, `reranker_base_url` — have live `registry.json`
+/// keys, and `from_env` opens no file, so both were inert here while the
+/// `ryu-spaces` module header advertised the extraction key as configurable. The
+/// embedder fields are unaffected either way: they have no file key (see
+/// `registry`'s module header for why the vec0 table width makes that the right
+/// answer).
 pub fn open_default() -> Result<SpaceStore> {
-    let registry = ModelRegistry::from_env();
+    let registry = crate::rag_host::retrieval_registry();
     let embedder = crate::rag_host::embedder_from_registry(&registry);
     let dims = embedder.dims();
     let extraction_model = registry.graph_extraction_model.clone();

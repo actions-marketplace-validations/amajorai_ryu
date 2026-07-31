@@ -31,7 +31,19 @@ pub enum JobTarget {
         input: std::collections::HashMap<String, String>,
     },
     /// Run an agent: a single chat turn against the given agent id.
-    Agent { agent_id: String, prompt: String },
+    ///
+    /// `model` optionally pins the model for *this turn only*, exactly as the
+    /// composer's model picker does — the agent's stored binding is otherwise
+    /// untouched. Absent, the agent runs on whatever it is configured with.
+    /// This exists because a scheduled turn is frequently a cheap errand
+    /// (a keep-alive ping, a status poll) that has no business burning the
+    /// agent's flagship model.
+    Agent {
+        agent_id: String,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
     /// Run one website-monitor check (fetch → compare → alert). The monitor engine
     /// runs OUT-OF-PROCESS (`ryu-monitors` sidecar); the tick dispatches over loopback
     /// via `crate::monitors_client`. Created automatically (reconciled) for every
@@ -58,8 +70,22 @@ pub enum JobTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Schedule {
-    /// Classic 5-field cron expression, evaluated in UTC.
-    Cron { expr: String },
+    /// Classic 5-field cron expression.
+    ///
+    /// Evaluated in UTC unless `tz` names an IANA zone (`"Europe/Lisbon"`), in
+    /// which case the expression is read against that zone's wall clock. Absent
+    /// `tz` is the historical behaviour, so every job written before this field
+    /// existed keeps firing exactly when it did.
+    ///
+    /// The zone is stored, not folded into the expression, because folding is
+    /// only correct until the next DST transition: "05:00 local" is a different
+    /// UTC hour in summer than in winter, and a schedule chosen to sit a fixed
+    /// distance from a rolling rate-limit boundary cannot absorb that drift.
+    Cron {
+        expr: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tz: Option<String>,
+    },
     /// Fixed interval, e.g. `30s`, `5m`, `1h` (parsed by `humantime`).
     Every { interval: String },
 }
@@ -102,6 +128,18 @@ pub struct ScheduledJob {
     /// unchanged.
     #[serde(default)]
     pub require_approval: bool,
+    /// The manifest id of the App that created this job (`com.ryu.warmup`), when
+    /// one did.
+    ///
+    /// Scheduler jobs outlive the surface that wrote them: they are files on
+    /// disk driven by Core's own tick loop, so a job created through an App's UI
+    /// keeps firing after that App is disabled or uninstalled — at which point
+    /// the user has no affordance left to stop it. Recording the owner lets the
+    /// tick loop treat "the owning App is off" as "its automations are off",
+    /// which is the only reading under which disabling an App actually means
+    /// something. `None` (a job Core or the desktop owns) is never gated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_app: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// ISO timestamp of the last time this job fired (success or failure).
@@ -204,10 +242,12 @@ mod tests {
             name: "n".into(),
             schedule: Schedule::Cron {
                 expr: "* * * * *".into(),
+                tz: None,
             },
             target: JobTarget::IdentityHealth,
             enabled: true,
             require_approval: false,
+            owner_app: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             last_run_at: None,
@@ -262,7 +302,8 @@ mod tests {
             .unwrap(),
             JobTarget::Agent {
                 agent_id: "a".into(),
-                prompt: "p".into()
+                prompt: "p".into(),
+                model: None,
             }
         );
         assert_eq!(
@@ -294,6 +335,46 @@ mod tests {
         assert!(!j.require_approval);
         assert!(j.history.is_empty());
         assert!(matches!(j.schedule, Schedule::Every { .. }));
+    }
+
+    #[test]
+    fn cron_tz_and_agent_model_are_optional_on_the_wire() {
+        // Absent: every job written before these fields existed still loads,
+        // and keeps its old meaning (UTC, agent's configured model).
+        let bare: Schedule =
+            serde_json::from_value(serde_json::json!({"kind":"cron","expr":"0 5 * * *"})).unwrap();
+        assert_eq!(
+            bare,
+            Schedule::Cron {
+                expr: "0 5 * * *".into(),
+                tz: None
+            }
+        );
+        let bare_agent: JobTarget =
+            serde_json::from_value(serde_json::json!({"type":"agent","agent_id":"a","prompt":"hi"}))
+                .unwrap();
+        assert!(matches!(bare_agent, JobTarget::Agent { model: None, .. }));
+
+        // Present: both round-trip, and neither is emitted when empty (so a
+        // UTC job's file is byte-identical to what it was before).
+        let zoned = Schedule::Cron {
+            expr: "0 5 * * *".into(),
+            tz: Some("Europe/Lisbon".into()),
+        };
+        let json = serde_json::to_string(&zoned).unwrap();
+        assert!(json.contains("Europe/Lisbon"));
+        assert_eq!(serde_json::from_str::<Schedule>(&json).unwrap(), zoned);
+        assert!(!serde_json::to_string(&bare).unwrap().contains("tz"));
+    }
+
+    #[test]
+    fn owner_app_defaults_absent_and_round_trips() {
+        let mut j = job();
+        assert!(j.owner_app.is_none());
+        assert!(!serde_json::to_string(&j).unwrap().contains("owner_app"));
+        j.owner_app = Some("com.ryu.warmup".into());
+        let round: ScheduledJob = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        assert_eq!(round.owner_app.as_deref(), Some("com.ryu.warmup"));
     }
 
     #[test]

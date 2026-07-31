@@ -142,16 +142,22 @@ pub async fn dispatch(tool: &str, arguments: Value, spaces: Option<&SpaceStore>)
             // No HTTP caller on the tool path — attribute to the local owner on a
             // bound node (the artifact lands in the shared "Artifacts" system space,
             // but the document itself is owned so it is not exposed to every member).
-            let doc_id = store
-                .create_file(
-                    &space_id,
-                    title,
-                    &bytes,
-                    mime,
-                    &crate::server::spaces::background_owner(),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("saving artifact: {e}"))?;
+            // Shared ingest path, so an agent-generated .docx/.pdf artifact is
+            // retrievable by what is IN it and not merely by its filename. The MCP
+            // registry holds a `SpaceStore` but no `ServerState`, so the detached
+            // variant borrows the published handle and — when there is none (test /
+            // CLI) — still stores the file and says extraction was never attempted.
+            let created = crate::space_file_index::create_file_indexed_detached(
+                store,
+                &space_id,
+                title,
+                &bytes,
+                mime,
+                &crate::server::spaces::background_owner(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("saving artifact: {e}"))?;
+            let doc_id = created.document_id;
 
             let url = format!("/api/spaces/{space_id}/documents/{doc_id}/blob");
             // A small markdown rendering so a chat surface can show a link/image.
@@ -167,6 +173,10 @@ pub async fn dispatch(tool: &str, arguments: Value, spaces: Option<&SpaceStore>)
                 "mime": mime,
                 "byte_size": byte_size,
                 "url": url,
+                // Whether the artifact's CONTENTS made it into the Space index, so
+                // the calling agent can tell "saved and searchable" from "saved, but
+                // nothing here can read this format".
+                "index": created.index.to_json(),
                 "content": [{ "type": "text", "text": markdown }],
             }))
         }

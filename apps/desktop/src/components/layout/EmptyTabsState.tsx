@@ -426,25 +426,28 @@ function LaunchpadComposer() {
 	// reads identically to ChatPage and the Ask Ryu dock. The launchpad owns its
 	// own agent selection state (persisted to localStorage); the shared hook renders
 	// the pickers and dispatches create / team / agent picks back to these setters.
-	const { leftActions, rightActions, sections } = useComposerAgentControls({
-		agents,
-		teams,
-		agentId,
-		teamId,
-		onSelectAgent: (next) => {
-			setTeamId(null);
-			setAgentId(next);
-			localStorage.setItem("ryu_default_agent", next);
-			setSelectedModel(getAgentModel(next));
-		},
-		onSelectTeam: (next) => setTeamId(next),
-		onCreateAgent: () => openTab("/agents/new/edit", { title: "New agent" }),
-		modelOptions,
-		model: effectiveModel,
-		onModelChange: handleEngineModelChange,
-		modelSection: acp.modelSection,
-		extraSections: acp.extraSections,
-	});
+	const { infoBar, leftActions, rightActions, sections } =
+		useComposerAgentControls({
+			agents,
+			// The launchpad always opens a new conversation.
+			atConversationStart: true,
+			teams,
+			agentId,
+			teamId,
+			onSelectAgent: (next) => {
+				setTeamId(null);
+				setAgentId(next);
+				localStorage.setItem("ryu_default_agent", next);
+				setSelectedModel(getAgentModel(next));
+			},
+			onSelectTeam: (next) => setTeamId(next),
+			onCreateAgent: () => openTab("/agents/new/edit", { title: "New agent" }),
+			modelOptions,
+			model: effectiveModel,
+			onModelChange: handleEngineModelChange,
+			modelSection: acp.modelSection,
+			extraSections: acp.extraSections,
+		});
 
 	// Voice: the node target the mic/voice-mode talk to. Read via a ref so the
 	// transcribe fn keeps a stable identity (no composer remount on node change).
@@ -534,6 +537,7 @@ function LaunchpadComposer() {
 				<InputBar
 					attachedImages={attachedImages}
 					autoFocus
+					infoBar={infoBar}
 					isDragOver={isDragOver}
 					leftActions={leftActions}
 					onAttach={handleAttach}

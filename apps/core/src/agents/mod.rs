@@ -212,7 +212,10 @@ pub struct AgentRecord {
     /// non-empty list narrows injection to the intersection of this allowlist
     /// and the globally-enabled skills (it never re-activates a globally
     /// inactive skill). Enforced in Core (skills are injected, not gateway-gated)
-    /// on both the openai-compat and ACP planes via the skill registry.
+    /// on both the openai-compat and ACP planes via the skill registry — and, since
+    /// it is the model itself that pulls L2 bodies under progressive disclosure,
+    /// also at `skills__search` / `skills__load` dispatch (`sidecar::mcp::skills_tool`),
+    /// so what an agent can load equals what its index shows.
     #[serde(default)]
     pub skills: Vec<String>,
     /// Identity Vault profile ids this agent is bound to (epic #517, Unit 4).

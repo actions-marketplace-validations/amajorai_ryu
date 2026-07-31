@@ -30,6 +30,71 @@
 //! extension**, so the UI can say "no parser for .pdf — install one" instead of
 //! dropping the file.
 //!
+//! ## What is wired, and what is not — read this before trusting the module doc above
+//!
+//! This module shipped in `9bf1e2023` with **no `mod document_parse;` line in
+//! `main.rs`**. It was not in the module tree, so it had never been compiled, let
+//! alone called — the module doc below describes a design, not a running system.
+//! Declaring it (and widening `ext_proxy::{resolve_provider_route, ProviderRoute}`
+//! to `pub(crate)`) was step zero of wiring Spaces ingest into it.
+//!
+//! As of that change, **the typed in-process API is live** — [`submit_blob`],
+//! [`job_outcome`] and [`builtin_parse`] are called by
+//! [`crate::space_file_index`], which is how an uploaded file's contents reach a
+//! Space index.
+//!
+//! **One of the three HTTP routes is registered; two are not, and the split is
+//! deliberate.**
+//!
+//! - [`parse_capability`] **is mounted** (`GET /api/documents/parse/capability`, in
+//!   the main route table of `apps/core/src/server/mod.rs`, deliberately *outside*
+//!   the Spaces `AppGate` — the bound provider serves chat attachments too, so a
+//!   node with Spaces turned off must still be able to read this). Its consumer is
+//!   the desktop's **Document parsing** settings panel
+//!   (`components/settings/DocumentParsingSettings.tsx`, mounted in the Gateway
+//!   dialog), which reads the bound provider's identity, its format list, its
+//!   missing native tools and `max_input_bytes` off this one response. Before it
+//!   was registered the panel's fetch 404'd, `capability` was `null`, and the two
+//!   rows that depend on it rendered nothing at all.
+//! - [`parse_document`] and [`parse_job`] are **still unmounted**. Their consumer is
+//!   the *composer* attachment flow, which now EXISTS as a seam
+//!   (`apps/desktop/src/lib/composer/attachments.ts`, whose `stageComposerFiles`
+//!   calls `parseDocument`) but which **no surface imports yet** — the chat page,
+//!   the Ask-Ryu dock and the launchpad still filter attachments to `image/*`
+//!   inline. A route with a caller nothing calls is still a route with no caller,
+//!   so registering them now would only widen the public surface ahead of its use.
+//!   Note for whoever wires that seam: `POST /api/documents/parse` must be
+//!   registered **with `DefaultBodyLimit::max(MAX_PARSE_BYTES)`**, or axum's
+//!   implicit 2 MiB limit rejects the body in the layer before the handler's
+//!   `{ code: "too_large" }` can name the real ceiling (see
+//!   `crate::server::uploads`' `a_route_without_an_explicit_limit_caps_at_axums_default`).
+//!
+//! They were left warning ("the `dead_code` warnings on them are accurate") — but a
+//! warning is not a decision. Eleven `never used` lines made `cargo check` merely
+//! *0-errors* instead of clean, and a reader could not tell this deliberate stub from
+//! an oversight; the next person's options were "delete it" or "leave the noise", and
+//! both lose the intent. So each still-unmounted route-only item carries an explicit
+//! `#[allow(dead_code)]` **with the reason on it**: the gate is the statement that
+//! these are unmounted on purpose, and removing the attribute is what the author of
+//! the composer surface does on the way to registering them in
+//! `apps/core/src/server/mod.rs` — exactly as this change did for
+//! [`parse_capability`]. Deleting them was the other honest option and was
+//! rejected: they are the designed shape of that surface (submit → poll, floor first,
+//! a 415 that names the extension), they compile, and re-deriving them later would
+//! re-derive the same three handlers from the same module doc.
+//!
+//! ## There is no `/api/document-parse/*` and there never was
+//!
+//! Which backend is bound is **not** served by a bespoke route here. The desktop
+//! reads it from the generic capability read model (`GET /api/capabilities`,
+//! filtered to `document.parse`) and writes it through
+//! `PUT /api/capabilities/bindings`, the same pair every other hot-swappable layer
+//! uses. A `document.parse`-specific pair was documented in the desktop client for
+//! one release and never existed in Core; see `apps/desktop/src/lib/api/documents.ts`
+//! for the removal. Do not add one back: the write endpoint REPLACES the whole
+//! override map, so a second write path would have to re-derive the read-merge-write
+//! or silently wipe every other capability's selection.
+//!
 //! ## Provider-agnostic by construction
 //!
 //! Nothing here names `com.ryu.unstructured`. The provider is resolved through
@@ -58,6 +123,15 @@ pub const CAP_DOCUMENT_PARSE: &str = "document.parse";
 
 /// Cap on bytes accepted for a parse, mirroring [`crate::server::uploads::MAX_UPLOAD_BYTES`]
 /// so a file the user could attach is a file the parser will look at.
+///
+/// Reported to clients as `max_input_bytes` by [`parse_capability`], which is what
+/// makes it the number the desktop's parsing panel prints instead of a client-side
+/// constant. Equality with the upload ceiling is the *design* — a document only
+/// reaches a parser by being uploaded first — not a coincidence to be hidden: the
+/// panel renders the reported figure whether or not it happens to agree.
+///
+/// The in-process floor is bounded by [`MAX_BLOB_PARSE_BYTES`] instead, because a
+/// blob address is not a request body.
 pub const MAX_PARSE_BYTES: usize = crate::server::uploads::MAX_UPLOAD_BYTES;
 
 /// Cap on bytes the typed in-process floor ([`builtin_parse`]) will read.
@@ -84,7 +158,8 @@ pub const MAX_MARKDOWN_BYTES: usize = 400_000;
 const PROVIDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Budget for the never-wakes `/capability` probe. Short on purpose: an asleep
-/// provider must cost the composer a refused loopback connection, not a stall.
+/// provider must cost the caller a refused loopback connection, not a stall — this
+/// runs on a settings-panel mount and on every composer mount.
 const CAPABILITY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long to wait for a lazy/idle-stopped provider sidecar to become healthy
@@ -142,6 +217,10 @@ pub fn extension_of(filename: &str) -> String {
 /// Percent-decode a header value. Invalid escapes are kept verbatim rather than
 /// dropped — a mangled character in a filename is recoverable, a silently shortened
 /// one is not.
+///
+/// Route-only: decodes `x-filename` for [`parse_document`], which is unmounted
+/// (module doc). The in-process API is handed a title directly and needs no decode.
+#[allow(dead_code)]
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -161,9 +240,99 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Whether Core itself can read `filename` with no provider bound.
+///
+/// Keys on the **extension**, which is the whole answer only when the caller holds a
+/// filename. A caller holding a *title* wants [`mime_floor_name`] as its second
+/// signal — see that function for why the split is two calls and not one.
 pub fn is_builtin_readable(filename: &str) -> bool {
     let ext = extension_of(filename);
     !ext.is_empty() && BUILTIN_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// MIME types that map onto a [`BUILTIN_EXTENSIONS`] entry, for a document whose
+/// **name carries no extension at all**.
+///
+/// Every right-hand side is already on the floor: this table can only re-route a
+/// document to a reader Core would have used anyway for the same content, never widen
+/// the floor to a new family. `text/rtf`, `application/octet-stream` and the
+/// `text/x-<language>` source types are deliberately absent — the first is markup the
+/// floor would emit as control words, the second is "unknown" (and is exactly what
+/// `POST /api/spaces/:id/files` defaults to when a client sends no mime), and the
+/// third has no floor extension to map onto.
+const MIME_FLOOR_EXTENSIONS: &[(&str, &str)] = &[
+    ("text/plain", ".txt"),
+    ("text/markdown", ".md"),
+    ("text/x-markdown", ".md"),
+    ("text/csv", ".csv"),
+    ("text/tab-separated-values", ".tsv"),
+    ("application/json", ".json"),
+    ("text/json", ".json"),
+    ("application/x-ndjson", ".jsonl"),
+    ("application/jsonl", ".jsonl"),
+    ("application/yaml", ".yaml"),
+    ("text/yaml", ".yaml"),
+    ("application/x-yaml", ".yaml"),
+    ("text/x-yaml", ".yaml"),
+    ("application/toml", ".toml"),
+    ("text/x-toml", ".toml"),
+    ("application/xml", ".xml"),
+    ("text/xml", ".xml"),
+    ("text/html", ".html"),
+    ("application/xhtml+xml", ".html"),
+];
+
+/// The floor filename for a **title with no extension**, recovered from its declared
+/// MIME type — or `None` when the title already carries an extension, or the mime
+/// names no floor family.
+///
+/// # Why this exists
+///
+/// [`is_builtin_readable`] keys on the extension, and two of the three
+/// [`crate::space_file_index::create_file_indexed`] callers pass a **title**, not a
+/// filename: `POST /api/spaces/:id/files` takes `body.title` and the `artifact__create`
+/// MCP tool takes a `title` argument. So a note called `notes` with `mime:
+/// text/plain` answered `false`, went to the bound provider, and landed on
+/// `skipped/no_provider` — telling the user to install a document parser for a file
+/// Core can read in-process, in microseconds, with no install at all.
+///
+/// # Why it refuses a title that HAS an extension
+///
+/// This may only *widen* the floor, never redirect a binary into a text reader. A
+/// mime is client-supplied and can disagree with the bytes; if the title already says
+/// `.pptx`, that extension is the more specific signal and it is the one the floor
+/// already refused. Honouring a `text/plain` claim over it would hand a zip container
+/// to [`decode_text`] — the exact failure the floor's narrowness exists to prevent. A
+/// title with no extension carries no such contradiction, so the mime is the only
+/// signal there is.
+///
+/// **This rule is a filter on the NAME, and a name check can never be the whole
+/// answer.** It stops `deck.pptx` + `text/plain`; it cannot stop `notes` +
+/// `text/plain` carrying the same zip, because a title with no extension contradicts
+/// nothing. That case reaches the decoder, which is why [`decode_text`] refuses bytes
+/// that are not plausibly text instead of lossily converting them. The two guards are
+/// a pair, and neither alone closes the hole: this one keeps a *declared* binary off
+/// the floor, that one keeps *actual* binary bytes from being stored as prose.
+///
+/// The cost of that rule is a title like `v1.2 notes`, whose "extension" (`.2 notes`)
+/// is not one — it stays on the provider path. Refusing to read a text file is a
+/// recoverable miss; confidently misreading a binary is not.
+pub fn mime_floor_name(title: &str, mime: &str) -> Option<String> {
+    if !extension_of(title).is_empty() {
+        return None;
+    }
+    // Strip any `; charset=…` parameter and normalize case — `Text/Plain; charset=utf-8`
+    // is the same type as `text/plain` and a client may send either.
+    let essence = mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let ext = MIME_FLOOR_EXTENSIONS
+        .iter()
+        .find(|(m, _)| *m == essence)
+        .map(|(_, ext)| *ext)?;
+    Some(format!("{title}{ext}"))
 }
 
 /// Decode floor bytes to markdown, or `None` when they are not valid UTF-8.
@@ -179,6 +348,10 @@ pub fn is_builtin_readable(filename: &str) -> bool {
 /// its bytes are text, but handing a model raw `<div class="…">` markup as "the
 /// document" spends the context window on layout. Minimal on purpose — see
 /// [`strip_html`].
+///
+/// Route-only: [`parse_document`] is its sole caller and is unmounted (module doc).
+/// The in-process floor is [`builtin_parse`], which differs deliberately — see there.
+#[allow(dead_code)]
 pub fn builtin_markdown(filename: &str, bytes: &[u8]) -> Option<(String, bool)> {
     let text = std::str::from_utf8(bytes).ok()?;
     Some(truncate_markdown(&apply_html_strip(filename, text)))
@@ -345,6 +518,9 @@ fn sibling_path(route: &ProviderRoute, name: &str) -> String {
 /// The returned guard must stay alive across the request: the ext-proxy's activity
 /// guard drops at header arrival, so without it an idle-stop sidecar can be reaped
 /// between the wake and the call.
+///
+/// Route-only (module doc): the typed twin [`hold_provider`] is the live one.
+#[allow(dead_code)]
 async fn wake_provider(
     state: &ServerState,
     route: &ProviderRoute,
@@ -413,6 +589,9 @@ async fn provider_call_typed(
 /// Both transport reasons collapse to the SAME 502 `provider_unreachable` the route
 /// contract has always returned — the typed split is new information for in-process
 /// callers, not a change to a shipped wire response.
+///
+/// Route-only: the three HTTP handlers are its only callers, and [`parse_capability`]
+/// (the one that is mounted) is what keeps it live.
 async fn provider_call(
     route: &ProviderRoute,
     method: reqwest::Method,
@@ -435,12 +614,34 @@ async fn provider_call(
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+//
+// **One of the three below is mounted: [`parse_capability`].** The other two still
+// carry `#[allow(dead_code)]` as the explicit statement that they are unmounted on
+// purpose, because a bare warning cannot distinguish a deliberate stub from an
+// oversight — see the module doc for which consumer each is waiting on and for what
+// registering them entails (a route table edit in `apps/core/src/server/mod.rs`, a
+// `DefaultBodyLimit` on the POST, plus a composer surface that actually imports
+// `stageComposerFiles` instead of filtering attachments to `image/*` inline).
 
 /// `GET /api/documents/parse/capability` — what this node can read, right now.
 ///
-/// The composer's file-picker `accept` list is built from this, so the picker offers
-/// exactly what the bound backend (plus the floor) can actually handle instead of a
-/// hardcoded guess that drifts the moment a provider is swapped.
+/// **Mounted** in the main route table (not `spaces_routes`): the bound provider
+/// serves chat attachments as well as Space uploads, so this must answer on a node
+/// with the Spaces app disabled.
+///
+/// Two consumers, one response:
+/// - the desktop's **Document parsing** settings panel renders `provider_name`,
+///   `available`, `extensions`, `missing_dependencies` and `max_input_bytes` from it
+///   — every figure it prints about parsing comes from here rather than from a
+///   client-side constant that cannot know which backend is bound;
+/// - the composer's file-picker `accept` list is built from `extensions`, so the
+///   picker offers exactly what the bound backend (plus the floor) can actually
+///   handle instead of a hardcoded guess that drifts the moment a provider is
+///   swapped.
+///
+/// Cheap by construction: it never wakes a sleeping provider (see the probe below),
+/// so mounting a settings panel or a composer costs at most one refused loopback
+/// connection.
 #[utoipa::path(
     get,
     path = "/api/documents/parse/capability",
@@ -544,6 +745,14 @@ pub async fn parse_capability(State(state): State<ServerState>) -> Response {
 /// - `{ status: "queued", via: "<provider id>", job_id }` — poll [`parse_job`];
 /// - `415 { code: "unsupported_format", extension }` — no floor, no provider that
 ///   claims it. The caller shows this on the attachment chip.
+///
+/// **Still unmounted** (unlike [`parse_capability`], which this change registered).
+/// Its consumer is `stageComposerFiles` in
+/// `apps/desktop/src/lib/composer/attachments.ts`, and no composer surface imports
+/// that seam yet. Register it together with the surface, and register it **with
+/// `DefaultBodyLimit::max(MAX_PARSE_BYTES)`** — without the layer, axum's implicit
+/// 2 MiB default refuses the body before this handler's `too_large` branch can name
+/// the real ceiling.
 #[utoipa::path(
     post,
     path = "/api/documents/parse",
@@ -552,6 +761,7 @@ pub async fn parse_capability(State(state): State<ServerState>) -> Response {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
+#[allow(dead_code)]
 pub async fn parse_document(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -697,6 +907,10 @@ pub async fn parse_document(
 ///
 /// Normalized to this facade's shape, so a caller written against `unstructured`
 /// keeps working when a different backend is bound.
+///
+/// **Still unmounted**, for the same reason as [`parse_document`]: it is the poll
+/// half of that submit, and registering one without the other would be a route that
+/// can only ever return "unknown job".
 #[utoipa::path(
     get,
     path = "/api/documents/parse/jobs/{job_id}",
@@ -705,6 +919,7 @@ pub async fn parse_document(
     params(("job_id" = String, Path, description = "Job id from POST /api/documents/parse")),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
+#[allow(dead_code)]
 pub async fn parse_job(State(state): State<ServerState>, Path(job_id): Path<String>) -> Response {
     // A job id is opaque and goes into a URL path; refuse anything that could
     // traverse out of the provider's `/jobs/` namespace rather than encoding around
@@ -863,6 +1078,31 @@ pub enum ParseFailureReason {
     /// deployment state, and it MUST NOT read as "the document has no text" — that
     /// is the failure mode the builtin floor exists to make impossible.
     PythonMissing,
+    /// The document's stored bytes could not be located or opened: a blob address
+    /// that is not a sha256 at all (an empty `sha256` column, a truncated row), or a
+    /// blob file that is missing or unreadable under `~/.ryu/blobs/`.
+    ///
+    /// Split out of [`Self::Unsupported`], which is where an unusable address used to
+    /// land ([`blob_input_path`] returned it) and which is a **`skipped`** state whose
+    /// remedy text is "install a `document.parse` app". Nothing about a broken blob
+    /// reference is fixed by installing a parser, and sending the user to the Store
+    /// for it is the kind of confidently-wrong remedy this module exists to stop
+    /// emitting. Nothing was attempted; the fault is on this node's storage.
+    BlobUnavailable,
+    /// The name (or the declared MIME type) put this file on the text floor, and the
+    /// **bytes are not text** — see [`decode_text`] for the two signals.
+    ///
+    /// The failure the floor's narrowness exists to prevent, now caught on the one
+    /// path that could still reach it. A binary under a floor extension (`payload.txt`
+    /// holding a zip) or under an extensionless title with a declared text mime
+    /// (`notes` + `text/plain`) used to be decoded LOSSILY: a page of replacement
+    /// characters, stored as the document's contents and handed to a model as prose.
+    ///
+    /// Not [`Self::Unsupported`] (whose remedy is "install a parser", and installing
+    /// one does not make a mislabelled file text) and not silence: the fault is that
+    /// the name/mime disagrees with the bytes, which is something the user can act on
+    /// by re-uploading under a truthful name.
+    NotText,
 }
 
 impl ParseFailureReason {
@@ -875,6 +1115,8 @@ impl ParseFailureReason {
             Self::ProviderError => "provider_error",
             Self::TooLarge => "too_large",
             Self::PythonMissing => "python_missing",
+            Self::BlobUnavailable => "blob_unavailable",
+            Self::NotText => "not_text",
         }
     }
 }
@@ -887,7 +1129,12 @@ pub struct ParseFailure {
 }
 
 impl ParseFailure {
-    fn new(reason: ParseFailureReason, message: impl Into<String>) -> Self {
+    /// `pub` so an in-process caller can construct the failure it is about to
+    /// record — [`crate::space_file_index`]'s tests build one to prove that a
+    /// failed parse still stores the file, and its orchestration builds one for the
+    /// two failure modes that never reach a provider at all (a poll budget that
+    /// expires, and a tool context with no [`ServerState`] wired).
+    pub fn new(reason: ParseFailureReason, message: impl Into<String>) -> Self {
         Self {
             reason,
             message: message.into(),
@@ -920,12 +1167,21 @@ pub struct ParseOutcome {
     /// Lowercase hex sha256 of the SOURCE bytes — the blob address, so a caller can
     /// dedupe an extraction against the file it came from.
     pub source_sha256: String,
+    /// When the extraction finished. Carried for a re-index that needs to tell a row
+    /// extracted by an old backend from a current one; no consumer reads it yet
+    /// ([`crate::space_file_index`] stamps its own `updated_at`), which is why the
+    /// gate is here and not a deletion — dropping provenance is not free to re-add.
+    #[allow(dead_code)]
     pub parsed_at: chrono::DateTime<chrono::Utc>,
     /// Non-fatal notes: a lossy decode, a missing OCR tool, a truncated result.
     /// Populated, not swallowed — a degraded parse the caller cannot see is the
     /// silent-drop bug wearing a hat.
     pub warnings: Vec<String>,
-    /// Whether `markdown` was cut at a cap.
+    /// Whether `markdown` was cut at a cap. Not read as a flag: every producer also
+    /// pushes a "output was truncated" line into `warnings`, which is the form the
+    /// status row and the UI actually surface, so the boolean is kept for a caller
+    /// that needs to branch rather than to display.
+    #[allow(dead_code)]
     pub truncated: bool,
 }
 
@@ -935,6 +1191,11 @@ pub enum ParseSubmission {
     Done(Box<ParseOutcome>),
     Job {
         job_id: String,
+        /// The provider that accepted the job. Unread today —
+        /// [`crate::space_file_index`] learns the backend id from the finished
+        /// [`ParseOutcome`] instead — but a caller that wants to name the parser
+        /// while the job is still `pending` has nowhere else to get it.
+        #[allow(dead_code)]
         backend_id: String,
     },
 }
@@ -946,11 +1207,12 @@ pub const BUILTIN_BACKEND_ID: &str = "builtin";
 /// Decode bytes Core can read itself, or say precisely why it cannot.
 ///
 /// The floor, as a typed call. Differs from [`builtin_markdown`] in exactly one way:
-/// a non-UTF-8 input is decoded anyway (BOM'd UTF-16 properly, anything else lossily)
-/// with the compromise recorded in `warnings`, because this caller CAN carry that
-/// nuance where an HTTP status code cannot. A non-floor extension is
-/// [`ParseFailureReason::Unsupported`] — never an empty string, which is the one
-/// answer that would let a document disappear silently.
+/// a *mis-encoded* input is decoded anyway (BOM'd UTF-16 properly, anything else
+/// lossily) with the compromise recorded in `warnings`, because this caller CAN carry
+/// that nuance where an HTTP status code cannot. That tolerance stops at bytes which
+/// are not text at all — those are [`ParseFailureReason::NotText`], see [`decode_text`].
+/// A non-floor extension is [`ParseFailureReason::Unsupported`] — never an empty
+/// string, which is the one answer that would let a document disappear silently.
 pub fn builtin_parse(filename: &str, bytes: &[u8]) -> Result<ParseOutcome, ParseFailure> {
     if bytes.len() > MAX_BLOB_PARSE_BYTES {
         return Err(ParseFailure::new(
@@ -972,7 +1234,7 @@ pub fn builtin_parse(filename: &str, bytes: &[u8]) -> Result<ParseOutcome, Parse
         ));
     }
 
-    let (text, mut warnings) = decode_text(bytes);
+    let (text, mut warnings) = decode_text(bytes)?;
     let (markdown, truncated) = truncate_markdown(&apply_html_strip(filename, &text));
     if truncated {
         warnings.push(format!(
@@ -1000,24 +1262,125 @@ fn display_extension(filename: &str) -> String {
     }
 }
 
+/// How many leading bytes the NUL probe in [`decode_text`] looks at.
+///
+/// 8 KiB, the same window `git` uses to call a blob binary. Bounded rather than
+/// whole-file for one reason: a NUL is only *evidence* of a binary, and a text file
+/// with one stray NUL a megabyte in is still a text file. Every real container puts
+/// its NULs in the header — a zip's local file header has them by byte 30, PNG's
+/// IHDR length by byte 8 — so a window this size costs nothing in detection.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+/// The share of decoded characters that may be U+FFFD before [`decode_text`] calls
+/// the input binary rather than merely mis-encoded.
+///
+/// 10% is where "a legacy encoding we are approximating" stops and "these bytes are
+/// not prose" starts. A latin-1 document decoded lossily loses only its accented
+/// characters — a few percent of a European-language page — while a binary that
+/// happens to carry no NUL in its first 8 KiB (a JPEG, a bare `%PDF` header) shreds
+/// into replacement characters at several times this rate. The threshold is over
+/// **decoded characters, not bytes**, because `from_utf8_lossy` collapses a run of
+/// invalid bytes into one U+FFFD and the ratio must not depend on how they clump.
+const MAX_REPLACEMENT_RATIO: f64 = 0.10;
+
 /// UTF-8 first, BOM'd UTF-16 second, lossy last — with a warning for anything but the
-/// first. Returns the text and whatever had to be compromised to get it.
-fn decode_text(bytes: &[u8]) -> (String, Vec<String>) {
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return (text.to_owned(), Vec::new());
-    }
+/// first. Returns the text and whatever had to be compromised to get it, or
+/// [`ParseFailureReason::NotText`] when the bytes are not plausibly text at all.
+///
+/// # Why this refuses rather than always decoding
+///
+/// The lossy last resort used to be unconditional, and the floor's `is_builtin_readable`
+/// gate was the only thing standing between a binary and it. That gate is keyed on the
+/// **name**, and a name is client-supplied:
+///
+/// - `payload.txt` holding a zip takes the extension arm;
+/// - `notes` + `mime: text/plain` takes the [`mime_floor_name`] arm, and title and mime
+///   arrive independently from the same request body (`POST /api/spaces/:id/files`), the
+///   same tool arguments (`artifact__create`), or the request's own `content-type`
+///   (`POST /api/uploads`).
+///
+/// Either way the bytes reached the decoder and came back as a page of replacement
+/// characters, which [`crate::space_file_index`] then chunked, embedded and stored **as
+/// the document's contents**. Mojibake presented as prose is worse than an unreadable
+/// file, because a model will reason about it and a user cannot tell it happened.
+///
+/// # The two signals, and why they are only these two
+///
+/// This is not a content sniffer and must not grow into one — guessing formats is what
+/// a `document.parse` provider is for. It refuses the *obvious* case on two cheap,
+/// standard tests: a NUL byte in the first [`BINARY_SNIFF_BYTES`] (no text encoding
+/// this floor accepts produces one — UTF-16, which does, is decoded on the arm above
+/// and never reaches the probe), and a decoded U+FFFD share over
+/// [`MAX_REPLACEMENT_RATIO`]. Anything subtler is allowed through with the warning it
+/// always had; the compromise stays visible either way.
+fn decode_text(bytes: &[u8]) -> Result<(String, Vec<String>), ParseFailure> {
+    // UTF-16 leads, because its ASCII content is half NUL bytes and the probe below
+    // would refuse a legitimately-decodable file. A BOM'd stream is never valid UTF-8
+    // (0xFF/0xFE cannot start one), so testing it before or after the UTF-8 arm is the
+    // same answer — but it MUST come before the NUL probe.
     if let Some(text) = decode_utf16_bom(bytes) {
-        return (
+        return Ok((
             text,
             vec!["input was UTF-16; decoded to UTF-8".to_owned()],
-        );
+        ));
     }
-    (
-        String::from_utf8_lossy(bytes).into_owned(),
+    if let Some(at) = nul_byte_offset(bytes) {
+        return Err(ParseFailure::new(
+            ParseFailureReason::NotText,
+            format!(
+                "these bytes are not text: a NUL byte at offset {at} means the file is \
+                 binary, whatever its name or declared type says"
+            ),
+        ));
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Ok((text.to_owned(), Vec::new()));
+    }
+
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    let ratio = replacement_ratio(&text);
+    if ratio > MAX_REPLACEMENT_RATIO {
+        return Err(ParseFailure::new(
+            ParseFailureReason::NotText,
+            format!(
+                "these bytes are not text: {:.0}% of them do not decode as UTF-8, so \
+                 reading this file would store replacement characters as its contents",
+                ratio * 100.0
+            ),
+        ));
+    }
+    Ok((
+        text,
         vec![
             "input was not valid UTF-8; undecodable bytes were replaced".to_owned(),
         ],
-    )
+    ))
+}
+
+/// Offset of the first NUL byte within the sniff window, or `None`.
+fn nul_byte_offset(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .iter()
+        .take(BINARY_SNIFF_BYTES)
+        .position(|b| *b == 0)
+}
+
+/// The share of `text`'s characters that are U+FFFD. `0.0` for empty input — an empty
+/// file is not binary, it is empty, and [`crate::space_file_index`] already has a state
+/// for that (`skipped/empty_document`).
+fn replacement_ratio(text: &str) -> f64 {
+    let mut total = 0usize;
+    let mut replacements = 0usize;
+    for c in text.chars() {
+        total += 1;
+        if c == '\u{FFFD}' {
+            replacements += 1;
+        }
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    replacements as f64 / total as f64
 }
 
 /// Decode a BOM-prefixed UTF-16 stream, or `None` when there is no BOM.
@@ -1065,6 +1428,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// accepted alphabet — which is a stronger guarantee than sanitising after the fact.
 /// (The sidecar re-checks containment on its side; this is the near half of the same
 /// fence.)
+///
+/// A rejected address is [`ParseFailureReason::BlobUnavailable`], **not**
+/// `Unsupported`: the commonest way to get here is a file document whose `sha256` is
+/// empty, and calling that "no parser can read this format" sent the user to the
+/// Store to fix a broken storage row.
 pub fn blob_input_path(sha256: &str) -> Result<std::path::PathBuf, ParseFailure> {
     let valid = sha256.len() == 64
         && sha256
@@ -1072,8 +1440,12 @@ pub fn blob_input_path(sha256: &str) -> Result<std::path::PathBuf, ParseFailure>
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if !valid {
         return Err(ParseFailure::new(
-            ParseFailureReason::Unsupported,
-            "blob address is not a 64-character lowercase hex sha256",
+            ParseFailureReason::BlobUnavailable,
+            if sha256.is_empty() {
+                "this document has no stored blob to read".to_owned()
+            } else {
+                "blob address is not a 64-character lowercase hex sha256".to_owned()
+            },
         ));
     }
     let shard = &sha256[..2];
@@ -1150,14 +1522,29 @@ pub async fn submit_blob(
 ) -> Result<ParseSubmission, ParseFailure> {
     let path = blob_input_path(blob_sha256)?;
 
-    if is_builtin_readable(filename) {
+    // The floor, in the same two arms as
+    // [`crate::space_file_index::create_file_indexed`] and for the same reason: the
+    // extension is the primary signal, and a name that carries none is judged by its
+    // declared mime instead (see [`mime_floor_name`]). Spelled out rather than hidden
+    // behind one combined helper so that both entry points to the floor read
+    // identically and neither can quietly acquire a different notion of it.
+    let floor_name: Option<std::borrow::Cow<'_, str>> = if is_builtin_readable(filename) {
+        Some(std::borrow::Cow::Borrowed(filename))
+    } else {
+        mime_floor_name(filename, mime).map(std::borrow::Cow::Owned)
+    };
+
+    if let Some(floor_name) = floor_name {
         let bytes = tokio::fs::read(&path).await.map_err(|e| {
+            // The address validated but the file is not there (or not readable). That
+            // is this node's storage, not a missing parser — same reasoning as
+            // [`blob_input_path`].
             ParseFailure::new(
-                ParseFailureReason::ProviderError,
+                ParseFailureReason::BlobUnavailable,
                 format!("cannot read blob {blob_sha256}: {e}"),
             )
         })?;
-        let mut outcome = builtin_parse(filename, &bytes)?;
+        let mut outcome = builtin_parse(&floor_name, &bytes)?;
         // Trust the caller's address over a recomputed one only when they agree;
         // a mismatch means the blob store handed us the wrong file, which the
         // caller must see rather than inherit silently.
@@ -1316,6 +1703,116 @@ pub async fn job_outcome(
 mod tests {
     use super::*;
 
+    /// `apps/core/src/server/mod.rs`, read as text. The route table is a builder
+    /// chain inside an `async fn` that needs a live `ServerState`, so there is no
+    /// cheap way to introspect the assembled `Router` for a path; the two source
+    /// tests below therefore read the registration the same way
+    /// `server::mod`'s own guard tests read theirs (`include_str!("voice_ws.rs")`,
+    /// `include_str!("learning.rs")`).
+    const SERVER_MOD_SRC: &str = include_str!("server/mod.rs");
+
+    /// Whether the route table registers `path` as a literal route.
+    ///
+    /// Anchored on `.route(` + the QUOTED path, not a bare `contains`. Two ways a
+    /// bare substring test lies here, and this module trips both:
+    ///
+    /// - `"/api/documents/parse"` is a prefix of the registered
+    ///   `"/api/documents/parse/capability"`, so `contains` on the unquoted form
+    ///   reports the unmounted submit route as mounted;
+    /// - rustfmt moves a registration onto its own lines once the handler list
+    ///   grows, so an indentation-sensitive needle reports a mounted route as
+    ///   absent — which would let the "these two are unmounted" assertions below
+    ///   keep passing after someone mounted them.
+    ///
+    /// The closing quote is what makes the prefix case exact; `\s*` is what makes
+    /// it formatting-proof. Mirrors `isRegistered` in
+    /// `apps/desktop/src/lib/api/documents.test.ts`, deliberately: the same
+    /// question is asked from both sides of the wire.
+    fn is_registered(path: &str) -> bool {
+        let needle = format!("\"{path}\"");
+        SERVER_MOD_SRC
+            .match_indices(".route(")
+            .any(|(at, marker)| {
+                let rest = SERVER_MOD_SRC[at + marker.len()..].trim_start();
+                rest.starts_with(&needle)
+            })
+    }
+
+    /// The mounted route is registered, by literal path AND by handler.
+    ///
+    /// Both halves matter and neither implies the other: the path string alone
+    /// could be a doc comment, and the handler alone could be a re-export. This
+    /// pair is what failed before — the handler existed, carried its `utoipa`
+    /// annotation and was `pub`, and simply appeared in no route table, so the
+    /// desktop's only reader of it 404'd and rendered an empty panel.
+    #[test]
+    fn parse_capability_is_registered_in_the_route_table() {
+        assert!(
+            is_registered("/api/documents/parse/capability"),
+            "the capability route's path must appear in the route table"
+        );
+        assert!(
+            SERVER_MOD_SRC.contains("get(crate::document_parse::parse_capability)"),
+            "the capability path must be wired to THIS handler"
+        );
+    }
+
+    /// The `#[allow(dead_code)]` gate and the route table must agree.
+    ///
+    /// The gate is this module's way of saying "unmounted on purpose" (module doc).
+    /// Two ways for that statement to become false, both silent:
+    ///
+    /// 1. someone registers `parse_document` / `parse_job` and leaves the gate on —
+    ///    the next reader is told a live route is dead code;
+    /// 2. someone removes a gate without registering — the handler starts warning
+    ///    again and the deliberate-stub decision is lost to noise.
+    ///
+    /// So this checks the pairing in both directions for each of the two, over this
+    /// module's own source. Registering them is expected eventually; doing it
+    /// without deleting the gate (and without adding the `DefaultBodyLimit` the POST
+    /// needs) is what must not pass silently.
+    #[test]
+    fn the_unmounted_handlers_are_gated_and_the_gated_handlers_are_unmounted() {
+        let this_file = include_str!("document_parse.rs");
+        for (handler, path) in [
+            ("parse_document", "/api/documents/parse"),
+            ("parse_job", "/api/documents/parse/jobs/:job_id"),
+        ] {
+            let signature = format!("pub async fn {handler}(");
+            let declaration = this_file
+                .find(&signature)
+                .unwrap_or_else(|| panic!("{handler} is declared in this module"));
+            // The gate sits directly above the fn, after its `#[utoipa::path(...)]`
+            // block; take the 200 bytes before the signature so the search cannot
+            // wander into the previous handler's attributes.
+            let preamble = &this_file[declaration.saturating_sub(200)..declaration];
+            assert!(
+                preamble.contains("#[allow(dead_code)]"),
+                "{handler} is unmounted, so it must carry the gate that says so"
+            );
+            assert!(
+                !is_registered(path),
+                "{handler} is registered at {path} but still carries #[allow(dead_code)] — \
+                 mount and gate disagree; drop the gate in the change that mounts it"
+            );
+            assert!(
+                !SERVER_MOD_SRC.contains(&format!("crate::document_parse::{handler}")),
+                "{handler} is wired into the route table but still gated as dead code"
+            );
+        }
+    }
+
+    /// The number the desktop's parsing panel prints is the node's real ceiling.
+    ///
+    /// `max_input_bytes` in the capability response is [`MAX_PARSE_BYTES`], and a
+    /// document only reaches a parser by being uploaded first, so the two must not
+    /// drift: a panel that printed a parse ceiling above the upload ceiling would
+    /// promise a file size the node refuses at the door.
+    #[test]
+    fn the_reported_parse_ceiling_is_the_upload_ceiling() {
+        assert_eq!(MAX_PARSE_BYTES, crate::server::uploads::MAX_UPLOAD_BYTES);
+    }
+
     #[test]
     fn extension_of_takes_the_last_dot_lowercased() {
         assert_eq!(extension_of("Report.PDF"), ".pdf");
@@ -1360,10 +1857,74 @@ mod tests {
 
     #[test]
     fn typed_floor_reports_a_lossy_decode_instead_of_hiding_it() {
-        let outcome = builtin_parse("a.txt", &[b'h', b'i', 0xff]).expect("lossy floor answers");
-        assert!(outcome.markdown.starts_with("hi"));
+        // A line of prose with one byte from some other encoding in it — a latin-1
+        // accent, a truncated write. That is still a text file, so it decodes with the
+        // compromise recorded rather than being refused.
+        //
+        // The fixture used to be `b"hi\xff"`, which no longer qualifies: one bad byte
+        // in three is 33% of the decoded characters, over `MAX_REPLACEMENT_RATIO`, and
+        // a file that is a third replacement characters is not a file whose text we
+        // recovered. The invariant this test is named for — a compromise is REPORTED,
+        // never silent — is unchanged and is what the assertions below still check.
+        let mut bytes = b"the colony subsists on native grasses".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b" and succulents.");
+        let outcome = builtin_parse("a.txt", &bytes).expect("lossy floor answers");
+        assert!(outcome.markdown.starts_with("the colony"));
+        assert!(outcome.markdown.ends_with("succulents."));
         assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
+        assert!(outcome.warnings[0].contains("not valid UTF-8"));
         assert_eq!(outcome.backend_id, BUILTIN_BACKEND_ID);
+    }
+
+    #[test]
+    fn the_floor_refuses_bytes_that_are_not_text_rather_than_decoding_them_lossily() {
+        // The defect: `is_builtin_readable` is keyed on the NAME, and the name is
+        // client-supplied, so binary bytes under a floor extension reached the lossy
+        // decoder and their mojibake was stored as the document's contents.
+        //
+        // Two signals, one case each. A NUL byte (every real container has one in its
+        // header) and an undecodable-character share over the threshold (for the
+        // formats that do not, like a bare `%PDF` header).
+        for (name, bytes) in [
+            ("payload.txt", b"PK\x03\x04\x14\x00\x00\x00".to_vec()),
+            (
+                "logo.txt",
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec(),
+            ),
+            ("report.txt", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec()),
+        ] {
+            let err = builtin_parse(name, &bytes)
+                .expect_err("binary bytes must not decode into a document");
+            assert_eq!(err.reason, ParseFailureReason::NotText, "{name}");
+            assert_eq!(err.reason.code(), "not_text");
+            assert!(
+                err.message.contains("not text"),
+                "the user has to be told what actually happened: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_bomless_utf16_file_is_refused_rather_than_read_as_nul_separated_ascii() {
+        // UTF-16LE ASCII is `A\0B\0…`, which IS valid UTF-8 — so the strict arm used to
+        // accept it, with no warning at all, and store a string full of NULs. The NUL
+        // probe runs before the UTF-8 arm precisely for this.
+        let mut bytes = Vec::new();
+        for unit in "hello there".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let err = builtin_parse("a.txt", &bytes).expect_err("NUL-riddled bytes are not text");
+        assert_eq!(err.reason, ParseFailureReason::NotText);
+        // And the BOM'd form of the same content still decodes, because the UTF-16 arm
+        // is deliberately ahead of the probe. Refusing that would be a regression.
+        let mut bommed = vec![0xFF, 0xFE];
+        bommed.extend_from_slice(&bytes);
+        assert_eq!(
+            builtin_parse("a.txt", &bommed).expect("BOM'd UTF-16 still reads").markdown,
+            "hello there"
+        );
     }
 
     #[test]
@@ -1390,6 +1951,129 @@ mod tests {
         assert_eq!(
             outcome.source_sha256,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    // ── The mime floor fallback ───────────────────────────────────────────────
+
+    #[test]
+    fn a_title_with_no_extension_reaches_the_floor_through_its_mime() {
+        // The defect: `POST /api/spaces/:id/files` and `artifact__create` pass a
+        // TITLE, so a plain-text note called `notes` answered `false` to the
+        // extension-keyed floor and was sent to a provider that would refuse it —
+        // `skipped/no_provider`, "install a document parser", for a file Core reads
+        // itself in microseconds.
+        assert!(!is_builtin_readable("notes"));
+        assert_eq!(
+            mime_floor_name("notes", "text/plain").as_deref(),
+            Some("notes.txt")
+        );
+        assert!(is_builtin_readable(
+            &mime_floor_name("notes", "text/plain").unwrap()
+        ));
+        // A charset parameter and odd casing are the same media type.
+        assert_eq!(
+            mime_floor_name("Q3 summary", "Text/Plain; charset=utf-8").as_deref(),
+            Some("Q3 summary.txt")
+        );
+        assert_eq!(
+            mime_floor_name("data", "text/csv").as_deref(),
+            Some("data.csv")
+        );
+        assert_eq!(
+            mime_floor_name("page", "text/html").as_deref(),
+            Some("page.html")
+        );
+    }
+
+    #[test]
+    fn the_mime_fallback_never_redirects_a_binary_into_the_text_reader() {
+        // ── Arm one: inputs that DECLARE themselves binary are not given a floor name.
+        //
+        // A mime is client-supplied; when it disagrees with an extension the floor
+        // already refused, honouring it would hand a zip container to the decoder.
+        assert_eq!(mime_floor_name("deck.pptx", "text/plain"), None);
+        assert_eq!(mime_floor_name("report.pdf", "text/markdown"), None);
+        // Nothing binary-ish maps at all, extension or not.
+        assert_eq!(mime_floor_name("scan", "application/pdf"), None);
+        assert_eq!(mime_floor_name("blob", "application/octet-stream"), None);
+        assert_eq!(mime_floor_name("archive", "application/zip"), None);
+        // `application/octet-stream` is what `POST /api/spaces/:id/files` DEFAULTS to
+        // when a client sends no mime, so a hit on it would widen the floor to every
+        // untyped upload — the single worst case.
+        assert_eq!(mime_floor_name("notes", ""), None);
+        // An extension that is already on the floor needs no fallback and gets none:
+        // arm one has already claimed it.
+        assert_eq!(mime_floor_name("notes.md", "text/markdown"), None);
+
+        // ── Arm two: binary BYTES that the fallback DOES accept a name for.
+        //
+        // This half is why the test was rewritten. Its name claims the fallback never
+        // redirects a binary into the text reader, and every assertion above is about
+        // a binary-*declaring* input — the case the name check catches. It never fed
+        // binary bytes down the path the fallback ACCEPTS, which is the only path that
+        // could break the invariant, and that path was broken the whole time: title and
+        // mime are independent client input, so `notes` + `text/plain` holding a zip got
+        // the floor name `notes.txt`, decoded lossily, and stored a page of replacement
+        // characters as the document's contents.
+        //
+        // The floor name is still handed out here — a title with no extension
+        // contradicts nothing, so there is nothing for `mime_floor_name` to refuse on.
+        // The refusal is the decoder's, one layer down, and that is what this asserts.
+        for (mime, bytes) in [
+            ("text/plain", b"PK\x03\x04\x14\x00\x00\x00".to_vec()),
+            ("text/csv", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec()),
+            ("text/markdown", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec()),
+        ] {
+            let floor_name =
+                mime_floor_name("notes", mime).expect("an extensionless title still gets a name");
+            assert!(is_builtin_readable(&floor_name));
+            let err = builtin_parse(&floor_name, &bytes)
+                .expect_err("binary bytes must not become a document's text");
+            assert_eq!(err.reason, ParseFailureReason::NotText, "{mime}");
+        }
+
+        // The control: the same accepted path with bytes that ARE text still reads,
+        // which is the whole point of the fallback and must not be collateral damage.
+        let floor_name = mime_floor_name("notes", "text/plain").unwrap();
+        assert_eq!(
+            builtin_parse(&floor_name, b"quokkas are small macropods")
+                .expect("real text still reaches the floor")
+                .markdown,
+            "quokkas are small macropods"
+        );
+    }
+
+    #[test]
+    fn every_mime_fallback_lands_on_an_extension_the_floor_already_reads() {
+        // The invariant that makes this table safe to extend: it may only re-route a
+        // document to a reader Core would have used anyway, never introduce a family.
+        for (mime, ext) in MIME_FLOOR_EXTENSIONS {
+            assert!(
+                BUILTIN_EXTENSIONS.contains(ext),
+                "{mime} maps to {ext}, which is not on the floor"
+            );
+            assert!(
+                is_builtin_readable(&format!("x{ext}")),
+                "{ext} does not survive the floor's own check"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_blob_is_not_reported_as_a_missing_parser() {
+        // An empty `sha256` column used to fail as `Unsupported`, which
+        // `space_file_index` records as `skipped` — whose remedy text is "install a
+        // `document.parse` app". Nothing about a broken storage row is fixed by
+        // installing a parser.
+        let err = blob_input_path("").expect_err("an empty address is not a blob");
+        assert_eq!(err.reason, ParseFailureReason::BlobUnavailable);
+        assert_eq!(err.reason.code(), "blob_unavailable");
+        assert_ne!(err.reason, ParseFailureReason::Unsupported);
+        assert!(
+            err.message.contains("no stored blob"),
+            "the message must say what actually happened: {}",
+            err.message
         );
     }
 

@@ -1286,14 +1286,29 @@ fn ryu_agent_route(
             } else {
                 String::new()
             };
+            // Pi cannot take the in-process MCP bridge (`pi-acp` advertises
+            // `mcpCapabilities {http:false, sse:false}` and drops `session/new`'s
+            // `mcpServers` on the floor), so its ONLY road to Ryu's tools is the
+            // `ryu-mcp` extension in the isolated config dir, which dials Core over
+            // HTTP. These three vars are how it finds and authenticates to Core.
+            //
+            // Omitting them does not disable the extension — it makes it guess. Its
+            // defaults are `http://127.0.0.1:7980` and an EMPTY token
+            // (`assets/pi-extensions/ryu-mcp.ts`), so under any non-release
+            // `RYU_PROFILE` it dials the wrong port, and on a token-guarded node it
+            // presents no bearer. Either way the user sees an agent that silently has
+            // no Ryu tools. The managed-binary path (`acp::ryu_pi_acp_cmd`) has always
+            // injected them; this PATH fallback did not, which made the two roads to
+            // the same agent behave differently.
             let gated_cmd = if cfg!(target_os = "windows") {
                 let gateway_env = if gateway {
                     format!("set OPENAI_BASE_URL={gateway_v1}&& set OPENAI_API_KEY={token}&& ")
                 } else {
                     String::new()
                 };
+                let mcp_env = acp::pi_mcp_extension_env(true);
                 format!(
-                    "cmd /c {gateway_env}set PI_CODING_AGENT_DIR={config_dir}&& {}",
+                    "cmd /c {gateway_env}{mcp_env}set PI_CODING_AGENT_DIR={config_dir}&& {}",
                     spawn_cmd.trim_start_matches("cmd /c ")
                 )
             } else {
@@ -1302,7 +1317,8 @@ fn ryu_agent_route(
                 } else {
                     String::new()
                 };
-                format!("{gateway_env}PI_CODING_AGENT_DIR={config_dir} {spawn_cmd}")
+                let mcp_env = acp::pi_mcp_extension_env(false);
+                format!("{gateway_env}{mcp_env}PI_CODING_AGENT_DIR={config_dir} {spawn_cmd}")
             };
             return Some(AgentRoute::Acp {
                 spawn_cmd: gated_cmd,
@@ -1364,7 +1380,10 @@ fn agent_route(
     // through the same `run_acp_prompt` path, so session modes/models/effort,
     // interactive permissions, and diff rendering all apply uniformly. Like the
     // self-fetching registry agents it makes its own provider calls (no gateway
-    // env-injection); its tool egress is still governed via the MCP bridge.
+    // env-injection). Its TOOLS still arrive over the MCP bridge, which is a
+    // separate gate (`agent-tool-bridge`, default ON) from the egress decision this
+    // branch is making — the two were one preference until they were split, and
+    // "tool egress" was the phrase that conflated them. Tools are not egress.
     if let Some(cmd) = engine.strip_prefix("acp-exec:") {
         let cmd = cmd.trim();
         if !cmd.is_empty() {
@@ -1674,6 +1693,156 @@ pub struct AgentSlots {
 /// prompt. Falls back to treating `agent_id` itself as the engine so clients that
 /// pass a registry id directly (the legacy path) keep working even before any store
 /// row exists.
+/// Everything [`resolve_binding`] resolves for a turn, plus the agent it was
+/// resolved for. Named so the fallback-policy hook can hand the whole set back
+/// after a rule may have moved the turn to a different agent.
+type ResolvedTurnBinding = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    AgentSlots,
+    Option<PersonaSlot>,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+);
+
+/// Apply the node's threshold fallback rules to one turn.
+///
+/// Returns the binding to actually run with. When no rule fires — the case on
+/// every node that has not configured this — the inputs come straight back out
+/// and nothing was read, computed or spawned.
+///
+/// **What a fired rule may change.** A rule whose target names only a model
+/// swaps the model and keeps the agent. That is the case this feature is really
+/// about, and the ACP plane supports it natively: `req.acp_model` is the
+/// per-turn `session/set_model` pin the composer's picker already writes, so
+/// pinning it here is indistinguishable from the user having picked that model
+/// themselves. A rule whose target names a different *agent* is heavier — an ACP
+/// agent owns its own thread state, so switching vendors mid-conversation
+/// silently starts a new session and loses the thread the user is looking at.
+/// Those swaps are therefore applied only at the START of a conversation. That
+/// gate is NOT implemented here but inside the evaluator
+/// (`routing_policy::Target::at_conversation_start`), so the composer's info bar
+/// — which runs the same evaluator — predicts exactly what this does instead of
+/// announcing a switch the turn then declines to make.
+#[allow(clippy::too_many_arguments)]
+async fn apply_routing_policy(
+    agent_id: Option<String>,
+    engine: Option<String>,
+    model: Option<String>,
+    agent_slots: AgentSlots,
+    persona: Option<PersonaSlot>,
+    composio_actions: Vec<String>,
+    skills_allowlist: Vec<String>,
+    identity_profile_ids: Vec<String>,
+    req: &mut ChatStreamRequest,
+    agent_store: &AgentStore,
+) -> ResolvedTurnBinding {
+    let unchanged = |agent_id, engine, model, slots, persona, composio, skills, identities| {
+        (
+            agent_id, engine, model, slots, persona, composio, skills, identities,
+        )
+    };
+    let Some(state) = crate::learning::global_state() else {
+        return unchanged(
+            agent_id,
+            engine,
+            model,
+            agent_slots,
+            persona,
+            composio_actions,
+            skills_allowlist,
+            identity_profile_ids,
+        );
+    };
+
+    // The turn as the user aimed it: the composer's per-turn model pin when
+    // there is one, else whatever the agent's binding says.
+    let target = crate::routing_policy::Target {
+        agent_id: agent_id.clone().unwrap_or_default(),
+        model: req
+            .acp_model
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| model.clone())
+            .unwrap_or_default(),
+        // `messages` carries the client's history for this thread and the current
+        // user turn is the last entry, so "one message" is the first turn of a
+        // conversation. Free, and it avoids a store round-trip on every turn.
+        at_conversation_start: req.conversation_id.is_none() || req.messages.len() <= 1,
+    };
+    let advice = crate::routing_policy::advice_for_turn(&state.preferences, &target).await;
+    if !advice.swaps() {
+        if advice.severity == crate::routing_policy::Severity::Warn {
+            tracing::info!(reason = ?advice.reason, "routing policy: headroom warning");
+        }
+        return unchanged(
+            agent_id,
+            engine,
+            model,
+            agent_slots,
+            persona,
+            composio_actions,
+            skills_allowlist,
+            identity_profile_ids,
+        );
+    }
+
+    let switches_agent = !advice.effective.agent_id.eq_ignore_ascii_case(&target.agent_id);
+
+    tracing::info!(
+        rule = ?advice.rule_id,
+        from_agent = %target.agent_id,
+        from_model = %target.model,
+        to_agent = %advice.effective.agent_id,
+        to_model = %advice.effective.model,
+        reason = ?advice.reason,
+        "routing policy: fallback applied"
+    );
+
+    // Pin the model on BOTH planes. `acp_model` is the ACP session pin; the
+    // binding `model` is what the OpenAI-compat / local-engine routes put in the
+    // request body. Each plane ignores the other's field, so setting both is how
+    // one rule governs a turn whose route is not yet decided here.
+    let new_model = (!advice.effective.model.is_empty()).then(|| advice.effective.model.clone());
+    if !switches_agent {
+        if let Some(ref m) = new_model {
+            req.acp_model = Some(m.clone());
+        }
+        return unchanged(
+            agent_id,
+            engine,
+            new_model.clone().or(model),
+            agent_slots,
+            persona,
+            composio_actions,
+            skills_allowlist,
+            identity_profile_ids,
+        );
+    }
+
+    // Cross-agent: re-resolve the whole binding for the agent we moved to, or
+    // the new agent would run with the old one's engine, persona, skills and
+    // identity bindings.
+    let new_agent_id = advice.effective.agent_id.clone();
+    let (engine, resolved_model, agent_slots, persona, composio_actions, skills, identities) =
+        resolve_binding(&new_agent_id, agent_store).await;
+    let model = new_model.or(resolved_model);
+    req.acp_model = model.clone();
+    req.agent_id = Some(new_agent_id.clone());
+    (
+        Some(new_agent_id),
+        engine,
+        model,
+        agent_slots,
+        persona,
+        composio_actions,
+        skills,
+        identities,
+    )
+}
+
 async fn resolve_binding(
     agent_id: &str,
     store: &AgentStore,
@@ -1960,8 +2129,17 @@ pub struct AutoRecallConfig {
     pub read_levels: Vec<String>,
     /// Space IDs the active agent may inject into chat, from its
     /// `MemorySlot.space_ids`. **Empty** means no Spaces are auto-injected (the
-    /// prior behaviour). This is what finally wires the agent→Spaces allowlist
-    /// into retrieval (it was previously hardcoded to none).
+    /// prior behaviour, and still the default agent's).
+    ///
+    /// This used to claim it "finally wires the agent→Spaces allowlist into
+    /// retrieval". It did wire it into `RetrievalOptions::space_ids` — but that
+    /// option selected rows in `retrieval.db`, and a Space's documents are never
+    /// indexed there (its `space_id` column holds OKF *bundle* ids). So the
+    /// allowlist matched nothing on this path until `RetrievalStore` gained the
+    /// [`ryu_rag::SpaceRecall`] delegate, which answers these ids out of the Spaces
+    /// store under each Space's own `retrieval_mode` — vector KNN or graph
+    /// traversal. Non-empty here now means real Space content (and real
+    /// `spaces.db` work) on the turn; empty still means none of either.
     pub space_ids: Vec<String>,
 }
 
@@ -1995,7 +2173,18 @@ fn assemble_recall_block(
     for chunk in memory_chunks {
         let snippet = truncate_snippet(&chunk.content);
         if !snippet.is_empty() {
-            lines.push(format!("- [memory] {snippet}"));
+            // Label by the chunk's OWN source, not by the list it arrived in. This
+            // list is the retrieval store's answer, which carries memory facts AND
+            // Space document text (an agent's Space allowlist is delegated to the
+            // Spaces store — `ryu_rag::SpaceRecall` — so a Space genuinely reaches
+            // this block now, whereas before it could not). Calling a document
+            // chunk "[memory]" would tell the model the user had told it that, which
+            // is a provenance claim the retrieval layer never made.
+            let label = match chunk.source {
+                ChunkSource::Space => "space",
+                ChunkSource::Memory => "memory",
+            };
+            lines.push(format!("- [{label}] {snippet}"));
         }
     }
     for hit in chat_hits {
@@ -2178,6 +2367,14 @@ async fn run_auto_recall(
     // Memory + Space half, gated by the agent's readable levels + Space allowlist
     // and the active project. Fetch more than top_k so dropping the recency-injected
     // facts still leaves room for the ones the recency window MISSED.
+    //
+    // The Space half is answered by the SPACES store, not by `retrieval.db`: the
+    // store's `ryu_rag::SpaceRecall` delegate (wired once in `main.rs`) runs each
+    // allowlisted Space under its own `retrieval_mode`, so a Space the user set to
+    // Graph is traversed here exactly as it is in the Spaces search box, and the two
+    // rankings are merged by rank (their scores are not comparable — a graph hit has
+    // none). An EMPTY allowlist skips `spaces.db` entirely, which is what keeps the
+    // default agent's turn free of that work.
     let memory_chunks = {
         let opts = RetrievalOptions {
             top_k: cfg.top_k + recency_ids.len(),
@@ -2384,6 +2581,8 @@ pub async fn run_reply_text(
             prompt,
             author_name.clone(),
             true,
+            // Channel turns run the agent as configured — no per-turn pin.
+            None,
             Arc::clone(&registry),
             conversations.clone(),
             agent_store.clone(),
@@ -2679,6 +2878,9 @@ pub(crate) async fn run_text_turn(
     text: String,
     author_name: Option<String>,
     persist: bool,
+    // `model` pins the model for this turn only, as the composer's picker does;
+    // `None` runs the agent on its configured model.
+    model: Option<String>,
     registry: Arc<AcpAgentRegistry>,
     conversations: ConversationStore,
     agent_store: AgentStore,
@@ -2698,6 +2900,7 @@ pub(crate) async fn run_text_turn(
         None,
         false,
         None,
+        model,
         registry,
         conversations,
         agent_store,
@@ -2733,6 +2936,8 @@ pub(crate) async fn run_text_turn_in(
     cwd: Option<String>,
     worktree_isolation: bool,
     worktree_branch: Option<String>,
+    // Per-turn model pin (see `run_text_turn`).
+    model: Option<String>,
     registry: Arc<AcpAgentRegistry>,
     conversations: ConversationStore,
     agent_store: AgentStore,
@@ -2765,7 +2970,10 @@ pub(crate) async fn run_text_turn_in(
         inference: None,
         acp_mode: None,
         acp_config: None,
-        acp_model: None,
+        // The per-turn model pin travels the same field the composer's picker
+        // writes, so an off-chat caller and a typing user reach the agent's
+        // model the same way. Empty is normalised to absent downstream.
+        acp_model: model,
         // Programmatic fan-out (delegate / threads / worker / scheduled / team
         // member) — yield to a directly-typing user on the shared local engine.
         background: true,
@@ -3599,6 +3807,39 @@ pub async fn route_chat_stream(
             Vec::new(),
         ),
     };
+
+    // Threshold-driven fallback (`crate::routing_policy`). THE enforcement point
+    // for it: every chat turn — gateway-routed and ACP alike — passes through
+    // here with its agent and model resolved but nothing dispatched yet, and the
+    // ACP plane is reachable *only* from Core (those agents bypass the Gateway
+    // entirely with their own vendor credential), so a rule like "Claude weekly
+    // under 50% → finish the week on Sonnet" has nowhere else it could be
+    // applied.
+    //
+    // Inert unless the user wrote a rule: `advice_for_turn` short-circuits on an
+    // empty policy before it reads a single signal.
+    let (
+        effective_agent_id,
+        engine,
+        model,
+        agent_slots,
+        persona,
+        composio_actions,
+        skills_allowlist,
+        identity_profile_ids,
+    ) = apply_routing_policy(
+        effective_agent_id,
+        engine,
+        model,
+        agent_slots,
+        persona,
+        composio_actions,
+        skills_allowlist,
+        identity_profile_ids,
+        &mut req,
+        &agent_store,
+    )
+    .await;
 
     // Build persona tone prefix (#410). Merged into the system prompt before
     // dispatching — prepended to long_term_system for both adapters.
@@ -6825,6 +7066,34 @@ mod tests {
         assert_eq!(block.matches("- [").count(), 2);
     }
 
+    /// A Space document chunk must be labelled `[space]`, not `[memory]`.
+    ///
+    /// This became reachable when `RetrievalStore` gained its Spaces delegate: the
+    /// agent's Space allowlist now returns real document text on this list, and the
+    /// label is the only provenance the model gets. Telling it a document is
+    /// "memory" asserts the user said it — a claim nothing in the retrieval path
+    /// makes. Both sources in one block, so the labels cannot be swapped wholesale.
+    #[test]
+    fn recall_block_labels_space_chunks_by_their_own_source() {
+        let space = ScoredChunk {
+            id: "s".to_owned(),
+            source: crate::server::retrieval::ChunkSource::Space,
+            space_id: Some("space-1".to_owned()),
+            content: "Acme is based in Rotterdam".to_owned(),
+            score: 0.5,
+        };
+        let block =
+            assemble_recall_block(&[mem_chunk("user prefers dark mode"), space], &[], 5).unwrap();
+        assert!(
+            block.contains("- [space] Acme is based in Rotterdam"),
+            "{block}"
+        );
+        assert!(
+            block.contains("- [memory] user prefers dark mode"),
+            "{block}"
+        );
+    }
+
     #[test]
     fn recall_block_empty_when_no_chunks() {
         assert!(assemble_recall_block(&[], &[], 5).is_none());
@@ -7177,6 +7446,92 @@ mod tests {
             }
             _ => panic!("expected ACP route for ryu agent (Pi + Gateway)"),
         }
+    }
+
+    #[test]
+    fn both_pi_roads_render_the_extension_env_from_one_source() {
+        let _pi_guard = crate::pi_config::lock_pi_config_test_env();
+        // Pi cannot take the in-process MCP bridge, so the `ryu-mcp` extension dialling
+        // Core over HTTP is its ONLY road to Ryu's tools, and these vars are how it
+        // finds Core. TWO spawn paths reach the same agent — the managed binary and
+        // this PATH fallback — and only the managed one injected them, so the
+        // fallback's Pi silently used the extension's compiled-in
+        // `http://127.0.0.1:7980` (wrong under any non-release `RYU_PROFILE`) with no
+        // bearer. The agent still started and answered; it just never had a tool.
+        //
+        // Asserting over a resolved spawn command CANNOT catch that: which of the two
+        // roads `ryu_agent_route` takes depends on whether the managed binary happens
+        // to exist on the machine running the test, so it silently exercised whichever
+        // one was installed. A first version of this test passed unchanged after the
+        // fallback's injection was deleted. So pin the property that removes the drift
+        // instead: exactly one renderer, both roads calling it.
+        for windows in [true, false] {
+            let env = acp::pi_mcp_extension_env(windows);
+            for var in ["RYU_MCP_CORE_URL", "RYU_MCP_AGENT_ID"] {
+                assert!(env.contains(var), "{var} missing from rendered env: {env}");
+            }
+            assert!(
+                env.contains(&crate::sidecar::gateway::core_self_url()),
+                "must carry THIS node's Core URL, not the extension's default: {env}"
+            );
+            // Shell rendering is the half a second caller would most plausibly get
+            // wrong on its own — POSIX inline vs `set VAR=…&&` chaining.
+            assert_eq!(
+                env.contains("set RYU_MCP_CORE_URL="),
+                windows,
+                "wrong shell form for windows={windows}: {env}"
+            );
+        }
+
+        // And neither road may re-derive the values itself. `RYU_MCP_CORE_URL=` should
+        // appear ONLY inside the renderer; a call site formatting its own is exactly
+        // how the two drifted apart, and it would not be a compile error.
+        let acp_rs = include_str!("acp.rs");
+        let mod_rs = include_str!("mod.rs");
+        // The renderer formats the var once per shell, so two occurrences — both
+        // inside it. What must never grow is a THIRD, which would be a call site
+        // rendering its own and is precisely how the two roads drifted.
+        // Built at runtime, never written as one literal: this test reads its OWN
+        // file, so a contiguous needle would match the assertion below and the check
+        // would be about itself rather than about the call sites.
+        let needle = format!("{}{}", "RYU_MCP_CORE_URL=", "{core_url}");
+        assert_eq!(
+            acp_rs.matches(needle.as_str()).count(),
+            2,
+            "only pi_mcp_extension_env's two shell branches may format this var"
+        );
+        assert!(
+            !mod_rs.contains(needle.as_str()),
+            "the PATH fallback must call pi_mcp_extension_env, not re-render the env"
+        );
+        // Both roads reach the renderer, in both shell forms.
+        for (file, src, call) in [
+            ("acp.rs", acp_rs, "pi_mcp_extension_env("),
+            ("mod.rs", mod_rs, "acp::pi_mcp_extension_env("),
+        ] {
+            for arg in ["true)", "false)"] {
+                let want = format!("{call}{arg}");
+                assert!(
+                    src.contains(&want),
+                    "{file} must call the shared renderer as `{want}`"
+                );
+            }
+        }
+
+        // Calling it is not enough — the result must reach the command. Deleting the
+        // interpolation leaves the call in place and compiles cleanly, so nothing but
+        // this assertion catches it. Needles built at runtime for the same
+        // self-reference reason as above.
+        let used_posix = format!("{}{}", "{gateway_env}{mcp_env}", "PI_CODING_AGENT_DIR");
+        let used_win = format!("{}{}", "{gateway_env}{mcp_env}", "set PI_CODING_AGENT_DIR");
+        assert!(
+            mod_rs.contains(used_posix.as_str()),
+            "the PATH fallback renders mcp_env but never interpolates it (posix)"
+        );
+        assert!(
+            mod_rs.contains(used_win.as_str()),
+            "the PATH fallback renders mcp_env but never interpolates it (windows)"
+        );
     }
 
     #[test]

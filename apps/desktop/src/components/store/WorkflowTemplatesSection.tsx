@@ -238,6 +238,7 @@ function TemplateList({
 								key={template.id}
 								name={template.name}
 								onClick={() => onSelect(template.id)}
+								seedId={template.id}
 								selected={template.id === selectedId}
 							/>
 						))}

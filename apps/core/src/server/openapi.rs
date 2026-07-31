@@ -209,6 +209,12 @@ use utoipa::OpenApi;
         super::delete_document,
         super::create_page,
         super::search_space,
+        // The `document.parse` capability's read model. Only the CAPABILITY route is
+        // listed: `parse_document` / `parse_job` carry `#[utoipa::path]` too but are
+        // not registered in the router, and documenting an unreachable path in the
+        // published API doc is a lie a client would only discover as a 404. Add them
+        // here in the same change that mounts them.
+        crate::document_parse::parse_capability,
         super::get_embedding_model,
         super::set_embedding_model,
         super::trigger_reindex,
@@ -275,6 +281,11 @@ use utoipa::OpenApi;
         super::acp_logout,
         super::agent_capabilities,
         super::usage_api::agent_usage,
+        super::usage_api::provider_credits,
+        // Threshold-driven model fallback
+        super::routing_api::advice,
+        super::routing_api::get_policy,
+        super::routing_api::put_policy,
         super::load_acp_session_handler,
         super::set_agent_capabilities,
         // Approvals
@@ -438,6 +449,7 @@ use utoipa::OpenApi;
         super::create_file,
         super::create_whiteboard,
         super::get_document_backlinks,
+        super::get_document_index_status,
         super::get_document_links,
         super::get_document_version,
         super::get_file_blob,

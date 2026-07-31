@@ -558,17 +558,42 @@ mod tests {
         p
     }
 
+    /// A private [`PreferencesStore`] for one test.
+    ///
+    /// The discriminator is a process-wide atomic counter, NOT a timestamp. It used
+    /// to be `SystemTime::now().as_nanos()`, and that made the whole `ryu-core`
+    /// binary's test run flaky: `cargo test` runs these in parallel threads, two
+    /// `temp_prefs()` calls that land inside the same clock tick produce the *same*
+    /// path, and then the two tests share one SQLite file. Observed twice while
+    /// verifying this round, both shapes of the same collision —
+    /// `default_active_is_builtin_primary` read back `modelscope` (the id
+    /// `active_model_source_resolves_to_its_endpoint_host` writes through
+    /// `set_active`, three tests away) instead of the built-in primary, and
+    /// `add_select_and_read_back_a_custom_source` panicked on the `open` below
+    /// because the other thread had just `remove_file`d the db out from under it.
+    /// Each reproduced only in a FULL-suite run and passed in isolation, which is
+    /// exactly the signature that gets a real failure dismissed as noise.
+    ///
+    /// `fetch_add` is unconditionally unique within the process, so neither clock
+    /// resolution nor thread interleaving can collide; the pid keeps concurrent
+    /// `cargo test` invocations apart. `temp_path` already had a per-test `name`
+    /// discriminator and is unaffected.
+    ///
+    /// Pre-existing (byte-identical at `HEAD`) — not a regression from this round's
+    /// changes; found by running the full binary suite rather than a module filter.
     fn temp_prefs() -> PreferencesStore {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "ryu-catalog-prefs-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&p);
+        p.push(format!("ryu-catalog-prefs-{}-{seq}.db", std::process::id()));
+        // Belt-and-braces, not a fix for anything observed: with a unique `seq` no
+        // sidecar can pre-exist. `PreferencesStore::open` sets `journal_mode = WAL`,
+        // so the db is three files, and removing only the `.db` while leaving
+        // `-wal`/`-shm` behind is the shape that bites the moment the discriminator
+        // is weakened again — which is how this helper got here.
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", p.display()));
+        }
         PreferencesStore::open(p).expect("open temp prefs")
     }
 
@@ -605,8 +630,14 @@ mod tests {
 
     #[test]
     fn preference_key_is_dotted_by_kind() {
-        assert_eq!(preference_key(CatalogKind::Model), "catalog.active_source.model");
-        assert_eq!(preference_key(CatalogKind::Skill), "catalog.active_source.skill");
+        assert_eq!(
+            preference_key(CatalogKind::Model),
+            "catalog.active_source.model"
+        );
+        assert_eq!(
+            preference_key(CatalogKind::Skill),
+            "catalog.active_source.skill"
+        );
     }
 
     fn spec(kind: CatalogKind, id: &str, base_url: Option<&str>) -> CustomSourceSpec {
@@ -663,7 +694,11 @@ mod tests {
     #[test]
     fn source_from_spec_mcp_and_knowledge_carriers() {
         assert!(matches!(
-            source_from_spec(spec(CatalogKind::Mcp, "m1", Some("https://registry/mirror"))),
+            source_from_spec(spec(
+                CatalogKind::Mcp,
+                "m1",
+                Some("https://registry/mirror")
+            )),
             Source::OfficialMcp(_)
         ));
         assert!(matches!(
@@ -684,9 +719,13 @@ mod tests {
     fn source_by_id_finds_builtin_and_missing() {
         let reg = CatalogSourceRegistry::with_file(temp_path("by-id"));
         // The built-in HF model source resolves by id.
-        assert!(reg.source_by_id(CatalogKind::Model, "huggingface").is_some());
+        assert!(reg
+            .source_by_id(CatalogKind::Model, "huggingface")
+            .is_some());
         // An unknown id resolves to None.
-        assert!(reg.source_by_id(CatalogKind::Model, "does-not-exist").is_none());
+        assert!(reg
+            .source_by_id(CatalogKind::Model, "does-not-exist")
+            .is_none());
     }
 
     #[test]

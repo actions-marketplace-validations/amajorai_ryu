@@ -58,9 +58,139 @@ pub fn builtin_prefixes() -> Vec<(String, String)> {
         // through the genai-backed provider, so they route here rather than
         // to the OpenAI-compatible passthroughs.
         ("gemini-", "genai"),
+        // ── The SEGREGATED credit-pool supplies ───────────────────────────────
+        // Without these rows the providers registered in
+        // `apps/gateway/src/providers/mod.rs` are reachable ONLY through an
+        // explicit operator `routing.model_map` or `default_provider`, so the
+        // whole pool split (`apps/gateway/src/credit_pools.rs`) is inert on a
+        // zero-config deploy: no id routes to the pool, so no request is ever
+        // pool-tagged and no grant is ever drawn. (That is still the situation for
+        // `openai-credits`, which cannot have a row — see the end of this block.)
+        //
+        // PLACEMENT IS LOAD-BEARING, for one row: `mistral.` MUST stay above the
+        // `("mistral", "local")` row below. `route` takes the FIRST `starts_with`
+        // hit top-down, not the longest, so beneath it every Bedrock Mistral id
+        // (`mistral.mistral-large-2407-v1:0`,
+        // `mistral.mixtral-8x7b-instruct-v0:1`) would be handed to the resident
+        // local engine, which does not have them.
+        // `builtin_prefix_order_puts_bedrock_mistral_before_local_mistral` fails
+        // if anyone re-sorts. The other rows are collision-free by anchoring:
+        // `@cf/meta/…` starts with `@`, not `meta.`; `anthropic.claude-…` starts
+        // with `anthropic.`, not `claude-`.
+        //
+        // Cloudflare Workers AI namespaces every model under `@cf/<vendor>/<id>`,
+        // so one prefix covers the catalog.
+        ("@cf/", "cloudflare"),
+        // Bedrock model ids are `<vendor>.<model>-v<n>:<n>`. This is the four
+        // vendor namespaces the pool spec named, NOT Bedrock's full vendor list:
+        // `cohere.`, `ai21.`, `writer.` and `deepseek.` ids stay unrouted here.
+        // The sharpest of those to know about is `deepseek.r1-v1:0`, which the
+        // `("deepseek", "local")` row below still claims for the resident local
+        // engine — pre-existing behavior, not something these rows changed, and
+        // fixable the same way `mistral.` was if that pool is ever stocked.
+        //
+        // Also deliberately absent: the `us.` / `eu.` / `apac.` cross-region
+        // inference-profile forms of the same ids. Those are broad two-letter
+        // prefixes to burn on a compile-time default (they would capture any
+        // future model whose id happens to start with them), and an operator who
+        // uses inference profiles can map them exactly in `routing.model_map`,
+        // which outranks this table anyway.
+        ("anthropic.", "bedrock"),
+        ("amazon.", "bedrock"),
+        ("meta.", "bedrock"),
+        ("mistral.", "bedrock"),
+        // Google Cloud Vertex AI. ONE row, and `google/…` is chosen because it is
+        // a real id on the surface the provider actually speaks: step 3 hands the
+        // provider the requested model VERBATIM (there is no rewrite slot — that
+        // exists only in the user `model_map`), so a prefix that is not part of a
+        // genuine upstream id routes perfectly and then 404s.
+        //
+        // `google/gemini-2.5-pro` is exactly how Vertex's OpenAI-compatible Chat
+        // Completions surface names a model, which is the surface
+        // `providers/mod.rs` registers this slot against.
+        //
+        // NOT `("publishers/", "vertex")`, tempting as it looks:
+        // `publishers/google/models/<id>` is the NATIVE `generateContent` REST
+        // path, not a `model` value the OpenAI-compatible endpoint accepts — so it
+        // would route and 404, the exact failure this row's phrasing avoids. Same
+        // reason there is no `anthropic/` row: Claude-on-Vertex is
+        // Anthropic-Messages-shaped, which an `OpenAiProvider` alias cannot serve
+        // (see the Bedrock registration comment for the identical argument). Other
+        // Vertex publishers — `meta/`, `mistralai/` — are left to `routing.model_map`
+        // for the same reason `cohere.`/`ai21.` are on the Bedrock side: they are
+        // not what this pool was stocked for, and a compile-time default should not
+        // claim ids nobody has confirmed the allowance serves.
+        //
+        // NOT `("gemini-", "vertex")` either, and this is the trap worth naming:
+        // the `("gemini-", "genai")` row above already claims every bare `gemini-*`
+        // id for the own-key Gemini API. A `vertex` row placed above it would
+        // re-home ALL existing Gemini traffic onto donated credit; placed below it
+        // would never fire, because step 3 takes the FIRST `starts_with` hit, not
+        // the longest. Neither is what anyone wants, so bare `gemini-*` stays with
+        // `genai`.
+        //
+        // AND NO `("google/", "vertex")` ROW EITHER — the reason is the one axis the
+        // obvious check misses. Comparing a candidate prefix against the other
+        // BUILTIN rows finds no collision for `google/`, but step 3 runs BEFORE step
+        // 4, so the ids a new row really takes are the ones that used to fall
+        // through to `default_provider`. `google/gemini-2.5-pro` is a valid
+        // OPENROUTER id, `"openrouter"` is an exposed `default_provider` value, and
+        // the composer lets a user free-type any gateway-routable id. So such a row
+        // breaks a working id two different ways: with `vertex` unconfigured it
+        // turns an OpenRouter-served request into `AllProvidersUnavailable`, and
+        // with `vertex` configured it silently debits the DONATED allowance for
+        // traffic the operator pointed at retail — while hard-402ing a wallet
+        // holding only `openrouter` grant money.
+        //
+        // So Vertex is reached exactly as the donated OpenAI slot below is: through
+        // an operator `routing.model_map` entry or `default_provider`, inert on a
+        // zero-config deploy. A donated allowance that must be aimed deliberately is
+        // the correct default — spending a donation is not a decision a compile-time
+        // prefix should make on an operator's behalf.
+        // NO ROW FOR THE DONATED OPENAI POOL, deliberately — see
+        // `config::OPENAI_CREDITS_PROVIDER_ID`. Real OpenAI ids carry no
+        // namespace, and `gpt-`/`o1`/`o3`/`o4`/`text-davinci` above are already
+        // claimed by the BYOK `openai` slot. Re-pointing any of them here would
+        // convert every pass-through caller's own-key traffic into donated spend,
+        // which is the one outcome the separate id exists to prevent, and an
+        // invented `openai/…` prefix would only 404 (see the verbatim-model note
+        // above). So the donated route is reachable through an operator
+        // `routing.model_map` entry or `default_provider` ONLY — inert on a
+        // zero-config deploy, on purpose.
+        //
+        // Consequence of routing these at all, stated so it is not a surprise:
+        // every pool provider registers only when configured (`if let Some(c) =
+        // config.cloudflare/bedrock/vertex`), so on an untagged deploy these ids
+        // resolve to an ABSENT registry id instead of falling through to
+        // `default_provider`. That is a clean miss, not a crash — the pipeline's
+        // `state.providers.get(...)` sites either skip the candidate or return
+        // `AllProvidersUnavailable`. Reaching the wrong provider's 404 was never
+        // the better outcome.
         ("llama", "local"),
         ("mistral", "local"),
         ("mixtral", "local"),
+        // ORDER IS LOAD-BEARING — `gemma-3-270m` MUST stay above `gemma`.
+        // `RoutingTables::route` walks this table top-down and takes the FIRST
+        // `starts_with` hit; it is not a longest-match. Sorting this table
+        // alphabetically, or "tidying" the two gemma rows together, would send
+        // the classify-tier classifier to the resident chat engine on `local`
+        // and silently break the guardrail inspector + LLM-judge evaluators.
+        // `builtin_prefix_order_puts_classify_gemma_before_local_gemma` fails if
+        // anyone does. The classifier is the only gemma served by the dedicated
+        // classify sidecar; every other gemma is a normal local chat model.
+        //
+        // …AND THIS WHOLE TABLE IS OUTRANKED. The intra-table order above only
+        // decides between builtin rows; steps 1-2 of [`RoutingTables::route`] (the
+        // user `model_map`, exact then longest-prefix) run BEFORE any of it. So a
+        // pre-existing operator mapping of `gemma` → `openrouter` captures the
+        // guardrail classifier and bills it to a paid hosted provider — this row
+        // never gets a look-in. That is intentional precedence (an operator's
+        // explicit config must win over a compile-time default), and it is why
+        // `apps/gateway`'s `Config::load` seeds an EXACT `model_map` entry for the
+        // resolved classifier id (`config.rs::seed_classify_route`): exact-match is
+        // step 1, so it beats the prefix scan the operator's row would win.
+        // `user_model_map_outranks_the_builtin_table` pins the precedence.
+        ("gemma-3-270m", "classify"),
         ("gemma", "local"),
         ("phi", "local"),
         ("qwen", "local"),
@@ -102,6 +232,19 @@ pub struct RoutingTables {
 impl RoutingTables {
     /// Determine which provider and model name to use for a given request model
     /// string. Returns `(provider_id, model)`.
+    ///
+    /// **Precedence, outermost first** — steps 1-2 (the operator's `model_map`)
+    /// outrank the whole builtin table, so no builtin row is a guarantee:
+    /// 1. exact `model_map` hit,
+    /// 2. longest `model_map` prefix hit,
+    /// 3. [`builtin_prefixes`] (first `starts_with` hit, top-down),
+    /// 4. `default_provider`.
+    ///
+    /// The consequence worth stating: a broad user prefix (`gemma`, `gpt-`) silently
+    /// re-homes every builtin route beneath it, including infrastructure routes like
+    /// `gemma-3-270m` → `classify`. Anything that must survive an operator's prefix
+    /// map has to be seeded as an EXACT entry (step 1) — see
+    /// `apps/gateway/src/config.rs::seed_classify_route`.
     pub fn route(&self, requested_model: &str) -> (String, String) {
         let model_lower = requested_model.to_lowercase();
 
@@ -449,6 +592,76 @@ mod tests {
     }
 
     #[test]
+    fn builtin_prefix_order_puts_classify_gemma_before_local_gemma() {
+        let t = bare("openai");
+        // The classify-tier classifier reaches its own dedicated sidecar…
+        assert_eq!(t.route("gemma-3-270m-it-qat-Q4_0").0, "classify");
+        // …while every other gemma still reaches the resident chat engine.
+        assert_eq!(t.route("gemma-3-12b-it").0, "local");
+        assert_eq!(t.route("gemma2:9b").0, "local");
+
+        // `route` takes the FIRST prefix hit, not the longest, so this is an
+        // ORDERING assertion, not a matching one: a future alphabetical tidy-up
+        // of `builtin_prefixes` would put "gemma" above "gemma-3-270m" and send
+        // the classifier to `local` while every assertion above still *looked*
+        // reasonable. Pin the positions directly so that edit fails here.
+        let prefixes = builtin_prefixes();
+        let idx = |p: &str| {
+            prefixes
+                .iter()
+                .position(|(prefix, _)| prefix == p)
+                .unwrap_or_else(|| panic!("builtin prefix {p} missing"))
+        };
+        assert!(
+            idx("gemma-3-270m") < idx("gemma"),
+            "gemma-3-270m→classify must precede gemma→local; route() is first-match, not longest-match"
+        );
+    }
+
+    /// Pins the precedence the builtin table's own ORDER-IS-LOAD-BEARING comment
+    /// does NOT cover: steps 1-2 outrank the entire builtin table. A broad operator
+    /// prefix silently re-homes infrastructure routes underneath it — most sharply
+    /// `gemma-3-270m` → `classify`, whose capture sends the guardrail classifier to
+    /// a paid hosted provider. The exact-entry seed is the only defense, so both
+    /// halves are asserted here.
+    #[test]
+    fn user_model_map_outranks_the_builtin_table() {
+        let mut model_map = HashMap::new();
+        model_map.insert("gemma".to_string(), ("openrouter".to_string(), None));
+        let captured = tables(
+            model_map.clone(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            Vec::new(),
+            0.0,
+            "openai",
+        );
+        // Step 2 (longest user prefix) beats the builtin `gemma-3-270m`→`classify`
+        // row entirely — the builtin table is never consulted.
+        assert_eq!(captured.route("gemma-3-270m-it-qat-Q4_0").0, "openrouter");
+
+        // An EXACT entry (step 1) is what survives that: it is evaluated before the
+        // prefix scan, so seeding one restores the classify route.
+        model_map.insert(
+            "gemma-3-270m-it-qat-Q4_0".to_string(),
+            ("classify".to_string(), None),
+        );
+        let seeded = tables(
+            model_map,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            Vec::new(),
+            0.0,
+            "openai",
+        );
+        assert_eq!(seeded.route("gemma-3-270m-it-qat-Q4_0").0, "classify");
+        // …while the operator's own broad mapping still applies to everything else.
+        assert_eq!(seeded.route("gemma-3-12b-it").0, "openrouter");
+    }
+
+    #[test]
     fn openrouter_prefix_routes_any_slug() {
         let t = bare("openai");
         assert_eq!(
@@ -456,6 +669,163 @@ mod tests {
             "openrouter"
         );
         assert_eq!(t.route("gemini-2.5-pro").0, "genai");
+    }
+
+    #[test]
+    fn cloudflare_workers_ai_ids_route_to_the_cloudflare_pool() {
+        let t = bare("openai");
+        // Workers AI namespaces its whole catalog under `@cf/<vendor>/<id>`.
+        assert_eq!(
+            t.route("@cf/meta/llama-3.1-8b-instruct"),
+            (
+                "cloudflare".to_string(),
+                "@cf/meta/llama-3.1-8b-instruct".to_string()
+            )
+        );
+        assert_eq!(
+            t.route("@cf/mistral/mistral-7b-instruct-v0.2").0,
+            "cloudflare"
+        );
+        assert_eq!(t.route("@cf/qwen/qwen1.5-14b-chat-awq").0, "cloudflare");
+    }
+
+    #[test]
+    fn bedrock_vendor_ids_route_to_the_bedrock_pool() {
+        let t = bare("openai");
+        // One representative id per served vendor family. The `anthropic.` case
+        // is the one the pre-fix table missed most quietly: it does NOT start
+        // with `claude-`, so it fell through to `default_provider`.
+        assert_eq!(
+            t.route("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+            (
+                "bedrock".to_string(),
+                "anthropic.claude-3-5-sonnet-20241022-v2:0".to_string()
+            )
+        );
+        assert_eq!(t.route("amazon.nova-pro-v1:0").0, "bedrock");
+        assert_eq!(t.route("meta.llama3-1-70b-instruct-v1:0").0, "bedrock");
+        assert_eq!(t.route("mistral.mistral-large-2407-v1:0").0, "bedrock");
+        assert_eq!(t.route("mistral.mixtral-8x7b-instruct-v0:1").0, "bedrock");
+    }
+
+    /// No builtin prefix routes to a donated pool by itself. The pools are aimed
+    /// by an operator (`routing.model_map` / `default_provider`), never claimed at
+    /// compile time.
+    #[test]
+    fn google_ids_still_fall_through_to_the_default_provider() {
+        // A `("google/", "vertex")` row looked safe against the other BUILTIN rows
+        // — and that is the wrong axis. Step 3 runs before step 4, so what such a
+        // row actually takes is the ids that previously fell through to
+        // `default_provider`. `google/gemini-2.5-pro` is a valid OpenRouter id, and
+        // `openrouter` is an exposed `default_provider` value, so the row broke a
+        // working id: unavailable when `vertex` was unconfigured, and silently
+        // spending the DONATED allowance on retail-aimed traffic when it was.
+        let t = bare("openrouter");
+        assert_eq!(
+            t.route("google/gemini-2.5-pro"),
+            ("openrouter".to_string(), "google/gemini-2.5-pro".to_string())
+        );
+        assert_eq!(t.route("google/gemini-2.5-flash").0, "openrouter");
+        // The native `generateContent` path form is likewise unclaimed.
+        assert_ne!(
+            t.route("publishers/google/models/gemini-2.5-flash").0,
+            "vertex"
+        );
+    }
+
+    /// The bare `gemini-*` ids stay with `genai`. This is the money-shaped half of
+    /// the Vertex wiring: `("gemini-", "vertex")` above the existing row would
+    /// silently move every current Gemini request onto donated credit, and below
+    /// it would never fire at all (first-match, not longest-match).
+    #[test]
+    fn bare_gemini_ids_stay_on_genai_not_the_vertex_pool() {
+        let t = bare("openai");
+        assert_eq!(t.route("gemini-1.5-pro").0, "genai");
+        assert_eq!(t.route("gemini-2.5-flash").0, "genai");
+        assert_eq!(
+            provider_of(&builtin_prefixes(), "gemini-"),
+            "genai",
+            "the gemini- row must not be re-homed to the vertex pool"
+        );
+    }
+
+    /// The donated OpenAI pool has NO builtin row, and that absence is the design
+    /// (see `config::OPENAI_CREDITS_PROVIDER_ID`). Pinned as a test because the
+    /// obvious "fix" — pointing `gpt-` at the pool — would convert every BYOK
+    /// caller's own-key traffic into donated spend, which is exactly what the
+    /// separate registry id exists to prevent.
+    #[test]
+    fn no_builtin_prefix_routes_to_the_donated_openai_pool() {
+        let prefixes = builtin_prefixes();
+        assert!(
+            !prefixes
+                .iter()
+                .any(|(_, provider)| provider == "openai-credits"),
+            "the donated OpenAI pool is reachable via model_map/default_provider only"
+        );
+        let t = bare("openai");
+        for model in ["gpt-4o", "gpt-5", "o1-preview", "o3-mini", "o4-mini"] {
+            assert_eq!(
+                t.route(model).0,
+                "openai",
+                "{model} must keep routing to the BYOK openai slot"
+            );
+        }
+    }
+
+    /// Resolve which provider a builtin prefix maps to, for the index/identity
+    /// assertions that behavior alone cannot make.
+    fn provider_of(prefixes: &[(String, String)], prefix: &str) -> String {
+        prefixes
+            .iter()
+            .find(|(p, _)| p == prefix)
+            .map(|(_, provider)| provider.clone())
+            .unwrap_or_else(|| panic!("builtin prefix {prefix} missing"))
+    }
+
+    /// The positional twin of `builtin_prefix_order_puts_classify_gemma_before_local_gemma`,
+    /// for the one new row that shares a prefix with an existing one. Asserted by
+    /// INDEX, not just by behavior: an alphabetical tidy-up of the table would put
+    /// `mistral` above `mistral.` while every behavioral assertion elsewhere still
+    /// looked reasonable, and Bedrock's Mistral models would silently be asked of
+    /// the resident local engine.
+    #[test]
+    fn builtin_prefix_order_puts_bedrock_mistral_before_local_mistral() {
+        let prefixes = builtin_prefixes();
+        let idx = |p: &str| {
+            prefixes
+                .iter()
+                .position(|(prefix, _)| prefix == p)
+                .unwrap_or_else(|| panic!("builtin prefix {p} missing"))
+        };
+        assert!(
+            idx("mistral.") < idx("mistral"),
+            "mistral.→bedrock must precede mistral→local; route() is first-match, not longest-match"
+        );
+    }
+
+    /// Regression guard for the ids that already routed before the pool rows were
+    /// added. The new prefixes are all anchored at position 0, so none of these
+    /// can be captured — but "added a broad prefix, silently re-homed the local
+    /// engine" is exactly the failure this table invites.
+    #[test]
+    fn pool_prefixes_do_not_capture_existing_routes() {
+        let t = bare("openai");
+        assert_eq!(t.route("llama3.2:latest").0, "local");
+        assert_eq!(t.route("mistral:latest").0, "local");
+        assert_eq!(t.route("mixtral-8x7b").0, "local");
+        assert_eq!(t.route("claude-sonnet-4-5").0, "anthropic");
+        assert_eq!(t.route("gpt-4o").0, "openai");
+        assert_eq!(t.route("o3-mini").0, "openai");
+        assert_eq!(t.route("gemini-1.5-pro").0, "genai");
+        assert_eq!(t.route("mistral.mistral-large-2407-v1:0").0, "bedrock");
+        assert_eq!(t.route("gemma-3-270m-it-qat-Q4_0").0, "classify");
+        assert_eq!(
+            t.route("openrouter/mistralai/mistral-7b-instruct").0,
+            "openrouter"
+        );
+        // Still the default: nothing about the new rows makes an unknown id pooled.
+        assert_eq!(t.route("some-unknown-model").0, "openai");
     }
 
     #[test]

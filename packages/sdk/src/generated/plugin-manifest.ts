@@ -1089,12 +1089,30 @@ export interface ToolFilterContribution {
  * capability bridge: `host.sideModel`, `host.storage`, `host.log`) in scope; it
  * returns a directive (`{kind:"none"}` | `{kind:"note",text}` |
  * `{kind:"continue",text}`). See Core's `plugin_host`.
+ *
+ * The body is authored as a **file** ([`code_file`]) and hydrated into [`code`]
+ * at parse time — see [`PluginManifest::hydrate_code_files`] for why the two
+ * fields are a source-form/wire-form pair rather than alternatives.
+ *
+ * [`code`]: Self::code
+ * [`code_file`]: Self::code_file
  */
 export interface TurnHookContribution {
 	/**
 	 * The JS hook body executed in the sandbox (returns a directive).
+	 *
+	 * Empty in a **source** manifest that declares [`Self::code_file`] instead;
+	 * [`PluginManifest::hydrate_code_files`] fills it in before any consumer sees
+	 * the manifest, and [`PluginManifest::validate`] refuses a manifest where it
+	 * is still empty. Every read site therefore keeps reading exactly this field.
 	 */
-	code: string;
+	code?: string;
+	/**
+	 * Path to the file holding the hook body, relative to the plugin root
+	 * (`hooks/<name>.js`) — the authoring form. Mutually exclusive with
+	 * [`Self::code`]; see [`PluginManifest::hydrate_code_files`].
+	 */
+	code_file?: string | null;
 	/**
 	 * Stable id for this hook (for logging/audit), unique within the plugin.
 	 */
@@ -1534,8 +1552,18 @@ export interface CapabilityAdapter {
 	 * The adapter body. Evaluated as the tail of a sandbox program that has already
 	 * bound `input`, `defaults`, `callTool` and `callNamed`; it `return`s the
 	 * canonical result.
+	 *
+	 * Empty in a **source** manifest that declares [`Self::code_file`] instead;
+	 * [`PluginManifest::hydrate_code_files`] fills it in at parse time and
+	 * [`PluginManifest::validate`] refuses a manifest where it is still empty.
 	 */
-	code: string;
+	code?: string;
+	/**
+	 * Path to the file holding the adapter body, relative to the plugin root
+	 * (`adapters/<verb>.js`) — the authoring form. Mutually exclusive with
+	 * [`Self::code`]; see [`PluginManifest::hydrate_code_files`].
+	 */
+	code_file?: string | null;
 	/**
 	 * ADDITIONAL provider tool ids this adapter may call, beyond
 	 * [`CapabilityToolBinding::tool`], reachable from the body as

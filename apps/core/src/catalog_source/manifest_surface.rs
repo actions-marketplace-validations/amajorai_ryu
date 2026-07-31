@@ -306,7 +306,13 @@ pub(crate) fn project_manifest(manifest: &Value) -> Map<String, Value> {
     let runnables: Vec<Value> = obj
         .get("runnables")
         .and_then(Value::as_array)
-        .map(|items| items.iter().take(MAX_ITEMS).filter_map(runnable_entry).collect())
+        .map(|items| {
+            items
+                .iter()
+                .take(MAX_ITEMS)
+                .filter_map(runnable_entry)
+                .collect()
+        })
         .unwrap_or_default();
 
     let contributes = obj.get("contributes");
@@ -410,9 +416,7 @@ pub(crate) fn project_manifest(manifest: &Value) -> Map<String, Value> {
                 .take(MAX_ITEMS)
                 // An explicit `"none"` support level means the surface is declared
                 // AND unsupported — it must not be listed as a platform.
-                .filter(|(_, entry)| {
-                    entry.get("support").and_then(Value::as_str) != Some("none")
-                })
+                .filter(|(_, entry)| entry.get("support").and_then(Value::as_str) != Some("none"))
                 .map(|(k, _)| Value::String(k.clone()))
                 .collect()
         })
@@ -457,7 +461,10 @@ mod tests {
             }],
         }));
         let json = serde_json::to_string(&s).expect("serializes");
-        assert!(!json.contains("evil"), "runnable config must not travel: {json}");
+        assert!(
+            !json.contains("evil"),
+            "runnable config must not travel: {json}"
+        );
         assert_eq!(s["runnables"][0]["kind"], "tool");
     }
 
@@ -490,7 +497,10 @@ mod tests {
             },
         }));
         let json = serde_json::to_string(&s).expect("serializes");
-        assert!(!json.contains("secret-abc123"), "env values must not travel: {json}");
+        assert!(
+            !json.contains("secret-abc123"),
+            "env values must not travel: {json}"
+        );
         assert_eq!(s["mcpServers"][0]["envKeys"][0], "NOTION_TOKEN");
         assert_eq!(s["mcpServers"][0]["command"], "npx");
     }
@@ -510,7 +520,10 @@ mod tests {
         assert_eq!(s["sidecars"][0]["publicMount"], "/api/mail");
         assert_eq!(s["sidecars"][0]["routes"][0]["path"], "/status");
         let json = serde_json::to_string(&s).expect("serializes");
-        assert!(!json.contains("server.js"), "process spec must not travel: {json}");
+        assert!(
+            !json.contains("server.js"),
+            "process spec must not travel: {json}"
+        );
     }
 
     #[test]
@@ -520,9 +533,15 @@ mod tests {
                 "turn_hooks": [{ "event": "post_assistant_turn", "code": "steal()" }],
             },
         }));
-        assert_eq!(s["triggers"]["turnHooks"][0]["event"], "post_assistant_turn");
+        assert_eq!(
+            s["triggers"]["turnHooks"][0]["event"],
+            "post_assistant_turn"
+        );
         let json = serde_json::to_string(&s).expect("serializes");
-        assert!(!json.contains("steal()"), "hook code must not travel: {json}");
+        assert!(
+            !json.contains("steal()"),
+            "hook code must not travel: {json}"
+        );
     }
 
     #[test]
@@ -553,7 +572,10 @@ mod tests {
         let surfaces = projected["surfaces"].as_array().expect("surfaces list");
         let names: Vec<&str> = surfaces.iter().filter_map(Value::as_str).collect();
         assert!(names.contains(&"desktop") && names.contains(&"mobile"));
-        assert!(!names.contains(&"island"), "an unsupported surface is not a platform");
+        assert!(
+            !names.contains(&"island"),
+            "an unsupported surface is not a platform"
+        );
     }
 
     #[test]
@@ -568,7 +590,11 @@ mod tests {
             "runnables": [{ "id": "x", "description": "d".repeat(MAX_TEXT * 3) }],
         }));
         let description = s["runnables"][0]["description"].as_str().expect("present");
-        assert!(description.len() <= MAX_TEXT + 4, "got {}", description.len());
+        assert!(
+            description.len() <= MAX_TEXT + 4,
+            "got {}",
+            description.len()
+        );
     }
 
     #[test]

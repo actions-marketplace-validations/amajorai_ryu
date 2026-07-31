@@ -70,7 +70,20 @@ pub fn load_user_plugins() -> Vec<PluginManifest> {
         let Ok(raw) = std::fs::read_to_string(&path) else {
             continue;
         };
-        match PluginManifest::parse_and_validate(&raw) {
+        // A plugin may keep its sandbox JS in real `hooks/*.js` / `adapters/*.js`
+        // files next to the manifest rather than inline; resolve them from the
+        // plugin's own directory. `parse_and_validate` (no resolver) would reject
+        // such a manifest rather than hand back an empty hook body, so this is the
+        // variant a disk loader must use.
+        let plugin_dir = path.parent().map(std::path::Path::to_path_buf);
+        let resolved = PluginManifest::parse_and_validate_with_code(&raw, |rel| {
+            let Some(dir) = plugin_dir.as_ref() else {
+                return Err(format!("cannot resolve '{rel}': no plugin directory"));
+            };
+            std::fs::read_to_string(dir.join(rel))
+                .map_err(|e| format!("{}: {e}", dir.join(rel).display()))
+        });
+        match resolved {
             Ok(m) if seen_ids.insert(m.id.clone()) => manifests.push(m),
             _ => {}
         }

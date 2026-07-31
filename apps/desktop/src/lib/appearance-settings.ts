@@ -36,6 +36,7 @@ import {
 	CODE_FONTS,
 	DEFAULT_CHAT_WIDTH,
 	DEFAULT_RADIUS,
+	DEFAULT_SCALE,
 	DEFAULT_SIDEBAR_WIDTH,
 	DEFAULT_SPACING,
 	HEADING_FONTS,
@@ -47,6 +48,7 @@ import {
 	setHeadingFont,
 	setLightPreset,
 	setRadius,
+	setScale,
 	setSidebarWidthSetting,
 	setSpacing,
 	setUiFont,
@@ -78,6 +80,7 @@ export const APPEARANCE_DEFAULTS = {
 	contrast: 50,
 	radius: DEFAULT_RADIUS,
 	spacing: DEFAULT_SPACING,
+	scale: DEFAULT_SCALE,
 	chatWidth: DEFAULT_CHAT_WIDTH,
 	sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
 	friendlyNames: DEFAULT_FRIENDLY_MODE,
@@ -178,6 +181,13 @@ function registerAppearanceSettings(): void {
 		category: "appearance",
 		label: "Spacing",
 		reset: () => setSpacing(APPEARANCE_DEFAULTS.spacing),
+	});
+
+	registerSetting({
+		id: "appearance.scale",
+		category: "appearance",
+		label: "UI scale",
+		reset: () => setScale(APPEARANCE_DEFAULTS.scale),
 	});
 
 	registerSetting({

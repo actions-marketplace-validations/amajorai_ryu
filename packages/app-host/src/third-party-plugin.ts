@@ -802,6 +802,16 @@ function htmlCompanionHeadFragment(
         agents: function () { return call("calendar.agents", []); },
         createAutomation: function (a) { return call("calendar.createAutomation", [a || {}]); }
       },
+      // Warmup (needs grant warmup:crud). The com.ryu.warmup companion schedules a
+      // keep-alive ping to each subscription agent so its rolling usage window is
+      // already open; the host calls Core's /api/agents (+ /usage, /acp-config) and
+      // /heartbeat/jobs directly (the monitors pattern).
+      warmup: {
+        detect: function () { return call("warmup.detect", []); },
+        list: function () { return call("warmup.list", []); },
+        apply: function (a) { return call("warmup.apply", [a || []]); },
+        runNow: function (a) { return call("warmup.runNow", [a || {}]); }
+      },
       // Learning (needs grant learning:crud). The com.ryu.learning companion renders
       // the read-only continual-learning surface; the host calls Core's
       // /api/learn/config + /api/experience/list + /api/healing/status directly (the

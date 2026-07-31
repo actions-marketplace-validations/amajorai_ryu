@@ -157,37 +157,57 @@ export type CompanionSurface = z.infer<typeof CompanionSurfaceSchema>;
 
 /**
  * A server-side chat turn hook. Mirrors `TurnHookContribution` in
- * `apps/core/src/plugin_manifest/mod.rs`. `code` is a JS body run in the plugin
- * sandbox with `ctx` + `host` in scope; it returns a directive. Authors usually
- * build this via `defineTurnHook` rather than writing the string by hand.
+ * `crates/core/kernel-contracts/src/manifest.rs`. The body is a JS fragment run in
+ * the plugin sandbox with `ctx` + `host` in scope; it returns a directive.
+ *
+ * It arrives one of two ways, and **exactly one** must be present:
+ *
+ * - `code_file` — the authoring form: a path to a real `hooks/<name>.js` file next
+ *   to the manifest. Readable, lintable, diffable, and reviewable for what it
+ *   actually does. Every first-party plugin uses this.
+ * - `code` — the wire form: the body inline. `ryu pack` produces it by reading
+ *   `code_file`, which is what keeps the whole hook body INSIDE the Gateway-signed
+ *   surface; Core also accepts it directly for a hand-written or `defineTurnHook`
+ *   generated manifest.
  */
-export const TurnHookContributionSchema = z.object({
-	/** Stable id for this hook (unique within the plugin). */
-	id: z.string().min(1),
-	/** Turn boundary this fires on. Today only `"post_assistant_turn"`. */
-	on: z.string().min(1).default("post_assistant_turn"),
-	/** The JS hook body executed in the sandbox (returns a directive). */
-	code: z.string().min(1),
-	/**
-	 * Cheap pre-gate mirroring Core's `HookMatch` (serde name `match` on
-	 * `TurnHookContribution.run_when`). MUST round-trip through this schema:
-	 * `ryu pack`/`publish` persist `safeParse(...).data`, so a field missing here
-	 * is silently STRIPPED before signing — a tool-gated `pre_tool_use` hook
-	 * (e.g. `tools: ["bash*"]`) would lose its gate and run on EVERY tool call.
-	 */
-	match: z
-		.object({
-			/** Run only if the request set this composer flag true. */
-			flag: z.string().optional(),
-			/** Run if the last user message starts with any of these prefixes. */
-			commands: z.array(z.string()).default([]),
-			/** Run if the plugin has stored state for this conversation. */
-			stateful: z.boolean().default(false),
-			/** Run if `ctx.tool_name` matches any of these `*`-wildcard patterns. */
-			tools: z.array(z.string()).default([]),
-		})
-		.optional(),
-});
+export const TurnHookContributionSchema = z
+	.object({
+		/** Stable id for this hook (unique within the plugin). */
+		id: z.string().min(1),
+		/** Turn boundary this fires on. Today only `"post_assistant_turn"`. */
+		on: z.string().min(1).default("post_assistant_turn"),
+		/** The JS hook body executed in the sandbox (returns a directive). */
+		code: z.string().min(1).optional(),
+		/** Path to the hook body, relative to the plugin root (`hooks/<name>.js`). */
+		code_file: z.string().min(1).optional(),
+		/**
+		 * Cheap pre-gate mirroring Core's `HookMatch` (serde name `match` on
+		 * `TurnHookContribution.run_when`). MUST round-trip through this schema:
+		 * `ryu pack`/`publish` persist `safeParse(...).data`, so a field missing here
+		 * is silently STRIPPED before signing — a tool-gated `pre_tool_use` hook
+		 * (e.g. `tools: ["bash*"]`) would lose its gate and run on EVERY tool call.
+		 */
+		match: z
+			.object({
+				/** Run only if the request set this composer flag true. */
+				flag: z.string().optional(),
+				/** Run if the last user message starts with any of these prefixes. */
+				commands: z.array(z.string()).default([]),
+				/** Run if the plugin has stored state for this conversation. */
+				stateful: z.boolean().default(false),
+				/** Run if `ctx.tool_name` matches any of these `*`-wildcard patterns. */
+				tools: z.array(z.string()).default([]),
+			})
+			.optional(),
+	})
+	// Fail closed, mirroring Core: declaring NEITHER would have the sandbox run an
+	// empty body, which no read site can tell apart from a hook that chose to do
+	// nothing; declaring BOTH gives two sources of truth for what executes.
+	.refine((h) => Boolean(h.code) !== Boolean(h.code_file), {
+		message:
+			"a turn hook must declare exactly one of 'code' (inline body) or 'code_file' (path to hooks/<name>.js)",
+		path: ["code_file"],
+	});
 
 export type TurnHookContribution = z.infer<typeof TurnHookContributionSchema>;
 

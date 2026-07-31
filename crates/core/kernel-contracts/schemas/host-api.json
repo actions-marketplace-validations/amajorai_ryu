@@ -764,6 +764,34 @@
       "tsHost": true
     },
     {
+      "capability": "warmup.crud",
+      "grant": "warmup:crud",
+      "method": "warmup.detect",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "warmup.crud",
+      "grant": "warmup:crud",
+      "method": "warmup.list",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "warmup.crud",
+      "grant": "warmup:crud",
+      "method": "warmup.apply",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "warmup.crud",
+      "grant": "warmup:crud",
+      "method": "warmup.runNow",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "learning.crud",
       "grant": "learning:crud",
       "method": "learning.config",

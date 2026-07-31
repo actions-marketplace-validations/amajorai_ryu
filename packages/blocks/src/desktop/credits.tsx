@@ -52,6 +52,29 @@ export interface CreditEntitlementView {
 	seats: number;
 }
 
+/**
+ * One pool-restricted grant balance, as the Credits page renders it.
+ *
+ * This is a DECOMPOSITION of the wallet total, not an addition to it: granted
+ * money already sits inside `CreditWalletView.balanceMicroUsd`. The view never
+ * sums these and never subtracts them — it only explains which part of the total
+ * is spendable on what.
+ *
+ * The container supplies every string. `label` is the pool's user-facing tier
+ * name and is the ONLY name a user may read for a pool (pools are named for
+ * speed/capability, never for the vendor behind them); `spendableOn` is
+ * user-facing copy the container derives from the pool catalog, and is omitted
+ * for a pool id this build does not recognize rather than guessed at.
+ */
+export interface CreditGrantPoolView {
+	/** Pre-formatted expiry ("Expires 12 Aug 2026"), or null when it never lapses. */
+	expiresAtLabel?: string | null;
+	id: string;
+	label: string;
+	remainingMicroUsd: number;
+	spendableOn?: string;
+}
+
 export interface CreditLedgerRow {
 	balanceAfter: number;
 	createdAtLabel: string;
@@ -69,6 +92,12 @@ export interface CreditsViewProps {
 	entitlement?: CreditEntitlementView | null;
 	/** Generic balance-load error message. */
 	errorMessage?: string | null;
+	/**
+	 * Pool-restricted grant balances that make up part of the total. Empty or
+	 * absent for the overwhelming majority of accounts, which must then see
+	 * EXACTLY the pre-grant page — no header, no placeholder, no empty state.
+	 */
+	grantPools?: CreditGrantPoolView[];
 	ledger?: CreditLedgerRow[];
 	ledgerPage?: number;
 	loading?: boolean;
@@ -119,6 +148,7 @@ export function CreditsView({
 	wallet,
 	walletEmpty,
 	entitlement,
+	grantPools = [],
 	ledger = [],
 	packs = [10, 25, 100],
 	minTopupDollars = 5,
@@ -284,6 +314,40 @@ export function CreditsView({
 					<p className="mt-2 text-muted-foreground text-xs">
 						Credits pay for AI usage as you go. They are non-refundable.
 					</p>
+
+					{/* The restricted breakdown lives INSIDE the balance card, under the
+					    total, because that is what it is: a slice of the number above,
+					    not a second wallet. Rendered only when the account actually
+					    holds granted credit — an account with none sees the card
+					    exactly as it was before pools existed. */}
+					{grantPools.length > 0 ? (
+						<div className="mt-4 space-y-2 border-t pt-3">
+							<p className="text-muted-foreground text-xs">
+								Part of this balance is granted credit, which can only be spent
+								on the models it was granted for:
+							</p>
+							{grantPools.map((pool) => (
+								<div
+									className="flex items-baseline justify-between gap-3"
+									key={pool.id}
+								>
+									<div className="min-w-0">
+										<p className="truncate font-medium text-sm">{pool.label}</p>
+										{pool.spendableOn || pool.expiresAtLabel ? (
+											<p className="text-muted-foreground text-xs">
+												{[pool.spendableOn, pool.expiresAtLabel]
+													.filter(Boolean)
+													.join(" · ")}
+											</p>
+										) : null}
+									</div>
+									<span className="shrink-0 font-medium text-sm tabular-nums">
+										{formatMicroUsd(pool.remainingMicroUsd, currency)}
+									</span>
+								</div>
+							))}
+						</div>
+					) : null}
 				</div>
 			</section>
 

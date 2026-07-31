@@ -30,7 +30,13 @@ import { toast } from "@ryu/ui/components/sileo";
 import { useTheme } from "next-themes";
 import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 import { isDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
-import { DEFAULT_SPACING, setSpacing } from "@/src/hooks/useThemePreset.ts";
+import {
+	DEFAULT_SCALE,
+	SCALE_MAX,
+	SCALE_MIN,
+	SCALE_STEP,
+	setScale,
+} from "@/src/hooks/useThemePreset.ts";
 import {
 	getConsoleBufferText,
 	isConsoleCaptureActive,
@@ -44,24 +50,19 @@ interface GlobalContextMenuProps {
 	children: ReactNode;
 }
 
-const SPACING_MIN = 0.16;
-const SPACING_MAX = 0.36;
-const SPACING_STEP = 0.02;
-
 const isMac =
 	typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
 const mod = isMac ? "⌘" : "Ctrl";
 
-function readSpacing(): number {
+function readScale(): number {
 	return Number(
-		localStorage.getItem(STORAGE_KEYS.spacing) ?? String(DEFAULT_SPACING)
+		localStorage.getItem(STORAGE_KEYS.scale) ?? String(DEFAULT_SCALE)
 	);
 }
 
-function clampSpacing(value: number): number {
-	return Math.min(SPACING_MAX, Math.max(SPACING_MIN, value));
+function clampScale(value: number): number {
+	return Math.min(SCALE_MAX, Math.max(SCALE_MIN, value));
 }
-
 function canEditSelection(): boolean {
 	const sel = window.getSelection();
 	return Boolean(sel && !sel.isCollapsed && sel.toString().length > 0);
@@ -226,13 +227,13 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 	};
 
 	const handleZoomIn = () => {
-		setSpacing(clampSpacing(readSpacing() + SPACING_STEP));
+		setScale(clampScale(readScale() + SCALE_STEP));
 	};
 	const handleZoomOut = () => {
-		setSpacing(clampSpacing(readSpacing() - SPACING_STEP));
+		setScale(clampScale(readScale() - SCALE_STEP));
 	};
 	const handleZoomReset = () => {
-		setSpacing(DEFAULT_SPACING);
+		setScale(DEFAULT_SCALE);
 	};
 
 	const handleReload = () => {

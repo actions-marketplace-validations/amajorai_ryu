@@ -358,9 +358,33 @@ const fn default_true() -> bool {
 }
 
 impl McpServerConfig {
+    /// Lower this config into the spawnable command `client::connect` runs.
+    ///
+    /// The **only** seam between a registry config and `Command::new`: all four
+    /// callers (`tools_for_server`, `call_tool`, `widget_resource`,
+    /// `prewarm_widgets`) pass the result straight to `client::*`, and none of them
+    /// uses the program for identity or comparison. The one place it is *displayed*
+    /// is `client.rs`'s spawn-error context (`spawn MCP server '{}'`), which the
+    /// rewrite below improves — the resolved `…\npx.cmd` is more diagnostic than the
+    /// bare name. The `GET /api/mcp/servers` listing reads `cfg.command` directly and
+    /// is unaffected.
+    ///
+    /// That makes this the right place to make `command` *spawnable* — see
+    /// [`spawn_program_for`] for the whitespace trim and the two Windows `PATH`
+    /// rewrites it applies (a `.cmd`/`.bat` shim, and an extensionless hit with no
+    /// `<name>.exe` anywhere on `PATH`).
+    ///
+    /// "Only seam" was audited across the crate, not assumed (2026-07-30), because a
+    /// second `McpStdioCommand` constructor would silently skip the rewrite: the one
+    /// other construction site is `recipes_host.rs`'s `ghost_command`, and it needs
+    /// nothing from here — its program is `ghost_bin_path()`, an absolute
+    /// `~/.ryu/bin/ghost[.exe]`, which [`spawn_program_for`] returns verbatim anyway
+    /// (it carries a path separator) and which is Ryu's own `.exe`, never a shim. If
+    /// a third constructor ever appears, route it through here rather than widening
+    /// that one.
     fn to_command(&self) -> McpStdioCommand {
         McpStdioCommand {
-            command: self.command.clone(),
+            command: spawn_program_for(&self.command),
             args: self.args.clone(),
             env: self
                 .env
@@ -460,6 +484,49 @@ pub fn may_register_mcp_servers(
 /// already held by a DIFFERENT plugin is refused and left out of the returned
 /// names, so a late-installed plugin cannot repoint an established server name
 /// (`ghost`, `agentbrowser`) at its own command.
+///
+/// # A server whose command cannot spawn is not offered to the model
+///
+/// Registration is what puts a server's tools into the next `tools/list`, so
+/// registering a declaration whose command does not exist hands the model a block of
+/// tools that every call ENOENTs on. `ghost` is the live instance: it is Core-tier
+/// and default-ON, so registration used to be unconditional, and Ghost's binary is
+/// only ever fetched by its own downloader — whose `archive_url()` has no default, so
+/// no end user has it. Every agent on a stock node therefore carried ~29 `ghost__*`
+/// tools that could not run. A model cannot tell "this tool is broken" from "I called
+/// it wrong", so it retries; an absent tool it simply routes around.
+///
+/// So each declaration is probed with [`mcp_command_is_present`] and skipped (warn,
+/// fail-soft — never an error, never a boot failure) when its command cannot be
+/// resolved. Three properties an implementer must keep:
+///
+/// * The probe runs on the **resolved** command — `mcp_server_config_from_decl`
+///   applies `command_env` first (`RYU_GHOST_BIN`), so an operator pointing at a
+///   binary outside `PATH` must not be told it is missing.
+/// * It probes the **runner, not the payload**. `agentbrowser` is
+///   `npx -y agent-browser mcp`: the command is `npx`, which exists, and the package
+///   is fetched lazily on first spawn. Probing `agent-browser` would break the whole
+///   lazy-package-runner idiom (`npx`/`bunx`/`uvx`/`pipx`). Because the probe reads
+///   `command` verbatim it gets this right with no exemption list — and if `npx`
+///   itself is absent, skipping is still correct.
+/// * A skip is **re-evaluated**, not remembered: the next boot's `onStartup` pass and
+///   any re-enable run this again, so installing the binary and restarting Core (or
+///   toggling the app) is all it takes. Nothing re-probes mid-process — an acceptable
+///   cost for a lookup on a path that must stay synchronous and cheap.
+/// * "Resolvable" must mean **spawnable by the code that actually spawns it**
+///   (`client::connect` → `Command::new(&cmd.command)`), not merely "a file with that
+///   name is on `PATH`". On Windows those differ: the runners this gate exists for
+///   ship as `npx.cmd` / `bunx.cmd`, and `std` only ever appends `.exe` to a bare
+///   name. The probe counts a `.cmd`/`.bat` shim as present ONLY because
+///   [`spawn_program_for`] rewrites such a command to its full resolved path before
+///   the spawn, and every registry spawn reaches `client` through
+///   [`McpServerConfig::to_command`], which calls it. Break that rewrite and this gate
+///   silently starts passing commands that cannot spawn — the exact failure it exists
+///   to prevent, for exactly the `npx` case above.
+///
+/// One consequence: a skipped name is not *owned* either, so it stays claimable. That
+/// is not a new hole — claiming it still requires the `mcp:server` grant, which is
+/// off the Gateway's default allowlist and can never be owner-scope self-approved.
 pub fn register_manifest_mcp_servers(
     registry: &McpRegistry,
     manifest: &PluginManifest,
@@ -481,15 +548,174 @@ pub fn register_manifest_mcp_servers(
     }
     let mut names = Vec::new();
     for (name, decl) in &manifest.mcp_servers {
-        if registry.register_server(
-            &manifest.id,
-            name.clone(),
-            mcp_server_config_from_decl(decl),
-        ) {
+        let config = mcp_server_config_from_decl(decl);
+        if !mcp_command_is_present(&config.command) {
+            tracing::warn!(
+                "plugin '{}' declares MCP server '{name}' but its command '{}' is not \
+                 installed (not on PATH and not an existing file); registration is skipped so \
+                 the model is not offered tools that cannot spawn. Install it and restart Core \
+                 (or re-enable the app) to pick it up",
+                manifest.id,
+                config.command
+            );
+            continue;
+        }
+        if registry.register_server(&manifest.id, name.clone(), config) {
             names.push(name.clone());
         }
     }
     names
+}
+
+/// Whether the command an `mcp_servers` declaration would hand to `Command::new`
+/// actually exists on this host.
+///
+/// Pure over the filesystem + `PATH` so it can be asserted directly; see
+/// [`register_manifest_mcp_servers`] for why registration depends on it, and for the
+/// resolved-command / runner-not-payload rules the callers must preserve.
+///
+/// A command carrying a path separator is checked as a **file** (that is what
+/// `Command::new` will do with it — `PATH` is not consulted for a path), everything
+/// else through `PATH`. Blank is `false`: there is nothing to spawn, and letting it
+/// through would register a server whose spawn fails with an empty program name.
+///
+/// Three of its answers are only true because [`spawn_program_for`] normalizes the same
+/// way on the way to `Command::new` — that pairing is the load-bearing part, spelled
+/// out on [`register_manifest_mcp_servers`]:
+///
+/// * a `PATH` hit that is a Windows `.cmd`/`.bat` shim, which `Command::new` cannot
+///   spawn from the bare name (it gets rewritten to the resolved path);
+/// * a Windows `PATH` hit that is an **extensionless** file, which the bare name cannot
+///   spawn either (`std` appends `.exe` and probes nothing else) — rewritten to the
+///   resolved path when no `<name>.exe` exists on `PATH`. Note this answer is only *made*
+///   true, not true by construction: `which_on_path`'s bare-`dir.join(program)` probe
+///   accepts a file `Command::new` would never look at, so the probe is the party that
+///   is wrong here (see the note on [`spawn_program_for`]);
+/// * a command with surrounding whitespace — trimmed here, so it must be trimmed there
+///   (nothing upstream trims: `mcp_server_config_from_decl` trims only the
+///   `command_env` override, and a pasted `mcp.json` trims nothing).
+pub(crate) fn mcp_command_is_present(command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+    if command.contains('/') || (cfg!(windows) && command.contains('\\')) {
+        return std::path::Path::new(command).is_file();
+    }
+    crate::sidecar::manifest_sidecar::which_on_path(command).is_some()
+}
+
+/// The program string `Command::new` must be given so `command` can actually spawn on
+/// this platform. Identity for every command the probe accepts, except one Windows
+/// case.
+///
+/// Surrounding whitespace is stripped on **all** platforms, because that is the same
+/// normalization [`mcp_command_is_present`] applies before it declares a command
+/// installed. `mcp_server_config_from_decl` does not trim the declaration's `command`
+/// (only its `command_env` override), and a hand-pasted `mcp.json` trims nothing at
+/// all, so without this a `"command": "npx "` would clear the gate and then `ENOENT`
+/// in `Command::new` — the probe-disagrees-with-spawn bug this function exists to
+/// close, one layer up from the Windows one.
+///
+/// On Windows, `std`'s program resolution appends **only** `.exe` to a bare name and
+/// never consults `PATHEXT` (`resolve_exe`'s `path.set_extension("exe")`, verified
+/// against the 1.96 toolchain), so `Command::new("npx")` cannot find `npx.cmd`. It
+/// *can* run a batch file when the program string itself ends in `.cmd`/`.bat`:
+/// `std` detects that (`is_batch_file`) and re-targets the spawn at
+/// `cmd.exe /d /c "<script>" <args>`, escaping the args and rejecting only `\r`/`\n`
+/// in them (`make_bat_command_line` — the CVE-2024-24576 hardening). So handing it the
+/// resolved `…\npx.cmd` path is both necessary and sufficient.
+///
+/// An **extensionless** `PATH` hit is the same probe-disagrees-with-spawn shape, one
+/// case narrower, and it is handled the same way. `which_on_path`'s first probe is the
+/// bare `dir.join(program)`, so a `PATH` entry that is a file literally named `npx`
+/// with no extension counts as installed (`manifest_sidecar.rs:153-155`) — but by the
+/// `set_extension("exe")` rule above, `Command::new("npx")` probes only `npx.exe` per
+/// directory and never the extensionless file, so the bare name cannot spawn it. Handing
+/// over the resolved path is the only thing that *can*: for a program string containing
+/// separators, `resolve_exe` appends `.exe`, and when *that* does not exist it strips it
+/// again and hands `CreateProcessW` the path verbatim (`append_suffix` →
+/// `program_exists` → `set_extension("")` → `args::to_user_path`, read against the 1.96
+/// toolchain). Whether the OS then runs an extensionless image is the OS's business —
+/// the rewrite does not depend on it, because the bare name is a *guaranteed* failure
+/// here (only `.exe` is ever appended to it), so the resolved path cannot be worse.
+///
+/// That rewrite is taken **only when no `<name>.exe` exists anywhere on `PATH`**, i.e.
+/// only when the bare name provably cannot spawn. Otherwise an extensionless file early
+/// on `PATH` (a Git-for-Windows shell script, say) would shadow a real `foo.exe` later
+/// on it that the bare name resolves today — a rewrite that broke a working spawn to fix
+/// a theoretical one.
+///
+/// Residual, deliberately not chased here: `resolve_exe` searches the **child's** `PATH`
+/// (a `PATH` entry in the server's declared `env`) and Core's own executable directory
+/// *before* `PATH`, while both this function and the probe read the parent process's
+/// `PATH` only. A `<name>.exe` reachable solely through one of those still resolves for
+/// the bare name while we conclude it cannot.
+///
+/// The root cause is upstream of this module and is a workaround here, not a fix:
+/// `which_on_path` probes the bare `dir.join(program)` *before* the `.exe`/`.cmd`/`.bat`
+/// candidates (`manifest_sidecar.rs:150-166`), an order `std` never uses for a dotless
+/// bare name — it appends `.exe` and looks at nothing else. Reordering (or dropping) that
+/// direct probe on Windows for a dotless program is what would make the probe answer the
+/// question `Command::new` actually asks.
+///
+/// Otherwise deliberately narrow, to keep the change to the cases that are broken
+/// today:
+/// * unix — returns the trimmed `command` and nothing else (`cfg!(windows)` is false),
+///   so no `PATH` walk happens on the spawn path there at all;
+/// * an `.exe` hit — returns the bare name, preserving late `PATH` binding (an operator
+///   can install/replace the binary without a Core restart);
+/// * an extensionless hit with a `<name>.exe` elsewhere on `PATH` — same, the bare name
+///   still resolves;
+/// * a command with a path separator — left as written: `std` does not search `PATH`
+///   for it and already batch-dispatches a path ending in `.cmd`/`.bat`;
+/// * nothing on `PATH` — left as written, so the spawn fails with the same "not found"
+///   error it always did rather than a confusing rewritten one.
+pub(crate) fn spawn_program_for(command: &str) -> String {
+    spawn_program_with(command, cfg!(windows), |program| {
+        crate::sidecar::manifest_sidecar::which_on_path(program)
+    })
+}
+
+/// [`spawn_program_for`] with the platform bit and the `PATH` lookup injected, so the
+/// Windows branch is testable from a unix CI box (the only host this repo's tests run
+/// on) instead of being asserted by inspection.
+///
+/// `lookup` must answer for the exact program string it is given (it is called with the
+/// bare name AND, for an extensionless hit, with `<name>.exe`) — the real one,
+/// `which_on_path`, does.
+fn spawn_program_with(
+    command: &str,
+    windows: bool,
+    lookup: impl Fn(&str) -> Option<std::path::PathBuf>,
+) -> String {
+    let trimmed = command.trim();
+    if !windows || trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('\\') {
+        return trimmed.to_owned();
+    }
+    let Some(resolved) = lookup(trimmed) else {
+        return trimmed.to_owned();
+    };
+    if let Some(shim) = batch_shim_program(&resolved) {
+        return shim;
+    }
+    // Extensionless hit: the bare name resolves ONLY through the `.exe` `std` appends,
+    // so fall back to the resolved path when there is no `<name>.exe` on `PATH` at all.
+    // Checked in this order so a `.cmd`/`.bat` shim keeps winning (first `PATH` directory
+    // wins, as `cmd.exe` itself would) without paying for a second `PATH` walk.
+    if resolved.extension().is_none() && lookup(&format!("{trimmed}.exe")).is_none() {
+        return resolved.to_string_lossy().into_owned();
+    }
+    trimmed.to_owned()
+}
+
+/// The spawn-program string a `PATH`-resolved path needs, or `None` when the bare
+/// command name already spawns. `Some` only for a Windows batch shim (`.cmd`/`.bat`,
+/// case-insensitively — `PATH` entries are routinely `NPX.CMD`).
+fn batch_shim_program(resolved: &std::path::Path) -> Option<String> {
+    let ext = resolved.extension()?.to_str()?;
+    (ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+        .then(|| resolved.to_string_lossy().into_owned())
 }
 
 /// Deregister every MCP server a plugin's manifest declares from `registry`.
@@ -815,6 +1041,66 @@ pub(crate) fn app_tool_registered_id(cfg: &crate::plugin_manifest::schema::ToolC
     }
 }
 
+/// The `skills__*` ids that are genuinely callable functions, sourced from the
+/// `skills` provider's own exported constants rather than re-spelled here.
+///
+/// These three are what [`skills_tool::dispatch`] has match arms for (`search` /
+/// `load` / `author`, after `split_tool_id` strips the server segment) and what
+/// [`skills_tool::tools`] advertises. Every other id under the `skills` server is a
+/// **catalog id** — a `skills__<slug>` discovery row for an Agent Skill, which
+/// `dispatch`'s fallthrough refuses.
+///
+/// **Cross-file dependency, stated deliberately:** this list and the refusal it
+/// depends on live in `skills_tool.rs`, not here. A drift guard test asserts
+/// `skills_tool::tools()` is a subset of this list. That direction is the
+/// load-bearing one: a new *callable* `skills__*` tool landing without a matching
+/// entry here would be classified as a catalog id and silently skip the approval
+/// gate — and `skills__author` already writes files into the shared skills
+/// directory, so an un-gated sibling of it would be a real hole. The opposite drift
+/// (a catalog id mistaken for a tool) merely restores today's behaviour: a dead
+/// approval, which is what this whole change removes.
+///
+/// The residual the subset test cannot see: a tool given a `dispatch` match arm but
+/// never advertised by `tools()` would pass the guard and lose its gate. `tools()`
+/// is a proxy for the authority (`dispatch`'s arms), not the authority — they name
+/// the same three tools today, and the guard is the mechanical half of keeping it
+/// that way.
+const SKILLS_CALLABLE_TOOL_IDS: [&str; 3] = [
+    skills_tool::SEARCH_TOOL_ID,
+    skills_tool::LOAD_TOOL_ID,
+    skills_tool::AUTHOR_TOOL_ID,
+];
+
+/// Whether the human-in-the-loop approval gate should run for this tool id.
+///
+/// `false` for exactly one shape: a `skills__<slug>` **catalog** id. Approving one
+/// cannot make it run — it is a discovery row, not a function — so queuing an
+/// approval for it puts a pending item in the user's inbox that can only ever
+/// resolve to `skills_tool::dispatch`'s refusal. See the call site in
+/// [`McpRegistry::call_tool_with_identity`] for the full reasoning.
+///
+/// The comparison is on the WHOLE id after confirming the server segment, because
+/// [`McpRegistry::split_tool_id`] is `split_once("__")`: `skills__a__b` splits to
+/// server `skills` + tool `a__b`, which is a slug containing the separator and
+/// correctly a catalog id, while `skills__search` matches a callable id exactly.
+/// An id with no separator at all (`skills`) is not routable to this provider and
+/// stays gated.
+///
+/// The call site passes the **resolved** `gate_id`, not the raw `tool_id` — the
+/// same value the gate classifies risk on. That is deliberate and mirrors the
+/// alias rule directly above it: an `app__…` tool whose manifest-fixed alias target
+/// is a `skills__<slug>` catalog id resolves to that id here and is skipped for
+/// exactly the same reason (the resolved call can only refuse), while an alias onto
+/// a real `skills__*` tool keeps its gate.
+pub(crate) fn approval_gate_applies(tool_id: &str) -> bool {
+    match McpRegistry::split_tool_id(tool_id) {
+        Some((server, _)) if server == skills_tool::SERVER_NAME => {
+            SKILLS_CALLABLE_TOOL_IDS.contains(&tool_id)
+        }
+        _ => true,
+    }
+}
+
 /// The grant set an app tool actually runs with — the enforcement input for
 /// `tool:http-egress:<domain>`, `tool:command:<bin>` and the sandbox `host.*` verbs.
 ///
@@ -994,6 +1280,10 @@ impl crate::tool_exec::SandboxBridge for CapabilityAdapterBridge {
             // Vault credential, and dropping them would silently downgrade a
             // vault-backed provider to anonymous.
             let result = Box::pin(self.registry.call_tool_with_identity_no_gate(
+                // A capability adapter carries no agent card of its own; the
+                // manifest fixes what it may call, so there is no per-agent record
+                // state to resolve.
+                None,
                 &target,
                 args,
                 None,
@@ -1604,14 +1894,10 @@ impl McpRegistry {
                 name: skills_tool::SERVER_NAME.to_owned(),
                 command: "(built-in)".to_owned(),
                 args: vec![],
-                description: Some(
-                    "Built-in skills: discover and load Agent Skills on demand \
-                     (skills__search / skills__load) instead of injecting every skill body \
-                     up front — progressive disclosure for low-context models. \
-                     skills__author writes a new structured, reusable SKILL.md and \
-                     refines it on reuse."
-                        .to_owned(),
-                ),
+                // Not an inline literal like its neighbours: the text depends on the
+                // `skills__author` opt-in, so it is computed where that gate lives
+                // (see `skills_tool::server_description`).
+                description: Some(skills_tool::server_description()),
                 enabled: true,
                 available: Some(true),
             },
@@ -2145,7 +2431,11 @@ impl McpRegistry {
         // conversation-reading tools refuse. On an unbound node they resolve to
         // `Unrestricted` — byte-identical to before. (Verified: no such caller
         // invokes a `threads__*` / `search_conversations__*` tool today.)
+        // `agent_id = None`: these callers have no agent card, so per-agent record
+        // state (the skill allowlist) resolves to the unscoped default — byte-
+        // identical to the behaviour before that lookup existed.
         self.call_tool_with_identity_no_gate(
+            None,
             tool_id,
             arguments,
             allowlist,
@@ -2229,22 +2519,57 @@ impl McpRegistry {
         } else {
             tool_id.to_owned()
         };
-        if let Some(err) = crate::approvals::gate_tool_call(
-            &gate_id,
-            &arguments,
-            &agent_approval_tools,
-            allowlist,
-            user_id,
-            profile_ids,
-            session_id.clone(),
-            host_conversation_id,
-        )
-        .await
-        {
-            // Gated: return the "approval required" error instead of dispatching.
-            // Every plane treats a tool error as not-done, so the call cannot be
-            // mistaken for a completed side effect; the engine runs it on approve.
-            return Err(err);
+        // An approval is a promise that approving makes the action happen. A
+        // `skills__<slug>` CATALOG id cannot keep that promise: it is a discovery
+        // row merged into `tool_search`, never a function, and every path to it
+        // ends in `skills_tool::dispatch`'s fallthrough refusal — including the
+        // approval engine's own re-run through `call_tool_with_identity_no_gate`.
+        // So gating one queues a pending item in the user's inbox whose only
+        // possible outcome is the same error the model would have received
+        // immediately.
+        //
+        // It is reachable with ordinary skill names, not adversarial ones:
+        // `approvals::policy::classify_risk` substring-matches the action segment
+        // (the part after the last `__` — for `skills__deploy-to-staging` that is
+        // the whole slug) against RISKY_PATTERNS, so `deploy-to-staging`,
+        // `send-weekly-digest` and `delete-stale-branches` all classify risky under
+        // the default `smart` mode; under `manual` every slug queues. Newly
+        // reachable because skill rows only recently started appearing in front of
+        // models as `skills__<slug>` ids.
+        //
+        // Skipping the gate here is not a privilege grant: it removes the approval
+        // for a call that had no privilege to begin with, and the refusal below is
+        // unchanged. Everything after this block — plugin PreToolUse hooks, the
+        // identity consult, the TOOL-allowlist check inside `no_gate`, the
+        // skills-unavailable envelope — still runs in the same order for these ids,
+        // so an agent whose tool allowlist excludes the `skills` server still gets
+        // "not in this agent's allowlist" rather than the refusal, exactly as before.
+        //
+        // Items already sitting in an inbox for a `skills__<slug>` id are untouched:
+        // approving one still lands in the dispatch fallthrough and still returns
+        // the refusal. This stops new ones being created; it does not migrate old.
+        //
+        // (Independent of the `?agent=` skill scoping on the SEARCH path — that is
+        // which skill rows a plane may see; this is what happens when a model calls
+        // one. Same ids, different mechanisms.)
+        if approval_gate_applies(&gate_id) {
+            if let Some(err) = crate::approvals::gate_tool_call(
+                &gate_id,
+                &arguments,
+                &agent_approval_tools,
+                allowlist,
+                user_id,
+                profile_ids,
+                session_id.clone(),
+                host_conversation_id,
+            )
+            .await
+            {
+                // Gated: return the "approval required" error instead of dispatching.
+                // Every plane treats a tool error as not-done, so the call cannot be
+                // mistaken for a completed side effect; the engine runs it on approve.
+                return Err(err);
+            }
         }
 
         // PreToolUse hooks (Claude parity): a plugin tool-firewall may block the
@@ -2266,6 +2591,7 @@ impl McpRegistry {
 
         let result = self
             .call_tool_with_identity_no_gate(
+                agent_id,
                 tool_id,
                 arguments,
                 allowlist,
@@ -2305,8 +2631,18 @@ impl McpRegistry {
     /// **no** approval gate. Called by [`call_tool_with_identity`] after the gate
     /// permits the call, and directly by the approval engine to run an approved
     /// tool call exactly once (without re-raising an approval).
+    ///
+    /// `agent_id` is the CALLING agent, threaded from [`call_tool_with_identity`]
+    /// (it is first, mirroring that entry's shape, so the three `Option<&str>`
+    /// arguments cannot be transposed unnoticed). It is what per-agent *record*
+    /// state is resolved from at dispatch — today the skill allowlist for the
+    /// `skills` provider. `None` for the agent-less callers (workflows, monitors,
+    /// recipes, capability adapters, the approval engine), which degrade to the
+    /// unscoped behaviour they had before.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call_tool_with_identity_no_gate(
         &self,
+        agent_id: Option<&str>,
         tool_id: &str,
         arguments: Value,
         allowlist: Option<&[String]>,
@@ -2626,6 +2962,9 @@ impl McpRegistry {
             // not to the manifest-fixed target — otherwise an app tool would raise
             // a second approval for its inner target.
             return Box::pin(self.call_tool_with_identity_no_gate(
+                // Same calling agent — the alias re-enter is one logical call, so
+                // per-agent scoping must not be dropped on the way in.
+                agent_id,
                 tool,
                 arguments,
                 None,
@@ -2835,7 +3174,30 @@ impl McpRegistry {
                     "error": "skills are not available on this node"
                 }));
             };
-            return skills_tool::dispatch(tool, arguments, skills).await;
+            // The calling agent's per-agent SKILL allowlist — a different list from
+            // the `allowlist` argument, which is the TOOL allowlist checked above.
+            // Without it `skills__load` matched on the globally-enabled set, so an
+            // agent could load by id a skill its allowlist kept out of the injected
+            // index. Resolved here (lazily, only for a `skills__*` call) from the
+            // same store the approval gate reads `approval_tools` from.
+            //
+            // Fail-open to the empty list — which `enabled_for` defines as "all
+            // enabled" — on every degraded path: no agent id (workflows, monitors,
+            // the approval engine), no agent store, unknown id, or a store error.
+            // A skill is instruction text with no secrets, so this list scopes an
+            // agent to its own skills; failing closed would silently strip skills
+            // from agent-less callers that legitimately had them, for no gain.
+            let skills_allowlist: Vec<String> = match (agent_id, &self.agent_store) {
+                (Some(id), Some(store)) => store
+                    .get(id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|rec| rec.skills)
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            return skills_tool::dispatch(tool, arguments, skills, &skills_allowlist).await;
         }
 
         // Capability tool facade (swappable layers): a stable verb id
@@ -2931,6 +3293,10 @@ impl McpRegistry {
             // provider to anonymous — a swap-visible behaviour difference, which is
             // exactly what this facade exists to prevent.
             let raw = Box::pin(self.call_tool_with_identity_no_gate(
+                // Same calling agent, for the same reason `profile_ids` is threaded:
+                // the facade must not be a way to lose per-agent context that a
+                // direct call to the provider's tool would have kept.
+                agent_id,
                 &target,
                 mapped,
                 None,
@@ -3617,6 +3983,70 @@ mod tests {
         RegistryTool::candidate("fs__read_file", "fs", "read_file")
     }
 
+    /// Make `ghost`'s manifest declaration RESOLVABLE for the life of the guard.
+    ///
+    /// `register_manifest_mcp_servers` now skips a declaration whose command is not
+    /// installed, and the `ghost` binary is fetched only by Ghost's own downloader
+    /// (whose `archive_url()` has no default), so on a dev box and in CI it is
+    /// genuinely absent — the real registration is correctly skipped there. The tests
+    /// below are about the REGISTRY (ownership, `contains_server`, `command_env`
+    /// lowering), not about whether Ghost shipped, so they point `RYU_GHOST_BIN` — the
+    /// same `command_env` the manifest declares, and the same one `main.rs` seeds — at
+    /// a file that exists.
+    ///
+    /// Holds [`MCP_ENV_LOCK`] and restores the previous value in `Drop`, so a panicking
+    /// assertion cannot leak `RYU_GHOST_BIN` into a sibling test. `std::sync::Mutex` is
+    /// NOT reentrant, so do **not** construct this while already holding
+    /// [`lock_mcp_env`] — that self-deadlocks. Take one or the other, never both. (The
+    /// associated [`GhostBinPresent::manifest`] takes no lock and is safe either way,
+    /// which is why the skip test can call it under its own guard.)
+    struct GhostBinPresent {
+        path: std::path::PathBuf,
+        previous: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl GhostBinPresent {
+        fn new() -> Self {
+            let lock = lock_mcp_env();
+            let ext = if cfg!(windows) { ".exe" } else { "" };
+            let path =
+                std::env::temp_dir().join(format!("ryu-test-ghost-{}{ext}", uuid::Uuid::new_v4()));
+            std::fs::write(&path, b"#!/bin/sh\n").expect("write the stand-in ghost binary");
+            let previous = std::env::var("RYU_GHOST_BIN").ok();
+            std::env::set_var("RYU_GHOST_BIN", &path);
+            Self {
+                path,
+                previous,
+                _lock: lock,
+            }
+        }
+
+        /// The absolute path `RYU_GHOST_BIN` points at — what the lowered
+        /// `McpServerConfig.command` must equal.
+        fn program(&self) -> String {
+            self.path.to_string_lossy().into_owned()
+        }
+
+        /// The real `ghost` built-in manifest.
+        fn manifest() -> PluginManifest {
+            crate::plugin_manifest::PluginManifestLoader::load_builtins()
+                .into_iter()
+                .find(|m| m.id == "ghost")
+                .expect("ghost built-in manifest present")
+        }
+    }
+
+    impl Drop for GhostBinPresent {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(prev) => std::env::set_var("RYU_GHOST_BIN", prev),
+                None => std::env::remove_var("RYU_GHOST_BIN"),
+            }
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
     // ── capability adapter bridge: what sandboxed JS may reach ─────────────────
     //
     // The adapter seam's whole safety argument is that an adapter's authority is a
@@ -3760,13 +4190,29 @@ mod tests {
         )
     }
 
+    /// A command that is guaranteed to resolve on every host these tests run on, so
+    /// the registration tests exercise the tier/ownership gates rather than
+    /// [`mcp_command_is_present`].
+    ///
+    /// It has to be *something* real: registration now skips a declaration whose
+    /// command cannot be found, so a literal `npx` (or `/bin/sh`) would make these
+    /// tests pass or fail on whether the runner happens to be installed — and a
+    /// refusal test would then pass for the wrong reason. The test binary itself is
+    /// the one path that always exists and is never spawned by any of this.
+    fn present_command() -> String {
+        std::env::current_exe()
+            .expect("a test binary always has a path")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// A manifest that declares one stdio MCP server under `mcp_servers`.
     fn manifest_with_mcp_server(id: &str, server: &str) -> PluginManifest {
         let mut mcp_servers = BTreeMap::new();
         mcp_servers.insert(
             server.to_owned(),
             crate::plugin_manifest::McpServerDecl {
-                command: "npx".to_owned(),
+                command: present_command(),
                 command_env: None,
                 args: vec!["-y".to_owned(), "some-mcp".to_owned()],
                 env: BTreeMap::new(),
@@ -3797,8 +4243,279 @@ mod tests {
         assert!(reg.contains_server("com.test.srv"));
         let servers = reg.servers.read().expect("lock");
         let cfg = servers.get("com.test.srv").expect("server registered");
-        assert_eq!(cfg.command, "npx");
+        assert_eq!(cfg.command, present_command());
         assert_eq!(cfg.args, vec!["-y", "some-mcp"]);
+    }
+
+    /// A declaration whose command is not installed must NOT be registered: doing so
+    /// puts its tools in the next `tools/list`, and every call then ENOENTs. `ghost`
+    /// is the live instance — Core-tier, default-ON, and its binary is fetched only by
+    /// a downloader whose `archive_url()` has no default, so every stock node carried
+    /// ~29 `ghost__*` tools that could not spawn.
+    ///
+    /// Fail-soft: the sibling declarations in the SAME manifest still register, so one
+    /// missing binary never costs a plugin its working servers.
+    #[test]
+    fn an_mcp_server_whose_binary_is_absent_is_not_registered() {
+        let reg = McpRegistry::empty();
+        let mut manifest = manifest_with_mcp_server("com.test.plugin", "present-srv");
+        let absent = format!("ryu-absent-mcp-{}", uuid::Uuid::new_v4());
+        manifest.mcp_servers.insert(
+            "absent-srv".to_owned(),
+            crate::plugin_manifest::McpServerDecl {
+                command: absent.clone(),
+                command_env: None,
+                args: vec!["mcp".to_owned()],
+                env: BTreeMap::new(),
+                description: None,
+                enabled: true,
+            },
+        );
+
+        let names = register_as_enabled(&reg, &manifest, &[GRANT_MCP_SERVER]);
+
+        assert_eq!(
+            names,
+            vec!["present-srv".to_owned()],
+            "only the resolvable declaration may register"
+        );
+        assert!(
+            !reg.contains_server("absent-srv"),
+            "a server whose command '{absent}' does not exist must not become listable"
+        );
+        assert!(
+            reg.contains_server("present-srv"),
+            "one missing binary must not cost the plugin its working servers"
+        );
+    }
+
+    /// `command_env` is applied BEFORE the probe, so an operator who points the
+    /// declaration at a binary outside `PATH` is not told it is missing. Without this
+    /// ordering, `ghost` with a valid `RYU_GHOST_BIN` would still be skipped.
+    #[test]
+    fn the_probe_honors_command_env_before_deciding_a_binary_is_missing() {
+        let reg = McpRegistry::empty();
+        let mut manifest = manifest_with_mcp_server("com.test.plugin", "env-srv");
+        let decl = manifest.mcp_servers.get_mut("env-srv").expect("decl");
+        // A bare name that is definitely not on PATH...
+        decl.command = format!("ryu-absent-mcp-{}", uuid::Uuid::new_v4());
+        // ...redirected by env at a path that exists.
+        decl.command_env = Some("RYU_TEST_PROBE_MCP_BIN".to_owned());
+        std::env::set_var("RYU_TEST_PROBE_MCP_BIN", present_command());
+
+        let names = register_as_enabled(&reg, &manifest, &[GRANT_MCP_SERVER]);
+        std::env::remove_var("RYU_TEST_PROBE_MCP_BIN");
+
+        assert_eq!(
+            names,
+            vec!["env-srv".to_owned()],
+            "an env-redirected command that exists must register"
+        );
+    }
+
+    /// The probe's rules, asserted directly: `PATH` lookup for a bare name, a FILE
+    /// check for anything carrying a separator (that is what `Command::new` does with
+    /// a path — it does not consult `PATH`), and blank is never spawnable.
+    ///
+    /// The lazy-package-runner idiom is the load-bearing case: `agentbrowser` declares
+    /// `npx -y agent-browser mcp`, so the thing probed must be `npx` (present, fetches
+    /// the package on first spawn) and never `agent-browser` (absent until then).
+    #[test]
+    fn the_probe_answers_for_path_names_paths_and_blanks() {
+        // A bare name resolved through PATH. The platform shell is the one program
+        // that is on PATH on every host this suite runs on; PATH is deliberately not
+        // mutated here (it is process-global and these tests run in parallel).
+        let on_path = if cfg!(windows) { "cmd" } else { "sh" };
+        assert!(
+            mcp_command_is_present(on_path),
+            "a bare name on PATH must resolve"
+        );
+        assert!(!mcp_command_is_present(&format!(
+            "ryu-absent-mcp-{}",
+            uuid::Uuid::new_v4()
+        )));
+
+        // A path is checked as a file, never through PATH.
+        let exe = present_command();
+        assert!(mcp_command_is_present(&exe), "an existing file resolves");
+        assert!(
+            !mcp_command_is_present(&format!("{exe}-does-not-exist")),
+            "a path that is not a file must not resolve"
+        );
+        let dir = std::env::temp_dir();
+        assert!(
+            !mcp_command_is_present(&dir.to_string_lossy()),
+            "a directory is not something Command::new can exec"
+        );
+
+        // Blank: nothing to spawn, and registering it would yield a spawn failure
+        // with an empty program name.
+        assert!(!mcp_command_is_present(""));
+        assert!(!mcp_command_is_present("   "));
+
+        // Surrounding whitespace is not part of the program name.
+        assert!(mcp_command_is_present(&format!("  {on_path}  ")));
+    }
+
+    /// The probe's Windows half: it counts a `.cmd`/`.bat` `PATH` hit as present, and
+    /// that is only true because the spawn seam rewrites such a command to its full
+    /// resolved path — `Command::new("npx")` looks for `npx.exe` and nothing else
+    /// (`std`'s `resolve_exe` appends only `.exe`; `PATHEXT` is a `cmd.exe` rule). The
+    /// platform bit and the `PATH` lookup are injected so the Windows behaviour is
+    /// asserted on the unix box this suite actually runs on. (The other unspawnable-hit
+    /// case, an extensionless `PATH` file, has its own test below.)
+    #[test]
+    fn the_spawn_seam_rewrites_windows_batch_shims_to_their_resolved_path() {
+        type Lookup = Option<std::path::PathBuf>;
+        let shim = |_: &str| -> Lookup { Some(std::path::PathBuf::from(r"C:\npm\npx.cmd")) };
+        let never = |_: &str| -> Lookup { panic!("a path must never be looked up on PATH") };
+
+        // Windows + a batch shim: the bare name cannot spawn, the resolved path can
+        // (std re-targets a `.cmd` program at `cmd.exe /c`).
+        assert_eq!(
+            spawn_program_with("npx", true, shim),
+            r"C:\npm\npx.cmd",
+            "a .cmd runner must be spawned by its resolved path"
+        );
+        // Same host, `.bat`, upper-cased as PATH entries often are.
+        assert_eq!(
+            spawn_program_with("thing", true, |_: &str| -> Lookup {
+                Some(std::path::PathBuf::from(r"C:\tools\THING.BAT"))
+            }),
+            r"C:\tools\THING.BAT"
+        );
+
+        // An .exe hit keeps the bare name, so PATH stays late-bound and the operator can
+        // swap the binary without restarting Core.
+        assert_eq!(
+            spawn_program_with("npx", true, |_: &str| -> Lookup {
+                Some(std::path::PathBuf::from(r"C:\npm\npx.exe"))
+            }),
+            "npx"
+        );
+
+        // Not found: untouched, so the spawn fails with its usual not-found error.
+        assert_eq!(
+            spawn_program_with("nope", true, |_: &str| -> Lookup { None }),
+            "nope"
+        );
+
+        // A command carrying a separator is never PATH-resolved (std doesn't either,
+        // and it already batch-dispatches a path ending in .cmd/.bat).
+        assert_eq!(
+            spawn_program_with(r"C:\tools\thing.cmd", true, never),
+            r"C:\tools\thing.cmd"
+        );
+        assert_eq!(
+            spawn_program_with("/usr/bin/npx", true, never),
+            "/usr/bin/npx"
+        );
+
+        // Blank stays blank (the probe already refuses to register it).
+        assert_eq!(spawn_program_with("", true, never), "");
+
+        // Non-Windows: the configured program, untouched, whatever PATH holds —
+        // including a unix file that merely happens to be named `*.cmd` (executable
+        // there, not a shim).
+        assert_eq!(spawn_program_with("npx", false, shim), "npx");
+
+        // Surrounding whitespace is stripped on BOTH platforms, because the probe
+        // (`mcp_command_is_present`) strips it before declaring the command installed
+        // and nothing upstream does: a declared `"npx "` otherwise passes the gate and
+        // then ENOENTs in `Command::new`, on unix as much as on Windows.
+        assert_eq!(spawn_program_with("  npx  ", false, shim), "npx");
+        assert_eq!(spawn_program_with(" npx ", true, shim), r"C:\npm\npx.cmd");
+        assert_eq!(
+            spawn_program_with("  /usr/bin/npx  ", false, never),
+            "/usr/bin/npx"
+        );
+    }
+
+    /// The extensionless Windows `PATH` hit: the probe counts it (`which_on_path` tries
+    /// the bare `dir\program` first) but `Command::new("ghost")` looks only for
+    /// `ghost.exe`, so the bare name cannot spawn it. Handing over the resolved path can
+    /// — `resolve_exe` strips the `.exe` it appended to a path-ish program string and
+    /// passes it verbatim. The rewrite is conditional: it must not shadow a real
+    /// `<name>.exe` that the bare name still resolves.
+    #[test]
+    fn the_spawn_seam_rewrites_an_unspawnable_extensionless_path_hit() {
+        type Lookup = Option<std::path::PathBuf>;
+
+        // Only the extensionless file exists ⇒ the bare name is a guaranteed ENOENT, so
+        // spawn the file the probe actually found.
+        let extensionless_only = |program: &str| -> Lookup {
+            (program == "ghost").then(|| std::path::PathBuf::from(r"C:\bin\ghost"))
+        };
+        assert_eq!(
+            spawn_program_with("ghost", true, extensionless_only),
+            r"C:\bin\ghost",
+            "an extensionless hit must be spawned by its resolved path"
+        );
+
+        // A real `ghost.exe` elsewhere on PATH ⇒ the bare name still resolves (std
+        // appends .exe and walks PATH), so leave it late-bound rather than pinning the
+        // spawn to a shell script that shadows it.
+        let extensionless_then_exe = |program: &str| -> Lookup {
+            match program {
+                "ghost" => Some(std::path::PathBuf::from(r"C:\git\usr\bin\ghost")),
+                "ghost.exe" => Some(std::path::PathBuf::from(r"C:\bin\ghost.exe")),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            spawn_program_with("ghost", true, extensionless_then_exe),
+            "ghost",
+            "a resolvable bare name must not be pinned to an extensionless shadow"
+        );
+
+        // A batch shim still wins on its own terms — the .exe probe is never reached for
+        // it, so first-PATH-directory-wins (cmd.exe's own rule) is preserved.
+        let cmd_then_exe = |program: &str| -> Lookup {
+            match program {
+                "npx" => Some(std::path::PathBuf::from(r"C:\npm\npx.cmd")),
+                "npx.exe" => panic!("a .cmd hit must not trigger the .exe probe"),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            spawn_program_with("npx", true, cmd_then_exe),
+            r"C:\npm\npx.cmd"
+        );
+
+        // Unix is untouched: no PATH walk at all, extensionless or not.
+        assert_eq!(
+            spawn_program_with("ghost", false, |_: &str| -> Lookup {
+                panic!("unix must never look up PATH on the spawn path")
+            }),
+            "ghost"
+        );
+    }
+
+    /// `to_command` is the only seam between a registry config and `Command::new`, and
+    /// on unix it must hand over exactly the configured program — present, absent, or
+    /// path-ish. Whitespace-padded commands are covered separately (they normalize to
+    /// what the probe validated, on every platform).
+    #[cfg(not(windows))]
+    #[test]
+    fn to_command_is_identity_on_unix() {
+        let absent = format!("ryu-absent-mcp-{}", uuid::Uuid::new_v4());
+        let present = present_command();
+        for command in ["sh", absent.as_str(), present.as_str(), ""] {
+            let cfg = McpServerConfig {
+                command: command.to_owned(),
+                args: vec!["-y".to_owned()],
+                env: BTreeMap::new(),
+                description: None,
+                enabled: true,
+                version: None,
+                catalog_id: None,
+            };
+            assert_eq!(
+                cfg.to_command().command,
+                command,
+                "unix spawn program must be the configured command verbatim"
+            );
+        }
     }
 
     /// Uninstall/disable seam: deregistering a manifest's `mcp_servers` removes
@@ -3828,8 +4545,10 @@ mod tests {
     fn community_manifest_mcp_server_needs_the_approved_grant() {
         let reg = McpRegistry::empty();
         let mut manifest = manifest_with_mcp_server("com.evil.plugin", "evil");
-        // The classic payload: an unsandboxed shell the next tools/list would spawn.
-        manifest.mcp_servers.get_mut("evil").expect("decl").command = "/bin/sh".to_owned();
+        // The payload stands in for the classic one (an unsandboxed shell the next
+        // tools/list would spawn) but must RESOLVE, or the grant gate below could pass
+        // because the probe skipped the declaration instead.
+        manifest.mcp_servers.get_mut("evil").expect("decl").command = present_command();
         // The plugin DECLARES the grant — self-declaration must not be enough.
         manifest.permission_grants = vec![GRANT_MCP_SERVER.to_owned()];
 
@@ -3878,13 +4597,28 @@ mod tests {
             vec!["shared-name".to_owned()]
         );
 
+        // A DIFFERENT command, and one that resolves — the refusal under test is the
+        // ownership check, so the probe must not be what stops it. Written under
+        // `temp_dir`, never beside `current_exe()`: this repo shares one
+        // `CARGO_TARGET_DIR` across concurrent jobs, and an unmanaged file dropped in
+        // there is someone else's phantom build error.
+        let hijack = std::env::temp_dir()
+            .join(format!("ryu-hijack-{}", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&hijack, b"#!/bin/sh\n").expect("write the stand-in payload");
         let mut squatter = manifest_with_mcp_server("com.evil.plugin", "shared-name");
         squatter
             .mcp_servers
             .get_mut("shared-name")
             .expect("decl")
-            .command = "/bin/sh".to_owned();
+            .command = hijack.clone();
+        assert!(
+            mcp_command_is_present(&hijack),
+            "the takeover payload must resolve, or this test passes for the wrong reason"
+        );
         let names = register_as_enabled(&reg, &squatter, &[GRANT_MCP_SERVER]);
+        let _ = std::fs::remove_file(&hijack);
         assert!(
             names.is_empty(),
             "a name owned by another plugin must not be re-registered, got {names:?}"
@@ -3896,7 +4630,7 @@ mod tests {
                 .get("shared-name")
                 .expect("still registered")
                 .command,
-            "npx",
+            present_command(),
             "the original owner's command must survive the takeover attempt"
         );
     }
@@ -4030,35 +4764,57 @@ mod tests {
     /// "installing the plugin registers the MCP" verification.
     #[test]
     fn ghost_manifest_registers_with_mcp_subcommand() {
-        let _lock = lock_mcp_env();
-        let ghost_manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
-            .into_iter()
-            .find(|m| m.id == "ghost")
-            .expect("ghost built-in manifest present");
-
         // RYU_GHOST_BIN (the profile-scoped path Core seeds in main.rs) overrides
-        // the bare `ghost` command at lowering time.
-        let bin = if cfg!(windows) {
-            "C:\\ryu\\bin\\ghost.exe"
-        } else {
-            "/ryu/bin/ghost"
-        };
-        std::env::set_var("RYU_GHOST_BIN", bin);
+        // the bare `ghost` command at lowering time. It has to point at a file that
+        // EXISTS: registration probes the lowered command, so an override at a
+        // made-up path is skipped — see [`GhostBinPresent`].
+        let ghost = GhostBinPresent::new();
+        let ghost_manifest = GhostBinPresent::manifest();
+
         let reg = McpRegistry::empty();
         let names = register_as_enabled(&reg, &ghost_manifest, &[]);
-        std::env::remove_var("RYU_GHOST_BIN");
 
         assert_eq!(names, vec![GHOST_SERVER.to_owned()]);
         let servers = reg.servers.read().expect("lock");
-        let ghost = servers
+        let entry = servers
             .get(GHOST_SERVER)
             .expect("ghost registered from manifest");
-        assert_eq!(ghost.args, vec!["mcp".to_owned()]);
-        assert!(ghost.enabled);
+        assert_eq!(entry.args, vec!["mcp".to_owned()]);
+        assert!(entry.enabled);
         assert_eq!(
-            ghost.command, bin,
+            entry.command,
+            ghost.program(),
             "RYU_GHOST_BIN must override the bare `ghost` command"
         );
+    }
+
+    /// The other half of the same seam: with NO usable `ghost` binary — the state
+    /// every stock node is actually in — the declaration is skipped rather than
+    /// registered, so the model is never offered ~29 `ghost__*` tools that ENOENT.
+    #[test]
+    fn ghost_manifest_is_skipped_when_no_ghost_binary_exists() {
+        let _lock = lock_mcp_env();
+        let previous = std::env::var("RYU_GHOST_BIN").ok();
+        // An override at a path that does not exist must NOT rescue it — the probe
+        // asks the filesystem, not the env var.
+        std::env::set_var(
+            "RYU_GHOST_BIN",
+            std::env::temp_dir().join(format!("ryu-absent-ghost-{}", uuid::Uuid::new_v4())),
+        );
+
+        let reg = McpRegistry::empty();
+        let names = register_as_enabled(&reg, &GhostBinPresent::manifest(), &[]);
+
+        match previous {
+            Some(prev) => std::env::set_var("RYU_GHOST_BIN", prev),
+            None => std::env::remove_var("RYU_GHOST_BIN"),
+        }
+
+        assert!(
+            names.is_empty(),
+            "ghost must not register without a binary, got {names:?}"
+        );
+        assert!(!reg.contains_server(GHOST_SERVER));
     }
 
     /// Agent Browser also moved from `builtin_servers()` to its plugin manifest's
@@ -4075,23 +4831,42 @@ mod tests {
             .into_iter()
             .find(|m| m.id == "agentbrowser")
             .expect("agentbrowser built-in manifest present");
-        let reg = McpRegistry::empty();
-        let names = register_as_enabled(&reg, &manifest, &[]);
-        assert_eq!(names, vec![AGENTBROWSER_SERVER.to_owned()]);
-        let servers = reg.servers.read().expect("lock");
-        let ab = servers
+        // The lowering is asserted probe-free, so the shape is pinned on every host:
+        // the command is the RUNNER (`npx`) and the package rides in the args. That is
+        // exactly why registration's binary probe reads `command` verbatim — probing
+        // `agent-browser`, which is fetched lazily on first spawn, would refuse every
+        // lazy-package-runner declaration there is.
+        let decl = manifest
+            .mcp_servers
             .get(AGENTBROWSER_SERVER)
-            .expect("agentbrowser registered from manifest");
-        assert_eq!(ab.command, "npx");
+            .expect("agentbrowser declares its MCP server");
+        let lowered = mcp_server_config_from_decl(decl);
+        assert_eq!(lowered.command, "npx");
         assert_eq!(
-            ab.args,
+            lowered.args,
             vec![
                 "-y".to_owned(),
                 "agent-browser".to_owned(),
                 "mcp".to_owned()
             ]
         );
-        assert!(ab.enabled);
+        assert!(lowered.enabled);
+
+        // And it registers wherever `npx` is actually installed. Asserted as an
+        // implication rather than unconditionally: a host with no node toolchain
+        // SHOULD skip it (an `npx` that is not there cannot fetch anything either),
+        // and this test is about the manifest, not about the runner being present.
+        let reg = McpRegistry::empty();
+        let names = register_as_enabled(&reg, &manifest, &[]);
+        if mcp_command_is_present("npx") {
+            assert_eq!(names, vec![AGENTBROWSER_SERVER.to_owned()]);
+            assert!(reg.contains_server(AGENTBROWSER_SERVER));
+        } else {
+            assert!(
+                names.is_empty(),
+                "with no `npx` on PATH the declaration must be skipped, got {names:?}"
+            );
+        }
     }
 
     #[test]
@@ -4237,24 +5012,20 @@ mod tests {
         // empty() has no ghost, so it should not be found.
         assert!(!reg.contains_server(GHOST_SERVER));
         // Ghost now arrives via its plugin manifest's `mcp_servers` (the activation
-        // seam), not `builtin_servers()`.
-        let ghost_manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
-            .into_iter()
-            .find(|m| m.id == "ghost")
-            .expect("ghost built-in manifest present");
-        register_as_enabled(&reg, &ghost_manifest, &[]);
+        // seam), not `builtin_servers()`. The guard is what makes its declared
+        // command resolvable — registration probes it.
+        let _ghost = GhostBinPresent::new();
+        register_as_enabled(&reg, &GhostBinPresent::manifest(), &[]);
         assert!(reg.contains_server(GHOST_SERVER));
     }
 
     #[test]
     fn duplicate_server_name_detected() {
         let reg = McpRegistry::empty();
-        // Ghost is registered via its manifest (no longer a hardcoded built-in).
-        let ghost_manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
-            .into_iter()
-            .find(|m| m.id == "ghost")
-            .expect("ghost built-in manifest present");
-        register_as_enabled(&reg, &ghost_manifest, &[]);
+        // Ghost is registered via its manifest (no longer a hardcoded built-in); the
+        // guard makes its declared command resolvable so registration is not skipped.
+        let _ghost = GhostBinPresent::new();
+        register_as_enabled(&reg, &GhostBinPresent::manifest(), &[]);
         assert!(reg.contains_server(GHOST_SERVER));
         // web_fetch is always reserved.
         assert!(reg.contains_server(web_fetch::SERVER_NAME));
@@ -5210,6 +5981,143 @@ mod tests {
             ),
             "a declared + granted + enabled MCP-server widget must promote"
         );
+    }
+
+    // ── the approval gate never fires for a skill CATALOG id ───────────────────
+    //
+    // `skills__<slug>` rows are discovery metadata merged into `tool_search`, not
+    // functions. Gating one queued a human approval whose only possible outcome was
+    // the dispatch fallthrough's refusal. These pin both halves: the classification
+    // that skips the gate, and the fact that the three real `skills__*` tools are
+    // still classified as gateable.
+
+    /// The defect, stated in the terms the gate itself uses.
+    ///
+    /// `gate_tool_call` consults `policy::should_require_approval_local`, so that is
+    /// what this asserts on — not `classify_risk`, which is only one of its inputs.
+    /// Ordinary skill names, not adversarial ones: `deploy-to-staging` matches the
+    /// `deploy` pattern, `send-weekly-digest` matches `send`, and under `manual` any
+    /// slug at all queues. Each is now classified as a catalog id, so the gate the
+    /// second half of each assertion describes is never reached.
+    #[test]
+    fn a_skill_catalog_id_would_have_queued_an_approval_and_now_skips_the_gate() {
+        use crate::approvals::policy::{should_require_approval_local, ApprovalMode};
+
+        for slug_id in [
+            "skills__deploy-to-staging",
+            "skills__send-weekly-digest",
+            "skills__delete-stale-branches",
+        ] {
+            assert!(
+                should_require_approval_local(&[], slug_id, ApprovalMode::Smart, Some("smart"))
+                    .is_some(),
+                "{slug_id} classifies risky under the default smart mode — this is \
+                 the dead approval the guard exists to prevent"
+            );
+            assert!(
+                !approval_gate_applies(slug_id),
+                "{slug_id} is a catalog id: the gate must be skipped ahead of it"
+            );
+        }
+
+        // Manual mode gates every tool id, risky pattern or not, so an innocuous
+        // slug queued too. Same guard covers it.
+        let innocuous = "skills__summarize-arxiv";
+        assert!(
+            should_require_approval_local(&[], innocuous, ApprovalMode::Manual, Some("manual"))
+                .is_some(),
+            "manual mode gates every id, which is why the fix cannot be a pattern tweak"
+        );
+        assert!(!approval_gate_applies(innocuous));
+    }
+
+    /// The three real tools stay gated exactly as before, and the classification
+    /// follows `split_once(\"__\")` rather than a prefix guess.
+    #[test]
+    fn the_real_skills_tools_stay_gateable_and_slug_shapes_do_not() {
+        for callable in SKILLS_CALLABLE_TOOL_IDS {
+            assert!(
+                approval_gate_applies(callable),
+                "{callable} is a callable tool and must keep whatever gate policy says"
+            );
+        }
+        // A slug that itself contains the separator: `split_tool_id` yields
+        // ("skills", "a__b"), which is a slug, not `skills__search`.
+        assert!(!approval_gate_applies("skills__a__b"));
+        assert!(!approval_gate_applies("skills__search__extra"));
+        assert!(!approval_gate_applies("skills__"));
+        // Everything outside the `skills` server is untouched. `app__skills__load`
+        // is asserted in its RAW form here; in production the call site classifies
+        // the resolved `gate_id`, so an alias is judged by whatever it resolves to —
+        // a real skills tool stays gated, a catalog-id target is skipped for the
+        // same reason a direct call to it is.
+        assert!(approval_gate_applies("gmail__send_email"));
+        assert!(approval_gate_applies("app__skills__load"));
+        assert!(approval_gate_applies("other__load"));
+        // Unroutable (no separator) ids keep the gate rather than losing it.
+        assert!(approval_gate_applies("skills"));
+    }
+
+    /// Drift guard, in the direction that can open a hole.
+    ///
+    /// If a new genuinely-callable `skills__*` tool is added to
+    /// [`skills_tool::tools`] without an entry in [`SKILLS_CALLABLE_TOOL_IDS`],
+    /// [`approval_gate_applies`] would call it a catalog id and drop its approval
+    /// gate — and `skills__author` already writes into the shared skills directory,
+    /// so an un-gated sibling of it would be a real privilege loss, not a cosmetic
+    /// one. `tools()` omits `author` unless `RYU_SKILLS_AUTHOR` is set, so this is a
+    /// subset assertion (not equality) and needs no env manipulation.
+    #[test]
+    fn every_advertised_skills_tool_is_in_the_callable_list() {
+        for tool in skills_tool::tools() {
+            assert!(
+                SKILLS_CALLABLE_TOOL_IDS.contains(&tool.id.as_str()),
+                "'{}' is advertised as a callable skills tool but is missing from \
+                 SKILLS_CALLABLE_TOOL_IDS, so the approval gate would be skipped for it",
+                tool.id
+            );
+        }
+    }
+
+    /// The call path is unchanged apart from the gate: a catalog id still reaches
+    /// the `skills` provider and comes back with the fallthrough refusal naming
+    /// `skills__load`.
+    ///
+    /// Note this process has no global approval engine (`set_global_engine` is a
+    /// `OnceLock`, and installing one here would gate every other test in this
+    /// binary), so `gate_tool_call` is a no-op regardless — what this pins is that
+    /// wrapping the gate did not reorder or short-circuit the dispatch that follows
+    /// it. The "would have gated" half is covered by the policy assertions above.
+    #[tokio::test]
+    async fn a_catalog_id_still_gets_the_unchanged_refusal_through_the_gated_entry() {
+        let reg = McpRegistry::default().with_skills(ryu_skills::SkillRegistry::empty());
+        let err = reg
+            .call_tool_with_identity(
+                None,
+                "skills__deploy-to-staging",
+                serde_json::json!({}),
+                None,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .expect_err("a skill catalog id is never callable");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("is not a callable tool") && msg.contains(skills_tool::LOAD_TOOL_ID),
+            "the refusal must be the dispatch fallthrough's, unchanged: {msg}"
+        );
+        assert!(
+            !msg.contains("Approvals inbox"),
+            "no approval may be raised for an id that can never execute: {msg}"
+        );
+        // The wording is built from the requested slug alone, so it is identical for
+        // a slug that names a real skill and one that does not — no enumeration
+        // oracle. (Structural, hence asserted on an empty registry: the registry
+        // holds no skill named here and the message still quotes it back verbatim.)
+        assert!(msg.contains("deploy-to-staging"));
     }
 }
 

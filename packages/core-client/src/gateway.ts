@@ -1,9 +1,32 @@
-// apps/desktop/src/lib/api/gateway.ts
+// packages/core-client/src/gateway.ts
 //
 // Typed client for the Gateway observability surface, surfaced through Core's
 // read-only proxy (`GET /api/gateway/status`). The proxy fetches the gateway's
 // /health and /metrics and returns a combined snapshot, or a clear down state
 // (`reachable: false`) when the gateway is unreachable while Core is still up.
+//
+// ── WHAT THIS FILE IS, AND WHAT IT IS NOT ────────────────────────────────────
+//
+// It is a *subset fork* of `apps/desktop/src/lib/api/gateway.ts`, not a shared
+// core the desktop delegates to. The header above used to literally read
+// `// apps/desktop/src/lib/api/gateway.ts`, which is how the two came to drift:
+// the desktop file grew evaluators, `modality_map`, `eval_routing`,
+// `provider_tiers`, the firewall inspector, budget spend and the classify-tier
+// helpers; none of that exists here, and no in-repo surface imports
+// `@ryuhq/core-client/gateway` today (grep: zero importers — the desktop imports
+// its own copy). Reconciling the two is a real piece of work and deliberately
+// out of scope for the fix below.
+//
+// It is NOT dead code, though, and that is the reason the fix below matters:
+// this package publishes to npm as `@ryuhq/core-client` (0.0.14) with an
+// `"./*": "./src/*.ts"` export map, so `@ryuhq/core-client/gateway` is a
+// supported public entry point for anyone building a surface against Core. Its
+// `fetchGatewayConfig` therefore has to hold the same contract the desktop's
+// does — in particular it must not fabricate config sections the gateway never
+// served. See {@link routingViewIncludesSmartRouting}.
+//
+// If you extend this file, port the desktop's *reasoning*, not its whole
+// surface, and say here which parts are still missing.
 
 import { type ApiTarget, request } from "./client.ts";
 
@@ -284,6 +307,14 @@ export interface ModelMapping {
 	provider_model?: string | null;
 }
 
+/**
+ * How the matching rule is chosen for a smart-routing decision:
+ * - `llm`: a cheap classifier model reads the message and picks a rule.
+ * - `embedding`: embed rule descriptions + the query, cosine-nearest above a threshold.
+ * - `keyword`: case-insensitive significant-word match; zero cost, zero network.
+ */
+export type RouteStrategy = "llm" | "embedding" | "keyword";
+
 /** A single smart-routing rule: a plain-language condition + target model. */
 export interface SmartRule {
 	/** Natural-language condition, e.g. "writing or refactoring code". */
@@ -298,6 +329,17 @@ export interface SmartRule {
  * best-matching rule, and the request is re-routed to that rule's target model
  * before the normal model→provider routing runs. Fails open: any error keeps the
  * originally requested model. Takes effect after the gateway restarts.
+ *
+ * All nine fields are always on the wire: `RoutingView.smart_routing`
+ * (`apps/gateway/src/api/config.rs`) is a plain `SmartRoutingConfig` struct, not
+ * an `Option`, and every field on it is `#[serde(default)]`-filled rather than
+ * skipped. `strategy` / `embedding_model` / `similarity_threshold` were missing
+ * from this interface while the gateway served them — a type that cannot see a
+ * served field is a setting a consumer of this package cannot round-trip, and a
+ * `smart_routing` literal built field-by-field from the six it *could* see would
+ * reset the other three on the next `PUT` (the section is replaced wholesale;
+ * see {@link routingViewIncludesSmartRouting}). They are required, not optional,
+ * because the gateway always emits them.
  */
 export interface SmartRoutingConfig {
 	/** Classify once per conversation and reuse the decision. Default true. */
@@ -306,10 +348,16 @@ export interface SmartRoutingConfig {
 	classifier_model: string;
 	/** Model used when no rule matches. null/empty ⇒ keep the requested model. */
 	default_model?: string | null;
+	/** Embedder for the `embedding` strategy. Empty ⇒ default local embedder. */
+	embedding_model: string;
 	/** Master switch. Off by default (the classifier adds a per-request call). */
 	enabled: boolean;
 	/** Ordered natural-language rules. */
 	rules: SmartRule[];
+	/** Min cosine for the `embedding` strategy to accept a rule. Default 0.35. */
+	similarity_threshold: number;
+	/** How the matching rule is chosen. Default `llm`. */
+	strategy: RouteStrategy;
 	/** Per-classification timeout in ms. Default 4000. */
 	timeout_ms: number;
 }
@@ -421,21 +469,77 @@ export interface GatewayConfigPatch {
 	routing?: GatewayRoutingConfig;
 }
 
+/**
+ * Values matching `SmartRoutingConfig::default()` on the gateway, for a consumer
+ * to bind a form control to when the served section is absent.
+ *
+ * Coalesce with this at YOUR OWN render edge, never inside
+ * {@link fetchGatewayConfig} — see {@link routingViewIncludesSmartRouting} for
+ * the difference that would destroy.
+ */
 export const DEFAULT_SMART_ROUTING: SmartRoutingConfig = {
 	enabled: false,
+	strategy: "llm",
 	classifier_model: "",
+	embedding_model: "",
+	similarity_threshold: 0.35,
 	rules: [],
 	default_model: null,
 	cache_by_session: true,
 	timeout_ms: 4000,
 };
 
+/**
+ * Shape used only when a 2xx arrives with no `routing` section at all. It
+ * deliberately omits `smart_routing`: this object stands in for "the gateway
+ * told us nothing", and manufacturing a section here would assert something
+ * about the node that was never observed.
+ */
 const DEFAULT_ROUTING: GatewayRoutingConfig = {
 	default_provider: "openai",
 	model_map: {},
 	fallback_chain: [],
-	smart_routing: DEFAULT_SMART_ROUTING,
 };
+
+/**
+ * Whether this gateway's `GET /v1/config` actually reported
+ * `routing.smart_routing`.
+ *
+ * A presence test rather than a `?? DEFAULT_SMART_ROUTING` default, and the
+ * reason is structural, not defensive typing.
+ *
+ * `PUT /v1/config { routing }` assigns the section wholesale
+ * (`apps/gateway/src/api/config.rs`: `updated_config.routing = routing.clone()`)
+ * and `RoutingConfig::smart_routing` is `#[serde(default)]`
+ * (`apps/gateway/src/config.rs`), so a PUT body that omits it deserializes to
+ * `SmartRoutingConfig::default()` and replaces whatever was on disk. Omission
+ * and an explicit default erase identically; there is no clobber guard on
+ * `routing`.
+ *
+ * So against a gateway too old to serve the field, a caller cannot round-trip
+ * what it cannot see, and any routing save wipes a hand-written
+ * `[routing.smart_routing]` in `gateway.toml`. From here that is not fixable,
+ * only reportable — which is precisely why the two states have to stay
+ * distinguishable.
+ *
+ * {@link fetchGatewayConfig} used to coalesce the field to
+ * {@link DEFAULT_SMART_ROUTING}, and that coalesce is worse than it looks: an
+ * unserved section became a *concrete* `enabled: false`, a fabricated "classifier
+ * routing is off" that the client then spread back out on the next save of any
+ * unrelated routing field. A status reporting healthy for a thing that was never
+ * there, then writing that status back. The desktop copy
+ * (`apps/desktop/src/lib/api/gateway.ts::routingViewIncludesSmartRouting`) was
+ * fixed first; this is the same fix for the published package.
+ *
+ * A gateway that DOES serve the field always emits the key (`RoutingView`
+ * carries a plain `SmartRoutingConfig`, not an `Option`), so presence is an
+ * exact test.
+ */
+export function routingViewIncludesSmartRouting(
+	routing: GatewayRoutingConfig
+): boolean {
+	return "smart_routing" in routing;
+}
 
 /**
  * Fetch the gateway's current config (redacted) via Core's proxy
@@ -453,10 +557,14 @@ export async function fetchGatewayConfig(
 	const routing = raw.routing ?? DEFAULT_ROUTING;
 	return {
 		...raw,
-		routing: {
-			...routing,
-			smart_routing: routing.smart_routing ?? DEFAULT_SMART_ROUTING,
-		},
+		// Passed through EXACTLY as served — no `smart_routing` default folded in.
+		// Coalescing here would erase the difference between "this gateway does not
+		// serve the section" and "it serves it, switched off", and because the PUT
+		// replaces `routing` wholesale the manufactured section rides back out on
+		// the next save of anything else. See {@link routingViewIncludesSmartRouting};
+		// a consumer that needs a value to bind a control to coalesces at its own
+		// edge, where it can also say which of the two states it is in.
+		routing,
 	};
 }
 

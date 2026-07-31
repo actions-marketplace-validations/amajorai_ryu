@@ -8,24 +8,39 @@ import {
 import { cn } from "@ryu/ui/lib/utils";
 import { memo } from "react";
 import { useAgentUsage } from "@/src/hooks/useAgentUsage.ts";
+import { useProviderCredits } from "@/src/hooks/useProviderCredits.ts";
 import {
 	type UsageBarMode,
 	type UsageBarStyle,
 	useUsageBarPrefs,
 } from "@/src/hooks/useUsageBarPrefs.ts";
-import type { UsageWindow } from "@/src/lib/api/usage.ts";
+import type {
+	UsageMeter,
+	UsageValue,
+	UsageWindow,
+} from "@/src/lib/api/usage.ts";
+import {
+	expiryClass,
+	formatCountdown,
+	formatExpiryDate,
+} from "@/src/lib/expiry.ts";
 
 /**
  * Compact subscription usage meters for the active chat agent (à la CodexBar /
- * openusage). When a subscription ACP agent is active (Claude Code, Codex), Core
- * reads that CLI's own local OAuth token and returns its rolling rate-limit
- * windows — the 5h "session" window and the weekly window — which render here as
- * tiny labeled bars beside the other composer controls.
+ * openusage). When a subscription ACP agent is active (Claude Code, Codex,
+ * Copilot, Grok, GLM), Core reads that CLI's own local credential and returns
+ * its rolling rate-limit windows — the 5h "session" window, the weekly window,
+ * per-model weekly limits — which render here as tiny labeled bars beside the
+ * other composer controls.
  *
- * Renders nothing unless there are real usage windows to show — no data, a
- * local model / Gemini / Pi, or an unavailable state (signed out, token
- * expired, rate limited) all just hide the meter, keeping the toolbar clean
- * instead of nagging.
+ * Alongside them come the figures that aren't percentages: a credit balance,
+ * Codex's banked rate-limit resets (a count whose credits each expire on their
+ * own date), extra-usage spend. Those render as tiny text chips, since a bar
+ * needs a denominator they don't have.
+ *
+ * Renders nothing unless there is real usage to show — no data, a local model /
+ * Gemini / Pi, or an unavailable state (signed out, token expired, rate limited)
+ * all just hide the meter, keeping the toolbar clean instead of nagging.
  */
 export const UsageBar = memo(function UsageBar({
 	agentId,
@@ -53,30 +68,51 @@ export const UsageBar = memo(function UsageBar({
 	const usage = useAgentUsage(agentId);
 	const prefs = useUsageBarPrefs();
 	const isVisible = visible ?? prefs.visible;
-	// Show real usage windows only. Anything else — hidden by the user, no data,
-	// unavailable (signed out / expired / rate limited), or zero windows —
-	// renders nothing, so the surface stays clean instead of nagging.
-	if (!(usage && isVisible && usage.available) || usage.windows.length === 0) {
+	// Show real usage only. Anything else — hidden by the user, no data,
+	// unavailable (signed out / expired / rate limited), or nothing to show at
+	// all — renders nothing, so the surface stays clean instead of nagging.
+	if (!(usage && isVisible && usage.available)) {
+		return null;
+	}
+	// Nothing to draw: neither a percent window nor a non-percent row.
+	if (usage.windows.length === 0 && usage.meters.length === 0) {
 		return null;
 	}
 	if (compact) {
 		return (
-			<div className={cn("flex items-center", className)}>
-				<CompactUsageMeter
-					barStyle={prefs.showBar ? prefs.barStyle : "bar"}
-					mode={prefs.mode}
-					plan={usage.plan}
-					windows={usage.windows}
-				/>
+			<div className={cn("flex items-center gap-1", className)}>
+				{usage.windows.length > 0 ? (
+					<CompactUsageMeter
+						barStyle={prefs.showBar ? prefs.barStyle : "bar"}
+						meters={usage.meters}
+						mode={prefs.mode}
+						plan={usage.plan}
+						windows={usage.windows}
+					/>
+				) : null}
+				{/* With no percent windows to hang the shared tooltip on, the
+				    non-percent rows still need their own chips. */}
+				{usage.windows.length === 0
+					? usage.meters.map((meter) => (
+							<MeterChip key={meter.label} meter={meter} plan={usage.plan} />
+						))
+					: null}
 			</div>
 		);
 	}
+	// Bound the inline row. Core can report six rows for one agent (Codex with the
+	// Spark limit: four windows plus banked resets and credits), and the composer's
+	// control cluster shares its line with the settings menu, the capability badges
+	// and the send button. The rest go behind one "+N" chip, mirroring the caret
+	// both reference apps hide their secondary metrics behind.
+	const inlineWindows = usage.windows.slice(0, INLINE_WINDOW_LIMIT);
+	const inlineMeters = usage.meters.slice(0, INLINE_METER_LIMIT);
 	return (
 		<div className={cn("flex items-center gap-1.5", className)}>
-			{usage.windows.map((usageWindow) => (
-				<UsageMeter
+			{inlineWindows.map((usageWindow) => (
+				<UsageWindowMeter
 					barStyle={prefs.barStyle}
-					key={usageWindow.label}
+					key={windowKey(usageWindow)}
 					mode={prefs.mode}
 					plan={usage.plan}
 					showBar={prefs.showBar}
@@ -84,9 +120,34 @@ export const UsageBar = memo(function UsageBar({
 					window={usageWindow}
 				/>
 			))}
+			{inlineMeters.map((meter) => (
+				<MeterChip key={meter.label} meter={meter} plan={usage.plan} />
+			))}
+			<OverflowChip
+				meters={usage.meters.slice(INLINE_METER_LIMIT)}
+				mode={prefs.mode}
+				plan={usage.plan}
+				windows={usage.windows.slice(INLINE_WINDOW_LIMIT)}
+			/>
 		</div>
 	);
 });
+
+/**
+ * How many of each row kind the non-compact bar shows inline before the rest move
+ * into the "+N" overflow chip. Two windows is the canonical Session/Weekly pair
+ * every vendor reports (Core emits them first); one meter covers the single row
+ * that is usually worth watching — a credit balance, or banked resets that are
+ * about to expire.
+ */
+const INLINE_WINDOW_LIMIT = 2;
+const INLINE_METER_LIMIT = 1;
+
+/**
+ * How many segments the compact pill draws. Purely visual — its tooltip lists
+ * every window and meter regardless of this cap.
+ */
+const COMPACT_SEGMENT_LIMIT = 3;
 
 /** Threshold colors for the filled portion: calm → amber → red as it fills. */
 function fillClass(usedPercent: number): string {
@@ -177,18 +238,39 @@ function UsageRing({ used, shown }: { used: number; shown: number }) {
 	);
 }
 
-/** Short axis label: "Session" → "5h", "Weekly" → "7d", "Sonnet weekly" → "Sonnet". */
-function shortLabel(label: string): string {
-	if (label === "Session") {
-		return "5h";
+const SECONDS_PER_HOUR = 3600;
+const HOURS_PER_DAY = 24;
+
+/**
+ * Short axis label. The two rolling windows every vendor reports collapse to
+ * their duration ("5h" / "7d") when the vendor told us how long the window is —
+ * so a per-model or vendor-specific window ("Sonnet", "Spark", "Web searches")
+ * keeps its own name instead of needing a case here. Labels are data now: Core
+ * reads Claude's per-model weekly limits straight out of the API's `limits`
+ * array, so this can't be a closed set.
+ */
+/**
+ * React key for a window. Labels alone aren't guaranteed unique — a vendor can
+ * report two windows of different lengths whose canonical names collide, and Core
+ * names them from the data — so the length participates in the key.
+ */
+function windowKey(usageWindow: UsageWindow): string {
+	return `${usageWindow.label}:${usageWindow.windowSeconds ?? "?"}`;
+}
+
+function shortLabel(usageWindow: UsageWindow): string {
+	const { label, windowSeconds } = usageWindow;
+	if (label !== "Session" && label !== "Weekly") {
+		return label;
 	}
-	if (label === "Weekly") {
-		return "7d";
+	if (windowSeconds === null || windowSeconds <= 0) {
+		return label === "Session" ? "5h" : "7d";
 	}
-	if (label === "Sonnet weekly") {
-		return "Sonnet";
+	const hours = Math.round(windowSeconds / SECONDS_PER_HOUR);
+	if (hours < HOURS_PER_DAY) {
+		return `${hours}h`;
 	}
-	return label;
+	return `${Math.round(hours / HOURS_PER_DAY)}d`;
 }
 
 /** "resets in ~3h" / "resets in ~12m" / "" when unknown or already past. */
@@ -214,6 +296,228 @@ function formatReset(resetsAt: string | null): string {
 	return `resets in ~${Math.round(hours / 24)}d`;
 }
 
+/** "$32.84" / "821 credits" / "42%" — one figure, formatted for its kind. */
+function formatValue(value: UsageValue): string {
+	if (value.kind === "dollars") {
+		return `$${value.number.toFixed(2)}`;
+	}
+	if (value.kind === "percent") {
+		return `${Math.round(value.number)}%`;
+	}
+	const count = value.number.toLocaleString();
+	return value.unit ? `${count} ${value.unit}` : count;
+}
+
+/**
+ * The chip text for a whole row. A pair of same-kind figures is a
+ * value-against-cap ("$2.50/$25.00", "120/3000"); anything else shows its
+ * leading figure with its unit ("2 available", "$32.84").
+ */
+function formatMeter(meter: UsageMeter): string {
+	const [first, second] = meter.values;
+	if (!first) {
+		return "";
+	}
+	if (second && second.kind === first.kind) {
+		const cap =
+			second.kind === "dollars"
+				? `$${second.number.toFixed(2)}`
+				: second.number.toLocaleString();
+		const used =
+			first.kind === "dollars"
+				? `$${first.number.toFixed(2)}`
+				: first.number.toLocaleString();
+		return `${used}/${cap}`;
+	}
+	return formatValue(first);
+}
+
+/**
+ * A meter's per-credit expiry timeline: every item soonest-first with its exact
+ * moment, its countdown, and an urgency dot. Shared by the chip's own tooltip and
+ * the overflow tooltip so the timeline is defined once.
+ */
+function ExpiryTimeline({ expiresAt }: { expiresAt: string[] }) {
+	return (
+		<>
+			{expiresAt.map((expiry, index) => (
+				<span
+					className="flex items-center gap-1.5 text-muted-foreground"
+					key={expiry}
+				>
+					<span
+						aria-hidden="true"
+						className={cn("size-1.5 rounded-full", expiryClass(expiry))}
+					/>
+					<span className="tabular-nums">
+						{index + 1}. expires {formatExpiryDate(expiry)}
+					</span>
+					<span className="tabular-nums opacity-70">
+						{formatCountdown(expiry)}
+					</span>
+				</span>
+			))}
+		</>
+	);
+}
+
+/** One window's line inside a shared tooltip: "Weekly: 61% used · resets in ~3d". */
+function WindowTooltipRow({
+	window: usageWindow,
+	mode,
+}: {
+	window: UsageWindow;
+	mode: UsageBarMode;
+}) {
+	const used = Math.max(0, Math.min(100, usageWindow.usedPercent));
+	const shown = mode === "remaining" ? 100 - used : used;
+	const reset = formatReset(usageWindow.resetsAt);
+	return (
+		<span className="font-medium">
+			{usageWindow.label}: {Math.round(shown)}%{" "}
+			{mode === "remaining" ? "left" : "used"}
+			{reset ? (
+				<span className="ml-1 font-normal text-muted-foreground">
+					· {reset}
+				</span>
+			) : null}
+		</span>
+	);
+}
+
+/** One meter's line inside a shared tooltip, with its expiry timeline. */
+function MeterTooltipRow({ meter }: { meter: UsageMeter }) {
+	const text = formatMeter(meter);
+	if (!text) {
+		return null;
+	}
+	return (
+		<>
+			<span className="font-medium">
+				{meter.label}: {text}
+			</span>
+			<ExpiryTimeline expiresAt={meter.expiresAt} />
+		</>
+	);
+}
+
+/**
+ * One non-percent usage row as a tiny text chip: a credit balance, the count of
+ * banked rate-limit resets, extra-usage spend. These have no denominator, so a
+ * bar would have to invent one — the number itself is the honest rendering.
+ *
+ * When the row carries per-item expiries (Codex's banked resets, where every
+ * credit expires on its own date), the tooltip lists them soonest-first as a
+ * timeline with a countdown and an urgency dot, and the chip itself wears the
+ * soonest expiry's hue.
+ */
+function MeterChip({
+	meter,
+	plan,
+}: {
+	meter: UsageMeter;
+	plan: string | null;
+}) {
+	const text = formatMeter(meter);
+	if (!text) {
+		return null;
+	}
+	const soonest = meter.expiresAt.at(0) ?? null;
+	const reset = formatReset(meter.resetsAt);
+	return (
+		<Tooltip>
+			<TooltipTrigger
+				render={
+					<span
+						aria-label={`${meter.label}: ${text}`}
+						className="flex shrink-0 items-center gap-1 text-muted-foreground/70"
+					/>
+				}
+			>
+				{soonest ? (
+					<span
+						aria-hidden="true"
+						className={cn("size-1.5 rounded-full", expiryClass(soonest))}
+					/>
+				) : null}
+				<span className="text-[10px] tabular-nums">{text}</span>
+			</TooltipTrigger>
+			<TooltipContent>
+				<div className="flex flex-col gap-0.5 text-xs">
+					<span className="font-medium">
+						{meter.label}: {text}
+					</span>
+					<ExpiryTimeline expiresAt={meter.expiresAt} />
+					{reset ? (
+						<span className="text-muted-foreground">{reset}</span>
+					) : null}
+					{plan ? (
+						<span className="text-muted-foreground">Plan: {plan}</span>
+					) : null}
+				</div>
+			</TooltipContent>
+		</Tooltip>
+	);
+}
+
+/**
+ * The rows that didn't fit inline, behind a single "+N" chip whose tooltip lists
+ * them in full.
+ *
+ * Both reference apps do the same thing for the same reason: CodexBar tucks Spark
+ * / Spark Weekly under a "show more" caret and openusage puts a provider's
+ * secondary metrics in an "On Demand" group. A Codex account with the Spark limit
+ * reports four windows plus two non-percent rows, and six inline meters would
+ * crowd the composer's control cluster off its line.
+ */
+function OverflowChip({
+	windows,
+	meters,
+	mode,
+	plan,
+}: {
+	windows: UsageWindow[];
+	meters: UsageMeter[];
+	mode: UsageBarMode;
+	plan: string | null;
+}) {
+	const count = windows.length + meters.length;
+	if (count === 0) {
+		return null;
+	}
+	return (
+		<Tooltip>
+			<TooltipTrigger
+				render={
+					<span
+						aria-label={`${count} more usage meters`}
+						className="shrink-0 text-[10px] text-muted-foreground/70 tabular-nums"
+					/>
+				}
+			>
+				+{count}
+			</TooltipTrigger>
+			<TooltipContent>
+				<div className="flex flex-col gap-0.5 text-xs">
+					{windows.map((usageWindow) => (
+						<WindowTooltipRow
+							key={windowKey(usageWindow)}
+							mode={mode}
+							window={usageWindow}
+						/>
+					))}
+					{meters.map((meter) => (
+						<MeterTooltipRow key={meter.label} meter={meter} />
+					))}
+					{plan ? (
+						<span className="text-muted-foreground">Plan: {plan}</span>
+					) : null}
+				</div>
+			</TooltipContent>
+		</Tooltip>
+	);
+}
+
 /**
  * All of an agent's usage windows collapsed into one short segmented pill — one
  * equal-width segment per window (5h, 7d), each filled and colored by its own
@@ -223,11 +527,14 @@ function formatReset(resetsAt: string | null): string {
  */
 function CompactUsageMeter({
 	windows,
+	meters,
 	plan,
 	mode,
 	barStyle,
 }: {
 	windows: UsageWindow[];
+	/** The non-percent rows, folded into this pill's shared tooltip. */
+	meters: UsageMeter[];
 	plan: string | null;
 	mode: UsageBarMode;
 	barStyle: UsageBarStyle;
@@ -239,9 +546,14 @@ function CompactUsageMeter({
 		.map((w) => {
 			const used = Math.max(0, Math.min(100, w.usedPercent));
 			const shown = mode === "remaining" ? 100 - used : used;
-			return `${shortLabel(w.label)}: ${Math.round(shown)}% ${noun}`;
+			return `${shortLabel(w)}: ${Math.round(shown)}% ${noun}`;
 		})
 		.join(", ");
+	// The pill is decorative — every number lives in the tooltip below, which
+	// always lists all of them. So cap the drawn segments: a fixed-width bar split
+	// six ways is unreadable, and in ring mode six 14px rings are wider than the
+	// sidebar row the compact variant exists to fit.
+	const segments = windows.slice(0, COMPACT_SEGMENT_LIMIT);
 	return (
 		<Tooltip>
 			<TooltipTrigger
@@ -249,19 +561,23 @@ function CompactUsageMeter({
 					<span
 						aria-label={`Usage — ${label}`}
 						className={cn(
-							"flex items-center",
+							"flex shrink-0 items-center",
 							isRing ? "gap-0.5" : "h-1.5 w-10 gap-px"
 						)}
 						role="img"
 					/>
 				}
 			>
-				{windows.map((usageWindow) => {
+				{segments.map((usageWindow) => {
 					const used = Math.max(0, Math.min(100, usageWindow.usedPercent));
 					const shown = mode === "remaining" ? 100 - used : used;
 					if (isRing) {
 						return (
-							<UsageRing key={usageWindow.label} shown={shown} used={used} />
+							<UsageRing
+								key={windowKey(usageWindow)}
+								shown={shown}
+								used={used}
+							/>
 						);
 					}
 					return (
@@ -270,7 +586,7 @@ function CompactUsageMeter({
 								"h-full flex-1 overflow-hidden rounded-full",
 								trackClass(used)
 							)}
-							key={usageWindow.label}
+							key={windowKey(usageWindow)}
 						>
 							<span
 								className={cn("block h-full rounded-full", fillClass(used))}
@@ -282,21 +598,16 @@ function CompactUsageMeter({
 			</TooltipTrigger>
 			<TooltipContent>
 				<div className="flex flex-col gap-0.5 text-xs">
-					{windows.map((usageWindow) => {
-						const used = Math.max(0, Math.min(100, usageWindow.usedPercent));
-						const shown = mode === "remaining" ? 100 - used : used;
-						const reset = formatReset(usageWindow.resetsAt);
-						return (
-							<span className="font-medium" key={usageWindow.label}>
-								{usageWindow.label}: {Math.round(shown)}% {noun}
-								{reset ? (
-									<span className="ml-1 font-normal text-muted-foreground">
-										· {reset}
-									</span>
-								) : null}
-							</span>
-						);
-					})}
+					{windows.map((usageWindow) => (
+						<WindowTooltipRow
+							key={windowKey(usageWindow)}
+							mode={mode}
+							window={usageWindow}
+						/>
+					))}
+					{meters.map((meter) => (
+						<MeterTooltipRow key={meter.label} meter={meter} />
+					))}
 					{plan ? (
 						<span className="text-muted-foreground">Plan: {plan}</span>
 					) : null}
@@ -306,7 +617,7 @@ function CompactUsageMeter({
 	);
 }
 
-function UsageMeter({
+function UsageWindowMeter({
 	window: usageWindow,
 	plan,
 	mode,
@@ -344,12 +655,12 @@ function UsageMeter({
 				render={
 					<span
 						aria-label={`${usageWindow.label}: ${Math.round(shown)}% ${noun}`}
-						className="flex items-center gap-1 text-muted-foreground/70"
+						className="flex shrink-0 items-center gap-1 text-muted-foreground/70"
 					/>
 				}
 			>
 				<span className="text-[10px] tabular-nums">
-					{shortLabel(usageWindow.label)}
+					{shortLabel(usageWindow)}
 				</span>
 				{showBar &&
 					(barStyle === "ring" ? (
@@ -377,3 +688,253 @@ function UsageMeter({
 		</Tooltip>
 	);
 }
+
+/**
+ * The agent picker's per-row usage indicator: the tightest possible read of an
+ * agent's subscription headroom, for the row you are about to pick.
+ *
+ * Shows the single most-consumed window as `NN%` (the one that will bite first),
+ * coloured by the same calm → amber → red danger scale as the composer bar, with
+ * the full breakdown — every window, every non-percent row, the plan — in its
+ * tooltip. Deliberately not the full `UsageBar`: a picker row already carries a
+ * logo, a name and a checkmark, and a meter per window would not fit.
+ *
+ * Renders nothing whenever there is nothing real to show, so a row for an agent
+ * with no subscription window (or one that is signed out) looks exactly as it did
+ * before this existed.
+ *
+ * Cost note: one of these mounts per installed subscription-agent row, so opening
+ * the picker can touch several vendor endpoints. They share `useAgentUsage`'s
+ * query key and its 5-minute `staleTime` with the composer bar, and TanStack's
+ * `refetchOnWindowFocus` is stale-gated (`shouldFetchOn` → `isStale`), so a focus
+ * cannot fan out a burst — a given agent is polled at most once per 5 minutes no
+ * matter how many badges are mounted.
+ */
+export const AgentUsageBadge = memo(function AgentUsageBadge({
+	agentId,
+	className,
+}: {
+	agentId: string;
+	className?: string;
+}) {
+	const usage = useAgentUsage(agentId);
+	if (!usage?.available) {
+		return null;
+	}
+	// The ACCOUNT-WIDE window closest to its cap. Model-scoped windows are excluded
+	// deliberately: they have their own badges on their own model rows, and folding
+	// them in here would read as "this agent is nearly out" when only one model's
+	// weekly limit is exhausted — sending the user to a different agent when
+	// switching model was free.
+	const worst = worstWindow(
+		usage.windows.filter((usageWindow) => usageWindow.model === null)
+	);
+	if (!(worst || usage.meters.length > 0)) {
+		return null;
+	}
+	const used = worst ? Math.max(0, Math.min(100, worst.usedPercent)) : 0;
+	return (
+		<Tooltip>
+			<TooltipTrigger
+				render={
+					<span
+						aria-label={
+							worst
+								? `${worst.label}: ${Math.round(used)}% used`
+								: "Subscription usage"
+						}
+						className={cn(
+							"shrink-0 text-[10px] tabular-nums",
+							worst ? usageTextClass(used) : "text-muted-foreground/70",
+							className
+						)}
+					/>
+				}
+			>
+				{worst ? `${Math.round(used)}%` : formatMeter(usage.meters[0])}
+			</TooltipTrigger>
+			<TooltipContent>
+				<div className="flex flex-col gap-0.5 text-xs">
+					{usage.windows.map((usageWindow) => (
+						<WindowTooltipRow
+							key={windowKey(usageWindow)}
+							mode="used"
+							window={usageWindow}
+						/>
+					))}
+					{usage.meters.map((meter) => (
+						<MeterTooltipRow key={meter.label} meter={meter} />
+					))}
+					{usage.plan ? (
+						<span className="text-muted-foreground">Plan: {usage.plan}</span>
+					) : null}
+				</div>
+			</TooltipContent>
+		</Tooltip>
+	);
+});
+
+/**
+ * The window closest to its cap — the one that stops the next turn, which is the
+ * only thing a one-number badge can usefully say. `null` for an empty list.
+ */
+function worstWindow(windows: UsageWindow[]): UsageWindow | null {
+	return windows.reduce<UsageWindow | null>(
+		(peak, candidate) =>
+			peak === null || candidate.usedPercent > peak.usedPercent
+				? candidate
+				: peak,
+		null
+	);
+}
+
+/** Text-colour counterpart of `fillClass`, for the picker badge's bare number. */
+function usageTextClass(usedPercent: number): string {
+	if (usedPercent >= 90) {
+		return "text-red-500";
+	}
+	if (usedPercent >= 70) {
+		return "text-amber-500";
+	}
+	return "text-muted-foreground/70";
+}
+
+/**
+ * Normalize a model name for matching: lowercase, strip everything that isn't a
+ * letter or digit. `"GPT-5.3-Codex-Spark"` and `"gpt_5_3_codex_spark"` collapse
+ * to the same token, so punctuation drift between the vendor's limit name and
+ * the model id in the picker can't break the match.
+ */
+function normalizeModel(value: string): string {
+	return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+}
+
+/**
+ * The per-model quota badge for a model row inside an agent's submenu: Claude's
+ * weekly Sonnet / Opus limits, Codex's Spark pair.
+ *
+ * Matched on `UsageWindow.model` — which Core reports explicitly — rather than on
+ * the window's label. Inferring "a label that isn't Session or Weekly names a
+ * model" would need a closed set of non-model labels, and Copilot's `Chat` /
+ * `Completions` and Z.ai's `Daily` are exactly what such a set misses; hanging an
+ * account-wide quota off a model row because they shared a word is worse than
+ * showing nothing.
+ *
+ * Renders nothing when this model has no window of its own, which is the common
+ * case — most models draw on the account-wide pool the row's agent badge shows.
+ */
+export const ModelUsageBadge = memo(function ModelUsageBadge({
+	agentId,
+	modelId,
+	modelName,
+}: {
+	agentId: string;
+	modelId: string;
+	modelName?: string;
+}) {
+	const usage = useAgentUsage(agentId);
+	if (!usage?.available) {
+		return null;
+	}
+	const haystack = normalizeModel(`${modelId} ${modelName ?? ""}`);
+	// A model can have MORE than one window of its own — Codex meters Spark on both
+	// a 5h and a weekly limit — so take the one closest to its cap, exactly as the
+	// agent badge does. Taking the first would hide a Spark weekly at 95% behind a
+	// session at 3%.
+	const scoped = worstWindow(
+		usage.windows.filter((usageWindow) => {
+			if (!usageWindow.model) {
+				return false;
+			}
+			const needle = normalizeModel(usageWindow.model);
+			return needle.length > 0 && haystack.includes(needle);
+		})
+	);
+	if (!scoped) {
+		return null;
+	}
+	const used = Math.max(0, Math.min(100, scoped.usedPercent));
+	const reset = formatReset(scoped.resetsAt);
+	return (
+		<Tooltip>
+			<TooltipTrigger
+				render={
+					<span
+						aria-label={`${scoped.label}: ${Math.round(used)}% used`}
+						className={cn(
+							"shrink-0 text-[10px] tabular-nums",
+							usageTextClass(used)
+						)}
+					/>
+				}
+			>
+				{Math.round(used)}%
+			</TooltipTrigger>
+			<TooltipContent>
+				<div className="flex flex-col gap-0.5 text-xs">
+					<WindowTooltipRow mode="used" window={scoped} />
+					{reset ? null : (
+						<span className="text-muted-foreground">
+							This model has its own limit.
+						</span>
+					)}
+				</div>
+			</TooltipContent>
+		</Tooltip>
+	);
+});
+
+/**
+ * A BYOK provider's remaining prepaid API credit, on its picker row: "$37.75".
+ *
+ * Only three providers expose a balance to the inference key you already hold
+ * (OpenRouter, DeepSeek, Moonshot) — `useProviderCredits` gates the query on
+ * that, so the ~13 that don't cost nothing. Anything unavailable renders
+ * nothing: a row that suddenly shows an error chip is worse than one that shows
+ * no chip, and `$0.00` for "we couldn't ask" would be a lie about their money.
+ */
+export const ProviderCreditsBadge = memo(function ProviderCreditsBadge({
+	providerId,
+	label,
+}: {
+	providerId: string;
+	label: string;
+}) {
+	const credits = useProviderCredits(providerId);
+	const meters = credits?.available ? credits.meters : [];
+	const balance = meters.at(0);
+	if (!balance) {
+		return null;
+	}
+	// The leading figure only. Core emits granted/voucher money as its OWN meter
+	// precisely so it can't be rendered as a "$9.87/$1.23" ratio; the chip shows
+	// the balance and the tooltip lists the rest.
+	const text = formatMeter(balance);
+	if (!text) {
+		return null;
+	}
+	return (
+		<Tooltip>
+			<TooltipTrigger
+				render={
+					<span
+						aria-label={`${label}: ${text} of API credit left`}
+						className="shrink-0 text-[10px] text-muted-foreground/70 tabular-nums"
+					/>
+				}
+			>
+				{text}
+			</TooltipTrigger>
+			<TooltipContent>
+				<div className="flex flex-col gap-0.5 text-xs">
+					{meters.map((meter) => (
+						<MeterTooltipRow key={meter.label} meter={meter} />
+					))}
+					<span className="text-muted-foreground">
+						Prepaid credit on your {label} key.
+					</span>
+				</div>
+			</TooltipContent>
+		</Tooltip>
+	);
+});

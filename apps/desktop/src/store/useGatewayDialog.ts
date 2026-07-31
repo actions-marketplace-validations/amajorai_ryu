@@ -29,6 +29,11 @@ export type GatewaySection =
 	| "email-alerts"
 	| "privacy"
 	| "storage"
+	// Which app extracts text from uploaded documents (the node-wide
+	// `document.parse` binding) and the ceiling it enforces. Node-level, not
+	// per-user: one provider is bound per node and serves every Space and every
+	// chat attachment on it.
+	| "parsing"
 	| "updates"
 	| "health"
 	| "danger";

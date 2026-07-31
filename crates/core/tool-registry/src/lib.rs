@@ -1,7 +1,8 @@
 //! Unified tool-catalog primitive (#474, P1) — extracted from `apps/core`.
 //!
 //! One searchable catalog across **MCP servers + built-ins + Composio + plugin
-//! tools** — no parallel registry. [`run_search`] ranks descriptors with a
+//! tools + Agent Skills** — no parallel registry. [`run_search`] ranks descriptors
+//! with a
 //! **swappable [`ToolRanker`]** (BM25 default, semantic rerank as a second impl
 //! seam, selectable via a pref key mirroring `catalog.active_source.{kind}`).
 //! [`describe_from_parts`] / [`describe_composio`] return a tool's argument
@@ -48,9 +49,21 @@ pub trait ToolEmbedder: Send + Sync {
     async fn embed(&self, text: &str) -> Option<Vec<f32>>;
 }
 
-/// Source plane of a tool. Serializes lowercase: `mcp|builtin|composio|app`,
+/// Source plane of a catalog entry. Serializes lowercase: `mcp|builtin|composio|app`,
 /// plus `core-api` for Core's own HTTP endpoints exposed as agent-drivable tools,
-/// and `command` for a declarative app tool that execs an allowlisted local CLI.
+/// `command` for a declarative app tool that execs an allowlisted local CLI, and
+/// `skill` for an Agent Skill.
+///
+/// ## `Skill` is the one kind that is not callable
+///
+/// Every other variant names a *function the model may invoke*. [`ToolKind::Skill`]
+/// names **instruction text the model may load** — an Agent Skill discovered through
+/// the same catalog so a model faces one search door instead of two, but reached with
+/// `skills__load` rather than by calling its id. The kind is the model's (and the
+/// gateway's) signal for that distinction: Core's `McpRegistry::describe` points a
+/// skill row at `skills__load`, the gateway declines to inject skill rows as function
+/// definitions, and Core's `skills` provider refuses a call that names a skill id as
+/// a tool. Discovery is unified; execution is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolKind {
@@ -67,9 +80,52 @@ pub enum ToolKind {
     /// the governed tool-exec path. Surfaced as its own kind so `?kind=command`
     /// selects these; the other app backends (http/inline_deno/alias) stay `App`.
     Command,
+    /// An Agent Skill: instruction text loaded with `skills__load`, **not** a
+    /// callable function. Ids are namespaced `skills__<slug>` so a skill row lives
+    /// in the same id space as the `skills__*` tools that serve it — which is what
+    /// makes the allowlist arm below, and Core's refusal path, work without a
+    /// bespoke lookup.
+    Skill,
 }
 
 impl ToolKind {
+    /// Every variant, in wire order — the single list both gateway mirrors and
+    /// Core's ACP bridge enumerate when asserting that their advertised
+    /// `tool_search.kind` enum covers every plane Core can filter on.
+    ///
+    /// **Adding a variant means adding it here.** [`ToolKind::wire_name`] below is a
+    /// wildcard-free `match`, so a new variant is a compile error there first; this
+    /// constant is two lines above it precisely so the same edit updates both. A
+    /// variant present in the enum but missing from `ALL` would make those mirror
+    /// tests pass vacuously — the exact failure mode that let `core-api` and
+    /// `command` stay invisible to every model for two releases.
+    pub const ALL: &'static [ToolKind] = &[
+        ToolKind::Mcp,
+        ToolKind::Builtin,
+        ToolKind::Composio,
+        ToolKind::App,
+        ToolKind::CoreApi,
+        ToolKind::Command,
+        ToolKind::Skill,
+    ];
+
+    /// The canonical wire spelling — the value [`ToolKind::parse_filter`] round-trips
+    /// and the one a `?kind=` / `tool_search.kind` filter must use.
+    ///
+    /// Exhaustive with no wildcard arm on purpose: that is the drift alarm. See
+    /// [`ToolKind::ALL`].
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            ToolKind::Mcp => "mcp",
+            ToolKind::Builtin => "builtin",
+            ToolKind::Composio => "composio",
+            ToolKind::App => "app",
+            ToolKind::CoreApi => "core-api",
+            ToolKind::Command => "command",
+            ToolKind::Skill => "skill",
+        }
+    }
+
     /// Parse the `?kind=` / `tool_search.kind` value. `any` → `None` (no filter);
     /// an unknown value also yields `None` so callers can treat it as "any".
     pub fn parse_filter(s: &str) -> Option<ToolKind> {
@@ -82,6 +138,7 @@ impl ToolKind {
             // variants callers may send.
             "core-api" | "core_api" | "coreapi" => Some(ToolKind::CoreApi),
             "command" => Some(ToolKind::Command),
+            "skill" | "skills" => Some(ToolKind::Skill),
             _ => None, // "any" or unknown
         }
     }
@@ -122,6 +179,28 @@ impl ToolDescriptor {
     /// bare tool name, **or** the server segment; for Composio it is matched on
     /// the fully-qualified id only (Composio ids have no name/server grant form,
     /// and id-only is the cross-plane-bypass guard on the call path).
+    ///
+    /// ## [`ToolKind::Skill`]: id or server segment, never the bare name
+    ///
+    /// A skill row's id is `skills__<slug>`, so its server segment is the `skills`
+    /// provider — the grant that lets an agent call `skills__load` at all. Matching
+    /// on id-or-server therefore mirrors the execution gate's *tool-allowlist half*
+    /// exactly: an agent with no grant on the `skills` server cannot load any skill,
+    /// so surfacing skill rows to it would advertise nothing reachable.
+    ///
+    /// The bare `name` is deliberately excluded. A skill's `name` is human prose
+    /// ("Resolve merge conflicts"), and the default arm's `e == name` would let an
+    /// allowlist entry written for a tool (`search`, meant for `exa__search`) match
+    /// a skill that happens to be *called* "search" — the same cross-plane
+    /// bare-name match the gateway's `is_allowed` doc records as security fix #1.
+    ///
+    /// **What this does NOT check** is the agent's per-agent *skill* allowlist
+    /// (`AgentRecord.skills`), which is a different list this crate never sees; it
+    /// is what `skills__search` / `skills__load` scope on. So under a tool
+    /// allowlist that grants `skills`, this returns `true` for every enabled skill,
+    /// including ones outside that agent's skill allowlist — which `skills__load`
+    /// will still refuse. See `McpRegistry::search_scoped` for where the skill
+    /// allowlist *is* applied and which plane still misses it.
     pub fn matches_allowlist(&self, allowlist: &[String]) -> bool {
         if self.kind == ToolKind::Composio {
             return allowlist.iter().any(|e| e == &self.id);
@@ -130,6 +209,9 @@ impl ToolDescriptor {
             .id
             .split_once("__")
             .map_or((self.id.as_str(), self.name.as_str()), |(s, t)| (s, t));
+        if self.kind == ToolKind::Skill {
+            return allowlist.iter().any(|e| e == &self.id || e == server);
+        }
         allowlist
             .iter()
             .any(|e| e == &self.id || e == name || e == server)
@@ -509,6 +591,43 @@ mod tests {
             serde_json::from_str::<ToolKind>("\"command\"").unwrap(),
             ToolKind::Command
         );
+        // Skill is the seventh plane; singular on the wire.
+        assert_eq!(
+            serde_json::to_string(&ToolKind::Skill).unwrap(),
+            "\"skill\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ToolKind>("\"skill\"").unwrap(),
+            ToolKind::Skill
+        );
+    }
+
+    /// [`ToolKind::ALL`] is what both gateway mirrors and the ACP bridge enumerate,
+    /// so a variant missing from it makes those parity tests pass vacuously. Assert
+    /// the two properties that would let that happen: every entry round-trips
+    /// through its own wire spelling, and no entry is listed twice.
+    #[test]
+    fn all_round_trips_through_wire_name_without_duplicates() {
+        for k in ToolKind::ALL {
+            assert_eq!(
+                ToolKind::parse_filter(k.wire_name()),
+                Some(*k),
+                "{k:?}'s wire_name is not what parse_filter maps back to it"
+            );
+            // The wire spelling and the serde spelling must be the same string, or
+            // a caller round-tripping a *serialized* descriptor's kind back into
+            // `?kind=` would silently get "no filter".
+            assert_eq!(
+                serde_json::to_string(k).unwrap(),
+                format!("\"{}\"", k.wire_name()),
+                "{k:?} serializes differently from its filter spelling"
+            );
+        }
+        let mut seen: Vec<&str> = ToolKind::ALL.iter().map(|k| k.wire_name()).collect();
+        let before = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "ToolKind::ALL lists a kind twice");
     }
 
     #[test]
@@ -523,6 +642,63 @@ mod tests {
         assert_eq!(ToolKind::parse_filter("CoreApi"), Some(ToolKind::CoreApi));
         assert_eq!(ToolKind::parse_filter("command"), Some(ToolKind::Command));
         assert_eq!(ToolKind::parse_filter("COMMAND"), Some(ToolKind::Command));
+        // `skill` is canonical; `skills` (the provider's name) is accepted as an
+        // alias because that is what a model that just read `skills__search` will
+        // reach for.
+        assert_eq!(ToolKind::parse_filter("skill"), Some(ToolKind::Skill));
+        assert_eq!(ToolKind::parse_filter("Skills"), Some(ToolKind::Skill));
+    }
+
+    /// A skill row is reachable via its id or the `skills` server segment (the grant
+    /// that lets an agent call `skills__load` at all), and **never** via its bare
+    /// human-readable name — which would let a tool-shaped allowlist entry match a
+    /// skill across planes.
+    #[test]
+    fn skill_rows_match_on_id_or_server_but_never_on_name() {
+        let s = desc(
+            "skills__merge-conflicts",
+            "search",
+            "resolve conflicts",
+            ToolKind::Skill,
+        );
+        assert!(s.matches_allowlist(&["skills__merge-conflicts".to_string()]));
+        assert!(s.matches_allowlist(&["skills".to_string()]));
+        // The name is "search" — an allowlist entry meant for `exa__search` must
+        // not reach this skill.
+        assert!(!s.matches_allowlist(&["search".to_string()]));
+        assert!(!s.matches_allowlist(&["merge-conflicts".to_string()]));
+        assert!(!s.matches_allowlist(&[]));
+        // The non-skill arm is unchanged: a bare name still matches a real tool.
+        let t = desc("exa__search", "search", "web search", ToolKind::Mcp);
+        assert!(t.matches_allowlist(&["search".to_string()]));
+    }
+
+    /// `kind=skill` selects only skill rows out of a mixed candidate set — the
+    /// property that makes `skills__search` a filtered view of the one catalog
+    /// rather than a second registry.
+    #[tokio::test]
+    async fn run_search_kind_skill_selects_only_skill_rows() {
+        let candidates = vec![
+            desc("exa__search", "search", "search the web", ToolKind::Mcp),
+            desc(
+                "skills__web-research",
+                "Web research",
+                "search the web methodically",
+                ToolKind::Skill,
+            ),
+        ];
+        let out = run_search(
+            "search",
+            candidates,
+            Vec::new(),
+            Some(ToolKind::Skill),
+            25,
+            ToolRanker::Bm25,
+            None,
+        )
+        .await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "skills__web-research");
     }
 
     #[test]

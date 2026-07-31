@@ -45,6 +45,251 @@ pub trait RagProvider: Send + Sync {
     async fn rerank(&self, query: &str, candidates: Vec<ScoredChunk>) -> Result<Vec<ScoredChunk>>;
 }
 
+/// Delegate that answers `opts.space_ids` **out of the Spaces store**, honouring
+/// each Space's own `retrieval_mode`.
+///
+/// # Why this exists (read before "simplifying" it away)
+///
+/// `retrieval.db` (this crate) and `spaces.db` (`ryu-spaces`) are two different
+/// databases, and a Space's *documents never enter this one*. The only writers of
+/// `ChunkSource::Space` rows here are [`RetrievalStore::index_chunk`] (the manual
+/// `POST /api/retrieval/index`, which no shipped client calls with a `space_id`)
+/// and [`RetrievalStore::ingest_okf_bundle`], whose `space_id` is a **bundle id**,
+/// not a Space id. So before this trait, `space_ids` — the agent's Space
+/// allowlist on every chat turn, and the `space_ids` body field of
+/// `POST /api/retrieval/search` — could not match a single row: a settable value
+/// that could not take effect.
+///
+/// A Space's entity graph (`graph_nodes`/`graph_edges`) lives in `spaces.db` and
+/// is built at ingest, gated on the Space's mode. Mirroring it here would give the
+/// node **two entity graphs that can disagree**, which is a worse defect than the
+/// one this closes. Delegation keeps exactly one graph, in the database that
+/// maintains it.
+///
+/// The implementation (`apps/core/src/rag_host.rs`) is a thin call into
+/// `SpaceStore::search_ext`, which already branches on the Space's own
+/// `retrieval_mode` — so **no mode-resolution logic is duplicated here**, and a
+/// Space set to `graph` is answered by traversal on the chat path exactly as it is
+/// in the Spaces search box. Deliberately *not* mode-split at this layer: routing
+/// only graph-mode Spaces through the Spaces store would leave vector-mode Spaces
+/// returning nothing in chat, i.e. "set the Space to Graph and it starts working".
+///
+/// # Costs this delegation adds, honestly
+///
+/// - One `search_ext` per selected Space per retrieval. Each does a KNN (or BFS)
+///   plus a rerank attempt against the (default-off, lazily started) reranker
+///   server, which fails open. `space_ids: Some([])` — the default agent, and the
+///   default chat turn — skips the hook entirely, so the common path is unchanged.
+/// - `SpaceStore` serves every Space from ONE connection behind one mutex, and
+///   **four** write paths hold it long enough to matter — not just the obvious
+///   one. `set_retrieval_mode`'s graph rebuild holds it for **minutes** on a large
+///   Space; `ingest_document` and `update_document` hold it for the whole
+///   `build_graph_for_chunks` pass on a graph-mode Space, which is `O(chunks ×
+///   entities²)` and is *not* bounded by "one document" (one uploaded book is one
+///   document). `create_file` joined them: its single descriptor chunk (`title` +
+///   `mime`) now obeys the Space's mode instead of a hardcoded `Vector`, and while
+///   one chunk sounds free, the descriptor is never split by `chunk_text` and
+///   `title` is uncapped at every HTTP/MCP entry point, so its edge fan-out is
+///   bounded by the caller's filename rather than by `CHUNK_CHAR_SIZE`. A retrieval
+///   overlapping any of the four blocks on that mutex; on
+///   the chat path `AUTO_RECALL_TIMEOUT` (4 s) turns that into "no recall this
+///   turn" rather than a stalled reply. No timeout is imposed here (this crate
+///   builds tokio without the `time` feature, and a second timeout policy on top
+///   of the caller's is worse than one).
+///
+///   All four now run their transaction on `tokio::task::spawn_blocking`, which
+///   is what makes the sentence above *true* rather than optimistic: while a write
+///   held the mutex inline on the runtime worker, a recall waiting on it could not
+///   be polled and its 4 s deadline could not fire either. Moving the writes off
+///   the worker did not shorten the wait — it made the wait interruptible. If a
+///   fifth long write path is ever added to `SpaceStore`, it belongs on the
+///   blocking pool for this reason and must be added to this list.
+///
+/// # What a graph-mode Space hit costs in *precision*, and what was accepted
+///
+/// This is a retrieval-quality trade, and it is written here rather than left to be
+/// rediscovered, because the delegate is what put it on **every** chat turn for an
+/// allowlisted Space.
+///
+/// A graph hit carries no relevance score (see [`fuse_ranked_lists`]) — so the
+/// merge is by rank, and the graph list's rank-0 element enters the fused ranking at
+/// **parity with the best cosine hit**, beating the second-best cosine hit. What
+/// justifies that placement is the multi-hop case the feature exists for, where the
+/// correct chunk shares no term with the query and cosine cannot rank it at all;
+/// what it costs is that a merely-plausible graph hit gets the same seat.
+///
+/// Two things bound the damage, and one deliberately does not:
+///
+/// - **Seeds have a floor.** `ryu_spaces::SEED_MAX_CHUNK_FRACTION` stops a word that
+///   appears in most of a Space from seeding the traversal while a rarer query word
+///   can. Be precise about what that buys, because the bound is easy to overstate:
+///   it changes **which chunk is visited first**, and therefore what occupies rank 0
+///   — the position this fusion injects. It does *not* purge common-word chunks from
+///   the result, since a flooding entity that co-occurs with the rare one in the same
+///   chunk (usually the case, which is why the user typed both) is rediscovered as a
+///   hop-1 neighbour and expands normally. Seed selection, not a filter.
+/// - **The list is relevance-ordered.** `SpaceStore::search_ext` reranks its
+///   candidates with the bge cross-encoder before returning them, so rank 0 is the
+///   most relevant of what the traversal found.
+/// - **Nothing is dropped for being weakly relevant.** The reranker reorders, it
+///   does not threshold, and hop-1..3 chunks have no relevance requirement of their
+///   own. So a graph-mode Space always contributes *something* when any query token
+///   matches anything in it. Adding a threshold there would have to reject the
+///   multi-hop answer too — it is a chunk with zero query overlap by construction —
+///   so the floor was put on the seeds instead, where it discriminates without
+///   cutting the traversal.
+///
+/// Demoting Space hits below the best cosine hit was considered and **not** done:
+/// this layer cannot tell a graph-mode Space list from a vector-mode one (see
+/// `rag_host::SpacesRecall`, which deliberately erases the distinction because a
+/// `vec0` distance and a synthetic 0.0 are not comparable), so the demotion would
+/// hit vector-mode Spaces too — i.e. it would make a Space's own documents rank
+/// below memory on every turn, which is a bigger regression than the one it fixes.
+#[async_trait::async_trait]
+pub trait SpaceRecall: Send + Sync {
+    /// Return ONE best-first ranked list **per Space** that `opts` selects — not a
+    /// flat merged list. Separate lists are what lets [`fuse_ranked_lists`] treat
+    /// each Space as its own ranking, which is required because scores are not
+    /// comparable across Spaces (per-Space embedder) or across modes (a graph hit
+    /// has no distance at all).
+    ///
+    /// `opts.space_ids`: `Some(ids)` = those Spaces; `Some([])` = none (the caller
+    /// must skip this trait entirely); `None` = every Space the caller may READ,
+    /// which the implementation enumerates under the same tenancy filter.
+    ///
+    /// `per_space_limit` is the cap for each list. Tenancy comes from
+    /// `opts.node_bound`/`caller_user_id`/`caller_org_id`, which the implementation
+    /// lowers into the Spaces `DocFilter` so a delegated search can never return a
+    /// document the caller may not read.
+    ///
+    /// Fail-open per Space: an implementation SHOULD warn and skip a Space whose
+    /// search fails rather than abort the whole recall. An `Err` here means the
+    /// Space set itself could not be resolved; the caller warns and continues with
+    /// the `retrieval.db` half.
+    async fn recall(
+        &self,
+        query: &str,
+        opts: &RetrievalOptions,
+        per_space_limit: usize,
+    ) -> Result<Vec<Vec<ScoredChunk>>>;
+}
+
+/// Reciprocal-rank-fusion constant (Cormack et al., 2009). Damps the head of each
+/// list so one list's rank-0 hit cannot dominate; 60 is the published default and
+/// is used here unchanged so the merge is a known quantity rather than a tuned
+/// mystery.
+const RRF_K: f32 = 60.0;
+
+/// Merge ranked lists that have **no comparable score** into one ranking, by rank
+/// position only (reciprocal rank fusion): `score = Σ 1/(K + rank)` over the lists
+/// a chunk appears in, `rank` 0-based.
+///
+/// # Why rank fusion and not "sort by score"
+///
+/// The lists being merged are scored on incompatible scales:
+///
+/// - the `retrieval.db` list carries a cosine similarity (`0..1`-ish), optionally
+///   overwritten by a cross-encoder relevance score;
+/// - a Space list in **vector** mode carries a real `vec0` distance (lower is
+///   better — the *opposite* direction);
+/// - a Space list in **graph** mode carries a constant `0.0`, because a traversal
+///   hit has no metric distance at all.
+///
+/// Sorting the union by any of those numbers is meaningless, and sorting by
+/// `distance` specifically would put **every graph hit first** (0.0 beats every
+/// real distance) — the trap this function exists to avoid. Rank position is the
+/// one signal every list genuinely has, and each list is already best-first under
+/// its own strategy (Space lists are reranked inside `search_ext`; the
+/// `retrieval.db` list is reranked inside `retrieve`).
+///
+/// # Resulting order, and its tie-break
+///
+/// With `K` much larger than the list lengths, `1/(K + rank)` is dominated by
+/// `rank`, so equal ranks tie and the output **interleaves**: `primary[0]`,
+/// `others[0][0]`, `others[1][0]`, …, `primary[1]`, … Ties are broken (1) by list,
+/// `primary` first — it carries memory, and it is the pre-existing behaviour — then
+/// in the order the caller passed the other lists (which is the Space order), and
+/// (2) by chunk id, so the output is fully deterministic for a given input and a
+/// re-run of the same query cannot reshuffle the injected context.
+///
+/// A chunk appearing in more than one list (possible only if the same id was
+/// manually indexed into `retrieval.db` AND lives in a delegated Space) sums its
+/// contributions once, in a single output row — it is not duplicated.
+///
+/// The returned `score` is an RRF score (~`1/60`), **not** a similarity. Callers
+/// that need cosine must not call this; [`RetrievalStore::retrieve`] only calls it
+/// when at least one Space list participates, and returns the untouched cosine
+/// list otherwise.
+#[must_use]
+pub fn fuse_ranked_lists(
+    primary: Vec<ScoredChunk>,
+    others: Vec<Vec<ScoredChunk>>,
+    top_k: usize,
+) -> Vec<ScoredChunk> {
+    // Structural no-op: with nothing to fuse, the primary list is returned exactly
+    // as it came in — same order, same cosine scores. This is what keeps every
+    // caller that selects no Spaces byte-identical.
+    if others.iter().all(Vec::is_empty) {
+        let mut out = primary;
+        out.truncate(top_k);
+        return out;
+    }
+
+    /// One fused row: the chunk, its summed RRF score, and the two tie-break keys
+    /// (best = lowest list index, then lowest rank within that list).
+    struct Fused {
+        chunk: ScoredChunk,
+        score: f32,
+        list: usize,
+        rank: usize,
+    }
+
+    let mut fused: Vec<Fused> = Vec::new();
+    let mut index_by_id: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (list_idx, list) in std::iter::once(primary).chain(others).enumerate() {
+        for (rank, chunk) in list.into_iter().enumerate() {
+            let contribution = 1.0 / (RRF_K + rank as f32);
+            match index_by_id.get(&chunk.id) {
+                Some(&existing) => {
+                    let row = &mut fused[existing];
+                    row.score += contribution;
+                    // Keep the best (earliest) position seen for the tie-break.
+                    if (list_idx, rank) < (row.list, row.rank) {
+                        row.list = list_idx;
+                        row.rank = rank;
+                    }
+                }
+                None => {
+                    index_by_id.insert(chunk.id.clone(), fused.len());
+                    fused.push(Fused {
+                        chunk,
+                        score: contribution,
+                        list: list_idx,
+                        rank,
+                    });
+                }
+            }
+        }
+    }
+
+    fused.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.list.cmp(&b.list))
+            .then_with(|| a.rank.cmp(&b.rank))
+            .then_with(|| a.chunk.id.cmp(&b.chunk.id))
+    });
+    fused.truncate(top_k);
+    fused
+        .into_iter()
+        .map(|f| ScoredChunk {
+            score: f.score,
+            ..f.chunk
+        })
+        .collect()
+}
+
 /// Where a retrievable chunk originated. Used to merge memory with Spaces and to
 /// label the injected context so the model can attribute its grounding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +363,12 @@ pub struct ScoredChunk {
     pub source: ChunkSource,
     pub space_id: Option<String>,
     pub content: String,
+    /// Relevance, higher is better — but the *scale* depends on how the result set
+    /// was produced. It is a cosine similarity (or a cross-encoder relevance score)
+    /// when every hit came from `retrieval.db`, and a rank-fusion score (~`1/60`,
+    /// see [`fuse_ranked_lists`]) once a delegated Space contributes, because
+    /// Space hits carry no score comparable to a cosine. Comparable *within* one
+    /// result set; never comparable across calls or against a fixed threshold.
     pub score: f32,
 }
 
@@ -128,6 +379,13 @@ pub struct RetrievalOptions {
     pub top_k: usize,
     /// Which Spaces to search. `None` searches all Spaces; an empty list
     /// searches no Spaces (memory only).
+    ///
+    /// This selects two different things, which is deliberate: the `space_id`
+    /// column of this store's own chunks (in practice the OKF bundles — a bundle id
+    /// is stored in that column), AND, when a [`SpaceRecall`] delegate is wired,
+    /// the real Spaces answered out of `spaces.db` under their own
+    /// `retrieval_mode`. Before that delegate existed, a real Space id here matched
+    /// nothing, because a Space's documents are never indexed into this store.
     pub space_ids: Option<Vec<String>>,
     /// Whether to include memory (U11) in the search.
     pub include_memory: bool,
@@ -142,6 +400,15 @@ pub struct RetrievalOptions {
     #[serde(default)]
     pub project_id: Option<String>,
     /// Drop chunks whose relevance falls below this score (0.0 keeps everything).
+    ///
+    /// **Scope: this store's own chunks only.** A hit delegated to the Spaces store
+    /// ([`SpaceRecall`]) carries no score on a comparable scale — in graph mode it
+    /// carries no score at all — so there is nothing to threshold, and delegated
+    /// hits pass through regardless of this value. Suppressing whole Spaces when a
+    /// non-zero threshold is set was the alternative and was rejected: it would
+    /// make an unrelated knob silently turn Spaces off. Callers that need a hard
+    /// cutoff over Space content should search the Space directly
+    /// (`POST /api/spaces/:id/search`), which ranks within one comparable scale.
     pub min_score: f32,
     /// How many candidates to collect before reranking. Must be >= top_k.
     /// Defaults to `top_k * 4` when not set.
@@ -664,6 +931,12 @@ pub struct RetrievalStore {
     /// Configured default reranker model id — the fallback reported for the local
     /// reranker (which has no model of its own). Resolved Core-side and passed in.
     reranker_model_id: String,
+    /// Optional delegate to the Spaces store for `opts.space_ids` (see
+    /// [`SpaceRecall`]). `None` — the default and every test construction — leaves
+    /// [`Self::retrieve`] byte-identical to the pure-`retrieval.db` behaviour.
+    /// Wired ONCE, Core-side, in `rag_host::open_retrieval_store`'s caller
+    /// (`apps/core/src/main.rs`), so every consumer of the process store gets it.
+    spaces: Option<Arc<dyn SpaceRecall>>,
 }
 
 impl RetrievalStore {
@@ -712,7 +985,20 @@ impl RetrievalStore {
             embedder,
             reranker,
             reranker_model_id,
+            spaces: None,
         })
+    }
+
+    /// Attach the Spaces delegate that answers `opts.space_ids` (see
+    /// [`SpaceRecall`] for what it buys and what it costs). Builder form because
+    /// the hook needs the `SpaceStore`, which Core opens *before* the retrieval
+    /// store; `RetrievalStore` is `Clone` over `Arc`s, so this must be applied to
+    /// the ONE instance that goes into `ServerState` — a later `with_space_recall`
+    /// on a clone would not reach the copies already handed out.
+    #[must_use]
+    pub fn with_space_recall(mut self, spaces: Arc<dyn SpaceRecall>) -> Self {
+        self.spaces = Some(spaces);
+        self
     }
 
     /// Attribute pre-tenancy MEMORY chunks to the local owner once the node binds —
@@ -823,6 +1109,7 @@ impl RetrievalStore {
             embedder: Embedder::Local { dims: embed_dims },
             reranker: Reranker::Local,
             reranker_model_id,
+            spaces: None,
         })
     }
 
@@ -839,6 +1126,7 @@ impl RetrievalStore {
             embedder,
             reranker: Reranker::Local,
             reranker_model_id,
+            spaces: None,
         })
     }
 
@@ -1343,11 +1631,75 @@ impl RetrievalStore {
     ///
     /// Pipeline: embed → search → filter → cosine rank → rerank top-(top_k × 4)
     /// → final top-K.
+    ///
+    /// # The Spaces half
+    ///
+    /// When a [`SpaceRecall`] delegate is wired AND `opts` selects at least one
+    /// Space, the selected Spaces are additionally answered **by the Spaces store**,
+    /// each under its own `retrieval_mode` (vector KNN or graph traversal), and
+    /// those per-Space rankings are merged with this store's list by
+    /// [`fuse_ranked_lists`]. Without that delegate — or with `space_ids: Some([])`
+    /// — this method behaves exactly as it did before the delegate existed, cosine
+    /// scores and all.
+    ///
+    /// Two consequences worth stating plainly rather than discovering:
+    ///
+    /// - `opts.min_score` is applied to THIS store's candidates only. A delegated
+    ///   Space hit has no comparable score to threshold (see [`fuse_ranked_lists`]),
+    ///   so it is not filtered by `min_score`; see the field doc on
+    ///   [`RetrievalOptions::min_score`].
+    /// - the returned `score` is a fusion score, not a cosine, whenever a Space
+    ///   list actually contributes.
+    ///
+    /// # When a local sidecar is down
+    ///
+    /// The embed call used to be the first statement and propagated with `?`, which
+    /// coupled two halves that do not share a dependency. The default
+    /// `embed_base_url` is `http://127.0.0.1:8081`, i.e. non-empty, so the embedder
+    /// is [`Embedder::Remote`] on a stock install and [`remote_embed`] returns `Err`
+    /// on a connect failure or a non-2xx — and the `llamacpp-embed` sidecar it points
+    /// at is started *lazily*. So an embed server that is not up yet took down
+    /// **graph-mode Space recall too**, which needs no vector at all: a BFS over
+    /// `graph_nodes` seeded from the query's own tokens. On the chat path the error
+    /// is swallowed (`auto-recall: memory retrieve failed (skipping)`), so the
+    /// user's symptom was an agent that quietly stopped citing an allowlisted Space.
+    ///
+    /// Now the failure is scoped to the half that genuinely cannot proceed:
+    ///
+    /// - **Lost:** this store's entire own list — memory *and* OKF — because every
+    ///   one of those hits is scored by cosine against the query vector. There is no
+    ///   partial answer to salvage there, and none is faked.
+    /// - **Kept:** the [`SpaceRecall`] half. A graph-mode Space answers normally; a
+    ///   vector-mode Space fails inside the delegate (its own embedder is down too)
+    ///   and is skipped per-Space, exactly as the trait already specifies.
+    ///
+    /// **The rerank pass gets the same treatment, and needed it as much.** The second
+    /// pass calls a cross-encoder that is `Reranker::Remote` whenever
+    /// `RYU_RERANKER_BASE_URL` is set — which `profile::apply_env_defaults` does on
+    /// every non-release `RYU_PROFILE`, so on a dev stack it is the default, pointed
+    /// at another lazily-started sidecar. A bare `?` there would have reproduced this
+    /// exact defect one sidecar over: Spaces recall dying for want of a service it
+    /// never calls. It is routed through the same degraded path, with the same
+    /// re-raise-if-nothing-salvaged rule. Note the local list is *dropped*, not
+    /// re-ordered by cosine — see [`Self::retrieve_spaces_only`] for why that
+    /// restraint is deliberate.
+    ///
+    /// **The error is never silently downgraded to an empty result.** If the Spaces
+    /// half returns nothing, the sidecar's own message is still what reaches the
+    /// caller — prefixed, not replaced (see [`Self::retrieve_spaces_only`] for why the
+    /// prefix is flattened into `Display` rather than attached as an `anyhow` context).
+    /// It is only suppressed (to a `warn!`) when there is a real, differently-grounded
+    /// answer to return instead.
     pub async fn retrieve(&self, query: &str, opts: &RetrievalOptions) -> Result<Vec<ScoredChunk>> {
         if query.trim().is_empty() || opts.top_k == 0 {
             return Ok(Vec::new());
         }
-        let query_embedding = self.embedder.embed(query).await?;
+        let query_embedding = match self.embedder.embed(query).await {
+            Ok(v) => v,
+            // Held, not logged-and-dropped: it is either re-raised below or reported
+            // as the reason the memory half is missing from an otherwise real answer.
+            Err(embed_err) => return self.retrieve_spaces_only(query, opts, embed_err).await,
+        };
 
         let candidates = self.load_candidates(opts).await?;
 
@@ -1378,10 +1730,118 @@ impl RetrievalStore {
             .unwrap_or(opts.top_k.saturating_mul(4).max(opts.top_k));
         scored.truncate(rerank_n);
 
-        // Second pass: rerank the expanded pool, then take the final top-K.
-        let mut reranked = self.reranker.rerank(query, scored).await?;
+        // Second pass: rerank the expanded pool, then take the final top-K. A remote
+        // cross-encoder is a second sidecar with the same liveness problem as the
+        // embedder (`remote_rerank` propagates on connect failure and on non-2xx), and
+        // it is the DEFAULT on every non-release `RYU_PROFILE` — so leaving a bare `?`
+        // here would have left the exact defect this method was restructured to close,
+        // one sidecar over.
+        let mut reranked = match self.reranker.rerank(query, scored).await {
+            Ok(r) => r,
+            Err(rerank_err) => return self.retrieve_spaces_only(query, opts, rerank_err).await,
+        };
         reranked.truncate(opts.top_k);
-        Ok(reranked)
+
+        // Third pass: the Spaces half. Runs AFTER the local pipeline (sequentially —
+        // this crate builds tokio with only the `sync` feature, so there is no
+        // `join!` here) and only when a delegate is wired and `opts` selects Spaces.
+        let space_lists = self.recall_spaces(query, opts).await;
+        Ok(fuse_ranked_lists(reranked, space_lists, opts.top_k))
+    }
+
+    /// The degraded path of [`Self::retrieve`]: this store's own half could not be
+    /// produced (the embed sidecar or the rerank sidecar is down), so answer from the
+    /// Spaces delegate alone — or re-raise `local_err` if that yields nothing.
+    ///
+    /// `local_err` is threaded in by value rather than logged at the call site
+    /// precisely so this function has the option of returning it. A
+    /// sidecar-unavailable error that becomes `Ok(vec![])` is the failure mode this
+    /// whole change exists to avoid recreating one layer down: the chat path already
+    /// swallows a retrieval error into a `warn!`, and an empty-and-silent result
+    /// there is indistinguishable from "nothing was relevant".
+    ///
+    /// Note this does **not** fall back to cosine order on a rerank failure — it
+    /// drops the local list entirely, exactly as the bare `?` did. Falling open to
+    /// cosine (what the Spaces path does) would be a different, larger decision about
+    /// what `POST /api/retrieval/search` returns; all that changes here is that one
+    /// dead sidecar no longer takes down a Space that never needed it.
+    ///
+    /// There is no `fuse_ranked_lists` no-op subtlety here: with an empty primary and
+    /// at least one non-empty Space list, fusion ranks by RRF position exactly as it
+    /// would have, and the `score` field is a fusion score — the same scale the
+    /// caller would have seen had the local half participated.
+    ///
+    /// # Why the prefix is formatted in, and not `.context(…)`
+    ///
+    /// `anyhow::Error::context` puts the new string *in front of* the cause in the
+    /// chain, and `Display` renders only the head: `format!("{e}")` and `e.to_string()`
+    /// on a context-wrapped error yield the context ALONE. Only the alternate form
+    /// `{e:#}` walks the chain. That distinction is not academic here, because the two
+    /// production callers of [`Self::retrieve`] disagree about which they use:
+    ///
+    /// - chat auto-recall (`sidecar::adapters`) logs `{e:#}` — chain visible;
+    /// - `POST /api/retrieval/search` (`server::mod`) answers `500` with
+    ///   `e.to_string()` — chain **invisible**.
+    ///
+    /// So wrapping with `.context` here would have deleted "connection refused to the
+    /// embed sidecar" from the one surface an operator actually reads, and replaced it
+    /// with a sentence that names no service — a regression in exactly the case this
+    /// degraded path exists to keep diagnosable. Formatting `{local_err:#}` into a
+    /// single message keeps the cause in `Display` for both callers. Nothing
+    /// `downcast`s a retrieval error (checked across `server/mod.rs`,
+    /// `sidecar/adapters/mod.rs` and this crate), so collapsing the chain costs
+    /// nothing that is read.
+    async fn retrieve_spaces_only(
+        &self,
+        query: &str,
+        opts: &RetrievalOptions,
+        local_err: anyhow::Error,
+    ) -> Result<Vec<ScoredChunk>> {
+        let space_lists = self.recall_spaces(query, opts).await;
+        let fused = fuse_ranked_lists(Vec::new(), space_lists, opts.top_k);
+        if fused.is_empty() {
+            return Err(anyhow::anyhow!(
+                "retrieval: the local half failed and no Space answered without it: \
+                 {local_err:#}"
+            ));
+        }
+        tracing::warn!(
+            "retrieval: local retrieval unavailable ({local_err:#}); answered from Spaces \
+             only — memory and OKF chunks are MISSING from this result"
+        );
+        Ok(fused)
+    }
+
+    /// The Spaces half of [`Self::retrieve`]: ask the [`SpaceRecall`] delegate for
+    /// one ranked list per selected Space. Returns an empty `Vec` — which makes
+    /// [`fuse_ranked_lists`] a structural no-op — in every case where the delegation
+    /// does not apply:
+    ///
+    /// - no delegate wired (the default, and every test that does not wire one);
+    /// - `space_ids: Some([])`, i.e. "no Spaces" — the default agent's allowlist and
+    ///   therefore the overwhelming majority of chat turns, which must stay free of
+    ///   any `spaces.db` work;
+    /// - the delegate could not resolve the Space set (warn + continue; the memory
+    ///   and OKF half of the answer is unaffected, and there is no risk of silently
+    ///   answering a graph-mode Space with vector hits, because this store holds no
+    ///   rows for a real Space at all).
+    ///
+    /// `per_space_limit = opts.top_k`: each Space may fill the whole budget, and the
+    /// fusion truncates the merged ranking back to `top_k`.
+    async fn recall_spaces(&self, query: &str, opts: &RetrievalOptions) -> Vec<Vec<ScoredChunk>> {
+        let Some(delegate) = self.spaces.as_ref() else {
+            return Vec::new();
+        };
+        if opts.space_ids.as_ref().is_some_and(Vec::is_empty) {
+            return Vec::new();
+        }
+        match delegate.recall(query, opts, opts.top_k).await {
+            Ok(lists) => lists,
+            Err(e) => {
+                tracing::warn!("retrieval: Spaces delegate failed (skipping Spaces): {e:#}");
+                Vec::new()
+            }
+        }
     }
 
     /// Load candidate chunks (with embeddings) matching the source/Space filter.
@@ -2657,5 +3117,599 @@ mod tests {
         // unbound: everything.
         let unbound = RetrievalOptions::default();
         assert!(memory_tenancy_allows(&base, &unbound));
+    }
+
+    // ── Spaces delegation (`SpaceRecall`) + rank fusion ───────────────────────
+    //
+    // What these cover, and why they exist at all: a Space's documents are NEVER
+    // indexed into this store (the only writers of `ChunkSource::Space` rows are
+    // `index_chunk` — the manual `POST /api/retrieval/index`, which no shipped
+    // client calls with a `space_id` — and `ingest_okf_bundle`, whose `space_id`
+    // is a BUNDLE id). So `space_ids` selected nothing until the delegate existed,
+    // and a Space's `retrieval_mode` could not reach `retrieve` at all. The fake
+    // below stands in for `rag_host::SpacesRecall` (which calls
+    // `SpaceStore::search_ext`, the same entry point the Spaces search box uses,
+    // so the mode branch is exercised there, not duplicated here).
+
+    /// A `SpaceRecall` that returns canned per-Space lists and counts its calls, so
+    /// a test can assert both WHAT was merged and WHETHER the delegate was consulted
+    /// at all (the `space_ids: Some([])` fast path must not touch it).
+    struct FakeSpaces {
+        /// One ranked list per Space id, returned in `space_ids` order.
+        by_space: std::collections::HashMap<String, Vec<ScoredChunk>>,
+        /// Set to fail the whole resolution (the "Spaces store unavailable" case).
+        fail: bool,
+        /// Consultation counter. There is deliberately no accessor method: the
+        /// fake is moved into the store under an `Arc<dyn SpaceRecall>`, so every
+        /// test clones this handle *before* the move and reads the atomic
+        /// directly. A `fn calls(&self)` would be unreachable after the move —
+        /// dead code that reads as an available affordance.
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        /// The `per_space_limit` the store asked for on the last call.
+        last_limit: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FakeSpaces {
+        fn new(by_space: Vec<(&str, Vec<&str>)>) -> Self {
+            let mut map = std::collections::HashMap::new();
+            for (space, contents) in by_space {
+                map.insert(
+                    space.to_owned(),
+                    contents
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, content)| ScoredChunk {
+                            id: format!("{space}:{i}"),
+                            source: ChunkSource::Space,
+                            space_id: Some(space.to_owned()),
+                            content: content.to_owned(),
+                            // Exactly what the real delegate does: no score, because
+                            // a graph hit has none and a vector distance is not
+                            // comparable to a cosine. Order carries the signal.
+                            score: 0.0,
+                        })
+                        .collect(),
+                );
+            }
+            Self {
+                by_space: map,
+                fail: false,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                last_limit: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn failing() -> Self {
+            let mut s = Self::new(vec![]);
+            s.fail = true;
+            s
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SpaceRecall for FakeSpaces {
+        async fn recall(
+            &self,
+            _query: &str,
+            opts: &RetrievalOptions,
+            per_space_limit: usize,
+        ) -> Result<Vec<Vec<ScoredChunk>>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.last_limit
+                .store(per_space_limit, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                anyhow::bail!("spaces store unavailable");
+            }
+            let ids: Vec<String> = match &opts.space_ids {
+                Some(ids) => ids.clone(),
+                // `None` = every Space, which the real delegate enumerates under the
+                // caller's tenancy filter.
+                None => {
+                    let mut all: Vec<String> = self.by_space.keys().cloned().collect();
+                    all.sort();
+                    all
+                }
+            };
+            Ok(ids
+                .iter()
+                .filter_map(|id| self.by_space.get(id).cloned())
+                .filter(|l: &Vec<ScoredChunk>| !l.is_empty())
+                .collect())
+        }
+    }
+
+    fn chunk(id: &str, score: f32) -> ScoredChunk {
+        ScoredChunk {
+            id: id.to_owned(),
+            source: ChunkSource::Memory,
+            space_id: None,
+            content: format!("content of {id}"),
+            score,
+        }
+    }
+
+    /// The no-op guarantee the whole design rests on: with nothing to fuse, the
+    /// primary list comes back **unchanged** — same order, same ids, and the same
+    /// cosine scores, not rank-fusion scores. Every caller that selects no Spaces
+    /// (and every caller predating the delegate) depends on this, including the
+    /// `score` field of `POST /api/retrieval/search`.
+    #[test]
+    fn fusion_without_space_lists_returns_the_primary_list_untouched() {
+        let primary = vec![chunk("a", 0.9), chunk("b", 0.5), chunk("c", 0.1)];
+        for others in [vec![], vec![vec![], vec![]]] {
+            let out = fuse_ranked_lists(primary.clone(), others, 10);
+            assert_eq!(
+                out.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+                ["a", "b", "c"]
+            );
+            let scores: Vec<f32> = out.iter().map(|c| c.score).collect();
+            assert_eq!(scores, vec![0.9, 0.5, 0.1], "cosine scores must survive");
+        }
+    }
+
+    /// Mixed retrieval: two rankings with incomparable scores interleave by RANK,
+    /// primary first at each rank. The graph-mode list deliberately carries the
+    /// constant `0.0` every graph hit has — under a naive sort by score/distance it
+    /// would either sink to the bottom or (sorting by distance) float every hit to
+    /// the top; under rank fusion its position depends only on its own ranking.
+    #[test]
+    fn fusion_interleaves_two_incomparable_rankings_by_rank() {
+        let primary = vec![chunk("v0", 0.91), chunk("v1", 0.88), chunk("v2", 0.4)];
+        let graph = vec![chunk("g0", 0.0), chunk("g1", 0.0), chunk("g2", 0.0)];
+        let out = fuse_ranked_lists(primary, vec![graph], 6);
+        assert_eq!(
+            out.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["v0", "g0", "v1", "g1", "v2", "g2"]
+        );
+        // Scores are now fusion scores, strictly non-increasing.
+        for pair in out.windows(2) {
+            assert!(pair[0].score >= pair[1].score);
+        }
+    }
+
+    /// Three lists (memory/OKF + two Spaces) keep the documented tie-break: at an
+    /// equal rank, the primary list wins, then the Spaces in the order the caller
+    /// passed them. Re-running the same fusion cannot reshuffle the injected
+    /// context, which is what makes a chat turn reproducible.
+    #[test]
+    fn fusion_tie_break_is_primary_then_list_order_and_is_deterministic() {
+        let primary = vec![chunk("p0", 0.9), chunk("p1", 0.8)];
+        let space_a = vec![chunk("a0", 0.0), chunk("a1", 0.0)];
+        let space_b = vec![chunk("b0", 0.0), chunk("b1", 0.0)];
+        let expected = ["p0", "a0", "b0", "p1", "a1", "b1"];
+        for _ in 0..5 {
+            let out = fuse_ranked_lists(primary.clone(), vec![space_a.clone(), space_b.clone()], 6);
+            assert_eq!(
+                out.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    /// A chunk id present in two lists is ONE output row whose contributions are
+    /// summed — it must not be injected twice into the model context. Reachable
+    /// when the same id was manually indexed here and also lives in a delegated
+    /// Space.
+    #[test]
+    fn fusion_dedupes_an_id_present_in_two_lists_and_sums_its_score() {
+        let primary = vec![chunk("dup", 0.9), chunk("p1", 0.8)];
+        let space = vec![chunk("s0", 0.0), chunk("dup", 0.0)];
+        let out = fuse_ranked_lists(primary, vec![space], 10);
+        assert_eq!(out.iter().filter(|c| c.id == "dup").count(), 1);
+        let dup = out.iter().find(|c| c.id == "dup").unwrap();
+        let solo = out.iter().find(|c| c.id == "s0").unwrap();
+        assert!(
+            dup.score > solo.score,
+            "a chunk both sources agree on must outrank one only one source found"
+        );
+        assert_eq!(out[0].id, "dup");
+    }
+
+    /// `top_k` bounds the MERGED ranking, not each list.
+    #[test]
+    fn fusion_truncates_the_merged_ranking_to_top_k() {
+        let primary = vec![chunk("v0", 0.9), chunk("v1", 0.8)];
+        let space = vec![chunk("g0", 0.0), chunk("g1", 0.0)];
+        let out = fuse_ranked_lists(primary, vec![space], 3);
+        assert_eq!(
+            out.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["v0", "g0", "v1"]
+        );
+    }
+
+    /// **The defect this unit closes.** A Space whose content lives ONLY in the
+    /// Spaces store (as every real Space's does) now reaches `retrieve` — the call
+    /// the chat turn makes — instead of returning nothing. Without the delegate the
+    /// same query over the same store yields memory only.
+    #[tokio::test]
+    async fn retrieve_surfaces_space_content_that_is_not_indexed_in_this_store() {
+        let store = mem_store();
+        seed(&store).await;
+        let opts = RetrievalOptions {
+            top_k: 4,
+            space_ids: Some(vec!["space-graph".to_owned()]),
+            ..RetrievalOptions::default()
+        };
+
+        // Before: nothing in this store carries `space_id = "space-graph"`.
+        let without = store.retrieve("moss ledger", &opts).await.unwrap();
+        assert!(
+            !without
+                .iter()
+                .any(|c| c.space_id.as_deref() == Some("space-graph")),
+            "precondition: a real Space id matches no row in retrieval.db"
+        );
+
+        let fake = FakeSpaces::new(vec![(
+            "space-graph",
+            vec!["Moss keeps the ledger", "Ledger entries for Q3"],
+        )]);
+        let calls = Arc::clone(&fake.calls);
+        let with = store
+            .clone()
+            .with_space_recall(Arc::new(fake))
+            .retrieve("moss ledger", &opts)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(with
+            .iter()
+            .any(|c| c.space_id.as_deref() == Some("space-graph")));
+        assert!(
+            with.iter().any(|c| c.source == ChunkSource::Memory),
+            "the memory half must still be there — delegation ADDS a source"
+        );
+    }
+
+    /// The default agent allowlist is `Some([])` ("no Spaces"), which is the
+    /// overwhelming majority of chat turns. It must not touch the Spaces store at
+    /// all: `spaces.db` is served by ONE connection behind one mutex that a graph
+    /// rebuild can hold for minutes, so a per-turn call there would be a real cost.
+    #[tokio::test]
+    async fn retrieve_with_an_empty_space_allowlist_never_calls_the_delegate() {
+        let store = mem_store();
+        seed(&store).await;
+        let fake = FakeSpaces::new(vec![("space-graph", vec!["Moss keeps the ledger"])]);
+        let calls = Arc::clone(&fake.calls);
+        let store = store.with_space_recall(Arc::new(fake));
+        let opts = RetrievalOptions {
+            top_k: 4,
+            space_ids: Some(Vec::new()),
+            ..RetrievalOptions::default()
+        };
+        let hits = store.retrieve("dark mode", &opts).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(hits.iter().all(|c| c.source == ChunkSource::Memory));
+        // …and the scores are still cosines, because nothing was fused.
+        assert!(hits.iter().any(|c| c.score > 0.05));
+    }
+
+    /// `space_ids: None` means "all Spaces" and must reach the delegate too —
+    /// treating it as "no Spaces" would reinstate the defect for the one caller
+    /// that asks for everything.
+    #[tokio::test]
+    async fn retrieve_with_no_space_filter_delegates_every_space() {
+        let store = mem_store();
+        seed(&store).await;
+        let fake = FakeSpaces::new(vec![
+            ("space-a", vec!["Alpha space content"]),
+            ("space-b", vec!["Beta space content"]),
+        ]);
+        let calls = Arc::clone(&fake.calls);
+        let hits = store
+            .with_space_recall(Arc::new(fake))
+            .retrieve(
+                "content",
+                &RetrievalOptions {
+                    top_k: 8,
+                    space_ids: None,
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        for space in ["space-a", "space-b"] {
+            assert!(
+                hits.iter().any(|c| c.space_id.as_deref() == Some(space)),
+                "missing {space}"
+            );
+        }
+    }
+
+    /// A Spaces store that cannot answer degrades to the `retrieval.db` half with a
+    /// warning — it does not fail the turn. Safe precisely because this store holds
+    /// no rows for a real Space, so "continue without Spaces" can never silently
+    /// answer a graph-mode Space with stale vector hits.
+    #[tokio::test]
+    async fn retrieve_survives_a_failing_spaces_delegate() {
+        let store = mem_store();
+        seed(&store).await;
+        let hits = store
+            .with_space_recall(Arc::new(FakeSpaces::failing()))
+            .retrieve(
+                "dark mode",
+                &RetrievalOptions {
+                    top_k: 4,
+                    space_ids: Some(vec!["space-graph".to_owned()]),
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(hits.iter().any(|c| c.source == ChunkSource::Memory));
+    }
+
+    /// `min_score` thresholds THIS store's cosine-scored chunks and cannot threshold
+    /// a delegated Space hit (which has no comparable score — none at all in graph
+    /// mode). Asserted rather than left implicit, because the field is settable
+    /// through `POST /api/retrieval/search` and a reader would otherwise assume it
+    /// covers the whole result set. See the field doc for why the alternative
+    /// (suppressing Spaces entirely) was rejected.
+    #[tokio::test]
+    async fn min_score_filters_local_chunks_only_never_delegated_space_hits() {
+        let store = mem_store();
+        seed(&store).await;
+        let fake = FakeSpaces::new(vec![("space-graph", vec!["Moss keeps the ledger"])]);
+        let hits = store
+            .with_space_recall(Arc::new(fake))
+            .retrieve(
+                "moss ledger",
+                &RetrievalOptions {
+                    top_k: 5,
+                    space_ids: Some(vec!["space-graph".to_owned()]),
+                    // Above any cosine the local hashing embedder produces, so the
+                    // local half is emptied.
+                    min_score: 0.999,
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            hits.iter()
+                .all(|c| c.space_id.as_deref() == Some("space-graph")),
+            "local chunks must be thresholded away: {hits:?}"
+        );
+        assert!(!hits.is_empty(), "delegated Space hits pass the threshold");
+    }
+
+    /// The per-Space budget handed to the delegate is `top_k`: each Space may fill
+    /// the whole budget and the fusion truncates the merged ranking. A smaller
+    /// per-Space limit would silently starve every Space but the first.
+    #[tokio::test]
+    async fn delegate_receives_top_k_as_the_per_space_limit() {
+        let store = mem_store();
+        let fake = FakeSpaces::new(vec![("space-a", vec!["a"])]);
+        let last = Arc::clone(&fake.last_limit);
+        store
+            .with_space_recall(Arc::new(fake))
+            .retrieve(
+                "anything",
+                &RetrievalOptions {
+                    top_k: 7,
+                    space_ids: Some(vec!["space-a".to_owned()]),
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(last.load(std::sync::atomic::Ordering::SeqCst), 7);
+    }
+
+    /// A store whose embedder can only fail: `Embedder::Remote` pointed at a port
+    /// nothing listens on. No network is required for this to be a *fast* failure —
+    /// a loopback connect to a closed port is refused immediately, which matters
+    /// because this crate builds tokio without the `time` feature and therefore has
+    /// no timeout to fall back on.
+    fn store_with_a_dead_embedder() -> RetrievalStore {
+        RetrievalStore::open_in_memory_with_embedder(
+            Embedder::remote(
+                "http://127.0.0.1:1",
+                "nomic-embed-text",
+                TEST_EMBED_DIMS,
+                None,
+            ),
+            TEST_RERANKER_ID.to_owned(),
+        )
+        .unwrap()
+    }
+
+    /// **The defect: an embed-server outage killed graph recall, which needs no
+    /// embedding.**
+    ///
+    /// `retrieve` embedded the query as its first statement and propagated with `?`,
+    /// so the Spaces half never ran. A graph-mode Space is answered by a BFS over
+    /// `graph_nodes` seeded from the query's own tokens — no vector anywhere in it —
+    /// yet a lazily-started `llamacpp-embed` sidecar that was not up yet took it
+    /// down, and the chat path swallowed the error into a `warn!`. The user saw an
+    /// agent quietly stop citing its allowlisted Space.
+    #[tokio::test]
+    async fn a_dead_embedder_does_not_take_down_graph_mode_space_recall() {
+        let store = store_with_a_dead_embedder();
+        // Precondition: the embedder really is broken, so the assertion below is
+        // about the restructure and not about a store that quietly fell back local.
+        assert!(
+            store.embedder.embed("anything").await.is_err(),
+            "fixture broken: the embedder must fail"
+        );
+
+        let fake = FakeSpaces::new(vec![("space-graph", vec!["Moss keeps the ledger"])]);
+        let calls = Arc::clone(&fake.calls);
+        let hits = store
+            .with_space_recall(Arc::new(fake))
+            .retrieve(
+                "moss ledger",
+                &RetrievalOptions {
+                    top_k: 4,
+                    space_ids: Some(vec!["space-graph".to_owned()]),
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await
+            .expect("a graph-mode Space must still answer without an embedder");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            hits.iter()
+                .all(|c| c.space_id.as_deref() == Some("space-graph")),
+            "only the Spaces half can survive: every local hit is cosine-scored \
+             against a vector that does not exist; got {hits:?}"
+        );
+        assert!(!hits.is_empty());
+    }
+
+    /// **The other half of the contract: the failure stays diagnosable.**
+    ///
+    /// "Degrade to the Spaces half" must not become "swallow the outage". With
+    /// nothing to salvage — no delegate wired here, which is also the `space_ids:
+    /// Some([])` shape of the ordinary chat turn — the embedder's own error
+    /// propagates, exactly as it did before. An `Ok(vec![])` here would be
+    /// indistinguishable from "nothing was relevant" to every caller, including the
+    /// auto-recall path that logs and continues.
+    #[tokio::test]
+    async fn a_dead_embedder_still_errors_when_no_space_can_answer() {
+        let store = store_with_a_dead_embedder();
+        let err = store
+            .retrieve(
+                "moss ledger",
+                &RetrievalOptions {
+                    top_k: 4,
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await
+            .expect_err("with no Space to answer, the embedder error must surface");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("embeddings request failed") || rendered.contains("embeddings"),
+            "the surfaced error must still name the embedder failure; got {rendered}"
+        );
+
+        // Same when a delegate IS wired but answers nothing: an empty Spaces half is
+        // not evidence that the query was answered.
+        let err = store
+            .with_space_recall(Arc::new(FakeSpaces::failing()))
+            .retrieve(
+                "moss ledger",
+                &RetrievalOptions {
+                    top_k: 4,
+                    space_ids: Some(vec!["space-graph".to_owned()]),
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await;
+        assert!(
+            err.is_err(),
+            "an empty Spaces half must not mask the outage"
+        );
+    }
+
+    /// **The degraded path must stay diagnosable through `Display`, not only `{:#}`.**
+    ///
+    /// The test above renders with `{err:#}`, which walks an `anyhow` chain — so it
+    /// passes whether the sidecar error is the cause of a context wrapper or is
+    /// formatted into the message. The two production callers do NOT agree on that
+    /// form: chat auto-recall logs `{e:#}`, but `POST /api/retrieval/search`
+    /// (`server::mod`) answers `500` with `e.to_string()`, i.e. plain `Display`.
+    ///
+    /// With `local_err.context(…)`, `to_string()` yields the context string ALONE and
+    /// the embed/rerank failure never reaches the HTTP body — an operator gets a
+    /// sentence naming no service, which is strictly less than the raw sidecar error
+    /// the route returned before the degraded path existed. That is the whole reason
+    /// [`RetrievalStore::retrieve_spaces_only`] formats the cause in instead.
+    ///
+    /// Asserted on `to_string()` specifically (not `{:#}`) because that is the exact
+    /// call the route makes; a future "tidy-up" to `.context(…)` fails here.
+    #[tokio::test]
+    async fn the_degraded_path_names_the_dead_sidecar_in_plain_display() {
+        let store = store_with_a_dead_embedder();
+        let err = store
+            .retrieve(
+                "moss ledger",
+                &RetrievalOptions {
+                    top_k: 4,
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await
+            .expect_err("with no Space to answer, the embedder error must surface");
+
+        let plain = err.to_string();
+        assert!(
+            plain.contains("embeddings"),
+            "`e.to_string()` is what POST /api/retrieval/search puts in the 500 body; \
+             it must still name the failing sidecar, got {plain}"
+        );
+        assert!(
+            plain.contains("no Space answered"),
+            "…and must keep the framing that says why the local half is missing, \
+             got {plain}"
+        );
+    }
+
+    /// **The same defect, one sidecar over.** The rerank pass also propagated with a
+    /// bare `?`, and `Reranker::Remote` is not an exotic configuration: every
+    /// non-release `RYU_PROFILE` seeds `RYU_RERANKER_BASE_URL`, so on a dev stack the
+    /// remote cross-encoder is the default and its `llamacpp-rerank` sidecar is
+    /// started lazily. A graph-mode Space calls neither the embedder nor this
+    /// reranker, so neither outage may cost it.
+    ///
+    /// The local list is still dropped rather than returned in cosine order — that
+    /// restraint is the pre-existing behaviour and is deliberate (see
+    /// `RetrievalStore::retrieve_spaces_only`); the only thing that changes is that
+    /// the Spaces half survives.
+    #[tokio::test]
+    async fn a_dead_reranker_does_not_take_down_graph_mode_space_recall() {
+        let store = RetrievalStore {
+            reranker: Reranker::remote("http://127.0.0.1:1", "bge-reranker", None),
+            ..mem_store()
+        };
+        seed(&store).await;
+        // Precondition: the reranker really is remote-and-broken, so this test is
+        // about the restructure and not about a store that quietly stayed local.
+        assert!(
+            store
+                .reranker
+                .rerank("anything", vec![chunk("a", 0.5)])
+                .await
+                .is_err(),
+            "fixture broken: the reranker must fail"
+        );
+
+        let fake = FakeSpaces::new(vec![("space-graph", vec!["Moss keeps the ledger"])]);
+        let hits = store
+            .clone()
+            .with_space_recall(Arc::new(fake))
+            .retrieve(
+                "moss ledger",
+                &RetrievalOptions {
+                    top_k: 4,
+                    space_ids: Some(vec!["space-graph".to_owned()]),
+                    ..RetrievalOptions::default()
+                },
+            )
+            .await
+            .expect("a graph-mode Space must still answer without a reranker");
+        assert!(
+            hits.iter()
+                .all(|c| c.space_id.as_deref() == Some("space-graph")),
+            "got {hits:?}"
+        );
+        assert!(!hits.is_empty());
+
+        // …and with nothing to salvage, the reranker error still surfaces.
+        assert!(
+            store
+                .retrieve(
+                    "moss ledger",
+                    &RetrievalOptions {
+                        top_k: 4,
+                        ..RetrievalOptions::default()
+                    },
+                )
+                .await
+                .is_err(),
+            "a rerank outage with no Space to answer must not become an empty result"
+        );
     }
 }

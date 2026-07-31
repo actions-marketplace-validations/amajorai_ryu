@@ -401,6 +401,45 @@ export interface CalendarAgentRecord {
 	[key: string]: unknown;
 }
 
+// --- Warmup (grant `warmup:crud`). The `com.ryu.warmup` app schedules a keep-alive
+// ping to each subscription agent so its rolling usage window is already open. As
+// with calendar, rpc.ts stays dependency-free and the host forwards Core's shapes
+// verbatim; the app owns the richer typed copies in `@ryu/warmup-app/types`. ---
+
+/** One agent the host detected, with its usage windows + advertised models. */
+export interface WarmupAgentRecord {
+	id: string;
+	[key: string]: unknown;
+}
+
+/** What `warmup.detect` reports: the agents plus the node's IANA zone. */
+export interface WarmupDetectionRecord {
+	agents: WarmupAgentRecord[];
+	tz: string;
+}
+
+/** One job to schedule. Deliberately narrower than Core's `CreateJobBody`: this
+ *  capability schedules agent pings, so a workflow/monitor target is not
+ *  expressible and the owning app is pinned host-side rather than claimed by the
+ *  frame (see {@link asWarmupJobsArg}). */
+export interface WarmupJobInput {
+	name: string;
+	schedule:
+		| { kind: "cron"; expr: string; tz?: string }
+		| { kind: "every"; interval: string };
+	target: {
+		type: "agent";
+		agentId: string;
+		prompt: string;
+		model?: string | null;
+	};
+}
+
+/** The one-off ping payload for `warmup.runNow`: a job the app already owns. */
+export interface WarmupRunNowPayload {
+	jobId: string;
+}
+
 /** The New-automation payload: schedule an agent on a cron/interval schedule. The
  *  host runs the same idempotent `createScheduledAgentWorkflow` composite the
  *  desktop dialog ran. */
@@ -1104,6 +1143,24 @@ export interface HostServices {
 		accept?: string;
 		multiple?: boolean;
 	}): Promise<UploadFileResult | UploadFileResult[] | null>;
+
+	// --- Warmup (grant `warmup:crud`). The `com.ryu.warmup` app keeps subscription
+	// usage windows open. Host-direct (the monitors pattern): the host holds the node
+	// token and calls `/api/agents`, `/api/agents/:id/usage`,
+	// `/api/agents/:id/acp-config` and `/heartbeat/jobs`. All optional so a host
+	// without Warmup is unaffected. ---
+
+	/** Replace this app's scheduled jobs with exactly `jobs` (delete-then-create,
+	 *  since Core has no update route). Rejects with Core's validation message. */
+	warmupApply?(jobs: WarmupJobInput[]): Promise<void>;
+	/** Subscription agents with their usage windows + advertised models, and the
+	 *  node's IANA zone. */
+	warmupDetect?(): Promise<WarmupDetectionRecord>;
+	/** List scheduled jobs (`GET /heartbeat/jobs`) so the app can find its own. */
+	warmupList?(): Promise<CalendarJobRecord[]>;
+	/** Run one of this app's scheduled pings now. Resolves when the turn completes;
+	 *  rejects with Core's message when the job itself failed. */
+	warmupRunNow?(input: WarmupRunNowPayload): Promise<void>;
 
 	// --- Inbound webhook registry (grant `webhooks:crud`). The `com.ryu.webhooks` app
 	// renders Core's read-only webhook endpoint registry from its sandboxed companion.
@@ -2768,6 +2825,53 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.calendarAgents();
+		case "warmup.detect":
+			if (!services.warmupDetect) {
+				throw new CodedRpcError(
+					"server_error",
+					"warmup.detect is not available"
+				);
+			}
+			return await services.warmupDetect();
+		case "warmup.list":
+			if (!services.warmupList) {
+				throw new CodedRpcError("server_error", "warmup.list is not available");
+			}
+			return await services.warmupList();
+		case "warmup.apply": {
+			const jobs = asWarmupJobsArg(args[0]);
+			if (!jobs) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"warmup.apply expects an array of { name, schedule, target:{type:'agent',…} }"
+				);
+			}
+			if (!services.warmupApply) {
+				throw new CodedRpcError(
+					"server_error",
+					"warmup.apply is not available"
+				);
+			}
+			await services.warmupApply(jobs);
+			return { ok: true };
+		}
+		case "warmup.runNow": {
+			const ping = asWarmupRunNowArg(args[0]);
+			if (!ping) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"warmup.runNow expects { jobId }"
+				);
+			}
+			if (!services.warmupRunNow) {
+				throw new CodedRpcError(
+					"server_error",
+					"warmup.runNow is not available"
+				);
+			}
+			await services.warmupRunNow(ping);
+			return { ok: true };
+		}
 		case "calendar.createAutomation": {
 			const input = asCalendarCreateAutomationArg(args[0]);
 			if (!input) {
@@ -4295,6 +4399,94 @@ export function asCalendarCreateAutomationArg(
 			? {}
 			: { requireApproval: o.requireApproval as boolean }),
 	};
+}
+
+/**
+ * Narrow the job list `warmup.apply` replaces this app's schedule with.
+ *
+ * Deliberately reconstructs each entry field by field rather than forwarding the
+ * object: the frame must not be able to widen this capability past what it is
+ * for. `target` is pinned to `agent` (a workflow or monitor target would let a
+ * warmup grant schedule arbitrary work), and the owning app id is NOT read from
+ * the input at all — the host stamps it, so the frame cannot claim ownership of
+ * another app's jobs and have the same call delete them.
+ *
+ * Cron expressions, intervals and zone names are left to Core, which already
+ * validates all three and answers 400 with a message the app surfaces.
+ */
+export function asWarmupJobsArg(data: unknown): WarmupJobInput[] | null {
+	if (!Array.isArray(data)) {
+		return null;
+	}
+	const jobs: WarmupJobInput[] = [];
+	for (const item of data) {
+		if (typeof item !== "object" || item === null || Array.isArray(item)) {
+			return null;
+		}
+		const o = item as Record<string, unknown>;
+		if (typeof o.name !== "string" || o.name.length === 0) {
+			return null;
+		}
+		if (typeof o.schedule !== "object" || o.schedule === null) {
+			return null;
+		}
+		const s = o.schedule as Record<string, unknown>;
+		let schedule: WarmupJobInput["schedule"];
+		if (s.kind === "cron" && typeof s.expr === "string") {
+			schedule =
+				typeof s.tz === "string" && s.tz.length > 0
+					? { kind: "cron", expr: s.expr, tz: s.tz }
+					: { kind: "cron", expr: s.expr };
+		} else if (s.kind === "every" && typeof s.interval === "string") {
+			schedule = { kind: "every", interval: s.interval };
+		} else {
+			return null;
+		}
+		if (typeof o.target !== "object" || o.target === null) {
+			return null;
+		}
+		const t = o.target as Record<string, unknown>;
+		if (
+			t.type !== "agent" ||
+			typeof t.agentId !== "string" ||
+			t.agentId.length === 0 ||
+			typeof t.prompt !== "string"
+		) {
+			return null;
+		}
+		jobs.push({
+			name: o.name,
+			schedule,
+			target: {
+				type: "agent",
+				agentId: t.agentId,
+				prompt: t.prompt,
+				...(typeof t.model === "string" && t.model.length > 0
+					? { model: t.model }
+					: {}),
+			},
+		});
+	}
+	return jobs;
+}
+
+/**
+ * Narrow the one-off `warmup.runNow` payload.
+ *
+ * It names an existing job rather than describing a turn, so what the button
+ * proves is what the schedule will actually do — and so the capability cannot be
+ * used to run an arbitrary prompt on an arbitrary agent. The host additionally
+ * refuses a job this app does not own.
+ */
+export function asWarmupRunNowArg(data: unknown): WarmupRunNowPayload | null {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (typeof o.jobId !== "string" || o.jobId.length === 0) {
+		return null;
+	}
+	return { jobId: o.jobId };
 }
 
 /** Narrow a quest create payload. Only the shape (`title`+`completion_condition`

@@ -1,0 +1,38 @@
+{
+  "id": "proof",
+  "name": "Proof of Work",
+  "version": "1.0.0",
+  "runnables": [],
+  "permission_grants": ["hook:run-agent", "storage:kv"],
+  "activation_events": ["*"],
+  "contributes": {
+    "slash_commands": [
+      {
+        "id": "proof.set",
+        "command": "/proof",
+        "description": "Pursue a goal until an INDEPENDENT verifier agent proves — with tool-gathered evidence — that it is actually done. Stronger than /goal, which only judges the transcript. Use '/proof clear' to stop."
+      }
+    ],
+    "settings_tabs": [
+      {
+        "id": "proof.settings",
+        "title": "Proof of Work",
+        "fields": [
+          {
+            "type": "model_picker",
+            "pref_key": "proof-verifier-model",
+            "label": "Verifier model"
+          }
+        ]
+      }
+    ],
+    "turn_hooks": [
+      {
+        "id": "proof.loop",
+        "on": "post_assistant_turn",
+        "match": { "commands": ["/proof"], "stateful": true },
+        "code_file": "hooks/loop.js"
+      }
+    ]
+  }
+}

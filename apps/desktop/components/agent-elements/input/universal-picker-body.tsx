@@ -60,6 +60,10 @@ import type {
 } from "@/components/agent-elements/input/composer-settings-menu.tsx";
 import { groupModelItems } from "@/components/agent-elements/input/model-groups.ts";
 import { createModelMenuRenderer } from "@/components/agent-elements/input/model-menu-content.tsx";
+import {
+	AgentUsageBadge,
+	ProviderCreditsBadge,
+} from "@/components/agent-elements/input/usage-bar.tsx";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
@@ -67,7 +71,13 @@ import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import { AgentLogo } from "@/src/lib/agent-logos.tsx";
 import type { AgentCatalogEntry, AgentSummary } from "@/src/lib/api/agents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
+import { formatMicroUsd } from "@/src/lib/api/credits.ts";
 import { discoverModels } from "@/src/lib/api/pi-config.ts";
+import {
+	expiryClass,
+	formatCountdown,
+	formatExpiryDate,
+} from "@/src/lib/expiry.ts";
 import { svglForProvider } from "@/src/lib/provider-brand.tsx";
 
 /** A Pi provider row for the Providers section (built by `useUniversalPicker`). */
@@ -80,6 +90,18 @@ export interface ProviderEntry {
 	currentModel: string | null;
 	/** The provider's current thinking level when active, else null. */
 	currentThinking: string | null;
+	/**
+	 * Enumerate this row's full model list under a DIFFERENT registry id. Set only
+	 * for the default managed Ryu row, which carries no `models_url` of its own and
+	 * borrows the public OpenRouter catalog it actually routes to.
+	 *
+	 * Absent means "discover under `id`, and only if `supportsDiscovery`". That
+	 * default is load-bearing now that several managed rows exist: a pool-backed
+	 * managed row (Ryu Fast / Ryu Frontier) that inherited OpenRouter's catalog
+	 * would offer models its own supply cannot serve, and every one of those picks
+	 * would fail at the gateway.
+	 */
+	discoveryProviderId?: string;
 	/** Engine key for the brand logo (anthropic / openai / gemini / …). */
 	engineKey: string;
 	id: string;
@@ -92,12 +114,44 @@ export interface ProviderEntry {
 	/** Selectable models (from the provider's suggested set; live-discovered ids
 	 * are merged in on open for discovery-capable providers like OpenRouter). */
 	models: ComposerSettingItem[];
+	/**
+	 * This row's remaining POOL-RESTRICTED granted credit, when it is a pool-backed
+	 * Ryu row and the account holds a grant in that pool. Absent otherwise.
+	 *
+	 * Strictly the pool's OWN money — the wallet's shared subscription/top-up
+	 * buckets are deliberately NOT folded in. Those are spendable once but would
+	 * appear on every pool row, so a user holding $12 shared and a $50 Frontier
+	 * grant would read three rows totalling $74 for $62 of actual credit. The
+	 * shared balance has its own single home (the account menu / node selector);
+	 * this row answers only "how much Frontier is left", which is the question a
+	 * segregated pool exists to make answerable.
+	 */
+	poolGrant?: {
+		/** When this pool's grant money lapses, ISO, or null if it does not. */
+		expiresAt: string | null;
+		remainingMicroUsd: number;
+	};
 	/** Whether Core can dynamically enumerate this provider's full model list. */
 	supportsDiscovery: boolean;
 	/** The managed provider with no active paid plan → show the subscription upsell
 	 * instead of the model list. The managed provider is always `configured` (it is
 	 * wallet-gated server-side), so upsell is gated on the entitlement, not `configured`. */
 	upsell: boolean;
+	/**
+	 * Overrides the upsell body's copy. Absent = the default managed row's wording,
+	 * which names OpenRouter because that row IS the managed OpenRouter route.
+	 *
+	 * A pool-backed managed row must override both halves: its tier is not
+	 * OpenRouter, and naming the supplier behind a pool breaks the rule that a user
+	 * only ever reads the pool's own tier name.
+	 */
+	upsellCopy?: {
+		/** Sub-label under "Use your own key", or null to drop that row — a pool's
+		 *  supply is not something a user can hold a key for. */
+		byoKey: string | null;
+		/** Sub-label under "Upgrade to Ryu". */
+		upgrade: string;
+	};
 }
 
 /** A team row for the optional Teams section. */
@@ -505,14 +559,14 @@ function ProviderSubBody({
 	// Live-enumerate the provider's full model list once the submenu opens (this
 	// component only mounts on open). OpenRouter exposes hundreds of models Core's
 	// static `suggestedModels` can't carry, so a discovery-capable provider gets the
-	// real list; others fall back to the suggestions. The managed provider carries no
-	// models_url of its own, so its full list is enumerated from the public OpenRouter
-	// catalog (the same models it routes to).
-	const discoveryId = provider.managed ? "openrouter" : provider.id;
+	// real list; others fall back to the suggestions. A row that borrows another
+	// registry id's catalog says so explicitly via `discoveryProviderId` — see the
+	// note on that field for why "managed" alone must never imply OpenRouter.
+	const discoveryId = provider.discoveryProviderId ?? provider.id;
 	const discoverable =
 		!provider.upsell &&
 		provider.configured &&
-		(provider.supportsDiscovery || provider.managed);
+		(provider.supportsDiscovery || provider.discoveryProviderId !== undefined);
 	const discovery = useQuery({
 		queryKey: ["pi-discover", node.url, discoveryId],
 		queryFn: () => discoverModels(toTarget(node), { provider: discoveryId }),
@@ -540,10 +594,17 @@ function ProviderSubBody({
 	}, [discovery.data, provider.models]);
 
 	if (provider.upsell) {
+		const upgradeCopy =
+			provider.upsellCopy?.upgrade ??
+			"Every model through Ryu's managed OpenRouter — no API keys, one subscription.";
+		const byoKeyCopy =
+			provider.upsellCopy === undefined
+				? "Already have an OpenRouter key? Add it instead."
+				: provider.upsellCopy.byoKey;
 		return (
 			<>
 				<ActionRow
-					description="Every model through Ryu's managed OpenRouter — no API keys, one subscription."
+					description={upgradeCopy}
 					icon={SparklesIcon}
 					label="Upgrade to Ryu"
 					onClick={() => {
@@ -551,15 +612,17 @@ function ProviderSubBody({
 						close();
 					}}
 				/>
-				<ActionRow
-					description="Already have an OpenRouter key? Add it instead."
-					icon={PlugSocketIcon}
-					label="Use your own key"
-					onClick={() => {
-						onConfigure();
-						close();
-					}}
-				/>
+				{byoKeyCopy === null ? null : (
+					<ActionRow
+						description={byoKeyCopy}
+						icon={PlugSocketIcon}
+						label="Use your own key"
+						onClick={() => {
+							onConfigure();
+							close();
+						}}
+					/>
+				)}
 			</>
 		);
 	}
@@ -636,6 +699,7 @@ function TargetSub({
 	providerId,
 	avatarUrl,
 	isActive,
+	trailing,
 	children,
 }: {
 	avatarUrl?: string | null;
@@ -645,6 +709,14 @@ function TargetSub({
 	providerId?: string;
 	isActive: boolean;
 	label: string;
+	/**
+	 * A small right-aligned status for this row, before the active checkmark: an
+	 * agent's subscription usage, or a Ryu pool's remaining granted credit. This is
+	 * the one seam both live on, because provider rows and agent rows are the same
+	 * component — anything that renders per-target belongs here rather than in two
+	 * near-identical copies.
+	 */
+	trailing?: ReactNode;
 }) {
 	// Provider rows carry a Pi id (groq, cerebras, nvidia, …) whose bundled brand
 	// mark lives in `/logos/`. Agents (no providerId) keep the engine logo.
@@ -676,6 +748,7 @@ function TargetSub({
 					)}
 					<span className="truncate">{label}</span>
 				</span>
+				{trailing}
 				{isActive && (
 					<HugeiconsIcon
 						className="mr-1 shrink-0 text-muted-foreground"
@@ -689,6 +762,61 @@ function TargetSub({
 				{children}
 			</DropdownMenuSubContent>
 		</DropdownMenuSub>
+	);
+}
+
+/**
+ * A Ryu pool row's remaining granted credit, in dollars, on the picker row.
+ *
+ * The number is the pool's own segregated grant balance and nothing else (see
+ * `ProviderEntry.poolGrant`). Campaign grants lapse, so when this money has a
+ * date the badge wears the shared expiry urgency hue and the tooltip says when —
+ * the same convention the composer's banked-reset timeline uses, from the same
+ * helpers, so two "expires in" readings on one screen can't disagree.
+ */
+function PoolGrantBadge({
+	grant,
+	label,
+}: {
+	grant: NonNullable<ProviderEntry["poolGrant"]>;
+	label: string;
+}) {
+	const amount = formatMicroUsd(grant.remainingMicroUsd);
+	const expiry = grant.expiresAt;
+	return (
+		<Tooltip>
+			<TooltipTrigger
+				render={
+					<span
+						aria-label={`${label}: ${amount} of granted credit left`}
+						className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70 tabular-nums"
+					/>
+				}
+			>
+				{expiry ? (
+					<span
+						aria-hidden="true"
+						className={cn("size-1.5 rounded-full", expiryClass(expiry))}
+					/>
+				) : null}
+				{amount}
+			</TooltipTrigger>
+			<TooltipContent>
+				<div className="flex flex-col gap-0.5 text-xs">
+					<span className="font-medium">
+						{amount} of {label} credit left
+					</span>
+					{expiry ? (
+						<span className="text-muted-foreground">
+							Expires {formatExpiryDate(expiry)} · {formatCountdown(expiry)}
+						</span>
+					) : null}
+					<span className="text-muted-foreground">
+						Only spendable on {label}.
+					</span>
+				</div>
+			</TooltipContent>
+		</Tooltip>
 	);
 }
 
@@ -902,6 +1030,19 @@ export function UniversalPickerBody({
 			key={provider.id}
 			label={provider.label}
 			providerId={provider.id}
+			trailing={
+				// A pool row shows the pool's granted credit; a BYOK row shows what's
+				// left on the key the user pasted. Never both — a pool has no key and
+				// a BYOK provider has no pool, so this is a fork, not a stack.
+				provider.poolGrant ? (
+					<PoolGrantBadge grant={provider.poolGrant} label={provider.label} />
+				) : (
+					<ProviderCreditsBadge
+						label={provider.label}
+						providerId={provider.id}
+					/>
+				)
+			}
 		>
 			<ProviderSubBody
 				close={close}
@@ -925,6 +1066,11 @@ export function UniversalPickerBody({
 				isActive={isActive}
 				key={agent.id}
 				label={agent.name}
+				// Installed subscription harnesses only. The not-installed catalog rows
+				// (`AvailableAgentRow`) deliberately get none: their ids match the same
+				// engine substrings, so a badge there would read a credential for a CLI
+				// that isn't on this machine and answer "not logged in" every time.
+				trailing={<AgentUsageBadge agentId={agent.id} />}
 			>
 				{isActive && activeSections.length > 0 ? (
 					<>

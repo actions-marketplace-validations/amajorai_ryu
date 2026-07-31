@@ -30,6 +30,7 @@ export const STORAGE_KEYS = {
 	contrast: "ryu_contrast",
 	radius: "ryu_radius",
 	spacing: "ryu_spacing",
+	scale: "ryu_ui_scale",
 	cardSpacing: "ryu_card_spacing",
 	chatWidth: "ryu_chat_width",
 	customThemes: "ryu_custom_themes",

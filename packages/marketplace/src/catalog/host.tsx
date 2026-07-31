@@ -82,6 +82,19 @@ export interface CatalogHost {
 	/** The "Use this model" control for an installed model (desktop-only; a
 	 *  read-only surface renders nothing since installed cards never appear). */
 	ActiveModelControl: ComponentType<{ repoId: string }>;
+	/** Whether the SKILL.md authoring routes actually resolve on this surface.
+	 *
+	 *  {@link navigate} says the host CAN deep-link; this says the deep link LANDS
+	 *  somewhere. The two came apart because the editor is a Ryu App
+	 *  (`com.ryu.skill-editor`) that ships default-OFF: desktop always has
+	 *  `navigate`, so it rendered New/Edit on every card, and each one opened a tab
+	 *  reading "App not enabled". A host that owns the editor should compute this
+	 *  from whatever tells it the app is live (desktop: the contributions feed), not
+	 *  from a baked plugin id.
+	 *
+	 *  Omitted ⇒ treated as `true`, so a host with no notion of app enablement keeps
+	 *  its old behaviour and only `navigate` gates authoring. */
+	canAuthorSkills?: boolean;
 	/** On-demand llmfit hardware fit + tok/s estimate for one repo. */
 	estimateLlmfit: (node: CatalogNode, repo: string) => Promise<LlmFitEstimate>;
 	/** Tailwind classes + dot color for a device-fit verdict. */
