@@ -44,7 +44,7 @@ test("installed-but-disabled backends are named, not hidden", async ({
 }) => {
 	await page.goto(STORY_URL);
 	await expect(page.getByText("Installed but turned off")).toBeVisible();
-	await expect(page.getByText(/Docling \(com\.ryu\.docling\)/)).toBeVisible();
+	await expect(page.getByText(/Docling \(@ryu\/docling\)/)).toBeVisible();
 });
 
 test("the capability readout renders with the node's own values", async ({
