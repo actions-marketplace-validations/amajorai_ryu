@@ -756,22 +756,22 @@ mod tests {
     #[test]
     fn selectable_two_providers_picks_the_declared_default() {
         let set = vec![
-            selectable_provider("tavily", "web.search", false),
-            selectable_provider("exa", "web.search", true),
+            selectable_provider("@ryu/tavily", "web.search", false),
+            selectable_provider("@ryu/exa", "web.search", true),
         ];
         let cfg = BindingConfig::default();
         let reg = BindingRegistry::new(&cfg, &set);
         assert_eq!(
             reg.resolve_by_name("web.search").unwrap().provider_id,
-            "exa"
+            "@ryu/exa"
         );
     }
 
     #[test]
     fn selectable_without_a_default_picks_lowest_id_deterministically() {
         let set = vec![
-            selectable_provider("tavily", "web.search", false),
-            selectable_provider("brave", "web.search", false),
+            selectable_provider("@ryu/tavily", "web.search", false),
+            selectable_provider("@ryu/brave", "web.search", false),
         ];
         let cfg = BindingConfig::default();
         let reg = BindingRegistry::new(&cfg, &set);
@@ -779,29 +779,29 @@ mod tests {
         // disable-safety reconstruction argument depends on.
         assert_eq!(
             reg.resolve_by_name("web.search").unwrap().provider_id,
-            "brave"
+            "@ryu/brave"
         );
         let reversed = vec![set[1].clone(), set[0].clone()];
         let reg2 = BindingRegistry::new(&cfg, &reversed);
         assert_eq!(
             reg2.resolve_by_name("web.search").unwrap().provider_id,
-            "brave"
+            "@ryu/brave"
         );
     }
 
     #[test]
     fn override_still_beats_the_selectable_default() {
         let set = vec![
-            selectable_provider("tavily", "web.search", false),
-            selectable_provider("exa", "web.search", true),
+            selectable_provider("@ryu/tavily", "web.search", false),
+            selectable_provider("@ryu/exa", "web.search", true),
         ];
         let mut cfg = BindingConfig::default();
         cfg.overrides
-            .insert("web.search".to_owned(), "tavily".to_owned());
+            .insert("web.search".to_owned(), "@ryu/tavily".to_owned());
         let reg = BindingRegistry::new(&cfg, &set);
         assert_eq!(
             reg.resolve_by_name("web.search").unwrap().provider_id,
-            "tavily"
+            "@ryu/tavily"
         );
     }
 
@@ -826,9 +826,9 @@ mod tests {
         // The engine UX: install five search backends, pick one. With the strict
         // flavour this consumer set would be refused at enable time.
         let mut set = vec![
-            selectable_provider("exa", "web.search", true),
-            selectable_provider("tavily", "web.search", false),
-            selectable_provider("brave", "web.search", false),
+            selectable_provider("@ryu/exa", "web.search", true),
+            selectable_provider("@ryu/tavily", "web.search", false),
+            selectable_provider("@ryu/brave", "web.search", false),
         ];
         set.push(consumer("agent-tools", "web.search", None));
         let cfg = BindingConfig::default();
@@ -838,13 +838,13 @@ mod tests {
     #[test]
     fn describe_capabilities_reports_providers_and_the_current_pick() {
         let set = vec![
-            selectable_provider("exa", "web.search", true),
-            selectable_provider("tavily", "web.search", false),
+            selectable_provider("@ryu/exa", "web.search", true),
+            selectable_provider("@ryu/tavily", "web.search", false),
             provider("vecrag", "rag", "1.0.0"),
         ];
         let mut cfg = BindingConfig::default();
         cfg.overrides
-            .insert("web.search".to_owned(), "tavily".to_owned());
+            .insert("web.search".to_owned(), "@ryu/tavily".to_owned());
         let described = describe_capabilities(&set, &set, &cfg);
 
         let search = described
@@ -853,14 +853,14 @@ mod tests {
             .expect("web.search described");
         assert!(search.selectable);
         assert!(search.overridden);
-        assert_eq!(search.bound.as_deref(), Some("tavily"));
+        assert_eq!(search.bound.as_deref(), Some("@ryu/tavily"));
         assert_eq!(
             search
                 .providers
                 .iter()
                 .map(|p| p.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["exa", "tavily"]
+            vec!["@ryu/exa", "@ryu/tavily"]
         );
         // Everything known is enabled here, so nothing is merely available.
         assert!(search.available.is_empty());
@@ -882,8 +882,8 @@ mod tests {
         // does not exist", and `web.search` - whose five providers all ship opt-in -
         // was therefore invisible on a fresh install with no pointer to the Store.
         let known = vec![
-            selectable_provider("exa", "web.search", true),
-            selectable_provider("tavily", "web.search", false),
+            selectable_provider("@ryu/exa", "web.search", true),
+            selectable_provider("@ryu/tavily", "web.search", false),
         ];
         let enabled: Vec<PluginManifest> = Vec::new();
         let described = describe_capabilities(&enabled, &known, &BindingConfig::default());
@@ -899,7 +899,7 @@ mod tests {
                 .iter()
                 .map(|p| p.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["exa", "tavily"],
+            vec!["@ryu/exa", "@ryu/tavily"],
             "both candidates must be offered so the user can enable one"
         );
         assert_eq!(search.bound, None, "nothing can be bound");
@@ -927,13 +927,14 @@ mod tests {
     fn override_naming_non_provider_is_rejected() {
         let set = vec![provider("rag-app", "rag", "1.0.0")];
         let mut cfg = BindingConfig::default();
-        cfg.overrides.insert("rag".to_owned(), "ghost".to_owned());
+        cfg.overrides
+            .insert("rag".to_owned(), "@ryu/ghost".to_owned());
         let reg = BindingRegistry::new(&cfg, &set);
         assert_eq!(
             reg.resolve(&req("rag", None)).unwrap_err(),
             BindingError::OverrideNotProvider {
                 capability: "rag".to_owned(),
-                chosen: "ghost".to_owned()
+                chosen: "@ryu/ghost".to_owned()
             }
         );
     }
@@ -992,20 +993,20 @@ mod tests {
 
     #[test]
     fn finetune_builtin_loads_after_the_kind_tag_fix() {
-        // Regression: com.ryu.finetune (default-on, a Python-sidecar app) silently
+        // Regression: @ryu/finetune (default-on, a Python-sidecar app) silently
         // never loaded — the SidecarProcess `#[serde(tag="kind")]` consumed the inner
         // ExternalRuntimeConfig.kind, so its manifest failed to parse and it was
         // absent from the built-in set. The inner kind now defaults; it must load.
         let builtins = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         assert!(
-            builtins.iter().any(|m| m.id == "com.ryu.finetune"),
-            "com.ryu.finetune now loads as a built-in"
+            builtins.iter().any(|m| m.id == "@ryu/finetune"),
+            "@ryu/finetune now loads as a built-in"
         );
     }
 
     #[test]
     fn builtin_rag_capability_resolves_to_engines_through_the_real_graph() {
-        // End-to-end over the SHIPPED manifests (not synthetic): com.ryu.rag declares
+        // End-to-end over the SHIPPED manifests (not synthetic): @ryu/rag declares
         // `requires.capabilities=[engines]`, the `engines` built-in declares
         // `provides=[engines]`, so the binding resolves + lowers to a real app edge
         // and the graph orders engines before rag / refuses disabling engines.
@@ -1016,41 +1017,41 @@ mod tests {
         // rag requires the `engines` capability, bound to the `engines` app.
         let rag = builtins
             .iter()
-            .find(|m| m.id == "com.ryu.rag")
-            .expect("com.ryu.rag built-in");
+            .find(|m| m.id == "@ryu/rag")
+            .expect("@ryu/rag built-in");
         let reg = BindingRegistry::new(&cfg, &builtins);
         let (bindings, errs) = reg.resolve_all(rag);
         assert!(errs.is_empty(), "rag's capabilities all bind: {errs:?}");
         assert!(
-            bindings.iter().any(|b| b.provider_id == "engines"),
+            bindings.iter().any(|b| b.provider_id == "@ryu/engines"),
             "rag's `engines` capability binds to the engines app"
         );
 
         // Lowered, the graph pulls engines in before rag and lists rag as a dependent
         // of engines (so engines can't be disabled out from under it).
         let lowered = lower_manifests(&builtins, &cfg);
-        let order = graph::resolve_enable_order("com.ryu.rag", &lowered).expect("resolves");
-        let ei = order.iter().position(|id| id == "engines");
-        let ri = order.iter().position(|id| id == "com.ryu.rag");
+        let order = graph::resolve_enable_order("@ryu/rag", &lowered).expect("resolves");
+        let ei = order.iter().position(|id| id == "@ryu/engines");
+        let ri = order.iter().position(|id| id == "@ryu/rag");
         assert!(ei < ri, "engines enabled before rag (order: {order:?})");
         assert!(
-            graph::dependents_of("engines", &lowered).contains(&"com.ryu.rag".to_owned()),
+            graph::dependents_of("@ryu/engines", &lowered).contains(&"@ryu/rag".to_owned()),
             "rag is a dependent of engines"
         );
 
         // The L2 chain: spaces requires the `rag` capability, so the enable order is
         // engines → rag → spaces, and disabling rag is blocked while spaces is enabled.
         let spaces_order =
-            graph::resolve_enable_order("com.ryu.spaces", &lowered).expect("spaces resolves");
-        let si = spaces_order.iter().position(|id| id == "com.ryu.spaces");
-        let sri = spaces_order.iter().position(|id| id == "com.ryu.rag");
-        let sei = spaces_order.iter().position(|id| id == "engines");
+            graph::resolve_enable_order("@ryu/spaces", &lowered).expect("spaces resolves");
+        let si = spaces_order.iter().position(|id| id == "@ryu/spaces");
+        let sri = spaces_order.iter().position(|id| id == "@ryu/rag");
+        let sei = spaces_order.iter().position(|id| id == "@ryu/engines");
         assert!(
             sei < sri && sri < si,
             "engines → rag → spaces (order: {spaces_order:?})"
         );
         assert!(
-            graph::dependents_of("com.ryu.rag", &lowered).contains(&"com.ryu.spaces".to_owned()),
+            graph::dependents_of("@ryu/rag", &lowered).contains(&"@ryu/spaces".to_owned()),
             "spaces is a dependent of rag (rag can't be disabled under spaces)"
         );
     }

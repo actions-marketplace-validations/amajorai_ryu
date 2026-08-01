@@ -4,7 +4,7 @@
 //! `ryu_healing::HealEngine` as a process-global, the scheduler + workflow executor
 //! called `ryu_healing::global_engine().report_failure(...)` directly, and the
 //! `/api/healing/*` HTTP surface was merged into Core's router. Healing is now an
-//! out-of-process app (`com.ryu.healing`): the `ryu-healing` sidecar owns the
+//! out-of-process app (`@ryu/healing`): the `ryu-healing` sidecar owns the
 //! diagnose→propose ENGINE, the per-source attempt cap (`healing-attempts.json`),
 //! the `healing.*` prefs, the Gateway diagnosis call, and the public
 //! `/api/healing/config|status` surface (served through the ext-proxy

@@ -27,10 +27,10 @@
 
 import { Add01Icon, SparklesIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import type { ComposerModelSection } from "@ryu/blocks/composer/composer-acp-sections";
 import { type ReactNode, useMemo } from "react";
 import { CapabilityBadges } from "@/components/agent-elements/input/capability-badges.tsx";
 import {
-	type ComposerSettingItem,
 	ComposerSettingsMenu,
 	type ComposerSettingsSection,
 } from "@/components/agent-elements/input/composer-settings-menu.tsx";
@@ -128,21 +128,10 @@ export function useComposerAgentModes(
 	}, [agents, teams, includeTeams, includeCreate]);
 }
 
-/**
- * A caller-supplied override for the composer's Model section — the ACP-models /
- * config-option / engine-catalog chain ChatPage computes. When omitted, the model
- * section is built from `modelOptions` (hidden for ACP agents, which advertise
- * their own models in-chat).
- */
-export interface ComposerModelSection {
-	items: ComposerSettingItem[];
-	/** The agent's model surface is still being probed (ACP capability fetch in flight). */
-	loading?: boolean;
-	onChange: (id: string) => void;
-	/** Grouped/searchable body; when set, overrides the flat item list. */
-	renderContent?: (onSelect: (id: string) => void) => ReactNode;
-	value: string | undefined;
-}
+// `ComposerModelSection` — the caller-supplied override for the Model section
+// (the ACP-models / config-option / engine-catalog chain) — is owned by
+// `@ryu/blocks/composer/composer-acp-sections`, alongside the derivation that
+// produces it, so desktop and the island cannot drift apart on its shape.
 
 export interface ComposerAgentControlsConfig {
 	/** Currently selected agent id, or null when a team is the active target. */

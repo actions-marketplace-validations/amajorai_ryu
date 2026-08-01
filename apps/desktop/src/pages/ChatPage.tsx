@@ -1,6 +1,7 @@
 import { useChat } from "@ai-sdk/react";
 import { ClipboardIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import type { StreamedAcpConfig } from "@ryu/blocks/composer/composer-acp-sections";
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
 import {
 	WidgetHostContext,
@@ -29,7 +30,6 @@ import type {
 	GhostControls,
 	PluginComposerControlRow,
 } from "@/components/agent-elements/input/goal-plus-button.tsx";
-import type { StreamedAcpConfig } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import type {
 	AttachedImage,

@@ -38,7 +38,7 @@ describe("skillAuthoringEnabled", () => {
 	});
 
 	// The regression this helper exists for: desktop ALWAYS has `navigate`, and the
-	// editor app (`com.ryu.skill-editor`) ships default-OFF, so New/Edit rendered on
+	// editor app (`@ryu/skill-editor`) ships default-OFF, so New/Edit rendered on
 	// a fresh install and every click opened a tab reading "App not enabled".
 	test("navigate with the editor app disabled cannot author", () => {
 		expect(skillAuthoringEnabled({ canAuthorSkills: false, navigate })).toBe(

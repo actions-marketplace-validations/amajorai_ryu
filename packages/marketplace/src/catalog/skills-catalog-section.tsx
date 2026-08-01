@@ -150,7 +150,7 @@ export function isMarkdownFile(path: string): boolean {
  * Two independent conditions, and getting only the first was a live bug:
  *   1. `navigate` — the host CAN deep link. A read-only surface (web) omits it.
  *   2. `canAuthorSkills` — the deep link LANDS somewhere. The editor is a Ryu App
- *      (`com.ryu.skill-editor`) that ships default-OFF, and desktop always has
+ *      (`@ryu/skill-editor`) that ships default-OFF, and desktop always has
  *      `navigate`, so on a fresh install every New/Edit button opened a tab reading
  *      "App not enabled". Omitted ⇒ `true`, so hosts with no notion of app
  *      enablement keep the old `navigate`-only behaviour.

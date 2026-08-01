@@ -166,6 +166,33 @@ impl PluginStore {
         Ok(())
     }
 
+    /// Move an app's lifecycle record from `from` to `to` — the plugin-id rename.
+    ///
+    /// The record carries the user's enabled/disabled choice AND the Gateway-approved
+    /// grant set, neither of which is re-derivable: `set_enabled` is the only writer
+    /// of `approved_grants`, so a lost record means the app silently reverts to
+    /// disabled-and-ungranted and the user has to re-approve everything.
+    ///
+    /// A no-op when `to` already exists (a re-run, or the app was installed fresh
+    /// under its new id): the newer record wins and the legacy row is dropped, so the
+    /// migration is safe to attempt more than once.
+    ///
+    /// Returns true when a legacy record was actually moved.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying SQLite statements fail.
+    pub async fn rekey(&self, from: &str, to: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        // `UPDATE OR IGNORE` leaves the row in place when `to` is already taken;
+        // the DELETE below then reaps it either way.
+        conn.execute(
+            "UPDATE OR IGNORE apps SET id = ?2 WHERE id = ?1",
+            params![from, to],
+        )?;
+        let removed = conn.execute("DELETE FROM apps WHERE id = ?1", params![from])?;
+        Ok(removed > 0)
+    }
+
     /// Union `grants` into an app's approved set WITHOUT touching `enabled`.
     ///
     /// Additive only — it can never revoke. Used by the one-time backfill, which must

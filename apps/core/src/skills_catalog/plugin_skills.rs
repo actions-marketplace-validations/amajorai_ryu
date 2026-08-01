@@ -53,7 +53,7 @@ pub fn plugin_skills_root(plugin_id: &str) -> Option<PathBuf> {
         return None;
     }
     let dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
-        .join(plugin_id)
+        .join(crate::plugin_manifest::plugin_dir_name(plugin_id))
         .join("skills");
     if dir.is_dir() {
         Some(dir)

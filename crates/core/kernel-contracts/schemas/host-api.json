@@ -526,6 +526,13 @@
       "tsHost": true
     },
     {
+      "capability": "workflows.catalogs",
+      "grant": "workflows:catalogs",
+      "method": "workflows.hookEvents",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "ghost.record",
       "grant": "ghost:record",
       "method": "ghost.recordStart",

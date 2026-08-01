@@ -91,7 +91,7 @@ type SettingsSection =
  * `CHROME_ORDER`: the App declares itself; the shell does not enumerate Apps.
  *
  * Inbox and Memory were the last two survivors of that rule, and both were live
- * dead ends: `com.ryu.approvals` and `com.ryu.memory` are BOTH absent from Core's
+ * dead ends: `@ryu/approvals` and `@ryu/memory` are BOTH absent from Core's
  * `CORE_DEFAULT_ON`, so on a fresh install "Inbox" opened a tab reading "App not
  * enabled" and "Memory" opened a Memory Library whose `/api/memory` reads 503
  * behind the same app gate. Neither needs a row here: an enabled approvals app is
@@ -279,7 +279,7 @@ export function CommandPalette() {
 	};
 
 	// Open a captured item back in the timeline at the moment it happened. The
-	// timeline is now a sandboxed companion (com.ryu.timeline); a shell window event
+	// timeline is now a sandboxed companion (@ryu/timeline); a shell window event
 	// cannot cross the frame, so the timestamp rides the deep-link path (/timeline/:ts)
 	// and the route bakes it into the frame's mount context as
 	// `window.ryu.context.focusTs`, which the companion reads at mount to scrub

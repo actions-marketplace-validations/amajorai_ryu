@@ -6,7 +6,7 @@
 //! `/api/monitors/*` route merge, a scheduler `JobTarget::Monitor` arm that called
 //! `global_engine().run_monitor()` directly, an activity subscribe-loop over the
 //! in-process alert broadcast, and an events fan-out over the same bus. Monitors is
-//! now an out-of-process app (`com.ryu.monitors`): the `ryu-monitors` sidecar owns
+//! now an out-of-process app (`@ryu/monitors`): the `ryu-monitors` sidecar owns
 //! `monitors.db`, the engine, and the `/api/monitors/*` surface — served through the
 //! generic ext-proxy `public_mount`. Core links NO monitor code; its reverse
 //! couplings reach the sidecar over loopback via this client, and the sidecar reaches

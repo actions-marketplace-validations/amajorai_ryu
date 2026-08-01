@@ -97,7 +97,7 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 	);
 
 	// Whether the SKILL.md editor app is live. `navigate` alone only proves desktop
-	// CAN open a tab; `com.ryu.skill-editor` ships default-OFF, so without this the
+	// CAN open a tab; `@ryu/skill-editor` ships default-OFF, so without this the
 	// Skills section rendered New/Edit on every card and each opened "App not
 	// enabled". Read from the live contributions feed — the same source the
 	// `/skills/new` + `/skills/:id/edit` routes mount from — so the button and the

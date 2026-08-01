@@ -5,7 +5,7 @@
 // UI concern), so we auto-lay them out left-to-right by longest-path depth — a DAG
 // reads best that way. Interaction is fully disabled (no drag/connect/zoom/select):
 // this is a picture of the workflow, not the editor (that lives in the sandboxed
-// com.ryu.workflows companion). React Flow's base CSS is already imported globally
+// @ryu/workflows companion). React Flow's base CSS is already imported globally
 // in index.css.
 
 import {

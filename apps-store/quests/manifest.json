@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.quests",
+  "id": "@ryu/quests",
   "name": "Quests",
   "version": "1.0.0",
   "description": "Quests: auto-detecting todos surfaced from your chats and activity, tracked as a lightweight quest board with progress and completion.",
@@ -53,6 +53,45 @@
     "icon": "target"
   },
   "contributes": {
+    "hook_events": [
+      {
+        "id": "@ryu/quests#quest.created",
+        "title": "Quest created",
+        "description": "A new quest was added to the board, from the companion UI or the API. Fires as soon as the quest is persisted, exactly once per quest — reopening a finished quest does not re-fire it.",
+        "payload_example": {
+          "id": "quest_9f3c1b2a4d5e6f708192a3b4c5d6e7f8",
+          "title": "Ship the release notes",
+          "detail": "Cover the routing rewrite",
+          "completion_condition": "the release notes are published",
+          "created_at": "2026-08-01T09:12:44Z"
+        }
+      },
+      {
+        "id": "@ryu/quests#quest.suggested",
+        "title": "Quest completion suggested",
+        "description": "The judge decided a quest looks done but not confidently enough to close it, so it is waiting on the user to confirm. Fires only on a NEW suggestion — an unchanged verdict on a later detection pass does not re-fire.",
+        "payload_example": {
+          "id": "quest_9f3c1b2a4d5e6f708192a3b4c5d6e7f8",
+          "title": "Ship the release notes",
+          "confidence": 72,
+          "reason": "The release notes page was published a few minutes ago.",
+          "suggested_at": "2026-08-01T10:31:08Z"
+        }
+      },
+      {
+        "id": "@ryu/quests#quest.completed",
+        "title": "Quest completed",
+        "description": "A quest moved to done. `source` is how it was decided (`manual` = the user checked it off, `detected` = the judge did) and `auto` is whether the engine closed it without the user — accepting a suggestion is `detected` but not `auto`. Can fire more than once for the same quest, because a finished quest can be reopened and finished again.",
+        "payload_example": {
+          "id": "quest_9f3c1b2a4d5e6f708192a3b4c5d6e7f8",
+          "title": "Ship the release notes",
+          "source": "detected",
+          "auto": true,
+          "confidence": 91,
+          "completed_at": "2026-08-01T10:33:20Z"
+        }
+      }
+    ],
     "settings_tabs": [
       {
         "id": "quests.settings",

@@ -2969,10 +2969,7 @@ impl GatewayConfig {
                 .filter(|s| !s.trim().is_empty())
                 .or_else(|| {
                     (!region.trim().is_empty()).then(|| {
-                        format!(
-                            "https://bedrock-mantle.{}.api.aws/anthropic",
-                            region.trim()
-                        )
+                        format!("https://bedrock-mantle.{}.api.aws/anthropic", region.trim())
                     })
                 });
             if let Some(base_url) = base_url {

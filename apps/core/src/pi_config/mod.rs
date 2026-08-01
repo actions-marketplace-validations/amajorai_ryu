@@ -2961,6 +2961,87 @@ mod tests {
         });
     }
 
+    /// The UPGRADE path: a Core that ships a newer extension body must overwrite
+    /// the copy an OLDER Core already wrote to the user's managed Pi dir.
+    ///
+    /// **Why this is a test and not a comment.** The extensions are `include_str!`d
+    /// into the Core binary, so they travel with a Core upgrade for free — but only
+    /// as far as the binary. Reaching the user's `~/.ryu/pi-agent/extensions/`
+    /// depends entirely on [`ship_pi_extension`] doing a CONTENT compare
+    /// (`existing != src`) rather than an existence check. Those two are one word
+    /// apart and behave identically on a fresh install, so the difference is
+    /// invisible to every other test here — `managed_defaults_ship_every_ryu_extension`
+    /// and the per-extension idempotency tests all start from an empty dir.
+    ///
+    /// If someone "optimises" that to write-if-absent, every EXISTING user is frozen
+    /// on whatever extension body their first install wrote, forever, while the
+    /// release notes say the fix shipped. That is the silent-degradation class this
+    /// file's guards exist to prevent, so it gets pinned from the upgrade side too.
+    ///
+    /// Registration is asserted as well: the settings entry must not be duplicated
+    /// by the rewrite, since the path is unchanged.
+    #[test]
+    fn a_stale_extension_body_is_replaced_on_upgrade() {
+        with_temp_dir(|| {
+            // An older Core's install: every extension present, but with a body
+            // that predates the current embed.
+            ensure_managed_defaults().expect("first install");
+            let stale = "// shipped by an older Ryu\n";
+            let paths = [
+                pi_mcp_extension_path(),
+                pi_lsp_extension_path(),
+                pi_plan_extension_path(),
+                pi_subagent_extension_path(),
+                pi_shell_extension_path(),
+            ];
+            for path in &paths {
+                fs::write(path, stale).expect("age the installed extension");
+            }
+
+            // The upgraded Core's spawn-time invariant pass.
+            ensure_managed_defaults().expect("upgrade");
+
+            for (path, expected) in paths.iter().zip([
+                PI_MCP_EXTENSION_SRC,
+                PI_LSP_EXTENSION_SRC,
+                PI_PLAN_EXTENSION_SRC,
+                PI_SUBAGENT_EXTENSION_SRC,
+                PI_SHELL_EXTENSION_SRC,
+            ]) {
+                let on_disk = fs::read_to_string(path).expect("extension still present");
+                assert_ne!(
+                    on_disk,
+                    stale,
+                    "{} was left at the older body — an upgraded Core never reached the user",
+                    path.display()
+                );
+                assert_eq!(
+                    on_disk,
+                    expected,
+                    "{} does not match the embed after upgrade",
+                    path.display()
+                );
+            }
+
+            let exts = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array present");
+            for path in &paths {
+                let abs = path.to_string_lossy().into_owned();
+                assert_eq!(
+                    exts.iter()
+                        .filter(|v| v.as_str() == Some(abs.as_str()))
+                        .count(),
+                    1,
+                    "{abs} registered exactly once after the upgrade rewrite"
+                );
+            }
+        });
+    }
+
     /// The bijection guard: every `.ts` asset under `apps/core/assets/pi-extensions/`
     /// must actually reach the managed Pi dir when Core runs its spawn-time
     /// invariant pass.

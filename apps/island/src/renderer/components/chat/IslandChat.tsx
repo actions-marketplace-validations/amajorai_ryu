@@ -16,7 +16,13 @@ import { useIslandChat } from "./use-island-chat.ts";
 type Reachability = "checking" | "offline" | "online";
 
 export function IslandChat() {
-	const { leftActions, getAcpPayload, sections } = useIslandComposerContext();
+	const {
+		leftActions,
+		getAcpPayload,
+		sections,
+		applyStreamedAcpConfig,
+		applyStreamedAcpMode,
+	} = useIslandComposerContext();
 	const composerShortcuts = useComposerShortcutBindings();
 	// Session-scoped double-check toggle. Read via a getter so useIslandChat's
 	// `send` callback never closes over a stale value.
@@ -27,6 +33,10 @@ export function IslandChat() {
 		useIslandChat({
 			getAcpPayload,
 			getDoubleCheck: () => doubleCheckRef.current,
+			// Agent-driven session-control write-backs go straight back into the
+			// composer's ACP state, so the next turn sends what the agent asked for.
+			onAcpConfig: applyStreamedAcpConfig,
+			onAcpMode: applyStreamedAcpMode,
 		});
 	const chatPrefill = useIslandState((store) => store.chatPrefill);
 	const clearChatPrefill = useIslandState((store) => store.clearChatPrefill);

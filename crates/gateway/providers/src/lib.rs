@@ -47,8 +47,7 @@ pub use modal::ModalProvider;
 pub use openai::OpenAiProvider;
 pub use openrouter::{OpenRouterOptions, OpenRouterProvider};
 pub use prompt_cache::{
-    PromptCacheDialect, PromptCacheMode, PromptCacheOptions, PromptCacheOutcome,
-    PromptCacheRequest,
+    PromptCacheDialect, PromptCacheMode, PromptCacheOptions, PromptCacheOutcome, PromptCacheRequest,
 };
 pub use quota::{ProviderQuotas, RateLimitInfo};
 pub use replicate::ReplicateProvider;
@@ -580,7 +579,9 @@ pub(crate) mod test_support {
             if q.len() > 1 {
                 q.pop_front().unwrap()
             } else {
-                q.front().cloned().unwrap_or_else(|| MockResponse::ok_json("{}"))
+                q.front()
+                    .cloned()
+                    .unwrap_or_else(|| MockResponse::ok_json("{}"))
             }
         };
 
@@ -760,7 +761,9 @@ mod status_check_tests {
         .await;
         let quota = ProviderQuotas::new();
         let resp = fetch(&server).await;
-        let json = check_response_status(resp, "p", Some(&quota)).await.unwrap();
+        let json = check_response_status(resp, "p", Some(&quota))
+            .await
+            .unwrap();
         assert_eq!(json["ok"], serde_json::json!(true));
         assert_eq!(quota.snapshot()["p"]["remaining"], serde_json::json!(900));
     }
@@ -788,7 +791,10 @@ mod status_check_tests {
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
-        assert_eq!(quota.snapshot()["p"]["rate_limited"], serde_json::json!(true));
+        assert_eq!(
+            quota.snapshot()["p"]["rate_limited"],
+            serde_json::json!(true)
+        );
     }
 
     #[tokio::test]

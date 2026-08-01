@@ -20,6 +20,12 @@ export interface RecordingPillProps {
 	error?: string | null;
 	/** Live amplitude history (0..1), oldest-to-newest, from the capture hook. */
 	levels?: number[];
+	/**
+	 * Let a long agent name wrap instead of truncating. Only safe on a surface
+	 * whose height tracks its content (the desktop island pill measures this and
+	 * grows); fixed-height hosts keep the single-line default.
+	 */
+	wrap?: boolean;
 }
 
 const DEMO_LEVELS = [
@@ -32,6 +38,7 @@ export function RecordingPill({
 	canCycle = false,
 	error = null,
 	levels,
+	wrap = false,
 }: RecordingPillProps) {
 	if (error) {
 		return (
@@ -49,7 +56,9 @@ export function RecordingPill({
 			/>
 			{agentName ? (
 				<span className="flex min-w-0 items-center gap-1 text-xs">
-					<span className="truncate font-medium text-popover-foreground">
+					<span
+						className={`font-medium text-popover-foreground ${wrap ? "break-words" : "truncate"}`}
+					>
 						{agentName}
 					</span>
 					{canCycle ? (

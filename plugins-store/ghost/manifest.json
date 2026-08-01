@@ -1,16 +1,23 @@
 {
-  "id": "ghost",
+  "id": "@ryu/ghost",
   "name": "Ghost",
   "version": "1.0.0",
   "description": "Desktop automation: 29 screen perception and input control tools. Windows-first.",
-  "keywords": ["automation", "desktop"],
+  "keywords": [
+    "automation",
+    "desktop"
+  ],
   "runnables": [],
-  "permission_grants": ["mcp:ghost"],
+  "permission_grants": [
+    "mcp:ghost"
+  ],
   "mcp_servers": {
     "ghost": {
       "command": "ghost",
       "command_env": "RYU_GHOST_BIN",
-      "args": ["mcp"],
+      "args": [
+        "mcp"
+      ],
       "description": "Ghost — desktop automation (29 tools: screen perception + input control). Windows-first; install the `ghost` sidecar to enable. Unavailable until installed."
     }
   },

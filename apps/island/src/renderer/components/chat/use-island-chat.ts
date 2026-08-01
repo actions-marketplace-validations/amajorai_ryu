@@ -58,6 +58,10 @@ export interface IslandChatState {
 const DOUBLE_CHECK_FLAG = "io.ryu.double-check";
 /** The SSE part type carrying a turn-hook note. */
 const PLUGIN_NOTE_PART = "data-plugin_note";
+/** The SSE part carrying an agent-requested session-config write-back. */
+const ACP_CONFIG_PART = "data-ryu-acp-config";
+/** The SSE part carrying an agent-initiated permission-mode switch. */
+const ACP_MODE_PART = "data-ryu-acp-mode";
 
 const OCR_LIMIT = 1200;
 
@@ -96,11 +100,29 @@ export function useIslandChat(options?: {
 	};
 	/** Read the current double-check toggle when a turn is sent (kept via ref). */
 	getDoubleCheck?: () => boolean;
+	/**
+	 * An agent-requested session-config write-back arrived on the stream. `key` is
+	 * this emission's identity, so the composer can dedupe on the PART rather than
+	 * the value — an agent re-emits the byte-identical map every cycle and each
+	 * emission must land.
+	 */
+	onAcpConfig?: (config: Record<string, string>, key: string) => void;
+	/** An agent-initiated permission-mode switch arrived on the stream. */
+	onAcpMode?: (modeId: string) => void;
 }) {
 	const getAcpPayloadRef = useRef(options?.getAcpPayload);
 	getAcpPayloadRef.current = options?.getAcpPayload;
 	const getDoubleCheckRef = useRef(options?.getDoubleCheck);
 	getDoubleCheckRef.current = options?.getDoubleCheck;
+	// Refs, not deps: the stream subscription below is mounted once, and these
+	// callbacks are re-created by the composer on every render.
+	const onAcpConfigRef = useRef(options?.onAcpConfig);
+	onAcpConfigRef.current = options?.onAcpConfig;
+	const onAcpModeRef = useRef(options?.onAcpMode);
+	onAcpModeRef.current = options?.onAcpMode;
+	// Monotonic across the whole session (never reset per stream) so an emission
+	// key is unique even if two streams reused an id.
+	const acpEmissionSeq = useRef(0);
 	const [state, setState] = useState<IslandChatState>({
 		messages: [],
 		sending: false,
@@ -260,6 +282,34 @@ export function useIslandChat(options?: {
 				const noteText = typeof data?.text === "string" ? data.text.trim() : "";
 				if (noteText.length > 0) {
 					setState((prev) => ({ ...prev, notes: [...prev.notes, noteText] }));
+				}
+			} else if (part.type === ACP_CONFIG_PART) {
+				// The agent asked the client to change session-config values it holds
+				// and re-sends every turn — an approved `ExitPlanMode` clearing the Plan
+				// mode pill is the shipped case. Hand it to the composer with a fresh
+				// emission key; without this the pill stays armed and the next turn
+				// re-enters plan mode, refusing the edits the user just approved.
+				const data = (part as { data?: { config?: unknown } }).data;
+				const config = data?.config;
+				if (
+					config &&
+					typeof config === "object" &&
+					Object.keys(config).length > 0
+				) {
+					acpEmissionSeq.current += 1;
+					onAcpConfigRef.current?.(
+						config as Record<string, string>,
+						`${event.streamId}:${acpEmissionSeq.current}`
+					);
+				}
+			} else if (part.type === ACP_MODE_PART) {
+				const data = (part as { data?: { currentModeId?: unknown } }).data;
+				const modeId =
+					typeof data?.currentModeId === "string"
+						? data.currentModeId.trim()
+						: "";
+				if (modeId.length > 0) {
+					onAcpModeRef.current?.(modeId);
 				}
 			}
 		};

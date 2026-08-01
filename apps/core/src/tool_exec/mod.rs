@@ -579,7 +579,12 @@ const ENV_SECRET_ALLOWLIST: &str = "RYU_PLUGIN_ENV_ALLOWLIST";
 fn plugin_env_prefix(plugin_id: &str) -> String {
     let mut out = String::with_capacity(plugin_id.len() + 12);
     out.push_str("RYU_PLUGIN_");
-    for ch in plugin_id.chars() {
+    // A scoped id's leading `@` is dropped rather than folded, so `@acme/weather`
+    // yields `RYU_PLUGIN_ACME_WEATHER_` instead of a double-underscore
+    // `RYU_PLUGIN__ACME_WEATHER_`. The `/` still folds like any other separator, so
+    // the namespace stays unambiguous — `@a/b` and `a-b` both fold to `A_B`, and
+    // colliding there costs a third-party plugin only its own namespace.
+    for ch in plugin_id.trim_start_matches('@').chars() {
         if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_uppercase());
         } else {
@@ -608,9 +613,9 @@ fn plugin_env_prefix(plugin_id: &str) -> String {
 /// - A **compiled-in** manifest (`plugin_manifest/fixtures/*.manifest.json`, embedded
 ///   with `include_str!`) reads any var. Its bytes ship inside the binary, and
 ///   several of them legitimately read a SHARED var that fits no per-plugin prefix:
-///   `com.ryuhq.advisor` and `shadow` both authenticate to loopback Core with
+///   `@ryu/advisor` and `shadow` both authenticate to loopback Core with
 ///   `env:RYU_TOKEN`. Note this is deliberately NOT `tier_for` — `exa`, `rtk` and
-///   `com.ryuhq.advisor` are all Community-tier yet compiled in, so a tier check
+///   `@ryu/advisor` are all Community-tier yet compiled in, so a tier check
 ///   would break three first-party tools while protecting nothing extra.
 /// - A **disk** manifest (`~/.ryu/plugins/<id>/manifest.json`, which the loader
 ///   validates for semver + id uniqueness and nothing else) reads only its own
@@ -825,7 +830,7 @@ async fn resolve_secret_header_source(
 
 /// The URL scheme a manifest uses to reach **this node's own Core** over loopback.
 ///
-/// `core:/api/ext/com.ryu.browser/tabs` — note the single slash; everything after
+/// `core:/api/ext/@ryu/browser/tabs` — note the single slash; everything after
 /// `core:` is the path, and the origin is filled in at call time.
 pub const CORE_URL_SCHEME: &str = "core:";
 
@@ -3065,7 +3070,7 @@ mod tests {
     /// so `may_read_env_secret` is unrestricted and these tests keep exercising the
     /// template grammar (literal text, multi-token, absent → omit) rather than the
     /// env-namespace gate, which has its own tests below.
-    const SECRET_HEADER_TEST_PLUGIN: &str = "shadow";
+    const SECRET_HEADER_TEST_PLUGIN: &str = "@ryu/shadow";
 
     #[tokio::test]
     async fn secret_header_bearer_scheme_substitutes_env_token() {
@@ -3339,10 +3344,10 @@ mod tests {
         std::env::remove_var("RYU_SHARED_PROXY_KEY");
     }
 
-    /// First-party regression: `com.ryuhq.advisor` and `shadow` authenticate to
+    /// First-party regression: `@ryu/advisor` and `shadow` authenticate to
     /// loopback Core with the SHARED `env:RYU_TOKEN`, which by construction fits no
     /// per-plugin prefix. Both ship as compiled-in fixtures, so the gate must not
-    /// touch them — and `com.ryuhq.advisor` is Community-TIER, which is exactly why
+    /// touch them — and `@ryu/advisor` is Community-TIER, which is exactly why
     /// the gate keys on provenance rather than tier.
     #[tokio::test]
     async fn compiled_in_plugins_still_read_the_shared_ryu_token() {
@@ -3350,7 +3355,7 @@ mod tests {
         std::env::set_var("RYU_TOKEN", "core-token");
         std::env::remove_var(ENV_SECRET_ALLOWLIST);
 
-        for plugin_id in ["shadow", "com.ryuhq.advisor"] {
+        for plugin_id in ["@ryu/shadow", "@ryu/advisor"] {
             let out = resolve_secret_header_source(
                 "Authorization",
                 "Bearer env:RYU_TOKEN",
@@ -3377,14 +3382,14 @@ mod tests {
     /// names its var `RYU_PLUGIN_<ID>_API_KEY` and needs no operator configuration.
     #[test]
     fn the_prefix_rule_is_rooted_under_the_plugin_namespace() {
-        assert_eq!(plugin_env_prefix("exa"), "RYU_PLUGIN_EXA_");
-        assert!("RYU_PLUGIN_EXA_API_KEY".starts_with(&plugin_env_prefix("exa")));
+        assert_eq!(plugin_env_prefix("@ryu/exa"), "RYU_PLUGIN_RYU_EXA_");
+        assert!("RYU_PLUGIN_RYU_EXA_API_KEY".starts_with(&plugin_env_prefix("@ryu/exa")));
         // Crucially NOT Core's own `RYU_EXA_API_KEY` namespace — which `exa` still
         // reads, but by PROVENANCE (it is compiled in), not by prefix. Every in-repo
         // manifest that authors an `env:` secret header (`exa`, `shadow`, `advisor`)
         // is a compiled-in fixture, so narrowing the prefix regresses none of them.
-        assert!(!"RYU_EXA_API_KEY".starts_with(&plugin_env_prefix("exa")));
-        assert!(may_read_env_secret("exa", "RYU_EXA_API_KEY"));
+        assert!(!"RYU_EXA_API_KEY".starts_with(&plugin_env_prefix("@ryu/exa")));
+        assert!(may_read_env_secret("@ryu/exa", "RYU_EXA_API_KEY"));
         // Dots and dashes in a reverse-DNS id fold to `_`.
         assert_eq!(
             plugin_env_prefix("com.acme.my-app"),
@@ -3409,16 +3414,16 @@ mod tests {
 
         let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
         store
-            .set("tavily", "RYU_TAVILY_API_KEY", "tvly-from-ui")
+            .set("@ryu/tavily", "RYU_TAVILY_API_KEY", "tvly-from-ui")
             .await
             .unwrap();
 
-        let out = resolve_env_secret_from("tavily", "RYU_TAVILY_API_KEY", Some(&store)).await;
+        let out = resolve_env_secret_from("@ryu/tavily", "RYU_TAVILY_API_KEY", Some(&store)).await;
         assert_eq!(out, SecretToken::Value("tvly-from-ui".to_string()));
 
         // With no store published at all, behaviour is exactly the pre-store one.
         assert_eq!(
-            resolve_env_secret_from("tavily", "RYU_TAVILY_API_KEY", None).await,
+            resolve_env_secret_from("@ryu/tavily", "RYU_TAVILY_API_KEY", None).await,
             SecretToken::Absent
         );
     }
@@ -3435,11 +3440,11 @@ mod tests {
 
         let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
         store
-            .set("tavily", "RYU_TAVILY_API_KEY", "tvly-from-ui")
+            .set("@ryu/tavily", "RYU_TAVILY_API_KEY", "tvly-from-ui")
             .await
             .unwrap();
 
-        let out = resolve_env_secret_from("tavily", "RYU_TAVILY_API_KEY", Some(&store)).await;
+        let out = resolve_env_secret_from("@ryu/tavily", "RYU_TAVILY_API_KEY", Some(&store)).await;
         assert_eq!(out, SecretToken::Value("tvly-from-env".to_string()));
 
         std::env::remove_var("RYU_TAVILY_API_KEY");
@@ -3649,8 +3654,8 @@ mod tests {
     /// for it, which is what this pins.
     #[test]
     fn the_shipped_byok_providers_may_read_their_own_keys() {
-        assert!(may_read_env_secret("tavily", "RYU_TAVILY_API_KEY"));
-        assert!(may_read_env_secret("exa", "RYU_EXA_API_KEY"));
+        assert!(may_read_env_secret("@ryu/tavily", "RYU_TAVILY_API_KEY"));
+        assert!(may_read_env_secret("@ryu/exa", "RYU_EXA_API_KEY"));
         // And the gate still holds sideways: one plugin cannot read another's key by
         // simply naming it.
         assert!(!may_read_env_secret(

@@ -1,10 +1,15 @@
 {
-  "id": "proof",
+  "id": "@ryu/proof",
   "name": "Proof of Work",
   "version": "1.0.0",
   "runnables": [],
-  "permission_grants": ["hook:run-agent", "storage:kv"],
-  "activation_events": ["*"],
+  "permission_grants": [
+    "hook:run-agent",
+    "storage:kv"
+  ],
+  "activation_events": [
+    "*"
+  ],
   "contributes": {
     "slash_commands": [
       {
@@ -30,7 +35,12 @@
       {
         "id": "proof.loop",
         "on": "post_assistant_turn",
-        "match": { "commands": ["/proof"], "stateful": true },
+        "match": {
+          "commands": [
+            "/proof"
+          ],
+          "stateful": true
+        },
         "code_file": "hooks/loop.js"
       }
     ]

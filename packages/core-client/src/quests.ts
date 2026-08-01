@@ -3,7 +3,7 @@
 // shapes exactly (the Rust structs use no rename). This mirrors the desktop
 // `apps/desktop/src/lib/api/quests.ts` client, minus the SSE event stream (the
 // plugin-host bridge services CRUD only), so any surface on `@ryuhq/core-client`
-// — native included — can drive the `com.ryu.quests` companion host-direct.
+// — native included — can drive the `@ryu/quests` companion host-direct.
 
 import { type ApiTarget, request } from "./client.ts";
 

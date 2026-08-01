@@ -207,7 +207,7 @@ fn seed_overrides() -> [SeedSpec; 17] {
             // self-healing attempt history) via the `learning:crud` bridge capability
             // (host-direct, monitors pattern): the host calls the existing
             // `/api/learn/config` + `/api/experience/list` + `/api/healing/status`
-            // reads. Ships a prebuilt companion UI. `com.ryu.learning` was a wave-2
+            // reads. Ships a prebuilt companion UI. `@ryu/learning` was a wave-2
             // route-gate governance shell (gating `/api/learn/*` + `/api/experience/*`)
             // that `requires` the `skills` app; the W7 frontend extraction upgrades it
             // in place to ALSO carry the companion runnable — the `requires` edge stays
@@ -226,7 +226,7 @@ fn seed_overrides() -> [SeedSpec; 17] {
             // the host calls the existing `/api/approvals/*`, `/api/notifications/*`
             // (host-resolved user id), and Shadow's `/proactive` + `/api/feedback`. The
             // quest section reuses the `quests:crud` verbs, so the app declares BOTH
-            // grants. Ships a prebuilt companion UI. `com.ryu.approvals` was a wave-2
+            // grants. Ships a prebuilt companion UI. `@ryu/approvals` was a wave-2
             // gate-only governance shell (gating `/api/approvals/*`); the W7 frontend
             // extraction upgrades it in place to ALSO carry the companion runnable.
             // It ALSO holds `shell:integrate` — the generic shell-primitive lane
@@ -683,7 +683,9 @@ async fn seed_companion_ui(store: &PluginStore, manifests: &[PluginManifest]) {
 ///   again ([`restore_learning_consent_surface`]).
 /// - v3: drop the seed-artifact records for the [`NOT_PRE_INSTALLED`] apps, but only
 ///   where they were never enabled ([`unseed_not_pre_installed`]).
-const STORE_SCHEMA_VERSION: i64 = 3;
+/// - v4: re-key records + plugin KV from legacy plugin ids to their scoped form
+///   ([`rekey_legacy_plugin_ids`]).
+const STORE_SCHEMA_VERSION: i64 = 4;
 
 /// One-time data migrations for ALREADY-INSTALLED stores.
 ///
@@ -725,8 +727,10 @@ const STORE_SCHEMA_VERSION: i64 = 3;
 /// an earlier step never re-runs it (see [`STORE_SCHEMA_VERSION`]):
 ///
 /// - v1 [`backfill_host_api_grants`] — the host-callback grant repair described above.
-/// - v2 [`restore_learning_consent_surface`] — re-enable `com.ryu.learning`, whose
+/// - v2 [`restore_learning_consent_surface`] — re-enable `@ryu/learning`, whose
 ///   record now owns the consent switches for a capture path the kernel runs anyway.
+/// - v4 [`rekey_legacy_plugin_ids`] — move lifecycle records and plugin KV onto the
+///   scoped ids (`@ryu/meetings` → `@ryu/meetings`).
 /// - v3 [`unseed_not_pre_installed`] — remove the never-enabled records that the old
 ///   unconditional companion-ui pre-seed wrote for the [`NOT_PRE_INSTALLED`] apps.
 ///   The seed change alone only fixes FRESH installs (the loop leaves every existing
@@ -753,6 +757,9 @@ pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginMan
     if current < 3 {
         unseed_not_pre_installed(store).await;
     }
+    if current < 4 {
+        rekey_legacy_plugin_ids(store).await;
+    }
 
     if let Err(e) = store.set_schema_version(STORE_SCHEMA_VERSION).await {
         // Not fatal, but not free either: a failed version write means every step is
@@ -764,6 +771,55 @@ pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginMan
         // write and the next restart. Only a store that cannot be written to at all
         // reaches here, so the narrow exposure is accepted rather than retried.
         tracing::warn!("store migration: recording schema version failed: {e}");
+    }
+}
+
+/// **v4** — move every install's lifecycle record and plugin KV from a legacy plugin
+/// id onto its scoped form (`@ryu/meetings` → `@ryu/meetings`).
+///
+/// The manifest loader canonicalizes ids at parse, so after the rename Core looks up
+/// `@ryu/meetings` — but the records on an existing machine are still filed under
+/// `@ryu/meetings`. Without this step every installed app on every existing
+/// install silently reverts to *not installed*: disabled, with an empty
+/// `approved_grants`, and with its plugin KV (active goals, learning state,
+/// per-conversation hook state) unreachable. Nothing errors; it just looks like the
+/// user's setup evaporated.
+///
+/// Driven off [`crate::plugin_manifest::LEGACY_PLUGIN_ID_ALIASES`], the same table
+/// `canonical_plugin_id` reads, so the migration and the runtime resolver can never
+/// disagree about what maps to what.
+///
+/// Both halves are re-run-safe (a record or KV row already present under the new id
+/// wins), which matters because the version write at the end of
+/// [`run_one_time_migrations`] can itself fail and re-run every step next boot.
+async fn rekey_legacy_plugin_ids(store: &PluginStore) {
+    let storage = crate::plugin_storage::global();
+    let mut records = 0usize;
+    let mut kv_rows = 0usize;
+
+    for (legacy, canonical) in crate::plugin_manifest::LEGACY_PLUGIN_ID_ALIASES {
+        match store.rekey(legacy, canonical).await {
+            Ok(true) => records += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!("store migration v4: rekey '{legacy}' record failed: {e}"),
+        }
+        // Best-effort and independent of the record move: an install can hold KV for
+        // a plugin whose record was already removed, and losing that state silently
+        // is the failure this step exists to prevent.
+        if let Some(storage) = storage {
+            match storage.rekey_plugin(legacy, canonical).await {
+                Ok(n) => kv_rows += n,
+                Err(e) => tracing::warn!("store migration v4: rekey '{legacy}' kv failed: {e}"),
+            }
+        }
+    }
+
+    if records > 0 || kv_rows > 0 {
+        tracing::info!(
+            records,
+            kv_rows,
+            "store migration v4: moved plugin state onto scoped ids"
+        );
     }
 }
 
@@ -823,12 +879,12 @@ async fn backfill_host_api_grants(store: &PluginStore, manifests: &[PluginManife
 /// # The regression this repairs
 ///
 /// The two learning consent switches moved out of Privacy settings and into an
-/// app-registered settings tab (`contributes.settings_tabs` in the `com.ryu.learning`
+/// app-registered settings tab (`contributes.settings_tabs` in the `@ryu/learning`
 /// manifest, rendered by the desktop's `LearningSettings.tsx`). An app-registered tab
 /// only renders while its owning app is ENABLED. Adding the id to [`CORE_DEFAULT_ON`]
 /// fixes fresh installs only: [`seed_default_on`] short-circuits on
 /// `Ok(Some(_)) => continue`, and Learning was default-OFF until now, so essentially
-/// every pre-existing install carries a `com.ryu.learning` record at `enabled = false`.
+/// every pre-existing install carries a `@ryu/learning` record at `enabled = false`.
 /// Those users would see NO consent switches at all.
 ///
 /// # Why enabling the record is safe — the whole justification
@@ -948,7 +1004,7 @@ async fn restore_learning_consent_surface(store: &PluginStore) {
 /// [`seed_default_on`] / [`seed_companion_ui`] leave every EXISTING record alone —
 /// that is the "user's choice wins" rule, and it is right. But it means dropping the
 /// pre-seed only ever fixes machines that have not booted yet: every current install
-/// keeps a `com.ryu.whiteboard` / `com.ryu.canvas` row forever, and the Store keeps
+/// keeps a `@ryu/whiteboard` / `@ryu/canvas` row forever, and the Store keeps
 /// listing them as installed. This step is what makes the change reach them.
 ///
 /// # Why removing the record loses nothing
@@ -1000,7 +1056,7 @@ async fn unseed_not_pre_installed(store: &PluginStore) {
 mod migration_tests {
     use super::*;
 
-    const RECIPES: &str = "com.ryu.recipes";
+    const RECIPES: &str = "@ryu/recipes";
 
     /// Reproduces the actual upgrade: a store seeded BEFORE the per-app
     /// `/api/host/recipes/*` callbacks moved onto the capability seam. Its record is
@@ -1093,7 +1149,7 @@ mod migration_tests {
 
     /// THE consent-surface regression (v2). Learning was default-OFF until its two
     /// consent switches moved onto its app-registered settings tab, so essentially
-    /// every pre-existing install has a `com.ryu.learning` record at `enabled = false`
+    /// every pre-existing install has a `@ryu/learning` record at `enabled = false`
     /// — and an app-registered tab only renders while its app is enabled. The seed
     /// loop cannot fix it (`Ok(Some(_)) => continue`), so those users lose the
     /// off-switch for a capture path the kernel keeps running regardless of the record.
@@ -1250,7 +1306,7 @@ mod migration_tests {
     }
 
     /// **v3** — the upgrade case the seed change cannot reach on its own: every
-    /// existing install carries the disabled `com.ryu.whiteboard` / `com.ryu.canvas`
+    /// existing install carries the disabled `@ryu/whiteboard` / `@ryu/canvas`
     /// record the old pre-seed wrote, and `seed_default_on` leaves existing records
     /// alone by design. Without this step the change ships as fresh-installs-only.
     #[tokio::test]
@@ -1376,7 +1432,7 @@ mod tests {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let (order, skipped) = seed_order(&specs, &manifests);
         let pos = |id: &str| order.iter().position(|x| x == id);
-        let (e, r, s) = (pos("engines"), pos("com.ryu.rag"), pos("com.ryu.spaces"));
+        let (e, r, s) = (pos("@ryu/engines"), pos("@ryu/rag"), pos("@ryu/spaces"));
         assert!(
             e.is_some() && r.is_some() && s.is_some(),
             "engines/rag/spaces all seeded (order: {order:?})"
@@ -1385,7 +1441,7 @@ mod tests {
         assert!(
             !skipped
                 .iter()
-                .any(|sk| sk.id == "com.ryu.spaces" || sk.id == "com.ryu.rag"),
+                .any(|sk| sk.id == "@ryu/spaces" || sk.id == "@ryu/rag"),
             "no capability-related seed skip (skipped: {skipped:?})"
         );
     }
@@ -1449,29 +1505,33 @@ mod tests {
     /// exactly the declaration order and nothing may be skipped.
     #[test]
     fn without_requires_the_order_is_the_declaration_order() {
-        let specs = [spec("engines"), spec("durable"), spec("goal")];
+        let specs = [
+            spec("@ryu/engines"),
+            spec("@ryu/durable"),
+            spec("@ryu/goal"),
+        ];
         let manifests = vec![
-            manifest("engines", "1.0.0", &[]),
-            manifest("durable", "1.0.0", &[]),
-            manifest("goal", "1.0.0", &[]),
+            manifest("@ryu/engines", "1.0.0", &[]),
+            manifest("@ryu/durable", "1.0.0", &[]),
+            manifest("@ryu/goal", "1.0.0", &[]),
         ];
 
         let (ordered, skipped) = seed_order(&specs, &manifests);
 
         assert!(skipped.is_empty());
-        assert_eq!(ordered, vec!["engines", "durable", "goal"]);
+        assert_eq!(ordered, vec!["@ryu/engines", "@ryu/durable", "@ryu/goal"]);
     }
 
     /// A spec with no loaded manifest is silently dropped (the pre-graph behaviour:
     /// the version lookup returned `None` and the block did nothing).
     #[test]
     fn a_spec_without_a_manifest_is_dropped() {
-        let specs = [spec("engines"), spec("not-loaded")];
-        let manifests = vec![manifest("engines", "1.0.0", &[])];
+        let specs = [spec("@ryu/engines"), spec("not-loaded")];
+        let manifests = vec![manifest("@ryu/engines", "1.0.0", &[])];
 
         let (ordered, skipped) = seed_order(&specs, &manifests);
 
-        assert_eq!(ordered, vec!["engines"]);
+        assert_eq!(ordered, vec!["@ryu/engines"]);
         assert!(skipped.is_empty(), "absent != unsatisfiable");
     }
 
@@ -1512,7 +1572,7 @@ mod tests {
         );
         // Non-companion Core plugins seed with EMPTY grants, exactly as the generic
         // loop did before this module existed.
-        let engines = specs.iter().find(|s| s.id == "engines").unwrap();
+        let engines = specs.iter().find(|s| s.id == "@ryu/engines").unwrap();
         assert!(engines.grants.is_empty());
     }
 
@@ -1522,10 +1582,10 @@ mod tests {
     async fn seeding_is_one_time_and_respects_a_user_disable() {
         let store = PluginStore::open_in_memory().unwrap();
         let manifests = vec![
-            manifest("engines", "1.0.0", &[]),
-            manifest("durable", "1.0.0", &[]),
+            manifest("@ryu/engines", "1.0.0", &[]),
+            manifest("@ryu/durable", "1.0.0", &[]),
         ];
-        let specs = [spec("engines"), spec("durable")];
+        let specs = [spec("@ryu/engines"), spec("@ryu/durable")];
         let (ordered, _) = seed_order(&specs, &manifests);
         assert_eq!(ordered.len(), 2);
 
@@ -1536,7 +1596,7 @@ mod tests {
             store.set_enabled(id, &[]).await.unwrap();
         }
         // The user disables one.
-        store.set_disabled("durable").await.unwrap();
+        store.set_disabled("@ryu/durable").await.unwrap();
 
         // A re-seed must leave it disabled: a present record always wins.
         for id in &ordered {
@@ -1545,8 +1605,8 @@ mod tests {
             }
             store.set_enabled(id, &[]).await.unwrap();
         }
-        assert!(store.get("engines").await.unwrap().unwrap().enabled);
-        assert!(!store.get("durable").await.unwrap().unwrap().enabled);
+        assert!(store.get("@ryu/engines").await.unwrap().unwrap().enabled);
+        assert!(!store.get("@ryu/durable").await.unwrap().unwrap().enabled);
     }
 
     /// The W7 Mail-companion extraction rests on this: mail is the first OPT-IN

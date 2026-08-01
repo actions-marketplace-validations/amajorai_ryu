@@ -1,6 +1,6 @@
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect } from "react";
+import { type ReactNode, useEffect } from "react";
 import {
 	IslandComposerProvider,
 	useIslandComposerContext,
@@ -8,6 +8,7 @@ import {
 import { useActiveContext } from "../hooks/use-active-context.ts";
 import { useCommandSummon } from "../hooks/use-command-summon.ts";
 import { useComposerShortcutBindings } from "../hooks/use-composer-shortcut-bindings.ts";
+import { useContentHeight } from "../hooks/use-content-height.ts";
 import { useDevStateSwitcher } from "../hooks/use-dev-state-switcher.ts";
 import { useDictation } from "../hooks/use-dictation.ts";
 import { useEyeCursor } from "../hooks/use-eye-cursor.ts";
@@ -41,6 +42,8 @@ import {
 	ISLAND_SPRING,
 	type IslandSize,
 	LOGO_CIRCLE,
+	pillHeight,
+	pillOverflows,
 	SPLIT_GAP,
 	SUGGESTION_STACK_GAP,
 } from "./island-config.ts";
@@ -100,11 +103,15 @@ function islandFootprint(
 /** Drag/grab handle class for the detail island, by surface. */
 function detailHandleClassFor(
 	isTextPill: boolean,
-	state: IslandState
+	state: IslandState,
+	scrolls: boolean
 ): string | null {
 	if (isTextPill) {
-		// Text pill: the whole surface drags + taps-to-collapse (just a label).
-		return COVER_HANDLE;
+		// Text pill: the whole surface drags + taps-to-collapse (just a label) —
+		// unless the label grew past the cap and now scrolls, in which case a full
+		// cover would eat the wheel. Fall back to the expanded panel's top strip so
+		// the body stays scrollable (and the strip still drags + taps).
+		return scrolls ? STRIP_HANDLE : COVER_HANDLE;
 	}
 	if (state === "suggestion") {
 		// No strip, so the chip stays fully clickable; the user drags via the logo.
@@ -114,18 +121,29 @@ function detailHandleClassFor(
 	return STRIP_HANDLE;
 }
 
-/** Inner-content layout class for the detail island, by surface. */
+/**
+ * Inner-content layout class for the detail island, by surface. The pill surfaces
+ * scroll only once their content outgrows `DETAIL_MAX_H` — while the shape is still
+ * growing to fit, the container is mid-spring at the *old* height with the content
+ * already at full size, so a standing `overflow-y-auto` would flash a scrollbar on
+ * every grow and shrink. Centering an overflowing scroll container also clips both
+ * ends (the top can never be scrolled to), so the same flag top-aligns it.
+ */
 function detailContentClassFor(
 	isExpanded: boolean,
-	state: IslandState
+	state: IslandState,
+	scrolls: boolean
 ): string {
 	if (isExpanded) {
 		return "flex h-full w-full items-stretch px-3 py-2";
 	}
+	const scroll = scrolls
+		? "items-start overflow-y-auto"
+		: "items-center overflow-hidden";
 	if (state === "suggestion") {
-		return "flex h-full w-full items-center px-3";
+		return `flex h-full w-full px-3 ${scroll}`;
 	}
-	return "flex h-full w-full items-center justify-center px-4";
+	return `flex h-full w-full justify-center px-4 ${scroll}`;
 }
 
 // Action mini-island skin. Each pill is a sibling shape of the detail island
@@ -143,6 +161,38 @@ const COVER_HANDLE =
 	"absolute inset-0 z-10 cursor-grab bg-transparent active:cursor-grabbing";
 const STRIP_HANDLE =
 	"absolute inset-x-0 top-0 z-10 h-9 w-full cursor-grab bg-transparent active:cursor-grabbing";
+
+/**
+ * Content holder for the detail island. On the pill surfaces it is the *measured*
+ * node: an auto-height wrapper whose natural height drives the shape's height (see
+ * `useContentHeight` — measuring anything the island itself sizes would feed the
+ * animated height straight back in). The expanded panel sizes itself from the
+ * composer, so it renders its children bare and is never observed.
+ */
+function PillBody({
+	children,
+	isExpanded,
+	measureRef,
+	state,
+}: {
+	children: ReactNode;
+	isExpanded: boolean;
+	measureRef: (node: HTMLElement | null) => void;
+	state: IslandState;
+}) {
+	if (isExpanded) {
+		return children;
+	}
+	// The suggestion chip lays itself out full-width; the text/recording pills are
+	// centered in the shape, so the wrapper has to re-center them.
+	const layout =
+		state === "suggestion" ? "w-full" : "flex w-full justify-center";
+	return (
+		<div className={layout} ref={measureRef}>
+			{children}
+		</div>
+	);
+}
 
 interface SuggestionAction {
 	key: string;
@@ -355,12 +405,22 @@ function IslandShell() {
 				height: compactHeight,
 				radius: EXPANDED_COMPACT_RADIUS,
 			};
+	// Pill surfaces (idle/context/recording/suggestion) are sized by their content:
+	// each state's `DETAIL_SIZES` height is the floor, the measured content grows the
+	// shape past it, and `DETAIL_MAX_H` caps that — after which the content scrolls
+	// inside the pill. The expanded panel keeps its own sizing (it already tracks the
+	// composer), so it never reads the measurement.
+	const pillContent = useContentHeight();
+	const pillScrolls = !isExpanded && pillOverflows(pillContent.height);
 	const detail =
 		state === "collapsed"
 			? null
 			: state === "expanded"
 				? expandedSize
-				: DETAIL_SIZES[state];
+				: {
+						...DETAIL_SIZES[state],
+						height: pillHeight(DETAIL_SIZES[state].height, pillContent.height),
+					};
 
 	// Report the visible footprint (logo + gap + detail bounding box, plus the
 	// suggestion action row) to the main process. In the acrylic appearance the
@@ -430,8 +490,16 @@ function IslandShell() {
 	}, [footprintWidth, footprintHeight, isExpanded]);
 
 	// Detail-island drag handle + inner layout vary by surface (see helpers).
-	const detailHandleClass = detailHandleClassFor(isTextPill, state);
-	const detailContentClass = detailContentClassFor(isExpanded, state);
+	const detailHandleClass = detailHandleClassFor(
+		isTextPill,
+		state,
+		pillScrolls
+	);
+	const detailContentClass = detailContentClassFor(
+		isExpanded,
+		state,
+		pillScrolls
+	);
 	const circleLabel = isCollapsed ? "Expand Ryu island" : "Collapse Ryu island";
 	const detailLabel = isTextPill ? "Open Ryu panel" : "Move island";
 	// Tapping the text pill opens the full panel (chat + Store + Settings); the
@@ -533,18 +601,25 @@ function IslandShell() {
 										key={state}
 										transition={CONTENT_SPRING}
 									>
-										<IslandContent
-											composerControls={leftActions}
-											context={context}
-											onVoiceClose={handleVoiceClose}
+										<PillBody
+											isExpanded={isExpanded}
+											measureRef={pillContent.ref}
 											state={state}
-											suggestion={activeSuggestion}
-											voice={voiceMode}
-											voiceAgentName={voiceAgentName}
-											voiceCanCycle={voiceCanCycle}
-											voiceError={voiceError}
-											voiceLevels={voiceLevels}
-										/>
+										>
+											<IslandContent
+												composerControls={leftActions}
+												context={context}
+												onVoiceClose={handleVoiceClose}
+												state={state}
+												suggestion={activeSuggestion}
+												voice={voiceMode}
+												voiceAgentName={voiceAgentName}
+												voiceCanCycle={voiceCanCycle}
+												voiceError={voiceError}
+												voiceLevels={voiceLevels}
+												wrap={!isExpanded}
+											/>
+										</PillBody>
 									</motion.div>
 								</AnimatePresence>
 							</motion.div>

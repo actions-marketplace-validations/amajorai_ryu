@@ -84,6 +84,15 @@ export function triggerMeta(trigger: WorkflowTrigger): {
 				label: trigger.toolkit || "Composio event",
 			};
 		}
+		case "event":
+			// Label with the event NAME, not the fully-qualified id — the namespace
+			// half is the app id and would blow out a badge.
+			return {
+				icon: ZapIcon,
+				label: trigger.event
+					? (trigger.event.split("#").pop() ?? trigger.event)
+					: "App event",
+			};
 		default:
 			return { icon: PlayIcon, label: "Manual" };
 	}
@@ -213,6 +222,10 @@ export function triggerTooltip(
 			return "Runs on incoming webhook";
 		case "composio":
 			return `${trigger.toolkit || "Composio"} · ${trigger.trigger_slug || "event"}`;
+		case "event":
+			return trigger.event
+				? `Runs on ${trigger.event}`
+				: "Runs on an app event (none selected)";
 		default:
 			return "Runs manually";
 	}

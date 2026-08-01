@@ -1,5 +1,5 @@
 {
-  "id": "com.ryuhq.advisor",
+  "id": "@ryu/advisor",
   "name": "Advisor",
   "version": "1.0.0",
   "description": "Consult a stronger reviewer model for a second opinion — as an auto-review turn hook (toggle / `/advisor`) and as the model-callable `advisor__consult` tool, a declarative HTTP tool routed through Core's `/api/advisor/consult` bridge.",
@@ -47,7 +47,7 @@
       {
         "id": "advisor.toggle",
         "type": "toggle",
-        "flag": "com.ryuhq.advisor",
+        "flag": "@ryu/advisor",
         "label": "Advisor",
         "description": "Consult a stronger reviewer model on the full conversation after each answer."
       }

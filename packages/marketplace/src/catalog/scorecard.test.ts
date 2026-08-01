@@ -107,7 +107,7 @@ describe("runScorecard", () => {
 	test("a community listing claiming a reserved id fails the identity check", () => {
 		const card = runScorecard(
 			entry({ origin: "community" }),
-			healthyDetail({ manifestId: "com.ryu.mail", origin: "community" }),
+			healthyDetail({ manifestId: "@ryu/mail", origin: "community" }),
 			NOW
 		);
 		expect(statusOf(card, "identity")).toBe("fail");

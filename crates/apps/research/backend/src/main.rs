@@ -347,10 +347,12 @@ mod tests {
         use axum::routing::get;
         let app = Router::new()
             .route("/guarded", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
-                let expected = token.clone();
-                async move { require_ext_token(req, next, expected.as_deref()).await }
-            }));
+            .layer(axum::middleware::from_fn(
+                move |req: Request, next: Next| {
+                    let expected = token.clone();
+                    async move { require_ext_token(req, next, expected.as_deref()).await }
+                },
+            ));
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();

@@ -1,5 +1,5 @@
 // Sidebar data source for the Canvas app: the list of canvas boards (Space docs of
-// kind `app:com.ryu.canvas` in the "Canvas" system space) plus create/delete. The
+// kind `app:@ryu/canvas` in the "Canvas" system space) plus create/delete. The
 // built-in file-store client (`lib/api/canvases.ts`) was removed with the port;
 // this reads the app's Space documents instead.
 

@@ -6865,7 +6865,11 @@ mod fallback_tests {
             _model: &'a str,
             _body: &'a Value,
         ) -> Pin<
-            Box<dyn std::future::Future<Output = Result<axum::body::Body, ProviderError>> + Send + 'a>,
+            Box<
+                dyn std::future::Future<Output = Result<axum::body::Body, ProviderError>>
+                    + Send
+                    + 'a,
+            >,
         > {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mode = self.mode;
@@ -6969,12 +6973,8 @@ mod fallback_tests {
         let mut state = chain_state(1);
         let (primary, primary_calls) = StubProvider::new("primary", Mode::RateLimited);
         let (secondary, secondary_calls) = StubProvider::new("secondary", Mode::Ok);
-        state
-            .providers
-            .register(primary as Arc<dyn Provider>);
-        state
-            .providers
-            .register(secondary as Arc<dyn Provider>);
+        state.providers.register(primary as Arc<dyn Provider>);
+        state.providers.register(secondary as Arc<dyn Provider>);
         let state = Arc::new(state);
 
         let out = run(Arc::clone(&state), plain_ctx(), ping_body())
@@ -6982,9 +6982,16 @@ mod fallback_tests {
             .expect("secondary must serve after primary rate-limits");
 
         assert_eq!(out.provider_used, "secondary");
-        assert_eq!(out.degraded, Some(DegradedMode::Fallback("secondary".into())));
+        assert_eq!(
+            out.degraded,
+            Some(DegradedMode::Fallback("secondary".into()))
+        );
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1, "primary was tried");
-        assert_eq!(secondary_calls.load(Ordering::SeqCst), 1, "secondary served");
+        assert_eq!(
+            secondary_calls.load(Ordering::SeqCst),
+            1,
+            "secondary served"
+        );
         // The 429 must NOT open the primary's circuit even with threshold=1.
         assert!(
             !state.circuit_breaker.is_open("primary"),
@@ -7009,7 +7016,10 @@ mod fallback_tests {
             .expect("secondary must serve after primary faults");
 
         assert_eq!(out.provider_used, "secondary");
-        assert_eq!(out.degraded, Some(DegradedMode::Fallback("secondary".into())));
+        assert_eq!(
+            out.degraded,
+            Some(DegradedMode::Fallback("secondary".into()))
+        );
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
         // A fault DOES trip the circuit (threshold 1).
@@ -7038,7 +7048,10 @@ mod fallback_tests {
             .expect("secondary serves when primary circuit is open");
 
         assert_eq!(out.provider_used, "secondary");
-        assert_eq!(out.degraded, Some(DegradedMode::Fallback("secondary".into())));
+        assert_eq!(
+            out.degraded,
+            Some(DegradedMode::Fallback("secondary".into()))
+        );
         assert_eq!(
             primary_calls.load(Ordering::SeqCst),
             0,
@@ -7221,7 +7234,10 @@ mod fallback_tests {
             .await
             .expect("drain sse body");
         let text = String::from_utf8_lossy(&bytes);
-        assert!(text.contains("pong"), "stream carries the provider's content");
+        assert!(
+            text.contains("pong"),
+            "stream carries the provider's content"
+        );
         assert!(text.contains("[DONE]"), "stream is terminated");
     }
 
@@ -7241,7 +7257,10 @@ mod fallback_tests {
             .await
             .expect("secondary streams after primary rate-limits");
         assert_eq!(out.provider_used, "secondary");
-        assert_eq!(out.degraded, Some(DegradedMode::Fallback("secondary".into())));
+        assert_eq!(
+            out.degraded,
+            Some(DegradedMode::Fallback("secondary".into()))
+        );
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
         // The 429 on the stream path must not trip the primary's circuit either.
@@ -7425,7 +7444,9 @@ mod fallback_tests {
                 >,
             > {
                 Box::pin(async move {
-                    Err(ryu_gw_providers::ProviderError::Provider("no stream".into()))
+                    Err(ryu_gw_providers::ProviderError::Provider(
+                        "no stream".into(),
+                    ))
                 })
             }
         }
@@ -7656,7 +7677,9 @@ mod fallback_tests {
                         + 'a,
                 >,
             > {
-                Box::pin(async move { Err(ryu_gw_providers::ProviderError::Provider("n/a".into())) })
+                Box::pin(
+                    async move { Err(ryu_gw_providers::ProviderError::Provider("n/a".into())) },
+                )
             }
             fn complete_stream<'a>(
                 &'a self,

@@ -78,6 +78,11 @@ Trigger object shape (the `triggers` array; omit for manual-only). One of:\n\
 - { \"type\": \"schedule\", \"cron\"?: string, \"every\"?: string, \"require_approval\"?: bool }  (cron wins if both set; every like \"5m\"/\"1h\"/\"1d\")\n\
 - { \"type\": \"webhook\", \"secret\"?: string }  (fires on an inbound POST to the workflow's ingress URL; secret = the HMAC signing key)\n\
 - { \"type\": \"composio\", \"toolkit\": string, \"trigger_slug\": string, \"connected_account_id\"?: string }  (fires on a Composio event)\n\
+- { \"type\": \"event\", \"event\": string }  \
+(fires on an APP event — something an installed Ryu app announced happened, e.g. a meeting ended or a monitor alerted. \
+`event` is the fully-qualified id `<app plugin id>#<event name>`, e.g. \"@ryu/meetings#meeting.ended\". \
+Use this whenever the user says \"when <something happens in an app>, do X\". \
+The event's payload becomes the run input, readable as {{trigger.<field>}})\n\
 Template tokens usable in string fields: {{input}} (incoming value), {{nodes.<id>}} (an upstream node's output), \
 {{state.<key>}} (run state), {{trigger.<path>}} (trigger payload field).\n\
 A workflow must be an acyclic graph (DAG): no cycles, every edge endpoint must name an existing node, node ids unique.";

@@ -299,7 +299,7 @@ const SECTION_PLUGIN_OWNER: Partial<Record<SectionKey, string>> = {
 	// `sidebar_sections` contribution (com.ryu.{meetings,canvas,whiteboard}), so its
 	// visibility follows the contributions feed (served only when the app is enabled),
 	// not a hardcoded owner gate. Only Spaces stays a hardcoded, owner-gated section.
-	spaces: "com.ryu.spaces",
+	spaces: "@ryu/spaces",
 };
 
 // Pin/archive/unread state is local-first: persisted in localStorage rather than
@@ -435,11 +435,11 @@ export type ChromeKey = BuiltinChromeKey | DynamicChromeKey;
 // not enumerate Apps.
 const CHROME_ORDER: ChromeKey[] = [
 	"node-selector",
-	// "home" removed — app-registered by com.ryu.dashboards (sidebar_buttons).
+	// "home" removed — app-registered by @ryu/dashboards (sidebar_buttons).
 	"new-chat",
 	"search",
 	"library",
-	// "memory" removed — now app-registered by com.ryu.memory (sidebar_buttons).
+	// "memory" removed — now app-registered by @ryu/memory (sidebar_buttons).
 	"store",
 	"inbox",
 	"announcements",
@@ -492,11 +492,11 @@ const FOOTER_CHROME: ReadonlySet<ChromeKey> = new Set([
 // below, since they ride a separate drag state. The logo + node-selector row
 // stays fixed (it is a horizontal row, not a stacked button).
 const HEADER_BUTTON_CHROME: ChromeKey[] = [
-	// "home" removed — app-registered by com.ryu.dashboards (sidebar_buttons).
+	// "home" removed — app-registered by @ryu/dashboards (sidebar_buttons).
 	"new-chat",
 	"store",
 	"library",
-	// "memory" removed — app-registered by com.ryu.memory (sidebar_buttons).
+	// "memory" removed — app-registered by @ryu/memory (sidebar_buttons).
 ];
 
 // Distinct drag-data format for reordering header buttons, so a button drag is
@@ -7010,7 +7010,7 @@ export function SidebarPanelContent({
 				);
 			// "search" now renders as an icon next to the node selector (see the
 			// SidebarHeader row below), not as a header button.
-			// "home" is app-registered by `com.ryu.dashboards` (the Home dashboard's
+			// "home" is app-registered by `@ryu/dashboards` (the Home dashboard's
 			// owning app, default-on) via a `sidebar_buttons` contribution; no hardcoded
 			// case. The key stays in BuiltinChromeKey/CHROME_LABELS for graceful
 			// filtering of any stale persisted layout.
@@ -7025,7 +7025,7 @@ export function SidebarPanelContent({
 					/>
 				);
 			// "memory" is no longer a hardcoded button — it is app-registered by
-			// `com.ryu.memory` via a `sidebar_buttons` contribution, so it appears in
+			// `@ryu/memory` via a `sidebar_buttons` contribution, so it appears in
 			// the header ONLY when that app is enabled (default-off ⇒ absent). The key
 			// stays in BuiltinChromeKey/CHROME_LABELS so a stale persisted layout is
 			// filtered out gracefully rather than crashing.
@@ -7129,7 +7129,7 @@ export function SidebarPanelContent({
 				return <TeamsSection key={key} {...sectionProps} />;
 			case "spaces":
 				return <SpacesSection key={key} {...sectionProps} />;
-			// "meetings" is app-registered (com.ryu.meetings `sidebar_sections`),
+			// "meetings" is app-registered (@ryu/meetings `sidebar_sections`),
 			// rendered via DynamicSidebarSection — no hardcoded case.
 			case "workflows":
 				return <WorkflowsSection key={key} {...sectionProps} />;

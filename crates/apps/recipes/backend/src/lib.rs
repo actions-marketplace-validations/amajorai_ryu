@@ -27,6 +27,15 @@
 //!   dedicated ghost subprocess held across start..stop), so they are inverted
 //!   through the [`RecipesHost`] trait — `apps/core` implements it and installs it
 //!   once at boot via [`set_global_host`].
+//!
+//! ## App events (outbound)
+//! Recording and replay are the two moments something else plausibly wants to react
+//! to ("install every recording as a recipe", "tell me when the nightly replay
+//! breaks"), and both are otherwise invisible: a replay leaves no run record and a
+//! recording's draft exists only in the `record/stop` response. So the manifest
+//! declares `recording.ended`, `replay.ended` and `replay.failed` in
+//! `contributes.hook_events` and this crate raises them at those exact sites, which
+//! is what lets a consumer subscribe instead of polling `/api/recipes/*`.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -123,6 +132,41 @@ fn host() -> Result<Arc<dyn RecipesHost>> {
         .ok_or_else(|| anyhow!("recipes host not initialized"))
 }
 
+// ── App events (the outbound half: what other plugins/workflows react to) ─────
+
+/// This app's plugin id — the namespace half of every event id below, and what the
+/// emitter presents to Core so it can re-check that we only raise events THIS
+/// manifest declares. Must stay byte-identical to `manifest.json`'s `id`.
+const PLUGIN_ID: &str = "@ryu/recipes";
+
+/// A recording session was stopped and its editable draft is ready.
+const EVENT_RECORDING_ENDED: &str = "@ryu/recipes#recording.ended";
+/// A replay finished against the desktop without erroring.
+const EVENT_REPLAY_ENDED: &str = "@ryu/recipes#replay.ended";
+/// A replay could not complete (ghost unreachable, recipe missing, step lost).
+const EVENT_REPLAY_FAILED: &str = "@ryu/recipes#replay.failed";
+
+/// Mirror of Core's `plugin_host::MAX_EVENT_PAYLOAD_BYTES`, kept a little UNDER it
+/// so the check here trips before Core's does (the wire body carries the event id
+/// and envelope on top of the payload). Core rejects an oversized emit outright, so
+/// this crate must shed the unbounded field itself rather than let the whole event
+/// be dropped.
+const MAX_EMIT_PAYLOAD_BYTES: usize = 60 * 1024;
+
+/// The process-wide event emitter, built on first use.
+///
+/// Same `OnceLock` shape as [`host_slot`] because the emit sites are free functions
+/// with no state to thread — but unlike the host this needs no installation step:
+/// [`EventEmitter::from_env`] reads Core's injected bind + ext token and yields a
+/// no-op emitter when they are absent. That is precisely the in-process Core build
+/// (Core has `RYU_CORE_PORT` but no per-plugin `RYU_EXT_TOKEN`) and the crate's own
+/// tests, so the events fire from the `ryu-recipes` sidecar — the real deployment —
+/// and stay silent everywhere else instead of emitting twice or failing.
+fn emitter() -> &'static ryu_app_events::EventEmitter {
+    static EMITTER: OnceLock<ryu_app_events::EventEmitter> = OnceLock::new();
+    EMITTER.get_or_init(|| ryu_app_events::EventEmitter::from_env(PLUGIN_ID))
+}
+
 // ── Stateless store ops (pure ghost-core; no host) ────────────────────────────
 
 /// A compact recipe row for the list view (mirrors `ghost_recipes`).
@@ -186,12 +230,36 @@ pub fn delete(name: &str) -> Result<()> {
 /// steps execute as real clicks/types against native apps, with `{{param}}` slots
 /// filled from `params`. Returns the structured `RecipeRunResult`
 /// (per-step success/timing).
+///
+/// Raises `replay.ended` or `replay.failed` on the way out — exactly one of the
+/// two, and only for a replay that was actually attempted (an uninstalled host is a
+/// misconfigured process, not a failed run). Nothing persists a run record, so the
+/// structured result travels in the payload or it is gone.
 pub async fn run(name: &str, params: Value) -> Result<Value> {
-    let result = host()?
-        .call_ghost_run(name, params)
-        .await
-        .map_err(|e| anyhow!("recipe replay failed: {e}"))?;
-    extract_mcp_json(&result)
+    let outcome = match host()?.call_ghost_run(name, params).await {
+        Ok(envelope) => extract_mcp_json(&envelope),
+        Err(e) => Err(anyhow!("recipe replay failed: {e}")),
+    };
+    match outcome {
+        Ok(result) => {
+            emitter()
+                .emit(
+                    EVENT_REPLAY_ENDED,
+                    json!({ "recipe": name, "result": result }),
+                )
+                .await;
+            Ok(result)
+        }
+        Err(e) => {
+            emitter()
+                .emit(
+                    EVENT_REPLAY_FAILED,
+                    json!({ "recipe": name, "error": e.to_string() }),
+                )
+                .await;
+            Err(e)
+        }
+    }
 }
 
 // ── Recording session (stateful: the McpSession lifecycle lives in the host) ──
@@ -227,6 +295,10 @@ pub async fn record_status() -> Result<Value> {
 /// return the captured action sequence plus a deterministic editable draft. The
 /// caller (or a model) turns these AX-enriched events into a recipe and persists
 /// it via [`save`]. Errors when no session is active.
+///
+/// Raises `recording.ended` with the draft once the session has actually been torn
+/// down, so a consumer ("save every recording as a recipe", "summarize what I just
+/// demonstrated") never has to poll `record/status` to notice.
 pub async fn record_stop() -> Result<Value> {
     let stopped = host()?.recorder_stop().await?;
     let task = stopped.task.clone();
@@ -250,6 +322,34 @@ pub async fn record_stop() -> Result<Value> {
     if let Some(dst) = out.as_object_mut() {
         dst.insert("draft".to_string(), draft_from_events(&task, &events));
     }
+    // The draft lives ONLY in this response until someone calls `save`, so a
+    // subscriber that wants to act on the recording must receive it here; the raw
+    // event stream is deliberately left out (it is per-keystroke and the draft
+    // already encodes it as steps). `event_count` comes from ghost when present,
+    // falling back to what we actually flattened.
+    //
+    // The draft is unbounded (it grows with the length of the recording) while Core
+    // caps an event payload at `MAX_EVENT_PAYLOAD_BYTES`. An oversized payload is
+    // REJECTED WHOLESALE, so naively embedding it would make exactly the longest,
+    // most valuable recordings deliver nothing. Degrade instead: keep the event
+    // firing without the draft and say so, so a subscriber still learns the
+    // recording ended and can tell why the draft is absent.
+    let mut payload = json!({
+        "task": task,
+        "started_at": stopped.started_at,
+        "event_count": out
+            .get("event_count")
+            .cloned()
+            .unwrap_or_else(|| json!(events.len())),
+        "draft": out.get("draft").cloned().unwrap_or(Value::Null),
+    });
+    if serde_json::to_vec(&payload).map_or(0, |v| v.len()) > MAX_EMIT_PAYLOAD_BYTES {
+        if let Some(dst) = payload.as_object_mut() {
+            dst.insert("draft".to_string(), Value::Null);
+            dst.insert("draft_omitted".to_string(), json!(true));
+        }
+    }
+    emitter().emit(EVENT_RECORDING_ENDED, payload).await;
     Ok(out)
 }
 
@@ -398,8 +498,8 @@ pub(crate) mod test_support {
         pub(crate) fn new() -> Self {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
-            let base = std::env::temp_dir()
-                .join(format!("ryu-recipes-test-{}-{n}", std::process::id()));
+            let base =
+                std::env::temp_dir().join(format!("ryu-recipes-test-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&base);
             std::env::set_var("GHOST_DATA_DIR", &base);
             Self { base }
@@ -416,9 +516,7 @@ pub(crate) mod test_support {
     /// A canonical minimal-valid recipe JSON document (the store's validator
     /// accepts it) for the given name.
     pub(crate) fn recipe_json(name: &str) -> String {
-        format!(
-            r#"{{"schema_version":2,"name":"{name}","description":"d","steps":[]}}"#
-        )
+        format!(r#"{{"schema_version":2,"name":"{name}","description":"d","steps":[]}}"#)
     }
 
     /// The fake-host script: each field, when set, is what the corresponding

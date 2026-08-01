@@ -491,17 +491,23 @@ mod tests {
         assert!(has_api_key());
 
         let client = reqwest::Client::new();
-        let s = stats_for(&client, "Llama 3.1 70B Instruct", "meta/Llama-3.1-70B-Instruct")
-            .await
-            .expect("a cached model fuzzy-matches");
+        let s = stats_for(
+            &client,
+            "Llama 3.1 70B Instruct",
+            "meta/Llama-3.1-70B-Instruct",
+        )
+        .await
+        .expect("a cached model fuzzy-matches");
         assert_eq!(s.matched_name, "Llama 3.1 70B Instruct");
         assert_eq!(s.intelligence_index, Some(55.0));
         assert_eq!(s.price_usd_per_1m, Some(0.8));
 
         // A name resembling nothing in the cache yields no stats.
-        assert!(stats_for(&client, "zzz-unrelated-widget", "acme/zzz-unrelated-widget")
-            .await
-            .is_none());
+        assert!(
+            stats_for(&client, "zzz-unrelated-widget", "acme/zzz-unrelated-widget")
+                .await
+                .is_none()
+        );
 
         // Mode read/write path.
         set_mode("realtime");

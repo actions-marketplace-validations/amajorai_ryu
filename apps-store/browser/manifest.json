@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.browser",
+  "id": "@ryu/browser",
   "name": "Browser",
   "version": "1.0.0",
   "description": "A real-Chromium browser (Electron) Ryu runs as a local sidecar and exposes as the grant-gated `browser.control` capability: list/open/navigate tabs, screenshot, read titles, take an accessibility snapshot with stable element refs, and drive the page with synthetic click/type/scroll input. Core spawns the sidecar lazily and idle-stops it; the desktop Browser panel drives it through the ext-proxy.",
@@ -17,7 +17,7 @@
         "slug": "chromium__list_tabs",
         "backend": "http",
         "method": "GET",
-        "url": "core:/api/ext/com.ryu.browser/tabs",
+        "url": "core:/api/ext/@ryu/browser/tabs",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -38,7 +38,7 @@
         "slug": "chromium__open_tab",
         "backend": "http",
         "method": "POST",
-        "url": "core:/api/ext/com.ryu.browser/tabs",
+        "url": "core:/api/ext/@ryu/browser/tabs",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -65,7 +65,7 @@
         "slug": "chromium__tab_detail",
         "backend": "http",
         "method": "GET",
-        "url": "core:/api/ext/com.ryu.browser/tabs/{id}",
+        "url": "core:/api/ext/@ryu/browser/tabs/{id}",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -92,7 +92,7 @@
         "slug": "chromium__navigate_tab",
         "backend": "http",
         "method": "POST",
-        "url": "core:/api/ext/com.ryu.browser/tabs/{id}/navigate",
+        "url": "core:/api/ext/@ryu/browser/tabs/{id}/navigate",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -123,7 +123,7 @@
         "slug": "chromium__screenshot_tab",
         "backend": "http",
         "method": "POST",
-        "url": "core:/api/ext/com.ryu.browser/tabs/{id}/screenshot",
+        "url": "core:/api/ext/@ryu/browser/tabs/{id}/screenshot",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -150,7 +150,7 @@
         "slug": "chromium__tab_title",
         "backend": "http",
         "method": "GET",
-        "url": "core:/api/ext/com.ryu.browser/tabs/{id}/title",
+        "url": "core:/api/ext/@ryu/browser/tabs/{id}/title",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -177,7 +177,7 @@
         "slug": "chromium__snapshot_tab",
         "backend": "http",
         "method": "POST",
-        "url": "core:/api/ext/com.ryu.browser/tabs/{id}/snapshot",
+        "url": "core:/api/ext/@ryu/browser/tabs/{id}/snapshot",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -204,7 +204,7 @@
         "slug": "chromium__click",
         "backend": "http",
         "method": "POST",
-        "url": "core:/api/ext/com.ryu.browser/click",
+        "url": "core:/api/ext/@ryu/browser/click",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -235,7 +235,7 @@
         "slug": "chromium__type",
         "backend": "http",
         "method": "POST",
-        "url": "core:/api/ext/com.ryu.browser/type",
+        "url": "core:/api/ext/@ryu/browser/type",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -278,7 +278,7 @@
         "slug": "chromium__scroll",
         "backend": "http",
         "method": "POST",
-        "url": "core:/api/ext/com.ryu.browser/scroll",
+        "url": "core:/api/ext/@ryu/browser/scroll",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },
@@ -314,7 +314,7 @@
         "slug": "chromium__close_tab",
         "backend": "http",
         "method": "DELETE",
-        "url": "core:/api/ext/com.ryu.browser/tabs/{id}",
+        "url": "core:/api/ext/@ryu/browser/tabs/{id}",
         "secret_headers": {
           "Authorization": "Bearer env:RYU_TOKEN"
         },

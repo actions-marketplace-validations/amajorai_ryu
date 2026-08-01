@@ -365,7 +365,13 @@ mod tests {
     use crate::test_support::{MockResponse, MockServer};
 
     fn provider(base_url: String) -> FalProvider {
-        FalProvider::new(reqwest::Client::new(), "fal-secret".into(), base_url, 250, 60)
+        FalProvider::new(
+            reqwest::Client::new(),
+            "fal-secret".into(),
+            base_url,
+            250,
+            60,
+        )
     }
 
     #[tokio::test]
@@ -396,8 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_errors_when_no_response_url() {
-        let server =
-            MockServer::always(MockResponse::ok_json(r#"{"status":"IN_QUEUE"}"#)).await;
+        let server = MockServer::always(MockResponse::ok_json(r#"{"status":"IN_QUEUE"}"#)).await;
         let p = provider(server.base_url().to_string());
         let err = p.submit_video("fal-ai/x", &json!({})).await.unwrap_err();
         assert!(err.to_string().contains("no response_url"), "{err}");
@@ -407,9 +412,7 @@ mod tests {
     async fn generate_image_inline_completes_without_polling() {
         // First reply: submit already COMPLETED. Second reply: the result fetch.
         let server = MockServer::start(vec![
-            MockResponse::ok_json(
-                r#"{"status":"COMPLETED","response_url":"{{BASE}}/req/r2"}"#,
-            ),
+            MockResponse::ok_json(r#"{"status":"COMPLETED","response_url":"{{BASE}}/req/r2"}"#),
             MockResponse::ok_json(r#"{"images":[{"url":"https://x/i.png"}]}"#),
         ])
         .await;
@@ -436,7 +439,10 @@ mod tests {
         let ref_url = format!("{}/req/r3", server.base_url());
         let job = p.poll_video(&ref_url).await.unwrap();
         assert_eq!(job.status, JobStatus::Succeeded);
-        assert_eq!(job.output.unwrap()["data"][0]["url"], json!("https://x/v.mp4"));
+        assert_eq!(
+            job.output.unwrap()["data"][0]["url"],
+            json!("https://x/v.mp4")
+        );
 
         let reqs = server.requests();
         // Status is polled at `{response_url}/status`.

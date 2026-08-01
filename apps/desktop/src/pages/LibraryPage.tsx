@@ -114,11 +114,11 @@ const SECTIONS: {
  *  Sections absent here (recents/favorites/chat/channel/identity) are host
  *  surfaces, always shown. */
 const SECTION_PLUGIN: Partial<Record<LibrarySection, string>> = {
-	agent: "com.ryu.agents",
-	workflow: "com.ryu.workflows",
-	space: "com.ryu.spaces",
-	team: "com.ryu.teams",
-	meeting: "com.ryu.meetings",
+	agent: "@ryu/agents",
+	workflow: "@ryu/workflows",
+	space: "@ryu/spaces",
+	team: "@ryu/teams",
+	meeting: "@ryu/meetings",
 };
 
 /** Per-type display metadata for the synthetic (mixed) tabs and filter chips. */

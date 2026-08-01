@@ -291,7 +291,7 @@ export function thirdPartyPluginSrcdoc(
         assets: {
           searchGifs: function (a) { return call("assets.searchGifs", [a || {}]); }
         },
-        // Fine-tune runs (needs grant finetune:runs). The com.ryu.finetune app drives
+        // Fine-tune runs (needs grant finetune:runs). The @ryu/finetune app drives
         // training runs; Core owns the orchestration + durable job store. Live progress
         // arrives via finetune.stream(args, { onFrame, signal }).
         finetune: {
@@ -312,7 +312,7 @@ export function thirdPartyPluginSrcdoc(
             return h.promise;
           }
         },
-        // Website monitors (needs grant monitors:crud). The com.ryu.monitors app
+        // Website monitors (needs grant monitors:crud). The @ryu/monitors app
         // drives Core's /api/monitors/* orchestration; the host calls that API
         // directly (it is already gated on the same enabled bit).
         monitors: {
@@ -326,7 +326,7 @@ export function thirdPartyPluginSrcdoc(
           alerts: function (a) { return call("monitors.alerts", [a || {}]); }
         },
         // Workflows (needs grants workflows:crud/runstate/catalogs). The
-        // com.ryu.workflows companion drives Core's DAG workflow engine; the host
+        // @ryu/workflows companion drives Core's DAG workflow engine; the host
         // calls the existing /workflows* + /api/workflows/catalog* API directly.
         workflows: {
           list: function () { return call("workflows.list", []); },
@@ -349,6 +349,7 @@ export function thirdPartyPluginSrcdoc(
           mcp: function () { return call("workflows.mcp", []); },
           skills: function () { return call("workflows.skills", []); },
           schedules: function () { return call("workflows.schedules", []); },
+          hookEvents: function () { return call("workflows.hookEvents", []); },
           composio: function (a) { return call("workflows.composio", [a || {}]); }
         },
         // Ghost record→replay (needs grant ghost:record). RecordToWorkflow records a
@@ -706,7 +707,7 @@ function htmlCompanionHeadFragment(
           return h.promise;
         }
       },
-      // Website monitors (needs grant monitors:crud). The com.ryu.monitors companion
+      // Website monitors (needs grant monitors:crud). The @ryu/monitors companion
       // drives Core's /api/monitors/* orchestration through these RPCs.
       monitors: {
         list: function () { return call("monitors.list", []); },
@@ -719,7 +720,7 @@ function htmlCompanionHeadFragment(
         alerts: function (a) { return call("monitors.alerts", [a || {}]); }
       },
       // Workflows (needs grants workflows:crud/runstate/catalogs). The
-      // com.ryu.workflows companion drives Core's DAG workflow engine through these RPCs.
+      // @ryu/workflows companion drives Core's DAG workflow engine through these RPCs.
       workflows: {
         list: function () { return call("workflows.list", []); },
         get: function (a) { return call("workflows.get", [a || {}]); },
@@ -741,6 +742,7 @@ function htmlCompanionHeadFragment(
         mcp: function () { return call("workflows.mcp", []); },
         skills: function () { return call("workflows.skills", []); },
         schedules: function () { return call("workflows.schedules", []); },
+        hookEvents: function () { return call("workflows.hookEvents", []); },
         composio: function (a) { return call("workflows.composio", [a || {}]); }
       },
       // Ghost record→replay (needs grant ghost:record).
@@ -750,13 +752,13 @@ function htmlCompanionHeadFragment(
         recordStatus: function () { return call("ghost.recordStatus", []); },
         recordStop: function () { return call("ghost.recordStop", []); }
       },
-      // Inbound webhook registry (needs grant webhooks:crud). The com.ryu.webhooks
+      // Inbound webhook registry (needs grant webhooks:crud). The @ryu/webhooks
       // companion renders Core's read-only /api/webhooks + /api/webhook-ingress/status.
       webhooks: {
         list: function () { return call("webhooks.list", []); },
         ingressStatus: function () { return call("webhooks.ingressStatus", []); }
       },
-      // Quests (needs grant quests:crud). The com.ryu.quests companion drives Core's
+      // Quests (needs grant quests:crud). The @ryu/quests companion drives Core's
       // /api/quests/* auto-detecting-todo orchestration; the host calls that API
       // directly (the monitors pattern). openDetectionSettings is a shell-navigation
       // verb (opens Settings at the Quests tab).
@@ -772,7 +774,7 @@ function htmlCompanionHeadFragment(
         judge: function (a) { return call("quests.judge", [a || {}]); },
         openDetectionSettings: function () { return call("quests.openDetectionSettings", []); }
       },
-      // Activity feed (needs grant activity:read). The com.ryu.activity companion
+      // Activity feed (needs grant activity:read). The @ryu/activity companion
       // renders Core's read-only unified feed; the host calls /api/activity directly
       // (the monitors pattern). openSession is a shell-navigation verb (opens the chat
       // tab for an item's session id).
@@ -780,7 +782,7 @@ function htmlCompanionHeadFragment(
         list: function (a) { return call("activity.list", [a || {}]); },
         openSession: function (a) { return call("activity.openSession", [a || {}]); }
       },
-      // Timeline (needs grant timeline:read). The com.ryu.timeline companion renders
+      // Timeline (needs grant timeline:read). The @ryu/timeline companion renders
       // the activity replay scrubber; the host calls Shadow's device-local /timeline
       // + /journal + /frame directly (the monitors pattern, but WITHOUT a node token —
       // Shadow is machine-pinned). frame returns a data: URL (CSP img-src data: blob:);
@@ -792,7 +794,7 @@ function htmlCompanionHeadFragment(
         openReview: function () { return call("timeline.openReview", []); },
         openSettings: function () { return call("timeline.openSettings", []); }
       },
-      // Calendar (needs grant calendar:crud). The com.ryu.calendar companion renders
+      // Calendar (needs grant calendar:crud). The @ryu/calendar companion renders
       // the scheduled-runs calendar and schedules an agent; the host calls Core's
       // /heartbeat/jobs + /workflows + /api/agents directly (the monitors pattern),
       // plus the createScheduledAgentWorkflow composite.
@@ -802,7 +804,7 @@ function htmlCompanionHeadFragment(
         agents: function () { return call("calendar.agents", []); },
         createAutomation: function (a) { return call("calendar.createAutomation", [a || {}]); }
       },
-      // Warmup (needs grant warmup:crud). The com.ryu.warmup companion schedules a
+      // Warmup (needs grant warmup:crud). The @ryu/warmup companion schedules a
       // keep-alive ping to each subscription agent so its rolling usage window is
       // already open; the host calls Core's /api/agents (+ /usage, /acp-config) and
       // /heartbeat/jobs directly (the monitors pattern).
@@ -812,7 +814,7 @@ function htmlCompanionHeadFragment(
         apply: function (a) { return call("warmup.apply", [a || []]); },
         runNow: function (a) { return call("warmup.runNow", [a || {}]); }
       },
-      // Learning (needs grant learning:crud). The com.ryu.learning companion renders
+      // Learning (needs grant learning:crud). The @ryu/learning companion renders
       // the read-only continual-learning surface; the host calls Core's
       // /api/learn/config + /api/experience/list + /api/healing/status directly (the
       // monitors pattern). All READ-ONLY.
@@ -821,7 +823,7 @@ function htmlCompanionHeadFragment(
         experience: function () { return call("learning.experience", []); },
         healing: function () { return call("learning.healing", []); }
       },
-      // Inbox / Approvals (needs grant approvals:crud). The com.ryu.approvals companion
+      // Inbox / Approvals (needs grant approvals:crud). The @ryu/approvals companion
       // renders the unified inbox; the host calls Core's /api/approvals/* +
       // /api/notifications/* (host-resolved user id) + Shadow's /proactive + /api/feedback
       // directly (the monitors pattern). openInChat is a shell-navigation verb (opens the
@@ -842,7 +844,7 @@ function htmlCompanionHeadFragment(
         feedback: function (a) { return call("suggestions.feedback", [a || {}]); },
         openInChat: function (a) { return call("suggestions.openInChat", [a || {}]); }
       },
-      // Meetings (needs grant meetings:crud). The com.ryu.meetings companion renders
+      // Meetings (needs grant meetings:crud). The @ryu/meetings companion renders
       // the record → live-transcript → AI-notes surface; the host calls Core's
       // /api/meetings/* directly (the monitors pattern). import is host-owned (the host
       // opens the OS file dialog + POSTs the multipart upload); open/openNotes/openList
@@ -860,7 +862,7 @@ function htmlCompanionHeadFragment(
         openNotes: function (a) { return call("meetings.openNotes", [a || {}]); },
         openList: function () { return call("meetings.openList", []); }
       },
-      // Skill authoring (needs grant skills:crud). The com.ryu.skill-editor companion
+      // Skill authoring (needs grant skills:crud). The @ryu/skill-editor companion
       // authors a user-owned Agent Skill (SKILL.md); the host calls Core's /api/skills
       // authoring endpoints directly (the monitors pattern). setTitle is a shell-navigation
       // verb (renames the companion's own tab). The edit target rides context.skillId.

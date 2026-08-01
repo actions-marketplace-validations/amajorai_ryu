@@ -131,8 +131,19 @@ const SOME_ADOPTION_STARS = 5;
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/;
 
 /** Reserved first-party id namespaces. A community listing whose manifest claims
- *  one of these is impersonating Ryu, which is a hard failure, not a warning. */
-const RESERVED_ID_PREFIXES = ["com.ryu.", "ai.ryu.", "com.amajor."];
+ *  one of these is impersonating Ryu, which is a hard failure, not a warning.
+ *
+ *  Both id generations are listed on purpose. The scoped forms are what
+ *  first-party plugins carry today; the reverse-DNS forms are what they carried
+ *  before the rename and what a stale third-party listing can still claim. Drop
+ *  either half and impersonation through the other silently starts passing. */
+const RESERVED_ID_PREFIXES = [
+	"@ryu/",
+	"@amajor/",
+	"com.ryu.",
+	"ai.ryu.",
+	"com.amajor.",
+];
 
 /** Whole days since an ISO timestamp, or null when it is absent/unparseable.
  *  `now` is injected so the checks are deterministic under test. */

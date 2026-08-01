@@ -47,14 +47,14 @@ pub struct SystemPlugin {
 /// Order is stable and determines display order in the App-store.
 pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
     SystemPlugin {
-        manifest_id: "ghost",
-        sidecar_name: "ghost",
+        manifest_id: "@ryu/ghost",
+        sidecar_name: "@ryu/ghost",
         windows_first: true,
         local_only: true,
     },
     SystemPlugin {
-        manifest_id: "shadow",
-        sidecar_name: "shadow",
+        manifest_id: "@ryu/shadow",
+        sidecar_name: "@ryu/shadow",
         windows_first: true,
         local_only: true,
     },
@@ -69,8 +69,8 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
     // Cross-platform (Node) and reaches the web, so neither Windows-first nor
     // local-only.
     SystemPlugin {
-        manifest_id: "agentbrowser",
-        sidecar_name: "agentbrowser",
+        manifest_id: "@ryu/agentbrowser",
+        sidecar_name: "@ryu/agentbrowser",
         windows_first: false,
         local_only: false,
     },
@@ -94,13 +94,13 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
 /// until a release publishes an installable sidecar binary (the WHY is documented at
 /// that absence). While it is disabled the desktop's Browser tab keeps its sandboxed
 /// iframe fallback, which works.
-pub const BROWSER_PLUGIN_ID: &str = "com.ryu.browser";
+pub const BROWSER_PLUGIN_ID: &str = "@ryu/browser";
 
 /// The Spaces app's plugin id — the document store + RAG index other apps write
 /// into. It is a **dependency target**: an app that owns Space documents declares
 /// `requires.apps = [{ id: SPACES_PLUGIN_ID }]` so the graph refuses to disable
 /// Spaces out from under it.
-pub const SPACES_PLUGIN_ID: &str = "com.ryu.spaces";
+pub const SPACES_PLUGIN_ID: &str = "@ryu/spaces";
 
 /// The Meetings app's plugin id — record → transcript → AI notes, auto-saved into
 /// the "Meetings" Space.
@@ -109,12 +109,12 @@ pub const SPACES_PLUGIN_ID: &str = "com.ryu.spaces";
 /// coupling is not decorative: `server/meetings_api.rs::save_notes_to_space` calls
 /// `state.spaces.ingest_document`, and `ensure_meetings_space` calls
 /// `state.spaces.{list_spaces, create_space}`.
-pub const MEETINGS_PLUGIN_ID: &str = "com.ryu.meetings";
+pub const MEETINGS_PLUGIN_ID: &str = "@ryu/meetings";
 
 /// The Research app's plugin id — the `/api/research/*` proxy over the autoresearch
 /// sidecar. A governance-shell leaf: default-on, no `requires` (it owns its own
 /// sidecar), compile-out-able behind the `research` cargo feature.
-pub const RESEARCH_PLUGIN_ID: &str = "com.ryu.research";
+pub const RESEARCH_PLUGIN_ID: &str = "@ryu/research";
 
 /// The MarkItDown app's plugin id — the **shipped default** provider of the
 /// `document.parse` capability (`apps-store/markitdown/`, a Python sidecar wrapping
@@ -122,7 +122,7 @@ pub const RESEARCH_PLUGIN_ID: &str = "com.ryu.research";
 /// [`CORE_DEFAULT_ON`], and the only one whose `provides` block carries
 /// `"default": true` — see the block comment on its entry there for why both halves
 /// are load-bearing and why the other three stay opt-in.
-pub const MARKITDOWN_PLUGIN_ID: &str = "com.ryu.markitdown";
+pub const MARKITDOWN_PLUGIN_ID: &str = "@ryu/markitdown";
 
 /// The Unstructured app's plugin id — a `document.parse` provider
 /// (`apps-store/unstructured/`, a Python sidecar wrapping the Apache-2.0 Unstructured
@@ -130,7 +130,7 @@ pub const MARKITDOWN_PLUGIN_ID: &str = "com.ryu.markitdown";
 /// [`CORE_DEFAULT_ON`] because `unstructured[all-docs]` is a 1-2 GB pip install whose
 /// native helpers (poppler/tesseract/libreoffice/pandoc) are not pip-installable, so
 /// it is opt-in from the Store — the same shape as `finetune`.
-pub const UNSTRUCTURED_PLUGIN_ID: &str = "com.ryu.unstructured";
+pub const UNSTRUCTURED_PLUGIN_ID: &str = "@ryu/unstructured";
 
 /// The Docling app's plugin id — a `document.parse` provider (`apps-store/docling/`,
 /// a Python sidecar wrapping IBM's MIT-licensed Docling). Core-tier and governed but
@@ -138,58 +138,58 @@ pub const UNSTRUCTURED_PLUGIN_ID: &str = "com.ryu.unstructured";
 /// downloads layout/OCR models on first parse.
 ///
 /// It is also the id the `document.parse` binding falls back to if `markitdown` ever
-/// loses its `"default": true` — `com.ryu.docling` sorts lexicographically lowest of
+/// loses its `"default": true` — `@ryu/docling` sorts lexicographically lowest of
 /// the four, and the tiebreak is alphabetical. That fallback would be an accident,
 /// never an intent.
-pub const DOCLING_PLUGIN_ID: &str = "com.ryu.docling";
+pub const DOCLING_PLUGIN_ID: &str = "@ryu/docling";
 
 /// The MinerU app's plugin id — a `document.parse` provider (`apps-store/mineru/`, a
 /// Python sidecar driving the AGPL-licensed MinerU CLI, PDF-focused). Core-tier and
 /// governed but **default-OFF** (absent from [`CORE_DEFAULT_ON`]): heaviest of the
 /// four (model downloads, GPU-oriented backends), so it is opt-in from the Store.
-pub const MINERU_PLUGIN_ID: &str = "com.ryu.mineru";
+pub const MINERU_PLUGIN_ID: &str = "@ryu/mineru";
 
 /// The Dashboards app's plugin id — the `/api/dashboards/*` live widget-grid
 /// surface. Governance-shell leaf: default-on, no `requires` (soft HTTP loopback to
 /// monitors/etc). Gate-only (deep in-crate coupling to hardware displays +
 /// `dashboard_builder`), so it is NOT behind a cargo feature.
-pub const DASHBOARDS_PLUGIN_ID: &str = "com.ryu.dashboards";
+pub const DASHBOARDS_PLUGIN_ID: &str = "@ryu/dashboards";
 
 /// The Teams app's plugin id — the `/api/teams/*` CRUD surface over agent teams.
 /// Governance-shell leaf: default-on, no `requires` (stores agent-id strings only).
 /// Gate-only (the store also backs `@team` chat routing + `agent_builder`), so it
 /// is NOT behind a cargo feature.
-pub const TEAMS_PLUGIN_ID: &str = "com.ryu.teams";
+pub const TEAMS_PLUGIN_ID: &str = "@ryu/teams";
 
 /// The Clips app's plugin id — the `/api/clips/*` Core→Shadow capture proxy. It
 /// `requires` the `shadow` app (its recordings live in Shadow), so the graph
 /// refuses to disable Shadow out from under an enabled Clips. Default-on;
 /// compile-out-able behind the `clips` cargo feature.
-pub const CLIPS_PLUGIN_ID: &str = "com.ryu.clips";
+pub const CLIPS_PLUGIN_ID: &str = "@ryu/clips";
 
 /// The Recipes app's plugin id — the `/api/recipes/*` record→replay surface over
 /// Ghost's RecipeStore. It `requires` the `ghost` app, so the graph refuses to
 /// disable Ghost out from under an enabled Recipes. Default-on; the HTTP routes are
 /// compile-out-able behind the `recipes` cargo feature (the extracted `ryu_recipes`
 /// engine stays compiled — the workflow executor's GhostAction node uses it).
-pub const RECIPES_PLUGIN_ID: &str = "com.ryu.recipes";
+pub const RECIPES_PLUGIN_ID: &str = "@ryu/recipes";
 
 /// The Mail (Agent Inboxes) app's plugin id. Unlike the gate-only apps above, Mail is
 /// a **fully manifest-driven** app: its `ryu-mail` sidecar (a local sibling binary) is
 /// spawned by the generic loader and its `/api/mail/*` surface is proxied via the
 /// `public_mount` mechanism — there is no hand-coded Rust proxy. Default-on so the
 /// externally-committed inbound-webhook URL resolves out of the box.
-pub const MAIL_PLUGIN_ID: &str = "com.ryu.mail";
+pub const MAIL_PLUGIN_ID: &str = "@ryu/mail";
 /// The Warmup app — an opt-in companion that schedules a keep-alive ping to each
 /// subscription agent so its rolling usage window is already open. Named here
 /// because [`crate::plugins::seed`] needs the id for its `ui_code` seed row.
-pub const WARMUP_PLUGIN_ID: &str = "com.ryu.warmup";
+pub const WARMUP_PLUGIN_ID: &str = "@ryu/warmup";
 
 /// The RAG capability app's plugin id — the default in-process embeddings+retrieval
 /// provider. Declares `provides:[rag]` + `requires:[engines]`, so the capability
 /// binding/graph resolves rag→engines for real (Track B). Default-on; a GraphRAG or
 /// third-party provider app can bind the `rag` capability to swap the implementation.
-pub const RAG_PLUGIN_ID: &str = "com.ryu.rag";
+pub const RAG_PLUGIN_ID: &str = "@ryu/rag";
 
 /// The Quests app's plugin id — the `/api/quests/*` auto-detecting todo board.
 /// Governance-shell leaf: default-on, no `requires` (the scheduler is kernel infra).
@@ -197,12 +197,12 @@ pub const RAG_PLUGIN_ID: &str = "com.ryu.rag";
 /// and mounted behind this gate; the whole capability is behind the `quests` cargo
 /// feature (in `default`), so a lean build drops it. This id stays in Core as the
 /// AppGate identity (a manifest/registry constant, not quest business logic).
-pub const QUESTS_PLUGIN_ID: &str = "com.ryu.quests";
+pub const QUESTS_PLUGIN_ID: &str = "@ryu/quests";
 
 /// The Approvals app's plugin id — the `/api/approvals/*` human-in-the-loop inbox.
 /// Governance-shell leaf: default-on, no `requires` (the workflow dependency is
 /// soft). It is a **dependency target**: Healing declares `requires.apps =
-/// [com.ryu.approvals]` because it delivers proposed fixes into this inbox. Gate-only
+/// [@ryu/approvals]` because it delivers proposed fixes into this inbox. Gate-only
 /// (its `ApprovalEngine` is a `ServerState` field used by the scheduler/workflow/
 /// healing), so it is NOT behind a cargo feature.
 ///
@@ -213,15 +213,15 @@ pub const QUESTS_PLUGIN_ID: &str = "com.ryu.quests";
 /// the pure-companion webhooks/activity/calendar apps): the `/api/approvals/*` routes
 /// remain gated on it; the unified inbox's reads (approvals + notifications + quest
 /// check-offs + Shadow suggestions) reach Core/Shadow host-side (the monitors pattern).
-pub const APPROVALS_PLUGIN_ID: &str = "com.ryu.approvals";
+pub const APPROVALS_PLUGIN_ID: &str = "@ryu/approvals";
 
 /// The Skills app's plugin id — the `/api/skills/*` + `/api/skills/catalog/*`
 /// SKILL.md discovery/authoring/catalog surface. Governance-shell leaf: default-on,
 /// no `requires`. It is a **dependency target**: Learning declares `requires.apps =
-/// [com.ryu.skills]` because it writes synthesized skills. Gate-only (its
+/// [@ryu/skills]` because it writes synthesized skills. Gate-only (its
 /// `SkillRegistry` is a `ServerState` field injected into every chat turn by
 /// `route_chat_stream`), so it is NOT behind a cargo feature.
-pub const SKILLS_PLUGIN_ID: &str = "com.ryu.skills";
+pub const SKILLS_PLUGIN_ID: &str = "@ryu/skills";
 
 /// The Learning app's plugin id — the `/api/learn/*` + `/api/experience/list`
 /// continual-learning loop. `requires` the `skills` app (it writes synthesized
@@ -236,7 +236,7 @@ pub const SKILLS_PLUGIN_ID: &str = "com.ryu.skills";
 /// `seed_overrides`). It stays a route gate (unlike the pure-companion webhooks/
 /// activity/calendar apps): the `/api/learn/*` + `/api/experience/*` routes remain
 /// gated on it; the companion's reads reach them host-side (monitors pattern).
-pub const LEARNING_PLUGIN_ID: &str = "com.ryu.learning";
+pub const LEARNING_PLUGIN_ID: &str = "@ryu/learning";
 
 /// The Self-Healing app's plugin id — the `/api/healing/*` diagnose→propose-fix
 /// surface, now served OUT-OF-PROCESS by the `ryu-healing` sidecar (`public_mount`).
@@ -244,7 +244,7 @@ pub const LEARNING_PLUGIN_ID: &str = "com.ryu.learning";
 /// refuses to disable Approvals out from under it. Default-on; Core keeps only the
 /// welded action side (`healing_client::CoreHealingHost`) and drives the sidecar over
 /// loopback, with the run-status bus loop spawned unconditionally in `main.rs`.
-pub const HEALING_PLUGIN_ID: &str = "com.ryu.healing";
+pub const HEALING_PLUGIN_ID: &str = "@ryu/healing";
 
 /// The Monitors app's plugin id — the `/api/monitors/*` website-watch surface
 /// (price/stock/keyword/content/uptime + alerts). Now served OUT-OF-PROCESS by the
@@ -254,7 +254,7 @@ pub const HEALING_PLUGIN_ID: &str = "com.ryu.healing";
 /// ext-bearer host callbacks (Spider fetch + alert fan-out); the interleaved
 /// `/api/activity/*`, `/api/events/*`, and `/api/notifications/*` streams are separate
 /// kernel concerns and stay ungated.
-pub const MONITORS_PLUGIN_ID: &str = "com.ryu.monitors";
+pub const MONITORS_PLUGIN_ID: &str = "@ryu/monitors";
 
 /// The Hardware app's plugin id — the PROTECTED `/api/hardware/devices*` device-
 /// registry CRUD (list/patch/delete + per-device dashboard config). Governance-shell
@@ -263,7 +263,7 @@ pub const MONITORS_PLUGIN_ID: &str = "com.ryu.monitors";
 /// NOT behind a cargo feature. The gate covers ONLY the protected device-management
 /// routes; the PUBLIC device channel (`/api/hardware/{ws,pair,display}`) stays ungated
 /// so physical ESP32 devices can connect and pair regardless of the app's enabled bit.
-pub const HARDWARE_PLUGIN_ID: &str = "com.ryu.hardware";
+pub const HARDWARE_PLUGIN_ID: &str = "@ryu/hardware";
 
 /// The Workflows app's plugin id — the protected workflow surface: the DAG CRUD
 /// (`/workflows/*`, no `/api` prefix) plus the template catalog
@@ -274,7 +274,7 @@ pub const HARDWARE_PLUGIN_ID: &str = "com.ryu.hardware";
 /// protected routes; the PUBLIC per-workflow webhook (`/api/workflows/:id/webhook`)
 /// stays on the public router, ungated, so external systems can POST triggers
 /// regardless of the app's enabled bit.
-pub const WORKFLOWS_PLUGIN_ID: &str = "com.ryu.workflows";
+pub const WORKFLOWS_PLUGIN_ID: &str = "@ryu/workflows";
 
 /// The Agents app's plugin id — the `/api/agents/*` catalog + CRUD + session-
 /// management surface (list/create/edit/delete/catalog/install, ACP config/auth/
@@ -287,7 +287,7 @@ pub const WORKFLOWS_PLUGIN_ID: &str = "com.ryu.workflows";
 /// serves a chat turn (`agent_routing/`, `sidecar/adapters/acp.rs`, and the
 /// `/api/chat/stream` path) is kernel and stays untouched — it never HTTP-loops back
 /// through `/api/agents`.
-pub const AGENTS_PLUGIN_ID: &str = "com.ryu.agents";
+pub const AGENTS_PLUGIN_ID: &str = "@ryu/agents";
 
 /// The Voice app's plugin id — the PROTECTED voice data path
 /// (`/api/voice/transcribe`, `/api/voice/speak`, `/api/voice/tts-engines`,
@@ -297,7 +297,7 @@ pub const AGENTS_PLUGIN_ID: &str = "com.ryu.agents";
 /// these protected routes; the PUBLIC realtime voice WS (`/api/voice/ws`) stays on the
 /// public router, ungated (a browser WS upgrade authenticates in-handler), so live
 /// voice mode connects regardless of the app's enabled bit.
-pub const VOICE_PLUGIN_ID: &str = "com.ryu.voice";
+pub const VOICE_PLUGIN_ID: &str = "@ryu/voice";
 
 /// The Media-Generation app's plugin id — the generative-media PRODUCERS
 /// (`/api/images/generate`, `/api/video/generate`, `/api/video/jobs/:id`,
@@ -307,7 +307,7 @@ pub const VOICE_PLUGIN_ID: &str = "com.ryu.voice";
 /// kernel storage because it also serves TTS audio and legacy media URLs. New user
 /// uploads (chat / editor / `ui.uploadFile`) go to `/api/uploads` → the Uploads
 /// system space instead — also ungated, for the same reason.
-pub const MEDIA_PLUGIN_ID: &str = "com.ryu.media";
+pub const MEDIA_PLUGIN_ID: &str = "@ryu/media";
 
 /// The Memory app's plugin id — the `/api/memory` + `/api/memory/:id` long-term memory
 /// CRUD surface (the Memory Library). Governance-shell leaf, no `requires`. Gate-only
@@ -322,14 +322,14 @@ pub const MEDIA_PLUGIN_ID: &str = "com.ryu.media";
 /// `sidebar_buttons` entry only while enabled, and the desktop palette's hardcoded
 /// Memory row — which additionally suppressed that contribution — is gone), so flipping
 /// this is a product call about what a fresh install ships, not a correctness fix.
-pub const MEMORY_PLUGIN_ID: &str = "com.ryu.memory";
+pub const MEMORY_PLUGIN_ID: &str = "@ryu/memory";
 
 /// The Layers app's plugin id — a settings-only governance shell for the swappable
 /// capability layers. It contributes no runnables and gates no route; it exists so the
 /// `layer.<capability>.default.<arg>` preferences have a home that is not tied to any
 /// one provider (hanging them off `exa` would lose them on a swap to `tavily`).
 /// Default-on, because a settings surface the user cannot reach is not a setting.
-pub const LAYERS_PLUGIN_ID: &str = "com.ryu.layers";
+pub const LAYERS_PLUGIN_ID: &str = "@ryu/layers";
 
 /// The Webhooks app's plugin id — the inbound webhook endpoint registry surfaced by
 /// the sandboxed `apps-store/webhooks/ui` companion (W7 frontend extraction). Unlike
@@ -338,7 +338,7 @@ pub const LAYERS_PLUGIN_ID: &str = "com.ryu.layers";
 /// (the desktop host calls them directly, monitors pattern). The manifest exists only
 /// to seed the companion's UI bundle + `webhooks:crud` grant. Default-on so the
 /// companion is present on every fresh install (the page it replaced was always-on).
-pub const WEBHOOKS_PLUGIN_ID: &str = "com.ryu.webhooks";
+pub const WEBHOOKS_PLUGIN_ID: &str = "@ryu/webhooks";
 
 /// The Activity app's plugin id — the unified chronological feed surfaced by the
 /// sandboxed `apps-store/activity/ui` companion (W7 frontend extraction). Like
@@ -347,7 +347,7 @@ pub const WEBHOOKS_PLUGIN_ID: &str = "com.ryu.webhooks";
 /// directly, monitors pattern). The manifest exists only to seed the companion's UI
 /// bundle + `activity:read` grant. Default-on so the companion is present on every
 /// fresh install (the page it replaced was always-on).
-pub const ACTIVITY_PLUGIN_ID: &str = "com.ryu.activity";
+pub const ACTIVITY_PLUGIN_ID: &str = "@ryu/activity";
 
 /// The Calendar app's plugin id — the scheduled-runs calendar (agent/workflow jobs
 /// projected onto Month/Week/Day/Agenda) surfaced by the sandboxed
@@ -357,7 +357,7 @@ pub const ACTIVITY_PLUGIN_ID: &str = "com.ryu.activity";
 /// desktop host calls them directly, monitors pattern). The manifest exists only to
 /// seed the companion's UI bundle + `calendar:crud` grant. Default-on so the
 /// companion is present on every fresh install (the page it replaced was always-on).
-pub const CALENDAR_PLUGIN_ID: &str = "com.ryu.calendar";
+pub const CALENDAR_PLUGIN_ID: &str = "@ryu/calendar";
 
 /// The Timeline app's plugin id — the CapCut-style activity replay scrubber
 /// (Shadow's captured lanes + keyframe preview + Dayflow work journal) surfaced by
@@ -368,7 +368,7 @@ pub const CALENDAR_PLUGIN_ID: &str = "com.ryu.calendar";
 /// pattern, but WITHOUT a node token — Shadow is machine-pinned). The manifest exists
 /// only to seed the companion's UI bundle + `timeline:read` grant. Default-on so the
 /// companion is present on every fresh install (the page it replaced was always-on).
-pub const TIMELINE_PLUGIN_ID: &str = "com.ryu.timeline";
+pub const TIMELINE_PLUGIN_ID: &str = "@ryu/timeline";
 
 /// The Skill Editor app's plugin id — the SKILL.md authoring editor (front-matter
 /// form fields + a markdown body + server-backed version history) surfaced by the
@@ -378,7 +378,7 @@ pub const TIMELINE_PLUGIN_ID: &str = "com.ryu.timeline";
 /// directly (the monitors pattern), so this manifest exists only to seed the
 /// companion's UI bundle + `skills:crud` grant. Default-on so the editor's
 /// `/skills/new` + `/skills/:id/edit` routes resolve on every fresh install.
-pub const SKILL_EDITOR_PLUGIN_ID: &str = "com.ryu.skill-editor";
+pub const SKILL_EDITOR_PLUGIN_ID: &str = "@ryu/skill-editor";
 
 /// The set of **Core-tier** built-in plugin ids (#444).
 ///
@@ -403,7 +403,7 @@ pub const SKILL_EDITOR_PLUGIN_ID: &str = "com.ryu.skill-editor";
 ///   its own sidecar/MCP lifecycle. `ghost` and `agentbrowser` declare no runnables
 ///   (their tools come from the dedicated MCP provider); the record is the
 ///   governance shell (see `crate::plugin_manifest` `BUILTIN_MANIFESTS` doc).
-///   `com.ryu.browser` is the exception among the sidecar-backed apps: it now also
+///   `@ryu/browser` is the exception among the sidecar-backed apps: it now also
 ///   carries declarative `http` tool runnables that reach its own sidecar through
 ///   the ext-proxy, because the swappable `browser.control` layer binds its verbs
 ///   to registry tool ids and a sidecar route is not one.
@@ -415,10 +415,10 @@ pub const SKILL_EDITOR_PLUGIN_ID: &str = "com.ryu.skill-editor";
 ///   third-party compression plugin would be. The bundled fixture is our
 ///   reference; nothing about the service is hardcoded.
 pub const CORE_PLUGINS: &[&str] = &[
-    "ghost",
-    "shadow",
-    "spider",
-    "agentbrowser",
+    "@ryu/ghost",
+    "@ryu/shadow",
+    "@ryu/spider",
+    "@ryu/agentbrowser",
     // Third `web.extract` provider (Scrapling's MCP server). Core-tier is a
     // REQUIREMENT here, not a promotion: `may_register_mcp_servers` auto-allows
     // manifest-declared `mcp_servers` only for compiled-in fixtures, and the
@@ -428,19 +428,19 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Deliberately NOT in `CORE_DEFAULT_ON`: it needs a `pip install "scrapling[ai]"`
     // the user must perform, so shipping it on would put a permanently unavailable
     // tool on every fresh install — the same reason the BYOK providers stay opt-in.
-    "scrapling",
+    "@ryu/scrapling",
     // The default `web.search` provider. Core-tier for the same reason `spider` is:
     // it is a default TOOL app that must exist out of the box, and default-on
     // requires Core-tier. The other four search providers (tavily, brave, serper,
     // firecrawl) stay Community + opt-in, because each is BYOK-only and would ship
     // a tool that can do nothing until the user pastes a key.
-    "exa",
+    "@ryu/exa",
     // Workspace real-Chromium browser sidecar — core built-in, installable from the
     // Store but NOT default-on (no publishable sidecar asset; see `CORE_DEFAULT_ON`).
     BROWSER_PLUGIN_ID,
-    "firewall",
-    "routing",
-    "sandbox",
+    "@ryu/firewall",
+    "@ryu/routing",
+    "@ryu/sandbox",
     // Mail (Agent Inboxes) — manifest-driven app; its `ryu-mail` sidecar is spawned
     // by the generic loader (see MAIL_PLUGIN_ID).
     MAIL_PLUGIN_ID,
@@ -449,39 +449,39 @@ pub const CORE_PLUGINS: &[&str] = &[
     // System-wide autocomplete. Core-tier but opt-in (NOT in CORE_DEFAULT_ON):
     // enabling it is the single on/off switch for the /api/predict/* brain, and it
     // sends text from arbitrary apps to a model, so it ships disabled.
-    "predict",
+    "@ryu/predict",
     // System-wide dictation + agent-ask (Island surface). Core-tier; default-on
     // (see CORE_DEFAULT_ON) so the previously-hardcoded Island feature keeps
     // working on a fresh install. Enabling the plugin is the single switch.
-    "dictation",
-    "engines",
-    "durable",
-    "goal",
-    "proof",
-    "double-check",
-    "chat-title",
+    "@ryu/dictation",
+    "@ryu/engines",
+    "@ryu/durable",
+    "@ryu/goal",
+    "@ryu/proof",
+    "@ryu/double-check",
+    "@ryu/chat-title",
     // Pre-turn prompt-improver: rewrites the outgoing message via a configurable
     // model before it is sent. Reverse-DNS id (matches its manifest + composer flag).
-    "com.ryuhq.auto-expand",
+    "@ryu/auto-expand",
     // The Whiteboard app — a full-page Companion (`ui_format:"html"`) that owns its
     // Space documents via `spaces:docs`. NOT default-on, and (unlike the other opt-in
     // companions) not pre-installed either: `seed::NOT_PRE_INSTALLED` keeps a fresh
     // store free of its record, and `lifecycle::install_app` attaches the compiled-in
     // `ui_code` HTML blob when the user installs it from the Store, at which point
     // `enable_app` gets its grants approved through the Gateway like any other app.
-    "com.ryu.whiteboard",
+    "@ryu/whiteboard",
     // The Canvas app — a full-page Companion (`ui_format:"html"`) that owns its Space
     // documents via `spaces:docs` and drives generation nodes through the window.ryu
     // media/agent bridge. Same posture as Whiteboard above: opt-in AND
     // not-pre-installed (`seed::NOT_PRE_INSTALLED`).
-    "com.ryu.canvas",
+    "@ryu/canvas",
     // The Fine-tuning app — a full-page Companion (`ui_format:"html"`) that drives
     // Core's fine-tune orchestration via `finetune:runs` and owns its Unsloth Python
     // training sidecar (spawned on the Core-tier auto-run path, so it declares no
     // `sidecar:process` grant — the Gateway denies that grant at enable). Default-on;
     // `plugins::seed` gives it its approved grants + `ui_code` HTML blob. Replaces the
     // built-in fine-tuning page.
-    "com.ryu.finetune",
+    "@ryu/finetune",
     // The four document-parsing apps — the providers of the `document.parse`
     // capability, each backed by a Python sidecar it owns (spawned on the Core-tier
     // auto-run path, so like `finetune` each declares NO `sidecar:process` grant — the
@@ -594,12 +594,12 @@ pub const CORE_PLUGINS: &[&str] = &[
 /// a user can disable any of them, and the fixture is the reference a third
 /// party can fork.
 pub const CORE_DEFAULT_ON: &[&str] = &[
-    "engines",
-    "durable",
-    "goal",
-    "proof",
-    "double-check",
-    "chat-title",
+    "@ryu/engines",
+    "@ryu/durable",
+    "@ryu/goal",
+    "@ryu/proof",
+    "@ryu/double-check",
+    "@ryu/chat-title",
     // The default tool apps — auto-installed (record seeded enabled) on a fresh
     // install so they show up like the auto-downloaded default models. The actual
     // process runs through its own sidecar/MCP lifecycle; enabling the record just
@@ -610,7 +610,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // tool, shadow four `http` tools reaching the Shadow sidecar through Core's
     // `/api/shadow/*` proxy (its native `sidecar/mcp` providers were deleted).
     // Seeding the record enabled is exactly what surfaces those tools — no
-    // double-listing, since nothing else owns them. (`com.ryu.browser` carries the
+    // double-listing, since nothing else owns them. (`@ryu/browser` carries the
     // same shape — seven `http` runnables that give `browser.control` registry tool
     // ids to bind to — but is NOT seeded; see the note below its former entry.)
     //
@@ -626,10 +626,10 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // `manifest_sidecar::missing_sidecar_binary_reports`, which covers manifest
     // `local` sidecars; ghost/shadow are built-in `impl Sidecar`s with their own
     // downloaders and are NOT covered by that record.
-    "ghost",
-    "shadow",
-    "spider",
-    "agentbrowser",
+    "@ryu/ghost",
+    "@ryu/shadow",
+    "@ryu/spider",
+    "@ryu/agentbrowser",
     // `exa` is default-ON so the `web.search` toolkit has a provider out of the
     // box. Without this the capability had ZERO enabled providers on a fresh
     // install, and because the read model derives its capability list from the
@@ -644,8 +644,8 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // credential: its binding falls back to Exa's public MCP endpoint when no
     // `RYU_EXA_API_KEY` is set (see fixtures/exa.manifest.json). Every other
     // search provider is BYOK-only and stays opt-in.
-    "exa",
-    // NOTE: com.ryu.browser is deliberately NOT default-on, and this is the one
+    "@ryu/exa",
+    // NOTE: @ryu/browser is deliberately NOT default-on, and this is the one
     // membership decision here that is driven by RELEASE reality rather than product
     // taste. It was default-on ("so the Browser tab uses the real-Chromium sidecar out
     // of the box, not the fallback iframe") — but no release publishes a binary the
@@ -679,7 +679,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // `binary_name` extraction), not renaming the zip — macOS cannot ship an Electron
     // app as one executable file.
     //
-    // NOTE: com.ryu.mail is intentionally NOT default-on. It is sidecar-only now
+    // NOTE: @ryu/mail is intentionally NOT default-on. It is sidecar-only now
     // (the in-process path was deleted, Track C). The release now builds + ships the
     // `ryu-mail` binary alongside the other 10 sidecar bins (see
     // `.github/workflows/release.yml`), so the old "binary not yet shipped" blocker is
@@ -693,7 +693,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // Auto-expand ships default-on so its composer toggle + `/expand` command are
     // available with zero setup; the flag/command `match` gate makes it free when
     // the toggle is off and no `/expand` is used (no sandbox spawn on idle turns).
-    "com.ryuhq.auto-expand",
+    "@ryu/auto-expand",
     // `markitdown` is default-ON so the `document.parse` capability has a provider out
     // of the box — the same argument as `exa` above, and for the same mechanical
     // reason: the read model derives the capability's provider list from the ENABLED
@@ -808,7 +808,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // Dictation is default-on: it was previously hardcoded into Island with
     // enabled-by-default prefs. Seeding the plugin enabled preserves that UX while
     // making the plugin the single switch (synced into the `dictation` pref blob).
-    "dictation",
+    "@ryu/dictation",
     VOICE_PLUGIN_ID,
     MEDIA_PLUGIN_ID,
     // W7: the webhooks companion, default-on so it is present on every fresh install
@@ -851,7 +851,7 @@ pub fn is_default_on(manifest_id: &str) -> bool {
 /// against (see `tool_exec::may_read_env_secret`: there is no Gateway approval for
 /// "may read env var X", so the only honest discriminator is where the manifest
 /// came from). Several first-party plugins are Community-tier but compiled in
-/// (`exa`, `rtk`, `com.ryuhq.advisor`), so the two predicates genuinely differ.
+/// (`exa`, `rtk`, `@ryu/advisor`), so the two predicates genuinely differ.
 ///
 /// Safe as an id comparison because the loader parses built-ins FIRST and
 /// duplicate ids are rejected first-occurrence-wins ([`crate::plugin_manifest::PluginManifestLoader::load`]),
@@ -896,7 +896,7 @@ pub fn find_system_plugin(manifest_id: &str) -> Option<&'static SystemPlugin> {
 ///   (`workflow::durable::FallbackEngine`). Disabling it strips durable execution
 ///   (checkpoints + bounded `While` resume) out from under every workflow run, so
 ///   in-flight/scheduled workflows lose their durability guarantee.
-/// - `com.ryu.agents` — the agent catalog/CRUD surface (`/api/agents/*`). The
+/// - `@ryu/agents` — the agent catalog/CRUD surface (`/api/agents/*`). The
 ///   composer fetches the agent list on boot to populate the picker, so a disabled
 ///   Agents app would leave chat with no selectable agent — a fresh install would
 ///   read as broken. The chat-serving ACP substrate is separate kernel code and is
@@ -905,7 +905,7 @@ pub fn find_system_plugin(manifest_id: &str) -> Option<&'static SystemPlugin> {
 /// Everything else stays freely swappable/disableable — this list is deliberately
 /// minimal so the "nothing hardcoded, everything swappable" principle holds for
 /// all but the two subsystems whose absence reads as a broken install.
-pub const LOAD_BEARING_PLUGINS: &[&str] = &["engines", "durable", AGENTS_PLUGIN_ID];
+pub const LOAD_BEARING_PLUGINS: &[&str] = &["@ryu/engines", "@ryu/durable", AGENTS_PLUGIN_ID];
 
 /// Whether disabling `manifest_id` needs an explicit force override because a core
 /// subsystem depends on it. See [`LOAD_BEARING_PLUGINS`].
@@ -950,42 +950,44 @@ mod tests {
     fn system_apps_contains_default_tool_apps() {
         // Spider is deliberately absent — it is a declarative `command` plugin now,
         // not a sidecar-backed system plugin.
-        for id in ["ghost", "shadow", "agentbrowser"] {
+        for id in ["@ryu/ghost", "@ryu/shadow", "@ryu/agentbrowser"] {
             assert!(
                 SYSTEM_PLUGINS.iter().any(|s| s.manifest_id == id),
                 "{id} must be in SYSTEM_PLUGINS"
             );
         }
         assert!(
-            !SYSTEM_PLUGINS.iter().any(|s| s.manifest_id == "spider"),
+            !SYSTEM_PLUGINS
+                .iter()
+                .any(|s| s.manifest_id == "@ryu/spider"),
             "spider is a declarative command plugin, not a system plugin"
         );
     }
 
     #[test]
     fn is_builtin_returns_true_for_known_ids() {
-        assert!(is_builtin("ghost"));
-        assert!(is_builtin("shadow"));
-        assert!(is_builtin("agentbrowser"));
+        assert!(is_builtin("@ryu/ghost"));
+        assert!(is_builtin("@ryu/shadow"));
+        assert!(is_builtin("@ryu/agentbrowser"));
         // spider is Core-tier + default-on but NOT a system plugin (no sidecar).
-        assert!(!is_builtin("spider"));
+        assert!(!is_builtin("@ryu/spider"));
     }
 
     #[test]
     fn is_builtin_returns_false_for_unknown_ids() {
-        assert!(!is_builtin("com.example.research-assistant"));
+        assert!(!is_builtin("@example/research-assistant"));
         assert!(!is_builtin("does.not.exist"));
     }
 
     #[test]
     fn find_system_plugin_returns_correct_metadata() {
-        let ghost = find_system_plugin("ghost").expect("ghost must be found");
-        assert_eq!(ghost.sidecar_name, "ghost");
+        let ghost = find_system_plugin("@ryu/ghost").expect("ghost must be found");
+        assert_eq!(ghost.sidecar_name, "@ryu/ghost");
         assert!(ghost.windows_first);
         assert!(ghost.local_only);
 
-        let shadow = find_system_plugin("shadow").expect("shadow must be found");
-        assert_eq!(shadow.sidecar_name, "shadow");
+        let shadow = find_system_plugin("@ryu/shadow").expect("shadow must be found");
+        assert_eq!(shadow.sidecar_name, "@ryu/shadow");
         assert!(shadow.windows_first);
         assert!(shadow.local_only);
     }
@@ -993,10 +995,10 @@ mod tests {
     #[test]
     fn find_system_plugin_returns_metadata_for_default_tool_apps() {
         // spider is no longer a system plugin (declarative command tool).
-        assert!(find_system_plugin("spider").is_none());
+        assert!(find_system_plugin("@ryu/spider").is_none());
 
-        let ab = find_system_plugin("agentbrowser").expect("agentbrowser must be found");
-        assert_eq!(ab.sidecar_name, "agentbrowser");
+        let ab = find_system_plugin("@ryu/agentbrowser").expect("agentbrowser must be found");
+        assert_eq!(ab.sidecar_name, "@ryu/agentbrowser");
         assert!(!ab.windows_first, "agentbrowser is cross-platform");
         assert!(!ab.local_only, "agentbrowser reaches the web");
     }
@@ -1011,13 +1013,13 @@ mod tests {
     #[test]
     fn tier_for_core_plugins_is_core() {
         use crate::plugin_manifest::PluginTier;
-        assert_eq!(tier_for("engines"), PluginTier::Core);
-        assert_eq!(tier_for("ghost"), PluginTier::Core);
-        assert_eq!(tier_for("firewall"), PluginTier::Core);
-        assert_eq!(tier_for("sandbox"), PluginTier::Core);
+        assert_eq!(tier_for("@ryu/engines"), PluginTier::Core);
+        assert_eq!(tier_for("@ryu/ghost"), PluginTier::Core);
+        assert_eq!(tier_for("@ryu/firewall"), PluginTier::Core);
+        assert_eq!(tier_for("@ryu/sandbox"), PluginTier::Core);
         // #448 dogfood: the durable workflow engine plugin is Core-tier.
-        assert_eq!(tier_for("durable"), PluginTier::Core);
-        assert!(is_default_on("durable"));
+        assert_eq!(tier_for("@ryu/durable"), PluginTier::Core);
+        assert!(is_default_on("@ryu/durable"));
     }
 
     /// The four sidecar-backed default tool apps are Core-tier AND default-on, so
@@ -1028,7 +1030,7 @@ mod tests {
     #[test]
     fn default_tool_apps_are_core_and_default_on_and_system() {
         use crate::plugin_manifest::PluginTier;
-        for id in ["ghost", "shadow", "agentbrowser"] {
+        for id in ["@ryu/ghost", "@ryu/shadow", "@ryu/agentbrowser"] {
             assert_eq!(tier_for(id), PluginTier::Core, "{id} must be Core-tier");
             assert!(is_default_on(id), "{id} must be default-on (auto-seeded)");
             assert!(is_builtin(id), "{id} must be a system plugin");
@@ -1037,19 +1039,19 @@ mod tests {
         // declarative tool works out of the box) but is NOT a system plugin — it
         // has no sidecar lifecycle.
         assert_eq!(
-            tier_for("spider"),
+            tier_for("@ryu/spider"),
             PluginTier::Core,
             "spider must be Core-tier"
         );
-        assert!(is_default_on("spider"), "spider must be default-on");
-        assert!(!is_builtin("spider"), "spider is not a system plugin");
+        assert!(is_default_on("@ryu/spider"), "spider must be default-on");
+        assert!(!is_builtin("@ryu/spider"), "spider is not a system plugin");
     }
 
     #[test]
     fn tier_for_unknown_is_community() {
         use crate::plugin_manifest::PluginTier;
         assert_eq!(
-            tier_for("com.example.research-assistant"),
+            tier_for("@example/research-assistant"),
             PluginTier::Community
         );
         assert_eq!(tier_for("does.not.exist"), PluginTier::Community);
@@ -1063,7 +1065,7 @@ mod tests {
     #[test]
     fn community_plugin_is_opt_in_never_default_on() {
         use crate::plugin_manifest::PluginTier;
-        let community_id = "com.example.research-assistant";
+        let community_id = "@example/research-assistant";
         // Tier is Community (not a manifest-asserted field — derived from membership).
         assert_eq!(tier_for(community_id), PluginTier::Community);
         // A Community plugin can never be Core-tier...
@@ -1431,16 +1433,16 @@ mod tests {
 
     #[test]
     fn engines_is_load_bearing_and_default_swappables_are_not() {
-        assert!(is_load_bearing("engines"), "engines is load-bearing");
-        assert!(is_load_bearing("durable"), "durable is load-bearing");
+        assert!(is_load_bearing("@ryu/engines"), "engines is load-bearing");
+        assert!(is_load_bearing("@ryu/durable"), "durable is load-bearing");
         assert!(
             is_load_bearing(AGENTS_PLUGIN_ID),
             "agents is load-bearing (composer fetches the agent list on boot)"
         );
         // A freely-disableable Core plugin is NOT load-bearing.
-        assert!(!is_load_bearing("goal"));
-        assert!(!is_load_bearing("firewall"));
-        assert!(!is_load_bearing("com.example.research-assistant"));
+        assert!(!is_load_bearing("@ryu/goal"));
+        assert!(!is_load_bearing("@ryu/firewall"));
+        assert!(!is_load_bearing("@example/research-assistant"));
     }
 
     /// The uninstall-protection predicate must cover the FULL resurrection set
@@ -1451,33 +1453,43 @@ mod tests {
     #[test]
     fn uninstall_protection_covers_every_default_on_plugin_not_just_system_apps() {
         // A default-on, non-SYSTEM plugin is protected (the crux).
-        assert!(!is_builtin("goal"), "goal is not a SYSTEM plugin");
-        assert!(is_default_on("goal"));
+        assert!(!is_builtin("@ryu/goal"), "goal is not a SYSTEM plugin");
+        assert!(is_default_on("@ryu/goal"));
         assert!(
-            is_uninstall_protected("goal"),
+            is_uninstall_protected("@ryu/goal"),
             "a default-on plugin must be uninstall-protected or the seed resurrects it"
         );
         // The SYSTEM sidecar apps are protected too.
-        for id in ["ghost", "shadow", "spider", "agentbrowser"] {
+        for id in [
+            "@ryu/ghost",
+            "@ryu/shadow",
+            "@ryu/spider",
+            "@ryu/agentbrowser",
+        ] {
             assert!(is_uninstall_protected(id), "{id} must be protected");
         }
         // engines/durable (default-on + load-bearing) are protected.
-        assert!(is_uninstall_protected("engines"));
-        assert!(is_uninstall_protected("durable"));
+        assert!(is_uninstall_protected("@ryu/engines"));
+        assert!(is_uninstall_protected("@ryu/durable"));
     }
 
     #[test]
     fn opt_in_builtins_and_community_plugins_are_not_uninstall_protected() {
         // Opt-in built-ins are compiled-in but NOT default-on, so removing their
         // record cannot resurrect them — uninstall is allowed.
-        for id in ["firewall", "routing", "sandbox", "predict"] {
+        for id in [
+            "@ryu/firewall",
+            "@ryu/routing",
+            "@ryu/sandbox",
+            "@ryu/predict",
+        ] {
             assert!(
                 !is_uninstall_protected(id),
                 "{id} is opt-in (not default-on) and must be uninstallable"
             );
         }
         // A user-installed Community plugin is always uninstallable.
-        assert!(!is_uninstall_protected("com.example.research-assistant"));
+        assert!(!is_uninstall_protected("@example/research-assistant"));
     }
 
     #[test]
@@ -1492,16 +1504,16 @@ mod tests {
         }
         // Gateway/sandbox policy plugins are Core-tier but NOT default-on
         // (they change gateway/sandbox behaviour, so they stay opt-in).
-        assert!(!is_default_on("firewall"));
-        assert!(!is_default_on("routing"));
-        assert!(!is_default_on("sandbox"));
-        assert!(!is_default_on("headroom"));
+        assert!(!is_default_on("@ryu/firewall"));
+        assert!(!is_default_on("@ryu/routing"));
+        assert!(!is_default_on("@ryu/sandbox"));
+        assert!(!is_default_on("@ryu/headroom"));
         // Autocomplete is Core-tier but opt-in (sends text to a model).
-        assert!(CORE_PLUGINS.contains(&"predict"));
-        assert!(!is_default_on("predict"));
+        assert!(CORE_PLUGINS.contains(&"@ryu/predict"));
+        assert!(!is_default_on("@ryu/predict"));
         // Dictation is Core-tier and default-on (Island surface, previously hardcoded).
-        assert!(CORE_PLUGINS.contains(&"dictation"));
-        assert!(is_default_on("dictation"));
+        assert!(CORE_PLUGINS.contains(&"@ryu/dictation"));
+        assert!(is_default_on("@ryu/dictation"));
     }
 
     // ── Registration integrity: every id in a membership list must exist ──────
@@ -1539,20 +1551,20 @@ mod tests {
     #[test]
     fn scrapling_is_core_tier_and_opt_in_with_a_loadable_mcp_manifest() {
         assert_eq!(
-            tier_for("scrapling"),
+            tier_for("@ryu/scrapling"),
             crate::plugin_manifest::PluginTier::Core,
             "scrapling must be Core-tier or its manifest-declared MCP server is never \
              registered and it owns no tools at all"
         );
         assert!(
-            !is_default_on("scrapling"),
+            !is_default_on("@ryu/scrapling"),
             "scrapling must stay opt-in: its MCP server is a BYO pip install"
         );
 
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let manifest = manifests
             .iter()
-            .find(|m| m.id == "scrapling")
+            .find(|m| m.id == "@ryu/scrapling")
             .expect("scrapling fixture did not load");
 
         // The tools come from the MCP server, so empty `runnables` is correct here —
@@ -1613,7 +1625,7 @@ mod tests {
     ///    not whichever id happens to sort first. `plugins::binding` resolves a
     ///    selectable capability as user override > sole provider > declared default >
     ///    **lexicographically-lowest provider id**, so zero defaults AND two defaults
-    ///    both silently elect `com.ryu.docling`. Nothing errors either way.
+    ///    both silently elect `@ryu/docling`. Nothing errors either way.
     /// 2. `markitdown` is in [`CORE_DEFAULT_ON`] — the flag only breaks ties among
     ///    ALREADY-ENABLED providers, it never installs anything, so without the seed
     ///    the capability has zero providers on a fresh install.

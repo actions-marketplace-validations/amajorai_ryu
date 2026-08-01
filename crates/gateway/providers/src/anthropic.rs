@@ -240,7 +240,10 @@ impl CacheUsage {
 /// prompt for callers that send content blocks.
 fn system_field(messages: &[Value]) -> Option<Value> {
     let mut blocks: Vec<Value> = Vec::new();
-    for m in messages.iter().filter(|m| m["role"].as_str() == Some("system")) {
+    for m in messages
+        .iter()
+        .filter(|m| m["role"].as_str() == Some("system"))
+    {
         blocks.extend(content_blocks(&m["content"]));
     }
     if blocks.is_empty() {
@@ -684,7 +687,10 @@ mod tests {
         assert_eq!(out["id"], json!("msg_42"));
         assert_eq!(out["object"], json!("chat.completion"));
         assert_eq!(out["model"], json!("gpt-4o-alias"));
-        assert_eq!(out["choices"][0]["message"]["content"], json!("hello world"));
+        assert_eq!(
+            out["choices"][0]["message"]["content"],
+            json!("hello world")
+        );
         // max_tokens → OpenAI "length".
         assert_eq!(out["choices"][0]["finish_reason"], json!("length"));
         assert_eq!(out["usage"]["prompt_tokens"], json!(10));
@@ -742,7 +748,10 @@ mod tests {
         });
         let out = p.to_anthropic_body("m", &body);
         assert_eq!(out["system"][0]["text"], json!("HUGE PREFIX"));
-        assert_eq!(out["system"][0]["cache_control"]["type"], json!("ephemeral"));
+        assert_eq!(
+            out["system"][0]["cache_control"]["type"],
+            json!("ephemeral")
+        );
     }
 
     #[test]
@@ -837,9 +846,12 @@ mod tests {
 
         let plain = MockServer::always(MockResponse::ok_json(ok)).await;
         let p = provider_with(plain.base_url().to_string(), vec!["k"]);
-        p.complete("m", &json!({ "messages": [{ "role": "user", "content": "hi" }] }))
-            .await
-            .unwrap();
+        p.complete(
+            "m",
+            &json!({ "messages": [{ "role": "user", "content": "hi" }] }),
+        )
+        .await
+        .unwrap();
         assert!(plain.requests()[0].header("anthropic-beta").is_none());
 
         let ttl = MockServer::always(MockResponse::ok_json(ok)).await;
@@ -894,10 +906,7 @@ mod tests {
         assert_eq!(p.next_key(), "only");
     }
 
-    async fn collect_stream(
-        chunks: Vec<&'static str>,
-        model: &str,
-    ) -> String {
+    async fn collect_stream(chunks: Vec<&'static str>, model: &str) -> String {
         let raw = futures_util::stream::iter(
             chunks
                 .into_iter()
@@ -953,7 +962,8 @@ mod tests {
         ))
         .await;
         let p = provider_with(server.base_url().to_string(), vec!["sk-secret-KEY"]);
-        let body = json!({ "model": "claude-alias", "messages": [{ "role": "user", "content": "hi" }] });
+        let body =
+            json!({ "model": "claude-alias", "messages": [{ "role": "user", "content": "hi" }] });
         let out = p.complete("claude-3-5", &body).await.unwrap();
 
         assert_eq!(out["choices"][0]["message"]["content"], json!("hi there"));
@@ -964,7 +974,10 @@ mod tests {
         let reqs = server.requests();
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].path, "/v1/messages");
-        assert_eq!(reqs[0].header("x-api-key").as_deref(), Some("sk-secret-KEY"));
+        assert_eq!(
+            reqs[0].header("x-api-key").as_deref(),
+            Some("sk-secret-KEY")
+        );
         assert_eq!(
             reqs[0].header("anthropic-version").as_deref(),
             Some("2023-06-01")
@@ -992,7 +1005,10 @@ mod tests {
         );
         // ...but it must never appear in the error surfaced to the caller.
         let rendered = format!("{err}{err:?}");
-        assert!(!rendered.contains(SECRET), "key leaked in error: {rendered}");
+        assert!(
+            !rendered.contains(SECRET),
+            "key leaked in error: {rendered}"
+        );
         assert!(rendered.contains("invalid request"));
     }
 
@@ -1019,10 +1035,9 @@ mod tests {
 
     #[tokio::test]
     async fn complete_surfaces_rate_limited_when_all_keys_exhausted() {
-        let server = MockServer::always(
-            MockResponse::json(429, "nope").with_header("retry-after", "9"),
-        )
-        .await;
+        let server =
+            MockServer::always(MockResponse::json(429, "nope").with_header("retry-after", "9"))
+                .await;
         let p = provider_with(server.base_url().to_string(), vec!["a", "b"]);
         let body = json!({ "messages": [] });
         let err = p.complete("m", &body).await.unwrap_err();

@@ -22,7 +22,7 @@ test("isSafeCommandPath accepts plain absolute sub-paths", () => {
 test("isSafeCommandPath rejects path-traversal and escape forms", () => {
 	for (const bad of [
 		"/../../../v1/chat/completions",
-		"/../api/plugins/com.ryu.mail/uninstall",
+		"/../api/plugins/@ryu/mail/uninstall",
 		"/foo/../../bar",
 		"/%2e%2e/%2e%2e/v1",
 		"/foo/%2E%2E/bar",

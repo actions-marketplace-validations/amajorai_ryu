@@ -1,10 +1,15 @@
 {
-  "id": "bytebot",
+  "id": "@ryu/bytebot",
   "name": "Bytebot Desktop",
   "version": "1.0.0",
   "description": "Drives a Bytebot desktop (https://github.com/bytebot-ai/bytebot) through `bytebotd`, its local HTTP daemon, as the SECOND provider of the swappable `computer.control` layer — the first thing that makes that layer actually swappable rather than merely marked selectable. READ THIS BEFORE SELECTING IT: bytebotd drives the desktop IT runs on, which in the shipped Bytebot product is a containerized Linux desktop, NOT the machine running Ryu. Selecting it re-points `computer__capture` / `computer__click` / `computer__type` / `computer__key` / `computer__scroll` away from your own screen (`ghost`, the declared default) and onto that desktop — the same remote-target relationship `browser.control` already has between the local Chromium sidecar and a hosted browser. It serves FIVE of the six canonical verbs: `computer__focus_app` is deliberately NOT bound, because bytebotd's `application` action takes a closed seven-value enum (firefox, 1password, thunderbird, vscode, terminal, desktop, directory) while the canonical verb takes a free-form app name, so any other name would be a schema-legal call that 400s. The app switch is still reachable natively as `bytebot__application`, whose own schema carries that enum so an illegal call cannot be composed. Requires no API key — bytebotd ships with no authentication at all, which is also why this plugin only ever addresses it over loopback. SECURITY, read before enabling: bytebotd ships with NO authentication — no auth middleware, permissive CORS — and this plugin reaches it at the fixed loopback port 9990. Its egress grant is `tool:http-egress:127.0.0.1`, which is HOST-scoped, not port-scoped: approving it grants reach to any service on loopback, not just bytebotd. Only enable this on a machine where you accept that an unauthenticated desktop-control daemon is running and reachable. TARGET: bytebotd drives the desktop IT runs on — in the shipped Bytebot product that is a containerized Linux desktop, NOT the machine running Ryu — so selecting this instead of `ghost` does not give you another way to drive your own computer.",
   "tagline": "Swap computer control onto a Bytebot desktop",
-  "keywords": ["automation", "desktop", "computer-use", "bytebot"],
+  "keywords": [
+    "automation",
+    "desktop",
+    "computer-use",
+    "bytebot"
+  ],
   "category": "Automation",
   "engines": {
     "ryu": ">=0.0.1"
@@ -62,12 +67,19 @@
                   "type": "integer"
                 }
               },
-              "required": ["x", "y"]
+              "required": [
+                "x",
+                "y"
+              ]
             },
             "button": {
               "type": "string",
               "description": "Which mouse button (daemon default when omitted: left).",
-              "enum": ["left", "right", "middle"]
+              "enum": [
+                "left",
+                "right",
+                "middle"
+              ]
             },
             "clickCount": {
               "type": "integer",
@@ -76,7 +88,9 @@
               "maximum": 3
             }
           },
-          "required": ["coordinates"]
+          "required": [
+            "coordinates"
+          ]
         }
       }
     },
@@ -108,7 +122,9 @@
               "minimum": 0
             }
           },
-          "required": ["text"]
+          "required": [
+            "text"
+          ]
         }
       }
     },
@@ -143,7 +159,9 @@
               "minimum": 0
             }
           },
-          "required": ["keys"]
+          "required": [
+            "keys"
+          ]
         }
       }
     },
@@ -169,7 +187,12 @@
             "direction": {
               "type": "string",
               "description": "Which way to scroll.",
-              "enum": ["up", "down", "left", "right"]
+              "enum": [
+                "up",
+                "down",
+                "left",
+                "right"
+              ]
             },
             "scrollCount": {
               "type": "integer",
@@ -178,7 +201,9 @@
               "maximum": 10
             }
           },
-          "required": ["direction"]
+          "required": [
+            "direction"
+          ]
         }
       }
     },
@@ -214,7 +239,9 @@
               ]
             }
           },
-          "required": ["application"]
+          "required": [
+            "application"
+          ]
         }
       }
     }
@@ -264,5 +291,7 @@
       }
     }
   ],
-  "permission_grants": ["tool:http-egress:127.0.0.1"]
+  "permission_grants": [
+    "tool:http-egress:127.0.0.1"
+  ]
 }

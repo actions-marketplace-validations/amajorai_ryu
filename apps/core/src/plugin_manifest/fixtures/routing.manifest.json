@@ -1,5 +1,5 @@
 {
-  "id": "routing",
+  "id": "@ryu/routing",
   "name": "Smart Model Routing",
   "version": "1.0.0",
   "engines": {
@@ -20,7 +20,12 @@
     }
   ],
   "contributes": {
-    "policies": [{ "id": "policy-smart-routing", "title": "Smart Routing" }]
+    "policies": [
+      {
+        "id": "policy-smart-routing",
+        "title": "Smart Routing"
+      }
+    ]
   },
   "permission_grants": []
 }

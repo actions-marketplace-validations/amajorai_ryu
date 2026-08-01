@@ -1326,18 +1326,21 @@ mod tests {
             .iter()
             .find(|r| r.verb.id == "web__search")
             .expect("the shipped fixtures must serve web__search");
-        assert_eq!(search.provider_id, "exa", "exa declares itself the default");
+        assert_eq!(
+            search.provider_id, "@ryu/exa",
+            "exa declares itself the default"
+        );
         assert_eq!(search.binding.tool, "exa__search");
 
         let mut cfg = BindingConfig::default();
         cfg.overrides
-            .insert(CAP_WEB_SEARCH.to_owned(), "tavily".to_owned());
+            .insert(CAP_WEB_SEARCH.to_owned(), "@ryu/tavily".to_owned());
         let swapped = resolve_verbs(&all, &cfg);
         let search_after = swapped
             .iter()
             .find(|r| r.verb.id == "web__search")
             .expect("web__search must survive the swap");
-        assert_eq!(search_after.provider_id, "tavily");
+        assert_eq!(search_after.provider_id, "@ryu/tavily");
         assert_eq!(search_after.binding.tool, "tavily__search");
     }
 
@@ -1366,7 +1369,7 @@ mod tests {
         ] {
             assert_eq!(
                 served.get(verb),
-                Some(&("com.ryu.browser", tool)),
+                Some(&("@ryu/browser", tool)),
                 "the shipped browser provider must serve {verb} via {tool}"
             );
         }
@@ -1379,7 +1382,7 @@ mod tests {
         // slug or path that is not there 404s at call time and nowhere else.
         let browser = all
             .iter()
-            .find(|m| m.id == "com.ryu.browser")
+            .find(|m| m.id == "@ryu/browser")
             .expect("the browser app must be compiled in and parseable");
         let slugs: Vec<&str> = browser
             .runnables
@@ -1394,11 +1397,11 @@ mod tests {
         for (_, (_, tool)) in &served {
             assert!(
                 slugs.contains(tool),
-                "verb target '{tool}' is not a runnable slug on com.ryu.browser"
+                "verb target '{tool}' is not a runnable slug on @ryu/browser"
             );
         }
         for url in ["/tabs/{id}/snapshot", "/click", "/type", "/scroll"] {
-            let full = format!("core:/api/ext/com.ryu.browser{url}");
+            let full = format!("core:/api/ext/@ryu/browser{url}");
             assert!(
                 urls.contains(&full.as_str()),
                 "no runnable targets {full}; the new control routes would be unreachable"
@@ -1432,10 +1435,10 @@ mod tests {
         let builtins = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let layers = builtins
             .iter()
-            .find(|m| m.id == "com.ryu.layers")
+            .find(|m| m.id == "@ryu/layers")
             .expect("the layers settings app must be compiled in and parseable");
         assert!(
-            crate::plugins::builtins::is_default_on("com.ryu.layers"),
+            crate::plugins::builtins::is_default_on("@ryu/layers"),
             "a settings surface the user cannot reach is not a setting"
         );
 
@@ -1594,12 +1597,12 @@ mod tests {
 
     #[test]
     fn only_verbs_the_bound_provider_declares_are_listed() {
-        let enabled = vec![search_provider("exa", true, "exa__search")];
+        let enabled = vec![search_provider("@ryu/exa", true, "exa__search")];
         let resolved = resolve_verbs(&enabled, &BindingConfig::default());
         // exa declares web__search only — no extract/crawl/browser/computer/memory.
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].verb.id, "web__search");
-        assert_eq!(resolved[0].provider_id, "exa");
+        assert_eq!(resolved[0].provider_id, "@ryu/exa");
         assert_eq!(resolved[0].binding.tool, "exa__search");
 
         let rows = tools(&resolved);
@@ -1611,8 +1614,8 @@ mod tests {
     #[test]
     fn swapping_the_provider_keeps_the_verb_and_changes_only_the_target() {
         let enabled = vec![
-            search_provider("exa", true, "exa__search"),
-            search_provider("tavily", false, "tavily__search"),
+            search_provider("@ryu/exa", true, "exa__search"),
+            search_provider("@ryu/tavily", false, "tavily__search"),
         ];
         // Zero-config: the declared default wins.
         let before = resolve_verbs(&enabled, &BindingConfig::default());
@@ -1623,7 +1626,7 @@ mod tests {
         // forwarding target moved.
         let mut cfg = BindingConfig::default();
         cfg.overrides
-            .insert(CAP_WEB_SEARCH.to_owned(), "tavily".to_owned());
+            .insert(CAP_WEB_SEARCH.to_owned(), "@ryu/tavily".to_owned());
         let after = resolve_verbs(&enabled, &cfg);
         assert_eq!(after[0].verb.id, before[0].verb.id);
         assert_eq!(after[0].binding.tool, "tavily__search");
@@ -1977,14 +1980,14 @@ mod tests {
 
     #[test]
     fn response_is_normalized_and_keeps_the_raw_item() {
-        let provider = search_provider("exa", true, "exa__search");
+        let provider = search_provider("@ryu/exa", true, "exa__search");
         let binding = provider.provides[0].tools.get("web__search").unwrap();
         let mapped = map_response(
             binding,
-            "exa",
+            "@ryu/exa",
             json!({ "results": [{ "title": "T", "url": "https://e", "text": "body", "score": 0.9 }] }),
         );
-        assert_eq!(mapped["provider"], json!("exa"));
+        assert_eq!(mapped["provider"], json!("@ryu/exa"));
         let first = &mapped["results"][0];
         assert_eq!(first["title"], json!("T"));
         assert_eq!(first["url"], json!("https://e"));
@@ -1995,7 +1998,7 @@ mod tests {
 
     #[test]
     fn two_providers_normalize_to_the_same_canonical_shape() {
-        let exa = search_provider("exa", true, "exa__search");
+        let exa = search_provider("@ryu/exa", true, "exa__search");
         let exa_binding = exa.provides[0].tools.get("web__search").unwrap();
 
         // A provider with a different envelope and different field names.
@@ -2016,12 +2019,12 @@ mod tests {
 
         let from_exa = map_response(
             exa_binding,
-            "exa",
+            "@ryu/exa",
             json!({ "results": [{ "title": "T", "url": "https://e", "text": "body" }] }),
         );
         let from_tavily = map_response(
             &tavily_binding,
-            "tavily",
+            "@ryu/tavily",
             json!({ "data": { "items": [{ "name": "T", "link": "https://e", "content": { "summary": "body" } }] } }),
         );
 
@@ -2065,7 +2068,7 @@ mod tests {
 
         let scalar = map_response(
             &binding,
-            "firecrawl",
+            "@ryu/firecrawl",
             json!({ "data": { "metadata": { "title": "Foo" } } }),
         );
         assert_eq!(scalar["results"][0]["title"], json!("Foo"));
@@ -2073,7 +2076,7 @@ mod tests {
         // Verbatim, array and all — no kernel-side unwrapping.
         let array = map_response(
             &binding,
-            "firecrawl",
+            "@ryu/firecrawl",
             json!({ "data": { "metadata": { "title": ["Foo"] } } }),
         );
         assert_eq!(array["results"][0]["title"], json!(["Foo"]));
@@ -2101,14 +2104,14 @@ mod tests {
         // missing API key) and the generic non-2xx envelope. Reporting either as
         // `results: []` would tell the model "no search results" when the truth is
         // "your key is rejected" — the failure this test exists to prevent.
-        let provider = search_provider("exa", true, "exa__search");
+        let provider = search_provider("@ryu/exa", true, "exa__search");
         let binding = provider.provides[0].tools.get("web__search").unwrap();
 
         for failure in [
             json!({ "available": false, "reason": "endpoint returned HTTP 401", "hint": "check the key" }),
             json!({ "status": 500, "body": "upstream exploded" }),
         ] {
-            let mapped = map_response(binding, "exa", failure.clone());
+            let mapped = map_response(binding, "@ryu/exa", failure.clone());
             assert!(
                 mapped.get("results").is_none(),
                 "a failure envelope must not be presented as a result set: {mapped}"
@@ -2122,9 +2125,9 @@ mod tests {
         // The other side of the coin: a provider that really found nothing returns
         // its envelope with an empty array, and that MUST stay a normal empty result
         // set rather than being mistaken for a failure.
-        let provider = search_provider("exa", true, "exa__search");
+        let provider = search_provider("@ryu/exa", true, "exa__search");
         let binding = provider.provides[0].tools.get("web__search").unwrap();
-        let mapped = map_response(binding, "exa", json!({ "results": [] }));
+        let mapped = map_response(binding, "@ryu/exa", json!({ "results": [] }));
         assert_eq!(mapped["results"], json!([]));
     }
 
@@ -2135,13 +2138,13 @@ mod tests {
         // VERBATIM, no envelope" for a 2xx in that mode. So the declared `results`
         // paths are relative to the provider's OWN body — this test pins that
         // assumption, since a wrapped envelope would make every mapping miss.
-        let provider = search_provider("exa", true, "exa__search");
+        let provider = search_provider("@ryu/exa", true, "exa__search");
         let binding = provider.provides[0].tools.get("web__search").unwrap();
         let upstream_body_verbatim = json!({
             "requestId": "abc",
             "results": [{ "title": "T", "url": "https://e", "text": "body" }]
         });
-        let mapped = map_response(binding, "exa", upstream_body_verbatim);
+        let mapped = map_response(binding, "@ryu/exa", upstream_body_verbatim);
         assert_eq!(mapped["results"][0]["title"], json!("T"));
         assert_eq!(mapped["results"][0]["snippet"], json!("body"));
     }

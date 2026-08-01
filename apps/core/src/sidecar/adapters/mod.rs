@@ -8202,7 +8202,10 @@ mod tests {
             &serde_json::json!({ "file_path": "/x.rs" }),
             &locations,
         );
-        assert_eq!(input["_ryuLocations"][0]["path"], serde_json::json!("/x.rs"));
+        assert_eq!(
+            input["_ryuLocations"][0]["path"],
+            serde_json::json!("/x.rs")
+        );
 
         let question = serde_json::json!({
             "questions": [{

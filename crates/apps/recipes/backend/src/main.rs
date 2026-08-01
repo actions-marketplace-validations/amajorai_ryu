@@ -82,7 +82,7 @@ const DEFAULT_PORT: u16 = 7999;
 /// Core's `plugins::builtins::RECIPES_PLUGIN_ID`). Presented on the
 /// `x-ryu-plugin-id` header of every host callback so Core can recompute the
 /// expected ext token.
-const RECIPES_PLUGIN_ID: &str = "com.ryu.recipes";
+const RECIPES_PLUGIN_ID: &str = "@ryu/recipes";
 
 /// The `x-ryu-plugin-id` header Core's `authenticate_sidecar` reads — mirrors
 /// `apps/core/src/sidecar/ext_proxy.rs::HDR_PLUGIN_ID`.
@@ -112,12 +112,20 @@ struct CoreCallback {
     http: reqwest::Client,
 }
 
+/// Core's loopback port, from the `RYU_CORE_PORT` Core injects at spawn (it is
+/// profile-shifted, so the constant is only the last-resort fallback for a bare
+/// run). One function because two callers need the SAME answer: the host callback
+/// and the `RYU_BIND` seed below.
+fn core_port() -> u16 {
+    std::env::var("RYU_CORE_PORT")
+        .ok()
+        .and_then(|p| p.trim().parse().ok())
+        .unwrap_or(DEFAULT_CORE_PORT)
+}
+
 impl CoreCallback {
     fn new() -> Self {
-        let core_port: u16 = std::env::var("RYU_CORE_PORT")
-            .ok()
-            .and_then(|p| p.trim().parse().ok())
-            .unwrap_or(DEFAULT_CORE_PORT);
+        let core_port = core_port();
         let ext_token = std::env::var("RYU_EXT_TOKEN")
             .ok()
             .map(|s| s.trim().to_owned())
@@ -178,7 +186,10 @@ impl RecipesHost for CoreCallback {
 
     async fn recorder_start(&self, task: &str) -> Result<RecorderStarted> {
         let raw = self
-            .post("/api/host/capability/ghost.recordStart", json!({ "task": task }))
+            .post(
+                "/api/host/capability/ghost.recordStart",
+                json!({ "task": task }),
+            )
             .await?;
         serde_json::from_value(raw)
             .map_err(|e| anyhow::anyhow!("malformed RecorderStarted from Core: {e}"))
@@ -213,6 +224,17 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.trim().parse().ok())
         .unwrap_or(DEFAULT_PORT);
+
+    // The app-event emit client (`ryu-app-events`) addresses Core through
+    // `RYU_BIND`, but a sidecar's injected env carries only `RYU_CORE_PORT`, and Core
+    // exports no `RYU_BIND` of its own outside the dev profile — so without this the
+    // `recording.ended` / `replay.*` events this manifest declares would silently
+    // no-op in exactly the build users run. Set unconditionally rather than only when
+    // unset: an inherited `RYU_BIND` is Core's LISTEN address, which may be
+    // `0.0.0.0:<port>` (a dial target that is invalid on Windows), while every
+    // sidecar→Core hop is by construction loopback — the same address+port
+    // `CoreCallback` uses.
+    std::env::set_var("RYU_BIND", format!("127.0.0.1:{}", core_port()));
 
     // Install the Core-callback host once at boot so the replay/record routes proxy
     // back to Core's `/api/host/capability/ghost.*` kernel capabilities (where the
@@ -377,7 +399,10 @@ mod tests {
         std::env::remove_var("RYU_CORE_PORT");
         std::env::remove_var("RYU_EXT_TOKEN");
         let cb = CoreCallback::new();
-        assert_eq!(cb.core_base, format!("http://127.0.0.1:{DEFAULT_CORE_PORT}"));
+        assert_eq!(
+            cb.core_base,
+            format!("http://127.0.0.1:{DEFAULT_CORE_PORT}")
+        );
         assert!(cb.ext_token.is_none());
     }
 
@@ -473,7 +498,10 @@ mod tests {
 
         let cb = CoreCallback::new();
         // call_ghost_run returns the RAW envelope verbatim (crate::run unwraps it).
-        let got = cb.call_ghost_run("myrecipe", json!({ "n": 2 })).await.unwrap();
+        let got = cb
+            .call_ghost_run("myrecipe", json!({ "n": 2 }))
+            .await
+            .unwrap();
         assert_eq!(got, envelope);
 
         let c = captured.lock().unwrap().clone().unwrap();
@@ -550,7 +578,11 @@ mod tests {
         std::env::set_var("RYU_EXT_TOKEN", "tok");
 
         let cb = CoreCallback::new();
-        let err = cb.call_ghost_run("r", json!({})).await.unwrap_err().to_string();
+        let err = cb
+            .call_ghost_run("r", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("kaboom"), "unexpected: {err}");
 
         std::env::remove_var("RYU_CORE_PORT");
@@ -567,7 +599,10 @@ mod tests {
 
         let cb = CoreCallback::new();
         let err = cb.recorder_start("x").await.unwrap_err().to_string();
-        assert!(err.contains("malformed RecorderStarted"), "unexpected: {err}");
+        assert!(
+            err.contains("malformed RecorderStarted"),
+            "unexpected: {err}"
+        );
 
         std::env::remove_var("RYU_CORE_PORT");
         std::env::remove_var("RYU_EXT_TOKEN");
@@ -580,7 +615,11 @@ mod tests {
         std::env::remove_var("RYU_CORE_PORT");
         let cb = CoreCallback::new();
         // No token configured → the callback refuses to send.
-        let err = cb.post("/api/host/capability/ghost.replay", json!({})).await.unwrap_err().to_string();
+        let err = cb
+            .post("/api/host/capability/ghost.replay", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no RYU_EXT_TOKEN"), "unexpected: {err}");
     }
 

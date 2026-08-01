@@ -3,11 +3,11 @@
 //! Fine-tuning used to live in an in-process surface (`server/finetune.rs`) that
 //! read Core's `ryu_finetune::FinetuneStore` field on `ServerState` and drove the
 //! Python `unsloth` worker directly. Fine-tuning is now an out-of-process app
-//! (`com.ryu.finetune`): the `ryu-finetune` sidecar owns `finetune.db`, gates local
+//! (`@ryu/finetune`): the `ryu-finetune` sidecar owns `finetune.db`, gates local
 //! training on the GPU, drives the Python worker over `RYU_UNSLOTH_URL`, and serves
 //! `/api/finetune/*` — which Core exposes verbatim through the generic ext-proxy
 //! `public_mount`. Core's remaining reverse-coupling is the plugin-host bridge
-//! (`host.finetune_*`, how the sandboxed `com.ryu.finetune` companion drives runs):
+//! (`host.finetune_*`, how the sandboxed `@ryu/finetune` companion drives runs):
 //! it reaches the sidecar over loopback HTTP through this client instead of touching
 //! an in-process store, so the sidecar is the single owner of `finetune.db`.
 //!

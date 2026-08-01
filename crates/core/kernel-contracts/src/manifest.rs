@@ -116,24 +116,67 @@ fn hydrate_one(
     Ok(())
 }
 
-/// Validate an app `id` for use as both an identity key **and** a filesystem
-/// directory name under the apps dir.
+/// Validate an app `id`.
 ///
-/// The `id` is written to disk as `apps_dir().join(id)` by the install-from-URL
-/// path, so an unvalidated id is a path-traversal / arbitrary-write sink. This
-/// uses a strict **allowlist** (not a blocklist) because the project is
-/// Windows-first: `\`, `/`, `:`, and a leading `.` must all be rejected, and on
-/// Windows `PathBuf::join` with an absolute or drive-qualified component silently
-/// replaces the base. The legal alphabet accepts both bare-kebab ids the built-in
-/// manifests use (e.g. `ghost`, `data-grid-explorer`) and any legacy dotted
-/// third-party id (e.g. `com.example.research-assistant`) for back-compat:
+/// Two shapes are legal, and they are matched as **exact shapes** — never by
+/// widening one permissive character allowlist to cover both:
 ///
-/// - non-empty, at most [`MAX_PLUGIN_ID_LEN`] bytes
+/// 1. **Scoped** (`@scope/name`, e.g. `@ryu/meetings`) — the current form.
+/// 2. **Legacy flat** (`ghost`, `@example/research-assistant`) — every id
+///    predating the scoped scheme. Still legal *forever*, because the alias map
+///    ([`canonical_plugin_id`]) lets a third-party manifest that was never updated
+///    keep loading.
+///
+/// # Why exact shapes and not one wider alphabet
+///
+/// The id reaches filesystem-path contexts (`apps_dir().join(...)`), so an
+/// unvalidated id is a path-traversal / arbitrary-write sink, and the original
+/// allowlist rejected `/`, `\`, `:` and a leading `.` deliberately — the project is
+/// Windows-first, where `PathBuf::join` with an absolute or drive-qualified
+/// component silently **replaces** the base. A scoped id contains a `/`, so simply
+/// adding `/` and `@` to that alphabet would make `@a/../../etc` a legal id and
+/// reopen exactly that hole. Instead the scoped branch splits on the single `/` and
+/// holds each half to the strict legacy alphabet, so no traversal segment can
+/// survive in either half.
+///
+/// Note the disk never sees this `/` regardless: [`plugin_dir_name`] flattens a
+/// scoped id before it is ever joined onto a path.
+///
+/// Both halves:
+/// - non-empty, whole id at most [`MAX_PLUGIN_ID_LEN`] bytes
 /// - characters limited to ASCII `[a-zA-Z0-9.-_]`
-/// - no `..` sequence anywhere, no leading/trailing `.`, no leading `-`
+/// - no `..` sequence, no leading/trailing `.`, no leading `-`
 ///
 /// Returns `Ok(())` when the id is safe, else a descriptive `Err(String)`.
 pub fn validate_plugin_id(id: &str) -> Result<(), String> {
+    // Scoped form: `@scope/name`. Exactly one `/`, `@` only as the first byte.
+    if let Some(rest) = id.strip_prefix('@') {
+        if id.len() > MAX_PLUGIN_ID_LEN {
+            return Err(format!(
+                "app id is too long ({} bytes, max {MAX_PLUGIN_ID_LEN})",
+                id.len()
+            ));
+        }
+        let Some((scope, name)) = rest.split_once('/') else {
+            return Err(format!(
+                "scoped app id '{id}' must be '@scope/name' (missing '/')"
+            ));
+        };
+        if name.contains('/') {
+            return Err(format!("scoped app id '{id}' must contain exactly one '/'"));
+        }
+        // Each half must itself be a legal flat id — this is what keeps `..`,
+        // leading `.`/`-`, `\`, `:` and `@` out of BOTH halves.
+        validate_flat_plugin_id(scope).map_err(|e| format!("scope of '{id}': {e}"))?;
+        validate_flat_plugin_id(name).map_err(|e| format!("name of '{id}': {e}"))?;
+        return Ok(());
+    }
+    validate_flat_plugin_id(id)
+}
+
+/// The strict legacy alphabet, applied to a whole flat id or to one half of a
+/// scoped one. See [`validate_plugin_id`] for why this stays narrow.
+fn validate_flat_plugin_id(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("app id must not be empty".to_string());
     }
@@ -162,6 +205,130 @@ pub fn validate_plugin_id(id: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The **on-disk directory name** for a plugin id.
+///
+/// A scoped id contains a `/` (`@ryu/meetings`), and the id is used as a directory
+/// name under the plugins/apps dir. Joining the raw id would create a NESTED path —
+/// and the manifest scanner uses a single-level `read_dir`, so a nested plugin would
+/// be silently invisible rather than loudly broken. It would also put a path
+/// separator into a value that reaches `PathBuf::join`, which is precisely the
+/// surface [`validate_plugin_id`] exists to keep closed.
+///
+/// So the disk name is a FLATTENED derivation: `@ryu/meetings` → `@ryu+meetings`.
+/// `+` is not legal in an id ([`validate_plugin_id`]'s alphabet excludes it), so the
+/// mapping is unambiguous and cannot collide with a legacy flat id.
+///
+/// Every site that joins a plugin id onto a path must call this. The id itself stays
+/// scoped everywhere else — this is a storage detail, not a rename.
+#[must_use]
+pub fn plugin_dir_name(id: &str) -> String {
+    id.replace('/', "+")
+}
+
+/// Canonicalize a possibly-legacy plugin id to its current form.
+///
+/// The scoped rename (`@ryu/meetings` → `@ryu/meetings`) would otherwise orphan
+/// real user state — the id is the `app_store` record key (carrying enabled-state and
+/// Gateway-approved grants), the `plugin_storage` KV prefix, and the hash input for
+/// every sidecar's minted ext token. This map is what lets the old id keep resolving
+/// forever, so a third-party manifest that was never updated still loads.
+///
+/// Applied at the manifest-load chokepoint so everything downstream — `app_store`
+/// lookups, hook dispatch, `may_emit_event` — only ever sees canonical ids and needs
+/// no alias awareness of its own. The one caller that must apply it explicitly is the
+/// sidecar callback authenticator, because the ext token is a hash over the raw id
+/// string a sidecar presents.
+#[must_use]
+pub fn canonical_plugin_id(id: &str) -> &str {
+    LEGACY_PLUGIN_ID_ALIASES
+        .iter()
+        .find(|(old, _)| *old == id)
+        .map_or(id, |(_, new)| *new)
+}
+
+/// Old id → current id. Generated from the rename; append-only.
+///
+/// Deliberately a plain sorted slice rather than a map: it is read rarely (load and
+/// sidecar auth), it must be greppable, and a static map would need a dependency to
+/// buy nothing at this size.
+pub const LEGACY_PLUGIN_ID_ALIASES: &[(&str, &str)] = &[
+    ("agentbrowser", "@ryu/agentbrowser"),
+    ("brave", "@ryu/brave"),
+    ("bytebot", "@ryu/bytebot"),
+    ("chat-title", "@ryu/chat-title"),
+    (
+        "com.example.research-assistant",
+        "@example/research-assistant",
+    ),
+    ("com.ryu.activity", "@ryu/activity"),
+    ("com.ryu.agents", "@ryu/agents"),
+    ("com.ryu.approvals", "@ryu/approvals"),
+    ("com.ryu.browser", "@ryu/browser"),
+    ("com.ryu.calendar", "@ryu/calendar"),
+    ("com.ryu.canvas", "@ryu/canvas"),
+    ("com.ryu.clips", "@ryu/clips"),
+    ("com.ryu.dashboards", "@ryu/dashboards"),
+    ("com.ryu.docling", "@ryu/docling"),
+    ("com.ryu.finetune", "@ryu/finetune"),
+    ("com.ryu.hardware", "@ryu/hardware"),
+    ("com.ryu.healing", "@ryu/healing"),
+    ("com.ryu.layers", "@ryu/layers"),
+    ("com.ryu.learning", "@ryu/learning"),
+    ("com.ryu.mail", "@ryu/mail"),
+    ("com.ryu.markitdown", "@ryu/markitdown"),
+    ("com.ryu.media", "@ryu/media"),
+    ("com.ryu.meetings", "@ryu/meetings"),
+    ("com.ryu.memory", "@ryu/memory"),
+    ("com.ryu.mineru", "@ryu/mineru"),
+    ("com.ryu.monitors", "@ryu/monitors"),
+    ("com.ryu.quests", "@ryu/quests"),
+    ("com.ryu.rag", "@ryu/rag"),
+    ("com.ryu.recipes", "@ryu/recipes"),
+    ("com.ryu.research", "@ryu/research"),
+    ("com.ryu.simulator", "@ryu/simulator"),
+    ("com.ryu.skill-editor", "@ryu/skill-editor"),
+    ("com.ryu.skills", "@ryu/skills"),
+    ("com.ryu.spaces", "@ryu/spaces"),
+    ("com.ryu.teams", "@ryu/teams"),
+    ("com.ryu.timeline", "@ryu/timeline"),
+    ("com.ryu.unstructured", "@ryu/unstructured"),
+    ("com.ryu.voice", "@ryu/voice"),
+    ("com.ryu.warmup", "@ryu/warmup"),
+    ("com.ryu.webhooks", "@ryu/webhooks"),
+    ("com.ryu.whiteboard", "@ryu/whiteboard"),
+    ("com.ryu.workflows", "@ryu/workflows"),
+    ("com.ryuhq.advisor", "@ryu/advisor"),
+    ("com.ryuhq.auto-expand", "@ryu/auto-expand"),
+    ("com.ryuhq.hook-observers", "@ryu/hook-observers"),
+    ("com.ryuhq.session-context", "@ryu/session-context"),
+    ("com.ryuhq.tool-firewall", "@ryu/tool-firewall"),
+    ("dictation", "@ryu/dictation"),
+    ("double-check", "@ryu/double-check"),
+    ("durable", "@ryu/durable"),
+    ("engines", "@ryu/engines"),
+    ("exa", "@ryu/exa"),
+    ("firecrawl", "@ryu/firecrawl"),
+    ("firewall", "@ryu/firewall"),
+    ("ghost", "@ryu/ghost"),
+    ("goal", "@ryu/goal"),
+    ("headroom", "@ryu/headroom"),
+    ("honcho", "@ryu/honcho"),
+    ("mem0", "@ryu/mem0"),
+    ("predict", "@ryu/predict"),
+    ("proof", "@ryu/proof"),
+    ("routing", "@ryu/routing"),
+    ("rtk", "@ryu/rtk"),
+    ("sample-widget", "@ryu/sample-widget"),
+    ("sandbox", "@ryu/sandbox"),
+    ("scrapling", "@ryu/scrapling"),
+    ("security-guidance", "@ryu/security-guidance"),
+    ("serper", "@ryu/serper"),
+    ("shadow", "@ryu/shadow"),
+    ("spider", "@ryu/spider"),
+    ("spidercloud", "@ryu/spidercloud"),
+    ("tavily", "@ryu/tavily"),
+];
 
 /// An installable Ryu App manifest (`manifest.json`).
 ///
@@ -699,8 +866,7 @@ impl PluginManifest {
                 let Some(adapter) = binding.adapter.as_mut() else {
                     continue;
                 };
-                let label =
-                    format!("plugin '{plugin}' capability '{capability}' adapter '{verb}'");
+                let label = format!("plugin '{plugin}' capability '{capability}' adapter '{verb}'");
                 hydrate_one(
                     &label,
                     &mut adapter.code,
@@ -784,6 +950,9 @@ impl PluginManifest {
         if let Some(contributes) = &self.contributes {
             contributes
                 .validate_settings_contributions()
+                .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+            contributes
+                .validate_hook_events(&self.id)
                 .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         }
         if let Some(permissions) = &self.permissions {
@@ -1010,13 +1179,58 @@ pub struct Contributes {
     #[serde(default)]
     pub policies: Vec<ContributionId>,
 
-    /// Chat turn hooks the plugin contributes — server-side logic that runs at a
-    /// turn boundary (e.g. `post_assistant_turn`) and returns a directive. These
-    /// are **self-contained** (they carry their own inline `code`), so they are
-    /// NOT cross-validated against `runnables` like the id-reference surfaces
-    /// above; the Core `plugin_host` runtime executes them in the sandbox.
+    /// Hooks the plugin contributes — server-side logic that runs at a hook
+    /// boundary and returns a directive. These are **self-contained** (they carry
+    /// their own inline `code`), so they are NOT cross-validated against
+    /// `runnables` like the id-reference surfaces above; the Core `plugin_host`
+    /// runtime executes them in the sandbox.
+    ///
+    /// The field name is historical. It originally held only *chat* turn
+    /// boundaries (`post_assistant_turn`, `pre_user_turn`); a hook's `on` is now
+    /// any hook phase, including an **app event** another plugin declared in its
+    /// [`Contributes::hook_events`] (`@example/meetings#meeting.ended`). It is
+    /// deliberately NOT renamed: `turn_hooks` is load-bearing in every packaged
+    /// manifest, the published JSON Schema, the SDK's TS mirror and the loader's
+    /// invariant tests, and the rename would buy nothing but churn.
     #[serde(default)]
     pub turn_hooks: Vec<TurnHookContribution>,
+
+    /// **App events this plugin emits** — the *provider* half of the hook system,
+    /// and the mirror image of [`Contributes::turn_hooks`] (the *consumer* half).
+    ///
+    /// Core's own hook phases (`post_assistant_turn`, `pre_tool_use`, `context`, …)
+    /// are a closed set built into `plugin_host`, so before this surface existed a
+    /// plugin could only react to things happening *in a chat turn*. An app that
+    /// owns a real-world lifecycle — a meeting ending, a workflow run failing, an
+    /// alert firing — had no way to let anything else react to it. That forced the
+    /// classic anti-pattern: every consumer polls the producer's HTTP routes, and
+    /// every new integration is bespoke wiring between two apps that must both be
+    /// changed.
+    ///
+    /// Declaring an event here makes it a first-class hook phase. Any other plugin
+    /// consumes it by naming it in a `turn_hooks[].on`, and any workflow consumes it
+    /// with an `event` trigger — neither the producer nor Core learns anything about
+    /// the consumer. Apps therefore both **provide** and **consume** over one
+    /// mechanism.
+    ///
+    /// # Ids are namespaced, and that is what makes collisions impossible
+    ///
+    /// Every id MUST be `<owning plugin id>#<event name>` — the owning half is
+    /// checked against the manifest's own `id` at load, and the name half is
+    /// `[a-z0-9][a-z0-9._-]*`. Because a Core phase name never contains `/`, an app
+    /// literally cannot declare an event that shadows one, no reserved-word list
+    /// required. It is also why the emit path can authorize purely from the
+    /// manifest: the caller's authenticated plugin id must be the id in the event
+    /// name, so an app can only ever emit its **own** events.
+    ///
+    /// # Core-interpreted, so a typed struct
+    ///
+    /// Core reads this table to authorize emits and to serve the event catalog, so
+    /// per this type's own doc comment it gets a typed struct rather than opaque
+    /// JSON. It names event strings rather than runnable ids, so it is
+    /// **self-contained** and stays out of [`Contributes::referenced_ids`].
+    #[serde(default)]
+    pub hook_events: Vec<HookEventContribution>,
 
     /// Declarative **native** UI widgets the plugin contributes to the desktop
     /// composer. Core stores these verbatim and serves them via
@@ -1141,8 +1355,8 @@ pub struct Contributes {
     /// App-registered **workspace dock panels** — a tab in the desktop's bottom or
     /// right dock (Terminal / Code Review / Browser / Simulator live there today).
     /// This is the seam that lets an app OWN its dock tab instead of the shell
-    /// welding the app into a closed `TabKind` union: `com.ryu.browser` and
-    /// `com.ryu.simulator` are apps, and their tabs are contributions, not enum
+    /// welding the app into a closed `TabKind` union: `@ryu/browser` and
+    /// `@ryu/simulator` are apps, and their tabs are contributions, not enum
     /// variants. Self-contained + opaque `spec` (see [`DockPanelContribution`]), so a
     /// new panel capability needs no Core change; served + tagged with the owning
     /// `plugin` id at `GET /api/plugins/contributions`.
@@ -1317,7 +1531,7 @@ where
 ///   `@ryu/ui` components, so a dock panel gets the Raycast tier for free.
 /// - `"native"` — the shell's OWN component, registered under `<plugin>/<id>`. This is
 ///   the migration seam for first-party apps whose panel is hand-written React driving
-///   their sidecar through the ext-proxy (`com.ryu.browser`, `com.ryu.simulator`): the
+///   their sidecar through the ext-proxy (`@ryu/browser`, `@ryu/simulator`): the
 ///   *component* stays in the shell, but its existence, label, icon and placement stop
 ///   being a hardcoded `TabKind` variant and become the app's own declaration, so
 ///   disabling the app removes the tab. An unknown `<plugin>/<id>` simply renders
@@ -1784,6 +1998,125 @@ pub struct HookMatch {
     /// spawning the sandbox on every unrelated tool call.
     #[serde(default)]
     pub tools: Vec<String>,
+}
+
+/// One **app event** a plugin declares it emits (a [`Contributes::hook_events`]
+/// row). This is a *declaration*, not code: the event is raised at runtime by the
+/// plugin's own sidecar calling the `events.emit` kernel capability, and Core
+/// checks the emit against this table.
+///
+/// The payload the emitter sends is delivered to every consumer as `ctx.event`, so
+/// [`Self::payload_example`] is the contract a consumer author reads. Keep it
+/// honest — it is the only description of the payload anyone gets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HookEventContribution {
+    /// The fully-qualified event id: `<owning plugin id>#<event name>`, e.g.
+    /// `@example/meetings#meeting.ended`. Validated at load against the owning
+    /// manifest's `id`; see [`Contributes::hook_events`] for why the namespace is
+    /// mandatory rather than conventional.
+    ///
+    /// Name the event after **what happened**, in the past tense, never after who
+    /// should react to it: a consumer that renames the producer's event to suit
+    /// itself is exactly the coupling this surface removes. The house patterns are
+    /// `x.started` / `x.ended` / `x.failed` for a lifecycle, `x.ready` for a
+    /// produced artifact, and `x.created` / `x.updated` / `x.deleted` for state.
+    pub id: String,
+    /// Human-readable title for the event picker (workflow trigger UI, docs).
+    pub title: String,
+    /// What the event means and, critically, *when* it fires — including whether it
+    /// can fire more than once for the same subject.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// An example of the payload delivered as `ctx.event`. Documentation, not a
+    /// schema: Core forwards whatever the emitter sends verbatim and validates
+    /// nothing beyond the size cap, so this exists for the human writing a consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_example: Option<serde_json::Value>,
+}
+
+/// The separator between the owning plugin id and the event name in a
+/// [`HookEventContribution::id`].
+///
+/// `#` and not `/`, because a **scoped plugin id contains a slash**
+/// (`@ryu/meetings`) — a `/` separator would make `@ryu/meetings/meeting.ended`
+/// ambiguous between "scope `@ryu`, plugin `meetings`" and any other split. `#` also
+/// cannot appear in an id at all (see [`validate_plugin_id`]), and no Core hook phase
+/// name contains it (they are bare `[a-z_]+` words), so the two namespaces still
+/// cannot collide — which is the property this separator exists to guarantee.
+///
+/// Safe in every context an event id actually travels through: manifest JSON, the
+/// workflow `event` trigger field, and the picker. Event ids never appear in a URL
+/// path or query, where `#` would truncate.
+pub const HOOK_EVENT_SEPARATOR: char = '#';
+
+/// Split a fully-qualified app-event id into `(owning plugin id, event name)`, or
+/// `None` when it is not app-event shaped (i.e. it is a Core phase name).
+///
+/// The owner half may itself contain a `/` (a scoped id like `@ryu/meetings`); only
+/// the [`HOOK_EVENT_SEPARATOR`] delimits owner from event name.
+///
+/// The one place the namespace rule is implemented. Load-time validation, the emit
+/// authorization check and the consumer catalog all route through it, so they cannot
+/// drift into three subtly different parsers.
+#[must_use]
+pub fn split_hook_event_id(id: &str) -> Option<(&str, &str)> {
+    let (owner, name) = id.split_once(HOOK_EVENT_SEPARATOR)?;
+    if owner.is_empty() || name.is_empty() || name.contains(HOOK_EVENT_SEPARATOR) {
+        return None;
+    }
+    Some((owner, name))
+}
+
+/// Whether `on` names an **app event** rather than one of Core's built-in hook
+/// phases. Purely structural: app events are namespaced, Core phases are bare words.
+#[must_use]
+pub fn is_app_event(on: &str) -> bool {
+    split_hook_event_id(on).is_some()
+}
+
+/// Validate one [`HookEventContribution`] against the manifest that declares it.
+/// Returns a diagnostic string on rejection.
+///
+/// Fail-closed at load rather than at emit: a malformed id would otherwise become an
+/// event that can be declared and consumed but never successfully emitted — a
+/// silently dead subscription, which is the worst failure mode this surface has.
+///
+/// # Errors
+/// Returns `Err` when the id is not `<plugin_id>/<name>` shaped, is namespaced to a
+/// different plugin, or the name half is not `[a-z0-9][a-z0-9._-]*`.
+pub fn validate_hook_event(event: &HookEventContribution, plugin_id: &str) -> Result<(), String> {
+    let Some((owner, name)) = split_hook_event_id(&event.id) else {
+        return Err(format!(
+            "hook_events[{}]: id must be `<plugin id>#<event name>` (e.g. `{plugin_id}#thing.ended`)",
+            event.id
+        ));
+    };
+    if owner != plugin_id {
+        return Err(format!(
+            "hook_events[{}]: namespaced to `{owner}` but declared by `{plugin_id}` — a plugin may only declare events in its own namespace",
+            event.id
+        ));
+    }
+    let valid_name = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
+    if !valid_name {
+        return Err(format!(
+            "hook_events[{}]: event name `{name}` must match [a-z0-9][a-z0-9._-]*",
+            event.id
+        ));
+    }
+    if event.title.trim().is_empty() {
+        return Err(format!(
+            "hook_events[{}]: title must not be empty",
+            event.id
+        ));
+    }
+    Ok(())
 }
 
 /// Which settings dialog a [`SettingsTabContribution`] belongs in.
@@ -2475,6 +2808,32 @@ impl Contributes {
         }
         Ok(())
     }
+
+    /// Hold `hook_events` to the namespace rule, and reject duplicate ids.
+    ///
+    /// Takes the owning `plugin_id` because a [`Contributes`] does not know which
+    /// manifest holds it, and the whole point of the check is that an event's
+    /// namespace half must *be* that id (see [`Contributes::hook_events`]).
+    ///
+    /// Deliberately does NOT validate `turn_hooks[].on` against any known event.
+    /// A consumer naming an event no installed plugin declares is normal and must
+    /// keep working: it is how you install a consumer before its provider, and how a
+    /// consumer survives its provider being temporarily disabled. An unmatched `on`
+    /// simply never fires — the same posture `tool_filters` takes toward naming
+    /// another plugin's tools.
+    ///
+    /// # Errors
+    /// Returns `Err` on a malformed or foreign-namespaced event id, or a duplicate.
+    pub fn validate_hook_events(&self, plugin_id: &str) -> Result<(), String> {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for event in &self.hook_events {
+            validate_hook_event(event, plugin_id)?;
+            if !seen.insert(event.id.as_str()) {
+                return Err(format!("duplicate hook event id '{}'", event.id));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A single contribution: a reference (by `id`) to a runnable declared in the
@@ -2612,7 +2971,11 @@ pub struct ProvidesEntry {
     /// Preferred pick among the providers of a [`Self::selectable`] capability when
     /// the user has set no override. At most one provider per capability may declare
     /// it. Meaningless (and ignored) on a non-selectable capability.
-    #[serde(default, rename = "default", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        rename = "default",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub default_provider: bool,
 
     /// WHAT this provider acts on, when the capability controls a machine or an
@@ -3222,7 +3585,7 @@ mod tests {
     fn validate_plugin_id_accepts_bare_and_dotted_rejects_traversal() {
         assert!(validate_plugin_id("ghost").is_ok());
         assert!(validate_plugin_id("data-grid-explorer").is_ok());
-        assert!(validate_plugin_id("com.example.research-assistant").is_ok());
+        assert!(validate_plugin_id("@example/research-assistant").is_ok());
         for bad in [
             "../../etc/x",
             "..",
@@ -3234,6 +3597,197 @@ mod tests {
         ] {
             assert!(validate_plugin_id(bad).is_err(), "'{bad}' must be rejected");
         }
+    }
+
+    // ── scoped plugin ids ────────────────────────────────────────────────────
+
+    /// The scoped form is matched as an exact SHAPE. The traversal cases matter most:
+    /// a wider character allowlist covering `@` and `/` would make `@a/../../etc`
+    /// legal, and the id reaches `PathBuf::join`.
+    #[test]
+    fn scoped_plugin_ids_are_shape_matched_and_reject_traversal() {
+        for ok in [
+            "@ryu/meetings",
+            "@ryu/skill-editor",
+            "@example/research-assistant",
+        ] {
+            assert!(validate_plugin_id(ok).is_ok(), "'{ok}' must be accepted");
+        }
+        for bad in [
+            "@a/../../etc",   // traversal in the name half
+            "@../x/y",        // traversal in the scope half
+            "@ryu/a/b",       // more than one slash
+            "@ryu/",          // empty name
+            "@/meetings",     // empty scope
+            "@ryu/.hidden",   // leading dot in name
+            "@ryu/-lead",     // leading dash in name
+            "@ryu/C:drive",   // Windows drive-qualified component
+            "@ryu/a\\b",      // backslash separator
+            "ryu/meetings",   // slash without the @ marker
+            "@@ryu/meetings", // '@' inside a half
+        ] {
+            assert!(validate_plugin_id(bad).is_err(), "'{bad}' must be rejected");
+        }
+    }
+
+    /// Legacy flat ids stay legal forever — the alias map means a third-party
+    /// manifest that was never updated must keep loading.
+    #[test]
+    fn legacy_flat_ids_remain_valid_alongside_scoped_ones() {
+        for ok in ["ghost", "data-grid-explorer", "com.acme.research-assistant"] {
+            assert!(
+                validate_plugin_id(ok).is_ok(),
+                "'{ok}' must still be accepted"
+            );
+        }
+    }
+
+    /// A scoped id must never reach a path with its `/` intact: the manifest scanner
+    /// is a single-level `read_dir`, so a nested dir is INVISIBLE rather than broken.
+    #[test]
+    fn scoped_ids_flatten_to_a_single_disk_component() {
+        assert_eq!(plugin_dir_name("@ryu/meetings"), "@ryu+meetings");
+        assert!(!plugin_dir_name("@ryu/meetings").contains('/'));
+        // A legacy id is its own disk name, so nothing on disk moves for them.
+        assert_eq!(plugin_dir_name("ghost"), "ghost");
+        assert_eq!(
+            plugin_dir_name("com.acme.research-assistant"),
+            "com.acme.research-assistant"
+        );
+        // `+` is outside the id alphabet, so the flattened form can never collide
+        // with a real id.
+        assert!(validate_plugin_id("@ryu+meetings").is_err());
+    }
+
+    /// An unknown id passes through unchanged — canonicalization must never invent
+    /// a mapping.
+    #[test]
+    fn canonicalizing_an_unaliased_id_is_identity() {
+        assert_eq!(canonical_plugin_id("@ryu/meetings"), "@ryu/meetings");
+        assert_eq!(canonical_plugin_id("totally-unknown"), "totally-unknown");
+        for (old, new) in LEGACY_PLUGIN_ID_ALIASES {
+            assert_eq!(canonical_plugin_id(old), *new, "alias '{old}' must resolve");
+            assert_eq!(
+                canonical_plugin_id(new),
+                *new,
+                "canonicalization must be idempotent for '{new}'"
+            );
+        }
+    }
+
+    // ── hook events (the provider half of the hook system) ───────────────────
+
+    fn event(id: &str) -> HookEventContribution {
+        HookEventContribution {
+            id: id.to_owned(),
+            title: "Something happened".to_owned(),
+            description: None,
+            payload_example: None,
+        }
+    }
+
+    /// The namespace rule is what makes an app event unable to shadow a Core hook
+    /// phase, so it is checked at load rather than trusted at emit.
+    #[test]
+    fn hook_event_id_must_be_namespaced_to_its_own_plugin() {
+        assert!(
+            validate_hook_event(&event("com.acme.meet#meeting.ended"), "com.acme.meet").is_ok()
+        );
+
+        // Bare (un-namespaced) — this is the shape that could collide with a Core
+        // phase, and the exact thing the separator rule exists to reject.
+        assert!(validate_hook_event(&event("meeting.ended"), "com.acme.meet").is_err());
+        assert!(validate_hook_event(&event("post_assistant_turn"), "com.acme.meet").is_err());
+
+        // Namespaced to somebody ELSE — declaring this would let an app publish a
+        // contract in a namespace it cannot emit into.
+        assert!(validate_hook_event(&event("com.other.app#thing.done"), "com.acme.meet").is_err());
+
+        // Malformed halves.
+        assert!(validate_hook_event(&event("#meeting.ended"), "com.acme.meet").is_err());
+        assert!(validate_hook_event(&event("com.acme.meet#"), "com.acme.meet").is_err());
+        assert!(validate_hook_event(&event("com.acme.meet#a#b"), "com.acme.meet").is_err());
+        assert!(
+            validate_hook_event(&event("com.acme.meet#Meeting.Ended"), "com.acme.meet").is_err()
+        );
+        assert!(validate_hook_event(&event("com.acme.meet#.leading"), "com.acme.meet").is_err());
+    }
+
+    /// A titleless event is invisible in the picker, so it is rejected rather than
+    /// shipped as a blank row.
+    #[test]
+    fn hook_event_requires_a_title() {
+        let mut e = event("com.acme.meet#meeting.ended");
+        e.title = "  ".to_owned();
+        assert!(validate_hook_event(&e, "com.acme.meet").is_err());
+    }
+
+    /// No Core hook phase may be app-event shaped, and no app event may be
+    /// Core-phase shaped. This is the whole collision argument, asserted directly
+    /// rather than left as a comment.
+    #[test]
+    fn core_phase_names_and_app_events_occupy_disjoint_namespaces() {
+        for phase in [
+            "post_assistant_turn",
+            "pre_user_turn",
+            "session_start",
+            "stop",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_result",
+            "subagent_stop",
+            "session_end",
+            "notification",
+            "context",
+            "message_end",
+            "session_before_compact",
+            "session_compact",
+            "model_select",
+            "session_tree",
+        ] {
+            assert!(
+                !is_app_event(phase),
+                "'{phase}' must not parse as an app event"
+            );
+        }
+        assert!(is_app_event("com.acme.meet#meeting.ended"));
+        assert_eq!(
+            split_hook_event_id("com.acme.meet#meeting.ended"),
+            Some(("com.acme.meet", "meeting.ended"))
+        );
+    }
+
+    /// Two rows with the same id mean the second silently shadows the first in the
+    /// catalog, so the duplicate is a load error.
+    #[test]
+    fn duplicate_hook_event_ids_are_rejected() {
+        let contributes = Contributes {
+            hook_events: vec![
+                event("com.acme.meet#meeting.ended"),
+                event("com.acme.meet#meeting.ended"),
+            ],
+            ..Default::default()
+        };
+        assert!(contributes.validate_hook_events("com.acme.meet").is_err());
+    }
+
+    /// A consumer may subscribe to an event nothing declares — that is how a
+    /// consumer gets installed before its provider, and it must not be a load error.
+    #[test]
+    fn consuming_an_undeclared_event_is_not_a_load_error() {
+        let contributes = Contributes {
+            turn_hooks: vec![TurnHookContribution {
+                id: "on-meeting-end".to_owned(),
+                on: "com.not.installed#meeting.ended".to_owned(),
+                code: "return {kind:'none'}".to_owned(),
+                code_file: None,
+                run_when: None,
+            }],
+            ..Default::default()
+        };
+        assert!(contributes
+            .validate_hook_events("com.acme.consumer")
+            .is_ok());
     }
 
     // ── code_file hydration ──────────────────────────────────────────────────
@@ -3326,10 +3880,9 @@ mod tests {
                 }]
             }
         }"#;
-        let err = PluginManifest::parse_and_validate_with_code(raw, |_| {
-            Ok("return null;".to_string())
-        })
-        .unwrap_err();
+        let err =
+            PluginManifest::parse_and_validate_with_code(raw, |_| Ok("return null;".to_string()))
+                .unwrap_err();
         assert!(err.contains("exactly one is allowed"), "got: {err}");
     }
 
@@ -3344,10 +3897,9 @@ mod tests {
                 "turn_hooks": [{ "id": "h.one", "on": "post_assistant_turn" }]
             }
         }"#;
-        let err = PluginManifest::parse_and_validate_with_code(raw, |_| {
-            Ok("return null;".to_string())
-        })
-        .unwrap_err();
+        let err =
+            PluginManifest::parse_and_validate_with_code(raw, |_| Ok("return null;".to_string()))
+                .unwrap_err();
         assert!(err.contains("declares neither"), "got: {err}");
     }
 
@@ -3362,11 +3914,10 @@ mod tests {
 
     #[test]
     fn an_empty_code_file_is_an_error() {
-        let err =
-            PluginManifest::parse_and_validate_with_code(code_file_manifest(), |_| {
-                Ok("   \n".to_string())
-            })
-            .unwrap_err();
+        let err = PluginManifest::parse_and_validate_with_code(code_file_manifest(), |_| {
+            Ok("   \n".to_string())
+        })
+        .unwrap_err();
         assert!(err.contains("is empty"), "got: {err}");
     }
 
@@ -3379,15 +3930,15 @@ mod tests {
         assert!(validate_code_file_path("adapters/web__search.mjs").is_ok());
         for bad in [
             "",
-            "one.js",                      // no dir segment
-            "hooks/nested/one.js",         // not flat: breaks the mirror's glob
-            "src/one.js",                  // dir not in CODE_FILE_DIRS
+            "one.js",              // no dir segment
+            "hooks/nested/one.js", // not flat: breaks the mirror's glob
+            "src/one.js",          // dir not in CODE_FILE_DIRS
             "hooks/../../../etc/passwd",
             "../hooks/one.js",
             "/etc/passwd",
-            "hooks\\one.js",               // Windows separator
+            "hooks\\one.js", // Windows separator
             "C:/hooks/one.js",
-            "hooks/one.txt",               // not JS
+            "hooks/one.txt", // not JS
             "hooks/.hidden.js",
             "hooks/one.js.js/../x.js",
         ] {
@@ -3401,10 +3952,9 @@ mod tests {
     #[test]
     fn an_oversized_code_file_is_rejected() {
         let big = "x".repeat(MAX_CODE_FILE_BYTES + 1);
-        let err = PluginManifest::parse_and_validate_with_code(code_file_manifest(), |_| {
-            Ok(big.clone())
-        })
-        .unwrap_err();
+        let err =
+            PluginManifest::parse_and_validate_with_code(code_file_manifest(), |_| Ok(big.clone()))
+                .unwrap_err();
         assert!(err.contains("max"), "got: {err}");
     }
 
@@ -3446,7 +3996,7 @@ mod tests {
             "name": "Meetings",
             "version": "1.0.0",
             "runnables": [],
-            "requires": { "apps": [{ "id": "com.ryu.spaces", "min_version": "1.0.0" }] },
+            "requires": { "apps": [{ "id": "@ryu/spaces", "min_version": "1.0.0" }] },
             "targets": ["core", "desktop"]
         }"#;
         let m = PluginManifest::parse_and_validate(raw).expect("parse");
@@ -3578,7 +4128,7 @@ mod tests {
         // `%2e`, backslash separators, encoded separators, and a non-absolute path.
         for bad in [
             "/../../../v1/chat/completions",
-            "/../api/plugins/com.ryu.mail/uninstall",
+            "/../api/plugins/@ryu/mail/uninstall",
             "/foo/../../bar",
             "/%2e%2e/%2e%2e/v1",
             "/foo/%2E%2E/bar",
@@ -3975,7 +4525,8 @@ mod tests {
         assert_eq!(go.transport_kind(), LspTransport::Stdio);
         assert!(go.restart_on_crash, "restartOnCrash defaults to true");
         assert!(go.diagnostics, "diagnostics defaults to true");
-        go.validate("go").expect("the documented example is startable");
+        go.validate("go")
+            .expect("the documented example is startable");
 
         // Round-trip: what we serialize back is what Claude Code reads, so the same
         // bytes survive a trip through Ryu and land in the other host unchanged.
@@ -4106,7 +4657,9 @@ mod tests {
         };
         assert!(blank.validate("blank").is_err());
         // The valid sibling is untouched by either.
-        servers["fine"].validate("fine").expect("valid server passes");
+        servers["fine"]
+            .validate("fine")
+            .expect("valid server passes");
     }
 
     #[test]
@@ -4131,7 +4684,10 @@ mod tests {
             .expect("an unrecognised transport must not fail the manifest");
         let servers = &m.contributes.as_ref().unwrap().lsp_servers;
         assert_eq!(servers["future"].transport, "quic", "value kept verbatim");
-        assert_eq!(servers["future"].transport_kind(), LspTransport::Unsupported);
+        assert_eq!(
+            servers["future"].transport_kind(),
+            LspTransport::Unsupported
+        );
         // Socket is valid config Core cannot drive yet, so it passes validate() and is
         // gated by the separate transport check instead.
         assert_eq!(servers["sock"].transport_kind(), LspTransport::Socket);
@@ -4406,7 +4962,10 @@ mod tests {
         // A select with no options degrades into a free-text box.
         reject(r#"[{"type":"select","pref_key":"k"}]"#, "no options");
         // A default of the wrong type is written straight into the preference store.
-        reject(r#"[{"type":"toggle","pref_key":"k","default":"yes"}]"#, "toggle");
+        reject(
+            r#"[{"type":"toggle","pref_key":"k","default":"yes"}]"#,
+            "toggle",
+        );
         // Bounds on a type that cannot enforce them read as a guarantee and are not one.
         reject(r#"[{"type":"toggle","pref_key":"k","min":1}]"#, "min/max");
         // A pref_key that would escape the `/api/preferences/<key>` route.

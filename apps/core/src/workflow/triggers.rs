@@ -22,6 +22,62 @@
 use super::WorkflowTrigger;
 use crate::scheduler::store::{self as sched_store, JobTarget, Schedule, ScheduledJob};
 
+/// Start every workflow subscribed to the app event `event`, passing `payload` as
+/// the run input. Returns how many runs were started.
+///
+/// Deliberately a **linear scan over saved workflows**, not a subscription index,
+/// mirroring [`crate::webhook_ingress_host::CoreWebhookIngressHost::has_webhook_trigger`].
+/// An index would be a second source of truth that has to be reconciled on every
+/// save, delete and import — the exact drift the webhook path avoided — to optimize
+/// a scan over a list that is small by construction (a node's workflows are
+/// hand-authored).
+///
+/// Runs are **detached**. A workflow can take minutes; the emitting sidecar is
+/// waiting on an HTTP response, and coupling "my meeting ended" to "the summarizer
+/// finished" would make emitting an event a latency hazard and turn one slow
+/// workflow into a failed emit. The count returned is therefore runs *started*, not
+/// runs completed.
+pub async fn fire_event_workflows(event: &str, payload: &serde_json::Value) -> usize {
+    let subscribed: Vec<(String, String)> = crate::workflow::store::list_workflows()
+        .into_iter()
+        .filter(|wf| {
+            wf.triggers
+                .iter()
+                .any(|t| matches!(t, WorkflowTrigger::Event { event: e } if e == event))
+        })
+        .map(|wf| (wf.id, wf.name))
+        .collect();
+    if subscribed.is_empty() {
+        return 0;
+    }
+
+    // Serialize once: every subscriber receives the identical payload, and the
+    // runner takes it as a string.
+    let payload_json = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_owned());
+    let started = subscribed.len();
+    for (workflow_id, name) in subscribed {
+        let payload_json = payload_json.clone();
+        let event = event.to_owned();
+        tokio::spawn(async move {
+            match crate::composio_host::run_workflow_for_trigger(&workflow_id, &payload_json).await
+            {
+                Ok(run_id) => tracing::info!(
+                    %event,
+                    workflow = %workflow_id,
+                    %run_id,
+                    "app event started workflow '{name}'"
+                ),
+                Err(e) => tracing::warn!(
+                    %event,
+                    workflow = %workflow_id,
+                    "app event failed to start workflow '{name}': {e:#}"
+                ),
+            }
+        });
+    }
+    started
+}
+
 /// Deterministic scheduler-job id for the `idx`-th schedule trigger of a
 /// workflow. Stable across re-saves so reconciliation is idempotent.
 pub fn schedule_job_id(workflow_id: &str, idx: usize) -> String {

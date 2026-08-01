@@ -37,7 +37,7 @@
       }
     }
   ],
-  "permission_grants": [],
+  "permission_grants": ["widget:render"],
   "activation_events": ["*"],
   "contributes": {
     "turn_hooks": [],

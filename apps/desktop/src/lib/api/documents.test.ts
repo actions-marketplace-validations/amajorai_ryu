@@ -182,14 +182,14 @@ const CAPABILITIES_PAYLOAD = {
 			capability: "document.parse",
 			providers: [
 				{
-					id: "com.ryu.markitdown",
+					id: "@ryu/markitdown",
 					name: "MarkItDown",
 					version: "1.2.0",
 					is_default: true,
 				},
 			],
-			available: [{ id: "com.ryu.docling", name: "Docling" }],
-			bound: "com.ryu.markitdown",
+			available: [{ id: "@ryu/docling", name: "Docling" }],
+			bound: "@ryu/markitdown",
 			overridden: false,
 			selectable: true,
 		},
@@ -203,14 +203,14 @@ describe("fetchParseBackends", () => {
 			() => jsonResponse(CAPABILITIES_PAYLOAD),
 			() => fetchParseBackends(TARGET)
 		);
-		expect(result.bound).toBe("com.ryu.markitdown");
-		expect(result.providers.map((p) => p.id)).toEqual(["com.ryu.markitdown"]);
+		expect(result.bound).toBe("@ryu/markitdown");
+		expect(result.providers.map((p) => p.id)).toEqual(["@ryu/markitdown"]);
 		expect(result.providers[0]?.isDefault).toBe(true);
 		expect(result.providers[0]?.version).toBe("1.2.0");
 		// Installed-but-disabled backends are carried, never hidden: every heavy
 		// parser ships opt-in, so dropping them leaves a node looking as if nothing
 		// could ever read a PDF.
-		expect(result.available.map((p) => p.id)).toEqual(["com.ryu.docling"]);
+		expect(result.available.map((p) => p.id)).toEqual(["@ryu/docling"]);
 		expect(result.selectable).toBe(true);
 		expect(result.overridden).toBe(false);
 	});
@@ -274,19 +274,19 @@ describe("setParseBackend", () => {
 				"web.search": "com.ryu.tavily",
 				memory: "com.ryu.mem0",
 			}),
-			() => setParseBackend(TARGET, "com.ryu.docling")
+			() => setParseBackend(TARGET, "@ryu/docling")
 		);
 		expect(putBody(calls)).toEqual({
 			"web.search": "com.ryu.tavily",
 			memory: "com.ryu.mem0",
-			"document.parse": "com.ryu.docling",
+			"document.parse": "@ryu/docling",
 		});
 	});
 
 	it("resetting to automatic removes ONLY the document.parse key", async () => {
 		const { calls } = await withFetch(
 			bindingRoutes({
-				"document.parse": "com.ryu.docling",
+				"document.parse": "@ryu/docling",
 				"web.search": "com.ryu.tavily",
 			}),
 			() => setParseBackend(TARGET, null)
@@ -311,11 +311,11 @@ describe("describeApiRefusal", () => {
 		const described = describeApiRefusal(
 			new CapabilityBindingConflictError(
 				"capability document.parse is ambiguous",
-				"com.ryu.spaces",
+				"@ryu/spaces",
 				"ambiguous"
 			)
 		);
-		expect(described).toContain("com.ryu.spaces");
+		expect(described).toContain("@ryu/spaces");
 		expect(described).toContain("ambiguous");
 	});
 

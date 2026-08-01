@@ -361,7 +361,10 @@ mod tests {
         let job = ReplicateProvider::video_from_prediction(&pred);
         assert_eq!(job.provider_ref, "pred_1");
         assert_eq!(job.status, JobStatus::Succeeded);
-        assert_eq!(job.output.unwrap()["data"][0]["url"], json!("https://x/v.mp4"));
+        assert_eq!(
+            job.output.unwrap()["data"][0]["url"],
+            json!("https://x/v.mp4")
+        );
         assert!(job.error.is_none());
     }
 
@@ -406,7 +409,13 @@ mod tests {
     use crate::test_support::{MockResponse, MockServer};
 
     fn provider(base_url: String) -> ReplicateProvider {
-        ReplicateProvider::new(reqwest::Client::new(), "r8-secret".into(), base_url, 250, 60)
+        ReplicateProvider::new(
+            reqwest::Client::new(),
+            "r8-secret".into(),
+            base_url,
+            250,
+            60,
+        )
     }
 
     #[tokio::test]
@@ -463,13 +472,9 @@ mod tests {
 
     #[tokio::test]
     async fn submit_video_errors_when_no_prediction_id() {
-        let server =
-            MockServer::always(MockResponse::json(201, r#"{"status":"starting"}"#)).await;
+        let server = MockServer::always(MockResponse::json(201, r#"{"status":"starting"}"#)).await;
         let p = provider(server.base_url().to_string());
-        let err = p
-            .submit_video("owner/name", &json!({}))
-            .await
-            .unwrap_err();
+        let err = p.submit_video("owner/name", &json!({})).await.unwrap_err();
         assert!(err.to_string().contains("no prediction id"), "{err}");
     }
 
@@ -521,16 +526,10 @@ mod tests {
 
     #[tokio::test]
     async fn create_prediction_maps_error_detail() {
-        let server = MockServer::always(MockResponse::json(
-            422,
-            r#"{"detail":"input is invalid"}"#,
-        ))
-        .await;
+        let server =
+            MockServer::always(MockResponse::json(422, r#"{"detail":"input is invalid"}"#)).await;
         let p = provider(server.base_url().to_string());
-        let err = p
-            .submit_video("owner/name", &json!({}))
-            .await
-            .unwrap_err();
+        let err = p.submit_video("owner/name", &json!({})).await.unwrap_err();
         assert!(err.to_string().contains("input is invalid"), "{err}");
         assert!(err.to_string().contains("422"));
     }

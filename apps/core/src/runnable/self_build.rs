@@ -415,7 +415,7 @@ pub fn validate_write_target(id: &str) -> Result<PathBuf> {
     }
 
     let apps_dir = PluginManifestLoader::plugins_dir();
-    let target = apps_dir.join(id);
+    let target = apps_dir.join(crate::plugin_manifest::plugin_dir_name(id));
 
     // If the apps_dir itself doesn't exist yet, we'll create it during write;
     // but the path join is sufficient for confinement checks as long as the id

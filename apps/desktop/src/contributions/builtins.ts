@@ -24,7 +24,7 @@
 //     `/spaces/:id/graph`, `/profile`): the old chain returned `null` (blank) for those
 //     paths, so mounting a real page here would be a regression, not a refactor. Left
 //     for a separate PR. (`/skills/new` + `/skills/:id/edit` ARE now handled below — the
-//     W7 frontend extraction landed the SKILL.md editor as the com.ryu.skill-editor
+//     W7 frontend extraction landed the SKILL.md editor as the @ryu/skill-editor
 //     companion; both previously resolved to blank.)
 //
 // No COMPANION ID is named here. This file used to carry twelve hardcoded aliases of the
@@ -115,7 +115,7 @@ const AGENT_EDIT = /^\/agents\/.+\/edit$/;
 // /skills/:id/edit — the SKILL.md editor for an existing skill (the `/skills/new`
 // fresh-draft entry is an exact route). Single id segment ([^/]+), deeper than the
 // `/skills` store exact, so no collision. The skill id is baked into the sandboxed
-// com.ryu.skill-editor companion as `window.ryu.context.skillId`.
+// @ryu/skill-editor companion as `window.ryu.context.skillId`.
 const SKILL_EDIT = /^\/skills\/[^/]+\/edit$/;
 // The legacy short-path catch-all: ANY single top-level segment the exact map and
 // every pattern above declined (`/calendar`, `/timeline`, `/inbox`, …). Registered
@@ -259,7 +259,7 @@ export function seedBuiltinRoutes(): void {
 	// Marketplace folded into the store: the legacy route opens the store.
 	exact("/marketplace", () => createElement(StorePage));
 	// The NL workflow builder (fresh draft). The visual canvas is the
-	// com.ryu.workflows companion (see the /workflows/:id pattern route below); the
+	// @ryu/workflows companion (see the /workflows/:id pattern route below); the
 	// builder is architecturally shell-only, so it keeps its own shell page.
 	exact("/workflows/build", () =>
 		createElement(WorkflowsPage, { initialWorkflowId: null })

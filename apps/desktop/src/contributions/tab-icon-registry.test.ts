@@ -18,25 +18,25 @@ describe("tab-icon-registry", () => {
 		const dispose = registerTabIcon({
 			id: "test:canvas",
 			pathPrefix: "/spaces",
-			pathIncludes: "/app/com.ryu.canvas",
+			pathIncludes: "/app/@ryu/canvas",
 			icon: "ai-image",
 			priority: 20,
 		});
-		expect(resolveTabIcon("/spaces/s1/app/com.ryu.canvas/d1")).toBe("ai-image");
+		expect(resolveTabIcon("/spaces/s1/app/@ryu/canvas/d1")).toBe("ai-image");
 		expect(resolveTabIcon("/spaces/s1/doc/d1")).toBe("file-01");
 		dispose();
 	});
 
 	test("ruleFromItemTarget strips template segments", () => {
 		const rule = ruleFromItemTarget(
-			"/spaces/{{item.space_id}}/app/com.ryu.canvas/{{item.id}}",
+			"/spaces/{{item.space_id}}/app/@ryu/canvas/{{item.id}}",
 			"ai-image",
 			"test:from-target"
 		);
 		expect(rule).toEqual({
 			id: "test:from-target",
 			pathPrefix: "/spaces",
-			pathIncludes: "/app/com.ryu.canvas",
+			pathIncludes: "/app/@ryu/canvas",
 			icon: "ai-image",
 			priority: 20,
 		});

@@ -16,7 +16,7 @@ export interface TabIconRule {
 	id: string;
 	/**
 	 * Optional substring the path must also contain (e.g. `/doc/`, `/db/`,
-	 * `/app/com.ryu.canvas/`). Lets pages/databases/app-docs share the `/spaces`
+	 * `/app/@ryu/canvas/`). Lets pages/databases/app-docs share the `/spaces`
 	 * prefix while keeping distinct glyphs.
 	 */
 	pathIncludes?: string;
@@ -135,8 +135,8 @@ export function resolveTabIcon(path: string): string | undefined {
 
 /**
  * Derive a tab-icon rule from a sidebar section `itemTarget` template.
- * Templates like `/spaces/{{item.space_id}}/app/com.ryu.canvas/{{item.id}}`
- * become `{ pathPrefix: "/spaces", pathIncludes: "/app/com.ryu.canvas" }`.
+ * Templates like `/spaces/{{item.space_id}}/app/@ryu/canvas/{{item.id}}`
+ * become `{ pathPrefix: "/spaces", pathIncludes: "/app/@ryu/canvas" }`.
  */
 export function ruleFromItemTarget(
 	itemTarget: string,
@@ -160,7 +160,7 @@ export function ruleFromItemTarget(
 	const pathPrefix =
 		staticPrefix.length > 0 ? `/${staticPrefix.join("/")}` : "/";
 	// Remaining static segments (between/after dynamics) become pathIncludes
-	// (e.g. `/app/com.ryu.canvas` for canvas docs under a space).
+	// (e.g. `/app/@ryu/canvas` for canvas docs under a space).
 	const trailingStatic = parts
 		.slice(Math.max(firstDynamic, 0))
 		.filter((p) => !p.includes("{{"));

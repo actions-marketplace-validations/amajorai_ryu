@@ -230,7 +230,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let prefs = host.prefs.lock().unwrap();
-        assert_eq!(prefs.get(HEALING_ENABLED_PREF).map(String::as_str), Some("false"));
+        assert_eq!(
+            prefs.get(HEALING_ENABLED_PREF).map(String::as_str),
+            Some("false")
+        );
         assert_eq!(
             prefs.get(HEALING_AUTO_DECIDE_PREF).map(String::as_str),
             Some("true")
@@ -240,7 +243,9 @@ mod tests {
             Some("5")
         );
         assert_eq!(
-            prefs.get(crate::HEALING_COOLDOWN_SECS_PREF).map(String::as_str),
+            prefs
+                .get(crate::HEALING_COOLDOWN_SECS_PREF)
+                .map(String::as_str),
             Some("0")
         );
         assert_eq!(
@@ -269,9 +274,7 @@ mod tests {
     // `report-failure` ingress and the `status` handler against that engine.
     #[tokio::test]
     async fn report_failure_and_status_handlers_use_global_engine() {
-        let host = Arc::new(
-            MockHost::new(tmp_dir()).with_pref(HEALING_AUTO_DECIDE_PREF, "true"),
-        );
+        let host = Arc::new(MockHost::new(tmp_dir()).with_pref(HEALING_AUTO_DECIDE_PREF, "true"));
         host.set_reply(Ok(
             "{\"diagnosis\":\"d\",\"corrected_prompt\":\"cp\"}".to_string()
         ));

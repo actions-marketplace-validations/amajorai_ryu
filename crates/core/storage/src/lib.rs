@@ -122,6 +122,38 @@ impl PluginStorage {
     }
 
     /// List the keys a plugin has set within a namespace (newest first).
+    /// Move every row owned by `from` to `to` — the plugin-id rename migration.
+    ///
+    /// The KV is keyed `(plugin_id, namespace, key)`, so a plugin whose id changes
+    /// would otherwise silently lose all of its state: a goal plugin's active
+    /// conditions, the learning log, anything a hook stashed. The rows are still
+    /// there, just unreachable under the new id, which reads to a user as data loss
+    /// with no error anywhere.
+    ///
+    /// `INSERT OR IGNORE` + `DELETE` rather than `UPDATE`: if the new id already has
+    /// a row at the same `(namespace, key)` — a re-run, or a fresh install that
+    /// already wrote state — the NEW value wins and the stale legacy row is dropped.
+    /// A bare `UPDATE` would fail the primary-key constraint and abort the whole
+    /// migration on the one plugin that needed it least.
+    ///
+    /// Returns the number of legacy rows removed.
+    ///
+    /// # Errors
+    /// Returns `Err` if the SQLite transaction fails.
+    pub async fn rekey_plugin(&self, from: &str, to: &str) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT OR IGNORE INTO plugin_kv (plugin_id, namespace, key, value, updated_at)
+             SELECT ?2, namespace, key, value, updated_at FROM plugin_kv WHERE plugin_id = ?1",
+            rusqlite::params![from, to],
+        )?;
+        let removed = conn.execute(
+            "DELETE FROM plugin_kv WHERE plugin_id = ?1",
+            rusqlite::params![from],
+        )?;
+        Ok(removed)
+    }
+
     pub async fn keys(&self, plugin_id: &str, namespace: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn

@@ -1,5 +1,5 @@
 {
-  "id": "com.ryuhq.session-context",
+  "id": "@ryu/session-context",
   "name": "Session Context",
   "version": "1.0.0",
   "runnables": [],

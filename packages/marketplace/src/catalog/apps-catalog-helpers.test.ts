@@ -88,7 +88,7 @@ describe("isCompanionApp", () => {
 
 describe("prettyPluginId", () => {
 	test("takes the last dotted segment and capitalizes it", () => {
-		expect(prettyPluginId("com.ryu.spaces")).toBe("Spaces");
+		expect(prettyPluginId("@ryu/spaces")).toBe("Spaces");
 		expect(prettyPluginId("com.example.myTool")).toBe("MyTool");
 	});
 

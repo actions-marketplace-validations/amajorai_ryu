@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.calendar",
+  "id": "@ryu/calendar",
   "name": "Calendar",
   "version": "1.0.0",
   "description": "The scheduled-runs calendar: every agent and workflow scheduled job projected onto Month, Week, Day, and Agenda views — past runs from history, upcoming runs from cron/interval — with a New automation dialog that schedules an agent.",

@@ -3,8 +3,8 @@
 //!
 //! The built-in canvas persisted each board as `~/.ryu/canvases/<id>.json`
 //! (`server/canvas.rs`, now removed). The feature was ported to a full-page
-//! Companion (`com.ryu.canvas`) which OWNS its boards as Space documents of kind
-//! `app:com.ryu.canvas`. This importer runs at startup: for every legacy file it
+//! Companion (`@ryu/canvas`) which OWNS its boards as Space documents of kind
+//! `app:@ryu/canvas`. This importer runs at startup: for every legacy file it
 //! creates one app document in the "Canvas" system space, copies the board into the
 //! doc `source` (the exact `{ name, nodes, edges, viewport }` shape the app reads
 //! via `window.ryu.spaces.getDoc`), then renames the file to `<id>.json.migrated`
@@ -22,7 +22,7 @@ fn canvases_dir() -> PathBuf {
     ryu_dir().join("canvases")
 }
 
-/// Import every legacy canvas file into `space_id` as a `com.ryu.canvas` document.
+/// Import every legacy canvas file into `space_id` as a `@ryu/canvas` document.
 /// Best-effort: a malformed file is skipped (and left in place) rather than
 /// aborting the whole pass. Returns the number of boards migrated.
 pub async fn migrate_legacy_canvases(store: &SpaceStore, space_id: &str) -> usize {

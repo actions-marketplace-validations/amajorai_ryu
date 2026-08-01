@@ -170,7 +170,7 @@ describe("round-trip: SDK build → JSON → Core schema parse", () => {
 	it("emitted manifest.json satisfies PluginManifestSchema (Core compat proof)", () => {
 		// 1. Build a manifest using the SDK.
 		const manifest = new PluginBuilder()
-			.id("com.example.research-assistant")
+			.id("@example/research-assistant")
 			.name("Research Assistant")
 			.version("1.0.0")
 			.runnable(agent().id("agent-researcher").name("Researcher").build())
@@ -204,7 +204,7 @@ describe("round-trip: SDK build → JSON → Core schema parse", () => {
 		}
 
 		const loaded = result.data;
-		expect(loaded.id).toBe("com.example.research-assistant");
+		expect(loaded.id).toBe("@example/research-assistant");
 		expect(loaded.runnables).toHaveLength(4);
 		expect(loaded.permission_grants).toEqual([
 			"mcp:web_search",
@@ -217,7 +217,7 @@ describe("round-trip: SDK build → JSON → Core schema parse", () => {
 		// The Core Rust test (`sample_fixture_deserializes_into_app_manifest`)
 		// asserts the same values — this verifies TS schema parity.
 		const fixture = {
-			id: "com.example.research-assistant",
+			id: "@example/research-assistant",
 			name: "Research Assistant",
 			version: "1.0.0",
 			runnables: [
@@ -240,7 +240,7 @@ describe("round-trip: SDK build → JSON → Core schema parse", () => {
 			return;
 		}
 
-		expect(result.data.id).toBe("com.example.research-assistant");
+		expect(result.data.id).toBe("@example/research-assistant");
 		expect(result.data.runnables).toHaveLength(4);
 		const kinds = result.data.runnables.map((r) => r.kind);
 		expect(kinds).toContain("agent");
@@ -424,7 +424,13 @@ describe("AppBuilder", () => {
 		expect(manifest.runnables).toHaveLength(2);
 		expect(manifest.contributes?.widgets).toHaveLength(1);
 		expect(manifest.contributes?.widgets[0]?.tool_id).toBe("checklist__render");
-		expect(manifest.permission_grants).toEqual(["mcp:file_read"]);
+		// The author's own grant, plus the `widget:render` the builder adds because
+		// this app synthesises a widget — without it Core silently degrades the
+		// widget to plain text.
+		expect(manifest.permission_grants).toEqual([
+			"mcp:file_read",
+			"widget:render",
+		]);
 	});
 
 	it("throws on missing id", () => {
@@ -475,15 +481,15 @@ describe("requires / targets", () => {
 			.id("com.example.meetings")
 			.name("Meetings")
 			.version("1.0.0")
-			.dependsOn("com.ryu.spaces", "1.2.0")
-			.dependsOn("com.ryu.voice")
+			.dependsOn("@ryu/spaces", "1.2.0")
+			.dependsOn("@ryu/voice")
 			.requiredGrant("spaces:docs")
 			.build();
 
 		// Survives the builder…
 		expect(manifest.requires?.apps).toEqual([
-			{ id: "com.ryu.spaces", min_version: "1.2.0" },
-			{ id: "com.ryu.voice" },
+			{ id: "@ryu/spaces", min_version: "1.2.0" },
+			{ id: "@ryu/voice" },
 		]);
 		expect(manifest.requires?.grants).toEqual(["spaces:docs"]);
 
@@ -509,7 +515,7 @@ describe("requires / targets", () => {
 			name: "Partial",
 			version: "1.0.0",
 			runnables: [],
-			requires: { apps: [{ id: "com.ryu.spaces" }] },
+			requires: { apps: [{ id: "@ryu/spaces" }] },
 		});
 
 		expect(parsed.success).toBe(true);
@@ -587,11 +593,11 @@ describe("requires / targets", () => {
 			slug: "dep-app",
 			uiEntry: "src/dep-app.tsx",
 			tools: [{ name: "render", description: "Render" }],
-			requires: { apps: [{ id: "com.ryu.spaces", min_version: "1.0.0" }] },
+			requires: { apps: [{ id: "@ryu/spaces", min_version: "1.0.0" }] },
 			targets: ["desktop"],
 		});
 
-		expect(manifest.requires?.apps[0]?.id).toBe("com.ryu.spaces");
+		expect(manifest.requires?.apps[0]?.id).toBe("@ryu/spaces");
 		expect(manifest.requires?.grants).toEqual([]);
 		expect(manifest.targets).toEqual(["desktop"]);
 

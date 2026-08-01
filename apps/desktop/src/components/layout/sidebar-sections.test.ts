@@ -26,7 +26,7 @@ describe("section vocabulary", () => {
 
 	it("accepts built-in and app-registered keys, rejects anything else", () => {
 		expect(isSectionKey("chats")).toBe(true);
-		expect(isSectionKey("plugin:com.ryu.meetings:meetings")).toBe(true);
+		expect(isSectionKey("plugin:@ryu/meetings:meetings")).toBe(true);
 		expect(isSectionKey("definitely-not-a-section")).toBe(false);
 	});
 });
@@ -77,7 +77,7 @@ describe("reconcileSectionOrder", () => {
 	});
 
 	it("keeps an app-registered section in its stored position", () => {
-		const appKey = "plugin:com.ryu.meetings:meetings";
+		const appKey = "plugin:@ryu/meetings:meetings";
 		const stored = ["tabs", appKey, ...DEFAULT_SECTION_ORDER.slice(1)];
 		const result = reconcileSectionOrder(stored);
 		expect(result[1]).toBe(appKey);

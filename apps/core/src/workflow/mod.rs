@@ -583,6 +583,28 @@ pub enum WorkflowTrigger {
         #[serde(default)]
         connected_account_id: Option<String>,
     },
+    /// Run when an **app event** fires — an event some installed app declared in
+    /// its manifest `contributes.hook_events` and raised through the `events.emit`
+    /// kernel capability (`@example/meetings#meeting.ended`).
+    ///
+    /// This is what makes workflows a first-class *consumer* of the hook system,
+    /// alongside plugin hooks: "when a meeting ends, summarize it and file the
+    /// notes" stops being bespoke wiring between two apps and becomes a workflow
+    /// the user assembles. The event payload arrives as the run's input, so a
+    /// workflow reads `meeting.transcript` the same way a manual run reads its
+    /// form.
+    ///
+    /// Like [`WorkflowTrigger::Webhook`] and unlike [`WorkflowTrigger::Schedule`] /
+    /// [`WorkflowTrigger::Composio`], this creates **no external resource** and so
+    /// needs no reconciliation: the emit path scans saved workflows for a matching
+    /// trigger, exactly as the webhook ingress does. That also means a workflow may
+    /// subscribe to an event whose provider is not installed yet — it simply never
+    /// fires until it is, which is the behaviour you want when a user builds the
+    /// automation before installing the app.
+    Event {
+        /// The fully-qualified event id to subscribe to.
+        event: String,
+    },
 }
 
 /// A persisted workflow definition.

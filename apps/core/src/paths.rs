@@ -439,7 +439,11 @@ mod tests {
         std::fs::create_dir_all(base.join("models")).unwrap();
         std::fs::write(base.join("models").join("a.bin"), b"y").unwrap();
         std::fs::create_dir_all(base.join("plugins")).unwrap();
-        std::fs::write(base.join("plugins").join("com.ryu.clips"), b"z").unwrap();
+        // The on-disk name, not the id: a scoped id is flattened by
+        // `plugin_manifest::plugin_dir_name` before it is ever joined onto a path,
+        // precisely so it stays ONE component (the loader's `read_dir` is
+        // single-level, so a nested dir would be invisible).
+        std::fs::write(base.join("plugins").join("@ryu+clips"), b"z").unwrap();
         std::fs::write(base.join("agents.db"), b"a").unwrap();
         std::fs::write(base.join("plugins.db"), b"p").unwrap();
         // Custody files to preserve.

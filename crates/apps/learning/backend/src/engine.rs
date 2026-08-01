@@ -1492,7 +1492,10 @@ mod flow_tests {
 
     #[tokio::test]
     async fn min_reward_clamps_to_unit_range_else_default() {
-        assert_eq!(resolve_min_reward(&MockHost::new()).await, DEFAULT_MIN_REWARD);
+        assert_eq!(
+            resolve_min_reward(&MockHost::new()).await,
+            DEFAULT_MIN_REWARD
+        );
         let ok = MockHost::new().with_pref(LEARNING_MIN_REWARD_PREF, "0.4");
         assert_eq!(resolve_min_reward(&ok).await, 0.4);
         // Out of [0,1] and non-numeric both fall back to the default.
@@ -1602,15 +1605,18 @@ mod flow_tests {
 
     #[tokio::test]
     async fn sweep_captures_pairs_and_is_idempotent() {
-        let host = MockHost::new().enabled().with_conversation("c1", 10, 4).with_messages(
-            "c1",
-            &[
-                ("user", "q1"),
-                ("assistant", "a1"),
-                ("user", "q2"),
-                ("assistant", "a2"),
-            ],
-        );
+        let host = MockHost::new()
+            .enabled()
+            .with_conversation("c1", 10, 4)
+            .with_messages(
+                "c1",
+                &[
+                    ("user", "q1"),
+                    ("assistant", "a1"),
+                    ("user", "q2"),
+                    ("assistant", "a2"),
+                ],
+            );
         let c = ctx(host, store("sweep-on"));
         assert_eq!(sweep_into_buffer(&c).await.unwrap(), 2);
         // Re-sweep: same assistant message ids -> nothing new.
@@ -1806,7 +1812,8 @@ mod flow_tests {
         assert!(out.reason.contains("nothing reusable"));
         // name present but instructions empty -> rejected
         let mut host2 = MockHost::new().with_messages("c1", &[("user", "q"), ("assistant", "a")]);
-        host2.synth_reply = Some(r#"{"name":"X","description":"d","instructions":"  "}"#.to_string());
+        host2.synth_reply =
+            Some(r#"{"name":"X","description":"d","instructions":"  "}"#.to_string());
         let c2 = ctx(host2, store("synth-empty"));
         let out2 = synthesize_skill(&c2, "c1", true, None).await.unwrap();
         assert!(!out2.created);
@@ -1819,11 +1826,16 @@ mod flow_tests {
         // must NOT fall through to direct write/activate. queue -> Queued.
         let mut host = MockHost::new()
             .with_pref(LEARNING_SKILLS_ENABLED_PREF, "false")
-            .with_messages("c1", &[("user", "how to reverse"), ("assistant", "use rev()")]);
+            .with_messages(
+                "c1",
+                &[("user", "how to reverse"), ("assistant", "use rev()")],
+            );
         host.synth_reply = Some(good_synth_json());
         host.queue = QueuedApproval::Queued;
         let (c, h) = ctx_arc(host, store("synth-force"));
-        let out = synthesize_skill(&c, "c1", true, Some("user-42")).await.unwrap();
+        let out = synthesize_skill(&c, "c1", true, Some("user-42"))
+            .await
+            .unwrap();
         // created=false because the write is DEFERRED to approval; slug is surfaced.
         assert!(!out.created);
         assert!(out.slug.as_deref().unwrap().starts_with("learned-"));
@@ -1834,8 +1846,7 @@ mod flow_tests {
 
     #[tokio::test]
     async fn synth_already_pending_is_deduped() {
-        let mut host =
-            MockHost::new().with_messages("c1", &[("user", "q"), ("assistant", "a")]);
+        let mut host = MockHost::new().with_messages("c1", &[("user", "q"), ("assistant", "a")]);
         host.synth_reply = Some(good_synth_json());
         host.queue = QueuedApproval::AlreadyPending;
         let (c, h) = ctx_arc(host, store("synth-dupe"));
@@ -1847,8 +1858,7 @@ mod flow_tests {
 
     #[tokio::test]
     async fn synth_queue_error_propagates() {
-        let mut host =
-            MockHost::new().with_messages("c1", &[("user", "q"), ("assistant", "a")]);
+        let mut host = MockHost::new().with_messages("c1", &[("user", "q"), ("assistant", "a")]);
         host.synth_reply = Some(good_synth_json());
         host.queue_bail = true;
         let c = ctx(host, store("synth-qerr"));
@@ -1858,8 +1868,7 @@ mod flow_tests {
 
     #[tokio::test]
     async fn synth_model_no_json_errors() {
-        let mut host =
-            MockHost::new().with_messages("c1", &[("user", "q"), ("assistant", "a")]);
+        let mut host = MockHost::new().with_messages("c1", &[("user", "q"), ("assistant", "a")]);
         host.synth_reply = Some("sorry, I have no idea".to_string());
         let c = ctx(host, store("synth-nojson"));
         let err = synthesize_skill(&c, "c1", true, None).await.unwrap_err();
@@ -1970,7 +1979,11 @@ mod flow_tests {
         let c = ctx(host, store("cycle-remote-misconfig"));
         let plan = run_cycle(&c, true).await.unwrap();
         assert!(!plan.dispatched);
-        assert!(plan.error.as_deref().unwrap().contains("remote-url is unset"));
+        assert!(plan
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("remote-url is unset"));
     }
 
     #[tokio::test]

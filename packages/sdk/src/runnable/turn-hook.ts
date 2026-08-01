@@ -15,6 +15,7 @@
 
 import type {
 	Contributes,
+	HookEventContribution,
 	PluginManifest,
 	RunnableMeta,
 	Surface,
@@ -90,9 +91,12 @@ export interface DefineTurnHookOptions {
  * is serialized into the sandbox `code` string and invoked with `ctx`/`host` at
  * run time.
  */
+// `code` is optional on `TurnHookContribution` because a hand-authored manifest may
+// carry `code_file` instead. This builder always produces the inline form, so it
+// narrows the return type — callers get a `code` they need not null-check.
 export function defineTurnHook(
 	options: DefineTurnHookOptions
-): TurnHookContribution {
+): TurnHookContribution & { code: string } {
 	const source = options.run.toString();
 	// The sandbox wraps `code` in an async IIFE where `ctx`/`host` are in scope
 	// and a bare `return` reports the directive — so call the serialized function
@@ -112,6 +116,13 @@ export interface DefinePluginOptions {
 	composerControls?: Record<string, unknown>[];
 	/** Capability grants the hooks need (e.g. `["hook:side-model", "storage:kv"]`). */
 	grants?: string[];
+	/**
+	 * App events this plugin EMITS — the provider half of the hook system whose
+	 * consumer half is {@link DefinePluginOptions.turnHooks}. Each `id` must be
+	 * namespaced to this plugin's own `id`; Core validates that at load and again
+	 * on every emit.
+	 */
+	hookEvents?: HookEventContribution[];
 	/** Reverse-domain id (e.g. `"com.example.my-plugin"`). */
 	id: string;
 	/**
@@ -160,6 +171,7 @@ export interface DefinePluginOptions {
 export function definePlugin(options: DefinePluginOptions): PluginManifest {
 	const contributes: Contributes = {
 		turn_hooks: options.turnHooks ?? [],
+		hook_events: options.hookEvents ?? [],
 		composer_controls: options.composerControls ?? [],
 		settings_tabs: options.settingsTabs ?? [],
 		slash_commands: options.slashCommands ?? [],

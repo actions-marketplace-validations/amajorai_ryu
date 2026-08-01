@@ -491,13 +491,50 @@ export interface Contributes {
 	 * App-registered **workspace dock panels** — a tab in the desktop's bottom or
 	 * right dock (Terminal / Code Review / Browser / Simulator live there today).
 	 * This is the seam that lets an app OWN its dock tab instead of the shell
-	 * welding the app into a closed `TabKind` union: `com.ryu.browser` and
-	 * `com.ryu.simulator` are apps, and their tabs are contributions, not enum
+	 * welding the app into a closed `TabKind` union: `@ryu/browser` and
+	 * `@ryu/simulator` are apps, and their tabs are contributions, not enum
 	 * variants. Self-contained + opaque `spec` (see [`DockPanelContribution`]), so a
 	 * new panel capability needs no Core change; served + tagged with the owning
 	 * `plugin` id at `GET /api/plugins/contributions`.
 	 */
 	dock_panels?: DockPanelContribution[];
+	/**
+	 * **App events this plugin emits** — the *provider* half of the hook system,
+	 * and the mirror image of [`Contributes::turn_hooks`] (the *consumer* half).
+	 *
+	 * Core's own hook phases (`post_assistant_turn`, `pre_tool_use`, `context`, …)
+	 * are a closed set built into `plugin_host`, so before this surface existed a
+	 * plugin could only react to things happening *in a chat turn*. An app that
+	 * owns a real-world lifecycle — a meeting ending, a workflow run failing, an
+	 * alert firing — had no way to let anything else react to it. That forced the
+	 * classic anti-pattern: every consumer polls the producer's HTTP routes, and
+	 * every new integration is bespoke wiring between two apps that must both be
+	 * changed.
+	 *
+	 * Declaring an event here makes it a first-class hook phase. Any other plugin
+	 * consumes it by naming it in a `turn_hooks[].on`, and any workflow consumes it
+	 * with an `event` trigger — neither the producer nor Core learns anything about
+	 * the consumer. Apps therefore both **provide** and **consume** over one
+	 * mechanism.
+	 *
+	 * # Ids are namespaced, and that is what makes collisions impossible
+	 *
+	 * Every id MUST be `<owning plugin id>#<event name>` — the owning half is
+	 * checked against the manifest's own `id` at load, and the name half is
+	 * `[a-z0-9][a-z0-9._-]*`. Because a Core phase name never contains `/`, an app
+	 * literally cannot declare an event that shadows one, no reserved-word list
+	 * required. It is also why the emit path can authorize purely from the
+	 * manifest: the caller's authenticated plugin id must be the id in the event
+	 * name, so an app can only ever emit its **own** events.
+	 *
+	 * # Core-interpreted, so a typed struct
+	 *
+	 * Core reads this table to authorize emits and to serve the event catalog, so
+	 * per this type's own doc comment it gets a typed struct rather than opaque
+	 * JSON. It names event strings rather than runnable ids, so it is
+	 * **self-contained** and stays out of [`Contributes::referenced_ids`].
+	 */
+	hook_events?: HookEventContribution[];
 	/**
 	 * **Language servers** the plugin declares, keyed by server name — the
 	 * agent-neutral mirror of Claude Code's `.lsp.json` / `lspServers`, so a config
@@ -604,11 +641,19 @@ export interface Contributes {
 	 */
 	tools?: ContributionId[];
 	/**
-	 * Chat turn hooks the plugin contributes — server-side logic that runs at a
-	 * turn boundary (e.g. `post_assistant_turn`) and returns a directive. These
-	 * are **self-contained** (they carry their own inline `code`), so they are
-	 * NOT cross-validated against `runnables` like the id-reference surfaces
-	 * above; the Core `plugin_host` runtime executes them in the sandbox.
+	 * Hooks the plugin contributes — server-side logic that runs at a hook
+	 * boundary and returns a directive. These are **self-contained** (they carry
+	 * their own inline `code`), so they are NOT cross-validated against
+	 * `runnables` like the id-reference surfaces above; the Core `plugin_host`
+	 * runtime executes them in the sandbox.
+	 *
+	 * The field name is historical. It originally held only *chat* turn
+	 * boundaries (`post_assistant_turn`, `pre_user_turn`); a hook's `on` is now
+	 * any hook phase, including an **app event** another plugin declared in its
+	 * [`Contributes::hook_events`] (`@example/meetings#meeting.ended`). It is
+	 * deliberately NOT renamed: `turn_hooks` is load-bearing in every packaged
+	 * manifest, the published JSON Schema, the SDK's TS mirror and the loader's
+	 * invariant tests, and the rename would buy nothing but churn.
 	 */
 	turn_hooks?: TurnHookContribution[];
 	/**
@@ -680,7 +725,7 @@ export interface ContributionId {
  *   `@ryu/ui` components, so a dock panel gets the Raycast tier for free.
  * - `"native"` — the shell's OWN component, registered under `<plugin>/<id>`. This is
  *   the migration seam for first-party apps whose panel is hand-written React driving
- *   their sidecar through the ext-proxy (`com.ryu.browser`, `com.ryu.simulator`): the
+ *   their sidecar through the ext-proxy (`@ryu/browser`, `@ryu/simulator`): the
  *   *component* stays in the shell, but its existence, label, icon and placement stop
  *   being a hardcoded `TabKind` variant and become the app's own declaration, so
  *   disabling the app removes the tab. An unknown `<plugin>/<id>` simply renders
@@ -725,6 +770,48 @@ export interface DockPanelContribution {
 	};
 	/**
 	 * Tab label shown on the dock tab strip and in the "new tab" menu.
+	 */
+	title: string;
+}
+/**
+ * One **app event** a plugin declares it emits (a [`Contributes::hook_events`]
+ * row). This is a *declaration*, not code: the event is raised at runtime by the
+ * plugin's own sidecar calling the `events.emit` kernel capability, and Core
+ * checks the emit against this table.
+ *
+ * The payload the emitter sends is delivered to every consumer as `ctx.event`, so
+ * [`Self::payload_example`] is the contract a consumer author reads. Keep it
+ * honest — it is the only description of the payload anyone gets.
+ */
+export interface HookEventContribution {
+	/**
+	 * What the event means and, critically, *when* it fires — including whether it
+	 * can fire more than once for the same subject.
+	 */
+	description?: string | null;
+	/**
+	 * The fully-qualified event id: `<owning plugin id>#<event name>`, e.g.
+	 * `@example/meetings#meeting.ended`. Validated at load against the owning
+	 * manifest's `id`; see [`Contributes::hook_events`] for why the namespace is
+	 * mandatory rather than conventional.
+	 *
+	 * Name the event after **what happened**, in the past tense, never after who
+	 * should react to it: a consumer that renames the producer's event to suit
+	 * itself is exactly the coupling this surface removes. The house patterns are
+	 * `x.started` / `x.ended` / `x.failed` for a lifecycle, `x.ready` for a
+	 * produced artifact, and `x.created` / `x.updated` / `x.deleted` for state.
+	 */
+	id: string;
+	/**
+	 * An example of the payload delivered as `ctx.event`. Documentation, not a
+	 * schema: Core forwards whatever the emitter sends verbatim and validates
+	 * nothing beyond the size cap, so this exists for the human writing a consumer.
+	 */
+	payload_example?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Human-readable title for the event picker (workflow trigger UI, docs).
 	 */
 	title: string;
 }

@@ -72,10 +72,7 @@ pub async fn insight_for(model: &str, provider: Option<&str>) -> Option<ModelIns
     }
 
     let mut meta = models_dev::meta_for(trimmed, provider).await;
-    let mut source = meta
-        .as_ref()
-        .map(|m| m.source.clone())
-        .unwrap_or_default();
+    let mut source = meta.as_ref().map(|m| m.source.clone()).unwrap_or_default();
 
     if meta.is_none() {
         if let Some(m) = openrouter_meta::meta_for(trimmed).await {
@@ -91,10 +88,7 @@ pub async fn insight_for(model: &str, provider: Option<&str>) -> Option<ModelIns
     let aa_key_present = aa::has_api_key();
     let aa_stats = if aa_key_present {
         if let Some(ref c) = client {
-            let name = meta
-                .as_ref()
-                .map(|m| m.name.as_str())
-                .unwrap_or(trimmed);
+            let name = meta.as_ref().map(|m| m.name.as_str()).unwrap_or(trimmed);
             // For local stems the "repo" is the stem itself; for cloud ids use
             // the bare model segment so AA's name matcher has something to chew.
             let repo = bare_model_id(trimmed);

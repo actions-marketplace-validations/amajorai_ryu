@@ -128,7 +128,7 @@ pub struct ScheduledJob {
     /// unchanged.
     #[serde(default)]
     pub require_approval: bool,
-    /// The manifest id of the App that created this job (`com.ryu.warmup`), when
+    /// The manifest id of the App that created this job (`@ryu/warmup`), when
     /// one did.
     ///
     /// Scheduler jobs outlive the surface that wrote them: they are files on
@@ -373,10 +373,10 @@ mod tests {
         let mut j = job();
         assert!(j.owner_app.is_none());
         assert!(!serde_json::to_string(&j).unwrap().contains("owner_app"));
-        j.owner_app = Some("com.ryu.warmup".into());
+        j.owner_app = Some("@ryu/warmup".into());
         let round: ScheduledJob =
             serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
-        assert_eq!(round.owner_app.as_deref(), Some("com.ryu.warmup"));
+        assert_eq!(round.owner_app.as_deref(), Some("@ryu/warmup"));
     }
 
     #[test]

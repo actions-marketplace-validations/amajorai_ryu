@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.memory",
+  "id": "@ryu/memory",
   "name": "Memory",
   "version": "1.0.0",
   "description": "Long-term memory CRUD: the multi-level (user/node/project/org) memory store surfaced in the Memory Library. Governance shell over the in-crate memory module — the in-process chat auto-recall path is KERNEL: it always reads the built-in store directly and never routes through this HTTP surface, so no provider selection can swap it. What IS swappable is the model-facing `memory` layer — the stable `memory__search` / `memory__store` / `memory__forget` verbs. Those resolve to exactly ONE provider at a time and default to this built-in store, so an external memory provider AUGMENTS the built-in store (which the kernel keeps recalling from regardless) rather than replacing it. The verbs are backed by declarative HTTP tools that loop back through Core's own authenticated `/api/memory` CRUD surface and its memory-only retrieval search.",

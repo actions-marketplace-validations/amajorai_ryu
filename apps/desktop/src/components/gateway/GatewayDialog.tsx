@@ -1726,6 +1726,7 @@ const MODALITY_PROVIDER_LABELS: Record<string, string> = {
 	// it presented as "Anthropic".
 	cloudflare: "Cloudflare Workers AI",
 	bedrock: "Amazon Bedrock",
+	vertex: "Google Vertex AI",
 };
 
 function modalityProviderLabel(id: string): string {

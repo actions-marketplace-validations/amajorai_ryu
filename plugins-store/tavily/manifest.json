@@ -1,10 +1,14 @@
 {
-  "id": "tavily",
+  "id": "@ryu/tavily",
   "name": "Tavily Search",
   "version": "1.0.0",
   "description": "Search-and-extract for agents via the Tavily API (https://tavily.com), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Tavily without changing what agents call. Requires a BYOK Tavily API key.",
   "tagline": "Agent-tuned web search and extraction",
-  "keywords": ["search", "web", "extract"],
+  "keywords": [
+    "search",
+    "web",
+    "extract"
+  ],
   "category": "Search",
   "engines": {
     "ryu": ">=0.0.1"
@@ -45,10 +49,15 @@
             "search_depth": {
               "type": "string",
               "description": "How much work Tavily does per query.",
-              "enum": ["basic", "advanced"]
+              "enum": [
+                "basic",
+                "advanced"
+              ]
             }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         }
       }
     },
@@ -73,10 +82,14 @@
             "urls": {
               "type": "array",
               "description": "URLs to extract content from.",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             }
           },
-          "required": ["urls"]
+          "required": [
+            "urls"
+          ]
         }
       }
     }
@@ -89,7 +102,9 @@
       "tools": {
         "web__search": {
           "tool": "tavily__search",
-          "args": { "limit": "max_results" },
+          "args": {
+            "limit": "max_results"
+          },
           "response": {
             "results": "results",
             "fields": {
@@ -109,7 +124,10 @@
       "tools": {
         "web__extract": {
           "tool": "tavily__extract",
-          "args": { "url": "urls[]", "format": "" },
+          "args": {
+            "url": "urls[]",
+            "format": ""
+          },
           "response": {
             "results": "results",
             "fields": {
@@ -121,7 +139,9 @@
       }
     }
   ],
-  "permission_grants": ["tool:http-egress:api.tavily.com"],
+  "permission_grants": [
+    "tool:http-egress:api.tavily.com"
+  ],
   "contributes": {
     "settings_tabs": [
       {

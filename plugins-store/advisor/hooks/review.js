@@ -11,7 +11,7 @@ const rev = ctx.transcript.slice().reverse();
 const lastUser = rev.find((m) => m.role === "user");
 const cmd = lastUser ? (lastUser.content || "").trim() : "";
 const onDemand = cmd === "/advisor" || cmd.indexOf("/advisor ") === 0;
-const toggled = !!(ctx.flags && ctx.flags["com.ryuhq.advisor"]);
+const toggled = !!(ctx.flags && ctx.flags["@ryu/advisor"]);
 if (!onDemand && !toggled) {
 	return { kind: "none" };
 }

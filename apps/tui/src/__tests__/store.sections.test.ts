@@ -108,7 +108,7 @@ test("the plugins realm loader reads the configured container key and title fiel
 		return Promise.resolve(
 			new Response(
 				JSON.stringify({
-					apps: [{ id: "com.ryu.mail", name: "Mail", version: "2.0.0" }],
+					apps: [{ id: "@ryu/mail", name: "Mail", version: "2.0.0" }],
 				}),
 				{ status: 200 }
 			)
@@ -120,9 +120,9 @@ test("the plugins realm loader reads the configured container key and title fiel
 	const rows = await plugins?.load(target);
 	expect(capturedUrl).toBe("http://node:7980/api/plugins");
 	expect(rows?.[0]).toEqual({
-		id: "com.ryu.mail",
+		id: "@ryu/mail",
 		title: "Mail",
-		subtitle: "com.ryu.mail",
+		subtitle: "@ryu/mail",
 		badge: "2.0.0",
 	});
 });

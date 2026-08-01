@@ -32,7 +32,7 @@ test("the bound backend is listed and marked in use", async ({ page }) => {
 	// Comes from `/api/capabilities`. Before this change the read 404'd and the
 	// panel claimed "No document parser is enabled on this node" instead.
 	await expect(page.getByText("MarkItDown").first()).toBeVisible();
-	await expect(page.getByText("com.ryu.markitdown · v0.1.3")).toBeVisible();
+	await expect(page.getByText("@ryu/markitdown · v0.1.3")).toBeVisible();
 	await expect(page.getByRole("button", { name: "In use" })).toBeVisible();
 	await expect(
 		page.getByText("No document parser is enabled on this node")

@@ -134,7 +134,24 @@ const VALID_HOOK_PHASES = new Set([
 	"subagent_stop",
 	"session_end",
 	"notification",
+	// Kernel lifecycle phases fired by Core's own subsystems (the workflow
+	// executor), not by any app.
+	"workflow_run_started",
+	"workflow_run_finished",
+	"workflow_run_failed",
 ]);
+
+/** An **app event** — a phase some app declares in `contributes.hook_events`,
+ *  always `<owning plugin id>#<event name>`. Matched by SHAPE, not against a list:
+ *  which app events exist depends on which apps are installed, so no fixed set
+ *  could be right. The mandatory `#` is also what keeps an app event from ever
+ *  colliding with one of the bare-word Core phases above. */
+const APP_EVENT_PHASE = /^[@A-Za-z0-9][A-Za-z0-9._/-]*#[a-z0-9][a-z0-9._-]*$/;
+
+/** Whether `on` names something Core can actually dispatch. */
+function isDispatchablePhase(on: string): boolean {
+	return VALID_HOOK_PHASES.has(on) || APP_EVENT_PHASE.test(on);
+}
 
 /** SDK schema default for an omitted `on` (mirrors `TurnHookContributionSchema`). */
 const DEFAULT_HOOK_PHASE = "post_assistant_turn";
@@ -253,7 +270,7 @@ describe("turn-hook phase names are valid Core phases", () => {
 				// `on` is optional in the schema; absent means the default phase.
 				const phase =
 					typeof hook.on === "string" ? hook.on : DEFAULT_HOOK_PHASE;
-				expect(VALID_HOOK_PHASES.has(phase)).toBe(true);
+				expect(isDispatchablePhase(phase)).toBe(true);
 			}
 		});
 	}
@@ -269,7 +286,7 @@ describe("turn-hook phase names are valid Core phases", () => {
 		// really do span several phases (post_assistant_turn, pre_tool_use, …).
 		expect(seen.size).toBeGreaterThan(1);
 		for (const phase of seen) {
-			expect(VALID_HOOK_PHASES.has(phase)).toBe(true);
+			expect(isDispatchablePhase(phase)).toBe(true);
 		}
 	});
 });

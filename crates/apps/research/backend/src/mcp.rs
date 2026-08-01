@@ -351,12 +351,16 @@ mod tests {
     #[tokio::test]
     async fn read_file_requires_both_workspace_and_path() {
         let client = reqwest::Client::new();
-        assert!(dispatch(&client, "read_file", json!({ "workspace_id": "w" }))
-            .await
-            .is_err());
-        assert!(dispatch(&client, "read_file", json!({ "path": "train.py" }))
-            .await
-            .is_err());
+        assert!(
+            dispatch(&client, "read_file", json!({ "workspace_id": "w" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            dispatch(&client, "read_file", json!({ "path": "train.py" }))
+                .await
+                .is_err()
+        );
     }
 
     // ── Graceful-degradation contract against a dead sidecar ────────────────────
@@ -371,14 +375,22 @@ mod tests {
         for (tool, args) in [
             ("list_experiments", json!({})),
             ("init_workspace", json!({ "experiment": "toy" })),
-            ("read_file", json!({ "workspace_id": "w", "path": "train.py" })),
-            ("write_file", json!({ "workspace_id": "w", "path": "train.py", "content": "x" })),
+            (
+                "read_file",
+                json!({ "workspace_id": "w", "path": "train.py" }),
+            ),
+            (
+                "write_file",
+                json!({ "workspace_id": "w", "path": "train.py", "content": "x" }),
+            ),
             ("run", json!({ "workspace_id": "w" })),
             ("keep", json!({ "workspace_id": "w" })),
             ("reset", json!({ "workspace_id": "w" })),
             ("ledger", json!({ "workspace_id": "w" })),
         ] {
-            let out = dispatch(&client, tool, args).await.expect("degrades, not Err");
+            let out = dispatch(&client, tool, args)
+                .await
+                .expect("degrades, not Err");
             assert_eq!(out["available"], json!(false), "tool {tool}");
             assert!(out["reason"].as_str().unwrap().contains("not reachable"));
         }
@@ -386,8 +398,10 @@ mod tests {
 
     /// Records the (method, path, body) of every request the mock sidecar sees, so a
     /// test can assert dispatch built the right upstream call.
-    async fn spawn_recorder() -> (String, std::sync::Arc<tokio::sync::Mutex<Vec<(String, String, Value)>>>)
-    {
+    async fn spawn_recorder() -> (
+        String,
+        std::sync::Arc<tokio::sync::Mutex<Vec<(String, String, Value)>>>,
+    ) {
         use axum::extract::Path as AxPath;
         use axum::routing::{get, post};
         use axum::{Json, Router};
@@ -434,7 +448,13 @@ mod tests {
                         let log = log.clone();
                         let q = req.uri().query().unwrap_or("").to_owned();
                         async move {
-                            rec(&log, "GET", format!("/workspace/{id}/file?{q}"), Value::Null).await;
+                            rec(
+                                &log,
+                                "GET",
+                                format!("/workspace/{id}/file?{q}"),
+                                Value::Null,
+                            )
+                            .await;
                             Json(json!({ "content": "print(1)" }))
                         }
                     }
@@ -513,7 +533,9 @@ mod tests {
         let client = reqwest::Client::new();
 
         // list_experiments → GET /experiments, and the catalog passes back.
-        let out = dispatch(&client, "list_experiments", json!({})).await.unwrap();
+        let out = dispatch(&client, "list_experiments", json!({}))
+            .await
+            .unwrap();
         assert_eq!(out["experiments"][0]["id"], json!("toy"));
 
         // init_workspace → POST /workspace/init with the experiment.
@@ -522,19 +544,31 @@ mod tests {
             .unwrap();
 
         // read_file → GET /workspace/{id}/file?path=<encoded>.
-        dispatch(&client, "read_file", json!({ "workspace_id": "ws 1", "path": "a b.py" }))
-            .await
-            .unwrap();
+        dispatch(
+            &client,
+            "read_file",
+            json!({ "workspace_id": "ws 1", "path": "a b.py" }),
+        )
+        .await
+        .unwrap();
 
         // write_file → PUT with path+content (content defaults to "" if omitted).
-        dispatch(&client, "write_file", json!({ "workspace_id": "w", "path": "t.py" }))
-            .await
-            .unwrap();
+        dispatch(
+            &client,
+            "write_file",
+            json!({ "workspace_id": "w", "path": "t.py" }),
+        )
+        .await
+        .unwrap();
 
         // run with explicit budget_s → POST /workspace/{id}/run { budget_s }.
-        dispatch(&client, "run", json!({ "workspace_id": "w", "budget_s": 42 }))
-            .await
-            .unwrap();
+        dispatch(
+            &client,
+            "run",
+            json!({ "workspace_id": "w", "budget_s": 42 }),
+        )
+        .await
+        .unwrap();
 
         // run without budget_s → empty body (no budget_s key).
         dispatch(&client, "run", json!({ "workspace_id": "w" }))
@@ -542,11 +576,17 @@ mod tests {
             .unwrap();
 
         // keep → git advance, reset → git reset.
-        dispatch(&client, "keep", json!({ "workspace_id": "w" })).await.unwrap();
-        dispatch(&client, "reset", json!({ "workspace_id": "w" })).await.unwrap();
+        dispatch(&client, "keep", json!({ "workspace_id": "w" }))
+            .await
+            .unwrap();
+        dispatch(&client, "reset", json!({ "workspace_id": "w" }))
+            .await
+            .unwrap();
 
         // ledger read (no append keys) → GET.
-        dispatch(&client, "ledger", json!({ "workspace_id": "w" })).await.unwrap();
+        dispatch(&client, "ledger", json!({ "workspace_id": "w" }))
+            .await
+            .unwrap();
 
         // ledger append (commit present) → POST with the full row.
         dispatch(
@@ -598,13 +638,21 @@ mod tests {
         let client = reqwest::Client::new();
 
         // score-only counts as append.
-        dispatch(&client, "ledger", json!({ "workspace_id": "w", "score": 0.1 }))
-            .await
-            .unwrap();
+        dispatch(
+            &client,
+            "ledger",
+            json!({ "workspace_id": "w", "score": 0.1 }),
+        )
+        .await
+        .unwrap();
         // status-only counts as append.
-        dispatch(&client, "ledger", json!({ "workspace_id": "w", "status": "crash" }))
-            .await
-            .unwrap();
+        dispatch(
+            &client,
+            "ledger",
+            json!({ "workspace_id": "w", "status": "crash" }),
+        )
+        .await
+        .unwrap();
 
         let calls = log.lock().await.clone();
         assert_eq!(calls[0].0, "POST");
@@ -619,7 +667,10 @@ mod tests {
         let app = Router::new().route(
             "/experiments",
             get(|| async {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "detail": "engine broke" })))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "detail": "engine broke" })),
+                )
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -628,7 +679,9 @@ mod tests {
 
         let _g = crate::UpstreamGuard::set(Some(&addr.to_string()));
         let client = reqwest::Client::new();
-        let out = dispatch(&client, "list_experiments", json!({})).await.unwrap();
+        let out = dispatch(&client, "list_experiments", json!({}))
+            .await
+            .unwrap();
         // A 5xx is surfaced but the turn stays alive: available:true + error + detail.
         assert_eq!(out["available"], json!(true));
         assert!(out["error"].as_str().unwrap().contains("500"));
@@ -646,7 +699,9 @@ mod tests {
 
         let _g = crate::UpstreamGuard::set(Some(&addr.to_string()));
         let client = reqwest::Client::new();
-        let out = dispatch(&client, "list_experiments", json!({})).await.unwrap();
+        let out = dispatch(&client, "list_experiments", json!({}))
+            .await
+            .unwrap();
         assert_eq!(out["raw"], json!("plain text"));
     }
 }

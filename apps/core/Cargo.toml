@@ -1,6 +1,6 @@
 [package]
 name = "ryu-core"
-version = "0.0.16"
+version = "0.0.17"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -190,7 +190,7 @@ ryu-research = { path = "../../crates/apps/research/backend" }
 # Self-healing loop — extracted Core capability crate. The diagnose→propose engine,
 # the loop-prevention decision logic, the per-source attempt cap, the `healing.*`
 # prefs, the Gateway diagnosis, and the `/api/healing/*` surface now run OUT-OF-PROCESS
-# in the crate's `[[bin]] ryu-healing` sidecar (`com.ryu.healing`, served via
+# in the crate's `[[bin]] ryu-healing` sidecar (`@ryu/healing`, served via
 # `public_mount`). NON-optional path dep because Core still links the crate for its
 # types (`HealVerdict`, `HealSource`) + `apply_verdict` + the `HealingHost` trait:
 # `healing_client` posts a failed run to the sidecar, then applies the returned verdict
@@ -587,7 +587,7 @@ tool-exec-deno = ["ryu-tool-exec/tool-exec-deno", "ryu-eval-code/tool-exec-deno"
 # coupling). The Python engine lifecycle (`ResearchManager` + `sidecar::tools::research`)
 # stays Core-side; the Rust sidecar's `ResearchHost::start_sidecar` is a deliberate no-op.
 # (The former in-process `clips` feature was retired in the CoreDecouple wave: clips
-# is now the out-of-process `com.ryu.clips` app — `apps-store/clips/backend` spawned
+# is now the out-of-process `@ryu/clips` app — `apps-store/clips/backend` spawned
 # by the generic sidecar loader, `/api/clips/*` served via `public_mount`. The two
 # `ClipsHost` kernel couplings degrade cleanly in the standalone sidecar.)
 # Recipes is now OUT-OF-PROCESS: the `ryu-recipes` sidecar owns the `/api/recipes/*`
@@ -607,12 +607,12 @@ tool-exec-deno = ["ryu-tool-exec/tool-exec-deno", "ryu-eval-code/tool-exec-deno"
 # store over loopback HTTP (`crate::teams_client::TeamsClient`) rather than opening the DB,
 # so the sidecar is the single owner of `teams.db`.
 # (The former in-process `healing` feature was retired in the CoreDecouple wave:
-# self-healing is now the out-of-process `com.ryu.healing` app — `crates/ryu-healing`
+# self-healing is now the out-of-process `@ryu/healing` app — `crates/ryu-healing`
 # `[[bin]]` spawned by the generic sidecar loader, `/api/healing/*` served via
 # `public_mount`. Core keeps only the welded action side via `healing_client`; the
 # run-status bus loop stays kernel and posts to the sidecar.)
 # (The former in-process `mail` feature was retired in Track C: mail is now the
-# out-of-process `com.ryu.mail` app — `crates/ryu-mail` spawned by the generic
+# out-of-process `@ryu/mail` app — `crates/ryu-mail` spawned by the generic
 # sidecar loader, `/api/mail/*` served via `public_mount`. `mail-parser` moved
 # to that crate.)
 tool-exec-securexec = ["ryu-tool-exec/tool-exec-securexec"]

@@ -278,7 +278,7 @@ export const DOCUMENT_PARSE_CAPABILITY = "document.parse";
 
 /** One `document.parse` provider app. */
 export interface ParseBackend {
-	/** The manifest id (`com.ryu.markitdown`) — the value an override stores. */
+	/** The manifest id (`@ryu/markitdown`) — the value an override stores. */
 	id: string;
 	/** Whether it declares itself the default pick. */
 	isDefault: boolean;

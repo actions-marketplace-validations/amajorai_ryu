@@ -379,7 +379,9 @@ mod tests {
             ..Default::default()
         });
         // With an explicit body.
-        let body = RunRecipeBody { params: json!({ "n": 1 }) };
+        let body = RunRecipeBody {
+            params: json!({ "n": 1 }),
+        };
         let (status, Json(out)) = run_recipe(Path("r".to_string()), Some(Json(body))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(out["result"], json!({ "done": 1 }));
@@ -414,7 +416,9 @@ mod tests {
             }),
             ..Default::default()
         });
-        let body = RecordStartBody { task: "do it".to_string() };
+        let body = RecordStartBody {
+            task: "do it".to_string(),
+        };
         let (status, Json(out)) = record_start(Some(Json(body))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(out["task"], json!("do it"));

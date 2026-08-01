@@ -517,7 +517,7 @@ async fn main() {
         // models are multi-GB, so it only starts once a user installs it).
         Arc::new(StableDiffusionManager::new().with_downloads(download_center.clone())),
         // (The Unsloth fine-tuning sidecar is no longer Core-managed — it is a
-        // manifest-declared managed sidecar OWNED by the `com.ryu.finetune` app,
+        // manifest-declared managed sidecar OWNED by the `@ryu/finetune` app,
         // started on plugin-enable + boot-reconcile. Core keeps NO in-process finetune
         // code: the `ryu-finetune` sidecar owns the store, the adapter catalog, the
         // worker HTTP client, and the `/api/finetune/*` surface; Core reaches only its
@@ -631,7 +631,7 @@ async fn main() {
     // (enabled in the same step) first runs. Off unless RYU_HEADROOM_ENABLED=1.
     let headroom = Arc::new(sidecar::headroom::HeadroomManager::new());
 
-    // Mail runs as the `com.ryu.mail` app: the generic sidecar loader spawns the
+    // Mail runs as the `@ryu/mail` app: the generic sidecar loader spawns the
     // out-of-process `ryu-mail` binary and proxies `/api/mail/*` to it via the
     // manifest's `public_mount` (Track C). No hand-coded MailManager here anymore.
 
@@ -707,7 +707,7 @@ async fn main() {
         tracing::warn!("failed to ensure Uploads system space: {e:#}");
     }
     // Ensure the default, undeletable "Clips" system space exists — where the
-    // out-of-process `com.ryu.clips` sidecar files recorded clips. The seed lives
+    // out-of-process `@ryu/clips` sidecar files recorded clips. The seed lives
     // here (not in the sidecar) so the Space is present and undeletable on every
     // fresh install regardless of whether the clips app has run yet; the name must
     // match the sidecar's `CLIPS_SPACE_NAME` ("Clips") since `ensure_system_space`
@@ -719,7 +719,7 @@ async fn main() {
         tracing::warn!("failed to ensure Clips system space: {e:#}");
     }
     // Ensure the "Canvas" system space and import any legacy file-store boards into
-    // it as `com.ryu.canvas` app documents (the built-in creative canvas was ported
+    // it as `@ryu/canvas` app documents (the built-in creative canvas was ported
     // to a Ryu App; see `server::canvas_migrate`). Idempotent — migrated files are
     // renamed so a restart never re-imports them.
     match spaces
@@ -731,7 +731,7 @@ async fn main() {
         }
         Err(e) => tracing::warn!("failed to ensure Canvas system space: {e:#}"),
     }
-    // Ensure the "Whiteboard" system space where `com.ryu.whiteboard` app documents
+    // Ensure the "Whiteboard" system space where `@ryu/whiteboard` app documents
     // (freeform boards) live. Unlike Canvas there is no legacy file-store to import,
     // so just ensure the space. Idempotent.
     if let Err(e) = spaces
@@ -1511,7 +1511,7 @@ async fn main() {
     // from code that has no `ServerState` in scope. Mirrors plugin_storage::global.
     crate::server::install_global_hook_dispatcher(server_state.clone());
     // Self-healing: the diagnose→propose ENGINE runs out-of-process in the
-    // `ryu-healing` sidecar (`com.ryu.healing`); Core only drives it. Publish the
+    // `ryu-healing` sidecar (`@ryu/healing`); Core only drives it. Publish the
     // loopback client (so the scheduler + workflow executor can reach it without
     // `ServerState`) and spawn the run-status bus loop, which reads a failed run's
     // context from the kernel conversation store and posts it to the sidecar,
@@ -1623,7 +1623,7 @@ async fn main() {
     }
 
     // (The `ryu-mail` sidecar is spawned by the generic plugin-sidecar loader when
-    // the default-on `com.ryu.mail` app is reconciled — no bespoke startup here.)
+    // the default-on `@ryu/mail` app is reconciled — no bespoke startup here.)
 
     // Webhook ingress seam (#479, P6a): build the configured ingress backend
     // (default RyuRelay; pref `webhook.ingress.backend`; env override

@@ -1,10 +1,15 @@
 {
-  "id": "goal",
+  "id": "@ryu/goal",
   "name": "Goal",
   "version": "1.0.0",
   "runnables": [],
-  "permission_grants": ["hook:side-model", "storage:kv"],
-  "activation_events": ["*"],
+  "permission_grants": [
+    "hook:side-model",
+    "storage:kv"
+  ],
+  "activation_events": [
+    "*"
+  ],
   "contributes": {
     "slash_commands": [
       {
@@ -30,7 +35,12 @@
       {
         "id": "goal.loop",
         "on": "post_assistant_turn",
-        "match": { "commands": ["/goal"], "stateful": true },
+        "match": {
+          "commands": [
+            "/goal"
+          ],
+          "stateful": true
+        },
         "code_file": "hooks/loop.js"
       }
     ]

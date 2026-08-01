@@ -41,7 +41,11 @@ export type WorkflowTrigger =
 			toolkit: string;
 			trigger_slug: string;
 			connected_account_id?: string | null;
-	  };
+	  }
+	/** Run when an app event fires — an event an installed app declared in its
+	 *  manifest `contributes.hook_events`, named fully-qualified as
+	 *  `<owning plugin id>#<event name>`. */
+	| { type: "event"; event: string };
 
 /** A persisted workflow definition as returned by Core. */
 export interface Workflow {

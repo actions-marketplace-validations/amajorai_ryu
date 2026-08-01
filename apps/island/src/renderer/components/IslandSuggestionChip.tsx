@@ -9,14 +9,18 @@ import type { IslandSuggestion } from "../../shared/ipc.ts";
 
 export interface IslandSuggestionChipProps {
 	suggestion: IslandSuggestion;
+	/** Wrap the title/body instead of truncating (the island grows to fit). */
+	wrap?: boolean;
 }
 
 export function IslandSuggestionChip({
 	suggestion,
+	wrap,
 }: IslandSuggestionChipProps) {
 	return (
 		<IslandSuggestionChipBlock
 			suggestion={{ title: suggestion.title, body: suggestion.body }}
+			wrap={wrap}
 		/>
 	);
 }

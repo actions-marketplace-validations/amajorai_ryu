@@ -76,7 +76,7 @@ export function useNotificationEvents(): void {
 	const meId = session?.user?.id ?? getActiveUserId() ?? null;
 	const qc = useQueryClient();
 	const { openTab } = useTabsContext();
-	// The Inbox is an app surface (`com.ryu.approvals`, default-OFF), so the deep
+	// The Inbox is an app surface (`@ryu/approvals`, default-OFF), so the deep
 	// link only exists while some enabled app claims the path. Held in a ref, not a
 	// dependency: the contributions feed resolves after first paint and again on every
 	// enable/disable, and tearing the notification stream down and reconnecting it

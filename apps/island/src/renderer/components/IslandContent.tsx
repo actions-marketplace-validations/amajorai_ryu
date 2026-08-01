@@ -51,6 +51,13 @@ export interface IslandContentProps {
 	voiceError: string | null;
 	/** Live per-bar mic levels (0..1) for the recording-state waveform. */
 	voiceLevels: number[];
+	/**
+	 * Let the pill surfaces wrap their text instead of truncating it to one line.
+	 * The island measures this content and grows the shape to fit (capped, then
+	 * scrolled), so wrapping is what makes long labels/bodies readable rather than
+	 * clipped. Never set on the expanded panel, which owns its own layout.
+	 */
+	wrap?: boolean;
 }
 
 export function IslandContent({
@@ -64,6 +71,7 @@ export function IslandContent({
 	voiceCanCycle,
 	voiceError,
 	voiceLevels,
+	wrap = false,
 }: IslandContentProps) {
 	const expandedView = useIslandState((store) => store.expandedView);
 	if (state === "expanded") {
@@ -85,6 +93,7 @@ export function IslandContent({
 				canCycle={voiceCanCycle}
 				error={voiceError}
 				levels={voiceLevels}
+				wrap={wrap}
 			/>
 		);
 	}
@@ -94,9 +103,9 @@ export function IslandContent({
 		suggestion ??
 		(IS_DEV && state === "suggestion" ? DEV_DEMO_SUGGESTION : null);
 	if (state === "suggestion" && shownSuggestion) {
-		return <IslandSuggestionChip suggestion={shownSuggestion} />;
+		return <IslandSuggestionChip suggestion={shownSuggestion} wrap={wrap} />;
 	}
 	// `idle` and `context` share the morphing pill: it widens to show the active
 	// app when live context is available, else falls back to the plain pill.
-	return <ContextPill context={context} />;
+	return <ContextPill context={context} wrap={wrap} />;
 }

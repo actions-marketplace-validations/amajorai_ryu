@@ -471,7 +471,12 @@ mod tests {
             format!("http://{}", self.addr)
         }
         fn last(&self) -> Captured {
-            self.captured.lock().unwrap().last().cloned().unwrap_or_default()
+            self.captured
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .unwrap_or_default()
         }
     }
 
@@ -605,7 +610,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("could not parse whisper response"), "got: {err}");
+        assert!(
+            err.contains("could not parse whisper response"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -625,7 +633,10 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("not reachable"), "got: {err}");
-        assert!(err.contains("whispercpp"), "actionable hint expected: {err}");
+        assert!(
+            err.contains("whispercpp"),
+            "actionable hint expected: {err}"
+        );
     }
 
     #[tokio::test]
@@ -689,7 +700,10 @@ mod tests {
         let cap = server.last();
         assert_eq!(cap.provider.as_deref(), Some("openai"));
         assert_eq!(cap.model.as_deref(), Some("whisper-large-v3"));
-        assert_eq!(cap.authorization.as_deref(), Some("Bearer secret-slot-token"));
+        assert_eq!(
+            cap.authorization.as_deref(),
+            Some("Bearer secret-slot-token")
+        );
     }
 
     #[tokio::test]

@@ -241,7 +241,9 @@ impl ArgSpec {
     /// quotes, blank required arg) surface later, at dispatch.
     pub fn validate(&self) -> Result<(), String> {
         if self.from.trim().is_empty() {
-            return Err("tool backend 'command': an 'args' entry needs a non-empty 'from'".to_owned());
+            return Err(
+                "tool backend 'command': an 'args' entry needs a non-empty 'from'".to_owned(),
+            );
         }
         if self.map.is_some() && self.split.is_some() {
             return Err(format!(
@@ -592,8 +594,8 @@ impl ToolConfig {
                     Some("json") => CommandOutput::Json,
                     Some(other) => {
                         return Err(format!(
-                            "tool backend 'command': unknown output '{other}' (expected stdout | json)"
-                        ))
+                        "tool backend 'command': unknown output '{other}' (expected stdout | json)"
+                    ))
                     }
                 };
                 // Structured `args` (map/split), when present, supersedes the
@@ -616,10 +618,7 @@ impl ToolConfig {
                     cwd: self.cwd.clone().filter(|c| !c.trim().is_empty()),
                     timeout_secs: self.timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS),
                     output,
-                    egress_url_arg: self
-                        .egress_url_arg
-                        .clone()
-                        .filter(|s| !s.trim().is_empty()),
+                    egress_url_arg: self.egress_url_arg.clone().filter(|s| !s.trim().is_empty()),
                     arg_specs,
                     arg_bounds: extract_arg_bounds(self.input_schema.as_ref()),
                 })
@@ -1540,7 +1539,7 @@ pub fn capability_label(grant: &str) -> String {
         "mcp:file_write" => "Write files".to_string(),
         "mcp:screen_capture" => "Screen capture".to_string(),
         "mcp:desktop_control" => "Desktop control".to_string(),
-        // Browser automation capability (`com.ryu.browser` / `browser.control`).
+        // Browser automation capability (`@ryu/browser` / `browser.control`).
         "browser:control" => "Browser control".to_string(),
         _ => humanize_grant(grant),
     }
@@ -1819,7 +1818,10 @@ mod tests {
 
     #[test]
     fn capability_label_labels_command_grant() {
-        assert_eq!(capability_label("tool:command:exa"), "Runs the 'exa' command");
+        assert_eq!(
+            capability_label("tool:command:exa"),
+            "Runs the 'exa' command"
+        );
         assert_eq!(capability_label("tool:command:*"), "Runs local commands");
     }
 
@@ -1849,7 +1851,10 @@ mod tests {
                 // No numeric bounds without an input_schema.
                 assert!(arg_bounds.is_empty());
                 assert_eq!(args, vec!["search", "--query={query}"]);
-                assert_eq!(env.get("RYU_EXA_API_KEY").map(String::as_str), Some("env:RYU_EXA_API_KEY"));
+                assert_eq!(
+                    env.get("RYU_EXA_API_KEY").map(String::as_str),
+                    Some("env:RYU_EXA_API_KEY")
+                );
                 assert_eq!(cwd, None);
                 // Default timeout applied when absent.
                 assert_eq!(timeout_secs, DEFAULT_COMMAND_TIMEOUT_SECS);
@@ -1896,7 +1901,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             json_out.resolve_backend().unwrap(),
-            ToolBackend::Command { output: CommandOutput::Json, .. }
+            ToolBackend::Command {
+                output: CommandOutput::Json,
+                ..
+            }
         ));
         let unknown: ToolConfig = serde_json::from_value(
             json!({ "slug": "x", "backend": "command", "bin": "exa", "output": "yaml" }),
@@ -1921,7 +1929,12 @@ mod tests {
         }))
         .unwrap();
         match cfg.resolve_backend().unwrap() {
-            ToolBackend::Command { bin, arg_specs, timeout_secs, .. } => {
+            ToolBackend::Command {
+                bin,
+                arg_specs,
+                timeout_secs,
+                ..
+            } => {
                 assert_eq!(bin, "rtk");
                 assert_eq!(timeout_secs, 120);
                 let specs = arg_specs.expect("structured args present");
@@ -1929,7 +1942,11 @@ mod tests {
                 assert_eq!(specs[0].from, "mode");
                 assert_eq!(specs[0].default.as_deref(), Some("wrap"));
                 assert_eq!(
-                    specs[0].map.as_ref().and_then(|m| m.get("wrap")).map(Vec::as_slice),
+                    specs[0]
+                        .map
+                        .as_ref()
+                        .and_then(|m| m.get("wrap"))
+                        .map(Vec::as_slice),
                     Some(&[][..])
                 );
                 assert_eq!(specs[1].from, "command");

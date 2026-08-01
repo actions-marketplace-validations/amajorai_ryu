@@ -2128,11 +2128,11 @@ mod tests {
     async fn disable_of_a_load_bearing_plugin_is_refused_without_force() {
         let s = store();
         // `engines` is load-bearing (the local chat engine every default agent uses).
-        let m = make_manifest("engines", "1.0.0", vec![]);
+        let m = make_manifest("@ryu/engines", "1.0.0", vec![]);
         install_app(&s, &m).await.unwrap();
-        s.set_enabled("engines", &[]).await.unwrap();
+        s.set_enabled("@ryu/engines", &[]).await.unwrap();
 
-        let err = disable_app(&s, "engines", std::slice::from_ref(&m), false, false)
+        let err = disable_app(&s, "@ryu/engines", std::slice::from_ref(&m), false, false)
             .await
             .unwrap_err();
         assert!(
@@ -2140,14 +2140,14 @@ mod tests {
             "got {err:?}"
         );
         // Refused means REFUSED — engines is still enabled.
-        assert!(s.get("engines").await.unwrap().unwrap().enabled);
+        assert!(s.get("@ryu/engines").await.unwrap().unwrap().enabled);
 
         // The explicit force override goes through.
-        let out = disable_app(&s, "engines", std::slice::from_ref(&m), false, true)
+        let out = disable_app(&s, "@ryu/engines", std::slice::from_ref(&m), false, true)
             .await
             .unwrap();
-        assert_eq!(out.target().id, "engines");
-        assert!(!s.get("engines").await.unwrap().unwrap().enabled);
+        assert_eq!(out.target().id, "@ryu/engines");
+        assert!(!s.get("@ryu/engines").await.unwrap().unwrap().enabled);
     }
 
     /// A cascade must not tear down a load-bearing plugin pulled in as a collateral
@@ -2159,12 +2159,12 @@ mod tests {
         let s = store();
         let x = make_manifest("com.test.x", "1.0.0", vec![]);
         // `engines` depends on `x`, so disabling `x` cascades into `engines`.
-        let engines = make_dep_manifest("engines", "1.0.0", &[("com.test.x", None)]);
+        let engines = make_dep_manifest("@ryu/engines", "1.0.0", &[("com.test.x", None)]);
         let all = vec![x.clone(), engines.clone()];
         install_app(&s, &x).await.unwrap();
         install_app(&s, &engines).await.unwrap();
         s.set_enabled("com.test.x", &[]).await.unwrap();
-        s.set_enabled("engines", &[]).await.unwrap();
+        s.set_enabled("@ryu/engines", &[]).await.unwrap();
 
         let err = disable_app(&s, "com.test.x", &all, true, false)
             .await
@@ -2172,9 +2172,9 @@ mod tests {
         let DisableError::LoadBearing { id } = err else {
             panic!("expected LoadBearing, got {err:?}");
         };
-        assert_eq!(id, "engines");
+        assert_eq!(id, "@ryu/engines");
         // Refused means REFUSED — nothing was flipped, engines still up.
-        assert!(s.get("engines").await.unwrap().unwrap().enabled);
+        assert!(s.get("@ryu/engines").await.unwrap().unwrap().enabled);
         assert!(s.get("com.test.x").await.unwrap().unwrap().enabled);
     }
 
@@ -2246,11 +2246,11 @@ mod tests {
     #[tokio::test]
     async fn uninstall_of_a_builtin_is_refused_so_it_never_resurrects() {
         let s = store();
-        let m = make_manifest("goal", "1.0.0", vec![]);
+        let m = make_manifest("@ryu/goal", "1.0.0", vec![]);
         install_app(&s, &m).await.unwrap();
-        s.set_enabled("goal", &[]).await.unwrap();
+        s.set_enabled("@ryu/goal", &[]).await.unwrap();
 
-        let err = uninstall_app(&s, "goal", std::slice::from_ref(&m), false)
+        let err = uninstall_app(&s, "@ryu/goal", std::slice::from_ref(&m), false)
             .await
             .unwrap_err();
         assert!(
@@ -2258,7 +2258,7 @@ mod tests {
             "got {err:?}"
         );
         // Untouched: refusing the uninstall is exactly what stops the seed re-adding it.
-        assert!(s.get("goal").await.unwrap().unwrap().enabled);
+        assert!(s.get("@ryu/goal").await.unwrap().unwrap().enabled);
     }
 
     /// A Community plugin uninstalls cleanly and can be reinstalled — no tombstone,

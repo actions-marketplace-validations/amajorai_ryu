@@ -444,7 +444,10 @@ mod tests {
     fn message_id_falls_back_on_empty_domain() {
         // `local@` — an empty domain part must not produce `@>`.
         let id = generate_message_id("local@");
-        assert!(id.ends_with("@ryu.local>"), "empty domain → placeholder: {id}");
+        assert!(
+            id.ends_with("@ryu.local>"),
+            "empty domain → placeholder: {id}"
+        );
     }
 
     #[test]
@@ -533,7 +536,10 @@ mod tests {
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("multipart/mixed"), "mixed wrapper: {s}");
         assert!(s.contains("report.pdf"), "attachment filename present");
-        assert!(s.contains("application/pdf"), "attachment content-type present");
+        assert!(
+            s.contains("application/pdf"),
+            "attachment content-type present"
+        );
     }
 
     #[test]
@@ -552,7 +558,10 @@ mod tests {
         });
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("multipart/mixed"), "outer mixed: {s}");
-        assert!(s.contains("multipart/alternative"), "nested alternative: {s}");
+        assert!(
+            s.contains("multipart/alternative"),
+            "nested alternative: {s}"
+        );
         assert!(s.contains("a.txt"), "attachment present");
     }
 

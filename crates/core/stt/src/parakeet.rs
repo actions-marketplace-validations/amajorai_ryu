@@ -146,7 +146,10 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("not built"), "got: {msg}");
         assert!(msg.contains("voice-parakeet"), "got: {msg}");
-        assert!(msg.contains("whisper.cpp"), "should suggest the fallback: {msg}");
+        assert!(
+            msg.contains("whisper.cpp"),
+            "should suggest the fallback: {msg}"
+        );
     }
 
     #[test]

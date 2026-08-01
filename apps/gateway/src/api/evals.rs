@@ -1335,8 +1335,13 @@ mod run_evals_tests {
             &'a self,
             _model: &'a str,
             _body: &'a Value,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<axum::body::Body, ProviderError>> + Send + 'a>>
-        {
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<Output = Result<axum::body::Body, ProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move { Err(ProviderError::Provider("no stream".into())) })
         }
     }
@@ -1360,10 +1365,16 @@ mod run_evals_tests {
             sample_rate: 0.0,
             stream_usage: false,
         };
-        let audit = AuditLogger::new(&AuditConfig { enabled: false, db_path: String::new() })
-            .expect("audit");
-        let mut state = AppState::new_for_test(config, audit, EvalsRunner::new(EvalsConfig::default()));
-        state.providers.register(Arc::new(EvalStub) as Arc<dyn Provider>);
+        let audit = AuditLogger::new(&AuditConfig {
+            enabled: false,
+            db_path: String::new(),
+        })
+        .expect("audit");
+        let mut state =
+            AppState::new_for_test(config, audit, EvalsRunner::new(EvalsConfig::default()));
+        state
+            .providers
+            .register(Arc::new(EvalStub) as Arc<dyn Provider>);
         Arc::new(state)
     }
 

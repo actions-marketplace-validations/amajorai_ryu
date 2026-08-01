@@ -32,12 +32,12 @@ const companion = (
  *  exactly as Core's `/api/plugins/contributions` serves them. */
 const CALENDAR = companion(
 	"app__calendar-companion",
-	"com.ryu.calendar",
+	"@ryu/calendar",
 	"Calendar"
 );
 const TIMELINE = companion(
 	"app__timeline-companion",
-	"com.ryu.timeline",
+	"@ryu/timeline",
 	"Timeline"
 );
 // Labelled "Inbox" but id-slugged "approvals" — the case that proves resolution
@@ -45,7 +45,7 @@ const TIMELINE = companion(
 // alias of `/approvals` in `builtins.ts` precisely because of this gap.
 const APPROVALS = companion(
 	"app__approvals-companion",
-	"com.ryu.approvals",
+	"@ryu/approvals",
 	"Inbox",
 	"Inbox"
 );
@@ -89,7 +89,7 @@ describe("resolveCompanionAlias", () => {
 		const buttons: PluginSidebarButton[] = [
 			{
 				id: "agenda",
-				plugin: "com.ryu.timeline",
+				plugin: "@ryu/timeline",
 				target: "/calendar",
 				title: "Agenda",
 			},
@@ -103,7 +103,7 @@ describe("resolveCompanionAlias", () => {
 		const buttons: PluginSidebarButton[] = [
 			{
 				id: "new-skill",
-				plugin: "com.ryu.calendar",
+				plugin: "@ryu/calendar",
 				target: "/skills/new",
 				title: "New skill",
 			},

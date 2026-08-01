@@ -5,7 +5,7 @@
 //! merge, a scheduler `JobTarget::Quest` arm that called `global_engine()`
 //! directly, and an activity subscribe-loop over the in-process broadcast. Quests
 //! is now an out-of-process app
-//! (`com.ryu.quests`): the `ryu-quests` sidecar owns `quests.db`, the engine, and
+//! (`@ryu/quests`): the `ryu-quests` sidecar owns `quests.db`, the engine, and
 //! the `/api/quests/*` surface — served through the generic ext-proxy
 //! `public_mount`. Core links NO quest code; its three remaining reverse-couplings
 //! reach the sidecar over loopback via this client:

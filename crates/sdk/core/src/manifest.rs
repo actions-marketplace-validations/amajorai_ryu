@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn validate_plugin_id_accepts_reverse_domain_and_bare() {
-        assert!(validate_plugin_id("com.example.research-assistant").is_ok());
+        assert!(validate_plugin_id("@example/research-assistant").is_ok());
         assert!(validate_plugin_id("io.ryu.ghost").is_ok());
         assert!(validate_plugin_id("com.example.my_app").is_ok());
         // Ending the drift: the canonical id rule (shared with Core, whose built-in
@@ -190,7 +190,7 @@ mod tests {
             "version": "1.0.0",
             "runnables": [],
             "requires": {
-                "apps": [{ "id": "com.ryu.spaces", "min_version": "1.0.0" }],
+                "apps": [{ "id": "@ryu/spaces", "min_version": "1.0.0" }],
                 "grants": ["spaces:docs"]
             },
             "targets": ["core", "desktop"]
@@ -198,7 +198,7 @@ mod tests {
 
         let m = PluginManifest::parse_and_validate(raw).expect("parse");
         assert_eq!(m.dependencies().len(), 1);
-        assert_eq!(m.dependencies()[0].id, "com.ryu.spaces");
+        assert_eq!(m.dependencies()[0].id, "@ryu/spaces");
         assert_eq!(m.dependencies()[0].min_version.as_deref(), Some("1.0.0"));
         assert!(m.supports_surface(Surface::Desktop));
         assert!(!m.supports_surface(Surface::Gateway));

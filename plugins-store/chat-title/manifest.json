@@ -1,5 +1,5 @@
 {
-  "id": "chat-title",
+  "id": "@ryu/chat-title",
   "name": "Chat Title",
   "version": "1.0.0",
   "runnables": [],
@@ -8,7 +8,9 @@
     "conversation:set-title",
     "preferences:read"
   ],
-  "activation_events": ["*"],
+  "activation_events": [
+    "*"
+  ],
   "contributes": {
     "settings_tabs": [
       {

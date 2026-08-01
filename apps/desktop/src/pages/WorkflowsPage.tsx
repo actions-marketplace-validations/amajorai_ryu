@@ -3,7 +3,7 @@
 // The natural-language **workflow builder** shell surface.
 //
 // The React Flow canvas (edit nodes/edges, triggers, run, resume, record→workflow)
-// now lives in the sandboxed `com.ryu.workflows` companion app
+// now lives in the sandboxed `@ryu/workflows` companion app
 // (`packages/workflows-app`, mounted at `/workflows/:id` via PluginCompanionPage).
 // The one piece that CANNOT move into the sandbox is the NL builder: it drives
 // Core's `workflow_builder__*` MCP tools through the shell's global Ask Ryu panel

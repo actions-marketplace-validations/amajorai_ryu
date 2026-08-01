@@ -462,7 +462,10 @@ mod tests {
             items_of(&json!({ "connected_accounts": [{"id":"a"}] })).len(),
             1
         );
-        assert_eq!(items_of(&json!({ "accounts": [{"id":"b"},{"id":"c"}] })).len(), 2);
+        assert_eq!(
+            items_of(&json!({ "accounts": [{"id":"b"},{"id":"c"}] })).len(),
+            2
+        );
         // Falls through to items/data and bare arrays too.
         assert_eq!(items_of(&json!({ "items": [{"id":"d"}] })).len(), 1);
         assert_eq!(items_of(&json!([{"id":"e"}])).len(), 1);

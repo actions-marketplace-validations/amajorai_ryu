@@ -6,7 +6,7 @@
 // defaults live in `lib/api/preferences.ts`, not here.
 //
 // The tab is manifest-registered — `contributes.settings_tabs` on
-// `com.ryu.learning`, node scope — and bound to this component by plugin id in
+// `@ryu/learning`, node scope — and bound to this component by plugin id in
 // EntitySettings. The app is default-on because Core's scheduler runs the skill
 // synthesis pass off `learning.skills-enabled` alone (default ON), regardless of
 // the app record — only the HTTP surface is gated — so the consent control has to

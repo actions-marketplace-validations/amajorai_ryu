@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.whiteboard",
+  "id": "@ryu/whiteboard",
   "name": "Whiteboard",
   "version": "1.0.0",
   "runnables": [
@@ -17,7 +17,7 @@
   "requires": {
     "apps": [
       {
-        "id": "com.ryu.spaces"
+        "id": "@ryu/spaces"
       }
     ],
     "grants": ["spaces:docs"]
@@ -37,15 +37,15 @@
           "source": {
             "http": {
               "method": "GET",
-              "path": "/api/apps/com.ryu.whiteboard/docs"
+              "path": "/api/apps/@ryu/whiteboard/docs"
             },
             "items": "documents"
           },
-          "itemTarget": "/spaces/{{item.space_id}}/app/com.ryu.whiteboard/{{item.id}}",
+          "itemTarget": "/spaces/{{item.space_id}}/app/@ryu/whiteboard/{{item.id}}",
           "create": {
             "http": {
               "method": "POST",
-              "path": "/api/apps/com.ryu.whiteboard/docs"
+              "path": "/api/apps/@ryu/whiteboard/docs"
             },
             "targetFrom": "id",
             "label": "New whiteboard"

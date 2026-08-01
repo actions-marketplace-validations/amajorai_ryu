@@ -1,5 +1,5 @@
 // Sidebar data source for the Whiteboard app: the list of whiteboards (Space docs
-// of kind `app:com.ryu.whiteboard` in the "Whiteboard" system space) plus
+// of kind `app:@ryu/whiteboard` in the "Whiteboard" system space) plus
 // create/delete. Mirrors `useCanvasDocs.ts`; reads the app's Space documents.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

@@ -6,7 +6,7 @@
 //! merge, an openapi sub-doc merge, an activity subscribe-loop over the in-process
 //! `MeetingEvent` broadcast, a unified-SSE `meetings` channel, and the hardware
 //! ambient-audio bridge feeding the engine directly. Meetings is now an
-//! out-of-process app (`com.ryu.meetings`): the `ryu-meetings` sidecar owns
+//! out-of-process app (`@ryu/meetings`): the `ryu-meetings` sidecar owns
 //! `meetings.db`, the engine + audio/diarize pipeline, and the `/api/meetings/*`
 //! surface — served to the desktop through the generic ext-proxy `public_mount`.
 //! Core links NO meeting code; its reverse couplings reach the sidecar over loopback

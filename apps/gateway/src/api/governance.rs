@@ -33,7 +33,7 @@ use crate::{error::GatewayError, governance, state::SharedState};
 pub struct ValidateGrantsRequest {
     /// Manifest id of the app requesting the grants. **Load-bearing**, not just
     /// log context: it is the subject of the capability grammar's owner-scoped
-    /// rule (`com.ryu.monitors` may self-grant `monitors:*`). Absent ⇒ the
+    /// rule (`@ryu/monitors` may self-grant `monitors:*`). Absent ⇒ the
     /// grammar falls back to allowlist-only, which is the fail-closed direction.
     #[serde(default)]
     pub app_id: Option<String>,
@@ -206,7 +206,9 @@ mod tests {
         let Json(resp) = validate_grants(State(state()), Json(req)).await.unwrap();
         // Every input grant lands in exactly one bucket.
         assert_eq!(resp.approved.len() + resp.denied.len(), 2);
-        assert!(resp.denied.contains(&"definitely-not-a-real-grant-xyz".to_string()));
+        assert!(resp
+            .denied
+            .contains(&"definitely-not-a-real-grant-xyz".to_string()));
         assert!(!resp.all_approved, "a bogus grant makes all_approved false");
     }
 

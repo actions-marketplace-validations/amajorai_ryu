@@ -297,7 +297,9 @@ impl PromptCacheOptions {
                     }
                     obj.insert("prompt_cache_options".into(), opts);
                     let placed = place_openai_breakpoints(obj, self.effective_breakpoints());
-                    return PromptCacheOutcome::Injected { breakpoints: placed };
+                    return PromptCacheOutcome::Injected {
+                        breakpoints: placed,
+                    };
                 }
                 if applied_session || obj.contains_key("prompt_cache_key") {
                     return PromptCacheOutcome::Injected { breakpoints: 0 };
@@ -310,12 +312,11 @@ impl PromptCacheOptions {
                 PromptCacheOutcome::Injected { breakpoints: 0 }
             }
             (PromptCacheDialect::Anthropic, PromptCacheMode::Explicit) => {
-                let placed = place_anthropic_breakpoints(
-                    obj,
-                    self.effective_breakpoints(),
-                    ttl.as_deref(),
-                );
-                PromptCacheOutcome::Injected { breakpoints: placed }
+                let placed =
+                    place_anthropic_breakpoints(obj, self.effective_breakpoints(), ttl.as_deref());
+                PromptCacheOutcome::Injected {
+                    breakpoints: placed,
+                }
             }
             (_, PromptCacheMode::Off) => PromptCacheOutcome::Disabled,
             (PromptCacheDialect::Automatic, _) => PromptCacheOutcome::AutomaticProvider,
@@ -453,7 +454,10 @@ fn place_openai_breakpoints(obj: &mut serde_json::Map<String, Value>, limit: usi
         };
         if let Some(last) = blocks.last_mut() {
             if let Some(block) = last.as_object_mut() {
-                block.insert("prompt_cache_breakpoint".into(), json!({ "mode": "explicit" }));
+                block.insert(
+                    "prompt_cache_breakpoint".into(),
+                    json!({ "mode": "explicit" }),
+                );
                 placed += 1;
             }
         }
@@ -529,7 +533,10 @@ mod tests {
         let out = opts(PromptCacheMode::Explicit).apply(&mut b, &req("anthropic/claude-sonnet-4"));
         assert_eq!(out, PromptCacheOutcome::Injected { breakpoints: 2 });
         // System message became a block array carrying the breakpoint.
-        assert_eq!(b["messages"][0]["content"][0]["text"], json!("big stable prefix"));
+        assert_eq!(
+            b["messages"][0]["content"][0]["text"],
+            json!("big stable prefix")
+        );
         assert_eq!(
             b["messages"][0]["content"][0]["cache_control"]["type"],
             json!("ephemeral")
@@ -635,7 +642,11 @@ mod tests {
 
     #[test]
     fn auto_caching_families_get_no_marker() {
-        for model in ["deepseek/deepseek-chat", "x-ai/grok-4", "moonshotai/kimi-k2"] {
+        for model in [
+            "deepseek/deepseek-chat",
+            "x-ai/grok-4",
+            "moonshotai/kimi-k2",
+        ] {
             let mut b = body();
             let before = b.clone();
             let out = opts(PromptCacheMode::Auto).apply(&mut b, &req(model));
@@ -647,7 +658,10 @@ mod tests {
     #[test]
     fn dialect_is_derived_from_the_model_family() {
         use PromptCacheDialect::{Anthropic, Automatic, OpenAi};
-        assert_eq!(PromptCacheDialect::for_model("claude-sonnet-4-5"), Anthropic);
+        assert_eq!(
+            PromptCacheDialect::for_model("claude-sonnet-4-5"),
+            Anthropic
+        );
         assert_eq!(
             PromptCacheDialect::for_model("anthropic/claude-opus-4"),
             Anthropic
@@ -778,7 +792,10 @@ mod tests {
     #[test]
     fn mode_parses_the_documented_spellings_and_rejects_typos() {
         assert_eq!(PromptCacheMode::parse("off"), Some(PromptCacheMode::Off));
-        assert_eq!(PromptCacheMode::parse(" AUTO "), Some(PromptCacheMode::Auto));
+        assert_eq!(
+            PromptCacheMode::parse(" AUTO "),
+            Some(PromptCacheMode::Auto)
+        );
         assert_eq!(PromptCacheMode::parse("on"), Some(PromptCacheMode::Auto));
         assert_eq!(
             PromptCacheMode::parse("explicit"),

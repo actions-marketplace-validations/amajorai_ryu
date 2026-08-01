@@ -88,7 +88,10 @@ fn sink_prefs_cache_and_resolution() {
 
     // Any other STARTTLS value ⇒ true (the default-on posture).
     std::env::set_var("RYU_SMTP_STARTTLS", "yes");
-    assert!(resolve_transport().expect("cfg").starttls, "non-0/false ⇒ true");
+    assert!(
+        resolve_transport().expect("cfg").starttls,
+        "non-0/false ⇒ true"
+    );
 
     // Defaults: no port/username/from/starttls env ⇒ port 587, starttls true,
     // and `from` defaults to the username.
@@ -103,11 +106,18 @@ fn sink_prefs_cache_and_resolution() {
 
     // A non-numeric port falls back to 587.
     std::env::set_var("RYU_SMTP_PORT", "not-a-number");
-    assert_eq!(resolve_transport().expect("cfg").port, 587, "bad port ⇒ 587");
+    assert_eq!(
+        resolve_transport().expect("cfg").port,
+        587,
+        "bad port ⇒ 587"
+    );
 
     // With the password hook unwired, env config resolves to nothing (fail-safe).
     set_password_resolver(|| None);
-    assert!(resolve_transport().is_none(), "no password ⇒ disabled even w/ env");
+    assert!(
+        resolve_transport().is_none(),
+        "no password ⇒ disabled even w/ env"
+    );
 
     // Clean up env so it cannot leak into other tests in this binary.
     for key in [

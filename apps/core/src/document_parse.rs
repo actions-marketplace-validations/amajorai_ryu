@@ -97,7 +97,7 @@
 //!
 //! ## Provider-agnostic by construction
 //!
-//! Nothing here names `com.ryu.unstructured`. The provider is resolved through
+//! Nothing here names `@ryu/unstructured`. The provider is resolved through
 //! [`crate::plugins::binding`] exactly like `web.search` or `computer.control`:
 //! user override > sole provider > declared default > lowest id. A second backend is
 //! pure manifest data. The normalized response shape (`status` / `markdown` /

@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.layers",
+  "id": "@ryu/layers",
   "name": "Toolkits",
   "version": "1.0.0",
   "runnables": [],

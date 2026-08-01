@@ -96,6 +96,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"workflows.skills": "workflows.catalogs",
 	"workflows.schedules": "workflows.catalogs",
 	"workflows.composio": "workflows.catalogs",
+	"workflows.hookEvents": "workflows.catalogs",
 	"ghost.recordStart": "ghost.record",
 	"ghost.recordStatus": "ghost.record",
 	"ghost.recordStop": "ghost.record",

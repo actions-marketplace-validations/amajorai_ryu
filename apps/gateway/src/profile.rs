@@ -119,7 +119,12 @@ mod tests {
     fn default_config_path_ends_at_the_gateway_toml() {
         if let Some(path) = default_config_path() {
             assert!(path.ends_with("gateway.toml"));
-            let parent = path.parent().unwrap().file_name().unwrap().to_string_lossy();
+            let parent = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy();
             assert_eq!(parent, format!("ryu{}", suffix()));
         }
     }

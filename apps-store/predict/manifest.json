@@ -1,5 +1,5 @@
 {
-  "id": "predict",
+  "id": "@ryu/predict",
   "name": "Autocomplete",
   "version": "1.0.0",
   "engines": {
@@ -28,7 +28,12 @@
         "view": "predict"
       }
     ],
-    "policies": [{ "id": "policy-predict", "title": "Autocomplete" }]
+    "policies": [
+      {
+        "id": "policy-predict",
+        "title": "Autocomplete"
+      }
+    ]
   },
   "permission_grants": []
 }

@@ -1385,7 +1385,7 @@ impl SpaceStore {
         // idempotent: after the first run no rows match, so re-running each startup is
         // a no-op. `flatten_app_source` handles the reflattened text on next re-embed.
         let _ = conn.execute_batch(
-            "UPDATE documents SET kind = 'app:com.ryu.whiteboard' WHERE kind = 'whiteboard';",
+            "UPDATE documents SET kind = 'app:@ryu/whiteboard' WHERE kind = 'whiteboard';",
         );
 
         // Idempotent migration: a document may belong to a parent document — used by
@@ -6454,7 +6454,10 @@ mod tests {
         // Fixed width: a variable-length id would sort lexicographically wrong the
         // moment the counter gained a digit, which is exactly how a "monotonic" id
         // scheme regresses into a random one without anything failing.
-        assert!(ids.iter().all(|id| id.len() == 32), "ids must be 32 hex chars");
+        assert!(
+            ids.iter().all(|id| id.len() == 32),
+            "ids must be 32 hex chars"
+        );
     }
 
     /// Asserted on the *rebuild* path (`set_retrieval_mode`) so the reported counts,

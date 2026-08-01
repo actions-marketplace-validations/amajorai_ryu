@@ -32,7 +32,7 @@ import {
 function panel(over: Partial<PluginDockPanel> = {}): PluginDockPanel {
 	return {
 		id: "browser",
-		plugin: "com.ryu.browser",
+		plugin: "@ryu/browser",
 		title: "Browser",
 		panel: "native",
 		placement: "both",
@@ -53,7 +53,7 @@ const BUILTIN_KINDS: BuiltinTabKind[] = [
 
 describe("tab kinds", () => {
 	test("a contributed panel's kind is namespaced by its owning plugin", () => {
-		expect(dockTabKind(panel())).toBe("plugin:com.ryu.browser:browser");
+		expect(dockTabKind(panel())).toBe("plugin:@ryu/browser:browser");
 		// Two apps may reuse a panel id without colliding.
 		expect(dockTabKind({ plugin: "com.acme.tools", id: "browser" })).toBe(
 			"plugin:com.acme.tools:browser"
@@ -68,7 +68,7 @@ describe("tab kinds", () => {
 	});
 
 	test("the native registry key is <plugin>/<id>", () => {
-		expect(nativeDockPanelKey(panel())).toBe("com.ryu.browser/browser");
+		expect(nativeDockPanelKey(panel())).toBe("@ryu/browser/browser");
 	});
 });
 
@@ -125,7 +125,7 @@ describe("dockPanelsFor", () => {
 	test("drops entries with no owning plugin or id", () => {
 		const panels = [
 			panel({ plugin: "" }),
-			panel({ id: "", plugin: "com.ryu.simulator" }),
+			panel({ id: "", plugin: "@ryu/simulator" }),
 			panel(),
 		];
 		expect(dockPanelsFor(panels, "bottom")).toHaveLength(1);
@@ -144,11 +144,11 @@ describe("dockPanelsFor", () => {
 describe("findDockPanel", () => {
 	const panels = [
 		panel(),
-		panel({ id: "simulator", plugin: "com.ryu.simulator", title: "Simulator" }),
+		panel({ id: "simulator", plugin: "@ryu/simulator", title: "Simulator" }),
 	];
 
 	test("resolves an open tab back to its contributed panel", () => {
-		const found = findDockPanel(panels, "plugin:com.ryu.simulator:simulator");
+		const found = findDockPanel(panels, "plugin:@ryu/simulator:simulator");
 		expect(found?.title).toBe("Simulator");
 	});
 
@@ -162,7 +162,7 @@ describe("findDockPanel", () => {
 		// The user's workspace still holds the tab; the feed no longer offers it
 		// (Core serves only ENABLED plugins' contributions). The renderer shows a
 		// placeholder — it does not crash, and the tab is not silently repurposed.
-		const kind: DockTabKind = "plugin:com.ryu.browser:browser";
+		const kind: DockTabKind = "plugin:@ryu/browser:browser";
 		expect(findDockPanel([], kind)).toBeUndefined();
 		expect(() => findDockPanel([], kind)).not.toThrow();
 	});
@@ -186,7 +186,7 @@ describe("isPinnableDockTabKind", () => {
 		expect(isPinnableDockTabKind("terminal")).toBe(true);
 		expect(isPinnableDockTabKind("files")).toBe(true);
 		expect(isPinnableDockTabKind("codereview")).toBe(true);
-		expect(isPinnableDockTabKind("plugin:com.ryu.browser:browser")).toBe(true);
+		expect(isPinnableDockTabKind("plugin:@ryu/browser:browser")).toBe(true);
 	});
 
 	test("chat-run panels stay conversation-local", () => {

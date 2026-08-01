@@ -1,5 +1,5 @@
 {
-  "id": "firewall",
+  "id": "@ryu/firewall",
   "name": "Gateway Firewall",
   "version": "1.0.0",
   "engines": {
@@ -20,7 +20,12 @@
     }
   ],
   "contributes": {
-    "policies": [{ "id": "policy-firewall", "title": "Gateway Firewall" }]
+    "policies": [
+      {
+        "id": "policy-firewall",
+        "title": "Gateway Firewall"
+      }
+    ]
   },
   "permission_grants": []
 }

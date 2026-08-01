@@ -41,10 +41,10 @@ import { SettingsSection } from "./shared/settings-items.tsx";
  * settings UI for third-party apps can hang off this same seam later.
  */
 const SETTINGS_VIEWS: Record<string, ComponentType> = {
-	"com.ryu.learning": LearningSettings,
-	"com.ryu.meetings": MeetingsSettings,
-	"com.ryu.memory": MemoryTab,
-	"com.ryu.quests": QuestsSettings,
+	"@ryu/learning": LearningSettings,
+	"@ryu/meetings": MeetingsSettings,
+	"@ryu/memory": MemoryTab,
+	"@ryu/quests": QuestsSettings,
 	dictation: DictationSettings,
 	predict: PredictSettings,
 };

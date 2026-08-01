@@ -30,7 +30,7 @@ import "../../src/index.css";
  * 32 MiB, Core's `MAX_UPLOAD_BYTES`.
  */
 const CAPABILITY = {
-	provider: "com.ryu.markitdown",
+	provider: "@ryu/markitdown",
 	provider_name: "MarkItDown",
 	available: true,
 	extensions: [
@@ -70,15 +70,15 @@ const CAPABILITIES = {
 			capability: "document.parse",
 			providers: [
 				{
-					id: "com.ryu.markitdown",
+					id: "@ryu/markitdown",
 					name: "MarkItDown",
 					version: "0.1.3",
 					is_default: true,
 					serves_verbs: false,
 				},
 			],
-			available: [{ id: "com.ryu.docling", name: "Docling", version: "2.0.0" }],
-			bound: "com.ryu.markitdown",
+			available: [{ id: "@ryu/docling", name: "Docling", version: "2.0.0" }],
+			bound: "@ryu/markitdown",
 			overridden: false,
 			selectable: true,
 		},

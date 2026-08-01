@@ -1,13 +1,17 @@
 {
-  "id": "security-guidance",
+  "id": "@ryu/security-guidance",
   "name": "Security Guidance",
   "version": "1.0.0",
   "engines": {
     "ryu": ">=0.0.1"
   },
   "runnables": [],
-  "permission_grants": ["hook:side-model"],
-  "activation_events": ["*"],
+  "permission_grants": [
+    "hook:side-model"
+  ],
+  "activation_events": [
+    "*"
+  ],
   "contributes": {
     "composer_controls": [
       {
@@ -44,7 +48,9 @@
         "on": "post_assistant_turn",
         "match": {
           "flag": "io.ryu.security-guidance",
-          "commands": ["/security"]
+          "commands": [
+            "/security"
+          ]
         },
         "code_file": "hooks/review.js"
       }

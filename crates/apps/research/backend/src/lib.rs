@@ -191,8 +191,7 @@ mod tests {
     #[tokio::test]
     async fn is_running_now_false_on_non_success_health() {
         use axum::{http::StatusCode, routing::get, Router};
-        let app = Router::new()
-            .route("/health", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let app = Router::new().route("/health", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

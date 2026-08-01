@@ -7,7 +7,7 @@
 //! where that hardcoded its route list, its shared-secret bearer, and its verbatim
 //! body/header pass-through, this module reads the SAME shape from a sidecar's
 //! declarative [`HttpProxySpec`]/[`HostApiSpec`]. Mail itself now rides this engine
-//! (the `com.ryu.mail` app + a `public_mount` — see [`public_mount_routes`]); the
+//! (the `@ryu/mail` app + a `public_mount` — see [`public_mount_routes`]); the
 //! dedicated `sidecar/mail.rs` was retired (Track C).
 //!
 //! ## The two lanes
@@ -363,6 +363,7 @@ async fn ext_proxy(
     Extension(expected_node_token): Extension<Option<String>>,
     req: Request,
 ) -> Response {
+    let (plugin_id, rest) = split_scoped_plugin_path(plugin_id, rest);
     proxy_for_plugin(
         &state,
         &plugin_id,
@@ -384,6 +385,33 @@ async fn ext_root_proxy(
     req: Request,
 ) -> Response {
     proxy_for_plugin(&state, &plugin_id, "/", expected_node_token, req).await
+}
+
+/// Reunite a **scoped** plugin id that the router split across two path segments.
+///
+/// A scoped id contains a slash (`@ryu/meetings`), and `/api/ext/:plugin_id/*rest`
+/// binds `:plugin_id` to ONE segment — so `/api/ext/@ryu/meetings/health` arrives as
+/// `plugin_id = "@ryu"`, `rest = "meetings/health"`. This takes the first segment of
+/// `rest` back as the name half.
+///
+/// Keyed on the leading `@`, which is unambiguous: a legacy flat id can never start
+/// with one ([`crate::plugin_manifest::validate_plugin_id`] permits `@` only as the
+/// scoped marker), so a legacy id keeps its old single-segment routing untouched.
+///
+/// This is why the id needs no percent-encoding anywhere: the slash inside a scoped
+/// id IS a path separator, so it round-trips through a URL as itself. `%2F` would
+/// have been the alternative, and reverse proxies routinely normalize it away.
+fn split_scoped_plugin_path(plugin_id: String, rest: String) -> (String, String) {
+    if !plugin_id.starts_with('@') {
+        return (plugin_id, rest);
+    }
+    match rest.split_once('/') {
+        // `@ryu` + `meetings/health` → `@ryu/meetings` + `health`
+        Some((name, tail)) => (format!("{plugin_id}/{name}"), tail.to_owned()),
+        // `@ryu` + `meetings` → the plugin ROOT of `@ryu/meetings`. `proxy_for_plugin`
+        // maps an empty sub-path to the bare mount the same way `ext_root_proxy` does.
+        None => (format!("{plugin_id}/{rest}"), String::new()),
+    }
 }
 
 /// The public-mount handler: same job as [`ext_proxy`], but the plugin id comes from
@@ -702,7 +730,7 @@ pub(crate) async fn authenticate_sidecar(
     state: &ServerState,
     headers: &HeaderMap,
 ) -> Result<(String, HashSet<String>), (StatusCode, &'static str)> {
-    let plugin_id = headers
+    let presented = headers
         .get(HDR_PLUGIN_ID)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
@@ -716,8 +744,25 @@ pub(crate) async fn authenticate_sidecar(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or((StatusCode::UNAUTHORIZED, "missing bearer"))?;
 
-    let expected = ext_token(node_token().as_deref(), &plugin_id);
-    if !ct_eq(provided, &expected) {
+    // The ONE site that must canonicalize explicitly. Everything else sees only
+    // canonical ids (the manifest loader rewrites them), but this id arrives from
+    // OUTSIDE — a sidecar sends whatever its manifest said when it was spawned, and
+    // an older third-party sidecar still sends its legacy id.
+    //
+    // `ext_token` is a hash over the id string, so the token a sidecar holds was
+    // minted from the id Core used at spawn. Accept EITHER derivation and compare
+    // both in constant time: the legacy id's token (what an un-migrated sidecar
+    // holds) and the canonical one's. Then hand the rest of the pipeline the
+    // canonical id only, so the `app_store` lookup below cannot miss.
+    //
+    // Getting this wrong is silent: the sidecar authenticates as nobody, every host
+    // callback 401s, and the app just quietly stops being able to reach Core.
+    let plugin_id = crate::plugin_manifest::canonical_plugin_id(&presented).to_owned();
+    let expected_canonical = ext_token(node_token().as_deref(), &plugin_id);
+    let matches = ct_eq(provided, &expected_canonical)
+        || (plugin_id != presented
+            && ct_eq(provided, &ext_token(node_token().as_deref(), &presented)));
+    if !matches {
         return Err((StatusCode::UNAUTHORIZED, "bad token"));
     }
 
@@ -960,12 +1005,128 @@ const KERNEL_CAPABILITIES: &[KernelCapability] = &[
         cap: "ghost.recordStop",
         grant: Some("ghost:record"),
     },
+    // Raise an **app event** the calling plugin declared in its manifest
+    // `contributes.hook_events`, fanning it out to every plugin hook and workflow
+    // that subscribes to it. Body `{ event, payload? }` → `{ event, hooks, workflows }`.
+    //
+    // A `grant: None` row, for a stronger reason than `notify.fanout`'s: this
+    // capability is authorized by **ownership**, which is tighter than any grant
+    // could be. `may_emit_event` requires the authenticated caller to be the plugin
+    // the event id is namespaced to AND to have declared that exact event in its own
+    // manifest, so the widest possible abuse of a stolen grant is "an app emits its
+    // own events" — which is the entire intended use. A coarse grant would only
+    // blur that, since holding it could never let an app emit someone else's event
+    // and lacking it would break the app's only way to emit its own.
+    KernelCapability {
+        cap: "events.emit",
+        grant: None,
+    },
 ];
 
 /// The [`KernelCapability`] row for `cap`, or `None` when the name belongs to the
 /// app-provided (binding-registry) half of the broker.
 fn kernel_capability(cap: &str) -> Option<&'static KernelCapability> {
     KERNEL_CAPABILITIES.iter().find(|k| k.cap == cap)
+}
+
+/// Body of the `events.emit` kernel capability.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct EventEmitBody {
+    /// The fully-qualified event id (`<plugin id>#<event name>`). Must be one the
+    /// calling plugin declared — see [`crate::plugin_host::may_emit_event`].
+    event: String,
+    /// The payload delivered to every consumer as `ctx.event`. Forwarded verbatim.
+    #[serde(default)]
+    payload: serde_json::Value,
+    /// Optional conversation this event belongs to, when the emitter knows one (a
+    /// meeting started from a chat, a workflow run kicked off by an agent). Carried
+    /// into [`crate::plugin_host::HookContext::conversation_id`] so a consumer can
+    /// key its own per-conversation state the same way a turn hook does.
+    #[serde(default)]
+    conversation_id: Option<String>,
+}
+
+/// `events.emit` — fan an app event out to its subscribers.
+///
+/// Re-authenticates the caller (the kernel-capability contract: every handler pins
+/// its own caller rather than trusting the broker's dispatch), then refuses anything
+/// the caller does not own. Ownership is the whole gate here, so it is checked
+/// before the payload is even looked at.
+///
+/// Two fan-outs, deliberately different in kind:
+/// - **plugin hooks** run through [`crate::plugin_host::dispatch_app_event`], which
+///   is awaited so the emitter learns how many consumers acted;
+/// - **workflows** are started detached, because a workflow run can take minutes and
+///   an emitter blocking on one would turn "my meeting ended" into a request timeout.
+async fn host_events_emit(
+    state: ServerState,
+    headers: HeaderMap,
+    Json(body): Json<EventEmitBody>,
+) -> Response {
+    let plugin_id = match authenticate_sidecar(&state, &headers).await {
+        Ok((id, _)) => id,
+        Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
+    };
+
+    if !crate::plugin_host::may_emit_event(&state, &plugin_id, &body.event).await {
+        // One message for "not yours" and "not declared" on purpose: distinguishing
+        // them would let a caller probe which events other plugins have declared.
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "plugin may only emit events it declares in contributes.hook_events",
+                "event": body.event,
+            })),
+        )
+            .into_response();
+    }
+
+    let payload_len = serde_json::to_vec(&body.payload).map_or(0, |v| v.len());
+    if payload_len > crate::plugin_host::MAX_EVENT_PAYLOAD_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "error": "event payload too large",
+                "limit_bytes": crate::plugin_host::MAX_EVENT_PAYLOAD_BYTES,
+                "size_bytes": payload_len,
+            })),
+        )
+            .into_response();
+    }
+
+    let ctx = crate::plugin_host::HookContext {
+        conversation_id: body.conversation_id.clone(),
+        event: Some(body.payload.clone()),
+        ..Default::default()
+    };
+    let directives = crate::plugin_host::dispatch_app_event(&state, &body.event, &ctx).await;
+
+    // Surface any `note` a consumer returned. An app event has no chat turn to
+    // attach a note to, so the notify store is the only place it can legibly go —
+    // and it is where a user already looks for "something happened".
+    for directive in &directives {
+        if let crate::plugin_host::HookDirective::Note { text } = directive {
+            crate::plugin_host::notify_app_event_note(&state, &body.event, text).await;
+        }
+    }
+
+    let workflows =
+        crate::workflow::triggers::fire_event_workflows(&body.event, &body.payload).await;
+
+    tracing::info!(
+        event = %body.event,
+        plugin = %plugin_id,
+        hooks = directives.len(),
+        workflows,
+        "events.emit: app event fanned out"
+    );
+
+    Json(json!({
+        "event": body.event,
+        "hooks": directives.len(),
+        "workflows": workflows,
+    }))
+    .into_response()
 }
 
 /// Whether `plugin_id` may exercise `grant`: the same declared∩approved intersection
@@ -1087,6 +1248,7 @@ async fn dispatch_kernel_capability(
         "ghost.recordStop" => {
             crate::recipes_client::host_recipes_record_stop(State(state), headers).await
         }
+        "events.emit" => host_events_emit(state, headers, body!(EventEmitBody)).await,
         // Unreachable: the caller only gets here after `kernel_capability` matched,
         // and that reads the same table this match implements. Fail closed anyway so
         // a future row added to one and not the other cannot 500 or, worse, fall
@@ -1555,7 +1717,7 @@ mod tests {
         };
         use crate::plugin_manifest::ProvidesEntry;
         crate::plugin_manifest::PluginManifest {
-            id: "com.ryu.rag".to_owned(),
+            id: "@ryu/rag".to_owned(),
             name: "RAG".to_owned(),
             version: "1.0.0".to_owned(),
             sidecars: vec![SidecarSpec {
@@ -1601,8 +1763,8 @@ mod tests {
     fn resolve_provider_route_pins_port_mount_and_path() {
         let m = provider_manifest(9099, Some("/api/rag/"));
         let entry = m.provided_capabilities()[0].clone();
-        let route = resolve_provider_route(&m, &entry, "com.ryu.rag").expect("resolves");
-        assert_eq!(route.provider_id, "com.ryu.rag");
+        let route = resolve_provider_route(&m, &entry, "@ryu/rag").expect("resolves");
+        assert_eq!(route.provider_id, "@ryu/rag");
         assert_eq!(route.port, 9099);
         // Mount trailing slash trimmed, route appended.
         assert_eq!(route.upstream_path, "/api/rag/query");
@@ -1615,9 +1777,9 @@ mod tests {
         let mut m = provider_manifest(9099, Some("/api/rag"));
         m.sidecars[0].lazy = true;
         let entry = m.provided_capabilities()[0].clone();
-        let route = resolve_provider_route(&m, &entry, "com.ryu.rag").expect("resolves");
+        let route = resolve_provider_route(&m, &entry, "@ryu/rag").expect("resolves");
         // A lazy provider sidecar is named for the broker to wake before forwarding.
-        assert_eq!(route.wake_name.as_deref(), Some("com.ryu.rag/rag"));
+        assert_eq!(route.wake_name.as_deref(), Some("@ryu/rag/rag"));
     }
 
     #[test]
@@ -1626,7 +1788,7 @@ mod tests {
         // a duplicate route) — the dedup guard drops the second. Build a router over
         // both; if the guard were missing, `Router::merge` would panic here.
         let mut a = provider_manifest(9001, Some("/api/mail"));
-        a.id = "com.ryu.mail".to_owned();
+        a.id = "@ryu/mail".to_owned();
         if let Some(http) = a.sidecars[0].http.as_mut() {
             http.public_mount = Some("/api/mail".to_owned());
         }
@@ -1648,7 +1810,7 @@ mod tests {
         // router exercises the `mount` (no-wildcard) path in `public_mount_routes`
         // — a duplicate exact route (or a trailing-slash form) would panic here.
         let mut a = provider_manifest(9001, Some("/api/x"));
-        a.id = "com.ryu.teams".to_owned();
+        a.id = "@ryu/teams".to_owned();
         if let Some(http) = a.sidecars[0].http.as_mut() {
             http.public_mount = Some("/api/x".to_owned());
             // The list endpoint the sidecar serves at the mount ROOT.
@@ -1727,6 +1889,12 @@ mod tests {
     /// Adding the exact route alongside the catch-all makes both the root and sub-paths
     /// resolve — pinned here at the routing layer (the same two-route shape `ext_routes`
     /// registers), which is where the bug lived.
+    ///
+    /// Uses a FLAT id deliberately: this pins raw axum matching, and a scoped id
+    /// (`@ryu/teams`) spans two segments, so it would exercise the wildcard route
+    /// rather than the bare-root one this regression is about. The scoped root is
+    /// covered by `scoped_plugin_ids_are_reunited_from_two_path_segments`, which
+    /// asserts the empty-tail rejoin.
     #[tokio::test]
     async fn ext_lane_bare_root_routes_with_exact_route() {
         use axum::routing::any;
@@ -1738,7 +1906,7 @@ mod tests {
         let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let p1 = l1.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(l1, only_wild).await.unwrap() });
-        let bare = reqwest::get(format!("http://127.0.0.1:{p1}/api/ext/com.ryu.teams"))
+        let bare = reqwest::get(format!("http://127.0.0.1:{p1}/api/ext/com.acme.app"))
             .await
             .unwrap();
         assert_eq!(bare.status(), reqwest::StatusCode::NOT_FOUND);
@@ -1750,12 +1918,12 @@ mod tests {
         let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let p2 = l2.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(l2, fixed).await.unwrap() });
-        let root = reqwest::get(format!("http://127.0.0.1:{p2}/api/ext/com.ryu.teams"))
+        let root = reqwest::get(format!("http://127.0.0.1:{p2}/api/ext/com.acme.app"))
             .await
             .unwrap();
         assert_eq!(root.status(), reqwest::StatusCode::OK);
         assert_eq!(root.text().await.unwrap(), "ROOT");
-        let sub = reqwest::get(format!("http://127.0.0.1:{p2}/api/ext/com.ryu.teams/42"))
+        let sub = reqwest::get(format!("http://127.0.0.1:{p2}/api/ext/com.acme.app/42"))
             .await
             .unwrap();
         assert_eq!(sub.status(), reqwest::StatusCode::OK);
@@ -1768,8 +1936,8 @@ mod tests {
         let builtins = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let mail = builtins
             .iter()
-            .find(|m| m.id == "com.ryu.mail")
-            .expect("com.ryu.mail is a registered built-in");
+            .find(|m| m.id == "@ryu/mail")
+            .expect("@ryu/mail is a registered built-in");
         let sc = &mail.sidecars[0];
         // Spawned as a local sibling binary (ryu-mail), not a download; the child is
         // told its (profile-shifted) bind port via `port_env` so Core's proxy +
@@ -1874,7 +2042,7 @@ mod tests {
             version: "1.0.0".to_owned(),
             ..Default::default()
         };
-        let resp = resolve_provider_route(&m, &in_proc, "com.ryu.rag").unwrap_err();
+        let resp = resolve_provider_route(&m, &in_proc, "@ryu/rag").unwrap_err();
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
@@ -1926,7 +2094,7 @@ mod tests {
     fn sidecar_port_is_none_for_an_undeclared_sidecar() {
         let m = provider_manifest(9099, None);
         assert!(sidecar_port(std::slice::from_ref(&m), &m.id, "no-such-sidecar").is_none());
-        assert!(sidecar_port(&[], "com.ryu.teams", "ryu-teams").is_none());
+        assert!(sidecar_port(&[], "@ryu/teams", "ryu-teams").is_none());
     }
 
     // ── Kernel capabilities (the retired per-app /api/host/<app>/* rows) ─────────
@@ -1936,6 +2104,42 @@ mod tests {
     /// the real file, not a path this test can silently fail to find.
     fn fixture(raw: &str) -> crate::plugin_manifest::PluginManifest {
         serde_json::from_str(raw).expect("built-in fixture parses")
+    }
+
+    /// A scoped id spans two router segments; a legacy id must be untouched.
+    ///
+    /// This is the whole reason the migration needs no `%2F` anywhere: the slash in
+    /// `@ryu/meetings` is a real path separator, so the id round-trips through a URL
+    /// as itself.
+    #[test]
+    fn scoped_plugin_ids_are_reunited_from_two_path_segments() {
+        // `/api/ext/@ryu/meetings/health`
+        assert_eq!(
+            split_scoped_plugin_path("@ryu".into(), "meetings/health".into()),
+            ("@ryu/meetings".to_owned(), "health".to_owned())
+        );
+        // Deeper tails keep their shape.
+        assert_eq!(
+            split_scoped_plugin_path("@ryu".into(), "meetings/a/b/c".into()),
+            ("@ryu/meetings".to_owned(), "a/b/c".to_owned())
+        );
+        // `/api/ext/@ryu/meetings` — the plugin root, empty tail.
+        assert_eq!(
+            split_scoped_plugin_path("@ryu".into(), "meetings".into()),
+            ("@ryu/meetings".to_owned(), String::new())
+        );
+        // A legacy flat id routes exactly as before — no `@`, no rejoin. Uses a
+        // SYNTHETIC third-party id on purpose: every first-party legacy id now
+        // canonicalizes to a scoped one, and this branch is about the ids that never
+        // will (an un-migrated third-party plugin).
+        assert_eq!(
+            split_scoped_plugin_path("com.acme.app".into(), "health".into()),
+            ("com.acme.app".to_owned(), "health".to_owned())
+        );
+        assert_eq!(
+            split_scoped_plugin_path("legacy-plugin".into(), "a/b".into()),
+            ("legacy-plugin".to_owned(), "a/b".to_owned())
+        );
     }
 
     /// Every kernel capability resolves from the table, and an app-provided name does
@@ -1957,15 +2161,19 @@ mod tests {
         assert!(kernel_capability("").is_none());
     }
 
-    /// Pin the table to the seven capabilities that replaced the seven retired
-    /// `/api/host/<app>/*` routes.
+    /// Pin the exact contents of the kernel-capability table.
     ///
     /// `dispatch_kernel_capability` implements the same names in a `match`, and the two
     /// can drift: a row added here with no arm falls to the fail-closed `_ => 501`, which
     /// is safe but silently dead. Pinning the list forces whoever adds a row to touch
     /// this test, which points at the match.
+    ///
+    /// The first seven are the capabilities that replaced the seven retired
+    /// `/api/host/<app>/*` routes. `events.emit` is the first row that is NOT a
+    /// retired callback but a new host primitive — the app-event emit seam. That it
+    /// arrived as a table row rather than a route is the point of the table.
     #[test]
-    fn kernel_capability_table_is_the_seven_retired_callbacks() {
+    fn kernel_capability_table_is_pinned() {
         let names: Vec<&str> = KERNEL_CAPABILITIES.iter().map(|k| k.cap).collect();
         assert_eq!(
             names,
@@ -1977,6 +2185,7 @@ mod tests {
                 "ghost.recordStart",
                 "ghost.recordStatus",
                 "ghost.recordStop",
+                "events.emit",
             ],
             "KERNEL_CAPABILITIES changed — add the matching arm to \
              `dispatch_kernel_capability` (a missing arm 501s) and update this list"

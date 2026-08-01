@@ -1840,7 +1840,7 @@ mod tests {
         }
     }
 
-    /// The 404-swallowing case, which is what left `com.ryu.browser` showing a
+    /// The 404-swallowing case, which is what left `@ryu/browser` showing a
     /// permanent "502 sidecar unreachable": when nothing resolves the command, the
     /// reason is RECORDED (not just warned) and it names the exact release asset this
     /// platform needs, so an operator can diff it against what CI publishes.

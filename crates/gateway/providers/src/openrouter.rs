@@ -441,7 +441,11 @@ mod tests {
 
     #[test]
     fn next_key_rotates_and_primary_is_first() {
-        let p = provider_with("http://x".into(), vec!["a", "b"], OpenRouterOptions::default());
+        let p = provider_with(
+            "http://x".into(),
+            vec!["a", "b"],
+            OpenRouterOptions::default(),
+        );
         assert_eq!(p.primary_key(), "a");
         assert_eq!(p.next_key(), "a");
         assert_eq!(p.next_key(), "b");
@@ -481,7 +485,10 @@ mod tests {
         assert_eq!(out["id"], json!("or"));
 
         let reqs = server.requests();
-        assert_eq!(reqs[0].header("http-referer").as_deref(), Some("https://ryu.example"));
+        assert_eq!(
+            reqs[0].header("http-referer").as_deref(),
+            Some("https://ryu.example")
+        );
         assert_eq!(reqs[0].header("x-title").as_deref(), Some("Ryu"));
         assert_eq!(
             reqs[0].header("authorization").as_deref(),
@@ -516,10 +523,15 @@ mod tests {
                 { "role": "user", "content": "hi" }
             ]
         });
-        p.complete("anthropic/claude-sonnet-4", &body).await.unwrap();
+        p.complete("anthropic/claude-sonnet-4", &body)
+            .await
+            .unwrap();
 
         let sent = server.requests()[0].json();
-        assert_eq!(sent["cache_control"], json!({ "type": "ephemeral", "ttl": "1h" }));
+        assert_eq!(
+            sent["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
         assert_eq!(sent["session_id"], json!("conv-abc"));
         assert_eq!(
             sent["messages"][0]["content"][0]["cache_control"]["type"],
@@ -559,10 +571,16 @@ mod tests {
     #[tokio::test]
     async fn complete_error_does_not_leak_key() {
         const SECRET: &str = "sk-or-SECRET-abcdef";
-        let server =
-            MockServer::always(MockResponse::json(402, r#"{"error":{"message":"no credits"}}"#))
-                .await;
-        let p = provider_with(server.base_url().to_string(), vec![SECRET], Default::default());
+        let server = MockServer::always(MockResponse::json(
+            402,
+            r#"{"error":{"message":"no credits"}}"#,
+        ))
+        .await;
+        let p = provider_with(
+            server.base_url().to_string(),
+            vec![SECRET],
+            Default::default(),
+        );
         let err = p
             .complete("m", &json!({ "messages": [] }))
             .await
@@ -580,7 +598,10 @@ mod tests {
         .await;
         let p = provider_with(server.base_url().to_string(), vec!["k"], Default::default());
         let out = p
-            .generate_image("google/gemini-2.5-flash-image", &json!({ "prompt": "a fox" }))
+            .generate_image(
+                "google/gemini-2.5-flash-image",
+                &json!({ "prompt": "a fox" }),
+            )
             .await
             .unwrap();
         assert_eq!(out["data"][0]["url"], json!("data:image/png;base64,ZZ"));

@@ -468,7 +468,10 @@ mod tests {
         assert_eq!(parsed.requests_per_minute, defaults.requests_per_minute);
         assert_eq!(parsed.max_burst_per_second, defaults.max_burst_per_second);
         assert!(parsed.tokens_per_minute.is_some(), "must not be unlimited");
-        assert!(parsed.requests_per_minute.is_some(), "must not be unlimited");
+        assert!(
+            parsed.requests_per_minute.is_some(),
+            "must not be unlimited"
+        );
     }
 
     #[test]

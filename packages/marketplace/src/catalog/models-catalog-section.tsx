@@ -1507,7 +1507,7 @@ function ModelDetailPanel({
 						</p>
 					</div>
 					<Button
-						onClick={() => host.navigate?.("/plugin/com.ryu.finetune")}
+						onClick={() => host.navigate?.("/plugin/@ryu/finetune")}
 						size="sm"
 						variant="outline"
 					>

@@ -413,6 +413,19 @@ export interface PluginWidgetApp {
 	widget_count: number;
 }
 
+/** One app event an enabled app declares it emits, as served (and tagged with its
+ *  owning `plugin` id) by `GET /api/plugins/contributions`. */
+export interface PluginHookEvent {
+	description?: string;
+	/** Fully-qualified event id: `<owning plugin id>#<event name>`. This exact string
+	 *  is what a workflow's `event` trigger or a hook's `on` must name. */
+	id: string;
+	payload_example?: Record<string, unknown>;
+	/** The owning plugin id, stamped server-side. */
+	plugin?: string;
+	title: string;
+}
+
 export interface PluginContributions {
 	/** Messaging-channel adapters an enabled plugin makes available. */
 	channels: PluginChannel[];
@@ -422,6 +435,11 @@ export interface PluginContributions {
 	/** App-registered workspace dock panels (bottom/right dock tabs), tagged with
 	 *  `plugin`. The declarative replacement for the shell's closed `TabKind` union. */
 	dock_panels: PluginDockPanel[];
+	/** App events enabled apps EMIT (`contributes.hook_events`), tagged with the
+	 *  owning `plugin` id. The provider half of the hook system, whose consumer half
+	 *  is {@link PluginContributions.turn_hooks}: this is the catalog a user picks
+	 *  from when subscribing a workflow or a hook to "when X happens". */
+	hook_events: PluginHookEvent[];
 	settings_tabs: Record<string, unknown>[];
 	/** App-registered sidebar buttons (single nav rows), tagged with `plugin`. */
 	sidebar_buttons: PluginSidebarButton[];
@@ -646,6 +664,7 @@ export async function getPluginContributions(
 		settings_tabs: json.settings_tabs ?? [],
 		slash_commands: json.slash_commands ?? [],
 		turn_hooks: json.turn_hooks ?? [],
+		hook_events: json.hook_events ?? [],
 		views: json.views ?? [],
 		sidebar_sections: json.sidebar_sections ?? [],
 		sidebar_buttons: json.sidebar_buttons ?? [],
@@ -855,7 +874,7 @@ export async function pluginHostInvokeStream(
 
 /**
  * `POST /api/plugins/:id/host/stream` (method `finetune.stream`) — subscribe to a
- * fine-tune run's live progress SSE for the `com.ryu.finetune` app. Unlike
+ * fine-tune run's live progress SSE for the `@ryu/finetune` app. Unlike
  * {@link pluginHostInvokeStream} (which parses the chat reply stream), this forwards
  * each raw SSE `data:` payload VERBATIM to `onFrame` — the sidecar's progress frames
  * (`snapshot`/`progress`/`state`/`end`, each a JSON object with step/loss/state). The

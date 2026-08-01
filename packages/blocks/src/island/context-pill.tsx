@@ -37,22 +37,33 @@ function titleCaseAppName(value: string): string {
 
 export function ContextPill({
 	context = DEGRADED_CONTEXT,
+	wrap = false,
 }: {
 	context?: IslandActiveContext;
+	/**
+	 * Let a long app name wrap onto more lines instead of truncating to one. Only
+	 * safe on a surface whose height tracks its content (the desktop island pill);
+	 * fixed-height hosts keep the default single truncated line.
+	 */
+	wrap?: boolean;
 }) {
 	const hasLiveApp = context.live && context.appName !== null;
 
 	if (hasLiveApp) {
 		return (
 			<div
-				className="flex items-center gap-2 text-current"
+				className={`flex gap-2 text-current ${wrap ? "items-start" : "items-center"}`}
 				title={context.appName ?? ""}
 			>
-				<span className="relative flex size-2 shrink-0">
+				<span
+					className={`relative flex size-2 shrink-0 ${wrap ? "mt-1.5" : ""}`}
+				>
 					<span className="absolute inline-flex size-full animate-ping rounded-full bg-sky-400 opacity-70" />
 					<span className="relative inline-flex size-2 rounded-full bg-sky-400" />
 				</span>
-				<span className="max-w-[150px] truncate font-medium text-sm">
+				<span
+					className={`font-medium text-sm ${wrap ? "min-w-0 break-words" : "max-w-[150px] truncate"}`}
+				>
 					{titleCaseAppName(context.appName ?? "")}
 				</span>
 			</div>

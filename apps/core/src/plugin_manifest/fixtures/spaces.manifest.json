@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.spaces",
+  "id": "@ryu/spaces",
   "name": "Spaces",
   "version": "1.0.0",
   "description": "Document Spaces: the shared store every note, doc, and RAG-indexed file lands in. The dependency target other apps declare when they own Space documents.",

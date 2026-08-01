@@ -1,7 +1,7 @@
 // apps/desktop/src/lib/api/warmup.ts
 //
 // The composites behind the `warmup:crud` bridge capability, for the
-// `com.ryu.warmup` companion. Following the monitors/calendar pattern, the host
+// `@ryu/warmup` companion. Following the monitors/calendar pattern, the host
 // holds the node token and drives Core's existing endpoints; the sandboxed frame
 // never fetches anything itself.
 //
@@ -24,7 +24,7 @@ import {
 import { fetchAgentUsage, supportsUsage } from "./usage.ts";
 
 /** The manifest id stamped on every job this app creates. */
-export const WARMUP_APP_ID = "com.ryu.warmup";
+export const WARMUP_APP_ID = "@ryu/warmup";
 
 /** One model an agent advertises (the ACP `availableModels` entry). */
 export interface WarmupModel {

@@ -26,6 +26,16 @@
 //! `/v1/chat/completions`), so it is firewalled / DLP'd / budgeted / audited —
 //! *what is allowed and measured* stays in the Gateway.
 //!
+//! ## App events
+//! Two outcomes are published as app events (declared in this app's manifest
+//! `contributes.hook_events`, raised through `ryu_app_events`): a resolved fix
+//! (`@ryu/healing#diagnosis.ready`) and the moment healing gives up on a source
+//! (`@ryu/healing#attempts.exhausted`). They are raised where the outcome is
+//! *decided* — here, in the process running the engine — rather than where the
+//! verdict is applied, because applying is the host's half and a Core-side action
+//! is not something this crate can observe. Emitting is best-effort: no subscriber
+//! can change or delay what the heal does.
+//!
 //! ## Loop prevention (five layers)
 //! 1. **Never heal a heal**: every heal re-run uses a `healrun_`-prefixed
 //!    conversation id; a failed event on such an id is dropped ([`decide_heal`]).
@@ -106,6 +116,19 @@ pub const HEALING_COOLDOWN_SECS_PREF: &str = "healing.cooldown-secs";
 pub const HEALING_DIAGNOSE_MODEL_PREF: &str = "healing.diagnose-model";
 /// reasoning_effort for the diagnosis call.
 pub const HEALING_DIAGNOSE_EFFORT_PREF: &str = "healing.diagnose-effort";
+
+// ---------------------------------------------------------------------------
+// App events (declared in this app's manifest `contributes.hook_events`)
+// ---------------------------------------------------------------------------
+
+/// This app's plugin id — the namespace half of every event id below, and the
+/// identity the emitter presents to Core. Must equal `manifest.json`'s `id`; Core
+/// rejects an emit whose namespace is not the calling plugin.
+const PLUGIN_ID: &str = "@ryu/healing";
+/// A failed run was diagnosed and a fix resolved (before it is applied or queued).
+const EVENT_DIAGNOSIS_READY: &str = "@ryu/healing#diagnosis.ready";
+/// The per-source attempt cap was hit and healing gave up on that source.
+const EVENT_ATTEMPTS_EXHAUSTED: &str = "@ryu/healing#attempts.exhausted";
 
 const DEFAULT_MAX_ATTEMPTS: u32 = 2;
 const DEFAULT_COOLDOWN_SECS: i64 = 60;
@@ -246,6 +269,18 @@ pub enum HealSource {
     Workflow,
 }
 
+impl HealSource {
+    /// The `kind` discriminant carried in this app's events. A consumer branches on
+    /// it because the two kinds heal differently — an agent gets a rewritten
+    /// instruction, a workflow is retried from scratch.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Agent { .. } => "agent",
+            Self::Workflow => "workflow",
+        }
+    }
+}
+
 fn attempts_path(data_dir: &Path) -> PathBuf {
     data_dir.join("healing-attempts.json")
 }
@@ -383,6 +418,9 @@ pub struct HealEngine {
     host: Arc<dyn HealingHost>,
     attempts_path: PathBuf,
     attempts: Arc<Mutex<HashMap<String, HealAttempt>>>,
+    /// Raises this app's declared events. Built once here and cloned with the
+    /// engine (it is an `Arc` inside); a no-op when the process is not Core-hosted.
+    events: ryu_app_events::EventEmitter,
 }
 
 static ENGINE: OnceLock<HealEngine> = OnceLock::new();
@@ -406,6 +444,7 @@ impl HealEngine {
             // Load persisted per-source caps so a restart doesn't reset them.
             attempts: Arc::new(Mutex::new(load_attempts(&attempts_path))),
             attempts_path,
+            events: ryu_app_events::EventEmitter::from_env(PLUGIN_ID),
         }
     }
 
@@ -490,13 +529,33 @@ impl HealEngine {
             HealDecision::Skip(reason) => HealVerdict::Skip {
                 reason: reason.to_owned(),
             },
-            HealDecision::GiveUp => HealVerdict::QueueExhausted {
-                source_id: source_id.to_owned(),
-                note: format!(
+            HealDecision::GiveUp => {
+                let note = format!(
                     "It failed after {} auto-fix attempt(s). Review it manually.",
                     cfg.max_attempts
-                ),
-            },
+                );
+                // Giving up is the one heal outcome nothing downstream ever hears
+                // about otherwise: the terminal inbox item is the last thing this
+                // engine does for the source, and `decide_heal` drops every later
+                // failure on it as "already given up". Announcing it here is what
+                // lets a user hang a real escalation (page someone, open an issue)
+                // off the moment automation stopped trying.
+                self.events
+                    .emit(
+                        EVENT_ATTEMPTS_EXHAUSTED,
+                        serde_json::json!({
+                            "source_id": source_id,
+                            "kind": source.kind(),
+                            "attempts": cfg.max_attempts,
+                            "note": note,
+                        }),
+                    )
+                    .await;
+                HealVerdict::QueueExhausted {
+                    source_id: source_id.to_owned(),
+                    note,
+                }
+            }
             HealDecision::Heal => {
                 self.diagnose_verdict(source_id, source, &instruction, &failure)
                     .await
@@ -518,6 +577,7 @@ impl HealEngine {
             };
         };
         let auto = resolve_auto_decide(&*self.host).await;
+        let kind = source.kind();
         match source {
             HealSource::Agent { agent_id } => {
                 let corrected = if corrected.trim().is_empty() {
@@ -525,6 +585,19 @@ impl HealEngine {
                 } else {
                     corrected
                 };
+                // Announce the diagnosis itself — the artifact this app exists to
+                // produce — BEFORE the verdict splits into auto-apply vs. inbox, so
+                // a consumer sees every fix rather than only the ones a human
+                // happened to open. `auto_apply` carries the split it doesn't see.
+                self.emit_diagnosis(
+                    source_id,
+                    kind,
+                    agent_id.as_deref(),
+                    &diagnosis,
+                    Some(&corrected),
+                    auto,
+                )
+                .await;
                 if auto {
                     HealVerdict::RerunAgent {
                         agent_id,
@@ -540,6 +613,11 @@ impl HealEngine {
                 }
             }
             HealSource::Workflow => {
+                // No `corrected_prompt`: a workflow is retried from scratch, so the
+                // model's rewritten instruction is discarded rather than applied.
+                // Publishing it would advertise a field nothing acts on.
+                self.emit_diagnosis(source_id, kind, None, &diagnosis, None, auto)
+                    .await;
                 if auto {
                     HealVerdict::RerunWorkflow {
                         source_id: source_id.to_owned(),
@@ -552,6 +630,33 @@ impl HealEngine {
                 }
             }
         }
+    }
+
+    /// Raise `@ryu/healing#diagnosis.ready`. Best-effort by construction (see
+    /// `ryu_app_events`): a subscriber that is slow or absent must never change what
+    /// the heal itself decides to do.
+    async fn emit_diagnosis(
+        &self,
+        source_id: &str,
+        kind: &str,
+        agent_id: Option<&str>,
+        diagnosis: &str,
+        corrected: Option<&str>,
+        auto_apply: bool,
+    ) {
+        self.events
+            .emit(
+                EVENT_DIAGNOSIS_READY,
+                serde_json::json!({
+                    "source_id": source_id,
+                    "kind": kind,
+                    "agent_id": agent_id,
+                    "diagnosis": diagnosis,
+                    "corrected_prompt": corrected,
+                    "auto_apply": auto_apply,
+                }),
+            )
+            .await;
     }
 
     async fn diagnose(&self, instruction: &str, failure: &str) -> Option<(String, String)> {
@@ -746,10 +851,9 @@ pub(crate) mod test_support {
             diagnosis: &str,
             corrected: String,
         ) {
-            self.actions
-                .lock()
-                .unwrap()
-                .push(format!("queue_fix:{source_id}:{agent_id:?}:{diagnosis}:{corrected}"));
+            self.actions.lock().unwrap().push(format!(
+                "queue_fix:{source_id}:{agent_id:?}:{diagnosis}:{corrected}"
+            ));
         }
         async fn queue_heal_workflow(&self, source_id: &str, diagnosis: &str) {
             self.actions
@@ -960,14 +1064,18 @@ mod tests {
     async fn resolve_max_attempts_default_and_validation() {
         assert_eq!(resolve_max_attempts(&MockHost::new(tmp_dir())).await, 2);
         assert_eq!(
-            resolve_max_attempts(&MockHost::new(tmp_dir()).with_pref(HEALING_MAX_ATTEMPTS_PREF, "5"))
-                .await,
+            resolve_max_attempts(
+                &MockHost::new(tmp_dir()).with_pref(HEALING_MAX_ATTEMPTS_PREF, "5")
+            )
+            .await,
             5
         );
         // Zero is rejected (filter n>0) -> falls back to default.
         assert_eq!(
-            resolve_max_attempts(&MockHost::new(tmp_dir()).with_pref(HEALING_MAX_ATTEMPTS_PREF, "0"))
-                .await,
+            resolve_max_attempts(
+                &MockHost::new(tmp_dir()).with_pref(HEALING_MAX_ATTEMPTS_PREF, "0")
+            )
+            .await,
             2
         );
         // Non-numeric -> default.
@@ -1116,7 +1224,10 @@ mod tests {
     #[test]
     fn extract_json_object_handles_escaped_quote_in_string() {
         let v = extract_json_object(r#"{"a":"he said \"hi\" }"}"#).expect("json");
-        assert_eq!(v.get("a").and_then(Value::as_str), Some(r#"he said "hi" }"#));
+        assert_eq!(
+            v.get("a").and_then(Value::as_str),
+            Some(r#"he said "hi" }"#)
+        );
     }
 
     // --- attempts persistence (load/save) -----------------------------------
@@ -1157,13 +1268,7 @@ mod tests {
     #[tokio::test]
     async fn apply_verdict_skip_records_nothing() {
         let host = MockHost::new(tmp_dir());
-        apply_verdict(
-            &host,
-            HealVerdict::Skip {
-                reason: "x".into(),
-            },
-        )
-        .await;
+        apply_verdict(&host, HealVerdict::Skip { reason: "x".into() }).await;
         assert!(host.actions().is_empty());
     }
 
@@ -1278,7 +1383,12 @@ mod tests {
                 "boom".into(),
             )
             .await;
-        assert_eq!(v, HealVerdict::Skip { reason: "healing disabled".into() });
+        assert_eq!(
+            v,
+            HealVerdict::Skip {
+                reason: "healing disabled".into()
+            }
+        );
     }
 
     #[tokio::test]
@@ -1336,9 +1446,7 @@ mod tests {
 
     #[tokio::test]
     async fn evaluate_agent_auto_applies_rerun() {
-        let host = Arc::new(
-            MockHost::new(tmp_dir()).with_pref(HEALING_AUTO_DECIDE_PREF, "true"),
-        );
+        let host = Arc::new(MockHost::new(tmp_dir()).with_pref(HEALING_AUTO_DECIDE_PREF, "true"));
         host.set_reply(Ok(valid_diagnosis("x", "corrected prompt")));
         let engine = HealEngine::new(host);
         let v = engine
@@ -1428,9 +1536,7 @@ mod tests {
         );
 
         // Auto ON -> RerunWorkflow.
-        let host2 = Arc::new(
-            MockHost::new(tmp_dir()).with_pref(HEALING_AUTO_DECIDE_PREF, "true"),
-        );
+        let host2 = Arc::new(MockHost::new(tmp_dir()).with_pref(HEALING_AUTO_DECIDE_PREF, "true"));
         host2.set_reply(Ok(valid_diagnosis("wf broke", "n/a")));
         let engine2 = HealEngine::new(host2);
         let v2 = engine2
@@ -1466,7 +1572,11 @@ mod tests {
         // The attempt was still recorded (count increments on the decision to Heal,
         // before diagnosis runs).
         assert_eq!(
-            engine.attempt_snapshot().await.get("conv-e").map(|a| a.count),
+            engine
+                .attempt_snapshot()
+                .await
+                .get("conv-e")
+                .map(|a| a.count),
             Some(1)
         );
     }
@@ -1522,8 +1632,17 @@ mod tests {
                 "f".into(),
             )
             .await;
-        assert!(matches!(v2, HealVerdict::QueueExhausted { source_id, .. } if source_id == "conv-g"));
-        assert!(engine.attempt_snapshot().await.get("conv-g").unwrap().given_up);
+        assert!(
+            matches!(v2, HealVerdict::QueueExhausted { source_id, .. } if source_id == "conv-g")
+        );
+        assert!(
+            engine
+                .attempt_snapshot()
+                .await
+                .get("conv-g")
+                .unwrap()
+                .given_up
+        );
 
         // 3rd -> already given up -> Skip.
         let v3 = engine
@@ -1544,9 +1663,7 @@ mod tests {
 
     #[tokio::test]
     async fn report_failure_applies_the_verdict() {
-        let host = Arc::new(
-            MockHost::new(tmp_dir()).with_pref(HEALING_AUTO_DECIDE_PREF, "true"),
-        );
+        let host = Arc::new(MockHost::new(tmp_dir()).with_pref(HEALING_AUTO_DECIDE_PREF, "true"));
         host.set_reply(Ok(valid_diagnosis("d", "fixed prompt")));
         let engine = HealEngine::new(host.clone());
         engine
@@ -1562,6 +1679,9 @@ mod tests {
         // report_failure -> evaluate -> apply_verdict -> host.rerun_agent.
         let actions = host.actions();
         assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0], "rerun_agent:Some(\"ag\"):heal=true:fixed prompt");
+        assert_eq!(
+            actions[0],
+            "rerun_agent:Some(\"ag\"):heal=true:fixed prompt"
+        );
     }
 }

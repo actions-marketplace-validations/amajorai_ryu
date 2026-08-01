@@ -284,7 +284,10 @@ mod tests {
     fn str_field_first_nonempty_and_meta_fallback() {
         let item = json!({ "slug": "", "name": "GitHub", "meta": { "logo": "x.png" } });
         // Empty candidate is skipped in favour of the next key.
-        assert_eq!(str_field(&item, &["slug", "name"]).as_deref(), Some("GitHub"));
+        assert_eq!(
+            str_field(&item, &["slug", "name"]).as_deref(),
+            Some("GitHub")
+        );
         // A field only present under `meta` is found.
         assert_eq!(str_field(&item, &["logo"]).as_deref(), Some("x.png"));
         // No match anywhere → None.

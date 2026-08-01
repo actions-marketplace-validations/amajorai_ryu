@@ -139,22 +139,22 @@ export type Capability =
 	// Split from `media.generate` so a transcribe-only app need not also unlock
 	// generation (least privilege).
 	| "media.transcribe"
-	// Fine-tune runs (grant `finetune:runs`) — the `com.ryu.finetune` app drives
+	// Fine-tune runs (grant `finetune:runs`) — the `@ryu/finetune` app drives
 	// training runs against Core's orchestration + durable job store. One capability
 	// gates the whole `finetune.*` family (unary calls + the live progress stream).
 	| "finetune.runs"
-	// Website monitors (grant `monitors:crud`) — the `com.ryu.monitors` app drives
+	// Website monitors (grant `monitors:crud`) — the `@ryu/monitors` app drives
 	// Core's `/api/monitors/*` orchestration (list/create/update/delete/run +
 	// snapshots/alerts). One capability gates the whole `monitors.*` family. Unlike
 	// the bridge-backed families, the host services call the existing Core monitors
 	// API directly (the media pattern) since `/api/monitors/*` is already gated on
-	// the same `com.ryu.monitors` enabled bit — no new Core bridge verb is needed.
+	// the same `@ryu/monitors` enabled bit — no new Core bridge verb is needed.
 	| "monitors.crud"
 	// Workflows (grants `workflows:crud` / `workflows:runstate` / `workflows:catalogs`)
-	// — the `com.ryu.workflows` app drives Core's DAG workflow engine from its
+	// — the `@ryu/workflows` app drives Core's DAG workflow engine from its
 	// sandboxed companion frame. Like monitors these are host-DIRECT families (the
 	// host holds the node token and calls the existing `/workflows*` + `/api/workflows/
-	// catalog*` API, already gated on the `com.ryu.workflows` enabled bit — no new Core
+	// catalog*` API, already gated on the `@ryu/workflows` enabled bit — no new Core
 	// bridge verb). Split into three least-privilege caps: `crud` (definition CRUD +
 	// versions + templates + webhook URL), `runstate` (run + poll + resume), and
 	// `catalogs` (the read-only node-config pickers: agents/apps/mcp/skills/schedules/
@@ -168,13 +168,13 @@ export type Capability =
 	// Core's `/api/recipes/*`. Split from `workflows.*` so a workflow app that does not
 	// use ghost capture need not hold it (least privilege).
 	| "ghost.record"
-	// Inbound webhook registry (grant `webhooks:crud`) — the `com.ryu.webhooks` app
+	// Inbound webhook registry (grant `webhooks:crud`) — the `@ryu/webhooks` app
 	// renders Core's `/api/webhooks` + `/api/webhook-ingress/status` reads from its
 	// sandboxed companion frame. Host-direct (the monitors pattern): the host holds the
 	// node token and calls the existing read-only registry endpoints. One capability
 	// gates the whole (read-only) `webhooks.*` family.
 	| "webhooks.crud"
-	// Quests (grant `quests:crud`) — the `com.ryu.quests` app drives Core's
+	// Quests (grant `quests:crud`) — the `@ryu/quests` app drives Core's
 	// `/api/quests/*` auto-detecting-todo orchestration (list/create/update/delete +
 	// complete/dismiss + suggestion accept/dismiss + judge) from its sandboxed companion
 	// frame. Host-direct (the monitors pattern): the host holds the node token and calls
@@ -182,14 +182,14 @@ export type Capability =
 	// including the `quests.openDetectionSettings` shell-navigation verb that opens the
 	// Settings dialog at the Quests (detection) tab.
 	| "quests.crud"
-	// Activity feed (grant `activity:read`) — the `com.ryu.activity` app renders Core's
+	// Activity feed (grant `activity:read`) — the `@ryu/activity` app renders Core's
 	// read-only unified feed (`GET /api/activity`) from its sandboxed companion frame.
 	// Host-direct (the monitors pattern): the host holds the node token and calls the
 	// existing `/api/activity` read. One capability gates the whole (read-only)
 	// `activity.*` family, including the `activity.openSession` shell-navigation verb
 	// that opens the chat tab for an item's session id.
 	| "activity.read"
-	// Timeline (grant `timeline:read`) — the `com.ryu.timeline` app renders the
+	// Timeline (grant `timeline:read`) — the `@ryu/timeline` app renders the
 	// CapCut-style activity replay scrubber (Shadow's captured lanes + keyframe
 	// preview + Dayflow work journal) from its sandboxed companion frame. Host-direct
 	// (the monitors pattern), but device-LOCAL: Shadow (:3030) is pinned to the
@@ -199,16 +199,16 @@ export type Capability =
 	// `timeline.frame` keyframe→data-URL verb (CSP `img-src data: blob:`) and the
 	// `timeline.openReview`/`openSettings` shell-navigation verbs.
 	| "timeline.read"
-	// Agent Inboxes (grant `mail:crud`) — the `com.ryu.mail` app drives Core's
+	// Agent Inboxes (grant `mail:crud`) — the `@ryu/mail` app drives Core's
 	// `/api/mail/*` orchestration (inbox CRUD, message list/send, inbound-secret
 	// rotation) from its sandboxed companion frame. Host-direct (the monitors
 	// pattern): the host holds the node token and calls the existing `/api/mail/*`
 	// client (served by the out-of-process `ryu-mail` sidecar, already gated on the
-	// `com.ryu.mail` enabled bit). One capability gates the whole `mail.*` family,
+	// `@ryu/mail` enabled bit). One capability gates the whole `mail.*` family,
 	// including the `mail.inboundUrl` verb the host resolves from the node URL (the
 	// frame has none) — the `workflows.webhook` precedent.
 	| "mail.crud"
-	// Calendar (grant `calendar:crud`) — the `com.ryu.calendar` app renders the
+	// Calendar (grant `calendar:crud`) — the `@ryu/calendar` app renders the
 	// scheduled-runs calendar (every agent/workflow scheduled job projected onto
 	// Month/Week/Day/Agenda) from its sandboxed companion frame, and schedules an
 	// agent via the New-automation dialog. Host-direct (the monitors pattern): the
@@ -217,7 +217,7 @@ export type Capability =
 	// `createScheduledAgentWorkflow` composite. One capability gates the whole
 	// `calendar.*` family.
 	| "calendar.crud"
-	// Learning (grant `learning:crud`) — the `com.ryu.learning` app renders the
+	// Learning (grant `learning:crud`) — the `@ryu/learning` app renders the
 	// read-only continual-learning surface (the two opt-in levels + the models in
 	// use, the experience buffer's captured/scored/trainable counts, and the
 	// read-only self-healing attempt history) from its sandboxed companion frame.
@@ -227,7 +227,7 @@ export type Capability =
 	// approvals + the heal inbox) stay in the Inbox, the opt-ins in Privacy settings.
 	// One capability gates the whole `learning.*` family.
 	| "learning.crud"
-	// Inbox / Approvals (grant `approvals:crud`) — the `com.ryu.approvals` app renders
+	// Inbox / Approvals (grant `approvals:crud`) — the `@ryu/approvals` app renders
 	// the unified inbox from its sandboxed companion frame: pending HITL approvals
 	// (approve/reject), the per-user notification feed (read + the workflow-resume ack
 	// gate), and Shadow's proactive suggestions (list + feedback + open-in-chat). Host-
@@ -237,7 +237,7 @@ export type Capability =
 	// verb. One capability gates that whole family; the inbox's quest task check-off reuses
 	// the separate `quests.crud` capability (the app declares BOTH grants).
 	| "approvals.crud"
-	// Meetings (grant `meetings:crud`) — the `com.ryu.meetings` app renders the
+	// Meetings (grant `meetings:crud`) — the `@ryu/meetings` app renders the
 	// record → live-transcript → AI-notes surface from its sandboxed companion frame.
 	// Host-direct (the monitors pattern): the host holds the node token and calls the
 	// existing `/api/meetings/*` orchestration (list/transcript + start/finalize/delete/
@@ -246,7 +246,7 @@ export type Capability =
 	// cannot POST multipart under the CSP) and the `meetings.open`/`openNotes`/`openList`
 	// shell-navigation verbs (mirroring the desktop page's `openTab`).
 	| "meetings.crud"
-	// Skill authoring (grant `skills:crud`) — the `com.ryu.skill-editor` app authors a
+	// Skill authoring (grant `skills:crud`) — the `@ryu/skill-editor` app authors a
 	// user-owned Agent Skill (`SKILL.md`): front-matter form fields + a markdown body +
 	// server-backed version history. Host-direct (the monitors pattern): the host holds
 	// the node token and calls the existing `/api/skills` authoring endpoints (reusing the
@@ -401,7 +401,7 @@ export interface CalendarAgentRecord {
 	[key: string]: unknown;
 }
 
-// --- Warmup (grant `warmup:crud`). The `com.ryu.warmup` app schedules a keep-alive
+// --- Warmup (grant `warmup:crud`). The `@ryu/warmup` app schedules a keep-alive
 // ping to each subscription agent so its rolling usage window is already open. As
 // with calendar, rpc.ts stays dependency-free and the host forwards Core's shapes
 // verbatim; the app owns the richer typed copies in `@ryu/warmup-app/types`. ---
@@ -584,7 +584,7 @@ export interface UploadFileResult {
  *  capability MUST keep that rule (every reply is readable by the sandboxed
  *  frame by construction). */
 export interface HostServices {
-	// --- Activity feed (grant `activity:read`). The `com.ryu.activity` app renders
+	// --- Activity feed (grant `activity:read`). The `@ryu/activity` app renders
 	// Core's read-only unified feed. Host-direct (the monitors pattern): the host holds
 	// the node token and calls the existing `GET /api/activity` read, forwarding Core's
 	// snake_case items verbatim over the bridge. All optional so a non-activity host is
@@ -599,7 +599,7 @@ export interface HostServices {
 	/** Approve a pending request (`POST /api/approvals/:id/approve`). */
 	approvalsApprove?(input: ApprovalDecidePayload): Promise<ApprovalRecord>;
 
-	// --- Inbox / Approvals (grant `approvals:crud`). The `com.ryu.approvals` app
+	// --- Inbox / Approvals (grant `approvals:crud`). The `@ryu/approvals` app
 	// renders the unified inbox. Host-direct (the monitors pattern): the host holds the
 	// node token and calls the existing `/api/approvals/*`, `/api/notifications/*`
 	// (host-resolved user id — the sandboxed frame has no session), and Shadow's
@@ -619,7 +619,7 @@ export interface HostServices {
 		input: CalendarCreateAutomationPayload
 	): Promise<void>;
 
-	// --- Calendar (grant `calendar:crud`). The `com.ryu.calendar` app renders the
+	// --- Calendar (grant `calendar:crud`). The `@ryu/calendar` app renders the
 	// scheduled-runs calendar + schedules an agent. Host-direct (the monitors
 	// pattern): the host holds the node token and calls the existing `/heartbeat/jobs`,
 	// `/workflows`, `/api/agents` reads + the `createScheduledAgentWorkflow` composite,
@@ -643,7 +643,7 @@ export interface HostServices {
 	/** Cooperatively cancel a running job (`host.finetune_cancel`). */
 	finetuneCancel?(input: { id: string }): Promise<unknown>;
 
-	// --- Fine-tune runs (grant `finetune:runs`). The `com.ryu.finetune` app drives
+	// --- Fine-tune runs (grant `finetune:runs`). The `@ryu/finetune` app drives
 	// training runs; Core owns the orchestration + durable job store + adapter→GGUF
 	// merge, reached through the governed bridge (`/api/plugins/:id/host`). Each is
 	// ONE privileged fetch; live progress streams over `finetuneStream`. All optional
@@ -699,7 +699,7 @@ export interface HostServices {
 	// --- Workflows (grants `workflows:crud`/`runstate`/`catalogs`) + ghost record
 	// (`ghost:record`). Host-direct families (the monitors pattern): the host holds the
 	// node token and calls the existing `/workflows*` + `/api/workflows/catalog*` +
-	// `/api/recipes/*` API, already gated on the `com.ryu.workflows` enabled bit. All
+	// `/api/recipes/*` API, already gated on the `@ryu/workflows` enabled bit. All
 	// return the plain JSON the existing desktop client returns (kept `unknown` so
 	// rpc.ts carries no workflow schema — the app owns the richer typed copies). All
 	// optional so a non-workflows host is unaffected. ---
@@ -714,7 +714,7 @@ export interface HostServices {
 	 *  (`POST /api/recipes/record/stop`). */
 	ghostRecordStop?(): Promise<unknown>;
 
-	// --- Learning (grant `learning:crud`). The `com.ryu.learning` app renders the
+	// --- Learning (grant `learning:crud`). The `@ryu/learning` app renders the
 	// read-only continual-learning surface. Host-direct (the monitors pattern): the
 	// host holds the node token and calls the existing `/api/learn/config`,
 	// `/api/experience/list`, `/api/healing/status` reads, forwarding Core's shapes
@@ -749,7 +749,7 @@ export interface HostServices {
 	/** List TTS engines + their voices (`/api/voice/tts-engines`). Read-only. */
 	listTtsEngines?(): Promise<unknown[]>;
 
-	// --- Agent Inboxes (grant `mail:crud`). The `com.ryu.mail` app drives Core's
+	// --- Agent Inboxes (grant `mail:crud`). The `@ryu/mail` app drives Core's
 	// `/api/mail/*` orchestration. Host-direct (the monitors pattern): the host holds
 	// the node token and calls the existing `/api/mail/*` client (served by the
 	// out-of-process `ryu-mail` sidecar). All optional so a non-mail host is
@@ -780,10 +780,10 @@ export interface HostServices {
 	 *  cancelled the picker. */
 	meetingsImport?(): Promise<MeetingRecord | null>;
 
-	// --- Meetings (grant `meetings:crud`). The `com.ryu.meetings` app renders the
+	// --- Meetings (grant `meetings:crud`). The `@ryu/meetings` app renders the
 	// record → live-transcript → AI-notes surface. Host-direct (the monitors pattern):
 	// the host holds the node token and calls the existing `/api/meetings/*` client
-	// (already gated on the `com.ryu.meetings` enabled bit). `meetingsImport` is
+	// (already gated on the `@ryu/meetings` enabled bit). `meetingsImport` is
 	// host-owned (the host opens the OS file dialog + POSTs the multipart upload the
 	// CSP-locked frame cannot); `meetingsOpen`/`meetingsOpenNotes`/`meetingsOpenList`
 	// are shell-navigation verbs. All optional so a non-meetings host is unaffected. ---
@@ -827,10 +827,10 @@ export interface HostServices {
 		effort?: string;
 	}): Promise<string>;
 
-	// --- Website monitors (grant `monitors:crud`). The `com.ryu.monitors` app drives
+	// --- Website monitors (grant `monitors:crud`). The `@ryu/monitors` app drives
 	// Core's `/api/monitors/*` orchestration. Unlike the bridge families, the host
 	// calls the existing Core monitors API DIRECTLY (the media pattern: it holds the
-	// node token; `/api/monitors/*` is already gated on the `com.ryu.monitors` bit).
+	// node token; `/api/monitors/*` is already gated on the `@ryu/monitors` bit).
 	// All optional so a non-monitors host is unaffected. ---
 
 	/** List the selected monitor's recent alerts (`GET /api/monitors/:id/alerts`). */
@@ -874,7 +874,7 @@ export interface HostServices {
 	 *  opening. Governed `window.openai.openExternal` impl. */
 	openExternal?(input: { href: string }): Promise<void>;
 
-	// --- Quests (grant `quests:crud`). The `com.ryu.quests` app drives Core's
+	// --- Quests (grant `quests:crud`). The `@ryu/quests` app drives Core's
 	// `/api/quests/*` auto-detecting-todo orchestration. Host-direct (the monitors
 	// pattern): the host holds the node token and calls the existing `/api/quests/*`
 	// API. All optional so a non-quests host is unaffected. ---
@@ -1019,7 +1019,7 @@ export interface HostServices {
 	 *  collision. Returns `{ id, source }`. */
 	skillsCreate?(input: SkillDraftPayload): Promise<SkillWriteRecord>;
 
-	// --- Skill authoring (grant `skills:crud`). The `com.ryu.skill-editor` app authors a
+	// --- Skill authoring (grant `skills:crud`). The `@ryu/skill-editor` app authors a
 	// user-owned Agent Skill (`SKILL.md`). Host-direct (the monitors pattern): the host
 	// holds the node token and calls the existing `/api/skills` authoring endpoints via the
 	// desktop `skills.ts` client (which normalizes Core's snake_case to camelCase), so the
@@ -1104,7 +1104,7 @@ export interface HostServices {
 		narrate?: boolean;
 	}): Promise<TimelineJournalRecord | null>;
 
-	// --- Timeline (grant `timeline:read`). The `com.ryu.timeline` app renders the
+	// --- Timeline (grant `timeline:read`). The `@ryu/timeline` app renders the
 	// activity replay scrubber. Host-direct but device-LOCAL: the host calls Shadow
 	// (127.0.0.1:3030) WITHOUT a node token — the `shadow.ts` INVARIANT (captured
 	// screen/input only has meaning on the physical machine). All optional so a
@@ -1144,7 +1144,7 @@ export interface HostServices {
 		multiple?: boolean;
 	}): Promise<UploadFileResult | UploadFileResult[] | null>;
 
-	// --- Warmup (grant `warmup:crud`). The `com.ryu.warmup` app keeps subscription
+	// --- Warmup (grant `warmup:crud`). The `@ryu/warmup` app keeps subscription
 	// usage windows open. Host-direct (the monitors pattern): the host holds the node
 	// token and calls `/api/agents`, `/api/agents/:id/usage`,
 	// `/api/agents/:id/acp-config` and `/heartbeat/jobs`. All optional so a host
@@ -1162,7 +1162,7 @@ export interface HostServices {
 	 *  rejects with Core's message when the job itself failed. */
 	warmupRunNow?(input: WarmupRunNowPayload): Promise<void>;
 
-	// --- Inbound webhook registry (grant `webhooks:crud`). The `com.ryu.webhooks` app
+	// --- Inbound webhook registry (grant `webhooks:crud`). The `@ryu/webhooks` app
 	// renders Core's read-only webhook endpoint registry from its sandboxed companion.
 	// Host-direct (the monitors pattern): the host holds the node token and calls the
 	// existing `/api/webhooks` + `/api/webhook-ingress/status` reads, already ungated on
@@ -1208,6 +1208,11 @@ export interface HostServices {
 	workflowsSchedules?(): Promise<unknown>;
 	/** Node-config picker: installed skills (`GET /api/skills`). */
 	workflowsSkills?(): Promise<unknown>;
+	/** Node-config picker: every app event an enabled app declares in its manifest
+	 *  `contributes.hook_events` (`GET /api/plugins/contributions` → `hook_events`).
+	 *  Backs the `event` trigger's picker, so a user chooses a real event instead of
+	 *  typing a fully-qualified id from memory. */
+	workflowsHookEvents?(): Promise<unknown>;
 	/** Fetch one workflow template's detail (`GET /api/workflows/catalog/:id`). */
 	workflowsTemplateGet?(input: { id: string }): Promise<unknown>;
 	/** Install a workflow template (`POST /api/workflows/catalog/install`). Returns
@@ -2402,6 +2407,14 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.workflowsSchedules();
+		case "workflows.hookEvents":
+			if (!services.workflowsHookEvents) {
+				throw new CodedRpcError(
+					"server_error",
+					"workflows.hookEvents is not available"
+				);
+			}
+			return await services.workflowsHookEvents();
 		case "workflows.composio": {
 			const input = asComposioArg(args[0]);
 			if (!input) {

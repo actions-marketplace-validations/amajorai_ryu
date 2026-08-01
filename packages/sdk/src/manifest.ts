@@ -211,6 +211,34 @@ export const TurnHookContributionSchema = z
 
 export type TurnHookContribution = z.infer<typeof TurnHookContributionSchema>;
 
+/**
+ * One **app event** this plugin declares it emits. Mirrors `HookEventContribution`
+ * in `crates/core/kernel-contracts/src/manifest.rs`.
+ *
+ * `turn_hooks` is the *consuming* half of the hook system; this is the *providing*
+ * half. Declaring an event here lets any other plugin react to it with a
+ * `turn_hooks[].on` naming the event, and any workflow react to it with an `event`
+ * trigger — without the emitter knowing a consumer exists. The event is raised at
+ * runtime by this plugin's own sidecar calling the `events.emit` host capability.
+ *
+ * `id` MUST be `<this plugin's id>#<event name>`. Core validates the namespace half
+ * against the owning manifest at load and re-checks it on every emit, which is both
+ * what makes collisions with Core's own hook phases impossible (a Core phase never
+ * contains `#`) and what stops one app emitting another's events.
+ */
+export const HookEventContributionSchema = z.object({
+	/** Fully-qualified event id: `<plugin id>#<event name>`, e.g. `@acme/meetings#meeting.ended`. */
+	id: z.string().min(1),
+	/** Human-readable title for the event picker. */
+	title: z.string().min(1),
+	/** What the event means and when it fires. */
+	description: z.string().optional(),
+	/** Example of the `ctx.event` payload. Documentation, not a validated schema. */
+	payload_example: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type HookEventContribution = z.infer<typeof HookEventContributionSchema>;
+
 // ── WidgetContribution (Ryu Apps) ─────────────────────────────────────────────
 
 /** Default widget MIME dialect. Mirrors Core `default_widget_mime`. */
@@ -282,6 +310,11 @@ export type ToolAppConfig = z.infer<typeof ToolAppConfigSchema>;
  */
 export const ContributesSchema = z.object({
 	turn_hooks: z.array(TurnHookContributionSchema).default([]),
+	/** App events this plugin EMITS — the provider half of the hook system, whose
+	 *  consumer half is `turn_hooks`. Mirrors the Rust `Contributes.hook_events`;
+	 *  omitting it here would have `ryu pack` strip every declared event before
+	 *  signing, leaving an app that emits events nothing is allowed to subscribe to. */
+	hook_events: z.array(HookEventContributionSchema).default([]),
 	composer_controls: z.array(z.record(z.string(), z.unknown())).default([]),
 	settings_tabs: z.array(z.record(z.string(), z.unknown())).default([]),
 	slash_commands: z.array(z.record(z.string(), z.unknown())).default([]),

@@ -25,7 +25,7 @@ test("execAppCommand refuses a traversal path without calling fetch", async () =
 
 	for (const path of [
 		"/../../../v1/chat/completions",
-		"/../api/plugins/com.ryu.mail/uninstall",
+		"/../api/plugins/@ryu/mail/uninstall",
 		"/%2e%2e/%2e%2e/v1",
 		"/..\\..\\v1",
 	]) {

@@ -93,7 +93,7 @@ describe("IslandViewPanel", () => {
 				view={{
 					id: "quest-board",
 					view: "list-detail",
-					plugin: "com.ryu.quests",
+					plugin: "@ryu/quests",
 					spec: {
 						view: "list-detail",
 						items: [],

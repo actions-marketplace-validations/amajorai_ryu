@@ -813,7 +813,13 @@ mod tests {
         assert!(store.list().await.unwrap().is_empty());
 
         let sub = store
-            .subscribe("agent-1", "slack", "SLACK_MSG", "ca_1", json!({ "channel": "C1" }))
+            .subscribe(
+                "agent-1",
+                "slack",
+                "SLACK_MSG",
+                "ca_1",
+                json!({ "channel": "C1" }),
+            )
             .await
             .expect("subscribe");
         assert_eq!(sub.agent_id, "agent-1");

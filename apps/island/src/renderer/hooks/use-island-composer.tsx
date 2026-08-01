@@ -2,6 +2,7 @@
 // Codex-style `ComposerSettingsMenu` as desktop), persisted per-agent via ACP
 // localStorage and `island-agents.voiceAgent` for routing.
 
+import type { StreamedAcpConfig } from "@ryu/blocks/composer/composer-acp-sections";
 import {
 	ComposerSettingsMenu,
 	type ComposerSettingsSection,
@@ -29,6 +30,17 @@ import { useIslandAcpSections } from "./use-island-acp-sections.ts";
 
 export interface IslandComposerState {
 	agentId: string;
+	/**
+	 * Adopt an agent-requested session-config write-back seen on the live chat
+	 * stream (Core's `data-ryu-acp-config`). `key` is the emission identity of the
+	 * part that carried it — a repeat of the byte-identical map under a NEW key
+	 * must still be adopted, which is why the value alone cannot be the identity.
+	 * Called by `useIslandChat`; without it an approved plan would re-arm the Plan
+	 * mode pill and the agent would refuse the edits just approved.
+	 */
+	applyStreamedAcpConfig: (config: Record<string, string>, key: string) => void;
+	/** Adopt an agent-initiated permission-mode switch (`data-ryu-acp-mode`). */
+	applyStreamedAcpMode: (modeId: string) => void;
 	/** Values for `CoreChatStreamRequest` ACP fields. */
 	getAcpPayload: () => {
 		acp_config?: Record<string, string>;
@@ -52,6 +64,21 @@ export function useIslandComposer(): IslandComposerState {
 	);
 	const [acpSessionConfig, setAcpSessionConfig] = useState<AcpConfig | null>(
 		null
+	);
+	// The newest agent-driven write-backs off the live chat stream. Never cleared:
+	// the shared hook dedupes the config channel on the emission key it carries, so
+	// a stale value can only ever be re-adopted by a NEW emission.
+	const [streamedAcpMode, setStreamedAcpMode] = useState<string | null>(null);
+	const [streamedAcpConfig, setStreamedAcpConfig] =
+		useState<StreamedAcpConfig | null>(null);
+	const applyStreamedAcpMode = useCallback((modeId: string) => {
+		setStreamedAcpMode(modeId);
+	}, []);
+	const applyStreamedAcpConfig = useCallback(
+		(config: Record<string, string>, key: string) => {
+			setStreamedAcpConfig({ config, key });
+		},
+		[]
 	);
 
 	useEffect(() => {
@@ -133,6 +160,8 @@ export function useIslandComposer(): IslandComposerState {
 			engineModel,
 			modelOptions,
 			onEngineModelChange: handleEngineModelChange,
+			streamedConfig: streamedAcpConfig,
+			streamedMode: streamedAcpMode,
 		});
 
 	const modes = useMemo<ModeOption[]>(
@@ -225,6 +254,8 @@ export function useIslandComposer(): IslandComposerState {
 
 	return {
 		agentId,
+		applyStreamedAcpConfig,
+		applyStreamedAcpMode,
 		getAcpPayload,
 		leftActions,
 		sections,

@@ -62,7 +62,7 @@ const MAX_CONTEXT_CHARS: usize = 2_000;
 
 /// The plugin id of the built-in memory store — the provider this seam deliberately
 /// does NOT call, because the kernel already reads it directly.
-pub const BUILTIN_MEMORY_PROVIDER: &str = "com.ryu.memory";
+pub const BUILTIN_MEMORY_PROVIDER: &str = "@ryu/memory";
 
 /// The bound `memory` provider's plugin id, or `None` when nothing resolves.
 ///

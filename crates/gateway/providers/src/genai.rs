@@ -335,7 +335,10 @@ mod tests {
         assert_eq!(opts.temperature, Some(0.3));
         assert_eq!(opts.max_tokens, Some(256));
         assert_eq!(opts.top_p, Some(0.8));
-        assert_eq!(opts.stop_sequences, vec!["END".to_string(), "STOP".to_string()]);
+        assert_eq!(
+            opts.stop_sequences,
+            vec!["END".to_string(), "STOP".to_string()]
+        );
         // capture_usage only set on the streaming path.
         assert_eq!(opts.capture_usage, None);
     }

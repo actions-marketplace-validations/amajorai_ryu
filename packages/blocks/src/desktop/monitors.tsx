@@ -1,7 +1,7 @@
 "use client";
 
 // Presentational layer of the desktop Monitors view. The live Monitors UI was
-// extracted into the sandboxed `com.ryu.monitors` companion app
+// extracted into the sandboxed `@ryu/monitors` companion app
 // (`packages/monitors-app`), which owns selection/editing state + data fetching
 // over the `window.ryu.monitors.*` bridge; the shell `MonitorsPage`/`useMonitors`
 // were deleted in that cutover. This block's only remaining consumer is the

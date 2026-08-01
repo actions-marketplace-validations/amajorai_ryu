@@ -422,10 +422,7 @@ mod tests {
             error_text(&json!({ "error": "", "message": "second" })).as_deref(),
             Some("second")
         );
-        assert_eq!(
-            error_text(&json!({ "detail": "d" })).as_deref(),
-            Some("d")
-        );
+        assert_eq!(error_text(&json!({ "detail": "d" })).as_deref(), Some("d"));
         assert!(error_text(&json!({ "nope": 1 })).is_none());
     }
 

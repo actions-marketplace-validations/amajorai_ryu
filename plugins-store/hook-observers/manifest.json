@@ -1,10 +1,12 @@
 {
-  "id": "com.ryuhq.hook-observers",
+  "id": "@ryu/hook-observers",
   "name": "Hook Observers",
   "version": "1.0.0",
   "runnables": [],
   "permission_grants": [],
-  "activation_events": ["*"],
+  "activation_events": [
+    "*"
+  ],
   "contributes": {
     "turn_hooks": [
       {
@@ -21,6 +23,16 @@
         "id": "observers.notification",
         "on": "notification",
         "code_file": "hooks/notification.js"
+      },
+      {
+        "id": "observers.workflow-run-failed",
+        "on": "workflow_run_failed",
+        "code_file": "hooks/workflow-run-failed.js"
+      },
+      {
+        "id": "observers.meeting-ended",
+        "on": "@ryu/meetings#meeting.ended",
+        "code_file": "hooks/app-event-meeting-ended.js"
       }
     ]
   }

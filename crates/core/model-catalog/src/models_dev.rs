@@ -264,15 +264,13 @@ async fn load_catalog(require_metas: bool) -> CachedCatalog {
     let mut cache = CACHE.lock().await;
 
     if let Some(entry) = cache.as_ref() {
-        let ok = is_fresh(entry.fetched_at, now)
-            && (!require_metas || !entry.metas.is_empty());
+        let ok = is_fresh(entry.fetched_at, now) && (!require_metas || !entry.metas.is_empty());
         if ok {
             return entry.clone();
         }
     }
     if let Some(entry) = read_disk_cache() {
-        let ok = is_fresh(entry.fetched_at, now)
-            && (!require_metas || !entry.metas.is_empty());
+        let ok = is_fresh(entry.fetched_at, now) && (!require_metas || !entry.metas.is_empty());
         if ok {
             *cache = Some(entry.clone());
             return entry;
@@ -325,7 +323,11 @@ pub async fn meta_for(model: &str, provider: Option<&str>) -> Option<ModelMeta> 
     let catalog = load_catalog(true).await;
     if let Some(p) = provider.map(str::trim).filter(|s| !s.is_empty()) {
         let key = models_dev_provider_key(p);
-        let qualified = format!("{}/{}", key.to_ascii_lowercase(), model.trim().to_ascii_lowercase());
+        let qualified = format!(
+            "{}/{}",
+            key.to_ascii_lowercase(),
+            model.trim().to_ascii_lowercase()
+        );
         if let Some(m) = match_meta(&catalog.metas, &qualified) {
             return Some(m);
         }

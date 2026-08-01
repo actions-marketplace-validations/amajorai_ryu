@@ -3831,7 +3831,8 @@ impl McpRegistry {
 /// [`ryu_tool_exec::SandboxAugment::default`] (today's bare `--allow-run`, no shim
 /// env), never blocking the tool call.
 async fn build_cap_shim_augment(plugin_id: &str) -> ryu_tool_exec::SandboxAugment {
-    let plugin_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir().join(plugin_id);
+    let plugin_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
+        .join(crate::plugin_manifest::plugin_dir_name(plugin_id));
     // The plugin's DECLARED capability edges → convenience-alias shims + the
     // scoped run allow-list. Empty is fine (the `ryu-cap` multiplexer still covers
     // every capability); only the convenience aliases are gated on this set.
@@ -4032,7 +4033,7 @@ mod tests {
         fn manifest() -> PluginManifest {
             crate::plugin_manifest::PluginManifestLoader::load_builtins()
                 .into_iter()
-                .find(|m| m.id == "ghost")
+                .find(|m| m.id == "@ryu/ghost")
                 .expect("ghost built-in manifest present")
         }
     }
@@ -4157,16 +4158,19 @@ mod tests {
 
     #[test]
     fn adapter_results_carry_the_provider_like_declarative_ones() {
-        let stamped = stamp_provider(serde_json::json!({ "results": [] }), "firecrawl");
-        assert_eq!(stamped["provider"], serde_json::json!("firecrawl"));
+        let stamped = stamp_provider(serde_json::json!({ "results": [] }), "@ryu/firecrawl");
+        assert_eq!(stamped["provider"], serde_json::json!("@ryu/firecrawl"));
 
         // An adapter that reported its own provider is trusted over the stamp.
-        let explicit = stamp_provider(serde_json::json!({ "provider": "proxied" }), "firecrawl");
+        let explicit = stamp_provider(
+            serde_json::json!({ "provider": "proxied" }),
+            "@ryu/firecrawl",
+        );
         assert_eq!(explicit["provider"], serde_json::json!("proxied"));
 
         // A non-object result is wrapped, never dropped.
-        let wrapped = stamp_provider(serde_json::json!([1, 2]), "firecrawl");
-        assert_eq!(wrapped["provider"], serde_json::json!("firecrawl"));
+        let wrapped = stamp_provider(serde_json::json!([1, 2]), "@ryu/firecrawl");
+        assert_eq!(wrapped["provider"], serde_json::json!("@ryu/firecrawl"));
         assert_eq!(wrapped["raw"], serde_json::json!([1, 2]));
     }
 
@@ -4829,7 +4833,7 @@ mod tests {
     fn agentbrowser_manifest_registers_via_npx() {
         let manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
             .into_iter()
-            .find(|m| m.id == "agentbrowser")
+            .find(|m| m.id == "@ryu/agentbrowser")
             .expect("agentbrowser built-in manifest present");
         // The lowering is asserted probe-free, so the shape is pinned on every host:
         // the command is the RUNNER (`npx`) and the package rides in the args. That is
@@ -4938,7 +4942,7 @@ mod tests {
                 "facade server '{facade}' must be listed"
             );
         }
-        assert!(!summaries.iter().any(|s| s.name == "shadow"));
+        assert!(!summaries.iter().any(|s| s.name == "@ryu/shadow"));
         assert!(summaries.iter().any(|s| s.name == sandbox::SERVER_NAME));
         assert!(summaries
             .iter()
@@ -5281,8 +5285,8 @@ mod tests {
     fn core_tier_builtin_tool_grants_survive_an_empty_record() {
         let builtins = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         for (id, grant) in [
-            ("spider", "tool:command:spider"),
-            ("shadow", "tool:http-egress:127.0.0.1"),
+            ("@ryu/spider", "tool:command:spider"),
+            ("@ryu/shadow", "tool:http-egress:127.0.0.1"),
         ] {
             let manifest = builtins
                 .iter()
@@ -5304,7 +5308,7 @@ mod tests {
     #[test]
     fn community_builtin_tool_grants_resolve_from_an_approved_record() {
         let builtins = crate::plugin_manifest::PluginManifestLoader::load_builtins();
-        for id in ["exa", "rtk", "advisor", "com.ryuhq.advisor"] {
+        for id in ["@ryu/exa", "@ryu/rtk", "advisor", "@ryu/advisor"] {
             let Some(manifest) = builtins.iter().find(|m| m.id == id) else {
                 continue;
             };

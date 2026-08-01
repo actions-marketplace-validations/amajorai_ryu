@@ -85,12 +85,66 @@ pub fn decide_while(counter: u64, condition_holds: bool) -> (bool, u64) {
 ///
 /// If `resume_run` is provided, already-`Completed` nodes are skipped and their
 /// recorded output is reused; otherwise a fresh run is created.
+/// Run-lifecycle hooks fire from HERE and not from the status assignments inside
+/// [`run_workflow_inner`], which is deliberate. That function is re-entered on every
+/// resume and recurses for sub-workflows, so firing at its `RunStatus` writes would
+/// emit `workflow_run_started` again for each resume and once per nested
+/// sub-workflow — a consumer counting runs would over-count and a consumer
+/// summarizing them would summarize fragments. This wrapper is the one boundary that
+/// corresponds to what a user calls "a run".
 pub async fn run_workflow(
     workflow: &Workflow,
     input: HashMap<String, String>,
     run_id: String,
 ) -> Result<WorkflowRun, String> {
-    run_workflow_inner(workflow, input, run_id, 0).await
+    crate::plugin_host::fire_workflow_run_event(
+        crate::plugin_host::ON_WORKFLOW_RUN_STARTED,
+        serde_json::json!({
+            "run_id": run_id,
+            "workflow_id": workflow.id,
+            "workflow_name": workflow.name,
+        }),
+    );
+
+    let outcome = run_workflow_inner(workflow, input, run_id.clone(), 0).await;
+
+    match &outcome {
+        // A run that suspended at an approval gate has NOT finished — it is waiting
+        // on a human and will come back through `resume_run`. Emitting `finished`
+        // here would tell a consumer the work is done while it is still pending.
+        Ok(run) if run.status == store::RunStatus::AwaitingInput => {}
+        Ok(run) => crate::plugin_host::fire_workflow_run_event(
+            if run.status == store::RunStatus::Failed {
+                crate::plugin_host::ON_WORKFLOW_RUN_FAILED
+            } else {
+                crate::plugin_host::ON_WORKFLOW_RUN_FINISHED
+            },
+            serde_json::json!({
+                "run_id": run.run_id,
+                "workflow_id": run.workflow_id,
+                "workflow_name": workflow.name,
+                "status": format!("{:?}", run.status).to_lowercase(),
+                "error": run.error,
+                "output": run.output,
+            }),
+        ),
+        // An `Err` here is the executor refusing to run at all (a malformed graph,
+        // nesting depth exceeded) — no run reached a terminal state, but from the
+        // caller's point of view the run failed, so a consumer watching for failures
+        // must still see it.
+        Err(e) => crate::plugin_host::fire_workflow_run_event(
+            crate::plugin_host::ON_WORKFLOW_RUN_FAILED,
+            serde_json::json!({
+                "run_id": run_id,
+                "workflow_id": workflow.id,
+                "workflow_name": workflow.name,
+                "status": "failed",
+                "error": e,
+            }),
+        ),
+    }
+
+    outcome
 }
 
 /// Resume a workflow run suspended at its `Awakeable` gate: flip the gate node to
@@ -156,6 +210,21 @@ pub async fn fail_run(run_id: &str, error: &str) -> Result<(), String> {
     run.awaiting_node = None;
     run.updated_at = chrono::Utc::now().to_rfc3339();
     let saved = store::save_run(&run).map_err(|e| format!("failed to persist run failure: {e}"));
+
+    // A run failed HERE (a rejected/expired approval gate) never returns through
+    // `run_workflow`, so its failure hook has to fire from this path too. The
+    // early-return above keeps it from double-firing on an already-terminal run.
+    if saved.is_ok() {
+        crate::plugin_host::fire_workflow_run_event(
+            crate::plugin_host::ON_WORKFLOW_RUN_FAILED,
+            serde_json::json!({
+                "run_id": run_id,
+                "workflow_id": run.workflow_id,
+                "status": "failed",
+                "error": error,
+            }),
+        );
+    }
 
     // Feed the failure to the self-healing loop (diagnose → propose a diagnosed
     // retry to the inbox, or auto-retry). Best-effort + fire-and-forget so it never

@@ -1,5 +1,5 @@
 {
-  "id": "durable",
+  "id": "@ryu/durable",
   "name": "Durable Workflows",
   "version": "1.0.0",
   "engines": {

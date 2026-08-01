@@ -1,10 +1,13 @@
 {
-  "id": "shadow",
+  "id": "@ryu/shadow",
   "name": "Shadow",
   "version": "1.0.0",
   "description": "Search everything Shadow has captured (screen text, audio transcripts, input) and summarize recent activity. Exposed as declarative HTTP tools that reach the device-local Shadow sidecar through Core's authenticated `/api/shadow/*` proxy (which injects Shadow's bearer token).",
   "tagline": "Recall what you have seen and done",
-  "keywords": ["capture", "memory"],
+  "keywords": [
+    "capture",
+    "memory"
+  ],
   "category": "Search",
   "runnables": [
     {
@@ -35,7 +38,9 @@
               "minimum": 1
             }
           },
-          "required": ["q"]
+          "required": [
+            "q"
+          ]
         }
       }
     },
@@ -67,7 +72,9 @@
               "minimum": 1
             }
           },
-          "required": ["q"]
+          "required": [
+            "q"
+          ]
         }
       }
     },
@@ -98,7 +105,10 @@
               "description": "Range end, microseconds since the Unix epoch."
             }
           },
-          "required": ["start", "end"]
+          "required": [
+            "start",
+            "end"
+          ]
         }
       }
     },
@@ -130,5 +140,7 @@
       }
     }
   ],
-  "permission_grants": ["tool:http-egress:127.0.0.1"]
+  "permission_grants": [
+    "tool:http-egress:127.0.0.1"
+  ]
 }

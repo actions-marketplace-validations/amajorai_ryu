@@ -3,7 +3,7 @@
 //! Agent **teams** used to live in an in-process [`ryu_teams::TeamStore`] that the
 //! `@team` chat orchestration, the `agent_builder__create_agent_team` MCP tool, and
 //! the `/api/teams/*` CRUD surface all shared. Teams is now an out-of-process app
-//! (`com.ryu.teams`): the `ryu-teams` sidecar owns `teams.db` and serves
+//! (`@ryu/teams`): the `ryu-teams` sidecar owns `teams.db` and serves
 //! `/api/teams/*`, which Core exposes verbatim through the generic ext-proxy
 //! `public_mount`. Core's remaining reverse-couplings (the two chat reads +
 //! `create_agent_team`) reach the store over loopback HTTP through this client

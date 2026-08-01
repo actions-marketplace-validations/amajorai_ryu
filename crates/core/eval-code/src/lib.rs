@@ -786,7 +786,10 @@ mod sandbox_posture_tests {
     fn unsandboxed_scores_are_tagged_on_the_wire_but_keep_their_own_detail() {
         let scored = CodeEvalOutcome::from_return(&json!({ "score": 1.0, "detail": "nope" }))
             .marked_unsandboxed();
-        assert_eq!(scored.detail, "nope", "the evaluator's detail stays verbatim");
+        assert_eq!(
+            scored.detail, "nope",
+            "the evaluator's detail stays verbatim"
+        );
         assert_eq!(
             scored.display_detail(),
             format!("{UNSANDBOXED_DETAIL_TAG} nope"),

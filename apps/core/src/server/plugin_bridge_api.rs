@@ -338,7 +338,7 @@ pub async fn plugin_bridge_stream(
     };
     let grants: HashSet<String> = record.approved_grants.into_iter().collect();
 
-    // Fine-tune progress stream: the `com.ryu.finetune` app subscribes to a run's
+    // Fine-tune progress stream: the `@ryu/finetune` app subscribes to a run's
     // live SSE. The `ryu-finetune` sidecar owns the orchestration + the source SSE
     // (local worker or remote node); we proxy that stream verbatim through the
     // loopback finetune client (its frames are the app's OWN run data — step/loss/

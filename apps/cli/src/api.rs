@@ -939,7 +939,11 @@ fn pick_recommended_quant(files: Vec<GgufFileWire>) -> Option<GgufFileWire> {
         }
         let by_fit = fit_rank(&f.fit).cmp(&fit_rank(&best.fit));
         if by_fit != std::cmp::Ordering::Equal {
-            return if by_fit == std::cmp::Ordering::Less { f } else { best };
+            return if by_fit == std::cmp::Ordering::Less {
+                f
+            } else {
+                best
+            };
         }
         if f.size_bytes.unwrap_or(u64::MAX) < best.size_bytes.unwrap_or(u64::MAX) {
             f
@@ -1011,10 +1015,7 @@ pub async fn install_model_file(
     client
         .post(format!("{api_url}/api/models/catalog/install"))
         .header("Content-Type", "application/json")
-        .body(
-            serde_json::json!({ "id": id, "file": file, "format": "gguf" })
-                .to_string(),
-        )
+        .body(serde_json::json!({ "id": id, "file": file, "format": "gguf" }).to_string())
         .send()
         .await?
         .error_for_status()?;

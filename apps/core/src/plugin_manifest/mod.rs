@@ -222,10 +222,10 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   that currently works. Hence the entry is absent rather than empty.
 /// - `mem0.manifest.json` — Mem0 hosted memory tool plugin (BYOK, Platform REST API).
 ///   The SECOND provider of the `memory` capability, and the one that makes that layer
-///   swappable at all — until it shipped, `com.ryu.memory` was the only provider, so
+///   swappable at all — until it shipped, `@ryu/memory` was the only provider, so
 ///   `memory_provider.rs`'s four kernel bridges (each guarded by `if !is_external()`)
 ///   were unreachable by construction. It is `selectable` and claims NO `default`:
-///   `com.ryu.memory` keeps that, so the built-in stays the zero-config pick.
+///   `@ryu/memory` keeps that, so the built-in stays the zero-config pick.
 ///   It binds `memory__search`, `memory__forget`, `memory__store` and `memory__sync`.
 ///   The two WRITE verbs became bindable only with `CapabilityToolBinding.arg_template`:
 ///   Mem0's write endpoint is `POST /v3/memories/add/`, whose `messages` field is an
@@ -252,7 +252,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   v3 REST API). The FIRST provider of `memory__context`, which is why it exists:
 ///   `memory_provider::context` and the `memory.provider-context` setting had no
 ///   provider that declared the verb, so that kernel bridge was unreachable by
-///   construction. `selectable`, claiming NO `default` — `com.ryu.memory` keeps it.
+///   construction. `selectable`, claiming NO `default` — `@ryu/memory` keeps it.
 ///   `memory__context` binds Honcho's Dialectic endpoint,
 ///   `POST /v3/workspaces/{workspace_id}/peers/{peer_id}/chat`, whose documented
 ///   response is `{content}` — one of the four keys `memory_provider::summary_text`
@@ -653,7 +653,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // **Exactly one carries `"default": true`, and it is `markitdown`** (see its
     // `provides` block). That is not decoration: with several providers ENABLED and
     // no default, `plugins::binding` falls through to the lexicographically-lowest
-    // plugin id, which elects `com.ryu.docling` — an alphabetical accident, not a
+    // plugin id, which elects `@ryu/docling` — an alphabetical accident, not a
     // product decision. Adding a second `"default": true` does not make that provider
     // win; it re-runs the same tiebreak and lands on docling again. So: never add a
     // second default, and never drop markitdown's.
@@ -682,7 +682,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
 /// The Canvas app's plugin id (its Space documents are `kind = app:<this>`). Shared
 /// by the default-on seed (`main.rs`), the legacy file-store migration
 /// (`server/canvas_migrate.rs`), and the desktop create/route flow.
-pub const CANVAS_PLUGIN_ID: &str = "com.ryu.canvas";
+pub const CANVAS_PLUGIN_ID: &str = "@ryu/canvas";
 
 /// The Canvas app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `packages/canvas-app`, all JS/CSS inlined). Seeded as the plugin's
@@ -693,7 +693,7 @@ pub const CANVAS_UI_HTML: &str = include_str!("fixtures/canvas.ui.html");
 /// The Whiteboard app's plugin id (its Space documents are `kind = app:<this>`).
 /// Shared by the default-on seed (`main.rs`), the legacy-kind migration
 /// (`server/spaces.rs`), and the desktop create/route flow.
-pub const WHITEBOARD_PLUGIN_ID: &str = "com.ryu.whiteboard";
+pub const WHITEBOARD_PLUGIN_ID: &str = "@ryu/whiteboard";
 
 /// The Whiteboard app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `packages/whiteboard-app`, all JS/CSS/fonts
@@ -706,7 +706,7 @@ pub const WHITEBOARD_UI_HTML: &str = include_str!("fixtures/whiteboard.ui.html")
 /// The Fine-tuning app's plugin id. Shared by the default-on seed (`main.rs`), the
 /// manifest-sidecar ensure in `server/finetune.rs`, and the desktop "Fine-tune this
 /// model" open path.
-pub const FINETUNE_PLUGIN_ID: &str = "com.ryu.finetune";
+pub const FINETUNE_PLUGIN_ID: &str = "@ryu/finetune";
 
 /// The Fine-tuning app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `packages/finetune-app`, all JS/CSS inlined).
@@ -781,7 +781,7 @@ pub const SKILL_EDITOR_UI_HTML: &str = include_str!("fixtures/skill-editor.ui.ht
 /// The Mail (Agent Inboxes) app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `apps-store/mail/ui`, all JS/CSS — incl. the
 /// tree-shaken `@ryu/ui` components — inlined). Seeded as the plugin's `ui_code`
-/// onto a DISABLED record so enabling the opt-in `com.ryu.mail` app (from the store)
+/// onto a DISABLED record so enabling the opt-in `@ryu/mail` app (from the store)
 /// mounts the sandboxed companion. Rebuild with `bun run --cwd apps-store/mail/ui
 /// build` (or `scripts/sync-app-fixtures.sh mail`) and copy `dist/index.html` to
 /// `fixtures/mail.ui.html` to refresh it.
@@ -799,7 +799,7 @@ pub const CALENDAR_UI_HTML: &str = include_str!("fixtures/calendar.ui.html");
 /// The Warmup app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/warmup/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
 /// components — inlined). Seeded as the plugin's `ui_code` onto a DISABLED record,
-/// so enabling the opt-in `com.ryu.warmup` app from the store mounts the sandboxed
+/// so enabling the opt-in `@ryu/warmup` app from the store mounts the sandboxed
 /// companion. Rebuild with `bun run --cwd apps-store/warmup/ui build` (or
 /// `scripts/sync-app-fixtures.sh warmup`) and copy `dist/index.html` to
 /// `fixtures/warmup.ui.html` to refresh it.
@@ -808,7 +808,7 @@ pub const WARMUP_UI_HTML: &str = include_str!("fixtures/warmup.ui.html");
 /// The Learning app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/learning/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
 /// components — inlined). Seeded as the plugin's `ui_code` (default-on companion) so
-/// the `/learning` route mounts the sandboxed companion. The `com.ryu.learning`
+/// the `/learning` route mounts the sandboxed companion. The `@ryu/learning`
 /// manifest was a wave-2 route-gate governance shell (gating `/api/learn/*` +
 /// `/api/experience/*`); the W7 frontend extraction upgrades it in place to ALSO
 /// carry the companion runnable. Rebuild with `bun run --cwd apps-store/learning/ui
@@ -820,7 +820,7 @@ pub const LEARNING_UI_HTML: &str = include_str!("fixtures/learning.ui.html");
 /// build of `apps-store/meetings/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
 /// components — inlined). Seeded as the plugin's `ui_code` (default-on companion) so
 /// the `/meetings` + `/meetings/:id` routes mount the sandboxed companion (record →
-/// live transcript → AI notes + audio import). The `com.ryu.meetings` manifest was a
+/// live transcript → AI notes + audio import). The `@ryu/meetings` manifest was a
 /// wave-2 route-gate governance shell (gating `/api/meetings/*`) that `requires` the
 /// `spaces` app; the W7 frontend extraction upgrades it in place to ALSO carry the
 /// companion runnable. Rebuild with `bun run --cwd apps-store/meetings/ui build` (or
@@ -832,7 +832,7 @@ pub const MEETINGS_UI_HTML: &str = include_str!("fixtures/meetings.ui.html");
 /// `vite-plugin-singlefile` build of `apps-store/approvals/ui`, all JS/CSS — incl. the
 /// tree-shaken `@ryu/ui` components — inlined). Seeded as the plugin's `ui_code`
 /// (default-on companion) so the `/inbox` + `/approvals` routes mount the sandboxed
-/// companion. The `com.ryu.approvals` manifest was a wave-2 gate-only governance shell
+/// companion. The `@ryu/approvals` manifest was a wave-2 gate-only governance shell
 /// (gating `/api/approvals/*`); the W7 frontend extraction upgrades it in place to ALSO
 /// carry the companion runnable — the unified Inbox page (approvals + notifications +
 /// quest check-offs + Shadow suggestions). Rebuild with
@@ -978,6 +978,39 @@ impl PluginManifestLoader {
             serde_json::from_str(raw).map_err(|e| format!("JSON parse error: {e}"))?;
 
         validate_plugin_id(&manifest.id).map_err(|e| format!("{e} (source: {source})"))?;
+
+        // Canonicalize a legacy id to its scoped form HERE — the single load
+        // chokepoint — so nothing downstream needs alias awareness. `app_store`
+        // lookups, hook dispatch, `may_emit_event`, the contributions endpoint and
+        // every `manifests.iter().find(|m| m.id == ...)` then only ever compare
+        // canonical ids. Sprinkling `canonical_plugin_id` at read sites instead is
+        // how one site ends up missing it and silently resolving nothing.
+        //
+        // Deliberately AFTER validation: an id is validated in the exact form the
+        // author wrote, so a malformed legacy id cannot be laundered by an alias.
+        let canonical = canonical_plugin_id(&manifest.id);
+        if canonical != manifest.id {
+            tracing::debug!(
+                legacy = %manifest.id,
+                canonical,
+                "plugin_manifest: canonicalized a legacy plugin id"
+            );
+            manifest.id = canonical.to_owned();
+        }
+
+        // Dependency edges name OTHER plugins, so they need the same treatment: a
+        // manifest that says `requires.apps: [{ id: "@ryu/ghost" }]` must still resolve
+        // after ghost became `@ryu/ghost`, or the dependency graph reports a missing
+        // dependency and refuses to enable the plugin. Applies to third-party
+        // manifests that will never be updated, which is the whole point of the map.
+        if let Some(requires) = manifest.requires.as_mut() {
+            for dep in &mut requires.apps {
+                let canonical = canonical_plugin_id(&dep.id);
+                if canonical != dep.id {
+                    dep.id = canonical.to_owned();
+                }
+            }
+        }
 
         hydrate_manifest_code_files(&mut manifest, code_base)
             .map_err(|e| format!("{e} (source: {source})"))?;
@@ -1508,7 +1541,7 @@ mod tests {
         let manifest: PluginManifest =
             serde_json::from_str(SAMPLE_JSON).expect("sample.ryu.json should deserialise");
 
-        assert_eq!(manifest.id, "com.example.research-assistant");
+        assert_eq!(manifest.id, "@example/research-assistant");
         assert_eq!(manifest.name, "Research Assistant");
         assert_eq!(manifest.version, "1.0.0");
         assert_eq!(
@@ -1615,11 +1648,11 @@ mod tests {
     #[test]
     fn validate_plugin_id_accepts_bare_kebab_and_legacy_dotted() {
         // Bare-kebab ids (the new built-in convention) must pass.
-        assert!(validate_plugin_id("ghost").is_ok());
+        assert!(validate_plugin_id("@ryu/ghost").is_ok());
         assert!(validate_plugin_id("data-grid-explorer").is_ok());
-        assert!(validate_plugin_id("rtk").is_ok());
+        assert!(validate_plugin_id("@ryu/rtk").is_ok());
         // Legacy dotted third-party ids must still pass (back-compat).
-        assert!(validate_plugin_id("com.example.research-assistant").is_ok());
+        assert!(validate_plugin_id("@example/research-assistant").is_ok());
         assert!(validate_plugin_id("io.ryu.ghost").is_ok());
         assert!(validate_plugin_id("com.example.my_app").is_ok());
     }
@@ -1711,7 +1744,13 @@ mod tests {
         );
         // The new Core-tier policy/engine plugins must load (their engines.ryu
         // requirement is satisfied by this Core version).
-        for id in ["firewall", "routing", "sandbox", "engines", "durable"] {
+        for id in [
+            "@ryu/firewall",
+            "@ryu/routing",
+            "@ryu/sandbox",
+            "@ryu/engines",
+            "@ryu/durable",
+        ] {
             assert!(
                 manifests.iter().any(|m| m.id == id),
                 "built-in '{id}' must load (engines.ryu must be satisfiable)"
@@ -1722,31 +1761,31 @@ mod tests {
         assert!(
             !manifests
                 .iter()
-                .any(|m| m.id == "com.example.research-assistant"),
+                .any(|m| m.id == "@example/research-assistant"),
             "sample research assistant manifest must not be a built-in"
         );
         assert!(
-            manifests.iter().any(|m| m.id == "spider"),
+            manifests.iter().any(|m| m.id == "@ryu/spider"),
             "built-in Spider manifest should be loaded"
         );
         assert!(
-            manifests.iter().any(|m| m.id == "exa"),
+            manifests.iter().any(|m| m.id == "@ryu/exa"),
             "built-in Exa manifest should be loaded"
         );
         assert!(
-            manifests.iter().any(|m| m.id == "ghost"),
+            manifests.iter().any(|m| m.id == "@ryu/ghost"),
             "built-in Ghost manifest should be loaded"
         );
         assert!(
-            manifests.iter().any(|m| m.id == "shadow"),
+            manifests.iter().any(|m| m.id == "@ryu/shadow"),
             "built-in Shadow manifest should be loaded"
         );
         assert!(
-            manifests.iter().any(|m| m.id == "proof"),
+            manifests.iter().any(|m| m.id == "@ryu/proof"),
             "built-in Proof of Work manifest should be loaded"
         );
         assert!(
-            manifests.iter().any(|m| m.id == "security-guidance"),
+            manifests.iter().any(|m| m.id == "@ryu/security-guidance"),
             "built-in Security Guidance manifest should be loaded"
         );
         // The Whiteboard app (the FIRST companion runnable in BUILTIN_MANIFESTS) must
@@ -1789,7 +1828,7 @@ mod tests {
         let manifests = PluginManifestLoader::load();
         let m = manifests
             .iter()
-            .find(|m| m.id == "sample-widget")
+            .find(|m| m.id == "@ryu/sample-widget")
             .expect("sample-widget fixture must load and validate");
         assert!(
             m.permission_grants.iter().any(|g| g == "widget:render"),
@@ -1822,7 +1861,7 @@ mod tests {
         let manifests = PluginManifestLoader::load();
         let m = manifests
             .iter()
-            .find(|m| m.id == "security-guidance")
+            .find(|m| m.id == "@ryu/security-guidance")
             .expect("security-guidance must load");
         assert!(
             m.permission_grants.iter().any(|g| g == "hook:side-model"),

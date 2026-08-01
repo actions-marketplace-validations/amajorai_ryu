@@ -46,7 +46,7 @@ const generatedSource = readFileSync(GENERATED_PATH, "utf8");
 describe("contracts lockstep (zod ↔ blessed JSON Schema ↔ generated TS)", () => {
 	test("the known-good mail manifest.json parses with the zod authoring schema", () => {
 		const parsed = PluginManifestSchema.parse(fixture);
-		expect(parsed.id).toBe("com.ryu.mail");
+		expect(parsed.id).toBe("@ryu/mail");
 		expect(parsed.runnables.length).toBeGreaterThan(0);
 	});
 

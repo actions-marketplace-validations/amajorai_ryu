@@ -310,7 +310,7 @@ export function NavUser({
 	// data (pending approvals + quest check-off suggestions) and its every action ends
 	// at `/inbox`, so with no owner it is a button that can only ever say "App not
 	// enabled". Read from the live contributions feed rather than a baked
-	// `com.ryu.approvals`, so this affordance and the route it opens resolve from one
+	// `@ryu/approvals`, so this affordance and the route it opens resolve from one
 	// source. Approvals ships default-OFF, so on a fresh install this is null.
 	const inboxOwner = useCompanionAlias(APPROVALS_ALIAS);
 	const badgePlan = entitlementBadgeTier(verdict);

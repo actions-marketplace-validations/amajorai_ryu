@@ -25,7 +25,7 @@ const GRANT_RUN_AGENT: &str = "hook:run-agent";
 /// Grant required to call `host.spaces_*` (own Space documents).
 const GRANT_SPACES: &str = "spaces:docs";
 /// Grant required to call `host.finetune_*` (drive fine-tune runs). Owned by the
-/// `com.ryu.finetune` app; Core still owns the orchestration + job store, the app
+/// `@ryu/finetune` app; Core still owns the orchestration + job store, the app
 /// reaches it through this governed bridge.
 const GRANT_FINETUNE: &str = "finetune:runs";
 /// Grant required to call `host.navigate` (ask the host shell to navigate/deep-link).
@@ -473,7 +473,7 @@ impl PluginHookBridge {
         }
     }
 
-    /// `host.finetune_*` — the `com.ryu.finetune` app drives fine-tune runs. The
+    /// `host.finetune_*` — the `@ryu/finetune` app drives fine-tune runs. The
     /// orchestration, GPU gate, durable job store, adapter→GGUF merge, and Python
     /// `unsloth` worker now live OUT-OF-PROCESS in the `ryu-finetune` sidecar; the
     /// app reaches them through this governed bridge (host holds the node token; the

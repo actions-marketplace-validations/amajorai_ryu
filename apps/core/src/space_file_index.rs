@@ -1907,14 +1907,14 @@ mod tests {
         // The terminal state replaces the pending row rather than appending.
         record.state = IndexState::Indexed;
         record.chunk_count = 4;
-        record.backend_id = Some("com.ryu.markitdown".to_owned());
+        record.backend_id = Some("@ryu/markitdown".to_owned());
         record.warnings = vec!["output was truncated".to_owned()];
         store.put(&record).await.unwrap();
         let read = store.get("d1").await.unwrap().unwrap();
         assert_eq!(read.state, IndexState::Indexed);
         assert_eq!(read.chunk_count, 4);
         assert_eq!(read.warnings, vec!["output was truncated".to_owned()]);
-        assert_eq!(read.to_json()["backend_id"], "com.ryu.markitdown");
+        assert_eq!(read.to_json()["backend_id"], "@ryu/markitdown");
 
         store.forget("d1").await.unwrap();
         assert!(store.get("d1").await.unwrap().is_none());
@@ -2115,7 +2115,7 @@ mod tests {
             doc_row("f1", FILE_DOCUMENT_KIND),
             doc_row("f2", FILE_DOCUMENT_KIND),
             doc_row("p1", "page"),
-            doc_row("a1", "app:com.ryu.whiteboard"),
+            doc_row("a1", "app:@ryu/whiteboard"),
         ];
         merge_index_into_documents(&mut rows, &records);
 

@@ -29,17 +29,32 @@ use serde_json::{json, Value};
 
 use crate::ResearchHost;
 
+/// This app's plugin id — the namespace half of every event id it may emit. Must
+/// match `apps-store/research/manifest.json`'s `id` exactly or Core rejects the emit.
+const PLUGIN_ID: &str = "@ryu/research";
+
+/// Event: a fresh experiment workspace was initialised and git-committed.
+const EV_WORKSPACE_CREATED: &str = "@ryu/research#workspace.created";
+
 /// Router state for the research HTTP surface: the [`ResearchHost`] that lazily
 /// starts the Core-managed sidecar and reports its install state. Cloneable so the
 /// router bakes a concrete state and returns `Router<()>`.
 #[derive(Clone)]
 pub struct ResearchCtx {
     host: Arc<dyn ResearchHost>,
+    /// Raises `@ryu/research/*` app events back into Core. Built here rather than
+    /// passed in so the constructor's signature (and every caller) is unchanged; it
+    /// is cheap to clone and no-ops entirely when the process is not Core-hosted —
+    /// which is exactly the in-process/library and unit-test state.
+    events: ryu_app_events::EventEmitter,
 }
 
 impl ResearchCtx {
     pub fn new(host: Arc<dyn ResearchHost>) -> Self {
-        Self { host }
+        Self {
+            host,
+            events: ryu_app_events::EventEmitter::from_env(PLUGIN_ID),
+        }
     }
 }
 
@@ -115,7 +130,8 @@ pub async fn research_status(State(ctx): State<ResearchCtx>) -> impl IntoRespons
 
 /// `POST /api/research/workspace` — init a new experiment workspace. Lazily
 /// starts the (off-by-default) sidecar so the flow works once installed, then
-/// proxies to the sidecar's `POST /workspace/init`.
+/// proxies to the sidecar's `POST /workspace/init`. On success it also raises
+/// [`EV_WORKSPACE_CREATED`], so hooks and workflows can pick the loop up from here.
 #[utoipa::path(
     post,
     path = "/api/research/workspace",
@@ -131,7 +147,34 @@ pub async fn research_init_workspace(
     if let Err(e) = ctx.host.start_sidecar().await {
         tracing::debug!("research lazy start skipped: {e:#}");
     }
-    proxy_post("/workspace/init", body).await
+    let (status, Json(value)) = proxy_post("/workspace/init", body).await;
+
+    // Raise the app event only when a workspace genuinely came into existence.
+    // `pass_through` forwards the sidecar's error bodies with their status, so
+    // gating on `workspace_id` (the init envelope's proof of creation) rather than
+    // on "the call returned" is what keeps a failed init from firing a lie.
+    if status.is_success() {
+        if let Some(workspace_id) = value.get("workspace_id").and_then(Value::as_str) {
+            ctx.events
+                .emit(
+                    EV_WORKSPACE_CREATED,
+                    json!({
+                        "workspace_id": workspace_id,
+                        "experiment": value.get("experiment").cloned().unwrap_or(Value::Null),
+                        // The files a researcher may edit — enough for a consumer to
+                        // act on the new workspace. `program_md` is deliberately left
+                        // out: it is a multi-KB instruction document, not a signal.
+                        "mutable_files": value
+                            .get("mutable_files")
+                            .cloned()
+                            .unwrap_or_else(|| json!([])),
+                    }),
+                )
+                .await;
+        }
+    }
+
+    (status, Json(value))
 }
 
 /// `GET /api/research/workspace/:id/ledger` — proxy the sidecar's ledger read.
@@ -305,7 +348,10 @@ mod tests {
         let (code, body) = read(resp).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["running"], json!(true));
-        assert_eq!(body["experiments"], json!([{ "id": "toy" }, { "id": "nanochat" }]));
+        assert_eq!(
+            body["experiments"],
+            json!([{ "id": "toy" }, { "id": "nanochat" }])
+        );
     }
 
     #[tokio::test]
@@ -336,9 +382,12 @@ mod tests {
         let _g = UpstreamGuard::set(Some(&addr));
 
         let host = FakeHost::new(true, false);
-        let resp = research_init_workspace(State(ctx(host.clone())), Json(json!({ "experiment": "toy" })))
-            .await
-            .into_response();
+        let resp = research_init_workspace(
+            State(ctx(host.clone())),
+            Json(json!({ "experiment": "toy" })),
+        )
+        .await
+        .into_response();
         let (code, body) = read(resp).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["echo"]["experiment"], json!("toy"));
@@ -364,6 +413,37 @@ mod tests {
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["ok"], json!(true));
         assert_eq!(host.start_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn init_workspace_passes_the_init_envelope_through_untouched() {
+        // The success path also raises `workspace.created`. That emit is best-effort
+        // and unhosted here (no RYU_BIND/RYU_EXT_TOKEN), so what this pins is that
+        // reading the body to build the payload does not consume or reshape it — the
+        // caller still gets the sidecar's full init envelope.
+        let app = Router::new().route(
+            "/workspace/init",
+            post(|| async {
+                Json(json!({
+                    "workspace_id": "9f3c1b2a",
+                    "experiment": "toy",
+                    "mutable_files": ["train.py"],
+                    "program_md": "# instructions"
+                }))
+            }),
+        );
+        let addr = spawn(app).await;
+        let _g = UpstreamGuard::set(Some(&addr));
+
+        let host = FakeHost::new(true, false);
+        let resp = research_init_workspace(State(ctx(host)), Json(json!({ "experiment": "toy" })))
+            .await
+            .into_response();
+        let (code, body) = read(resp).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["workspace_id"], json!("9f3c1b2a"));
+        assert_eq!(body["mutable_files"], json!(["train.py"]));
+        assert_eq!(body["program_md"], json!("# instructions"));
     }
 
     #[tokio::test]
@@ -404,7 +484,12 @@ mod tests {
         // A 404 from the sidecar must be surfaced with its status, not masked as 200.
         let app = Router::new().route(
             "/workspace/:id/ledger",
-            get(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "no such workspace" }))) }),
+            get(|| async {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "no such workspace" })),
+                )
+            }),
         );
         let addr = spawn(app).await;
         let _g = UpstreamGuard::set(Some(&addr));
@@ -421,10 +506,7 @@ mod tests {
     #[tokio::test]
     async fn pass_through_wraps_non_json_body_as_raw() {
         // Sidecar returns 200 with a plain-text body → wrapped as { "raw": ... }.
-        let app = Router::new().route(
-            "/workspace/init",
-            post(|| async { "not json at all" }),
-        );
+        let app = Router::new().route("/workspace/init", post(|| async { "not json at all" }));
         let addr = spawn(app).await;
         let _g = UpstreamGuard::set(Some(&addr));
 

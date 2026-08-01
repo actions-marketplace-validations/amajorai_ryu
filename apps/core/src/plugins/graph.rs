@@ -470,9 +470,9 @@ mod tests {
     fn enabling_an_uninstalled_plugin_is_not_installed() {
         let installed = vec![m("other", "1.0.0", &[])];
         assert_eq!(
-            resolve_enable_order("ghost", &installed).unwrap_err(),
+            resolve_enable_order("@ryu/ghost", &installed).unwrap_err(),
             DependencyError::NotInstalled {
-                plugin: "ghost".to_owned()
+                plugin: "@ryu/ghost".to_owned()
             }
         );
     }

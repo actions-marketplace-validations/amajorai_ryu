@@ -341,8 +341,229 @@ pub const ON_MODEL_SELECT: &str = "model_select";
 /// / `session_tree`). Observation-only. Payload rides in [`HookContext::event`].
 pub const ON_SESSION_TREE: &str = "session_tree";
 
+// ── Kernel lifecycle phases (Core subsystems, not apps) ──────────────────────
+//
+// These are the non-chat counterpart to the app events below, and the split is not
+// arbitrary. `workflows`, `approvals`, `activity` and `timeline` have an apps-store
+// package, but it is a UI shell over a Core subsystem: the workflow executor IS
+// `crate::workflow`, in this process, with no sidecar. There is nothing to emit
+// FROM, so their lifecycles are Core hook phases fired at Core's own sites.
+//
+// This is also what keeps the satellite rule intact. A phase named for the host
+// primitive (`workflow_run_finished`) names no app, so nothing about it couples Core
+// to a package. Had these been app events, Core would have had to emit on some app's
+// behalf — i.e. hardcode an app id in the kernel, the exact thing the ext-proxy and
+// kernel-capability seams exist to prevent.
+
+/// Fires when a workflow run **starts** — once per run as a user understands it, not
+/// once per resume or nested sub-workflow. Observation-only. Payload rides in
+/// [`HookContext::event`]: `{run_id, workflow_id, workflow_name}`.
+pub const ON_WORKFLOW_RUN_STARTED: &str = "workflow_run_started";
+
+/// Fires when a workflow run **completes successfully**. Observation-only. Payload:
+/// `{run_id, workflow_id, workflow_name, status, error, output}`.
+///
+/// A run suspended at an approval gate does NOT fire this — it has not finished, it
+/// is waiting on a human, and will fire when it resumes and terminates.
+pub const ON_WORKFLOW_RUN_FINISHED: &str = "workflow_run_finished";
+
+/// Fires when a workflow run **fails**, including a failure to start at all and a
+/// run failed by a rejected/expired approval gate. Observation-only. Same payload
+/// shape as [`ON_WORKFLOW_RUN_FINISHED`], with `error` populated.
+///
+/// Split from the success phase rather than folded into it with a status field
+/// because "tell me when something breaks" is the overwhelmingly common
+/// subscription, and making it a phase means such a hook never spawns a sandbox on a
+/// successful run.
+pub const ON_WORKFLOW_RUN_FAILED: &str = "workflow_run_failed";
+
+/// Fire a workflow-run lifecycle hook DETACHED, with `payload` in
+/// [`HookContext::event`].
+///
+/// Detached for the same reason [`ON_POST_TOOL_USE`] is: the executor is the hot
+/// path for every automation on the node, and a hook must not be able to slow a run
+/// down — let alone fail one. Callers are sync-friendly (this spawns rather than
+/// awaiting), which is what lets it be called from the executor without
+/// restructuring it.
+pub fn fire_workflow_run_event(phase: &'static str, payload: serde_json::Value) {
+    tokio::spawn(async move {
+        let ctx = HookContext {
+            event: Some(payload),
+            ..Default::default()
+        };
+        let _ = dispatch_global(phase, ctx).await;
+    });
+}
+
+// ── App events (plugin-declared phases) ──────────────────────────────────────
+//
+// Every phase above is a Core-owned constant. An **app event** is the open half of
+// the same mechanism: a plugin declares `contributes.hook_events` (see
+// [`crate::plugin_manifest::HookEventContribution`]), its sidecar raises the event
+// through the `events.emit` kernel capability, and Core dispatches it here as a
+// phase named `<owning plugin id>#<event name>`.
+//
+// That naming is not cosmetic. Core phases are bare words and app events always
+// carry a `/`, so the two namespaces cannot collide and `phase_matches` needs no
+// special case — an app event flows through the exact same `dispatch_phase` path
+// every built-in phase uses. The only thing app events need on top is a narrower
+// directive policy, below.
+
+/// Directives an **app-event** hook may return.
+///
+/// An app event fires with no turn in flight — a meeting ended, a workflow run
+/// failed — so most of the [`HookDirective`] vocabulary is meaningless here:
+/// there is no outgoing user message to [`Replace`], no context to [`Inject`] into
+/// and no turn to [`Continue`]. Applying one would mean silently mutating whatever
+/// chat happened to be open, which is not what the hook asked for and not something
+/// the user could predict.
+///
+/// So an app-event hook is observation-plus-notification: [`None`] or [`Note`].
+/// Anything else is dropped with a log rather than an error, because the hook is
+/// otherwise well-formed and failing the whole dispatch would punish the plugin for
+/// a directive that simply has no meaning in this position.
+///
+/// A plugin that genuinely wants an app event to *drive a conversation* has the
+/// right tool already: react to the event with a workflow (a
+/// [`crate::workflow::WorkflowTrigger::Event`]), which owns its own run context.
+///
+/// [`None`]: HookDirective::None
+/// [`Note`]: HookDirective::Note
+/// [`Replace`]: HookDirective::Replace
+/// [`Inject`]: HookDirective::Inject
+/// [`Continue`]: HookDirective::Continue
+fn app_event_directive_allowed(directive: &HookDirective) -> bool {
+    matches!(directive, HookDirective::None | HookDirective::Note { .. })
+}
+
+/// The maximum serialized size of an app-event payload, in bytes.
+///
+/// The payload is forwarded verbatim into every consumer's sandbox, so an
+/// unbounded one is an amplification channel: a single emit would be copied into N
+/// Deno processes. 64 KiB is far above any real event and far below anything that
+/// makes fan-out expensive.
+pub const MAX_EVENT_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// Dispatch an **app event** to every enabled plugin whose hook declares it.
+///
+/// Detached-style semantics (fail-open, never blocks the emitter) matching the
+/// [`ON_POST_TOOL_USE`] precedent, with directives filtered by
+/// [`app_event_directive_allowed`]. Returns the surviving directives so the emit
+/// handler can report how many consumers acted.
+///
+/// Authorization is NOT checked here — this is the dispatch primitive, and the emit
+/// seam (`events.emit`) is what proves the caller owns the event. Anything reaching
+/// this function is already authorized.
+pub async fn dispatch_app_event(
+    state: &ServerState,
+    event: &str,
+    ctx: &HookContext,
+) -> Vec<HookDirective> {
+    let directives = dispatch_phase(state, event, ctx).await;
+    let total = directives.len();
+    let kept: Vec<HookDirective> = directives
+        .into_iter()
+        .filter(app_event_directive_allowed)
+        .collect();
+    if kept.len() != total {
+        tracing::debug!(
+            event,
+            dropped = total - kept.len(),
+            "plugin_host: dropped app-event directives that have no meaning off the chat path"
+        );
+    }
+    kept
+}
+
+/// Surface a [`HookDirective::Note`] returned by an app-event hook.
+///
+/// On the chat path a note is rendered out-of-band next to the answer. An app event
+/// has no answer to sit beside, so the note goes to the **unified activity feed** —
+/// the one place a user already looks for "something happened while I wasn't
+/// watching", and the same sink a fired monitor alert lands in.
+///
+/// Deliberately NOT the notification fan-out: that reaches configured channels
+/// (Telegram, email, push), and a hook firing on every `x.updated` event would turn
+/// into a pager. An app-event hook that genuinely warrants pushing to a human has
+/// the `notify.fanout` capability for it.
+///
+/// Best-effort — a feed write failure is logged, never propagated to the emitter.
+pub async fn notify_app_event_note(state: &ServerState, event: &str, text: &str) {
+    let item = ryu_activity::ActivityItem::new("plugin_hook_note", "plugins", event.to_owned())
+        .with_body(Some(text.to_owned()))
+        .with_level(ryu_activity::ActivityLevel::Info)
+        .with_metadata(serde_json::json!({ "event": event }));
+    if let Err(e) = state.activity.record(item).await {
+        tracing::warn!("plugin_host: failed to record app-event note on activity feed: {e:#}");
+    }
+}
+
+/// Every app event declared by a currently **enabled** plugin, as
+/// `(event, owning plugin id, contribution)`.
+///
+/// The catalog behind the event picker in the workflow builder and the consumer
+/// docs. Reads the live manifest set, so an enable/disable is reflected without a
+/// refresh — same posture as [`collect_enabled_hooks`].
+pub async fn collect_declared_events(
+    state: &ServerState,
+) -> Vec<(String, crate::plugin_manifest::HookEventContribution)> {
+    let enabled_ids: HashSet<String> = match state.app_store.list().await {
+        Ok(records) => records
+            .into_iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.id)
+            .collect(),
+        Err(e) => {
+            tracing::warn!("plugin_host: could not list plugins for event catalog: {e}");
+            return Vec::new();
+        }
+    };
+    let manifests = state.app_manifests.read().await;
+    let mut events = Vec::new();
+    for manifest in manifests.iter() {
+        if !enabled_ids.contains(&manifest.id) {
+            continue;
+        }
+        let Some(contributes) = &manifest.contributes else {
+            continue;
+        };
+        for event in &contributes.hook_events {
+            events.push((manifest.id.clone(), event.clone()));
+        }
+    }
+    events
+}
+
+/// Whether `plugin_id` declared `event` in its manifest — the authorization
+/// predicate behind the emit seam.
+///
+/// Two conditions, and both matter. The namespace half of the event id must be
+/// `plugin_id` (so an app cannot emit into another app's namespace even if it
+/// declares the row), and the event must actually appear in that manifest's
+/// `hook_events` (so an app cannot emit an event it never published a contract
+/// for). Fail-closed: an unknown plugin, a missing `contributes`, or an
+/// undeclared event all return `false`.
+pub async fn may_emit_event(state: &ServerState, plugin_id: &str, event: &str) -> bool {
+    let Some((owner, _)) = crate::plugin_manifest::split_hook_event_id(event) else {
+        return false;
+    };
+    if owner != plugin_id {
+        return false;
+    }
+    let manifests = state.app_manifests.read().await;
+    manifests
+        .iter()
+        .find(|m| m.id == plugin_id)
+        .and_then(|m| m.contributes.as_ref())
+        .is_some_and(|c| c.hook_events.iter().any(|e| e.id == event))
+}
+
 /// Whether a hook declared for `hook_on` should run in `phase`. Exact match,
 /// except [`ON_STOP`] is treated as an alias of [`ON_POST_ASSISTANT_TURN`].
+///
+/// App-event phases need no clause here: they are exact-matched like everything
+/// else, and their mandatory `/` keeps them from ever colliding with a Core phase
+/// name.
 pub fn phase_matches(hook_on: &str, phase: &str) -> bool {
     hook_on == phase || (phase == ON_POST_ASSISTANT_TURN && hook_on == ON_STOP)
 }
@@ -689,6 +910,55 @@ const host = {{
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// An app event fires with no turn in flight, so only the directives that mean
+    /// something off the chat path survive. Getting this wrong would let a hook
+    /// reacting to "a meeting ended" silently inject text into whatever chat happened
+    /// to be open.
+    #[test]
+    fn app_event_hooks_may_only_observe_or_note() {
+        assert!(app_event_directive_allowed(&HookDirective::None));
+        assert!(app_event_directive_allowed(&HookDirective::Note {
+            text: "meeting summarized".into()
+        }));
+
+        for turn_only in [
+            HookDirective::Continue {
+                text: "keep going".into(),
+            },
+            HookDirective::Replace {
+                text: "rewritten".into(),
+            },
+            HookDirective::Inject {
+                text: "context".into(),
+            },
+        ] {
+            assert!(
+                !app_event_directive_allowed(&turn_only),
+                "{turn_only:?} has no meaning off the chat path and must be dropped"
+            );
+        }
+    }
+
+    /// An app-event phase must route through the ordinary exact-match dispatch, and
+    /// must never be captured by the one alias `phase_matches` implements.
+    #[test]
+    fn app_event_phases_match_exactly_and_never_alias() {
+        assert!(phase_matches(
+            "com.acme.meet/meeting.ended",
+            "com.acme.meet/meeting.ended"
+        ));
+        assert!(!phase_matches(
+            "com.acme.meet/meeting.ended",
+            "com.acme.meet/meeting.started"
+        ));
+        // The `stop` → `post_assistant_turn` alias must not drag an app event in.
+        assert!(!phase_matches(
+            "com.acme.meet/meeting.ended",
+            ON_POST_ASSISTANT_TURN
+        ));
+        assert!(!phase_matches(ON_STOP, "com.acme.meet/meeting.ended"));
+    }
 
     #[test]
     fn parse_directive_handles_each_variant() {
@@ -1223,11 +1493,11 @@ mod tests {
                     content: "Put them in a global variable.".into(),
                 },
             ],
-            flags: std::iter::once(("com.ryuhq.advisor".to_string(), true)).collect(),
+            flags: std::iter::once(("@ryu/advisor".to_string(), true)).collect(),
             ..Default::default()
         };
         let directive = run_fixture(
-            "com.ryuhq.advisor",
+            "@ryu/advisor",
             ctx,
             serde_json::json!("A global is not request-safe; use a signed cookie or a store."),
         )
@@ -1312,7 +1582,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let directive = run_fixture("com.ryuhq.advisor", ctx, serde_json::json!("unused")).await;
+        let directive = run_fixture("@ryu/advisor", ctx, serde_json::json!("unused")).await;
         assert_eq!(directive, HookDirective::None);
     }
 
@@ -1332,7 +1602,7 @@ mod tests {
             ..Default::default()
         };
         let directive = run_fixture(
-            "com.ryuhq.advisor",
+            "@ryu/advisor",
             ctx,
             serde_json::json!("Reconsider the data model first."),
         )
@@ -1358,11 +1628,11 @@ mod tests {
         let ctx = HookContext {
             conversation_id: Some("c1".into()),
             input: Some("fix login".into()),
-            flags: std::iter::once(("com.ryuhq.auto-expand".to_string(), true)).collect(),
+            flags: std::iter::once(("@ryu/auto-expand".to_string(), true)).collect(),
             ..Default::default()
         };
         let directive = run_fixture(
-            "com.ryuhq.auto-expand",
+            "@ryu/auto-expand",
             ctx,
             serde_json::json!("Investigate and fix the login bug: ..."),
         )
@@ -1387,8 +1657,7 @@ mod tests {
             input: Some("just a normal message".into()),
             ..Default::default()
         };
-        let directive =
-            run_fixture("com.ryuhq.auto-expand", ctx, serde_json::json!("unused")).await;
+        let directive = run_fixture("@ryu/auto-expand", ctx, serde_json::json!("unused")).await;
         assert_eq!(directive, HookDirective::None);
     }
 
@@ -1405,7 +1674,7 @@ mod tests {
             ..Default::default()
         };
         let directive = run_fixture(
-            "com.ryuhq.auto-expand",
+            "@ryu/auto-expand",
             ctx,
             serde_json::json!("Write a comprehensive unit test suite for ..."),
         )
@@ -1431,7 +1700,7 @@ mod tests {
             input: Some("what day is it?".into()),
             ..Default::default()
         };
-        let directive = run_fixture("com.ryuhq.session-context", ctx, serde_json::json!("")).await;
+        let directive = run_fixture("@ryu/session-context", ctx, serde_json::json!("")).await;
         match directive {
             HookDirective::Inject { text } => {
                 assert!(text.contains("Session context"), "inject: {text}");

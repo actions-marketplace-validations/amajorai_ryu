@@ -338,9 +338,17 @@
         },
         "dock_panels": {
           "default": [],
-          "description": "App-registered **workspace dock panels** — a tab in the desktop's bottom or\nright dock (Terminal / Code Review / Browser / Simulator live there today).\nThis is the seam that lets an app OWN its dock tab instead of the shell\nwelding the app into a closed `TabKind` union: `com.ryu.browser` and\n`com.ryu.simulator` are apps, and their tabs are contributions, not enum\nvariants. Self-contained + opaque `spec` (see [`DockPanelContribution`]), so a\nnew panel capability needs no Core change; served + tagged with the owning\n`plugin` id at `GET /api/plugins/contributions`.",
+          "description": "App-registered **workspace dock panels** — a tab in the desktop's bottom or\nright dock (Terminal / Code Review / Browser / Simulator live there today).\nThis is the seam that lets an app OWN its dock tab instead of the shell\nwelding the app into a closed `TabKind` union: `@ryu/browser` and\n`@ryu/simulator` are apps, and their tabs are contributions, not enum\nvariants. Self-contained + opaque `spec` (see [`DockPanelContribution`]), so a\nnew panel capability needs no Core change; served + tagged with the owning\n`plugin` id at `GET /api/plugins/contributions`.",
           "items": {
             "$ref": "#/$defs/DockPanelContribution"
+          },
+          "type": "array"
+        },
+        "hook_events": {
+          "default": [],
+          "description": "**App events this plugin emits** — the *provider* half of the hook system,\nand the mirror image of [`Contributes::turn_hooks`] (the *consumer* half).\n\nCore's own hook phases (`post_assistant_turn`, `pre_tool_use`, `context`, …)\nare a closed set built into `plugin_host`, so before this surface existed a\nplugin could only react to things happening *in a chat turn*. An app that\nowns a real-world lifecycle — a meeting ending, a workflow run failing, an\nalert firing — had no way to let anything else react to it. That forced the\nclassic anti-pattern: every consumer polls the producer's HTTP routes, and\nevery new integration is bespoke wiring between two apps that must both be\nchanged.\n\nDeclaring an event here makes it a first-class hook phase. Any other plugin\nconsumes it by naming it in a `turn_hooks[].on`, and any workflow consumes it\nwith an `event` trigger — neither the producer nor Core learns anything about\nthe consumer. Apps therefore both **provide** and **consume** over one\nmechanism.\n\n# Ids are namespaced, and that is what makes collisions impossible\n\nEvery id MUST be `<owning plugin id>#<event name>` — the owning half is\nchecked against the manifest's own `id` at load, and the name half is\n`[a-z0-9][a-z0-9._-]*`. Because a Core phase name never contains `/`, an app\nliterally cannot declare an event that shadows one, no reserved-word list\nrequired. It is also why the emit path can authorize purely from the\nmanifest: the caller's authenticated plugin id must be the id in the event\nname, so an app can only ever emit its **own** events.\n\n# Core-interpreted, so a typed struct\n\nCore reads this table to authorize emits and to serve the event catalog, so\nper this type's own doc comment it gets a typed struct rather than opaque\nJSON. It names event strings rather than runnable ids, so it is\n**self-contained** and stays out of [`Contributes::referenced_ids`].",
+          "items": {
+            "$ref": "#/$defs/HookEventContribution"
           },
           "type": "array"
         },
@@ -407,7 +415,7 @@
         },
         "turn_hooks": {
           "default": [],
-          "description": "Chat turn hooks the plugin contributes — server-side logic that runs at a\nturn boundary (e.g. `post_assistant_turn`) and returns a directive. These\nare **self-contained** (they carry their own inline `code`), so they are\nNOT cross-validated against `runnables` like the id-reference surfaces\nabove; the Core `plugin_host` runtime executes them in the sandbox.",
+          "description": "Hooks the plugin contributes — server-side logic that runs at a hook\nboundary and returns a directive. These are **self-contained** (they carry\ntheir own inline `code`), so they are NOT cross-validated against\n`runnables` like the id-reference surfaces above; the Core `plugin_host`\nruntime executes them in the sandbox.\n\nThe field name is historical. It originally held only *chat* turn\nboundaries (`post_assistant_turn`, `pre_user_turn`); a hook's `on` is now\nany hook phase, including an **app event** another plugin declared in its\n[`Contributes::hook_events`] (`@example/meetings#meeting.ended`). It is\ndeliberately NOT renamed: `turn_hooks` is load-bearing in every packaged\nmanifest, the published JSON Schema, the SDK's TS mirror and the loader's\ninvariant tests, and the rename would buy nothing but churn.",
           "items": {
             "$ref": "#/$defs/TurnHookContribution"
           },
@@ -462,7 +470,7 @@
       "type": "object"
     },
     "DockPanelContribution": {
-      "description": "One app-registered **workspace dock panel** — a tab in the desktop's bottom or\nright dock (see [`Contributes::dock_panels`]).\n\nThe dock sibling of [`ViewContribution`] / [`SidebarSectionContribution`]: a typed\nenvelope (`id` / `title` / `icon` / `placement`) around an OPAQUE description of\nwhat the tab renders. Core stores it verbatim, tags it with the owning `plugin` id\nat `GET /api/plugins/contributions`, and never interprets `panel` or `spec` — so a\nnew panel capability is a renderer change, never a Core change.\n\n# The `panel` vocabulary\n\n`panel` is the render-mode discriminant the desktop's dock renderer switches on.\nIt is a plain `String` (not an enum) for the same reason [`ViewContribution::view`]\nis: an unknown member must reach a newer shell intact rather than being rejected at\nload by an older Core. The vocabulary the desktop understands today:\n\n- `\"companion\"` — mount the app's sandboxed companion surface in the dock. The\n  `spec` names it: `{ \"companion\": \"<runnable id>\" }`. This is the third-party\n  path: an app ships one companion UI and can surface it in the dock, the sidebar,\n  or a full tab without any host code.\n- `\"view\"` — render one of the plugin's own [`Contributes::views`] entries inside\n  the dock chrome: `{ \"view\": \"<view id>\" }`. Data-only, drawn with the host's own\n  `@ryu/ui` components, so a dock panel gets the Raycast tier for free.\n- `\"native\"` — the shell's OWN component, registered under `<plugin>/<id>`. This is\n  the migration seam for first-party apps whose panel is hand-written React driving\n  their sidecar through the ext-proxy (`com.ryu.browser`, `com.ryu.simulator`): the\n  *component* stays in the shell, but its existence, label, icon and placement stop\n  being a hardcoded `TabKind` variant and become the app's own declaration, so\n  disabling the app removes the tab. An unknown `<plugin>/<id>` simply renders\n  nothing — a native panel is never a code channel.\n\nThe full `spec` shape is owned by the shared TS vocabulary (`@ryu/app-host/views`\n`DockPanelSpec`), NOT by this contract.",
+      "description": "One app-registered **workspace dock panel** — a tab in the desktop's bottom or\nright dock (see [`Contributes::dock_panels`]).\n\nThe dock sibling of [`ViewContribution`] / [`SidebarSectionContribution`]: a typed\nenvelope (`id` / `title` / `icon` / `placement`) around an OPAQUE description of\nwhat the tab renders. Core stores it verbatim, tags it with the owning `plugin` id\nat `GET /api/plugins/contributions`, and never interprets `panel` or `spec` — so a\nnew panel capability is a renderer change, never a Core change.\n\n# The `panel` vocabulary\n\n`panel` is the render-mode discriminant the desktop's dock renderer switches on.\nIt is a plain `String` (not an enum) for the same reason [`ViewContribution::view`]\nis: an unknown member must reach a newer shell intact rather than being rejected at\nload by an older Core. The vocabulary the desktop understands today:\n\n- `\"companion\"` — mount the app's sandboxed companion surface in the dock. The\n  `spec` names it: `{ \"companion\": \"<runnable id>\" }`. This is the third-party\n  path: an app ships one companion UI and can surface it in the dock, the sidebar,\n  or a full tab without any host code.\n- `\"view\"` — render one of the plugin's own [`Contributes::views`] entries inside\n  the dock chrome: `{ \"view\": \"<view id>\" }`. Data-only, drawn with the host's own\n  `@ryu/ui` components, so a dock panel gets the Raycast tier for free.\n- `\"native\"` — the shell's OWN component, registered under `<plugin>/<id>`. This is\n  the migration seam for first-party apps whose panel is hand-written React driving\n  their sidecar through the ext-proxy (`@ryu/browser`, `@ryu/simulator`): the\n  *component* stays in the shell, but its existence, label, icon and placement stop\n  being a hardcoded `TabKind` variant and become the app's own declaration, so\n  disabling the app removes the tab. An unknown `<plugin>/<id>` simply renders\n  nothing — a native panel is never a code channel.\n\nThe full `spec` shape is owned by the shared TS vocabulary (`@ryu/app-host/views`\n`DockPanelSpec`), NOT by this contract.",
       "properties": {
         "icon": {
           "description": "Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).",
@@ -654,6 +662,35 @@
           "type": "array"
         }
       },
+      "type": "object"
+    },
+    "HookEventContribution": {
+      "description": "One **app event** a plugin declares it emits (a [`Contributes::hook_events`]\nrow). This is a *declaration*, not code: the event is raised at runtime by the\nplugin's own sidecar calling the `events.emit` kernel capability, and Core\nchecks the emit against this table.\n\nThe payload the emitter sends is delivered to every consumer as `ctx.event`, so\n[`Self::payload_example`] is the contract a consumer author reads. Keep it\nhonest — it is the only description of the payload anyone gets.",
+      "properties": {
+        "description": {
+          "default": null,
+          "description": "What the event means and, critically, *when* it fires — including whether it\ncan fire more than once for the same subject.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The fully-qualified event id: `<owning plugin id>#<event name>`, e.g.\n`@example/meetings#meeting.ended`. Validated at load against the owning\nmanifest's `id`; see [`Contributes::hook_events`] for why the namespace is\nmandatory rather than conventional.\n\nName the event after **what happened**, in the past tense, never after who\nshould react to it: a consumer that renames the producer's event to suit\nitself is exactly the coupling this surface removes. The house patterns are\n`x.started` / `x.ended` / `x.failed` for a lifecycle, `x.ready` for a\nproduced artifact, and `x.created` / `x.updated` / `x.deleted` for state.",
+          "type": "string"
+        },
+        "payload_example": {
+          "description": "An example of the payload delivered as `ctx.event`. Documentation, not a\nschema: Core forwards whatever the emitter sends verbatim and validates\nnothing beyond the size cap, so this exists for the human writing a consumer."
+        },
+        "title": {
+          "description": "Human-readable title for the event picker (workflow trigger UI, docs).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
       "type": "object"
     },
     "HookMatch": {

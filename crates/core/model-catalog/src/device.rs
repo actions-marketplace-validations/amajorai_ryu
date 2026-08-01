@@ -451,7 +451,10 @@ mod tests {
     fn fit_zero_bytes_is_unknown() {
         // A zero-length weight (metadata-only / unknown size) can't be judged.
         assert_eq!(
-            estimate_fit(Some(0), &dev(Some(16_000_000_000), Some(16_000_000_000), false)),
+            estimate_fit(
+                Some(0),
+                &dev(Some(16_000_000_000), Some(16_000_000_000), false)
+            ),
             FitVerdict::Unknown
         );
     }

@@ -48,6 +48,42 @@ export const DETAIL_SIZES: Record<DetailState, IslandSize> = {
 } as const;
 
 /**
+ * The heights above are *floors*, not fixed sizes. Each pill measures the natural
+ * height of its content (`useContentHeight`) and grows past its floor when the
+ * content needs more than the single row it was tuned for — a wrapping app name, a
+ * multi-line suggestion body, a long voice error. Past `DETAIL_MAX_H` it stops
+ * growing and the content scrolls inside the shape, mirroring what the expanded
+ * compact bar does with the composer.
+ */
+/** Vertical padding (px) added around measured pill content. */
+export const DETAIL_CONTENT_VPAD = 16;
+/** Ceiling (px): past this a pill's content scrolls instead of growing the shape. */
+export const DETAIL_MAX_H = 200;
+
+/**
+ * Height (px) for a pill whose content measures `contentHeight`: its base height
+ * while the content fits, growing to hold the content, capped at `DETAIL_MAX_H`.
+ * A `contentHeight` of 0 means "not measured yet" (nothing mounted), so the base
+ * height stands rather than collapsing the shape.
+ */
+export function pillHeight(base: number, contentHeight: number): number {
+	if (contentHeight <= 0) {
+		return base;
+	}
+	return Math.min(
+		DETAIL_MAX_H,
+		Math.max(base, contentHeight + DETAIL_CONTENT_VPAD)
+	);
+}
+
+/** Whether measured content exceeds what the pill is allowed to grow to. */
+export function pillOverflows(contentHeight: number): boolean {
+	return (
+		contentHeight > 0 && contentHeight + DETAIL_CONTENT_VPAD > DETAIL_MAX_H
+	);
+}
+
+/**
  * The expanded island when there is nothing to show but the composer: a short,
  * wide input bar (just the blended text input + the inbox button). It grows to
  * the full `DETAIL_SIZES.expanded` height only once there is chat history (or the

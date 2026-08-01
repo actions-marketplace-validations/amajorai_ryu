@@ -311,7 +311,7 @@ export default function SpacesPage({
 		}
 		try {
 			// The whiteboard is a Ryu App: create an app-owned Space document
-			// (kind `app:com.ryu.whiteboard`) through the app's `spaces:docs`
+			// (kind `app:@ryu/whiteboard`) through the app's `spaces:docs`
 			// capability, then open it in the app's Companion. This REPLACES the
 			// built-in `create_whiteboard` — one implementation, still a first-class
 			// Space document (persisted, search-embedded, backlinked, versioned).

@@ -184,14 +184,14 @@ pub struct ServerState {
     // engine field. The `/api/monitors/*` surface is served via the manifest
     // `public_mount`; the scheduler reaches the sidecar over loopback via
     // `crate::monitors_client` (`JobTarget::Monitor` run + backing-job reconcile).
-    /// Loopback client for the out-of-process `ryu-meetings` sidecar (`com.ryu.meetings`),
+    /// Loopback client for the out-of-process `ryu-meetings` sidecar (`@ryu/meetings`),
     /// the single owner of `meetings.db` + the engine/audio pipeline + the
     /// `/api/meetings/*` surface (served to the desktop through the ext-proxy
     /// `public_mount`). Core links NO meeting code; this client backs the kernel hardware
     /// ambient-audio path (`ryu_hardware::MeetingIngest`), the activity-feed fold, and
     /// the data-admin clear (see [`crate::meetings_client`]).
     pub meetings: crate::meetings_client::MeetingsClient,
-    /// Loopback client for the out-of-process `ryu-quests` sidecar (`com.ryu.quests`),
+    /// Loopback client for the out-of-process `ryu-quests` sidecar (`@ryu/quests`),
     /// the single owner of `quests.db` + the detection engine. The `/api/quests/*`
     /// surface is served by the sidecar via the manifest `public_mount`; this client
     /// backs Core's three reverse-couplings — the scheduler judge, the
@@ -248,7 +248,7 @@ pub struct ServerState {
     /// apply + rebroadcast on update, flush-and-drop on last-leave. Cheap to clone
     /// (an `Arc` bag). See [`ryu_collab`].
     pub collab: ryu_collab::DocRegistry,
-    /// Loopback client for the out-of-process `ryu-finetune` sidecar (`com.ryu.finetune`),
+    /// Loopback client for the out-of-process `ryu-finetune` sidecar (`@ryu/finetune`),
     /// the single owner of `finetune.db` + the adapter catalog + the Python `unsloth`
     /// worker. The `/api/finetune/*` surface is served by the sidecar via the manifest
     /// `public_mount`; this client backs Core's one remaining reverse-coupling — the
@@ -522,7 +522,7 @@ async fn track_connection(
 #[derive(Clone)]
 pub(crate) struct AppGate {
     store: PluginStore,
-    /// The manifest id of the owning App (e.g. `com.ryu.meetings`).
+    /// The manifest id of the owning App (e.g. `@ryu/meetings`).
     app_id: &'static str,
     /// Display name for the refusal message ("Enable the **Meetings** app").
     label: &'static str,
@@ -2171,7 +2171,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // `callTool` lane and the ONLY egress path a widget's passive assets have.
         .route("/api/widgets/asset", get(widgets::widget_asset));
     // Agent mail (Self-host Agent Inboxes) is now a fully manifest-driven app:
-    // `com.ryu.mail` declares the `ryu-mail` sidecar + a `/api/mail` `public_mount`,
+    // `@ryu/mail` declares the `ryu-mail` sidecar + a `/api/mail` `public_mount`,
     // and the generic ext-proxy loader below serves `/api/mail/*` (public inbound +
     // protected CRUD) when the app is enabled. The hand-coded `sidecar::mail` proxy
     // and the in-process `crate::mail` path were both retired here — mail is
@@ -2377,7 +2377,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // `/api/teams/*` is now served OUT-OF-PROCESS by the `ryu-teams` sidecar via
         // the manifest `public_mount` (generic ext-proxy loader) — no in-process
         // route merge. The `@team` chat orchestration reads the store over loopback
-        // through `state.teams` (a `TeamsClient`). See `com.ryu.teams`.
+        // through `state.teams` (a `TeamsClient`). See `@ryu/teams`.
         .route(
             "/api/mcp/servers",
             get(list_mcp_servers).post(create_mcp_server),
@@ -2677,7 +2677,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // ── Fine-tuning `/api/finetune/*` is now served OUT-OF-PROCESS by the
         //    `ryu-finetune` sidecar via the manifest `public_mount` (generic ext-proxy
         //    loader) — no in-process route merge. The sidecar owns `finetune.db`, the
-        //    adapter catalog, and the Python `unsloth` worker. See `com.ryu.finetune`.
+        //    adapter catalog, and the Python `unsloth` worker. See `@ryu/finetune`.
         // ── Continual-learning loop (experience buffer + PRM + skill synthesis) ──
         // The ONE mount of `/api/learn/*` + `/api/experience/list`, in its own gated
         // sub-router (see `learning_routes`) so the Learning App's enabled bit
@@ -2714,7 +2714,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/uploads/:id", get(uploads::serve_upload))
         // ── Autoresearch data path (`/api/research/*`) is served out-of-process by
         // the `ryu-research` sidecar via the manifest `public_mount` — no in-process
-        // route (see `com.ryu.research`).
+        // route (see `@ryu/research`).
         // ── Git workspace status (read-only, Unit U009) ─────────────────────
         .route("/api/git/status", get(git::git_status))
         // ── Git branch list + switch (composer branch selector) ─────────────
@@ -2755,7 +2755,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/gateway/audit", get(gateway_audit))
         // ── Gateway budget-spend proxy (M2 control-layer UX) ─────────────────
         .route("/api/gateway/budget/spend", get(gateway_budget_spend))
-        // ── Canvas: ported to the `com.ryu.canvas` Ryu App (Path-B companion).
+        // ── Canvas: ported to the `@ryu/canvas` Ryu App (Path-B companion).
         // The board is now a Space document owned by the app; there is no bespoke
         // `/api/canvases` file store any more (legacy files are imported at startup
         // by `server::canvas_migrate`). ────────────────────────────────────────
@@ -2769,7 +2769,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // triggers regardless of the app's enabled bit.
         // ── Clips (agent-native Loom/Jam → Shadow proxy) is served OUT-OF-PROCESS
         // by the `ryu-clips` sidecar via the manifest `public_mount` — no in-process
-        // route merge. See `com.ryu.clips` in `plugin_manifest`.
+        // route merge. See `@ryu/clips` in `plugin_manifest`.
         .merge(workflow_routes(&state.app_store))
         // ── Activity feed (unified cross-module timeline) ───────────────────
         // The SSE `stream` route is registered before the collection route (no
@@ -2827,19 +2827,19 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         //    `ryu-quests` sidecar via the manifest `public_mount` (generic ext-proxy
         //    loader) — no in-process route merge. The sidecar owns `quests.db` and
         //    the detection engine; Core reaches its scheduler/activity couplings over
-        //    loopback via `quests_client`. See `com.ryu.quests`.
+        //    loopback via `quests_client`. See `@ryu/quests`.
         // ── Home dashboards (customizable live widget grid) ─────────────────
         // OUT-OF-PROCESS: `/api/dashboards/*` is served by the `ryu-dashboards`
         // sidecar via the manifest `public_mount` (generic ext-proxy loader) — no
         // in-process route merge. The sidecar owns `dashboards.db` + the refresh
         // loop; Core reaches its hardware-render + builder couplings over loopback
-        // via `dashboards_client`. See `com.ryu.dashboards`.
+        // via `dashboards_client`. See `@ryu/dashboards`.
         // ── Meeting notes (record → live transcript → AI notes) ─────────────
         // OUT-OF-PROCESS: `/api/meetings/*` is served by the `ryu-meetings` sidecar
         // via the manifest `public_mount` (generic ext-proxy loader) — no in-process
         // route merge. The sidecar owns `meetings.db` + the engine/audio pipeline;
         // Core reaches its hardware-ambient + activity + save-notes couplings over
-        // loopback via `meetings_client`. See `com.ryu.meetings`.
+        // loopback via `meetings_client`. See `@ryu/meetings`.
         // ── Hardware device registry (management; protected) ────────────────
         // The realtime `/api/hardware/ws` + nonce-gated `/api/hardware/pair` +
         // TRMNL `/api/hardware/display/*` are PUBLIC (registered on the public router
@@ -2901,7 +2901,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // ── Ghost recipes (`/api/recipes/*`) are served OUT-OF-PROCESS by the
         // `ryu-recipes` sidecar via the manifest `public_mount` (no in-process
         // merge); the crate's replay/record engine stays compiled as a non-optional
-        // dep for the workflow GhostAction node. See `com.ryu.recipes`.
+        // dep for the workflow GhostAction node. See `@ryu/recipes`.
         // ── Scheduled jobs / heartbeat ──────────────────────────────────────
         .route("/heartbeat/jobs", get(list_jobs).post(create_job))
         .route("/heartbeat/jobs/:id", get(get_job).delete(delete_job))
@@ -2933,7 +2933,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // data. See `server::shadow_proxy`.
         .merge(shadow_proxy::routes());
     // Agent-mail management routes (`/api/mail/*` protected CRUD) are served by the
-    // `com.ryu.mail` app's `ryu-mail` sidecar via the generic `public_mount` loader
+    // `@ryu/mail` app's `ryu-mail` sidecar via the generic `public_mount` loader
     // (registered on the PUBLIC router, which enforces the same node bearer per-route);
     // the hand-coded proxy + in-process path were retired (Track C, sidecar-only).
     // Compile-out-able leaf features (research/clips/recipes). Each is merged here —
@@ -2944,10 +2944,10 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
     // Router merge is path-based, so moving them out of the mid-chain is identical.
     // Research `/api/research/*` is now served OUT-OF-PROCESS by the `ryu-research`
     // sidecar via the manifest `public_mount` (generic ext-proxy loader) — no
-    // in-process route merge. See `com.ryu.research` in `plugin_manifest`.
+    // in-process route merge. See `@ryu/research` in `plugin_manifest`.
     // Clips `/api/clips/*` is now served OUT-OF-PROCESS by the `ryu-clips` sidecar
     // via the manifest `public_mount` (generic ext-proxy loader) — no in-process
-    // route merge. See `com.ryu.clips` in `plugin_manifest`.
+    // route merge. See `@ryu/clips` in `plugin_manifest`.
     // Recipes `/api/recipes/*` is now served OUT-OF-PROCESS by the `ryu-recipes`
     // sidecar via the manifest `public_mount` (generic ext-proxy loader) — no
     // in-process route merge. Its two live-ghost paths (replay + the recording
@@ -2955,10 +2955,10 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
     // the recorder subprocess are kernel; see `recipes_client` + `recipes_host`).
     // The workflow executor's `Recipe`/`GhostAction` nodes still call
     // `ryu_recipes::run` IN-PROCESS (no HTTP round-trip) against the same host.
-    // See `com.ryu.recipes` in `plugin_manifest`.
+    // See `@ryu/recipes` in `plugin_manifest`.
     // Healing `/api/healing/*` is now served OUT-OF-PROCESS by the `ryu-healing`
     // sidecar via the manifest `public_mount` — no in-process route merge. See
-    // `com.ryu.healing` in `plugin_manifest` and `healing_client`.
+    // `@ryu/healing` in `plugin_manifest` and `healing_client`.
     let protected = protected
         // Verified user identity (Phase 0): the innermost layer, so it runs AFTER
         // require_auth admits the node and just before the handler. It attaches an
@@ -2986,7 +2986,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
 /// # Why Spaces is gated at all
 ///
 /// Spaces is the *dependency target* of the graph (`Meetings`, `Whiteboard`, and
-/// `Canvas` all declare `requires.apps = [com.ryu.spaces]`). An App whose `enabled`
+/// `Canvas` all declare `requires.apps = [@ryu/spaces]`). An App whose `enabled`
 /// bit governs nothing would make that graph decorative: the Store renders a live
 /// Switch for Spaces, and flipping it must actually turn the capability off. With
 /// this gate, "disabled" has the same teeth for Spaces that it has for Meetings.
@@ -3110,7 +3110,7 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
 /// A governance-shell leaf: both route blocks (the skills.sh catalog + the SKILL.md
 /// CRUD/version surface) live in this one sub-router so a single `route_layer` gates
 /// them together. Skills declares no `requires`; it is the dependency *target* of
-/// Learning (`requires.apps = [com.ryu.skills]`). Default-on, so the gate is
+/// Learning (`requires.apps = [@ryu/skills]`). Default-on, so the gate is
 /// transparent on a fresh install.
 ///
 /// Only the HTTP surface is gated — the in-process `state.skills` [`SkillRegistry`]
@@ -3355,7 +3355,7 @@ fn hardware_ctx(state: &ServerState) -> ryu_hardware::api::HardwareCtx {
 ///
 /// A governance-shell leaf. Approvals declares no `requires` (the workflow dependency
 /// is soft); it is the dependency *target* of Healing (`requires.apps =
-/// [com.ryu.approvals]`). Default-on, so the gate is transparent on a fresh install.
+/// [@ryu/approvals]`). Default-on, so the gate is transparent on a fresh install.
 /// Static `events`/`mode` are registered before `:id` so they match first.
 ///
 /// Only the HTTP surface is gated — the in-process `state.approvals`
@@ -3427,7 +3427,7 @@ fn learning_routes(app_store: &PluginStore) -> Router<ServerState> {
 }
 
 // The `/api/healing/*` surface moved OUT-OF-PROCESS to the `ryu-healing` sidecar
-// (`com.ryu.healing`), served via the manifest `public_mount` (generic ext-proxy
+// (`@ryu/healing`), served via the manifest `public_mount` (generic ext-proxy
 // loader) and gated on the Self-Healing App there. There is no in-process
 // `healing_routes` fn: the diagnose→propose engine, the attempt cap, the `healing.*`
 // prefs, and the config/status handlers all live in the sidecar; Core keeps only the
@@ -3437,7 +3437,7 @@ fn learning_routes(app_store: &PluginStore) -> Router<ServerState> {
 // loop through `healing_client::spawn`).
 
 // The `/api/clips/*` surface moved OUT-OF-PROCESS to the `ryu-clips` sidecar
-// (`com.ryu.clips`), served via the manifest `public_mount` (generic ext-proxy
+// (`@ryu/clips`), served via the manifest `public_mount` (generic ext-proxy
 // loader). There is no in-process `clips_routes` fn or `CoreClipsHost` shim — the
 // sidecar reads `RYU_SHADOW_URL` itself and degrades the two `ClipsHost` kernel
 // couplings (yt-dlp URL ingest + `Clips`-Space filing) cleanly.
@@ -8280,7 +8280,8 @@ const MAX_PLUGIN_README_BYTES: usize = 256 * 1024;
 /// Read an installed plugin's README from its plugin directory. Built-ins have no
 /// directory, so this is simply absent for them — not an error.
 fn local_plugin_readme(id: &str) -> Option<String> {
-    let dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir().join(id);
+    let dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
+        .join(crate::plugin_manifest::plugin_dir_name(id));
     for name in PLUGIN_README_NAMES {
         let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
             continue;
@@ -9065,7 +9066,8 @@ async fn install_app_from_url(
     }
 
     // Write to disk under the plugins dir (same resolver the loader reads from).
-    let app_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir().join(&manifest.id);
+    let app_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
+        .join(crate::plugin_manifest::plugin_dir_name(&manifest.id));
     if let Err(e) = tokio::fs::create_dir_all(&app_dir).await {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -9342,7 +9344,8 @@ async fn persist_installed_plugin(
 async fn write_plugin_manifest_to_disk(
     manifest: &crate::plugin_manifest::PluginManifest,
 ) -> Result<(), (StatusCode, String)> {
-    let plugin_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir().join(&manifest.id);
+    let plugin_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
+        .join(crate::plugin_manifest::plugin_dir_name(&manifest.id));
     tokio::fs::create_dir_all(&plugin_dir).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -9716,7 +9719,8 @@ async fn rollback_plugin_install(state: &ServerState, id: &str) {
         tracing::warn!(plugin = %id, "refusing to roll back a plugin with an invalid id");
         return;
     }
-    let plugin_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir().join(id);
+    let plugin_dir = crate::plugin_manifest::PluginManifestLoader::plugins_dir()
+        .join(crate::plugin_manifest::plugin_dir_name(id));
     if plugin_dir.exists() {
         if let Err(e) = tokio::fs::remove_dir_all(&plugin_dir).await {
             tracing::warn!(plugin = %id, "rollback: failed to remove plugin directory: {e}");
@@ -10808,6 +10812,7 @@ async fn plugin_contributions(
     let mut composer_controls = Vec::new();
     let mut settings_tabs = Vec::new();
     let mut turn_hooks = Vec::new();
+    let mut hook_events = Vec::new();
     let mut views = Vec::new();
     let mut sidebar_sections = Vec::new();
     let mut sidebar_buttons = Vec::new();
@@ -10881,6 +10886,17 @@ async fn plugin_contributions(
             c.turn_hooks
                 .iter()
                 .map(|h| serde_json::json!({ "plugin": manifest.id, "id": h.id, "on": h.on })),
+        );
+        // App events this plugin EMITS — the provider half of the hook system, and
+        // what a consumer author (or the workflow builder's event-trigger picker)
+        // reads to discover what there is to subscribe to. Served next to
+        // `turn_hooks` (which is the consumer half) on purpose: the two together are
+        // the whole two-way picture of who publishes what and who listens.
+        hook_events.extend(
+            c.hook_events
+                .iter()
+                .filter_map(|e| serde_json::to_value(e).ok())
+                .map(tag),
         );
     }
     // Channel adapters contributed by enabled plugins (`RunnableKind::Channel`),
@@ -10987,6 +11003,7 @@ async fn plugin_contributions(
         "settings_tabs": settings_tabs,
         "slash_commands": slash_commands,
         "turn_hooks": turn_hooks,
+        "hook_events": hook_events,
         "views": views,
         "sidebar_sections": sidebar_sections,
         "sidebar_buttons": sidebar_buttons,
@@ -11453,7 +11470,7 @@ impl PolicyApplyOutcome {
 /// (`validate_plugin_id`), so this join is traversal-safe.
 fn plugin_runtime_dir(plugin_id: &str) -> std::path::PathBuf {
     crate::plugin_manifest::PluginManifestLoader::plugins_dir()
-        .join(plugin_id)
+        .join(crate::plugin_manifest::plugin_dir_name(plugin_id))
         .join("runtime")
 }
 
@@ -14953,7 +14970,7 @@ async fn btw_handler(
 }
 
 /// Preference key holding the (stronger) advisor model. Shared with the
-/// `com.ryuhq.advisor` turn-hook plugin's settings tab so one picker drives both
+/// `@ryu/advisor` turn-hook plugin's settings tab so one picker drives both
 /// the auto-review hook and the `advisor__consult` tool.
 const ADVISOR_MODEL_PREF: &str = "advisor-model";
 
@@ -18835,8 +18852,8 @@ async fn list_documents(
 /// here. An app not in this map has no document space (its section shows nothing).
 fn app_space_name(plugin_id: &str) -> Option<&'static str> {
     match plugin_id {
-        "com.ryu.canvas" => Some("Canvas"),
-        "com.ryu.whiteboard" => Some("Whiteboard"),
+        "@ryu/canvas" => Some("Canvas"),
+        "@ryu/whiteboard" => Some("Whiteboard"),
         _ => None,
     }
 }
@@ -27119,7 +27136,7 @@ mod plugin_catalog_tests {
     /// for ids a squatter can actually claim.
     #[test]
     fn local_detail_trust_signals_track_manifest_provenance() {
-        let detail = local_plugin_detail("ghost").expect("ghost is a compiled-in fixture");
+        let detail = local_plugin_detail("@ryu/ghost").expect("ghost is a compiled-in fixture");
         assert_eq!(detail["origin"], json!("first_party"));
         assert_eq!(detail["reviewed"], json!(true));
         assert_eq!(detail["source"], json!("built-in"));
@@ -28751,9 +28768,9 @@ mod pure_helper_tests {
     // ── app_space_name ───────────────────────────────────────────────────────
     #[test]
     fn app_space_name_maps_only_the_seeded_apps() {
-        assert_eq!(app_space_name("com.ryu.canvas"), Some("Canvas"));
-        assert_eq!(app_space_name("com.ryu.whiteboard"), Some("Whiteboard"));
-        assert_eq!(app_space_name("com.ryu.meetings"), None);
+        assert_eq!(app_space_name("@ryu/canvas"), Some("Canvas"));
+        assert_eq!(app_space_name("@ryu/whiteboard"), Some("Whiteboard"));
+        assert_eq!(app_space_name("@ryu/meetings"), None);
         assert_eq!(app_space_name(""), None);
     }
 

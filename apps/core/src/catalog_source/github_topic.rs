@@ -968,7 +968,7 @@ mod tests {
             Some(("acme".to_string(), "ryu-thing".to_string()))
         );
         for foreign in [
-            "com.ryu.mail",
+            "@ryu/mail",
             "acme/ryu-thing",
             "gh:acme",
             "gh:/thing",
@@ -1000,7 +1000,7 @@ mod tests {
         assert_eq!(descriptor.raw["origin"], COMMUNITY_ORIGIN);
         // A foreign id is refused without touching the network.
         assert!(source
-            .install_descriptor(&client, "com.ryu.mail")
+            .install_descriptor(&client, "@ryu/mail")
             .await
             .is_err());
     }

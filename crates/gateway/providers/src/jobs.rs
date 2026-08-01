@@ -100,6 +100,9 @@ mod tests {
         };
         assert_eq!(job.provider_ref, "pred_123");
         assert!(job.status.is_terminal());
-        assert_eq!(job.output.unwrap()["data"][0]["url"], json!("https://x/v.mp4"));
+        assert_eq!(
+            job.output.unwrap()["data"][0]["url"],
+            json!("https://x/v.mp4")
+        );
     }
 }

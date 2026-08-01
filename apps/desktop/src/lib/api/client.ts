@@ -180,7 +180,7 @@ async function verifiedUserHeader(): Promise<Record<string, string>> {
  * catch it to offer a one-click "Enable" instead of showing a dead error string.
  */
 export class AppDisabledError extends Error {
-	/** The owning App's manifest id the caller must enable (e.g. `com.ryu.meetings`). */
+	/** The owning App's manifest id the caller must enable (e.g. `@ryu/meetings`). */
 	readonly app: string;
 	constructor(app: string, message: string) {
 		super(message);

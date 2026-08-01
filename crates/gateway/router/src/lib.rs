@@ -723,7 +723,10 @@ mod tests {
         let t = bare("openrouter");
         assert_eq!(
             t.route("google/gemini-2.5-pro"),
-            ("openrouter".to_string(), "google/gemini-2.5-pro".to_string())
+            (
+                "openrouter".to_string(),
+                "google/gemini-2.5-pro".to_string()
+            )
         );
         assert_eq!(t.route("google/gemini-2.5-flash").0, "openrouter");
         // The native `generateContent` path form is likewise unclaimed.

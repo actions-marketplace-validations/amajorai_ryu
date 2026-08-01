@@ -323,9 +323,8 @@ mod tests {
     async fn synthesize_queues_for_approval() {
         let mut host =
             MockHost::new().with_messages("c1", &[("user", "how"), ("assistant", "do it")]);
-        host.synth_reply = Some(
-            r#"{"name":"A skill","description":"d","instructions":"steps here"}"#.to_string(),
-        );
+        host.synth_reply =
+            Some(r#"{"name":"A skill","description":"d","instructions":"steps here"}"#.to_string());
         let c = ctx(host, store("synth-ok"));
         let resp = synthesize(
             State(c),

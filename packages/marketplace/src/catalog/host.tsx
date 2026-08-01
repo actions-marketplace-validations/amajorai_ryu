@@ -86,7 +86,7 @@ export interface CatalogHost {
 	 *
 	 *  {@link navigate} says the host CAN deep-link; this says the deep link LANDS
 	 *  somewhere. The two came apart because the editor is a Ryu App
-	 *  (`com.ryu.skill-editor`) that ships default-OFF: desktop always has
+	 *  (`@ryu/skill-editor`) that ships default-OFF: desktop always has
 	 *  `navigate`, so it rendered New/Edit on every card, and each one opened a tab
 	 *  reading "App not enabled". A host that owns the editor should compute this
 	 *  from whatever tells it the app is live (desktop: the contributions feed), not

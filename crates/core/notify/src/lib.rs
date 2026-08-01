@@ -311,11 +311,7 @@ mod tests {
         status: StatusCode,
     }
 
-    async fn record_handler(
-        State(st): State<AppState>,
-        uri: Uri,
-        body: Bytes,
-    ) -> StatusCode {
+    async fn record_handler(State(st): State<AppState>, uri: Uri, body: Bytes) -> StatusCode {
         let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
         st.recorded.lock().unwrap().push(Recorded {
             path: uri.path().to_string(),
@@ -432,14 +428,7 @@ mod tests {
         // return value) — fan-out never fails a caller.
         let (addr, _rec) = spawn_server(StatusCode::BAD_GATEWAY).await;
         let http = reqwest::Client::new();
-        send_webhook_alert(
-            &http,
-            &format!("http://{addr}/hook"),
-            "t",
-            "m",
-            &json!({}),
-        )
-        .await;
+        send_webhook_alert(&http, &format!("http://{addr}/hook"), "t", "m", &json!({})).await;
         send_webhook_alert(
             &http,
             &format!("http://{}/hook", dead_addr()),

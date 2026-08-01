@@ -97,7 +97,15 @@ pub fn capability_namespace(scope: &str) -> Option<&str> {
 }
 
 /// The namespace a plugin **owns**, derived from its manifest id: the last
-/// dot-separated segment. `"com.ryu.monitors"` → `"monitors"`, `"rtk"` → `"rtk"`.
+/// segment, splitting on either separator. `"@ryu/monitors"` → `"monitors"`,
+/// `"com.ryu.monitors"` → `"monitors"`, `"rtk"` → `"rtk"`.
+///
+/// Both separators are honoured because ids come in two shapes: the scoped form
+/// (`@scope/name`) and the legacy flat/dotted form that predates it and stays valid
+/// forever via the alias map. Splitting on `.` alone would make a scoped id derive
+/// its WHOLE string as the namespace (`@ryu/monitors`), which contains `/` and `@`
+/// and so fails the ident check below — silently disabling owner-scoped approval for
+/// every first-party app and failing their grants closed.
 ///
 /// Returns `None` for a malformed id (empty, trailing dot, whitespace, or a
 /// segment with characters outside `[A-Za-z0-9_-]`), which disables owner-scoped
@@ -107,7 +115,7 @@ pub fn capability_namespace(scope: &str) -> Option<&str> {
 ///
 /// Capability namespaces are a flat global vocabulary while plugin ids are
 /// hierarchical, so `com.evil.monitors` derives the same owner namespace as
-/// `com.ryu.monitors` and could self-approve `monitors:crud`. Two things bound
+/// `@ryu/monitors` and could self-approve `monitors:crud`. Two things bound
 /// that: (a) host primitives live in [`GrantPolicy::reserved_namespaces`] and
 /// are never owner-scopable, so the squat can only reach another *app's*
 /// surface, never Core's; and (b) Core's enforcement points additionally gate on
@@ -119,8 +127,8 @@ pub fn owner_namespace(app_id: &str) -> Option<&str> {
     if id.is_empty() || id.chars().any(char::is_whitespace) {
         return None;
     }
-    let segment = match id.rfind('.') {
-        Some(dot) => &id[dot + 1..],
+    let segment = match id.rfind(['.', '/']) {
+        Some(sep) => &id[sep + 1..],
         None => id,
     };
     if segment.is_empty() || !segment.chars().all(is_ident_char) {
@@ -159,7 +167,7 @@ pub fn validate_grants(grants: &[String], allowlist: &[String]) -> GrantDecision
 ///      override; **or**
 ///   2. it is an **owner-scoped self-grant**: its namespace equals the namespace
 ///      derived from the caller's own manifest id, and that namespace is not
-///      reserved. `com.ryu.monitors` declaring `monitors:crud` needs no policy
+///      reserved. `@ryu/monitors` declaring `monitors:crud` needs no policy
 ///      entry — which is what lets a third-party app ship a capability of its
 ///      own without a Gateway code change.
 ///
@@ -202,7 +210,11 @@ pub fn validate_grants_for(
 fn scope_allowed(scope: &str, owner: Option<&str>, policy: &GrantPolicy<'_>) -> bool {
     // Rule 1 — reviewed policy. Checked first so an operator override can
     // approve a reserved scope the grammar would otherwise refuse.
-    if policy.allowlist.iter().any(|a| a.eq_ignore_ascii_case(scope)) {
+    if policy
+        .allowlist
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(scope))
+    {
         return true;
     }
     // Rule 2 — owner-scoped self-grant.
@@ -386,10 +398,10 @@ mod tests {
 
     #[test]
     fn owner_namespace_takes_the_last_id_segment() {
-        assert_eq!(owner_namespace("com.ryu.monitors"), Some("monitors"));
+        assert_eq!(owner_namespace("@ryu/monitors"), Some("monitors"));
         assert_eq!(owner_namespace("rtk"), Some("rtk"), "unqualified id");
-        assert_eq!(owner_namespace("  com.ryu.mail  "), Some("mail"), "trimmed");
-        assert_eq!(owner_namespace("com.ryu.skill-editor"), Some("skill-editor"));
+        assert_eq!(owner_namespace("  @ryu/mail  "), Some("mail"), "trimmed");
+        assert_eq!(owner_namespace("@ryu/skill-editor"), Some("skill-editor"));
     }
 
     #[test]
@@ -398,7 +410,19 @@ mod tests {
         assert_eq!(owner_namespace("   "), None);
         assert_eq!(owner_namespace("com.ryu."), None, "trailing dot");
         assert_eq!(owner_namespace("com ryu"), None, "whitespace");
-        assert_eq!(owner_namespace("com.ryu.mon/itors"), None, "bad char");
+        assert_eq!(owner_namespace("com.ryu.mon:itors"), None, "bad char");
+        assert_eq!(owner_namespace("@ryu/"), None, "trailing slash");
+    }
+
+    /// Both id shapes must derive the same owner namespace. Splitting on `.` alone
+    /// made a scoped id yield its whole string, which fails the ident check and
+    /// silently disabled owner-scoped approval for every first-party app.
+    #[test]
+    fn owner_namespace_handles_scoped_and_legacy_ids_alike() {
+        assert_eq!(owner_namespace("@ryu/monitors"), Some("monitors"));
+        assert_eq!(owner_namespace("com.ryu.monitors"), Some("monitors"));
+        assert_eq!(owner_namespace("rtk"), Some("rtk"));
+        assert_eq!(owner_namespace("@acme/weather-app"), Some("weather-app"));
     }
 
     #[test]
@@ -429,17 +453,21 @@ mod tests {
 
     #[test]
     fn spoofed_id_cannot_claim_another_apps_namespace() {
-        // The named spoofing case: an app that is not `com.ryu.monitors` must
+        // The named spoofing case: an app that is not `@ryu/monitors` must
         // not self-approve `monitors:crud`, however it dresses up its id.
         let reserved = scopes(&["model"]);
         for id in [
             "com.ryu.evil",
             "monitors.evil",
-            "com.ryu.monitors.evil",
+            "@ryu/monitors.evil",
             "evil-monitors",
-            "com.ryu.monitorsx",
+            "@ryu/monitorsx",
         ] {
-            let d = validate_grants_for(Some(id), &scopes(&["monitors:crud"]), &policy(&[], &reserved));
+            let d = validate_grants_for(
+                Some(id),
+                &scopes(&["monitors:crud"]),
+                &policy(&[], &reserved),
+            );
             assert_eq!(
                 d.denied,
                 vec!["monitors:crud".to_string()],
@@ -483,7 +511,7 @@ mod tests {
         let reserved = scopes(&["hook", "mcp"]);
         let allow = scopes(&["hook:side-model", "mcp:ghost"]);
         let d = validate_grants_for(
-            Some("com.ryuhq.advisor"),
+            Some("@ryu/advisor"),
             &scopes(&["hook:side-model"]),
             &policy(&allow, &reserved),
         );
@@ -542,7 +570,10 @@ mod tests {
         );
         assert!(d.all_approved(), "denied: {:?}", d.denied);
         // The response echoes the requested spelling, not a normalized one.
-        assert_eq!(d.approved, vec!["NOTES:crud".to_string(), "model.chat".to_string()]);
+        assert_eq!(
+            d.approved,
+            vec!["NOTES:crud".to_string(), "model.chat".to_string()]
+        );
 
         // Case-folding does not open the reserved gate either.
         let d = validate_grants_for(

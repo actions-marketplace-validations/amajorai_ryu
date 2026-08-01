@@ -31,7 +31,7 @@
 //!      `tool:command:*`, `hook:*`, `widget:render`, …), not per-app strings, so
 //!      it does not grow when an app ships.
 //!   2. **Owner-scoped self-grant** — a plugin declaring a capability in its own
-//!      namespace (the last dot-segment of its manifest id: `com.ryu.monitors` ⇒
+//!      namespace (the last dot-segment of its manifest id: `@ryu/monitors` ⇒
 //!      `monitors:*`) is approved with no policy entry at all. This is what
 //!      unblocks a third-party marketplace.
 //!
@@ -175,7 +175,7 @@ fn reserved_namespaces() -> Vec<String> {
         // (`browser.connect`) as well as the Browser app's sidecar control.
         "browser",
         // Core-owned data domains that a NON-owner app legitimately reads or
-        // drives (`com.ryu.skill-editor` holds `skills:crud`, `com.ryu.approvals`
+        // drives (`@ryu/skill-editor` holds `skills:crud`, `@ryu/approvals`
         // holds `quests:crud`), so they are host vocabulary rather than an app's
         // own namespace.
         "skills",
@@ -201,7 +201,7 @@ fn reserved_namespaces() -> Vec<String> {
 /// needed a Gateway Rust edit before it could ever be enabled. They are now
 /// approved by the owner-scoped rule in
 /// [`ryu_gw_governance::validate_grants_for`] because each is declared by the
-/// app whose id ends in the same namespace segment (`com.ryu.monitors` ⇒
+/// app whose id ends in the same namespace segment (`@ryu/monitors` ⇒
 /// `monitors:*`). Do not re-add per-app strings here: if a first-party app's
 /// capability is denied, either its namespace does not match its id (rename one
 /// of them) or the capability is genuinely a host primitive and belongs in
@@ -295,7 +295,7 @@ fn default_grant_allowlist() -> Vec<String> {
         "files.read",
         // Core's `/api/skills` CRUD, driven from a sandboxed companion frame via
         // the `skills.crud` bridge family. A **cross-app** hold: the declaring
-        // app is `com.ryu.skill-editor`, whose namespace is `skill-editor`, not
+        // app is `@ryu/skill-editor`, whose namespace is `skill-editor`, not
         // `skills` — so the owner-scoped rule does not cover it and the reviewed
         // entry stays. Skills are a Core-owned domain, not this app's surface.
         "skills:crud",
@@ -344,16 +344,16 @@ fn default_grant_allowlist() -> Vec<String> {
         "preferences:read",
         "hook:run-agent",
         "hook:side-model",
-        // Ghost record→replay: the `com.ryu.workflows` RecordToWorkflow flow captures
+        // Ghost record→replay: the `@ryu/workflows` RecordToWorkflow flow captures
         // a native-desktop action sequence into a recipe. Cross-namespace (the
         // `ghost` capture plane is a host primitive, not the Workflows app's own
         // surface), and split from `workflows:*` so a workflow app that does not use
         // ghost capture need not hold it.
         "ghost:record",
         // Core's `/api/quests/*` auto-detecting-todo orchestration. On the list
-        // because `com.ryu.approvals` holds it **cross-app** for the quest-task
+        // because `@ryu/approvals` holds it **cross-app** for the quest-task
         // section of the unified inbox — quests are a Core-owned domain, so the
-        // reserved-namespace rule sends every holder (including `com.ryu.quests`)
+        // reserved-namespace rule sends every holder (including `@ryu/quests`)
         // through this reviewed entry rather than the owner-scoped rule.
         "quests:crud",
         // Shell integration: a companion app that contributes a sidebar section /
@@ -374,13 +374,13 @@ fn default_grant_allowlist() -> Vec<String> {
         // disable→re-enable of a widget companion is approved, not denied with
         // GrantsDenied. Swappable via the env override.
         "chat.sendFollowUp",
-        // The Browser app (`com.ryu.browser`) exposes a real-Chromium Electron
+        // The Browser app (`@ryu/browser`) exposes a real-Chromium Electron
         // sidecar as the grant-gated `browser.control` capability (list/open/
         // navigate tabs, screenshot, read titles, evaluate JS), which the desktop
         // Browser panel drives through the ext-proxy. The `browser` namespace is
         // RESERVED (it also carries the identity-vault `browser.connect` flow above),
         // so this one is not owner-scoped even though the declaring app is
-        // `com.ryu.browser` — driving a real browser is too close to the credential
+        // `@ryu/browser` — driving a real browser is too close to the credential
         // plane to hand out on a name match. Swappable via the env override.
         "browser:control",
     ]
@@ -662,7 +662,7 @@ mod tests {
     fn unknown_grant_is_denied_and_blocks() {
         // Neither allowlisted nor owner-scoped (`filesystem` ≠ `canvas`).
         let d = validate_grants_for(
-            Some("com.ryu.canvas"),
+            Some("@ryu/canvas"),
             &scopes(&["mcp.tools", "filesystem.write_all"]),
         );
         assert!(!d.all_approved());
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn empty_grants_approve() {
-        let d = validate_grants_for(Some("com.ryu.monitors"), &[]);
+        let d = validate_grants_for(Some("@ryu/monitors"), &[]);
         assert!(d.all_approved());
     }
 
@@ -683,7 +683,7 @@ mod tests {
         // RESERVED namespaces (`browser`, `identity`), so the reviewed entry is
         // the only thing approving them — no app can name its way into them.
         let d = validate_grants_for(
-            Some("com.ryu.browser"),
+            Some("@ryu/browser"),
             &scopes(&["browser.connect", "identity.read"]),
         );
         assert!(d.all_approved());
@@ -697,10 +697,10 @@ mod tests {
         // runtime disable→re-enable (which re-runs `/v1/grants/validate`) instead
         // of being dropped with GrantsDenied — which would leave the canvas unable
         // to call anything. Post-grammar the three `workflows:*` scopes are
-        // owner-scoped (`com.ryu.workflows` ⇒ namespace `workflows`) and
+        // owner-scoped (`@ryu/workflows` ⇒ namespace `workflows`) and
         // `ghost:record` is a reviewed host primitive; the app must not notice.
         let d = validate_grants_for(
-            Some("com.ryu.workflows"),
+            Some("@ryu/workflows"),
             &scopes(&[
                 "workflows:crud",
                 "workflows:runstate",
@@ -733,9 +733,9 @@ mod tests {
         // representative holder for the scopes no fixture declares.
         let table: &[(&str, &str)] = &[
             // tool / MCP capability scopes (host vocabulary, no declarer)
-            ("com.ryu.canvas", "mcp.tools"),
-            ("com.ryu.canvas", "tools.read"),
-            ("com.ryu.canvas", "tools.invoke"),
+            ("@ryu/canvas", "mcp.tools"),
+            ("@ryu/canvas", "tools.read"),
+            ("@ryu/canvas", "tools.invoke"),
             // per-server MCP tool grants from the seeded system MCP-tool plugins
             ("spider", "mcp:spider"),
             ("agentbrowser", "mcp:agentbrowser"),
@@ -744,52 +744,52 @@ mod tests {
             ("shadow", "mcp:shadow"),
             // declarative `http` / `command` tool plugins
             ("exa", "tool:http-egress:api.exa.ai"),
-            ("com.ryuhq.advisor", "tool:http-egress:127.0.0.1"),
+            ("@ryu/advisor", "tool:http-egress:127.0.0.1"),
             ("spider", "tool:command:spider"),
             ("rtk", "tool:command:rtk"),
             // data scopes
-            ("com.ryu.canvas", "memory.read"),
-            ("com.ryu.canvas", "memory.write"),
-            ("com.ryu.canvas", "spaces.read"),
-            ("com.ryu.canvas", "spaces.write"),
-            ("com.ryu.canvas", "files.read"),
+            ("@ryu/canvas", "memory.read"),
+            ("@ryu/canvas", "memory.write"),
+            ("@ryu/canvas", "spaces.read"),
+            ("@ryu/canvas", "spaces.write"),
+            ("@ryu/canvas", "files.read"),
             // companion bridge capabilities (the 14 the grammar retired)
-            ("com.ryu.monitors", "monitors:crud"),
-            ("com.ryu.mail", "mail:crud"),
-            ("com.ryu.finetune", "finetune:runs"),
-            ("com.ryu.workflows", "workflows:crud"),
-            ("com.ryu.workflows", "workflows:runstate"),
-            ("com.ryu.workflows", "workflows:catalogs"),
-            ("com.ryu.simulator", "simulator:control"),
-            ("com.ryu.webhooks", "webhooks:crud"),
-            ("com.ryu.activity", "activity:read"),
-            ("com.ryu.timeline", "timeline:read"),
-            ("com.ryu.calendar", "calendar:crud"),
-            ("com.ryu.learning", "learning:crud"),
-            ("com.ryu.approvals", "approvals:crud"),
-            ("com.ryu.meetings", "meetings:crud"),
+            ("@ryu/monitors", "monitors:crud"),
+            ("@ryu/mail", "mail:crud"),
+            ("@ryu/finetune", "finetune:runs"),
+            ("@ryu/workflows", "workflows:crud"),
+            ("@ryu/workflows", "workflows:runstate"),
+            ("@ryu/workflows", "workflows:catalogs"),
+            ("@ryu/simulator", "simulator:control"),
+            ("@ryu/webhooks", "webhooks:crud"),
+            ("@ryu/activity", "activity:read"),
+            ("@ryu/timeline", "timeline:read"),
+            ("@ryu/calendar", "calendar:crud"),
+            ("@ryu/learning", "learning:crud"),
+            ("@ryu/approvals", "approvals:crud"),
+            ("@ryu/meetings", "meetings:crud"),
             // cross-app / reserved-namespace holds that stay on the list
-            ("com.ryu.skill-editor", "skills:crud"),
-            ("com.ryu.quests", "quests:crud"),
-            ("com.ryu.approvals", "quests:crud"),
-            ("com.ryu.browser", "browser:control"),
+            ("@ryu/skill-editor", "skills:crud"),
+            ("@ryu/quests", "quests:crud"),
+            ("@ryu/approvals", "quests:crud"),
+            ("@ryu/browser", "browser:control"),
             // model / network scopes
-            ("com.ryu.canvas", "model.chat"),
-            ("com.ryu.canvas", "model.embed"),
-            ("com.ryu.canvas", "network.fetch"),
+            ("@ryu/canvas", "model.chat"),
+            ("@ryu/canvas", "model.embed"),
+            ("@ryu/canvas", "network.fetch"),
             // identity-vault scopes (#523)
-            ("com.ryu.browser", "browser.connect"),
-            ("com.ryu.browser", "identity.read"),
+            ("@ryu/browser", "browser.connect"),
+            ("@ryu/browser", "identity.read"),
             // widget consent + companion host primitives
             ("sample-widget", "widget:render"),
-            ("com.ryu.canvas", "spaces:docs"),
-            ("com.ryu.canvas", "core:list_agents"),
-            ("com.ryu.canvas", "media:generate"),
-            ("com.ryu.canvas", "media:transcribe"),
+            ("@ryu/canvas", "spaces:docs"),
+            ("@ryu/canvas", "core:list_agents"),
+            ("@ryu/canvas", "media:generate"),
+            ("@ryu/canvas", "media:transcribe"),
             ("proof", "hook:run-agent"),
             ("double-check", "hook:side-model"),
-            ("com.ryu.workflows", "ghost:record"),
-            ("com.ryu.activity", "shell:integrate"),
+            ("@ryu/workflows", "ghost:record"),
+            ("@ryu/activity", "shell:integrate"),
             ("goal", "storage:kv"),
             ("checklist", "chat.sendFollowUp"),
         ];
@@ -836,7 +836,7 @@ mod tests {
         // Nor by dressing the id up as a prefix/suffix of the real owner.
         for id in [
             "monitors.evil",
-            "com.ryu.monitors.evil",
+            "@ryu/monitors.evil",
             "com.ryu.evil-monitors",
             "com.ryu.monitorz",
         ] {
@@ -855,7 +855,7 @@ mod tests {
         // a manifest is arbitrary code execution. It is on no default allowlist,
         // and `sidecar` is reserved so no manifest id can name its way into it.
         for id in [
-            "com.ryu.monitors",
+            "@ryu/monitors",
             "com.evil.sidecar",
             "sidecar",
             "com.ryu.sidecar",
@@ -954,7 +954,7 @@ mod tests {
             owner_scoped: true,
         };
         let d = ryu_gw_governance::validate_grants_for(
-            Some("com.ryu.browser"),
+            Some("@ryu/browser"),
             &scopes(&["sidecar:process"]),
             &policy,
         );
@@ -962,7 +962,7 @@ mod tests {
 
         // …and a narrowed override still denies what it left out.
         let d = ryu_gw_governance::validate_grants_for(
-            Some("com.ryu.browser"),
+            Some("@ryu/browser"),
             &scopes(&["browser:control"]),
             &policy,
         );
@@ -988,7 +988,7 @@ mod tests {
             owner_scoped: false,
         };
         let d = ryu_gw_governance::validate_grants_for(
-            Some("com.ryu.monitors"),
+            Some("@ryu/monitors"),
             &scopes(&["monitors:crud"]),
             &strict,
         );

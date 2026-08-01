@@ -19,6 +19,13 @@ export interface IslandSuggestionView {
 
 export interface IslandSuggestionChipProps {
 	suggestion?: IslandSuggestionView;
+	/**
+	 * Let the title/body wrap onto more lines instead of truncating each to one.
+	 * Only safe on a surface whose height tracks its content (the desktop island
+	 * pill measures this chip and grows); the web island's chip sits in a
+	 * fixed-height shape, so it keeps the single-line default.
+	 */
+	wrap?: boolean;
 }
 
 const DEMO_SUGGESTION: IslandSuggestionView = {
@@ -28,7 +35,9 @@ const DEMO_SUGGESTION: IslandSuggestionView = {
 
 export function IslandSuggestionChip({
 	suggestion = DEMO_SUGGESTION,
+	wrap = false,
 }: IslandSuggestionChipProps) {
+	const lineClass = wrap ? "break-words" : "truncate";
 	return (
 		<section
 			aria-label="Proactive suggestion"
@@ -36,11 +45,13 @@ export function IslandSuggestionChip({
 		>
 			<span className="mt-1 size-2 shrink-0 rounded-full bg-amber-400" />
 			<div className="min-w-0 flex-1">
-				<p className="truncate font-medium text-neutral-100 text-sm leading-tight">
+				<p
+					className={`font-medium text-neutral-100 text-sm leading-tight ${lineClass}`}
+				>
 					{suggestion.title}
 				</p>
 				{suggestion.body.trim().length > 0 ? (
-					<p className="truncate text-neutral-400 text-xs leading-tight">
+					<p className={`text-neutral-400 text-xs leading-tight ${lineClass}`}>
 						{suggestion.body}
 					</p>
 				) : null}

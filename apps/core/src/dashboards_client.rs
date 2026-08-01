@@ -5,7 +5,7 @@
 //! field on `ServerState`, an in-process `/api/dashboards/*` route merge, a
 //! dashboard-owned refresh loop, and the hardware device-dashboard renderer +
 //! nudge loop reaching the engine directly. Dashboards is now an out-of-process app
-//! (`com.ryu.dashboards`): the `ryu-dashboards` sidecar owns `dashboards.db`, the
+//! (`@ryu/dashboards`): the `ryu-dashboards` sidecar owns `dashboards.db`, the
 //! refresh loop, and the `/api/dashboards/*` surface — served to the desktop
 //! through the generic ext-proxy `public_mount`. Core links NO dashboard code; its
 //! remaining reverse couplings reach the sidecar over loopback through this client:

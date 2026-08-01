@@ -108,12 +108,8 @@ fn parse_metas(payload: &Value) -> HashMap<String, ModelMeta> {
             .and_then(per_token_to_per_1m);
 
         let arch = entry.get("architecture");
-        let modalities_input = string_list(
-            arch.and_then(|a| a.get("input_modalities")),
-        );
-        let modalities_output = string_list(
-            arch.and_then(|a| a.get("output_modalities")),
-        );
+        let modalities_input = string_list(arch.and_then(|a| a.get("input_modalities")));
+        let modalities_output = string_list(arch.and_then(|a| a.get("output_modalities")));
 
         let reasoning = entry
             .get("reasoning")
@@ -122,9 +118,9 @@ fn parse_metas(payload: &Value) -> HashMap<String, ModelMeta> {
             .get("supported_parameters")
             .and_then(Value::as_array)
             .map(|params| {
-                params.iter().any(|p| {
-                    matches!(p.as_str(), Some("tools") | Some("tool_choice"))
-                })
+                params
+                    .iter()
+                    .any(|p| matches!(p.as_str(), Some("tools") | Some("tool_choice")))
             });
         let knowledge = entry
             .get("knowledge_cutoff")
@@ -210,10 +206,7 @@ async fn load_metas() -> HashMap<String, ModelMeta> {
             *cache = Some(entry);
             metas
         }
-        _ => cache
-            .as_ref()
-            .map(|e| e.metas.clone())
-            .unwrap_or_default(),
+        _ => cache.as_ref().map(|e| e.metas.clone()).unwrap_or_default(),
     }
 }
 

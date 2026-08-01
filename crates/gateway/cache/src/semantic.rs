@@ -424,7 +424,10 @@ mod tests {
             { "role": "user", "content": "hi" },
             { "role": "assistant", "content": "hello" },
         ]);
-        assert_eq!(SemanticCache::messages_to_text(&msgs), "user: hi\nassistant: hello");
+        assert_eq!(
+            SemanticCache::messages_to_text(&msgs),
+            "user: hi\nassistant: hello"
+        );
     }
 
     #[test]
@@ -452,7 +455,10 @@ mod tests {
     #[test]
     fn messages_to_text_non_array_is_empty() {
         assert_eq!(SemanticCache::messages_to_text(&json!(null)), "");
-        assert_eq!(SemanticCache::messages_to_text(&json!({ "role": "user" })), "");
+        assert_eq!(
+            SemanticCache::messages_to_text(&json!({ "role": "user" })),
+            ""
+        );
     }
 
     // ─── lookup / insert ─────────────────────────────────────────────────────
@@ -495,8 +501,14 @@ mod tests {
         c.insert(Some("orgA".into()), vec![1.0, 0.0], json!({ "who": "A" }));
         c.insert(Some("orgB".into()), vec![1.0, 0.0], json!({ "who": "B" }));
         // Same embedding, different tenant => each org sees only its own row.
-        assert_eq!(c.lookup(Some("orgA"), &[1.0, 0.0]), Some(json!({ "who": "A" })));
-        assert_eq!(c.lookup(Some("orgB"), &[1.0, 0.0]), Some(json!({ "who": "B" })));
+        assert_eq!(
+            c.lookup(Some("orgA"), &[1.0, 0.0]),
+            Some(json!({ "who": "A" }))
+        );
+        assert_eq!(
+            c.lookup(Some("orgB"), &[1.0, 0.0]),
+            Some(json!({ "who": "B" }))
+        );
         // The no-org bucket never matches a real org's entry.
         assert_eq!(c.lookup(None, &[1.0, 0.0]), None);
     }
@@ -513,8 +525,16 @@ mod tests {
     fn lookup_returns_nearest_neighbor() {
         let c = cache(0.5, 3600);
         // Two candidates; the query is much closer to `near` than to `far`.
-        c.insert(Some("org".into()), vec![1.0, 0.0], json!({ "which": "near" }));
-        c.insert(Some("org".into()), vec![0.7, 0.7], json!({ "which": "far" }));
+        c.insert(
+            Some("org".into()),
+            vec![1.0, 0.0],
+            json!({ "which": "near" }),
+        );
+        c.insert(
+            Some("org".into()),
+            vec![0.7, 0.7],
+            json!({ "which": "far" }),
+        );
         assert_eq!(
             c.lookup(Some("org"), &[1.0, 0.05]),
             Some(json!({ "which": "near" }))
@@ -592,7 +612,10 @@ mod tests {
     fn from_cache_registers_builtin_as_active() {
         let reg = SemanticCacheRegistry::from_cache(cache(0.92, 3600));
         assert!(reg.active().is_some());
-        assert_eq!(reg.available(), vec![SemanticCacheRegistry::BUILTIN.to_string()]);
+        assert_eq!(
+            reg.available(),
+            vec![SemanticCacheRegistry::BUILTIN.to_string()]
+        );
         // The active built-in answers a real lookup (empty store => None).
         assert_eq!(reg.active().unwrap().lookup(Some("org"), &[1.0, 0.0]), None);
     }
@@ -608,7 +631,10 @@ mod tests {
     #[test]
     fn register_then_set_active_swaps_backend() {
         let mut reg = SemanticCacheRegistry::from_cache(cache(0.92, 3600));
-        reg.register("stub", Arc::new(StubBackend) as Arc<dyn SemanticCacheBackend>);
+        reg.register(
+            "stub",
+            Arc::new(StubBackend) as Arc<dyn SemanticCacheBackend>,
+        );
         // Registered but not yet active: built-in still answers (None on empty).
         assert_eq!(reg.active().unwrap().lookup(Some("org"), &[1.0, 0.0]), None);
 
@@ -647,6 +673,9 @@ mod tests {
             "live handle should reflect the replacement"
         );
         // Re-registering the same id must not duplicate it in the order list.
-        assert_eq!(reg.available(), vec![SemanticCacheRegistry::BUILTIN.to_string()]);
+        assert_eq!(
+            reg.available(),
+            vec![SemanticCacheRegistry::BUILTIN.to_string()]
+        );
     }
 }

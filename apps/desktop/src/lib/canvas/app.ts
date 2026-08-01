@@ -1,11 +1,11 @@
 // Shared identity for the Canvas Ryu App on the desktop side. The built-in
-// creative-canvas board was ported to a full-page Companion (`com.ryu.canvas`); its
-// boards are now Space documents of kind `app:com.ryu.canvas` living in the
+// creative-canvas board was ported to a full-page Companion (`@ryu/canvas`); its
+// boards are now Space documents of kind `app:@ryu/canvas` living in the
 // "Canvas" system space (seeded by Core at startup). Mirrors
 // `lib/whiteboard/app.ts`.
 
 /** The Canvas app's plugin id (matches Core `CANVAS_PLUGIN_ID`). */
-export const CANVAS_PLUGIN_ID = "com.ryu.canvas";
+export const CANVAS_PLUGIN_ID = "@ryu/canvas";
 
 /** The undeletable system space that holds every canvas board (Core seeds it). */
 export const CANVAS_SPACE_NAME = "Canvas";

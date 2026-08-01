@@ -1,5 +1,5 @@
 {
-  "id": "com.ryuhq.tool-firewall",
+  "id": "@ryu/tool-firewall",
   "name": "Tool Firewall",
   "version": "1.0.0",
   "runnables": [],

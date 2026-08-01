@@ -213,6 +213,10 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 
 	const contributes: Contributes = {
 		turn_hooks: [],
+		// This builder synthesises an app from its runnables; an app that emits
+		// events declares them in a hand-authored `manifest.json`, same as
+		// `lsp_servers` below.
+		hook_events: [],
 		composer_controls: [],
 		settings_tabs: [],
 		slash_commands: [],

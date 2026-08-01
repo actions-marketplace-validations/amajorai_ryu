@@ -464,6 +464,35 @@ export async function fetchApps(target: ApiTarget): Promise<AppInfo[]> {
 	return (json.apps ?? []).map(toAppInfo);
 }
 
+/** One app event an enabled app declares it emits (`contributes.hook_events`),
+ *  tagged server-side with its owning `plugin` id. */
+export interface HookEventInfo {
+	description?: string;
+	/** Fully-qualified event id: `<owning plugin id>#<event name>` — the exact string
+	 *  a workflow's `event` trigger or a plugin hook's `on` must name. */
+	id: string;
+	payload_example?: Record<string, unknown>;
+	plugin?: string;
+	title: string;
+}
+
+/** `GET /api/plugins/contributions` → `hook_events` — every app event an ENABLED
+ *  app emits. The catalog behind the `event` workflow trigger's picker, so a user
+ *  chooses a real event instead of typing a fully-qualified id from memory. */
+export async function fetchHookEvents(
+	target: ApiTarget
+): Promise<HookEventInfo[]> {
+	const resp = await fetch(apiUrl(target, "/api/plugins/contributions"), {
+		method: "GET",
+		headers: makeHeaders(target.token),
+	});
+	if (!resp.ok) {
+		throw new Error(`/api/plugins/contributions failed: ${resp.status}`);
+	}
+	const json = (await resp.json()) as { hook_events?: HookEventInfo[] };
+	return json.hook_events ?? [];
+}
+
 /** `POST /api/plugins/:id/install` — record the app as installed (disabled). */
 export async function installApp(
 	target: ApiTarget,

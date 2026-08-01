@@ -545,6 +545,19 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // The app-event catalog behind the `event` workflow trigger's picker: every
+    // event any ENABLED app declares in its `contributes.hook_events`. Another
+    // read-only node-config picker, so it joins the existing `workflows.catalogs`
+    // capability rather than minting a new one — the canvas already holds it, and a
+    // separate grant would gate a strictly-less-sensitive read than the ones it
+    // already makes.
+    m(
+        "workflows.hookEvents",
+        "workflows.catalogs",
+        Some("workflows:catalogs"),
+        false,
+        true,
+    ),
     m(
         "ghost.recordStart",
         "ghost.record",
@@ -753,7 +766,7 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
-    // Warmup — the `com.ryu.warmup` companion schedules a keep-alive ping to each
+    // Warmup — the `@ryu/warmup` companion schedules a keep-alive ping to each
     // subscription agent so its rolling usage window is already open. `detect`
     // reads agents + their usage windows + advertised models; `list`/`apply`
     // read and replace the app's own scheduler jobs; `runNow` fires one ping
@@ -765,7 +778,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
-    m("warmup.list", "warmup.crud", Some("warmup:crud"), false, true),
+    m(
+        "warmup.list",
+        "warmup.crud",
+        Some("warmup:crud"),
+        false,
+        true,
+    ),
     m(
         "warmup.apply",
         "warmup.crud",

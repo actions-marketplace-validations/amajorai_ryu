@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.webhooks",
+  "id": "@ryu/webhooks",
   "name": "Webhooks",
   "version": "1.0.0",
   "description": "Inbound webhook endpoint registry: resolved public URLs, secret presence, last-delivery times, and the ingress backend status.",

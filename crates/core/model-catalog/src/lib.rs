@@ -2120,14 +2120,20 @@ mod tests {
 
     #[test]
     fn catalog_sort_parse_and_hf_key() {
-        assert!(matches!(CatalogSort::parse("downloads"), CatalogSort::Downloads));
+        assert!(matches!(
+            CatalogSort::parse("downloads"),
+            CatalogSort::Downloads
+        ));
         assert!(matches!(CatalogSort::parse("likes"), CatalogSort::Likes));
         assert!(matches!(CatalogSort::parse("recent"), CatalogSort::Recent));
         assert!(matches!(
             CatalogSort::parse("lastModified"),
             CatalogSort::Recent
         ));
-        assert!(matches!(CatalogSort::parse("anything"), CatalogSort::Trending));
+        assert!(matches!(
+            CatalogSort::parse("anything"),
+            CatalogSort::Trending
+        ));
         assert_eq!(CatalogSort::Trending.hf_key(), "trendingScore");
         assert_eq!(CatalogSort::Downloads.hf_key(), "downloads");
         assert_eq!(CatalogSort::Likes.hf_key(), "likes");
@@ -2158,14 +2164,20 @@ mod tests {
 
     #[test]
     fn sanitize_task_and_author_reject_unsafe() {
-        assert_eq!(sanitize_task(" text-generation "), Some("text-generation".into()));
+        assert_eq!(
+            sanitize_task(" text-generation "),
+            Some("text-generation".into())
+        );
         assert_eq!(sanitize_task("speech2text"), Some("speech2text".into()));
         assert_eq!(sanitize_task(""), None);
         assert_eq!(sanitize_task("Has Spaces!"), None);
         assert_eq!(sanitize_task("inject&param=1"), None);
 
         assert_eq!(sanitize_author(" google "), Some("google".into()));
-        assert_eq!(sanitize_author("mlx-community"), Some("mlx-community".into()));
+        assert_eq!(
+            sanitize_author("mlx-community"),
+            Some("mlx-community".into())
+        );
         assert_eq!(sanitize_author(""), None);
         assert_eq!(sanitize_author("bad/author"), None);
     }
@@ -2245,7 +2257,10 @@ mod tests {
         let key = "list:unit-test-cache-unique-1".to_string();
         assert!(cache_get(&key, LIST_TTL).is_none());
         cache_put(key.clone(), serde_json::json!({ "a": 1 }));
-        assert_eq!(cache_get(&key, LIST_TTL), Some(serde_json::json!({ "a": 1 })));
+        assert_eq!(
+            cache_get(&key, LIST_TTL),
+            Some(serde_json::json!({ "a": 1 }))
+        );
         cache_invalidate("unit-test-cache-unique-1");
         assert!(cache_get(&key, LIST_TTL).is_none());
     }
@@ -2259,7 +2274,10 @@ mod tests {
         assert!(spec
             .dest
             .ends_with(std::path::Path::new("models/my-stem.gguf")));
-        assert_eq!(spec.version_record.as_ref().unwrap().store_key, "gguf:my-stem");
+        assert_eq!(
+            spec.version_record.as_ref().unwrap().store_key,
+            "gguf:my-stem"
+        );
         // Empty sha → no checksum on the spec.
         let spec2 = gguf_download_spec("s2", "u", "", "l");
         assert!(spec2.sha256.is_none());
@@ -2485,8 +2503,7 @@ mod tests {
                     req
                 }
             }
-            let dir =
-                std::env::temp_dir().join(format!("ryu-mc-downloads-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("ryu-mc-downloads-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             ryu_downloads::set_global_host(std::sync::Arc::new(DlHost { dir }));
         });
@@ -2583,7 +2600,11 @@ mod tests {
                 .into_bytes();
                 (200, vec![], body)
             } else if path.contains("/raw/") && path.contains("README") {
-                (200, vec![], b"---\nlicense: mit\n---\n# Hello\nBody text".to_vec())
+                (
+                    200,
+                    vec![],
+                    b"---\nlicense: mit\n---\n# Hello\nBody text".to_vec(),
+                )
             } else if path.contains("/api/models/") {
                 let body = serde_json::json!({
                     "id": "acme/widget-detail-model",
@@ -2701,15 +2722,10 @@ mod tests {
         std::fs::create_dir_all(ryu_dir().join("models")).unwrap();
         let stem = "install-desc-unique-c1";
         let url = format!("http://{addr}/acme/desc-repo/resolve/main/{stem}.gguf");
-        let res = install_from_descriptor(
-            "acme/desc-repo",
-            &url,
-            None,
-            &format!("{stem}.gguf"),
-            &dc,
-        )
-        .await
-        .unwrap();
+        let res =
+            install_from_descriptor("acme/desc-repo", &url, None, &format!("{stem}.gguf"), &dc)
+                .await
+                .unwrap();
 
         assert_eq!(res.repo_id, "acme/desc-repo");
         assert_eq!(res.filename, format!("{stem}.gguf"));
@@ -2756,12 +2772,16 @@ mod tests {
         assert!(installed::load_present().iter().any(|m| m.stem == stem));
 
         // Path-traversal + bad-repo guards fire before any network.
-        assert!(install_file(&test_client(), &endpoint, "acme/x", "../evil.gguf", &dc)
-            .await
-            .is_err());
-        assert!(install_file(&test_client(), &endpoint, "no-slash", "ok.gguf", &dc)
-            .await
-            .is_err());
+        assert!(
+            install_file(&test_client(), &endpoint, "acme/x", "../evil.gguf", &dc)
+                .await
+                .is_err()
+        );
+        assert!(
+            install_file(&test_client(), &endpoint, "no-slash", "ok.gguf", &dc)
+                .await
+                .is_err()
+        );
 
         let _ = installed::remove(stem);
         let _ = std::fs::remove_file(ryu_dir().join("models").join(format!("{stem}.gguf")));
@@ -2792,9 +2812,15 @@ mod tests {
         };
         let dc = ryu_downloads::DownloadCenter::with_default_client();
         let repo = "acme/snap-c3";
-        let res = install_snapshot(&test_client(), &endpoint, repo, ModelFormat::Safetensors, &dc)
-            .await
-            .unwrap();
+        let res = install_snapshot(
+            &test_client(),
+            &endpoint,
+            repo,
+            ModelFormat::Safetensors,
+            &dc,
+        )
+        .await
+        .unwrap();
         let slug = installed::slugify_repo(repo);
         assert_eq!(res.repo_id, repo);
         assert!(installed::load_present().iter().any(|m| m.stem == slug));

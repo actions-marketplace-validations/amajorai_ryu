@@ -576,9 +576,13 @@ mod tests {
     async fn ingest_exec_records_and_advances_the_budget_counter() {
         let state = state_with(false);
         assert_eq!(state.exec_budget.current_count(), 0);
-        let Json(body) = ingest_exec_audit(State(Arc::clone(&state)), bearer("sk-master"), Json(exec_body()))
-            .await
-            .expect("master key may ingest");
+        let Json(body) = ingest_exec_audit(
+            State(Arc::clone(&state)),
+            bearer("sk-master"),
+            Json(exec_body()),
+        )
+        .await
+        .expect("master key may ingest");
         assert_eq!(body["ok"], true);
         assert_eq!(body["exec_count"], 1);
         assert_eq!(state.exec_budget.current_count(), 1);
@@ -611,9 +615,10 @@ mod tests {
     #[tokio::test]
     async fn check_exec_budget_allows_under_default_unlimited_budget() {
         let state = state_with(false);
-        let Json(resp) = check_exec_budget(State(state), bearer("sk-master"), Json(check_body(None)))
-            .await
-            .expect("master key");
+        let Json(resp) =
+            check_exec_budget(State(state), bearer("sk-master"), Json(check_body(None)))
+                .await
+                .expect("master key");
         assert!(resp.allowed);
         assert!(resp.reason.is_none());
     }

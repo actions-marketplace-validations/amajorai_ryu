@@ -1559,9 +1559,9 @@ function IframePanel({
 	);
 }
 
-// ── Browser sidecar panel (com.ryu.browser) ───────────────────────────────────
+// ── Browser sidecar panel (@ryu/browser) ───────────────────────────────────
 
-const BROWSER_PLUGIN_ID = "com.ryu.browser";
+const BROWSER_PLUGIN_ID = "@ryu/browser";
 
 interface SidecarTab {
 	id: string;
@@ -1569,7 +1569,7 @@ interface SidecarTab {
 	url: string;
 }
 
-// Feature-detected browser tab: when the `com.ryu.browser` app is enabled, drive its
+// Feature-detected browser tab: when the `@ryu/browser` app is enabled, drive its
 // real-Chromium sidecar through Core's ext-proxy (tab list + open/navigate + a static
 // screenshot preview — real embedding is a followup). When it is disabled, fall back
 // to today's sandboxed IframePanel unchanged.
@@ -1590,7 +1590,7 @@ function BrowserSidecarPanel() {
 	const [shot, setShot] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 
-	const base = "/api/ext/com.ryu.browser";
+	const base = "/api/ext/@ryu/browser";
 	const headers = useMemo(() => makeHeaders(node.token ?? null), [node.token]);
 
 	const call = useCallback(
@@ -1776,10 +1776,10 @@ function BrowserSidecarPanel() {
 	);
 }
 
-// ── Simulator sidecar panel (com.ryu.simulator) ───────────────────────────────
+// ── Simulator sidecar panel (@ryu/simulator) ───────────────────────────────
 
-const SIMULATOR_PLUGIN_ID = "com.ryu.simulator";
-const SIM_BASE = "/api/ext/com.ryu.simulator";
+const SIMULATOR_PLUGIN_ID = "@ryu/simulator";
+const SIM_BASE = "/api/ext/@ryu/simulator";
 const SIM_POLL_MS = 1500;
 
 type SimPlatform = "ios" | "android";
@@ -1804,7 +1804,7 @@ interface SimCapabilities {
 	ios: SimPlatformCap;
 }
 
-// Feature-detected simulator tab: when the `com.ryu.simulator` app is enabled, drive its
+// Feature-detected simulator tab: when the `@ryu/simulator` app is enabled, drive its
 // device-control sidecar (simctl/adb) through Core's ext-proxy. When disabled, prompt to
 // enable it. Availability of each platform is a RUNTIME probe from the sidecar, never an
 // OS sniff on the desktop — iOS shows only on a Mac node with Xcode; Android wherever the
@@ -2390,11 +2390,11 @@ interface NativeDockPanelDef {
  *  `TabKind` union; their components below are unchanged, so an enabled app
  *  renders exactly what it did before. */
 const NATIVE_DOCK_PANELS: Record<string, NativeDockPanelDef> = {
-	"com.ryu.browser/browser": {
+	"@ryu/browser/browser": {
 		icon: Globe02Icon,
 		render: ({ label }) => <BrowserTabPanel title={label} />,
 	},
-	"com.ryu.simulator/simulator": {
+	"@ryu/simulator/simulator": {
 		icon: SmartPhone01Icon,
 		render: () => <SimulatorTabPanel />,
 	},

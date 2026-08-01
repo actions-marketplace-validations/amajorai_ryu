@@ -32,120 +32,130 @@
 pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     // advisor
     (
-        "com.ryuhq.advisor",
+        "@ryu/advisor",
         "hooks/review.js",
         include_str!("../../../../plugins-store/advisor/hooks/review.js"),
     ),
     // agentbrowser
     (
-        "agentbrowser",
+        "@ryu/agentbrowser",
         "adapters/browser__screenshot.js",
         include_str!("../../../../plugins-store/agentbrowser/adapters/browser__screenshot.js"),
     ),
     (
-        "agentbrowser",
+        "@ryu/agentbrowser",
         "adapters/browser__snapshot.js",
         include_str!("../../../../plugins-store/agentbrowser/adapters/browser__snapshot.js"),
     ),
     (
-        "agentbrowser",
+        "@ryu/agentbrowser",
         "adapters/browser__type.js",
         include_str!("../../../../plugins-store/agentbrowser/adapters/browser__type.js"),
     ),
     // chat-title
     (
-        "chat-title",
+        "@ryu/chat-title",
         "hooks/rename.js",
         include_str!("../../../../plugins-store/chat-title/hooks/rename.js"),
     ),
     // double-check
     (
-        "double-check",
+        "@ryu/double-check",
         "hooks/review.js",
         include_str!("../../../../plugins-store/double-check/hooks/review.js"),
     ),
     // exa
     (
-        "exa",
+        "@ryu/exa",
         "adapters/web__search.js",
         include_str!("../../../../plugins-store/exa/adapters/web__search.js"),
     ),
     // firecrawl
     (
-        "firecrawl",
+        "@ryu/firecrawl",
         "adapters/web__crawl.js",
         include_str!("../../../../plugins-store/firecrawl/adapters/web__crawl.js"),
     ),
     (
-        "firecrawl",
+        "@ryu/firecrawl",
         "adapters/web__extract.js",
         include_str!("../../../../plugins-store/firecrawl/adapters/web__extract.js"),
     ),
     // goal
     (
-        "goal",
+        "@ryu/goal",
         "hooks/loop.js",
         include_str!("../../../../plugins-store/goal/hooks/loop.js"),
     ),
     // honcho
     (
-        "honcho",
+        "@ryu/honcho",
         "adapters/memory__store.js",
         include_str!("../../../../plugins-store/honcho/adapters/memory__store.js"),
     ),
     (
-        "honcho",
+        "@ryu/honcho",
         "adapters/memory__sync.js",
         include_str!("../../../../plugins-store/honcho/adapters/memory__sync.js"),
     ),
     // hook-observers
     (
-        "com.ryuhq.hook-observers",
+        "@ryu/hook-observers",
         "hooks/notification.js",
         include_str!("../../../../plugins-store/hook-observers/hooks/notification.js"),
     ),
     (
-        "com.ryuhq.hook-observers",
+        "@ryu/hook-observers",
         "hooks/session-end.js",
         include_str!("../../../../plugins-store/hook-observers/hooks/session-end.js"),
     ),
     (
-        "com.ryuhq.hook-observers",
+        "@ryu/hook-observers",
         "hooks/subagent-stop.js",
         include_str!("../../../../plugins-store/hook-observers/hooks/subagent-stop.js"),
     ),
+    (
+        "@ryu/hook-observers",
+        "hooks/workflow-run-failed.js",
+        include_str!("../../../../plugins-store/hook-observers/hooks/workflow-run-failed.js"),
+    ),
+    (
+        "@ryu/hook-observers",
+        "hooks/app-event-meeting-ended.js",
+        include_str!("../../../../plugins-store/hook-observers/hooks/app-event-meeting-ended.js"),
+    ),
     // hook-session-context
     (
-        "com.ryuhq.session-context",
+        "@ryu/session-context",
         "hooks/start.js",
         include_str!("../../../../plugins-store/hook-session-context/hooks/start.js"),
     ),
     // proof
     (
-        "proof",
+        "@ryu/proof",
         "hooks/loop.js",
         include_str!("../../../../plugins-store/proof/hooks/loop.js"),
     ),
     // scrapling
     (
-        "scrapling",
+        "@ryu/scrapling",
         "adapters/web__extract.js",
         include_str!("../../../../plugins-store/scrapling/adapters/web__extract.js"),
     ),
     // security-guidance
     (
-        "security-guidance",
+        "@ryu/security-guidance",
         "hooks/review.js",
         include_str!("../../../../plugins-store/security-guidance/hooks/review.js"),
     ),
     // tool-firewall
     (
-        "com.ryuhq.tool-firewall",
+        "@ryu/tool-firewall",
         "hooks/post.js",
         include_str!("../../../../plugins-store/tool-firewall/hooks/post.js"),
     ),
     (
-        "com.ryuhq.tool-firewall",
+        "@ryu/tool-firewall",
         "hooks/pre.js",
         include_str!("../../../../plugins-store/tool-firewall/hooks/pre.js"),
     ),

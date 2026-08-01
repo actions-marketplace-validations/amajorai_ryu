@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::{
-    BEDROCK_PROVIDER_ID, CLOUDFLARE_PROVIDER_ID, OPENAI_CREDITS_PROVIDER_ID, ProvidersConfig,
+    ProvidersConfig, BEDROCK_PROVIDER_ID, CLOUDFLARE_PROVIDER_ID, OPENAI_CREDITS_PROVIDER_ID,
     VERTEX_PROVIDER_ID,
 };
 use crate::quota::ProviderQuotas;
@@ -615,7 +615,10 @@ mod tests {
         }))
         .expect("providers config parses");
         let reg = ProviderRegistry::new(&config, quota());
-        assert_eq!(reg.get("cloudflare").map(Provider::name), Some("cloudflare"));
+        assert_eq!(
+            reg.get("cloudflare").map(Provider::name),
+            Some("cloudflare")
+        );
         assert_eq!(reg.get("bedrock").map(Provider::name), Some("bedrock"));
         assert_eq!(reg.get("vertex").map(Provider::name), Some("vertex"));
         assert_eq!(reg.get("openai").map(Provider::name), Some("openai"));

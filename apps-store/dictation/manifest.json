@@ -1,5 +1,5 @@
 {
-  "id": "dictation",
+  "id": "@ryu/dictation",
   "name": "Dictation",
   "version": "1.0.0",
   "description": "System-wide dictation and agent-ask via the Island companion: speak anywhere to type a transcript, or ask an agent and paste the answer into the focused app.",
@@ -29,7 +29,12 @@
         "view": "dictation"
       }
     ],
-    "policies": [{ "id": "policy-dictation", "title": "Dictation" }]
+    "policies": [
+      {
+        "id": "policy-dictation",
+        "title": "Dictation"
+      }
+    ]
   },
   "permission_grants": []
 }

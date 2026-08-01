@@ -1,5 +1,5 @@
 {
-  "id": "com.ryu.rag",
+  "id": "@ryu/rag",
   "name": "RAG (retrieval-augmented generation)",
   "version": "1.0.0",
   "runnables": [],

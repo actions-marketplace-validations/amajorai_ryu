@@ -10,7 +10,7 @@ import { describe, expect, it } from "bun:test";
 import { htmlCompanionSrcdoc } from "./third-party-plugin.ts";
 
 const NONCE = "host-nonce-abc";
-const PLUGIN_ID = "com.ryu.whiteboard";
+const PLUGIN_ID = "@ryu/whiteboard";
 const APP_HTML =
 	'<!doctype html><html lang="en"><head><meta charset="utf-8" /><title>Whiteboard</title></head><body><div id="ryu-plugin-root"></div><script type="module">console.log("app")</script></body></html>';
 

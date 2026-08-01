@@ -1,5 +1,5 @@
 {
-  "id": "com.example.research-assistant",
+  "id": "@example/research-assistant",
   "name": "Research Assistant",
   "version": "1.0.0",
   "runnables": [

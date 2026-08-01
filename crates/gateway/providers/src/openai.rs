@@ -434,10 +434,7 @@ mod tests {
         ])
         .await;
         let p = provider_with(server.base_url().to_string(), vec!["k1", "k2"]);
-        let out = p
-            .complete("m", &json!({ "messages": [] }))
-            .await
-            .unwrap();
+        let out = p.complete("m", &json!({ "messages": [] })).await.unwrap();
         assert_eq!(out["id"], json!("ok"));
         let reqs = server.requests();
         assert_eq!(reqs.len(), 2);

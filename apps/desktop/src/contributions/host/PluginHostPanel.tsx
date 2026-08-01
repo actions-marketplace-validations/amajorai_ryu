@@ -111,6 +111,7 @@ import {
 import {
 	fetchApps,
 	fetchPluginUiBundle,
+	getPluginContributions,
 	type PluginCompanion,
 	pluginFinetuneStream,
 	pluginHostInvoke,
@@ -427,14 +428,14 @@ export function PluginHostPanel({
 	// companion's own hardcoded token block is the fallback for anything unread.
 	const [themeTokens] = useState(readHostThemeTokens);
 	// The managed-path numeric cap on monitors (free-tier gating). Read from the
-	// React entitlement context so the guard is always fresh — the `com.ryu.monitors`
+	// React entitlement context so the guard is always fresh — the `@ryu/monitors`
 	// companion re-applies it in `monitorsCreate` below (the old `useMonitors` hook
 	// that carried this gate is deleted with `MonitorsPage`). Caps live ONLY in the
 	// closed desktop layer (open-core rule, `planCapBridge.ts`), so this stays here,
 	// not in Core. A no-op off the managed path (self-host is uncapped).
 	const { guard, limitFor } = useEntityCap();
 	// Band-2 boolean gate for always-on workflow triggers (schedule / webhook /
-	// Composio). The `com.ryu.workflows` companion re-applies it in `workflowsSave`
+	// Composio). The `@ryu/workflows` companion re-applies it in `workflowsSave`
 	// below — the shell `TriggerConfig` that carried `canUse("local-background-runs")`
 	// was deleted with the shell canvas, and the sandboxed companion's own
 	// entitlement is stubbed (it cannot import `@ryu/auth`). Same open-core reasoning
@@ -442,22 +443,22 @@ export function PluginHostPanel({
 	// (Core's scheduler fires triggers headlessly and carries no paywall). A no-op
 	// off the managed path (self-host is unrestricted).
 	const { canUse, requestUpgrade } = useEntitlementContext();
-	// The shell Settings dialog opener — the `com.ryu.quests` companion's detection-
+	// The shell Settings dialog opener — the `@ryu/quests` companion's detection-
 	// settings gear opens Settings → Quests through the `questsOpenDetectionSettings`
 	// bridge verb (the QuestsSettings tab stays a shell surface; the extracted page's
 	// gear reaches it via this host-side navigation, preserving the old behavior).
 	// Quests is an app: its settings render under the Apps header in the node-scoped
 	// Gateway dialog, addressed by its `app:<id>` entity value.
 	const openGateway = useGatewayDialog((s) => s.openGateway);
-	// The shell tab opener — the `com.ryu.activity` companion's clickable rows open the
+	// The shell tab opener — the `@ryu/activity` companion's clickable rows open the
 	// chat tab for an item's session through the `activityOpenSession` bridge verb (the
 	// extracted page used `useTabsContext().openTab` directly; the sandboxed frame reaches
 	// it here). PluginHostPanel renders as tab content, so it sits under TabsProvider.
 	const { openTab, updateTabTitle, updateTabsIconWhere } = useTabsContext();
-	// The current tab id — the `com.ryu.skill-editor` companion's `skills.setTitle` verb
+	// The current tab id — the `@ryu/skill-editor` companion's `skills.setTitle` verb
 	// renames its own owning tab (the desktop page's `updateTabTitle(currentTabId, …)`).
 	const currentTabId = useCurrentTabId();
-	// The signed-in user id, resolved HOST-SIDE for the `com.ryu.approvals` companion's
+	// The signed-in user id, resolved HOST-SIDE for the `@ryu/approvals` companion's
 	// Notifications section: the per-user feed is scoped by user id, but the sandboxed
 	// frame has no Better Auth session, so the host reads it (the session query, falling
 	// back to the local account vault) exactly as the deleted `useNotifications` hook did.
@@ -712,7 +713,7 @@ export function PluginHostPanel({
 				);
 				return { configured: resp.configured, results };
 			},
-			// Fine-tune runs — the com.ryu.finetune app drives Core's orchestration +
+			// Fine-tune runs — the @ryu/finetune app drives Core's orchestration +
 			// durable job store through the governed bridge (host holds the node token).
 			// Unary calls forward verbatim; live progress streams over finetuneStream.
 			finetuneCapability: () =>
@@ -769,10 +770,10 @@ export function PluginHostPanel({
 					onFrame: emit,
 					signal,
 				}),
-			// Website monitors — the com.ryu.monitors companion drives Core's
+			// Website monitors — the @ryu/monitors companion drives Core's
 			// `/api/monitors/*` orchestration. Called DIRECTLY (the media pattern), not
 			// via the PluginHookBridge: `/api/monitors/*` already exists and is gated on
-			// the same com.ryu.monitors enabled bit, so no Core bridge verb is needed.
+			// the same @ryu/monitors enabled bit, so no Core bridge verb is needed.
 			monitorsList: () =>
 				listMonitors(toTarget(node)) as unknown as Promise<MonitorRecord[]>,
 			monitorsGet: ({ id }) =>
@@ -808,11 +809,11 @@ export function PluginHostPanel({
 				listMonitorAlerts(toTarget(node), id, limit) as unknown as Promise<
 					Record<string, unknown>[]
 				>,
-			// Workflows — the com.ryu.workflows companion drives Core's DAG workflow
+			// Workflows — the @ryu/workflows companion drives Core's DAG workflow
 			// engine + templates + node-config catalogs + ghost record→replay. Host-
 			// direct (the monitors pattern): the host holds the node token and calls
 			// the existing `/workflows*` + `/api/workflows/catalog*` + `/api/recipes/*`
-			// + node-config API, already gated on the com.ryu.workflows enabled bit.
+			// + node-config API, already gated on the @ryu/workflows enabled bit.
 			// definition CRUD (workflows:crud)
 			workflowsList: () => fetchWorkflows(toTarget(node)),
 			workflowsGet: ({ id }) => fetchWorkflow(toTarget(node), id),
@@ -878,6 +879,11 @@ export function PluginHostPanel({
 			}),
 			workflowsSkills: () => listSkills(toTarget(node)),
 			workflowsSchedules: () => fetchJobs(toTarget(node)),
+			// The app-event catalog behind the `event` trigger's picker. Served from
+			// the same contributions endpoint the shell already reads, narrowed to the
+			// one family the canvas needs.
+			workflowsHookEvents: async () =>
+				(await getPluginContributions(toTarget(node))).hook_events,
 			workflowsComposio: ({ kind, toolkit }) => {
 				switch (kind) {
 					case "status":
@@ -895,14 +901,14 @@ export function PluginHostPanel({
 			ghostRecordStart: ({ task }) => startRecording(toTarget(node), task),
 			ghostRecordStatus: () => getRecordingStatus(toTarget(node)),
 			ghostRecordStop: () => stopRecording(toTarget(node)),
-			// Inbound webhook registry — the com.ryu.webhooks companion renders Core's
+			// Inbound webhook registry — the @ryu/webhooks companion renders Core's
 			// read-only `/api/webhooks` + `/api/webhook-ingress/status`. Host-direct (the
 			// monitors pattern): the host holds the node token and calls the existing
 			// ungated reads; both return the camelCase-normalized shape the desktop page
 			// used, forwarded verbatim over the bridge (webhooks:crud).
 			webhooksList: () => fetchWebhooks(toTarget(node)),
 			webhooksIngressStatus: () => fetchWebhookIngressStatus(toTarget(node)),
-			// Quests — the com.ryu.quests companion drives Core's `/api/quests/*`
+			// Quests — the @ryu/quests companion drives Core's `/api/quests/*`
 			// auto-detecting-todo orchestration. Host-direct (the monitors pattern): the
 			// host holds the node token and calls the existing `/api/quests/*` client,
 			// forwarding Core's snake_case shapes verbatim over the bridge (quests:crud).
@@ -942,8 +948,8 @@ export function PluginHostPanel({
 				>,
 			// Shell navigation: open Settings at the Quests (detection) tab. Not a Core
 			// call — the companion's gear reaches the shell SettingsDialog through here.
-			questsOpenDetectionSettings: () => openGateway("app:com.ryu.quests"),
-			// Activity feed — the com.ryu.activity companion renders Core's read-only
+			questsOpenDetectionSettings: () => openGateway("app:@ryu/quests"),
+			// Activity feed — the @ryu/activity companion renders Core's read-only
 			// unified feed. Host-direct (the monitors pattern): the host holds the node
 			// token and calls the existing `/api/activity` read, forwarding Core's
 			// snake_case items verbatim over the bridge (activity:read).
@@ -955,7 +961,7 @@ export function PluginHostPanel({
 			// the extracted page opened it via `useTabsContext().openTab` (same call here).
 			activityOpenSession: ({ session_id }) =>
 				openTab("/chat", { conversationId: session_id, title: "Chat" }),
-			// Timeline — the com.ryu.timeline companion renders the activity replay
+			// Timeline — the @ryu/timeline companion renders the activity replay
 			// scrubber. Host-direct but device-LOCAL: Shadow (:3030) is machine-pinned,
 			// so these call the `shadow.ts` client WITHOUT `toTarget(node)` — the
 			// INVARIANT (the same host-direct-to-Shadow shape as `suggestions*` above).
@@ -974,7 +980,7 @@ export function PluginHostPanel({
 			timelineFrame: ({ tsMicros }) => fetchFrameDataUrl(tsMicros),
 			timelineOpenReview: () => openTab("/review", { title: "Weekly review" }),
 			timelineOpenSettings: () => openTab("/settings"),
-			// Agent Inboxes — the com.ryu.mail companion drives Core's `/api/mail/*`
+			// Agent Inboxes — the @ryu/mail companion drives Core's `/api/mail/*`
 			// orchestration (inbox CRUD, message list/send, inbound-secret rotation).
 			// Host-direct (the monitors pattern): the host holds the node token and
 			// calls the existing `/api/mail/*` client (served by the out-of-process
@@ -1008,7 +1014,7 @@ export function PluginHostPanel({
 				Promise.resolve({
 					url: `${node.url.replace(/\/+$/, "")}/api/mail/inbound/${inboxId}`,
 				}),
-			// Calendar — the com.ryu.calendar companion renders the scheduled-runs
+			// Calendar — the @ryu/calendar companion renders the scheduled-runs
 			// calendar and schedules an agent. Host-direct (the monitors pattern): the
 			// host holds the node token and calls the existing `/heartbeat/jobs` (jobs),
 			// `/workflows` (names), and `/api/agents` (picker) reads, forwarding Core's
@@ -1029,12 +1035,12 @@ export function PluginHostPanel({
 				>,
 			calendarCreateAutomation: (args) =>
 				createScheduledAgentWorkflow(toTarget(node), args),
-			// Warmup — the com.ryu.warmup companion keeps subscription usage windows
+			// Warmup — the @ryu/warmup companion keeps subscription usage windows
 			// open by scheduling a keep-alive ping per agent. Host-direct (the monitors
 			// pattern): the host holds the node token and drives `/api/agents` (+ its
 			// `/usage` and `/acp-config` reads) and `/heartbeat/jobs`, forwarding Core's
 			// shapes verbatim over the bridge (warmup:crud). Both mutating verbs are
-			// scoped to jobs stamped `ownerApp: com.ryu.warmup`, so the grant can never
+			// scoped to jobs stamped `ownerApp: @ryu/warmup`, so the grant can never
 			// reach an automation another app or Core owns.
 			warmupDetect: () =>
 				detectWarmupAgents(toTarget(node)) as unknown as Promise<{
@@ -1047,7 +1053,7 @@ export function PluginHostPanel({
 				>,
 			warmupApply: (jobs) => applyWarmupJobs(toTarget(node), jobs),
 			warmupRunNow: ({ jobId }) => runWarmupJobNow(toTarget(node), jobId),
-			// Learning — the com.ryu.learning companion renders the read-only
+			// Learning — the @ryu/learning companion renders the read-only
 			// continual-learning surface. Host-direct (the monitors pattern): the host
 			// holds the node token and calls the existing `/api/learn/config` (config),
 			// `/api/experience/list` (buffer), and `/api/healing/status` (heal history)
@@ -1066,7 +1072,7 @@ export function PluginHostPanel({
 				getHealingStatus(toTarget(node)) as unknown as Promise<
 					Record<string, unknown>
 				>,
-			// Inbox / Approvals — the com.ryu.approvals companion renders the unified
+			// Inbox / Approvals — the @ryu/approvals companion renders the unified
 			// inbox. Host-direct (the monitors pattern): the host holds the node token
 			// and calls the existing `/api/approvals/*` (approve/reject),
 			// `/api/notifications/*` (the per-user feed, scoped by the host-resolved
@@ -1105,7 +1111,7 @@ export function PluginHostPanel({
 					initialPrompt: prompt,
 					title: "Chat",
 				}),
-			// Meetings — the com.ryu.meetings companion renders the record → live-
+			// Meetings — the @ryu/meetings companion renders the record → live-
 			// transcript → AI-notes surface. Host-direct (the monitors pattern): the host
 			// holds the node token and calls the existing `/api/meetings/*` clients,
 			// forwarding Core's shapes verbatim over the bridge (meetings:crud). `import`
@@ -1166,7 +1172,7 @@ export function PluginHostPanel({
 					title: title ?? "Notes",
 				}),
 			meetingsOpenList: () => openTab("/meetings", { title: "Meetings" }),
-			// Skill authoring — the com.ryu.skill-editor companion authors a user-owned
+			// Skill authoring — the @ryu/skill-editor companion authors a user-owned
 			// Agent Skill (SKILL.md). Host-direct (the monitors pattern): the host holds the
 			// node token and calls the existing `skills.ts` authoring client (createSkill/
 			// updateSkill/getSkillSource/version history), which normalizes Core's snake_case

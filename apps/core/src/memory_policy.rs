@@ -1,6 +1,6 @@
 //! User-facing controls over how long-term memory behaves in chat — the
 //! Hermes/Honcho-style knobs (`recall_mode`, `recall_budget`, `write_frequency`)
-//! surfaced as plugin settings on `com.ryu.memory`.
+//! surfaced as plugin settings on `@ryu/memory`.
 //!
 //! ## Why this is a policy object and not three scattered reads
 //!

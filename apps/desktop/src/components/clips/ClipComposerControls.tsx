@@ -34,7 +34,7 @@ import { useNodeStore } from "@/src/store/useNodeStore.ts";
 const MAX_FRAMES = 24;
 
 /** The Clips app id — the composer controls only appear when it's enabled. */
-const CLIPS_PLUGIN_ID = "com.ryu.clips";
+const CLIPS_PLUGIN_ID = "@ryu/clips";
 
 /** Pick up to {@link MAX_FRAMES} moments: prefer the recommended (diagnostic)
  * moments, else fall back to evenly-spaced samples across the clip. */
@@ -139,7 +139,7 @@ export function ClipComposerControls({
 	);
 
 	// Clips is an APP: only surface its composer controls (record/attach + the Pro
-	// badge) when `com.ryu.clips` is installed AND enabled, so a default-off Clips
+	// badge) when `@ryu/clips` is installed AND enabled, so a default-off Clips
 	// leaves the composer clean — the app owns its own presence in the shell rather
 	// than the composer hardcoding it. Hidden while the app list is still loading.
 	if (!apps.some((a) => a.id === CLIPS_PLUGIN_ID && a.enabled)) {
