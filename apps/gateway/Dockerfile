@@ -30,14 +30,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-# Context is the repo root; copy only the self-contained gateway crate. The root
-# .dockerignore already excludes **/target, so no build output is transferred.
-COPY apps/gateway ./
+# Context is the repo root. `apps/gateway` is its own Cargo workspace (own
+# Cargo.lock), but it is NOT dependency-free: since the decomposition it carries
+# ~12 path deps into `crates/gateway/*` plus `crates/core/tool-registry`, and
+# those crates in turn depend on their siblings. Copying `apps/gateway` alone
+# built fine until 2026-07-16 and has failed ever since with
+# `failed to read /crates/gateway/audit/Cargo.toml`, which is a BUILD-time error
+# no test catches — the gateway simply stopped being redeployable while the
+# already-running container kept serving, so nothing looked broken.
+#
+# `crates/` is copied whole rather than crate-by-crate deliberately: an
+# enumerated list is what rotted last time, and a new path dep would silently
+# reintroduce the same failure. The root .dockerignore excludes **/target, so no
+# build output is transferred.
+COPY apps/gateway ./apps/gateway
+COPY crates ./crates
+WORKDIR /src/apps/gateway
 # Build the release binary against the committed lockfile for reproducibility.
 # BuildKit cache mounts keep the crates.io registry and target dir warm across
 # rebuilds so redeploys are incremental, not cold.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/src/apps/gateway/target \
     cargo build --release --locked \
  && cp target/release/ryu-gateway /usr/local/bin/ryu-gateway
 
