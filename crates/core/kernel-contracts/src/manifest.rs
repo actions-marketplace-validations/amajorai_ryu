@@ -717,12 +717,28 @@ impl PluginManifest {
     /// [`surfaces`]: PluginManifest::surfaces
     /// [`targets`]: PluginManifest::targets
     pub fn supports_surface(&self, surface: Surface) -> bool {
+        // A caller only ever asks about a REAL surface. `Surface::Unknown` is a
+        // deserialization landing pad for a token this build does not know, so
+        // answering it is meaningless — and answering `true` would let a manifest
+        // widen its own support by naming a surface we cannot verify.
+        if surface == Surface::Unknown {
+            return false;
+        }
         if let Some(surfaces) = &self.surfaces {
             return surfaces
                 .get(&surface)
-                .is_some_and(|e| e.support != SurfaceSupport::None);
+                .is_some_and(|e| e.support.is_supported());
         }
-        self.targets.is_empty() || self.targets.contains(&surface)
+        // Legacy flat list. Unknown entries are surfaces a NEWER Ryu added, so they
+        // can never match what we were asked about — but they still prove the author
+        // declared an explicit target list. Dropping them and falling back to
+        // "empty means everywhere" would turn a manifest aimed only at future
+        // surfaces into one that renders on every current surface, which is the
+        // opposite of what it asked for.
+        if self.targets.is_empty() {
+            return true;
+        }
+        self.targets.contains(&surface)
     }
 
     /// The capability edges this manifest requires (empty when `requires` is absent
@@ -3223,6 +3239,30 @@ pub enum SurfaceSupport {
     /// explicit so a manifest can document intent.
     #[default]
     None,
+
+    /// A support level this build does not know — a manifest written against a newer
+    /// Ryu that added a level (say `read-only`).
+    ///
+    /// Deserializing to this instead of failing is what lets a newer manifest load on
+    /// an older Core at all. It counts as **supported**, deliberately: the author said
+    /// the plugin works here, just in a way we cannot describe, and the honest
+    /// degradation is to offer it and let the surface render what it can. The opposite
+    /// choice (treat as [`None`]) would silently delist a plugin from a surface its
+    /// author explicitly listed.
+    ///
+    /// Never write this — it exists only as a deserialization landing pad.
+    #[serde(other)]
+    Unknown,
+}
+
+impl SurfaceSupport {
+    /// Whether this level means the plugin appears on the surface at all.
+    ///
+    /// Everything except [`SurfaceSupport::None`] counts, including
+    /// [`SurfaceSupport::Unknown`] — see that variant for why.
+    pub const fn is_supported(self) -> bool {
+        !matches!(self, SurfaceSupport::None)
+    }
 }
 
 /// One [`PluginManifest::surfaces`] entry: the support level plus an optional UI
@@ -3348,6 +3388,33 @@ pub enum Surface {
     Web,
     /// The terminal client.
     Cli,
+
+    /// A surface this build has never heard of — a manifest written against a newer
+    /// Ryu that added one.
+    ///
+    /// Before this variant existed, an unrecognised surface token failed
+    /// deserialization and took the **entire manifest** down with it, so one new
+    /// surface in a future release would break the plugin on every older client. Now
+    /// it lands here and reads as "not this surface", which is what an older client
+    /// should conclude.
+    ///
+    /// Two rules keep it honest:
+    /// - It never equals a real surface, so it can only ever *narrow* support, never
+    ///   widen it. [`PluginManifest::supports_surface`] is only ever asked about real
+    ///   surfaces, and no real surface is `Unknown`.
+    /// - [`Surface::parse`] still returns `None` for an unknown token, so this variant
+    ///   is unreachable from the `x-ryu-surface` header. That asymmetry is deliberate:
+    ///   an unknown *caller* means "do not filter", while an unknown *declaration*
+    ///   means "not here". Collapsing the two would let a client opt out of filtering
+    ///   by sending a garbage surface.
+    ///
+    /// Round-trip caveat: re-serializing a manifest that carried an unknown surface
+    /// emits `"unknown"` rather than the original token. Only the SDK bindings
+    /// (`crates/sdk/*`) re-serialize a parsed manifest, and they hand it to a client
+    /// that could not have handled the real token either. Nothing writes a parsed
+    /// manifest back to its source file.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Surface {
@@ -3363,6 +3430,7 @@ impl Surface {
             Surface::Extension => "extension",
             Surface::Web => "web",
             Surface::Cli => "cli",
+            Surface::Unknown => "unknown",
         }
     }
 

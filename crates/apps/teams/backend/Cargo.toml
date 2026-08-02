@@ -1,6 +1,6 @@
 [package]
 name = "ryu-teams"
-version = "0.0.17"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Agent teams for Ryu (a named, ordered collection of agents + a coordination strategy, addressed as one unit via @team) — an extracted Core capability crate: SQLite store + `/api/teams/*` HTTP surface. In-process default; Core consumes it as a path dependency behind the `teams` feature. The store's only host coupling (the data-dir path) is injected at open time, so this crate has ZERO dependency on apps/core; the @team chat orchestration stays in Core's session loop as a consumer of this crate's types."
@@ -36,7 +36,7 @@ utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 # process is not Core-hosted, so the standalone binary and this crate's tests are
 # unaffected. The `version` alongside the path is what lets the published satellite
 # tree — which has no sibling `crates/` — resolve it from the registry instead.
-ryu-app-events = { path = "../../../../crates/core/app-events", version = "0.0.17" }
+ryu-app-events = { path = "../../../../crates/core/app-events", version = "0.1.0" }
 # Sidecar-binary-only deps (data-dir resolution + logging), mirroring `ryu-mail`.
 # Core already pulls all of these, so there is no new dependency in the in-process
 # build.

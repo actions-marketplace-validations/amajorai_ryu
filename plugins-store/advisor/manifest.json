@@ -3,6 +3,16 @@
   "name": "Advisor",
   "version": "1.0.0",
   "description": "Consult a stronger reviewer model for a second opinion — as an auto-review turn hook (toggle / `/advisor`) and as the model-callable `advisor__consult` tool, a declarative HTTP tool routed through Core's `/api/advisor/consult` bridge.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "runnables": [
     {
       "id": "tool-advisor-consult",

@@ -2,11 +2,19 @@
   "id": "@ryu/hook-observers",
   "name": "Hook Observers",
   "version": "1.0.0",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "full" },
+    "mobile": { "support": "full" },
+    "extension": { "support": "full" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "runnables": [],
   "permission_grants": [],
-  "activation_events": [
-    "*"
-  ],
+  "activation_events": ["*"],
   "contributes": {
     "turn_hooks": [
       {

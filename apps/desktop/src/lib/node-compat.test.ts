@@ -8,6 +8,8 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+	channelMismatch,
+	channelOf,
 	compareSemver,
 	hasCapability,
 	isNodeCompatible,
@@ -71,5 +73,47 @@ describe("hasCapability", () => {
 	it("treats an undefined or empty list as legacy 'has everything'", () => {
 		expect(hasCapability(undefined, "anything")).toBe(true);
 		expect(hasCapability([], "anything")).toBe(true);
+	});
+});
+
+describe("channelOf", () => {
+	it("reads the channel out of the version itself", () => {
+		// Mirrors Core's channel_of, so both sides agree without storing anything.
+		expect(channelOf("0.0.18")).toBe("stable");
+		expect(channelOf("v0.0.18")).toBe("stable");
+		expect(channelOf("0.0.18-nightly.20260802.23")).toBe("nightly");
+		expect(channelOf("0.0.18-canary.4")).toBe("canary");
+		expect(channelOf("0.0.18-beta.1")).toBe("beta");
+		// Build metadata is not a channel.
+		expect(channelOf("0.0.18-nightly.3+f1a68ac")).toBe("nightly");
+		expect(channelOf("0.0.18+f1a68ac")).toBe("stable");
+	});
+
+	it("fails soft on a missing version", () => {
+		expect(channelOf(null)).toBe("stable");
+		expect(channelOf(undefined)).toBe("stable");
+		expect(channelOf("")).toBe("stable");
+	});
+});
+
+describe("channelMismatch", () => {
+	it("catches skew the version floor cannot see", () => {
+		// The exact blind spot: compareSemver discards the prerelease, so these two
+		// compare EQUAL and no version check could ever flag them.
+		expect(compareSemver("0.0.18", "0.0.18-canary.4")).toBe(0);
+		expect(channelMismatch("0.0.18", "0.0.18-canary.4")).toEqual({
+			desktop: "stable",
+			node: "canary",
+		});
+	});
+
+	it("is silent when both sides agree", () => {
+		expect(channelMismatch("0.0.18", "0.0.19")).toBeNull();
+		expect(channelMismatch("0.0.18-nightly.1", "0.0.19-nightly.2")).toBeNull();
+	});
+
+	it("fails soft when either version is unknown", () => {
+		expect(channelMismatch(null, "0.0.18-canary.1")).toBeNull();
+		expect(channelMismatch("0.0.18", null)).toBeNull();
 	});
 });

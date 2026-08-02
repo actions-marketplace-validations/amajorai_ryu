@@ -52,13 +52,6 @@ import {
 } from "@ryu/ui/components/select.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import {
-	Tabs,
-	TabsContent,
-	TabsIndicator,
-	TabsList,
-	TabsTrigger,
-} from "@ryu/ui/components/tabs.tsx";
-import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
@@ -78,19 +71,9 @@ import StoreCatalogLayout, {
 import StoreItemAction, {
 	StoreItemContextMenuContent,
 } from "./chrome/store-item-action.tsx";
-import {
-	ApiReferencePanel,
-	hasApiSurface,
-} from "./detail/api-reference-panel.tsx";
-import {
-	DependenciesPanel,
-	DetailMetaStrip,
-	hasDependencies,
-	ReadmePanel,
-	VersionsPanel,
-} from "./detail/detail-panels.tsx";
-import ReviewsPanel from "./detail/reviews-panel.tsx";
-import { ScorecardBadge, ScorecardPanel } from "./detail/scorecard-panel.tsx";
+import { DetailMetaStrip } from "./detail/detail-panels.tsx";
+import { ListingDetailTabs } from "./detail/listing-detail-tabs.tsx";
+import { ScorecardBadge } from "./detail/scorecard-panel.tsx";
 import { grantDescription, grantLabel } from "./grant-labels.ts";
 import {
 	type CatalogHost,
@@ -102,6 +85,7 @@ import { resolveCardIcon } from "./icon-url.ts";
 import { REALM_ICONS } from "./realm-icons.ts";
 import { safeHttpUrl } from "./safe-url.ts";
 import { runScorecard } from "./scorecard.ts";
+import { stabilityLabel } from "./stability.ts";
 import type {
 	AddMarketplaceParams,
 	AppCatalogItem,
@@ -674,6 +658,8 @@ function AppList({
 						onClick={() => onSelect(it.entry.id)}
 						seedId={it.entry.id}
 						selected={it.entry.id === selectedId}
+						stability={it.entry.stability}
+						surfaces={it.entry.surfaces}
 					/>
 				))}
 			</StoreCardGrid>
@@ -1098,7 +1084,8 @@ function AppDetailPanel({
 	noun: string;
 	renderAffordance: CatalogHost["renderAffordance"];
 }) {
-	const { Markdown } = useCatalogHost();
+	const { Markdown, fetchVersionDetail: hostFetchVersionDetail } =
+		useCatalogHost();
 	// Reviews live on the control plane, reached through the money-layer host. Read
 	// optionally: a surface that mounts the catalog without the money layer (test
 	// harnesses, the storyboard) simply gets no Reviews tab.
@@ -1146,6 +1133,9 @@ function AppDetailPanel({
 	}
 
 	const { entry, grants, installed, enabled } = item;
+	// The repo a version tag can be read from. `repositoryUrl` is the detail's
+	// own field; `repo_url` is the card's — either names the same GitHub repo.
+	const versionRepo = detail?.repositoryUrl ?? entry.repo_url ?? null;
 	const integrationUrl =
 		entry.integration_url ?? detail?.url ?? detail?.descriptor?.url ?? null;
 	const showHero =
@@ -1158,35 +1148,6 @@ function AppDetailPanel({
 	const isIntegrationDescriptor = Boolean(
 		entry.descriptor_only && entry.integration_kind
 	);
-	const readme = detail?.readme?.trim() ?? "";
-	const versions = detail?.versions ?? [];
-	// Reviews and Health are UNCONDITIONAL (given a review service / a loaded
-	// detail). They used to be conditional on content, which made the tab row
-	// inconsistent between store sections that render this exact panel: a Community
-	// listing arrived with a README and a full signal set and showed every tab, while
-	// a first-party Apps/Plugins listing showed a lone Overview. The tab row is
-	// navigation — it should not appear and disappear per listing — and an unrated
-	// item or a thin scorecard is information the user asked for, not a reason to
-	// hide the tab. The content tabs stay conditional: an absent README has nothing
-	// to render at all, whereas "no reviews yet" and "not enough signals" do.
-	const tabs: { id: DetailTabId; label: string }[] = [
-		{ id: "overview", label: "Overview" },
-		...(readme ? [{ id: "readme" as const, label: "README" }] : []),
-		...(hasApiSurface(detail?.apiSurface)
-			? [{ id: "api" as const, label: "API" }]
-			: []),
-		...(versions.length > 0
-			? [{ id: "versions" as const, label: "Versions" }]
-			: []),
-		...(hasDependencies(detail, entry)
-			? [{ id: "dependencies" as const, label: "Dependencies" }]
-			: []),
-		...(reviewsService ? [{ id: "reviews" as const, label: "Reviews" }] : []),
-		...(scorecard ? [{ id: "health" as const, label: "Health" }] : []),
-	];
-	// Guard against a tab that vanished while it was selected (the detail request
-	// resolving can remove tabs as well as add them).
-	const activeTab = tabs.some((t) => t.id === tab) ? tab : "overview";
 
 	const overview = (
 		<div className="flex flex-col gap-6">
@@ -1307,6 +1268,14 @@ function AppDetailPanel({
 							Community
 						</Badge>
 					) : null}
+					{stabilityLabel(entry.stability) ? (
+						<Badge
+							className="border-amber-500/40 text-amber-600 text-xs"
+							variant="outline"
+						>
+							{stabilityLabel(entry.stability)}
+						</Badge>
+					) : null}
 					{entry.kinds.map((k) => (
 						<Badge className="text-xs" key={k} variant="secondary">
 							{k.toUpperCase()}
@@ -1347,66 +1316,23 @@ function AppDetailPanel({
 				<p className="text-destructive text-sm">{detailError}</p>
 			) : null}
 
-			{tabs.length === 1 ? (
-				overview
-			) : (
-				<Tabs
-					onValueChange={(value) => setTab(value as DetailTabId)}
-					value={activeTab}
-				>
-					<TabsList variant="line">
-						{tabs.map((t) => (
-							<TabsTrigger key={t.id} value={t.id}>
-								{t.label}
-							</TabsTrigger>
-						))}
-						<TabsIndicator />
-					</TabsList>
-					<TabsContent className="pt-2" value="overview">
-						{overview}
-					</TabsContent>
-					{readme ? (
-						<TabsContent className="pt-2" value="readme">
-							<ReadmePanel
-								Markdown={Markdown}
-								readme={readme}
-								readmeUrl={detail?.readmeUrl}
-							/>
-						</TabsContent>
-					) : null}
-					{detail?.apiSurface ? (
-						<TabsContent className="pt-2" value="api">
-							<ApiReferencePanel surface={detail.apiSurface} />
-						</TabsContent>
-					) : null}
-					{versions.length > 0 ? (
-						<TabsContent className="pt-2" value="versions">
-							<VersionsPanel versions={versions} />
-						</TabsContent>
-					) : null}
-					{hasDependencies(detail, entry) ? (
-						<TabsContent className="pt-2" value="dependencies">
-							<DependenciesPanel detail={detail} entry={entry} />
-						</TabsContent>
-					) : null}
-					{reviewsService ? (
-						<TabsContent className="pt-2" value="reviews">
-							<ReviewsPanel
-								id={entry.id}
-								// Every listing in this section is a plugin/app on the control
-								// plane — apps ARE plugins that ship a companion surface.
-								kind="plugin"
-								service={reviewsService}
-							/>
-						</TabsContent>
-					) : null}
-					{scorecard ? (
-						<TabsContent className="pt-2" value="health">
-							<ScorecardPanel scorecard={scorecard} />
-						</TabsContent>
-					) : null}
-				</Tabs>
-			)}
+			<ListingDetailTabs
+				activeTab={tab}
+				detail={detail}
+				entry={entry}
+				fetchVersionDetail={
+					// Offered only when the host can serve it AND the listing names a repo —
+					// without one there is no tag to read from.
+					hostFetchVersionDetail && versionRepo
+						? (tag: string) => hostFetchVersionDetail(versionRepo, tag)
+						: undefined
+				}
+				Markdown={Markdown}
+				onTabChange={setTab}
+				overview={overview}
+				reviewsService={reviewsService}
+				scorecard={scorecard}
+			/>
 		</div>
 	);
 }

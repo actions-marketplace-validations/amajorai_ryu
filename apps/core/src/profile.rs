@@ -7,9 +7,10 @@
 //!
 //! `RYU_PROFILE` defaults to `"release"`, which is **byte-identical to having no
 //! profile at all**: port offset 0, `~/.ryu`, the `ryu/master-key` keychain slot,
-//! the original ports. Any other value (e.g. `"dev"`) shifts every base port by
-//! [`DEV_PORT_OFFSET`] and suffixes the data dir / config dir / keychain account
-//! with `-<profile>`.
+//! the original ports. Every other KNOWN profile (see [`PROFILE_PORT_OFFSETS`])
+//! shifts every base port by its own offset and suffixes the data dir / config
+//! dir / keychain account with `-<profile>`. An unrecognised name is rejected at
+//! startup rather than aliased onto dev's ports.
 //!
 //! Design rule (the one that prevents the "adopt-and-share" bug where a spawn
 //! side and the client that dials it disagree): **there is exactly one offset
@@ -32,19 +33,65 @@ pub const RYU_PROFILE_ENV: &str = "RYU_PROFILE";
 /// The canonical release profile — the zero-offset, no-suffix default.
 pub const RELEASE_PROFILE: &str = "release";
 
-/// Port offset applied to every base port for any non-release profile. release=0.
+/// Port offset for the `dev` profile. Kept as a named const because call sites
+/// outside this module reference the dev stack's offset directly.
 pub const DEV_PORT_OFFSET: u16 = 1000;
+
+/// **Every profile the stack knows, and the port offset that isolates it.**
+///
+/// A profile is a whole parallel stack, so two profiles sharing an offset is not
+/// a cosmetic clash — they get separate data dirs and separate keychain slots
+/// while fighting over one listener, which is *worse* than no isolation because
+/// both sides believe they are isolated.
+///
+/// This used to be `if release { 0 } else { 1000 }`, which handed EVERY
+/// non-release name dev's ports: `RYU_PROFILE=canary` got `~/.ryu-canary` and
+/// `master-key-canary` but bound 8980/8981 right on top of the dev stack. The
+/// table exists so that can never silently happen again — there is deliberately
+/// no fallback arm, and an unrecognised profile is rejected at startup by
+/// [`resolve`] rather than being quietly aliased onto dev.
+///
+/// Adding a stack means adding a row here (and to the gateway + desktop mirrors).
+pub const PROFILE_PORT_OFFSETS: &[(&str, u16)] = &[
+    (RELEASE_PROFILE, 0),
+    ("dev", DEV_PORT_OFFSET),
+    ("canary", 2000),
+    ("nightly", 3000),
+    ("beta", 4000),
+];
 
 // ── Pure resolvers (test these; they take the profile explicitly) ────────────────
 
-/// Port offset for a given profile name (already lowercased/trimmed). release ⇒ 0,
-/// anything else ⇒ [`DEV_PORT_OFFSET`].
+/// The port offset for `profile`, or `None` when it is not a known profile.
+/// Prefer this over [`port_offset_for`] anywhere the name is not yet validated.
+pub fn offset_of(profile: &str) -> Option<u16> {
+    PROFILE_PORT_OFFSETS
+        .iter()
+        .find(|(name, _)| *name == profile)
+        .map(|(_, offset)| *offset)
+}
+
+/// Comma-separated list of known profiles, for error messages.
+pub fn known_profiles() -> String {
+    PROFILE_PORT_OFFSETS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Port offset for a given profile name (already lowercased/trimmed).
+///
+/// Panics on an unknown profile. That is unreachable in a running process:
+/// [`resolve`] rejects an unknown `RYU_PROFILE` before anything caches a port,
+/// so reaching here with one means a caller bypassed resolution.
 pub fn port_offset_for(profile: &str) -> u16 {
-    if profile == RELEASE_PROFILE {
-        0
-    } else {
-        DEV_PORT_OFFSET
-    }
+    offset_of(profile).unwrap_or_else(|| {
+        panic!(
+            "unknown ryu profile '{profile}' (known: {}) — profiles must come from PROFILE_PORT_OFFSETS",
+            known_profiles()
+        )
+    })
 }
 
 /// `base + offset(profile)`, saturating (a base near `u16::MAX` never wraps).
@@ -76,11 +123,24 @@ pub fn dev_default_if_unset(current: Option<String>, profile_default: String) ->
 // ── Cached process-wide accessors (production) ───────────────────────────────────
 
 fn resolve() -> String {
-    std::env::var(RYU_PROFILE_ENV)
+    let name = std::env::var(RYU_PROFILE_ENV)
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| RELEASE_PROFILE.to_owned())
+        .unwrap_or_else(|| RELEASE_PROFILE.to_owned());
+
+    // Fail loudly rather than aliasing an unrecognised name onto dev's ports.
+    // A typo used to produce a stack with its own data dir and keychain slot but
+    // dev's listeners — two stacks silently corrupting each other's ports.
+    if offset_of(&name).is_none() {
+        eprintln!(
+            "ryu: unknown {RYU_PROFILE_ENV}='{name}'. Known profiles: {}.\n\
+             Add a row to PROFILE_PORT_OFFSETS (and the gateway + desktop mirrors) to define a new one.",
+            known_profiles()
+        );
+        std::process::exit(1);
+    }
+    name
 }
 
 static PROFILE: OnceLock<String> = OnceLock::new();
@@ -229,6 +289,70 @@ mod tests {
         assert_eq!(port_for(7981, RELEASE_PROFILE), 7981);
         // No suffix ⇒ the exact original data dir + keychain slot.
         assert_eq!(suffix_for(RELEASE_PROFILE), "");
+    }
+
+    /// The three `PROFILE_PORT_OFFSETS` mirrors (Core, Gateway, desktop) MUST
+    /// stay identical: Core spawns the Gateway and the desktop spawns Core, all
+    /// with the same `RYU_PROFILE`, so one table drifting means a spawner dials a
+    /// port its child never bound. Each crate asserts the SAME literal rows, so
+    /// editing one mirror without the others fails here.
+    #[test]
+    fn the_profile_table_matches_its_mirrors() {
+        assert_eq!(
+            PROFILE_PORT_OFFSETS,
+            &[
+                ("release", 0u16),
+                ("dev", 1000),
+                ("canary", 2000),
+                ("nightly", 3000),
+                ("beta", 4000),
+            ][..]
+        );
+    }
+
+    #[test]
+    fn every_known_profile_gets_a_distinct_port_offset() {
+        // The bug this replaces: `if release { 0 } else { 1000 }` gave canary,
+        // nightly and beta all of dev's ports while giving each its own data dir
+        // and keychain slot — isolation that only half existed.
+        let mut offsets: Vec<u16> = PROFILE_PORT_OFFSETS.iter().map(|(_, o)| *o).collect();
+        let count = offsets.len();
+        offsets.sort_unstable();
+        offsets.dedup();
+        assert_eq!(offsets.len(), count, "two profiles share a port offset");
+
+        let mut names: Vec<&str> = PROFILE_PORT_OFFSETS.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "a profile name is listed twice");
+    }
+
+    #[test]
+    fn the_release_profile_is_the_only_zero_offset() {
+        assert_eq!(offset_of(RELEASE_PROFILE), Some(0));
+        for (name, offset) in PROFILE_PORT_OFFSETS {
+            if *name != RELEASE_PROFILE {
+                assert_ne!(*offset, 0, "non-release profile '{name}' has no offset");
+            }
+        }
+    }
+
+    #[test]
+    fn canary_no_longer_collides_with_dev() {
+        // The concrete regression: both used to resolve to 8980/8981.
+        assert_eq!(port_for(7980, "dev"), 8980);
+        assert_eq!(port_for(7980, "canary"), 9980);
+        assert_eq!(port_for(7980, "nightly"), 10980);
+        assert_eq!(port_for(7980, "beta"), 11980);
+        assert_ne!(port_for(7981, "canary"), port_for(7981, "dev"));
+    }
+
+    #[test]
+    fn an_unknown_profile_is_not_silently_aliased_onto_dev() {
+        assert_eq!(offset_of("typo"), None);
+        assert_eq!(offset_of(""), None);
+        // And it is loud rather than wrong.
+        assert!(std::panic::catch_unwind(|| port_offset_for("typo")).is_err());
     }
 
     #[test]

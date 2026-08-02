@@ -3,6 +3,16 @@
   "name": "Meetings",
   "version": "1.0.0",
   "description": "Meeting notes: record → live transcript → AI notes, auto-saved into the Meetings Space so they stay editable and RAG-searchable.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

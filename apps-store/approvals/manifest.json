@@ -3,6 +3,16 @@
   "name": "Approvals",
   "version": "1.0.0",
   "description": "Approval inbox: a human-in-the-loop queue where agent-proposed actions, edits, and fixes wait for your accept or reject before they take effect.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

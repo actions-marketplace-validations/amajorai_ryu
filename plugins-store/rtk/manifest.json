@@ -5,6 +5,16 @@
   "description": "Run a dev command through RTK (Rust Token Killer) and get a token-compressed version of its output (60-90% fewer tokens), exposed as a declarative `command` tool that shells out to the locally-installed `rtk` binary. BYO — no API key.",
   "tagline": "Token-compress noisy dev-command output for agents",
   "category": "Developer Tools",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
@@ -28,33 +38,20 @@
             },
             "mode": {
               "type": "string",
-              "enum": [
-                "wrap",
-                "proxy",
-                "test",
-                "err"
-              ],
+              "enum": ["wrap", "proxy", "test", "err"],
               "description": "wrap (default): filter+compress the output. proxy: run raw with tracking (no filtering). test: keep only failures. err: keep only errors."
             }
           },
-          "required": [
-            "command"
-          ]
+          "required": ["command"]
         },
         "args": [
           {
             "from": "mode",
             "map": {
               "wrap": [],
-              "proxy": [
-                "proxy"
-              ],
-              "test": [
-                "test"
-              ],
-              "err": [
-                "err"
-              ]
+              "proxy": ["proxy"],
+              "test": ["test"],
+              "err": ["err"]
             },
             "default": "wrap"
           },
@@ -67,9 +64,7 @@
       }
     }
   ],
-  "permission_grants": [
-    "tool:command:rtk"
-  ],
+  "permission_grants": ["tool:command:rtk"],
   "activation_events": [],
   "contributes": {
     "settings_tabs": [

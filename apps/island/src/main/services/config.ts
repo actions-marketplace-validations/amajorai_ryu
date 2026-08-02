@@ -178,13 +178,21 @@ export function saveSettings(patch: IslandSettingsPatch): IslandSettings {
 	return getSettings();
 }
 
-/** Build the headers Core expects, including the bearer token when set. */
+/** Build the headers Core expects, including the bearer token when set.
+ *
+ * `X-Ryu-Surface` identifies this client as the island so Core can filter plugin
+ * listings and contributions to the ones that declare island support. Without it
+ * Core sees an unknown caller and — correctly, since an unknown caller must never
+ * be filtered to nothing — returns the UNFILTERED set, so the island was showing
+ * plugins that explicitly do not support it. Mirrors the desktop's
+ * `identityHeaders()` and the mobile/cli/web clients. */
 export function coreHeaders(
 	extra?: Record<string, string>
 ): Record<string, string> {
 	const cfg = loadConfig();
 	const headers: Record<string, string> = {
 		Accept: "application/json",
+		"X-Ryu-Surface": "island",
 		...extra,
 	};
 	if (cfg.coreToken) {

@@ -2,15 +2,23 @@
   "id": "@ryu/chat-title",
   "name": "Chat Title",
   "version": "1.0.0",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "runnables": [],
   "permission_grants": [
     "hook:side-model",
     "conversation:set-title",
     "preferences:read"
   ],
-  "activation_events": [
-    "*"
-  ],
+  "activation_events": ["*"],
   "contributes": {
     "settings_tabs": [
       {

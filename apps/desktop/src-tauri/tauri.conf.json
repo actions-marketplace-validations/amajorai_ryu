@@ -2,8 +2,8 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Ryu",
   "mainBinaryName": "Ryu",
-  "identifier": "dev.ryu.desktop",
-  "version": "0.0.17",
+  "identifier": "ai.amajor.ryu.desktop",
+  "version": "0.1.0",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",

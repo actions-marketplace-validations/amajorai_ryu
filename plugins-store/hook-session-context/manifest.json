@@ -2,6 +2,16 @@
   "id": "@ryu/session-context",
   "name": "Session Context",
   "version": "1.0.0",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "full" },
+    "mobile": { "support": "full" },
+    "extension": { "support": "full" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "runnables": [],
   "permission_grants": [],
   "activation_events": ["*"],

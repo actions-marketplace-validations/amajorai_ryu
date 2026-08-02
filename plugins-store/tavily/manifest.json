@@ -4,12 +4,18 @@
   "version": "1.0.0",
   "description": "Search-and-extract for agents via the Tavily API (https://tavily.com), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Tavily without changing what agents call. Requires a BYOK Tavily API key.",
   "tagline": "Agent-tuned web search and extraction",
-  "keywords": [
-    "search",
-    "web",
-    "extract"
-  ],
+  "keywords": ["search", "web", "extract"],
   "category": "Search",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
@@ -49,15 +55,10 @@
             "search_depth": {
               "type": "string",
               "description": "How much work Tavily does per query.",
-              "enum": [
-                "basic",
-                "advanced"
-              ]
+              "enum": ["basic", "advanced"]
             }
           },
-          "required": [
-            "query"
-          ]
+          "required": ["query"]
         }
       }
     },
@@ -87,9 +88,7 @@
               }
             }
           },
-          "required": [
-            "urls"
-          ]
+          "required": ["urls"]
         }
       }
     }
@@ -139,9 +138,7 @@
       }
     }
   ],
-  "permission_grants": [
-    "tool:http-egress:api.tavily.com"
-  ],
+  "permission_grants": ["tool:http-egress:api.tavily.com"],
   "contributes": {
     "settings_tabs": [
       {

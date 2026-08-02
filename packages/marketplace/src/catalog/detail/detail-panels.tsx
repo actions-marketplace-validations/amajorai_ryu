@@ -19,10 +19,16 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import type { ComponentType } from "react";
+import { useState } from "react";
 import { grantDescription, grantLabel } from "../grant-labels.ts";
 import { prettyPluginId } from "../plugin-id.ts";
 import { safeHttpUrl } from "../safe-url.ts";
-import type { CatalogEntry, PluginCatalogDetail } from "../types.ts";
+import { surfaceLabel } from "../surface-labels.ts";
+import type {
+	CatalogEntry,
+	PluginCatalogDetail,
+	VersionSnapshot,
+} from "../types.ts";
 
 /** Render an ISO timestamp as a short absolute date. Absolute rather than
  *  relative on purpose: "2 years ago" is the health tab's job, a version table
@@ -52,24 +58,6 @@ export function formatCount(value: number): string {
 		return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0).replace(/\.0$/, "")}k`;
 	}
 	return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-}
-
-/** Human labels for the host surfaces a plugin can declare. Unknown surfaces
- *  fall back to the raw token rather than being dropped — a new surface should
- *  show up in the UI the day a manifest declares it, not the day this map is
- *  updated. */
-const SURFACE_LABELS: Record<string, string> = {
-	browser: "Browser extension",
-	cli: "CLI",
-	desktop: "Desktop",
-	island: "Island",
-	mobile: "Mobile",
-	tui: "Terminal",
-	web: "Web",
-};
-
-function surfaceLabel(surface: string): string {
-	return SURFACE_LABELS[surface] ?? surface;
 }
 
 /** One item in the strip under the listing name. */
@@ -213,10 +201,100 @@ export function ReadmePanel({
 }
 
 /** The Versions tab: published version history, newest first. */
+/** One version row's expandable "as published" snapshot.
+ *
+ *  Fetched lazily on expand, never up front: a listing can carry 20 versions and
+ *  eagerly reading each one's manifest and README would be 40 network round-trips
+ *  to render a tab nobody may open. */
+function VersionSnapshotRow({
+	tag,
+	fetchVersionDetail,
+}: {
+	tag: string;
+	fetchVersionDetail: (tag: string) => Promise<VersionSnapshot | null>;
+}) {
+	const [state, setState] = useState<
+		| { status: "idle" }
+		| { status: "loading" }
+		| { status: "empty" }
+		| { status: "ready"; snapshot: VersionSnapshot }
+	>({ status: "idle" });
+
+	const load = async () => {
+		if (state.status !== "idle") {
+			return;
+		}
+		setState({ status: "loading" });
+		try {
+			const snapshot = await fetchVersionDetail(tag);
+			setState(snapshot ? { snapshot, status: "ready" } : { status: "empty" });
+		} catch {
+			// A tag with no readable manifest is the NORMAL case for tags predating
+			// the listing being packaged — not an error worth shouting about.
+			setState({ status: "empty" });
+		}
+	};
+
+	if (state.status === "idle") {
+		return (
+			<button
+				className="mt-1 text-muted-foreground text-xs hover:underline"
+				onClick={load}
+				type="button"
+			>
+				Show what shipped in this version
+			</button>
+		);
+	}
+	if (state.status === "loading") {
+		return <p className="mt-1 text-muted-foreground text-xs">Reading tag…</p>;
+	}
+	if (state.status === "empty") {
+		return (
+			<p className="mt-1 text-muted-foreground text-xs">
+				No manifest published at this tag.
+			</p>
+		);
+	}
+
+	const { snapshot } = state;
+	const facts = [
+		snapshot.description ? `“${snapshot.description}”` : null,
+		snapshot.license ? `Licence: ${snapshot.license}` : null,
+		snapshot.engines?.ryu ? `Requires Ryu ${snapshot.engines.ryu}` : null,
+		snapshot.readme
+			? `README: ${Math.round(snapshot.readme.length / 100) / 10}k chars`
+			: "No README at this tag",
+	].filter(Boolean) as string[];
+
+	return (
+		<div className="mt-2 flex flex-col gap-1 rounded-md bg-muted/40 px-2.5 py-2">
+			{facts.map((fact) => (
+				<p className="text-muted-foreground text-xs leading-relaxed" key={fact}>
+					{fact}
+				</p>
+			))}
+			{/* The honesty line. Only repo-resident signals are historical; stars,
+			    issues and the archived flag are reported as of NOW and cannot be
+			    reconstructed for a past tag, so this panel must never imply it is
+			    showing a full health grade for that version. */}
+			<p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+				Read from the repository at this tag. Repository stats (stars, issues,
+				activity) always reflect today, not this release.
+			</p>
+		</div>
+	);
+}
+
 export function VersionsPanel({
 	versions,
+	fetchVersionDetail,
 }: {
 	versions: NonNullable<PluginCatalogDetail["versions"]>;
+	/** Host-supplied reader for one version's snapshot. Injected because this
+	 *  package is host-agnostic — the desktop talks to Core, the web host has no
+	 *  such endpoint and simply omits it, which hides the affordance entirely. */
+	fetchVersionDetail?: (tag: string) => Promise<VersionSnapshot | null>;
 }) {
 	return (
 		<ul className="flex flex-col gap-1.5">
@@ -266,6 +344,14 @@ export function VersionsPanel({
 							>
 								View release
 							</a>
+						) : null}
+						{fetchVersionDetail ? (
+							<div>
+								<VersionSnapshotRow
+									fetchVersionDetail={fetchVersionDetail}
+									tag={version.version}
+								/>
+							</div>
 						) : null}
 					</li>
 				);

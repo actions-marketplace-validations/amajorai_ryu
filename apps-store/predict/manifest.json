@@ -2,6 +2,16 @@
   "id": "@ryu/predict",
   "name": "Autocomplete",
   "version": "1.0.0",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

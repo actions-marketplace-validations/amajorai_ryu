@@ -1,5 +1,6 @@
 mod core;
 mod hardware;
+mod identifier_migration;
 mod nodes;
 mod permissions;
 mod profile;
@@ -319,16 +320,23 @@ async fn install_update_from_channel(
 ) -> Result<bool, String> {
 	use tauri_plugin_updater::UpdaterExt;
 
-	// Per-channel feed under the same release hub as the Stable endpoint in
-	// tauri.conf.json (`.../latest/download/latest.json`). GitHub release asset
-	// names are FLAT (no slashes), so a channel maps to `latest-<channel>.json`,
-	// e.g. `latest-nightly.json`. The release CI must publish these assets for the
-	// non-stable channels — until it does, `check()` returns None (Ok(false)).
-	// Stable is the default JS path and never reaches here.
-	let url = format!(
-		"https://github.com/amajorai/ryu/releases/latest/download/latest-{}.json",
-		channel
-	);
+	// Per-channel feed. `canary` and `nightly` publish to a ROLLING TAG of the
+	// same name that CI force-moves each run, and their workflows assemble
+	// `latest-<channel>.json` onto that tag from their own signed artifacts
+	// (`scripts/release/assemble-channel-feed.sh`). So the feed is addressed at
+	// `/releases/download/<channel>/…`, NOT `/releases/latest/download/…` —
+	// GitHub defines `/latest` to exclude prereleases and every rolling build is
+	// one, which is exactly why this used to resolve to the Stable release and
+	// silently offer a channel user the Stable build.
+	//
+	// `beta` has no rolling build train, so it keeps resolving to the Stable
+	// release, where the release workflow still copies Stable's feed to
+	// `latest-beta.json`. That is a deliberate fallback, not an oversight.
+	let url = if channel == "beta" {
+		"https://github.com/amajorai/ryu/releases/latest/download/latest-beta.json".to_string()
+	} else {
+		format!("https://github.com/amajorai/ryu/releases/download/{channel}/latest-{channel}.json")
+	};
 	let endpoint = url
 		.parse()
 		.map_err(|e| format!("bad channel feed url: {e}"))?;
@@ -525,6 +533,61 @@ async fn run_data_path_subcommand(
 	} else {
 		err.trim().to_string()
 	})
+}
+
+/// Remove the auxiliary roots a node reset never reaches — `~/.shadow`,
+/// `~/.ghost`, and the OS config dir holding `gateway.toml` + the data-path
+/// pointer.
+///
+/// Separate from `reset_data_path` because two of those are NOT profile-scoped:
+/// shadow and ghost use a plain `~/.shadow` / `~/.ghost` for every profile, so
+/// clearing them from one profile clears them for all. The confirm copy says so.
+///
+/// Stops Core first, and does not restart: the data dir is untouched, so there is
+/// nothing for the running node to re-resolve.
+#[tauri::command]
+async fn deep_clean_node(
+	app: tauri::AppHandle,
+	state: tauri::State<'_, CoreState>,
+) -> Result<(), String> {
+	let binary =
+		resolve_core_binary().ok_or_else(|| "Could not find ryu-core binary.".to_string())?;
+	stop_core_and_wait(&state).await?;
+	let args = vec!["data-path".to_string(), "deep-clean".to_string()];
+	run_data_path_subcommand(&app, &binary, &args).await
+}
+
+/// Copy THIS profile's data folder into another profile's, carrying the master
+/// key, so a canary (or any) profile can be tested against real state instead of
+/// one rebuilt by hand.
+///
+/// Deliberately does NOT restart: neither profile's pointer file is touched, so
+/// the running app's own data dir is unchanged and there is nothing to re-resolve.
+/// The target profile picks the copy up the next time it starts.
+///
+/// `--from-profile` is passed EXPLICITLY rather than letting the child infer it.
+/// `run_data_path_subcommand` spawns with inherited env only, so a child would
+/// otherwise resolve whatever `RYU_PROFILE` this process happens to carry — which
+/// is right by luck today and wrong the moment a dev build drives the copy.
+#[tauri::command]
+async fn copy_data_folder_to_profile(
+	app: tauri::AppHandle,
+	state: tauri::State<'_, CoreState>,
+	to_profile: String,
+) -> Result<(), String> {
+	let binary =
+		resolve_core_binary().ok_or_else(|| "Could not find ryu-core binary.".to_string())?;
+	// WAL is on for every store, so a live copy captures a torn snapshot.
+	stop_core_and_wait(&state).await?;
+	let args = vec![
+		"data-path".to_string(),
+		"copy-profile".to_string(),
+		"--from-profile".to_string(),
+		crate::profile::name(),
+		"--to-profile".to_string(),
+		to_profile,
+	];
+	run_data_path_subcommand(&app, &binary, &args).await
 }
 
 /// Copy-relocate the data folder to `to`, then restart the app to apply.
@@ -1162,6 +1225,13 @@ async fn list_project_markdown(folder: String) -> Result<Vec<String>, String> {
 }
 
 pub fn run() {
+	// BEFORE the builder, deliberately: the bundle identifier keys the app-data
+	// dir, so the 2026-08 rename would otherwise point a freshly-updated install
+	// at an empty folder and silently sign the user out. Running here rather than
+	// in `setup` removes the race against the webview, which can call
+	// `load("auth.bin")` while `setup` is still executing.
+	identifier_migration::migrate_app_data();
+
 	let mut builder = tauri::Builder::default()
 		.manage(CoreState {
 			process: Mutex::new(None),
@@ -1411,6 +1481,8 @@ pub fn run() {
             get_build_profile,
             install_update_from_channel,
             install_update_at_tag,
+            copy_data_folder_to_profile,
+            deep_clean_node,
             migrate_data_folder,
             import_data_folder,
             open_external,

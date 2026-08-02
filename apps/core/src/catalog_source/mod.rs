@@ -109,6 +109,43 @@ pub async fn enrich_github_repo(
     }
     github_enrich::enrich_repo(cache_id, GITHUB_API_BASE, &headers, &owner, &repo).await
 }
+
+/// The detail payload for ONE published version of a listing, read from its repo
+/// at that version's tag.
+///
+/// Only signals that live IN THE REPOSITORY are returned — README, licence,
+/// description, engines, surfaces, declared permissions. Repository health (stars,
+/// open issues, archived, last-updated) is current-state and is deliberately
+/// omitted rather than filled with today's numbers: a per-version card that
+/// silently mixes "as of that tag" with "as of now" reads as authoritative and is
+/// not. Returns `None` for a non-GitHub reference or a tag with no readable
+/// manifest, which is normal for tags predating packaging.
+pub async fn github_version_detail(
+    repo_reference: &str,
+    tag: &str,
+) -> Option<serde_json::Value> {
+    let (owner, repo) = split_github_repo(repo_reference)?;
+    github_enrich::version_detail(&owner, &repo, tag).await
+}
+
+/// Channels a listing publishes, each with the tag it currently resolves to.
+///
+/// Empty for a non-GitHub reference or a repo with no releases — the caller shows
+/// no picker rather than an empty one.
+pub async fn github_listing_channels(
+    repo_reference: &str,
+    token: Option<&str>,
+) -> Vec<(String, String)> {
+    let Some((owner, repo)) = split_github_repo(repo_reference) else {
+        return Vec::new();
+    };
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) {
+        headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+    }
+    github_enrich::listing_channels(GITHUB_API_BASE, &headers, &owner, &repo).await
+}
+
 pub use registry::{CatalogSourceRegistry, CustomSourceSpec, SourceMeta};
 pub use sources::{
     integration_brand_slug, integrations_sh_brands, with_buyer_token, HfSource, IntegrationBrand,

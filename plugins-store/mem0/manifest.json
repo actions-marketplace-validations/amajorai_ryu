@@ -4,13 +4,18 @@
   "version": "1.1.0",
   "description": "Read and write a hosted Mem0 memory project (https://mem0.ai) through the Mem0 Platform REST API, exposed as three declarative HTTP tools. The SECOND provider of the swappable `memory` layer — the built-in store stays the default and keeps running alongside it — so selecting Mem0 re-points the stable `memory__search` / `memory__store` / `memory__sync` / `memory__forget` tools at your Mem0 project without changing what agents call, and turns on the kernel bridges that fold Mem0 into every turn's recall and echo this node's writes out to it. The one canonical verb Mem0 does NOT serve is `memory__context`: Mem0 publishes no standing-summary endpoint, and forcing the verb onto its get-all would dump raw facts at system rank under a label promising a synthesis. The two WRITE verbs both post to `POST /v3/memories/add/`, which is ASYNCHRONOUS — it answers `{message, status: \"PENDING\", event_id}` and never a fact id — so `memory__store` returns an accepted-for-processing envelope, not the id of the fact it created, and nothing may chain `memory__forget` onto its result. That is fine for the way both verbs are used: the kernel `mirror` and `sync` bridges are fire-and-forget and never read the response. The two verbs differ in ONE documented field: `store` sends `infer: false` because the caller has already decided the fact and Mem0 should keep the text as-is, while `sync` hands over a raw turn with Mem0's default inference on and lets Mem0 mine it. Note the entity id lives in two different places in Mem0's own API — nested inside `filters` for search, top-level for add — and both are pinned from the same `mem0.user-id` preference. Requires a BYOK Mem0 API key.",
   "tagline": "Recall and record in an existing Mem0 project inside Ryu",
-  "keywords": [
-    "memory",
-    "recall",
-    "facts",
-    "mem0"
-  ],
+  "keywords": ["memory", "recall", "facts", "mem0"],
   "category": "Knowledge",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
@@ -63,10 +68,7 @@
               "description": "Include memories whose expiration_date has passed (Mem0 default false)."
             }
           },
-          "required": [
-            "query",
-            "filters"
-          ]
+          "required": ["query", "filters"]
         }
       }
     },
@@ -97,21 +99,14 @@
                   "role": {
                     "type": "string",
                     "description": "Who produced the turn.",
-                    "enum": [
-                      "user",
-                      "assistant",
-                      "system"
-                    ]
+                    "enum": ["user", "assistant", "system"]
                   },
                   "content": {
                     "type": "string",
                     "description": "The text of the turn."
                   }
                 },
-                "required": [
-                  "role",
-                  "content"
-                ]
+                "required": ["role", "content"]
               },
               "minItems": 1
             },
@@ -124,9 +119,7 @@
               "description": "Mem0 default true: run Mem0's own extraction over `messages` and store what it derives. Set false to skip inference and store the provided text as-is, which is what a fact the caller has already decided on wants."
             }
           },
-          "required": [
-            "messages"
-          ]
+          "required": ["messages"]
         }
       }
     },
@@ -153,9 +146,7 @@
               "description": "The Mem0 memory id (a uuid) to delete."
             }
           },
-          "required": [
-            "memory_id"
-          ]
+          "required": ["memory_id"]
         }
       }
     }
@@ -230,9 +221,7 @@
       }
     }
   ],
-  "permission_grants": [
-    "tool:http-egress:api.mem0.ai"
-  ],
+  "permission_grants": ["tool:http-egress:api.mem0.ai"],
   "contributes": {
     "settings_tabs": [
       {

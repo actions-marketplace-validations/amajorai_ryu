@@ -143,8 +143,19 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> String {
 /// Best-effort README read over `raw.githubusercontent.com` — a CDN, so this
 /// costs nothing against the API rate limit. Returns `(markdown, raw_url)`.
 async fn fetch_readme(owner: &str, repo: &str) -> Option<(String, String)> {
+    fetch_readme_at(owner, repo, "HEAD").await
+}
+
+/// The README as it stood at `git_ref` (a tag, branch or sha).
+///
+/// This is what makes a PER-VERSION view possible at all: the raw host serves any
+/// ref, so an old tag's README is one substitution away — `HEAD` was simply
+/// hardcoded. Note this covers only the checks whose evidence lives IN THE REPO.
+/// Stars, open issues and the archived flag are current-state facts GitHub reports
+/// as of now and cannot be reconstructed for a past tag by any means.
+async fn fetch_readme_at(owner: &str, repo: &str, git_ref: &str) -> Option<(String, String)> {
     for path in REPO_README_PATHS {
-        let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}");
+        let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/{git_ref}/{path}");
         let Ok(bytes) = crate::server::guarded_get_bytes(&url).await else {
             continue;
         };
@@ -159,6 +170,58 @@ async fn fetch_readme(owner: &str, repo: &str) -> Option<(String, String)> {
         return Some((truncate_utf8(trimmed, MAX_README_BYTES), url));
     }
     None
+}
+
+/// Candidate manifest locations inside a listing's repo, most specific first.
+const REPO_MANIFEST_PATHS: [&str; 2] = ["manifest.json", "plugin.json"];
+
+/// The listing's manifest as it stood at `git_ref`.
+async fn fetch_manifest_at(owner: &str, repo: &str, git_ref: &str) -> Option<serde_json::Value> {
+    for path in REPO_MANIFEST_PATHS {
+        let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/{git_ref}/{path}");
+        let Ok(bytes) = crate::server::guarded_get_bytes(&url).await else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Build the detail payload for ONE published version, from the repo contents at
+/// that version's tag.
+///
+/// **Read the honesty constraint before using this.** Only the checks whose
+/// evidence lives in the repository can be graded historically: the README, the
+/// declared licence/description/engines/surfaces, and the manifest-shaped signals
+/// derived from them. Repository HEALTH — stars, open issues, archived/disabled,
+/// "last updated" — is current-state, reported by GitHub as of now, and is
+/// deliberately LEFT OUT rather than filled with today's values. Mixing the two
+/// would produce a card that looks like "the grade at that version" while half of
+/// it silently describes today, which is worse than showing nothing.
+///
+/// Returns `None` when the tag has no readable manifest, which is the normal case
+/// for a tag predating the listing being packaged.
+pub async fn version_detail(owner: &str, repo: &str, tag: &str) -> Option<serde_json::Value> {
+    let manifest = fetch_manifest_at(owner, repo, tag).await?;
+    let readme = fetch_readme_at(owner, repo, tag).await;
+
+    let mut out = serde_json::Map::new();
+    out.insert("version".into(), manifest.get("version").cloned().unwrap_or(serde_json::Value::Null));
+    if let Some((text, url)) = readme {
+        out.insert("readme".into(), serde_json::Value::String(text));
+        out.insert("readmeUrl".into(), serde_json::Value::String(url));
+    }
+    for key in ["description", "license", "engines", "surfaces", "targets", "permissions"] {
+        if let Some(v) = manifest.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    // Names the ref this was read at, so a client can never present it as anything
+    // other than a point-in-time snapshot.
+    out.insert("atRef".into(), serde_json::Value::String(tag.to_string()));
+    Some(serde_json::Value::Object(out))
 }
 
 /// Fetch `GET /repos/{owner}/{repo}`. One rate-limited call, worth it: it is the
@@ -191,6 +254,37 @@ async fn fetch_releases(
         .ok()?;
     let releases: Vec<GithubReleaseItem> = serde_json::from_slice(&bytes).ok()?;
     Some(releases.into_iter().filter(|r| !r.draft).collect())
+}
+
+/// Every release channel a listing publishes, plus the tag each channel currently
+/// resolves to.
+///
+/// This is what makes a per-listing channel picker honest: it offers only the
+/// channels that actually have a build, so nobody selects `nightly` and is then
+/// told there is nothing there. Resolution itself is
+/// [`crate::update::pick_version_for_channel`], the SAME rule Core applies to its
+/// own builds — channel read off the tag, semver maximum within the channel, and
+/// never a cross-channel fallback.
+pub async fn listing_channels(
+    api_base: &str,
+    headers: &[(String, String)],
+    owner: &str,
+    repo: &str,
+) -> Vec<(String, String)> {
+    let Some(releases) = fetch_releases(api_base, headers, owner, repo).await else {
+        return Vec::new();
+    };
+    let tags: Vec<&str> = releases
+        .iter()
+        .filter_map(|r| r.tag_name.as_deref())
+        .collect();
+    crate::update::channels_available(&tags)
+        .into_iter()
+        .filter_map(|channel| {
+            crate::update::pick_version_for_channel(&tags, &channel)
+                .map(|tag| (channel, tag.to_string()))
+        })
+        .collect()
 }
 
 /// Fetch git tags — the Versions fallback for a repo that tags but never

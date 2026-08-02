@@ -4,11 +4,18 @@
   "version": "1.0.0",
   "description": "High-performance web crawling and content extraction via the Spider CLI (https://spider.cloud), exposed as a declarative `command` tool that shells out to the locally-installed `spider` binary. No API key.",
   "tagline": "Crawl and extract web pages for agents",
-  "keywords": [
-    "web",
-    "scraping"
-  ],
+  "keywords": ["web", "scraping"],
   "category": "Search",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "full" },
+    "mobile": { "support": "full" },
+    "extension": { "support": "full" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
@@ -58,9 +65,7 @@
               "maximum": 500
             }
           },
-          "required": [
-            "url"
-          ]
+          "required": ["url"]
         }
       }
     }
@@ -96,7 +101,5 @@
       }
     }
   ],
-  "permission_grants": [
-    "tool:command:spider"
-  ]
+  "permission_grants": ["tool:command:spider"]
 }

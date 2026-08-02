@@ -35,6 +35,7 @@ import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
 import type { DownloadKind } from "@/src/lib/api/downloads.ts";
 import { estimateLlmfit, listInstalledModels } from "@/src/lib/api/models.ts";
+import { fetchPluginVersionDetail } from "@/src/lib/api/plugins.ts";
 import { installSidecar } from "@/src/lib/services-api.ts";
 import { useInstallProgress } from "@/src/store/useDownloadsStore.ts";
 
@@ -88,6 +89,7 @@ function useInstalledModels(): InstalledModelEntry[] {
 
 /** Mount once above every store surface that renders the shared catalog sections. */
 export function DesktopCatalogHost({ children }: { children: ReactNode }) {
+	const activeNode = useCatalogNode();
 	const { openTab } = useTabsContext();
 	const navigate = useCallback(
 		(path: string) => {
@@ -109,6 +111,15 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			canAuthorSkills: skillEditorOwner !== null,
 			install: { InstallButton: DesktopInstallButton },
 			Markdown,
+			// Reads the listing's repo at a version tag. Bound to the active node
+			// here so the shared panel stays node-agnostic, matching how
+			// `estimateLlmfit` is bound below.
+			fetchVersionDetail: (repo: string, tag: string) =>
+				fetchPluginVersionDetail(
+					{ url: activeNode.url, token: activeNode.token },
+					repo,
+					tag
+				),
 			navigate,
 			openExternal,
 			useAppsCatalog,
@@ -123,7 +134,9 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			ActiveModelControl,
 			fitStyle,
 		}),
-		[navigate, skillEditorOwner]
+		// activeNode is a dep because fetchVersionDetail closes over it — without
+		// it, switching nodes would keep reading versions from the previous one.
+		[navigate, skillEditorOwner, activeNode.url, activeNode.token]
 	);
 
 	return <CatalogHostProvider host={host}>{children}</CatalogHostProvider>;

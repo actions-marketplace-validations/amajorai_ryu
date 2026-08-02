@@ -2293,6 +2293,14 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/plugins/catalog", get(list_apps_catalog))
         .route("/api/plugins/catalog/browse", get(plugin_catalog_browse))
         .route("/api/plugins/catalog/detail", get(plugin_catalog_detail))
+        .route(
+            "/api/plugins/catalog/version-detail",
+            get(plugin_catalog_version_detail),
+        )
+        .route(
+            "/api/plugins/catalog/channels",
+            get(plugin_catalog_channels),
+        )
         .route("/api/plugins/install", post(install_app_from_url))
         .route("/api/plugins/reload", post(reload_app_manifests))
         .route(
@@ -3596,7 +3604,13 @@ fn retrieval_routes(app_store: &PluginStore) -> Router<ServerState> {
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn get_version() -> Json<crate::update::VersionInfo> {
-    Json(crate::update::version_info())
+    // The Gateway is the one component Core can actually observe — its version is
+    // cached by the readiness probe, so this stays a pure read. Before this, every
+    // component was stamped with Core's own version and a stale Gateway reported
+    // itself as current.
+    Json(crate::update::version_info_with(
+        crate::sidecar::gateway::observed_gateway_version().as_deref(),
+    ))
 }
 
 /// Query for `GET /api/update/check`.
@@ -8092,6 +8106,112 @@ async fn plugin_catalog_browse(
     }
 }
 
+/// `GET /api/plugins/catalog/version-detail?repo=<owner/repo>&tag=<tag>` — the
+/// listing as it stood at ONE published version.
+///
+/// Reads the repo at that tag, so the README and the declared
+/// licence/description/engines/surfaces/permissions are genuinely historical. It
+/// deliberately does NOT include repository health — stars, open issues, archived,
+/// last-updated are current-state facts GitHub reports as of now and cannot be
+/// reconstructed for a past tag. Returning them next to historical fields would
+/// produce a card that looks like "the state at that version" while half of it
+/// silently describes today.
+///
+/// 404 when the tag has no readable manifest, which is normal for tags predating
+/// the listing being packaged — a client should render "not available for this
+/// version", not an error.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/catalog/version-detail",
+    tag = "Plugins",
+    summary = "Listing detail at one published version",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn plugin_catalog_version_detail(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(repo) = params.get("repo").filter(|s| !s.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing required `repo` query parameter" })),
+        );
+    };
+    // `?channel=` resolves the tag instead of naming it — the per-listing
+    // equivalent of Core's own channel selection. Same rule: read the channel off
+    // each tag, take the semver maximum within it, and NEVER fall back to another
+    // channel, so asking for `beta` on a listing with no betas answers "nothing
+    // published yet" rather than quietly handing back stable.
+    let resolved_tag: Option<String> = match params.get("channel").filter(|s| !s.is_empty()) {
+        Some(channel) => {
+            let channels =
+                crate::catalog_source::github_listing_channels(repo, None).await;
+            match channels.iter().find(|(name, _)| name == channel) {
+                Some((_, tag)) => Some(tag.clone()),
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({
+                            "error": "no build published on that channel",
+                            "channels": channels.iter().map(|(c, _)| c).collect::<Vec<_>>(),
+                        })),
+                    );
+                }
+            }
+        }
+        None => None,
+    };
+    let Some(tag) = resolved_tag
+        .as_deref()
+        .or_else(|| params.get("tag").map(String::as_str))
+        .filter(|s| !s.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing required `tag` or `channel` query parameter" })),
+        );
+    };
+    match crate::catalog_source::github_version_detail(repo, tag).await {
+        Some(detail) => (StatusCode::OK, Json(detail)),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no readable manifest at that tag" })),
+        ),
+    }
+}
+
+/// `GET /api/plugins/catalog/channels?repo=<owner/repo>` — the release channels a
+/// listing publishes, each with the tag it currently resolves to.
+///
+/// Drives a per-listing channel picker. Only channels with an actual build are
+/// returned, so nobody selects one and is then told there is nothing there.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/catalog/channels",
+    tag = "Plugins",
+    summary = "Release channels a listing publishes",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn plugin_catalog_channels(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(repo) = params.get("repo").filter(|s| !s.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing required `repo` query parameter" })),
+        );
+    };
+    let channels = crate::catalog_source::github_listing_channels(repo, None).await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "channels": channels
+                .into_iter()
+                .map(|(channel, tag)| json!({ "channel": channel, "tag": tag }))
+                .collect::<Vec<_>>(),
+        })),
+    )
+}
+
 /// `GET /api/plugins/catalog/detail?id=<entry-id>` — detail for the selected
 /// entry from the active Plugin catalog source (integrations.sh descriptors, etc.).
 #[utoipa::path(
@@ -8515,6 +8635,25 @@ fn merge_plugin_contract_fields(
     }
     if !m.targets.is_empty() {
         obj.insert("targets".to_owned(), json!(m.targets));
+    }
+    // `surfaces`, flattened to the list the store renders as platform badges.
+    //
+    // The map form supersedes `targets` and carries a per-surface support LEVEL, but
+    // a CARD only needs "which platforms does this run on" — the level belongs on the
+    // detail page. An explicit `"none"` is filtered OUT: it declares NON-support, so
+    // listing it would advertise the one platform the author ruled out.
+    //
+    // Same non-empty rule as `targets` above, for the same reason: absent means "not
+    // declared" (offered everywhere), while `[]` would read as "runs nowhere".
+    if let Some(surfaces) = &m.surfaces {
+        let listed: Vec<&str> = surfaces
+            .iter()
+            .filter(|(_, e)| e.support.is_supported())
+            .map(|(s, _)| s.as_str())
+            .collect();
+        if !listed.is_empty() {
+            obj.insert("surfaces".to_owned(), json!(listed));
+        }
     }
     // capabilities: declared, else derived from permission_grants.
     obj.insert("capabilities".to_owned(), json!(m.resolved_capabilities()));
@@ -20252,6 +20391,18 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({
         "status": "ok",
         "version": crate::capabilities::version(),
+        // The release channel this build came from, derived from the version's
+        // prerelease identifier (`0.0.18-nightly.…` ⇒ "nightly", a bare `0.0.18`
+        // ⇒ "stable"), so a build is self-describing with nothing stored.
+        //
+        // Clients need this because version alone cannot answer "am I a stable
+        // desktop talking to a canary node?" — the desktop's own comparator
+        // (`node-compat.ts`) parses major.minor.patch and DISCARDS the prerelease,
+        // so channel skew was structurally invisible to it.
+        //
+        // Additive, per this module's rule: a client that does not know the field
+        // ignores it, and no existing field changed.
+        "channel": crate::update::channel_of(crate::capabilities::version()),
         "capabilities": crate::capabilities::CAPABILITIES,
     }))
 }

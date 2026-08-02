@@ -2,14 +2,19 @@
   "id": "@ryu/proof",
   "name": "Proof of Work",
   "version": "1.0.0",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "runnables": [],
-  "permission_grants": [
-    "hook:run-agent",
-    "storage:kv"
-  ],
-  "activation_events": [
-    "*"
-  ],
+  "permission_grants": ["hook:run-agent", "storage:kv"],
+  "activation_events": ["*"],
   "contributes": {
     "slash_commands": [
       {
@@ -36,9 +41,7 @@
         "id": "proof.loop",
         "on": "post_assistant_turn",
         "match": {
-          "commands": [
-            "/proof"
-          ],
+          "commands": ["/proof"],
           "stateful": true
         },
         "code_file": "hooks/loop.js"

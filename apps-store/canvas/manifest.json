@@ -2,6 +2,16 @@
   "id": "@ryu/canvas",
   "name": "Canvas",
   "version": "1.0.0",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "runnables": [
     {
       "id": "canvas-companion",

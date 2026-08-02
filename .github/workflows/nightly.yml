@@ -192,6 +192,8 @@ jobs:
           args: ${{ matrix.args }}
       - name: Collect desktop installers
         shell: bash
+        env:
+          TAURI_ARGS: ${{ matrix.args }}
         run: |
           set -euo pipefail
           mkdir -p dist-desktop
@@ -200,6 +202,21 @@ jobs:
                -o -name "*.msi" -o -name "*-setup.exe" -o -name "*.app.tar.gz" \
                -o -name "*.sig" \) \
             -not -path "*deps*" -exec cp {} dist-desktop/ \; || true
+          # macOS names the updater bundle `Ryu.app.tar.gz` with NO arch in it, so
+          # the aarch64 and x86_64 legs upload the SAME filename and `--clobber`
+          # leaves only whichever finished last — one arch's updater bundle is lost
+          # every run, and the channel feed cannot address both. Stamp the arch in.
+          # (The .dmg/.exe/.AppImage names already carry arch or are single-arch.)
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            case "$TAURI_ARGS" in
+              *aarch64-apple-darwin*) arch=aarch64 ;;
+              *) arch=x86_64 ;;
+            esac
+            for f in dist-desktop/Ryu.app.tar.gz dist-desktop/Ryu.app.tar.gz.sig; do
+              [ -e "$f" ] || continue
+              mv "$f" "${f/Ryu.app.tar.gz/Ryu-$arch.app.tar.gz}"
+            done
+          fi
           ls -la dist-desktop || true
       - name: Upload to release
         env:
@@ -432,3 +449,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload nightly dist/* --clobber
+
+  # ── Per-channel updater feed ────────────────────────────────────────────────
+  # Without this the desktop's `install_update_from_channel` finds no
+  # `latest-nightly.json` on the rolling tag and falls back to the Stable feed, so a
+  # user who opted into nightly is offered the *Stable* build. The rolling tag is
+  # what makes a fixed feed URL possible at all: GitHub's `/releases/latest/`
+  # excludes prereleases, and every rolling build is one.
+  #
+  # Runs after the desktop matrix so every platform's artifact + .sig is already
+  # on the release. `if: always()` is deliberate: one platform leg failing should
+  # still publish a feed for the platforms that DID build, rather than leaving the
+  # channel on a stale feed. The script omits any platform whose .sig is missing.
+  channel-feed:
+    needs: [prepare, desktop]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Assemble and publish latest-nightly.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/release/assemble-channel-feed.sh \
+            nightly "${{ needs.prepare.outputs.version }}" "${{ github.repository }}"

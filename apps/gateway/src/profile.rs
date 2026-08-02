@@ -19,16 +19,48 @@ pub const RYU_PROFILE_ENV: &str = "RYU_PROFILE";
 /// The canonical release profile — zero offset, no suffix.
 pub const RELEASE_PROFILE: &str = "release";
 
-/// Port offset applied for any non-release profile. Kept in lockstep with
+/// Port offset for the `dev` profile. Kept in lockstep with
 /// `apps/core/src/profile.rs::DEV_PORT_OFFSET`.
 pub const DEV_PORT_OFFSET: u16 = 1000;
 
+/// Mirror of `apps/core/src/profile.rs::PROFILE_PORT_OFFSETS` — see that table
+/// for why there is no fallback arm. The two MUST agree row for row: Core spawns
+/// the Gateway with the same `RYU_PROFILE`, so a disagreement here means Core
+/// dials a port the Gateway never bound.
+pub const PROFILE_PORT_OFFSETS: &[(&str, u16)] = &[
+    (RELEASE_PROFILE, 0),
+    ("dev", DEV_PORT_OFFSET),
+    ("canary", 2000),
+    ("nightly", 3000),
+    ("beta", 4000),
+];
+
+/// The port offset for `profile`, or `None` when it is not a known profile.
+pub fn offset_of(profile: &str) -> Option<u16> {
+    PROFILE_PORT_OFFSETS
+        .iter()
+        .find(|(name, _)| *name == profile)
+        .map(|(_, offset)| *offset)
+}
+
 fn resolve() -> String {
-    std::env::var(RYU_PROFILE_ENV)
+    let name = std::env::var(RYU_PROFILE_ENV)
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| RELEASE_PROFILE.to_owned())
+        .unwrap_or_else(|| RELEASE_PROFILE.to_owned());
+
+    // Same rule as Core: reject rather than alias an unknown name onto dev's
+    // ports, which would silently bind on top of a running dev Gateway.
+    if offset_of(&name).is_none() {
+        let known: Vec<&str> = PROFILE_PORT_OFFSETS.iter().map(|(n, _)| *n).collect();
+        eprintln!(
+            "ryu-gateway: unknown {RYU_PROFILE_ENV}='{name}'. Known profiles: {}.",
+            known.join(", ")
+        );
+        std::process::exit(1);
+    }
+    name
 }
 
 static PROFILE: OnceLock<String> = OnceLock::new();
@@ -42,13 +74,11 @@ fn is_release() -> bool {
     profile() == RELEASE_PROFILE
 }
 
-/// Port offset for the active profile (0 on release, [`DEV_PORT_OFFSET`] else).
+/// Port offset for the active profile, from [`PROFILE_PORT_OFFSETS`]. The
+/// `unwrap_or(0)` arm is unreachable — `resolve` already rejected any name that
+/// is not in the table.
 pub fn port_offset() -> u16 {
-    if is_release() {
-        0
-    } else {
-        DEV_PORT_OFFSET
-    }
+    offset_of(profile()).unwrap_or(0)
 }
 
 /// `base + offset` (saturating). The single offset source, matching Core.
@@ -86,6 +116,25 @@ mod tests {
     // process resolved to (RYU_PROFILE is process-global + cached in a OnceLock, so
     // we never set it here — we pin the offset invariants instead).
 
+    /// The three `PROFILE_PORT_OFFSETS` mirrors (Core, Gateway, desktop) MUST
+    /// stay identical: Core spawns the Gateway and the desktop spawns Core, all
+    /// with the same `RYU_PROFILE`, so one table drifting means a spawner dials a
+    /// port its child never bound. Each crate asserts the SAME literal rows, so
+    /// editing one mirror without the others fails here.
+    #[test]
+    fn the_profile_table_matches_its_mirrors() {
+        assert_eq!(
+            PROFILE_PORT_OFFSETS,
+            &[
+                ("release", 0u16),
+                ("dev", 1000),
+                ("canary", 2000),
+                ("nightly", 3000),
+                ("beta", 4000),
+            ][..]
+        );
+    }
+
     #[test]
     fn dev_offset_is_a_thousand() {
         assert_eq!(DEV_PORT_OFFSET, 1000);
@@ -94,7 +143,10 @@ mod tests {
     #[test]
     fn offset_is_zero_or_dev_offset() {
         let off = port_offset();
-        assert!(off == 0 || off == DEV_PORT_OFFSET);
+        assert!(
+            PROFILE_PORT_OFFSETS.iter().any(|(_, o)| *o == off),
+            "active offset {off} is not in the table"
+        );
     }
 
     #[test]

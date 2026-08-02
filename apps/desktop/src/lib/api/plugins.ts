@@ -1367,6 +1367,8 @@ export async function searchPluginCatalog(
 }
 
 /** Detail payload for a federated catalog entry (integrations.sh descriptor). */
+export type { VersionSnapshot } from "@ryu/marketplace/catalog/types";
+
 export interface PluginCatalogDetail {
 	accentColor?: string | null;
 	banner?: CatalogBanner | null;
@@ -1412,6 +1414,30 @@ export async function fetchPluginCatalogDetail(
 		target,
 		`/api/plugins/catalog/detail?${q.toString()}`
 	);
+}
+
+/** `GET /api/plugins/catalog/version-detail` — the listing as it stood at one
+ *  published version's tag.
+ *
+ *  `tag` is the Versions tab's `version` field, which IS the raw git tag_name
+ *  (`v1.2.0`, not `1.2.0`), so it passes straight through with no normalisation.
+ *
+ *  Resolves to `null` rather than throwing when the tag has no readable manifest —
+ *  the normal case for tags predating the listing being packaged, which the UI
+ *  renders as "not published at this tag", not as a failure. */
+export async function fetchPluginVersionDetail(
+	target: ApiTarget,
+	repo: string,
+	tag: string
+): Promise<import("@ryu/marketplace/catalog/types").VersionSnapshot | null> {
+	const q = new URLSearchParams({ repo, tag });
+	try {
+		return await request<
+			import("@ryu/marketplace/catalog/types").VersionSnapshot
+		>(target, `/api/plugins/catalog/version-detail?${q.toString()}`);
+	} catch {
+		return null;
+	}
 }
 
 /** `POST /api/plugins/install` — install a plugin from an `https://` manifest.json URL.

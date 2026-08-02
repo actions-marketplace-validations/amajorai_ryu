@@ -49,7 +49,7 @@ export type ProviderTarget = "local-machine" | "remote-desktop";
  * An **empty/absent** `targets` list means the plugin runs on *every* surface —
  * that is the backward-compatible default and MUST NOT be read as "hidden".
  */
-export type Surface = "gateway" | "core" | "desktop" | "island" | "mobile" | "extension" | "web" | "cli";
+export type Surface = "gateway" | "core" | "desktop" | "island" | "mobile" | "extension" | "web" | "cli" | "unknown";
 
 /**
  * An installable Ryu App manifest (`manifest.json`).
@@ -2209,7 +2209,7 @@ export interface SurfaceEntry {
 	/**
 	 * How much of the plugin this surface supports.
 	 */
-	support?: "full" | "limited" | "list" | "commands" | "none";
+	support?: "full" | "limited" | "list" | "commands" | "none" | "unknown";
 	/**
 	 * Optional surface-specific UI descriptor (bundle id, mount point, …),
 	 * interpreted by the surface's app host. Opaque to the contract.

@@ -131,15 +131,28 @@ pub fn platform_tag() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// Build the `/api/version` payload. The component list is the single release
-/// train: every binary ships at `current_version()`.
-pub fn version_info() -> VersionInfo {
+/// Build the `/api/version` payload.
+///
+/// `gateway` is passed in because it is the one component Core can actually
+/// observe: it spawns the Gateway and can read the `version` out of its `/health`.
+/// Everything else is left at Core's own version, which is honest for the single
+/// release train (one tag ships every binary) and is all Core can know — `cli` and
+/// `desktop` are separate installs Core never talks to.
+///
+/// This used to stamp Core's version onto ALL FOUR components unconditionally, so
+/// a stale Gateway binary reported itself as up to date and no mismatch could ever
+/// be detected. The struct doc on [`ComponentVersion`] anticipated exactly this
+/// fix as "a data change, not an API change" — the shape is unchanged.
+pub fn version_info_with(gateway_version: Option<&str>) -> VersionInfo {
     let v = current_version();
     let components = ["core", "gateway", "cli", "desktop"]
         .iter()
         .map(|name| ComponentVersion {
             name: (*name).to_string(),
-            version: v.clone(),
+            version: match *name {
+                "gateway" => gateway_version.unwrap_or(&v).to_string(),
+                _ => v.clone(),
+            },
         })
         .collect();
     VersionInfo {
@@ -147,6 +160,23 @@ pub fn version_info() -> VersionInfo {
         components,
         platform: platform_tag(),
     }
+}
+
+/// [`version_info_with`] with no observed Gateway — every component reports Core's
+/// version. Kept for callers with no Gateway handle (and for tests).
+pub fn version_info() -> VersionInfo {
+    version_info_with(None)
+}
+
+/// Whether an observed component version disagrees with Core's own.
+///
+/// Core and the Gateway ship from ONE release train (`bump-version.sh` stamps every
+/// `Cargo.toml` in a single pass), so any drift means a stale binary — most often a
+/// Gateway left behind in `~/.ryu/bin` after the app self-updated. Compared as
+/// strings, deliberately: a channel suffix is part of the identity here, so
+/// `0.0.18` and `0.0.18-nightly.3` are a genuine mismatch, not equal patch levels.
+pub fn version_disagrees(core: &str, other: &str) -> bool {
+    core.trim() != other.trim()
 }
 
 /// Normalise a release tag to a bare semver string (`v1.2.3` → `1.2.3`).
@@ -216,6 +246,68 @@ pub fn channel_of(version: &str) -> String {
             .to_string(),
         _ => STABLE_CHANNEL.to_string(),
     }
+}
+
+/// Pick the version a listing should install for a given release channel.
+///
+/// `versions` is the published tag list — each entry the raw tag, which is what
+/// the Versions tab carries verbatim.
+///
+/// Takes the SEMVER MAXIMUM within the channel, not the first match, matching
+/// [`select_release`] so the two paths cannot disagree about what "newest on a
+/// channel" means. List order is GitHub's publish order, not semver order: a
+/// patch cut from an old branch and published later sorts first, and picking by
+/// position would hand it back as the newest.
+///
+/// This is the same model Core uses for its own builds — a version is
+/// self-describing, so a channel is read off the tag rather than stored — applied
+/// to marketplace listings so a plugin can ship nightly/canary/beta trains the way
+/// the app does.
+///
+/// Two rules, both chosen so a channel can never make things worse:
+///
+///   - A channel selects only its OWN builds. Asking for `beta` never hands back a
+///     nightly, even when the nightly is newer. Blending them is how a "beta"
+///     subscriber silently ends up on the least-tested train.
+///   - `stable` means exactly "no prerelease suffix". A tag like `1.2.0-rc.1` is
+///     NOT stable, however finished it looks.
+///
+/// Returns `None` when the channel has no build yet, which the caller must treat
+/// as "stay where you are" rather than falling back to another channel — a silent
+/// fallback is how someone on `canary` quietly gets moved to stable.
+pub fn pick_version_for_channel<'a>(versions: &[&'a str], channel: &str) -> Option<&'a str> {
+    let want = channel.trim().to_ascii_lowercase();
+    let want = if want.is_empty() { STABLE_CHANNEL } else { &want };
+    versions
+        .iter()
+        .filter(|tag| channel_of(tag) == want)
+        // A tag that will not parse as semver cannot be compared, so it loses to
+        // any that does — but is still eligible when it is all the channel has,
+        // which is why the fold keeps the first-seen rather than dropping it.
+        .copied()
+        .fold(None::<&'a str>, |best, tag| match best {
+            None => Some(tag),
+            Some(current) => match (parse_version(tag), parse_version(current)) {
+                (Some(a), Some(b)) if a > b => Some(tag),
+                (Some(_), None) => Some(tag),
+                _ => Some(current),
+            },
+        })
+}
+
+/// Every channel a listing actually publishes, newest-first order preserved.
+///
+/// Drives the channel picker: offering a channel with no builds would let someone
+/// select one and then be told there is nothing there.
+pub fn channels_available(versions: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in versions {
+        let channel = channel_of(tag);
+        if !out.contains(&channel) {
+            out.push(channel);
+        }
+    }
+    out
 }
 
 /// The channel name for a build with no prerelease suffix.
@@ -1430,5 +1522,142 @@ mod tests {
         assert!(!check.restricted_by_cutoff);
         std::env::remove_var("RYU_UPDATE_FAKE_PUBLISHED_AT");
         std::env::remove_var("RYU_UPDATE_FAKE_LATEST");
+    }
+}
+
+#[cfg(test)]
+mod version_gate_tests {
+    use super::*;
+
+    /// A listing publishing several trains at once — the case the feature exists
+    /// for. Newest-first, as `fetch_releases` returns them.
+    const MIXED: [&str; 6] = [
+        "v1.3.0-nightly.20260803.7",
+        "v1.3.0-canary.2",
+        "v1.2.0",
+        "v1.2.0-rc.1",
+        "v1.1.0-beta.4",
+        "v1.1.0",
+    ];
+
+    #[test]
+    fn a_channel_selects_only_its_own_builds() {
+        // The rule that matters: asking for beta must never hand back the nightly,
+        // even though the nightly is newer. Blending trains is how a "beta"
+        // subscriber silently lands on the least-tested one.
+        let v: Vec<&str> = MIXED.to_vec();
+        assert_eq!(pick_version_for_channel(&v, "beta"), Some("v1.1.0-beta.4"));
+        assert_eq!(
+            pick_version_for_channel(&v, "nightly"),
+            Some("v1.3.0-nightly.20260803.7")
+        );
+        assert_eq!(pick_version_for_channel(&v, "canary"), Some("v1.3.0-canary.2"));
+        assert_eq!(pick_version_for_channel(&v, "rc"), Some("v1.2.0-rc.1"));
+    }
+
+    /// GitHub returns releases in PUBLISH order, not semver order. A patch cut
+    /// from an old branch and published later sorts first, so picking by position
+    /// would hand it back as "newest". `select_release` already takes the semver
+    /// maximum; this must agree with it.
+    #[test]
+    fn newest_on_a_channel_is_the_semver_maximum_not_the_first_listed() {
+        let out_of_order: Vec<&str> = vec!["v1.0.1", "v2.0.0", "v1.0.0"];
+        assert_eq!(
+            pick_version_for_channel(&out_of_order, "stable"),
+            Some("v2.0.0")
+        );
+
+        let betas: Vec<&str> = vec!["v1.0.0-beta.2", "v1.5.0-beta.1"];
+        assert_eq!(
+            pick_version_for_channel(&betas, "beta"),
+            Some("v1.5.0-beta.1")
+        );
+    }
+
+    #[test]
+    fn stable_means_no_prerelease_suffix_at_all() {
+        let v: Vec<&str> = MIXED.to_vec();
+        // Newest STABLE, not newest overall — the nightly and canary above it are
+        // deliberately skipped.
+        assert_eq!(pick_version_for_channel(&v, "stable"), Some("v1.2.0"));
+        // An rc looks finished and is not stable.
+        assert_eq!(pick_version_for_channel(&["v2.0.0-rc.1"], "stable"), None);
+        // An empty channel means stable rather than "anything".
+        assert_eq!(pick_version_for_channel(&v, ""), Some("v1.2.0"));
+        assert_eq!(pick_version_for_channel(&v, "  STABLE "), Some("v1.2.0"));
+    }
+
+    #[test]
+    fn an_empty_channel_never_falls_back_to_another_one() {
+        // Returning a stable build to someone on `canary` would silently move them
+        // off the train they chose. The caller must render "nothing published yet".
+        let stable_only: Vec<&str> = vec!["v1.0.0", "v0.9.0"];
+        assert_eq!(pick_version_for_channel(&stable_only, "canary"), None);
+        assert_eq!(pick_version_for_channel(&stable_only, "beta"), None);
+        assert_eq!(pick_version_for_channel(&[], "stable"), None);
+    }
+
+    #[test]
+    fn only_channels_that_actually_publish_are_offered() {
+        // Offering an empty channel lets someone pick one and then be told there is
+        // nothing there.
+        let v: Vec<&str> = MIXED.to_vec();
+        assert_eq!(
+            channels_available(&v),
+            vec!["nightly", "canary", "stable", "rc", "beta"]
+        );
+        assert_eq!(channels_available(&["v1.0.0"]), vec!["stable"]);
+        assert!(channels_available(&[]).is_empty());
+    }
+
+    /// The regression this replaces: `/api/version` stamped Core's own version onto
+    /// every component, so a stale Gateway always reported itself as current and no
+    /// mismatch was detectable.
+    #[test]
+    fn an_observed_gateway_version_is_reported_not_overwritten() {
+        let info = version_info_with(Some("0.0.1-stale"));
+        let gw = info
+            .components
+            .iter()
+            .find(|c| c.name == "gateway")
+            .expect("gateway component");
+        assert_eq!(gw.version, "0.0.1-stale");
+
+        // Core still reports its own, and is never taken from the Gateway.
+        let core = info
+            .components
+            .iter()
+            .find(|c| c.name == "core")
+            .expect("core component");
+        assert_eq!(core.version, current_version());
+    }
+
+    /// With nothing observed we fall back to the single-release-train assumption
+    /// rather than inventing a version or omitting the component.
+    #[test]
+    fn an_unobserved_gateway_falls_back_to_cores_version() {
+        let info = version_info_with(None);
+        for c in &info.components {
+            assert_eq!(c.version, current_version(), "{} drifted", c.name);
+        }
+        assert_eq!(info.components.len(), 4);
+    }
+
+    #[test]
+    fn a_channel_suffix_counts_as_a_mismatch() {
+        assert!(!version_disagrees("0.0.18", "0.0.18"));
+        assert!(!version_disagrees(" 0.0.18 ", "0.0.18"));
+        // A stable Core against a nightly Gateway is exactly the skew we want to
+        // surface, even though the numeric parts are identical.
+        assert!(version_disagrees("0.0.18", "0.0.18-nightly.20260802.23"));
+        assert!(version_disagrees("0.0.18", "0.0.17"));
+    }
+
+    #[test]
+    fn channel_is_derived_from_the_version_alone() {
+        assert_eq!(channel_of("0.0.18"), "stable");
+        assert_eq!(channel_of("0.0.18-nightly.20260802.23"), "nightly");
+        assert_eq!(channel_of("0.0.18-canary.4"), "canary");
+        assert_eq!(channel_of("0.0.18-beta.1"), "beta");
     }
 }

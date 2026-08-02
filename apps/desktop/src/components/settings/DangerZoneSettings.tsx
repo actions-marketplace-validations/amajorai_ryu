@@ -17,7 +17,8 @@ import {
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useState } from "react";
 import { sileo } from "sileo";
 import { restartRyuCore } from "@/lib/tauri-bridge.ts";
 import {
@@ -152,6 +153,28 @@ export function DangerZoneSettings() {
 	// Reset node: a full wipe of this node (own type-to-confirm on the node name,
 	// separate from the per-category deletes above).
 	const nodeName = getNode().name;
+	const [deepCleanOpen, setDeepCleanOpen] = useState(false);
+	const [deepCleaning, setDeepCleaning] = useState(false);
+	const doDeepClean = useCallback(async () => {
+		setDeepCleaning(true);
+		try {
+			// Core is stopped by the Tauri command before anything is removed.
+			await invoke("deep_clean_node");
+			sileo.success({
+				title: "Removed",
+				description:
+					"Shadow, ghost and the gateway config folder are gone. Your data folder is untouched.",
+			});
+		} catch (e) {
+			sileo.error({
+				title: "Could not deep clean",
+				description: String(e),
+			});
+		} finally {
+			setDeepCleaning(false);
+			setDeepCleanOpen(false);
+		}
+	}, []);
 	const [resetOpen, setResetOpen] = useState(false);
 	const [resetTyped, setResetTyped] = useState("");
 	const [resetBusy, setResetBusy] = useState(false);
@@ -314,6 +337,72 @@ export function DangerZoneSettings() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+
+			<SettingsSection
+				caption="Reset node clears this node's data folder — and nothing else. Shadow captures, ghost state and the gateway config live OUTSIDE it and survive, which is why a 'reset' node can still be several gigabytes. This removes those too."
+				title="Deep clean"
+			>
+				<SettingsGroup>
+					<SettingsItem
+						actions={
+							<Button
+								disabled={deepCleaning}
+								onClick={() => setDeepCleanOpen(true)}
+								size="sm"
+								variant="destructive"
+							>
+								{deepCleaning ? "Cleaning…" : "Deep clean"}
+							</Button>
+						}
+						description="Removes ~/.shadow, ~/.ghost and the gateway config folder"
+						title="Remove everything outside the data folder"
+					/>
+				</SettingsGroup>
+			</SettingsSection>
+
+			<AlertDialog
+				onOpenChange={(open) => {
+					if (!open) {
+						setDeepCleanOpen(false);
+					}
+				}}
+				open={deepCleanOpen}
+			>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>Remove these folders?</AlertDialogTitle>
+						<AlertDialogDescription>
+							Ryu will stop, then permanently delete your shadow captures
+							(~/.shadow), ghost state (~/.ghost), and the gateway config folder
+							— which holds gateway.toml and the pointer to your data folder.
+							This cannot be undone.
+						</AlertDialogDescription>
+						{/* The one thing a user cannot infer from the folder names: two of
+						    these three are NOT profile-scoped. Their Rust uses a plain
+						    ~/.shadow / ~/.ghost for every profile, so a "clean my canary"
+						    click clears stable's captures with it. */}
+						<AlertDialogDescription className="text-warning">
+							Shadow and ghost are shared by every profile on this machine, not
+							just this one — clearing them here clears them everywhere. Your
+							chats, spaces and memory live in the data folder and are NOT
+							touched; use Reset node for those.
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel disabled={deepCleaning}>
+							Cancel
+						</AlertDialogCancel>
+						<AlertDialogAction
+							disabled={deepCleaning}
+							onClick={() => {
+								void doDeepClean();
+							}}
+						>
+							{deepCleaning ? "Cleaning…" : "Remove them"}
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
 
 			<AlertDialog
 				onOpenChange={(open) => {

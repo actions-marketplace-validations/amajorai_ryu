@@ -26,6 +26,8 @@ import { Icon } from "@ryu/ui/components/icon.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { resolveCardIcon } from "../icon-url.ts";
+import { stabilityLabel } from "../stability.ts";
+import { surfaceLabel } from "../surface-labels.ts";
 import type { CardDither } from "../types.ts";
 
 /** The four gradient directions dither-kit accepts. */
@@ -94,6 +96,8 @@ export default function StoreCatalogCard({
 	name,
 	seedId,
 	description,
+	surfaces,
+	stability,
 	selected = false,
 	onClick,
 	action,
@@ -121,6 +125,16 @@ export default function StoreCatalogCard({
 	 *  (`namespace/name`, a model/skill id, …) when available, else the name. */
 	seedId?: string | null;
 	description?: string | null;
+	/** Host surfaces this listing runs on, already flattened and with any
+	 *  explicitly-unsupported surface removed.
+	 *
+	 *  Absent/empty means NOT DECLARED, which renders as nothing at all — never as
+	 *  "runs nowhere". A card is the first place someone asks "does this work on my
+	 *  phone?", so this is deliberately on the card and not only the detail page. */
+	surfaces?: string[] | null;
+	/** How finished this listing is ("alpha", "beta", …). Absent/stable renders
+	 *  nothing — a finished listing must not sprout a badge. */
+	stability?: string | null;
 	selected?: boolean;
 	onClick: () => void;
 	/** The right-hand lifecycle control (see {@link StoreItemAction}). */
@@ -206,10 +220,29 @@ export default function StoreCatalogCard({
 					)}
 				</span>
 				<span className="min-w-0 flex-1">
-					<span className="block truncate font-medium text-sm">{name}</span>
+					<span className="flex items-center gap-1.5">
+						<span className="truncate font-medium text-sm">{name}</span>
+						{stabilityLabel(stability) ? (
+							<span className="shrink-0 rounded-sm border border-amber-500/40 px-1 py-px text-[10px] text-amber-600 leading-tight">
+								{stabilityLabel(stability)}
+							</span>
+						) : null}
+					</span>
 					<span className="block truncate text-muted-foreground text-xs">
 						{description || "No description provided."}
 					</span>
+					{surfaces && surfaces.length > 0 ? (
+						<span className="mt-1 flex flex-wrap items-center gap-1">
+							{surfaces.map((surface) => (
+								<span
+									className="rounded-sm border px-1 py-px text-[10px] text-muted-foreground leading-tight"
+									key={surface}
+								>
+									{surfaceLabel(surface)}
+								</span>
+							))}
+						</span>
+					) : null}
 				</span>
 			</button>
 			{action ? <div className="shrink-0">{action}</div> : null}
@@ -222,7 +255,7 @@ export default function StoreCatalogCard({
 
 	return (
 		<ContextMenu>
-			<ContextMenuTrigger render={<>{card}</>} />
+			<ContextMenuTrigger render={card} />
 			<ContextMenuContent align="end">{contextMenu}</ContextMenuContent>
 		</ContextMenu>
 	);

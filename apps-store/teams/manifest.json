@@ -3,6 +3,16 @@
   "name": "Teams",
   "version": "1.0.0",
   "description": "Teams: named groups of agents you can address as one. Governance shell over the in-crate teams store (agent-id membership only); no documents, no external dependencies. Runs the out-of-process ryu-teams sidecar; Core proxies /api/teams/* to it.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "full" },
+    "mobile": { "support": "full" },
+    "extension": { "support": "full" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

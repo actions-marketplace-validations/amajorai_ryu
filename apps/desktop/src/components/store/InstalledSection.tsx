@@ -27,11 +27,14 @@ import {
 	Triangle01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Markdown } from "@ryu/blocks/desktop/agent-elements/markdown";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import { ListingDetailTabs } from "@ryu/marketplace/catalog/detail/listing-detail-tabs";
+import type { CatalogEntry } from "@ryu/marketplace/catalog/types";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -55,6 +58,7 @@ import {
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PluginSettingsFields } from "@/src/components/settings/PluginSettingsFields.tsx";
@@ -62,8 +66,9 @@ import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginSettingsTabs } from "@/src/hooks/usePluginSettingsTabs.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import type { AppInfo } from "@/src/lib/api/plugins.ts";
 import {
+	type AppInfo,
+	fetchPluginCatalogDetail,
 	fetchSidecarStatus,
 	installSidecar,
 	setPluginGrants,
@@ -653,6 +658,58 @@ interface InstalledAppDetailProps {
 	toggleError: string | null;
 }
 
+/** The catalog entry an installed app maps onto, so the shared detail tabs can
+ *  grade and render it exactly as the store does.
+ *
+ *  Only the five fields `CatalogEntry` requires are synthesised; everything the
+ *  tabs actually read (README, versions, permissions, licence…) comes from the
+ *  DETAIL fetch, not from here. Kept deliberately thin rather than fabricating
+ *  plausible-looking values — a made-up description or tag would be graded by the
+ *  scorecard as if the listing had declared it. */
+function installedAppAsEntry(app: AppInfo): CatalogEntry {
+	return {
+		description: "",
+		id: app.id,
+		kinds: [...new Set(app.runnables.map((r) => r.kind))],
+		name: app.name,
+		tags: [],
+		version: app.version,
+	};
+}
+
+/** README / API / Versions / Dependencies / Reviews / Health for an INSTALLED
+ *  app — the same tabs the store shows.
+ *
+ *  Installing an app used to make its documentation disappear: the store rendered
+ *  the full tabbed panel, and Store → Installed rendered a separate view with none
+ *  of it. Fetched lazily and rendered only once it resolves, so the lifecycle
+ *  controls above are never blocked on a network round-trip, and a listing with no
+ *  catalog presence (a local-only app) simply shows nothing extra rather than an
+ *  error. */
+function InstalledAppTabs({
+	app,
+	target,
+}: {
+	app: AppInfo;
+	target: ApiTarget;
+}) {
+	const entry = useMemo(() => installedAppAsEntry(app), [app]);
+	const { data: detail } = useQuery({
+		enabled: Boolean(app.id),
+		queryFn: () => fetchPluginCatalogDetail(target, app.id),
+		queryKey: ["plugins", "detail", "installed", app.id],
+		// A local-only app has no catalog listing; that is expected, not an error.
+		retry: false,
+		staleTime: 5 * 60 * 1000,
+	});
+	if (!detail) {
+		return null;
+	}
+	return (
+		<ListingDetailTabs detail={detail} entry={entry} Markdown={Markdown} />
+	);
+}
+
 function InstalledAppDetail({
 	app,
 	busy,
@@ -833,6 +890,7 @@ function InstalledAppDetail({
 					</AlertDialogFooter>
 				</AlertDialogContent>
 			</AlertDialog>
+			<InstalledAppTabs app={app} target={target} />
 		</div>
 	);
 }

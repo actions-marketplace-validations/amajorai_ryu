@@ -12,6 +12,29 @@
 // Apps (plugins) realm
 // ---------------------------------------------------------------------------
 
+/** The host surfaces a plugin can declare support for.
+ *
+ *  Mirrors the `Surface` enum in `crates/core/kernel-contracts/src/manifest.rs`
+ *  (and its SDK mirror, `@ryuhq/sdk`'s generated `plugin-manifest.ts`). Duplicated
+ *  here rather than imported so this package keeps no dependency on the SDK; the
+ *  `satisfies Record<Surface, string>` on `SURFACE_LABELS` is what stops the two
+ *  drifting silently, which is exactly how that map ended up defining `browser`
+ *  and `tui` — two tokens that were never real surfaces.
+ *
+ *  `unknown` is not a surface anyone declares: it is the landing pad Core
+ *  deserializes an unrecognised token onto so a manifest from a newer Ryu loads
+ *  instead of failing outright. */
+export type Surface =
+	| "gateway"
+	| "core"
+	| "desktop"
+	| "island"
+	| "mobile"
+	| "extension"
+	| "web"
+	| "cli"
+	| "unknown";
+
 /** Presentational banner descriptor for an app's hero region. */
 export interface CatalogBanner {
 	colors: string[];
@@ -43,6 +66,30 @@ export interface CatalogVersion {
 	tagOnly?: boolean;
 	url?: string | null;
 	version: string;
+}
+
+/** A listing as it stood at ONE published version, read from its repository at
+ *  that version's tag (`GET /api/plugins/catalog/version-detail`).
+ *
+ *  Carries ONLY signals that live in the repo and are therefore genuinely
+ *  historical. Repository health — stars, open issues, archived, last-updated — is
+ *  current-state, reported as of now, and is deliberately absent: showing it beside
+ *  these fields would read as "the state at that version" while half of it
+ *  described today. `atRef` names the tag it was read at so this can never be
+ *  presented as anything but a snapshot. */
+export interface VersionSnapshot {
+	/** The git ref this was read at. */
+	atRef?: string | null;
+	description?: string | null;
+	engines?: { ryu?: string | null } | null;
+	license?: string | null;
+	permissions?: unknown;
+	readme?: string | null;
+	readmeUrl?: string | null;
+	surfaces?: string[] | null;
+	targets?: string[] | null;
+	/** The version the manifest declared at that tag. */
+	version?: string | null;
 }
 
 /** A named, described thing a plugin contributes (command, tool, agent, …).
@@ -210,8 +257,29 @@ export interface CatalogEntry {
 	 *  companions/mcp) — the manifest runnables. Powers "What's included". */
 	runnables?: { id: string; kind: string; name?: string }[];
 	source?: string;
+	/** How finished this listing is: `"alpha"`, `"beta"`, `"rc"`, … Absent (or
+	 *  `"stable"`, which the producer strips) means finished and renders no badge.
+	 *
+	 *  Typed as a plain string, not a union: a newer index may publish a tier this
+	 *  build has never heard of, and it must render verbatim rather than be
+	 *  dropped — the same tolerance `surfaces` settled on. */
+	stability?: string | null;
 	/** Upstream popularity signal (GitHub stars) for ranking unmoderated listings. */
 	stars?: number | null;
+	/** Host surfaces this listing runs on, flattened from the manifest's `surfaces`
+	 *  map (or its older flat `targets` list) with any explicitly-unsupported
+	 *  surface already removed.
+	 *
+	 *  snake_case-free single word, so it reads the same on the card payload (which
+	 *  is snake_case) and the detail payload (camelCase) — see `origin` above and
+	 *  `discoveredFrom` below for the casing contract this sits between.
+	 *
+	 *  Absent means NOT DECLARED, which the store shows as "runs everywhere". It
+	 *  must never be rendered as "runs nowhere" — that is why Core omits the key
+	 *  rather than emitting `[]`. Typed loosely for the same reason `surfaces` is on
+	 *  the detail: a newer manifest may name a surface this build has not heard of,
+	 *  and the card must carry it through rather than drop it. */
+	surfaces?: string[];
 	tagline?: string | null;
 	tags: string[];
 	/** Explicit app-vs-plugin discriminator from the catalog. Preferred over the
@@ -302,7 +370,12 @@ export interface PluginCatalogDetail {
 	screenshots?: string[];
 	stars?: number | null;
 	/** Host surfaces this plugin declares support for (desktop, island, mobile, …).
-	 *  Empty/absent means it is offered everywhere — never read it as "nowhere". */
+	 *  Empty/absent means it is offered everywhere — never read it as "nowhere".
+	 *
+	 *  Typed as plain `string[]`, deliberately: a manifest written against a newer
+	 *  Ryu may name a surface this build has never heard of, and the catalog must
+	 *  carry it through rather than drop it. Use {@link Surface} when you need the
+	 *  known set (e.g. to exhaustively label them). */
 	surfaces?: string[];
 	tagline?: string | null;
 	termsOfServiceUrl?: string | null;

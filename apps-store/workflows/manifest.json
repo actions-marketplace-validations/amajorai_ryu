@@ -3,6 +3,16 @@
   "name": "Workflows",
   "version": "1.0.0",
   "description": "Workflows: petgraph DAG automation with triggers, durable execution, and a natural-language workflow builder.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

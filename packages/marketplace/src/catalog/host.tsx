@@ -29,6 +29,7 @@ import type {
 	LlmFitEstimate,
 	ModelCatalogState,
 	SkillsCatalogState,
+	VersionSnapshot,
 } from "./types.ts";
 
 /** Which realm an affordance target belongs to (drives the web deep-link page). */
@@ -97,6 +98,15 @@ export interface CatalogHost {
 	canAuthorSkills?: boolean;
 	/** On-demand llmfit hardware fit + tok/s estimate for one repo. */
 	estimateLlmfit: (node: CatalogNode, repo: string) => Promise<LlmFitEstimate>;
+	/** Read a listing as it stood at one published version's tag.
+	 *
+	 *  Optional because it is genuinely host-specific: the desktop asks its node,
+	 *  and a read-only web surface has no such endpoint. Omitting it hides the
+	 *  affordance entirely rather than offering an expander that cannot resolve. */
+	fetchVersionDetail?: (
+		repo: string,
+		tag: string
+	) => Promise<VersionSnapshot | null>;
 	/** Tailwind classes + dot color for a device-fit verdict. */
 	fitStyle: (fit: string) => { className: string; dot: string };
 	/** The install layer, or `null` on read-only surfaces (web). When null the

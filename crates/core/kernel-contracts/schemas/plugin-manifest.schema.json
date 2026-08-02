@@ -1776,6 +1776,11 @@
           "const": "cli",
           "description": "The terminal client.",
           "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "A surface this build has never heard of — a manifest written against a newer\nRyu that added one.\n\nBefore this variant existed, an unrecognised surface token failed\ndeserialization and took the **entire manifest** down with it, so one new\nsurface in a future release would break the plugin on every older client. Now\nit lands here and reads as \"not this surface\", which is what an older client\nshould conclude.\n\nTwo rules keep it honest:\n- It never equals a real surface, so it can only ever *narrow* support, never\n  widen it. [`PluginManifest::supports_surface`] is only ever asked about real\n  surfaces, and no real surface is `Unknown`.\n- [`Surface::parse`] still returns `None` for an unknown token, so this variant\n  is unreachable from the `x-ryu-surface` header. That asymmetry is deliberate:\n  an unknown *caller* means \"do not filter\", while an unknown *declaration*\n  means \"not here\". Collapsing the two would let a client opt out of filtering\n  by sending a garbage surface.\n\nRound-trip caveat: re-serializing a manifest that carried an unknown surface\nemits `\"unknown\"` rather than the original token. Only the SDK bindings\n(`crates/sdk/*`) re-serialize a parsed manifest, and they hand it to a client\nthat could not have handled the real token either. Nothing writes a parsed\nmanifest back to its source file.",
+          "type": "string"
         }
       ]
     },
@@ -1826,6 +1831,11 @@
         {
           "const": "none",
           "description": "Explicitly unsupported on this surface. Equivalent to omitting the key, made\nexplicit so a manifest can document intent.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "A support level this build does not know — a manifest written against a newer\nRyu that added a level (say `read-only`).\n\nDeserializing to this instead of failing is what lets a newer manifest load on\nan older Core at all. It counts as **supported**, deliberately: the author said\nthe plugin works here, just in a way we cannot describe, and the honest\ndegradation is to offer it and let the surface render what it can. The opposite\nchoice (treat as [`None`]) would silently delist a plugin from a surface its\nauthor explicitly listed.\n\nNever write this — it exists only as a deserialization landing pad.",
           "type": "string"
         }
       ]

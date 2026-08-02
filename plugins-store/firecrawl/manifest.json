@@ -4,13 +4,18 @@
   "version": "1.0.0",
   "description": "Web search and page scraping via the Firecrawl v2 API (https://firecrawl.dev), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Firecrawl without changing what agents call. Requires a BYOK Firecrawl API key.",
   "tagline": "Search and scrape the web for agents",
-  "keywords": [
-    "search",
-    "web",
-    "extract",
-    "scrape"
-  ],
+  "keywords": ["search", "web", "extract", "scrape"],
   "category": "Search",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
@@ -44,9 +49,7 @@
               "maximum": 100
             }
           },
-          "required": [
-            "query"
-          ]
+          "required": ["query"]
         }
       }
     },
@@ -73,9 +76,7 @@
               "description": "The URL of the page to scrape."
             }
           },
-          "required": [
-            "url"
-          ]
+          "required": ["url"]
         }
       }
     },
@@ -112,9 +113,7 @@
               "description": "Link-discovery hops to follow from the start URL."
             }
           },
-          "required": [
-            "url"
-          ]
+          "required": ["url"]
         }
       }
     },
@@ -141,9 +140,7 @@
               "description": "The crawl job id returned by firecrawl__crawl_start."
             }
           },
-          "required": [
-            "id"
-          ]
+          "required": ["id"]
         }
       }
     }
@@ -191,19 +188,14 @@
         "web__crawl": {
           "tool": "firecrawl__crawl_start",
           "adapter": {
-            "tools": [
-              "firecrawl__crawl_status"
-            ],
+            "tools": ["firecrawl__crawl_status"],
             "code_file": "adapters/web__crawl.js"
           }
         }
       }
     }
   ],
-  "permission_grants": [
-    "tool:http-egress:api.firecrawl.dev",
-    "tool:execute"
-  ],
+  "permission_grants": ["tool:http-egress:api.firecrawl.dev", "tool:execute"],
   "contributes": {
     "settings_tabs": [
       {

@@ -2273,7 +2273,12 @@ mod tests {
                     m.id
                 );
             }
-            if m.targets.is_empty() {
+            // Scoped on BOTH forms being absent. `surfaces` supersedes `targets`
+            // and inverts its default, so a manifest that declares a `surfaces`
+            // map has an empty `targets` list while being anything but permissive
+            // — checking `targets` alone would demand every declared app surface
+            // everywhere, which is the opposite of what declaring means.
+            if m.surfaces.is_none() && m.targets.is_empty() {
                 for surface in [
                     Surface::Gateway,
                     Surface::Core,
@@ -2286,12 +2291,48 @@ mod tests {
                 ] {
                     assert!(
                         m.supports_surface(surface),
-                        "built-in '{}' declares no `targets`, so it must surface on \
-                         EVERY host ({surface:?})",
+                        "built-in '{}' declares neither `surfaces` nor `targets`, so \
+                         it must surface on EVERY host ({surface:?})",
                         m.id
                     );
                 }
             }
+        }
+    }
+
+    /// The sharp edge of the `surfaces` map: it INVERTS the `targets` default, so
+    /// an absent key means *unsupported*. A map that forgets a surface — or marks
+    /// every surface `none` — silently delists the app with no error anywhere.
+    ///
+    /// This is the guard for that. A built-in that declares a map must be reachable
+    /// somewhere, and must be reachable on at least one surface a human can
+    /// actually use (`core` alone is a headless node, not a place anyone browses).
+    #[test]
+    fn a_declared_surfaces_map_never_delists_a_builtin_everywhere() {
+        let manifests = PluginManifestLoader::load_builtins();
+        assert!(!manifests.is_empty(), "built-ins must load");
+
+        // Surfaces a person actually interacts with. `gateway` and `core` are
+        // headless hosts, so support there does not make an app reachable.
+        const HUMAN_SURFACES: [Surface; 6] = [
+            Surface::Desktop,
+            Surface::Island,
+            Surface::Mobile,
+            Surface::Extension,
+            Surface::Web,
+            Surface::Cli,
+        ];
+
+        for m in &manifests {
+            if m.surfaces.is_none() {
+                continue;
+            }
+            assert!(
+                HUMAN_SURFACES.iter().any(|s| m.supports_surface(*s)),
+                "built-in '{}' declares a `surfaces` map that supports no \
+                 human-facing surface — it would vanish from every client",
+                m.id
+            );
         }
     }
 
@@ -2367,16 +2408,89 @@ mod tests {
         assert!(!m.supports_surface(Surface::Core));
     }
 
+    /// Replaces `unknown_surface_is_rejected`, which pinned the behaviour this
+    /// deliberately removes.
+    ///
+    /// A surface token an older build has never heard of used to fail
+    /// deserialization and take the WHOLE manifest with it — so the first release
+    /// that added a surface would break every plugin naming it on every older
+    /// client. It now lands on [`Surface::Unknown`] and simply reads as "not that
+    /// surface", which is what an older client should conclude.
     #[test]
-    fn unknown_surface_is_rejected() {
+    fn unknown_surface_degrades_instead_of_killing_the_manifest() {
         let raw = r#"{
-            "id": "bad.surface",
-            "name": "Bad Surface",
+            "id": "future.surface",
+            "name": "Future Surface",
             "version": "1.0.0",
             "runnables": [],
-            "targets": ["toaster"]
+            "targets": ["desktop", "toaster"]
         }"#;
-        assert!(parse(raw).is_err(), "an unknown surface must be rejected");
+        let m = parse(raw).expect("an unknown surface must NOT fail the manifest");
+
+        // The surfaces we do understand still work exactly as declared.
+        assert!(m.supports_surface(Surface::Desktop));
+        // The unknown one narrows, never widens: it cannot match a real surface,
+        // and an explicit target list still excludes everything not named.
+        assert!(!m.supports_surface(Surface::Web));
+        assert!(!m.supports_surface(Surface::Mobile));
+        // And asking about Unknown itself is always false — a manifest must never be
+        // able to claim support for a surface this build cannot verify.
+        assert!(!m.supports_surface(Surface::Unknown));
+    }
+
+    /// A manifest aimed ONLY at surfaces we do not know must render nowhere, not
+    /// everywhere. Dropping unknown entries and falling back to "empty targets means
+    /// all surfaces" would invert the author's intent completely.
+    #[test]
+    fn a_manifest_targeting_only_future_surfaces_appears_nowhere() {
+        let raw = r#"{
+            "id": "future.only",
+            "name": "Future Only",
+            "version": "1.0.0",
+            "runnables": [],
+            "targets": ["toaster", "fridge"]
+        }"#;
+        let m = parse(raw).expect("unknown surfaces must not fail the manifest");
+        for s in [
+            Surface::Desktop,
+            Surface::Web,
+            Surface::Mobile,
+            Surface::Cli,
+            Surface::Island,
+            Surface::Extension,
+        ] {
+            assert!(
+                !m.supports_surface(s),
+                "a future-only manifest must not appear on {s:?}"
+            );
+        }
+    }
+
+    /// The `surfaces` map equivalent, plus the support-level landing pad: an
+    /// unrecognised LEVEL counts as supported (the author said it works here, just in
+    /// a way we cannot describe), while an explicit `none` still excludes.
+    #[test]
+    fn unknown_surface_support_level_counts_as_supported() {
+        let raw = r#"{
+            "id": "future.level",
+            "name": "Future Level",
+            "version": "1.0.0",
+            "runnables": [],
+            "surfaces": {
+                "desktop": { "support": "read-only" },
+                "web": { "support": "full" },
+                "mobile": { "support": "none" }
+            }
+        }"#;
+        let m = parse(raw).expect("an unknown support level must NOT fail the manifest");
+        assert!(
+            m.supports_surface(Surface::Desktop),
+            "an unknown level must not delist a surface the author explicitly listed"
+        );
+        assert!(m.supports_surface(Surface::Web));
+        assert!(!m.supports_surface(Surface::Mobile), "explicit none excludes");
+        // Absent key = unsupported (the `surfaces` map inverts the `targets` default).
+        assert!(!m.supports_surface(Surface::Cli));
     }
 
     #[test]

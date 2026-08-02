@@ -5,6 +5,16 @@
   "description": "Drive iOS Simulators (macOS + Xcode) and Android Emulators from a workspace tab. Ryu runs the device-control toolchain (`simctl`, `adb`) as a local sidecar and exposes the grant-gated `simulator.control` capability: list/boot devices, install & launch apps, open deep links, screenshot, and (Android) tap/swipe/type. The desktop Simulator panel shows whichever platform the connected node supports.",
   "tagline": "iOS Simulator & Android Emulator control for agents",
   "category": "Automation",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

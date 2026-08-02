@@ -4,11 +4,18 @@
   "version": "1.0.0",
   "description": "Independent web search via the Brave Search API (https://brave.com/search/api/), exposed as one declarative HTTP tool. Provides the swappable `web.search` layer, so selecting it in the layer picker re-points the stable `web__search` tool at Brave's own crawled index without changing what agents call. Brave is search-only: it deliberately declares neither `web.extract` nor `web.crawl`. Requires a BYOK Brave Search API key.",
   "tagline": "Search an index nobody else syndicates",
-  "keywords": [
-    "search",
-    "web"
-  ],
+  "keywords": ["search", "web"],
   "category": "Search",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
@@ -58,20 +65,14 @@
             "safesearch": {
               "type": "string",
               "description": "Adult-content filter (Brave defaults to moderate).",
-              "enum": [
-                "off",
-                "moderate",
-                "strict"
-              ]
+              "enum": ["off", "moderate", "strict"]
             },
             "freshness": {
               "type": "string",
               "description": "Restrict results by age: pd (past 24h), pw (past 7 days), pm (past 31 days), py (past year), or an explicit YYYY-MM-DDtoYYYY-MM-DD range."
             }
           },
-          "required": [
-            "q"
-          ]
+          "required": ["q"]
         }
       }
     }
@@ -106,9 +107,7 @@
       }
     }
   ],
-  "permission_grants": [
-    "tool:http-egress:api.search.brave.com"
-  ],
+  "permission_grants": ["tool:http-egress:api.search.brave.com"],
   "contributes": {
     "settings_tabs": [
       {

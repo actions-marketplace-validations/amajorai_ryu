@@ -3,6 +3,16 @@
   "name": "Learning",
   "version": "1.0.0",
   "description": "Learning loop: turn chats and runs into reusable skills, gated by the approval Inbox, with an experience log of what was learned.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

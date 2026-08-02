@@ -3,6 +3,16 @@
   "name": "Timeline",
   "version": "1.0.0",
   "description": "The activity replay timeline: a CapCut-style scrubber over Shadow's captured screen/input/window/audio lanes with a keyframe preview, a Dayflow work journal, and jump-to-moment focus.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

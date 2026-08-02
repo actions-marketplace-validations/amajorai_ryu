@@ -40,6 +40,15 @@ import {
 	validateDataPath,
 } from "@/src/lib/api/data-path.ts";
 
+/** Profiles a copy can target.
+ *
+ *  Mirrors the non-release rows of `PROFILE_PORT_OFFSETS`
+ *  (apps/core/src/profile.rs) — the profiles that have their own port offset, data
+ *  dir and keychain slot. `release` is deliberately absent: copying INTO your
+ *  primary profile is a restore, which belongs to Backup & restore where it is
+ *  guarded accordingly. */
+const PROFILE_COPY_TARGETS = ["dev", "canary", "nightly", "beta"] as const;
+
 function humanBytes(n: number): string {
 	const units = ["B", "KB", "MB", "GB", "TB"];
 	let v = n;
@@ -67,6 +76,9 @@ export function StorageSettings() {
 	const [info, setInfo] = useState<DataPathInfo | null>(null);
 	const [picked, setPicked] = useState<PickedTarget | null>(null);
 	const [busy, setBusy] = useState(false);
+	const [pendingProfileCopy, setPendingProfileCopy] = useState<string | null>(
+		null
+	);
 	const [progress, setProgress] = useState<ProgressState | null>(null);
 	const [pendingRestore, setPendingRestore] = useState<string | null>(null);
 	const [loadFailed, setLoadFailed] = useState(false);
@@ -168,6 +180,28 @@ export function StorageSettings() {
 			sileo.error({ title: "Could not reset folder", description: String(e) });
 		}
 	}, [getNode]);
+
+	const doProfileCopy = useCallback(async (toProfile: string) => {
+		setBusy(true);
+		try {
+			// Core is stopped by the Tauri command before anything is copied (every
+			// store runs in WAL mode, so a live copy captures a torn snapshot), and the
+			// master key is moved BEFORE any file is written — a failure there aborts
+			// with nothing copied rather than leaving unreadable ciphertext behind.
+			await invoke("copy_data_folder_to_profile", { toProfile });
+			sileo.success(`Copied to the ${toProfile} profile`, {
+				description:
+					"Start Ryu on that profile to use it. This profile is unchanged.",
+			});
+		} catch (e) {
+			sileo.error("Could not copy to that profile", {
+				description: String(e),
+			});
+		} finally {
+			setBusy(false);
+			setPendingProfileCopy(null);
+		}
+	}, []);
 
 	const doExport = useCallback(async () => {
 		const dest = await save({
@@ -371,7 +405,32 @@ export function StorageSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Export a zip backup of the whole data folder, or restore from one. Restoring overwrites the current data and restarts the app."
+				caption="Give another profile a copy of this one's data \u2014 e.g. hand canary your stable chats, spaces and agents so you can test against real state instead of rebuilding it by hand. Both profiles stay usable; nothing here changes where THIS profile reads from."
+				title="Copy to another profile"
+			>
+				<SettingsGroup>
+					{PROFILE_COPY_TARGETS.map((target) => (
+						<SettingsItem
+							actions={
+								<Button
+									disabled={busy}
+									onClick={() => setPendingProfileCopy(target)}
+									size="sm"
+									variant="outline"
+								>
+									Copy
+								</Button>
+							}
+							description={`Copies into ~/.ryu-${target}. Refused if that profile already has data.`}
+							key={target}
+							title={`Copy to ${target}`}
+						/>
+					))}
+				</SettingsGroup>
+			</SettingsSection>
+
+			<SettingsSection
+				caption="Export a zip backup of the whole data folder, or restore from one. Restoring overwrites the current data and restarts the app. The backup does NOT contain your encryption key \u2014 it can only be restored on this machine, signed in as this user."
 				title="Backup &amp; restore"
 			>
 				<SettingsGroup>
@@ -413,6 +472,51 @@ export function StorageSettings() {
 			<AlertDialog
 				onOpenChange={(nextOpen) => {
 					if (!nextOpen) {
+						setPendingProfileCopy(null);
+					}
+				}}
+				open={pendingProfileCopy !== null}
+			>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>
+							Copy this profile&apos;s data to {pendingProfileCopy}?
+						</AlertDialogTitle>
+						<AlertDialogDescription>
+							Ryu will stop, copy your chats, spaces, agents, memory and models
+							into the {pendingProfileCopy} profile, and carry your encryption
+							key across so the copy stays readable. This profile is left
+							exactly as it is.
+						</AlertDialogDescription>
+						{/* The three things a user would otherwise discover the hard way,
+						    stated before the irreversible step. Each corresponds to an
+						    explicit exclusion or refusal in `data_path::copy_profile`. */}
+						<AlertDialogDescription>
+							Not copied: this node&apos;s identity and sign-in, its saved node
+							list, and the downloaded binaries — so {pendingProfileCopy} runs
+							its own build rather than adopting this one&apos;s. If that
+							profile already has data, the copy is refused rather than merged.
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+						<AlertDialogAction
+							disabled={busy}
+							onClick={() => {
+								if (pendingProfileCopy) {
+									void doProfileCopy(pendingProfileCopy);
+								}
+							}}
+						>
+							{busy ? "Copying…" : "Copy"}
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+
+			<AlertDialog
+				onOpenChange={(nextOpen) => {
+					if (!nextOpen) {
 						setPendingRestore(null);
 					}
 				}}
@@ -425,6 +529,18 @@ export function StorageSettings() {
 							This replaces all of your current data — chats, spaces, memory,
 							models and downloaded engines — with the contents of the backup,
 							then restarts the app. This cannot be undone.
+						</AlertDialogDescription>
+						{/* The encryption key lives in the OS keychain, never in the zip.
+						    Restoring on a different machine or OS user therefore produces
+						    a node that boots and looks healthy while every message body,
+						    memory entry and plugin secret is unreadable — and there is no
+						    rekey path to recover it. Saying so here is the only place a
+						    user can still act on it. */}
+						<AlertDialogDescription className="text-warning">
+							Your encryption key is stored in this machine&apos;s keychain, not
+							in the backup. If this zip came from another machine or another
+							user account, chats, memory and plugin secrets will restore but
+							stay permanently unreadable.
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					{pendingRestore ? (

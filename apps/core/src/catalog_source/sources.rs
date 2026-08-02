@@ -597,6 +597,33 @@ struct MarketplacePlugin {
     /// Optional explicit skill paths within the plugin repo.
     #[serde(default)]
     skills: Vec<serde_json::Value>,
+    /// How finished this listing is: `alpha`, `beta`, `rc`, … Absent or `stable`
+    /// means finished, and renders no badge.
+    ///
+    /// A free-form STRING, not an enum, and deliberately so: an unrecognised level
+    /// renders verbatim rather than being dropped, so publishing a `canary` tier
+    /// needs no client release. That is the same tolerance the surfaces work
+    /// settled on — an unknown value from a newer index must degrade, never break.
+    ///
+    /// Sits beside `hidden` because both are visibility controls the published
+    /// index owns: a listing graduates from beta by flipping this and re-mirroring,
+    /// with no Core release. Absent ⇒ stable, so nothing already published gains a
+    /// badge it never asked for.
+    #[serde(default)]
+    stability: Option<String>,
+    /// Hide this entry from the catalog without removing it.
+    ///
+    /// The published `marketplace.json` is the LIVE control point: flipping this
+    /// in the marketplace repo hides a listing for every already-shipped client on
+    /// its next fetch — no re-mirror, no Core release, no redeploy. That is the
+    /// whole point of putting it here rather than gating at generation time, where
+    /// changing your mind would mean cutting a new build.
+    ///
+    /// Absent ⇒ visible, so every existing index keeps working unchanged and an
+    /// older Core that predates this field simply shows everything, which is the
+    /// safe direction for a field whose job is to REMOVE things.
+    #[serde(default)]
+    hidden: bool,
     // ── Rich metadata (Phase 1.5) ─────────────────────────────────────────────
     /// Pretty display name (Claude/Codex `displayName`). `name` stays the
     /// kebab-case identity; this is what the card/detail renders when present.
@@ -676,6 +703,7 @@ struct MarketplacePlugin {
 /// under the marketplace **detail** contract keys. All optional/additive.
 #[derive(Debug, Clone, Default)]
 struct MarketplaceItemMeta {
+    stability: Option<String>,
     display_name: Option<String>,
     homepage: Option<String>,
     author: Option<serde_json::Value>,
@@ -722,6 +750,7 @@ impl MarketplacePlugin {
             banner: self.banner.clone(),
             developer: self.developer.clone(),
             screenshots: self.screenshots.clone(),
+            stability: self.stability.clone(),
             tagline: self.tagline.clone(),
             example_prompts: self.example_prompts.clone(),
             capabilities: self.capabilities.clone(),
@@ -930,6 +959,20 @@ impl MarketplaceSource {
                         .or_else(|| item.meta.author.as_ref().and_then(author_developer_string))
                     {
                         obj.insert("developer".to_owned(), serde_json::json!(dev));
+                    }
+                    // Emitted only when it says something: absent/"stable" means
+                    // finished, and a card must not sprout a badge for that.
+                    if let Some(stability) = item
+                        .meta
+                        .stability
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("stable"))
+                    {
+                        obj.insert(
+                            "stability".to_owned(),
+                            serde_json::json!(stability.to_ascii_lowercase()),
+                        );
                     }
                     if let Some(tagline) = &item.meta.tagline {
                         obj.insert("tagline".to_owned(), serde_json::json!(tagline));
@@ -1182,6 +1225,7 @@ fn plugins_as_items(manifest: &MarketplaceManifest, repo_context: &str) -> Vec<M
     manifest
         .plugins
         .iter()
+        .filter(|plugin| !plugin.hidden)
         .filter_map(|plugin| {
             let repo = plugin_source_string(&plugin.source)?;
             Some(MarketplaceItem {
@@ -1203,6 +1247,11 @@ fn plugins_as_items(manifest: &MarketplaceManifest, repo_context: &str) -> Vec<M
 fn flatten_plugins(manifest: &MarketplaceManifest, repo_context: &str) -> Vec<MarketplaceItem> {
     let mut out = Vec::new();
     for plugin in &manifest.plugins {
+        // Both readers must honour `hidden`, or a listing hidden from the Plugins
+        // tab would still be sold as an individual Skill from the same index.
+        if plugin.hidden {
+            continue;
+        }
         let Some(raw) = plugin_source_string(&plugin.source) else {
             continue;
         };
@@ -5028,4 +5077,44 @@ mod tests {
         // Path encoding PRESERVES `/` and `@` (qualified names), escapes the space.
         assert_eq!(urlencode_path("@scope/name x"), "@scope/name%20x");
     }
+
+    /// `hidden` is the LIVE kill switch: the published marketplace.json controls
+    /// visibility for every already-shipped client, with no re-mirror and no Core
+    /// release. Both readers must honour it, or a listing hidden from the Plugins
+    /// tab would still be sold as a Skill out of the same index.
+    #[test]
+    fn hidden_entries_are_dropped_by_both_readers() {
+        let raw = br#"{
+            "name": "m",
+            "plugins": [
+                { "name": "shown", "source": "acme/shown" },
+                { "name": "gone", "source": "acme/gone", "hidden": true }
+            ]
+        }"#;
+        let manifest = parse_marketplace(raw).expect("parses");
+
+        let plugins = plugins_as_items(&manifest, "acme/m");
+        assert_eq!(plugins.len(), 1, "hidden plugin must not be listed");
+        assert_eq!(plugins[0].plugin, "shown");
+
+        let skills = flatten_plugins(&manifest, "acme/m");
+        assert!(
+            skills.iter().all(|i| i.plugin != "gone"),
+            "hidden entry must not leak through the skill reader either"
+        );
+    }
+
+    /// Absent ⇒ visible. Every index published before this field existed must keep
+    /// working unchanged, and an older Core that predates it shows everything —
+    /// the safe direction for a flag whose job is to REMOVE things.
+    #[test]
+    fn an_index_without_the_field_still_lists_everything() {
+        let raw = br#"{
+            "name": "m",
+            "plugins": [{ "name": "legacy", "source": "acme/legacy" }]
+        }"#;
+        let manifest = parse_marketplace(raw).expect("parses");
+        assert_eq!(plugins_as_items(&manifest, "acme/m").len(), 1);
+    }
+
 }

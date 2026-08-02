@@ -3,6 +3,16 @@
   "name": "Calendar",
   "version": "1.0.0",
   "description": "The scheduled-runs calendar: every agent and workflow scheduled job projected onto Month, Week, Day, and Agenda views — past runs from history, upcoming runs from cron/interval — with a New automation dialog that schedules an agent.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

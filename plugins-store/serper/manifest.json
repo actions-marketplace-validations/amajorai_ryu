@@ -4,13 +4,18 @@
   "version": "1.0.0",
   "description": "Google's own search results as JSON via the Serper API (https://serper.dev), plus single-page scraping, exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Serper without changing what agents call. Serper is a paid, credit-metered API with a free allowance; requires a BYOK Serper API key.",
   "tagline": "Google's real results, as JSON, in a second",
-  "keywords": [
-    "search",
-    "web",
-    "google",
-    "scrape"
-  ],
+  "keywords": ["search", "web", "google", "scrape"],
   "category": "Search",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
@@ -64,9 +69,7 @@
               "description": "Let Google correct apparent typos in the query (default true). Set false to search the phrase verbatim."
             }
           },
-          "required": [
-            "q"
-          ]
+          "required": ["q"]
         }
       }
     },
@@ -100,9 +103,7 @@
               "description": "Also return the page as markdown alongside the plain text (default true here)."
             }
           },
-          "required": [
-            "url"
-          ]
+          "required": ["url"]
         }
       }
     }

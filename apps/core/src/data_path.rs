@@ -173,7 +173,211 @@ fn copy_tree(
     Ok(())
 }
 
+/// Files and directories that must NOT travel when copying one profile's data to
+/// another, because they identify the NODE or the RUNNING PROCESS rather than the
+/// user's content.
+///
+/// Copying these is not merely untidy — each has a concrete failure:
+///   - `core.token`    minted once with `create_new(true)`; a copy makes the target
+///                     claim the source's node identity, and `/api/node/init` then
+///                     answers 409 `already_initialized` forever.
+///   - `nodes.json`    entries carry absolute URLs with a HARDCODED port. Copying
+///                     `http://127.0.0.1:7980` into a profile that listens on 9980
+///                     leaves it pointing at the wrong stack — the source's.
+///   - `auth.json`     device sign-in token, stored in plaintext.
+///   - `ryu-core.pid`  the source's live process id.
+///   - `.reset-pending` a pending node wipe would fire on the target instead.
+///   - `bin/`          binaries plus `.version` markers keyed to the APP version, so
+///                     a same-version copy makes the target adopt the source's
+///                     binaries and skip its own download — defeating the entire
+///                     point of a canary profile, which exists to run a different
+///                     build.
+///   - `tmp/`, `cache/` regenerable, and often large.
+const PROFILE_COPY_EXCLUDE: &[&str] = &[
+    ".reset-pending",
+    "auth.json",
+    "bin",
+    "cache",
+    "core.token",
+    "nodes.json",
+    "ryu-core.pid",
+    "tmp",
+];
+
+/// Whether `name` (a direct child of the data dir) is excluded from a profile copy.
+pub fn is_profile_copy_excluded(name: &str) -> bool {
+    PROFILE_COPY_EXCLUDE.contains(&name)
+}
+
+/// Recursively copy `from` into `to`, skipping the node-identity and runtime
+/// entries at the TOP LEVEL only (a nested `cache/` inside a plugin's data is the
+/// plugin's business).
+fn copy_tree_filtered(
+    from: &Path,
+    to: &Path,
+    copied: &mut u64,
+    on_bytes: &mut dyn FnMut(u64),
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_profile_copy_excluded(&name.to_string_lossy()) {
+            continue;
+        }
+        let src = entry.path();
+        let dst = to.join(&name);
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            copy_tree(&src, &dst, copied, on_bytes)?;
+        } else if ft.is_file() {
+            let bytes = std::fs::copy(&src, &dst)?;
+            *copied += bytes;
+            on_bytes(*copied);
+        }
+    }
+    Ok(())
+}
+
+/// Auxiliary roots a node reset does NOT reach, and where each lives.
+///
+/// `apply_pending_reset` wipes the DATA dir and nothing else, which leaves a
+/// "reset" node still carrying its shadow captures, ghost state, gateway config
+/// and data-path pointer. Users reasonably read "reset node" as "this node is
+/// blank" and then find several gigabytes and their old gateway settings intact.
+///
+/// `~/.shadow` and `~/.ghost` are NOT profile-suffixed — their Rust uses a plain
+/// `home_dir().join(".shadow")` — so clearing them affects EVERY profile on the
+/// machine, not just this one. That is why they are opt-in and called out
+/// separately rather than folded into the reset.
+pub fn auxiliary_roots(home: &Path, config_dir: Option<&Path>, suffix: &str) -> Vec<(String, PathBuf)> {
+    let mut out = vec![
+        ("shadow captures (all profiles)".to_string(), home.join(".shadow")),
+        ("ghost state (all profiles)".to_string(), home.join(".ghost")),
+    ];
+    if let Some(config) = config_dir {
+        out.push((
+            "gateway config + data-path pointer".to_string(),
+            config.join(format!("ryu{suffix}")),
+        ));
+    }
+    out
+}
+
+/// Remove the auxiliary roots above. Returns what was actually removed.
+///
+/// Every path is re-checked against `$HOME` before deletion: these are computed
+/// from a home dir and a profile suffix, and a bug in either would otherwise aim a
+/// recursive delete somewhere arbitrary.
+pub fn deep_clean(home: &Path, config_dir: Option<&Path>, suffix: &str) -> Vec<String> {
+    let mut removed = Vec::new();
+    for (label, path) in auxiliary_roots(home, config_dir, suffix) {
+        if !path.exists() {
+            continue;
+        }
+        // Never delete the home dir itself, and never anything outside it.
+        let inside = path.strip_prefix(home).is_ok_and(|rel| rel.components().count() >= 1);
+        if !inside {
+            eprintln!("data-path deep-clean: refusing {} (outside home)", path.display());
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed.push(format!("{label} — {}", path.display())),
+            Err(e) => eprintln!("data-path deep-clean: could not remove {}: {e}", path.display()),
+        }
+    }
+    removed
+}
+
+/// Copy one profile's data directory into another profile's, carrying the master
+/// key across so the copied data stays readable.
+///
+/// Unlike [`migrate`], this deliberately does NOT touch any pointer file: both
+/// profiles remain usable and each keeps resolving its own data dir. It is a
+/// "give canary a copy of my stable state to test against", not a relocation.
+///
+/// **Core must be stopped for both profiles.** Every store runs in WAL mode, so
+/// copying a live `.db` captures a torn snapshot.
+///
+/// Ordering is the safety property: the key is moved FIRST and any failure aborts
+/// before a single file is written. The alternative — copy, then discover the key
+/// cannot travel — leaves a directory full of ciphertext nothing can read, and
+/// there is no rekey path to recover it.
+pub fn copy_profile(
+    from: &Path,
+    to: &Path,
+    from_suffix: &str,
+    to_suffix: &str,
+) -> std::io::Result<()> {
+    // `check_target` probes writability by creating the directory, so a refusal
+    // AFTER that point would leave an empty dir behind and contradict the "nothing
+    // was copied" the caller is told. Remember whether it existed first, and undo
+    // the probe on any abort.
+    let target_pre_existed = to.exists();
+    let undo_probe = || {
+        if !target_pre_existed {
+            // Only ever removes a directory we created and left empty; a populated
+            // one means the copy got further than these guards and must survive.
+            let _ = std::fs::remove_dir(to);
+        }
+    };
+
+    // Same guardrails as a relocation: absolute, non-overlapping, and — critically
+    // — an EMPTY target. Merging into a profile that already has data is
+    // unrecoverable, and this is reachable from a Settings button.
+    let validation = validate_target(from, to, true);
+    if let Some(err) = validation.error {
+        undo_probe();
+        return Err(std::io::Error::other(err));
+    }
+
+    match ryu_crypto::copy_master_key_between_profiles(from_suffix, to_suffix) {
+        ryu_crypto::KeyCopy::Copied => {}
+        ryu_crypto::KeyCopy::DestinationOccupied => {
+            undo_probe();
+            return Err(std::io::Error::other(format!(
+                "the '{to_suffix}' profile already has its own master key. Copying onto it \
+                 would leave data sealed under two different keys with no way to recover \
+                 either. Reset that profile first if you want to replace it."
+            )));
+        }
+        ryu_crypto::KeyCopy::SourceMissing => {
+            undo_probe();
+            return Err(std::io::Error::other(
+                "the source profile has no master key in the keychain, so the copied data \
+                 could not be decrypted by the target. Nothing was copied.",
+            ));
+        }
+        ryu_crypto::KeyCopy::Unavailable => {
+            undo_probe();
+            return Err(std::io::Error::other(
+                "could not read or write the OS keychain, so the master key cannot travel \
+                 with the data. Nothing was copied — a copy without the key produces a \
+                 profile that looks healthy but cannot read its own messages.",
+            ));
+        }
+    }
+
+    let total = paths::dir_size(from);
+    let mut copied = 0u64;
+    let mut on_bytes = |done: u64| {
+        emit(&Progress {
+            phase: "copy",
+            copied_bytes: done,
+            total_bytes: total,
+        });
+    };
+    copy_tree_filtered(from, to, &mut copied, &mut on_bytes)?;
+    emit(&Progress {
+        phase: "done",
+        copied_bytes: total,
+        total_bytes: total,
+    });
+    Ok(())
+}
+
 /// Relocate the data folder: copy `from` → `to`, then (on success) update the
+
 /// pointer so the next Core start resolves to `to`. With `move_source=true` the
 /// source is removed after a verified copy (cross-drive safe, unlike `rename`).
 pub fn migrate(from: &Path, to: &Path, move_source: bool) -> std::io::Result<()> {
@@ -327,7 +531,9 @@ pub fn run_cli(args: &[String]) -> bool {
     };
     let rest = &args[pos + 1..];
     let Some(cmd) = rest.first() else {
-        eprintln!("usage: ryu-core data-path <migrate|import|export> [flags]");
+        eprintln!(
+            "usage: ryu-core data-path <migrate|import|export|copy-profile|deep-clean> [flags]"
+        );
         std::process::exit(2);
     };
     let flag = |name: &str| -> Option<String> {
@@ -338,6 +544,52 @@ pub fn run_cli(args: &[String]) -> bool {
     };
 
     let result: std::io::Result<()> = match cmd.as_str() {
+        // Copy THIS profile's data into another profile's data dir, carrying the
+        // master key. Neither pointer file is touched: both profiles stay usable.
+        //
+        // `--from-profile` / `--to-profile` are the profile NAMES (release, dev,
+        // canary, …); the suffixes they map to are what key the keychain slots, and
+        // getting them wrong is what silently orphans the data.
+        // Remove the auxiliary roots a node reset never reaches (~/.shadow,
+        // ~/.ghost, the OS config dir). Separate from `reset` because two of those
+        // are shared by EVERY profile on the machine.
+        "deep-clean" => {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            let suffix = crate::profile::suffix();
+            let removed = deep_clean(&home, dirs::config_dir().as_deref(), &suffix);
+            if removed.is_empty() {
+                println!("nothing to remove");
+            }
+            for line in &removed {
+                println!("removed {line}");
+            }
+            Ok(())
+        }
+        "copy-profile" => {
+            let from_profile = flag("--from-profile")
+                .unwrap_or_else(|| crate::profile::profile().to_string());
+            let Some(to_profile) = flag("--to-profile") else {
+                eprintln!(
+                    "usage: ryu-core data-path copy-profile --to-profile <name> \
+                     [--from-profile <name>]"
+                );
+                std::process::exit(2);
+            };
+            if from_profile == to_profile {
+                eprintln!("data-path copy-profile: source and target are the same profile");
+                std::process::exit(2);
+            }
+            let from_suffix = crate::profile::suffix_for(&from_profile);
+            let to_suffix = crate::profile::suffix_for(&to_profile);
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            let from = flag("--from")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(format!(".ryu{from_suffix}")));
+            let to = flag("--to")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(format!(".ryu{to_suffix}")));
+            copy_profile(&from, &to, &from_suffix, &to_suffix)
+        }
         "migrate" => {
             let from = flag("--from")
                 .map(PathBuf::from)
@@ -551,5 +803,193 @@ mod tests {
         // No "data-path" argument → not consumed, Core boots normally.
         assert!(!run_cli(&["ryu-core".to_string(), "serve".to_string()]));
         assert!(!run_cli(&[]));
+    }
+
+    // ── profile copy ────────────────────────────────────────────────────────────
+
+    /// Every entry here has a concrete failure if it travels. Pinned as a list so
+    /// removing one is a deliberate act with a visible diff, not an oversight.
+    #[test]
+    fn node_identity_and_runtime_files_never_travel_between_profiles() {
+        for name in [
+            "core.token",     // target would claim the source's node identity (409 on init)
+            "nodes.json",     // absolute URLs with the SOURCE profile's hardcoded port
+            "auth.json",      // plaintext device sign-in token
+            "ryu-core.pid",   // the source's live process id
+            ".reset-pending", // a pending wipe would fire on the target
+            "bin",            // .version markers make the target adopt source binaries
+            "tmp",
+            "cache",
+        ] {
+            assert!(
+                is_profile_copy_excluded(name),
+                "'{name}' must not travel between profiles"
+            );
+        }
+    }
+
+    /// The user's actual content MUST travel, or the feature is pointless.
+    #[test]
+    fn user_content_does_travel() {
+        for name in [
+            "conversations.db",
+            "spaces.db",
+            "agents.db",
+            "plugins.db",
+            "preferences.db",
+            "media",
+            "models",
+            "plugins",
+            "workflows",
+            "master.key",
+        ] {
+            assert!(
+                !is_profile_copy_excluded(name),
+                "'{name}' is user content and must be copied"
+            );
+        }
+    }
+
+    /// The exclusion is TOP-LEVEL only. A plugin that keeps its own `cache/` inside
+    /// its data directory is the plugin's business, and dropping it would corrupt
+    /// that plugin's state rather than protect anything.
+    #[test]
+    fn exclusion_is_by_exact_name_not_by_substring() {
+        assert!(is_profile_copy_excluded("cache"));
+        assert!(!is_profile_copy_excluded("catalog-cache.json"));
+        assert!(!is_profile_copy_excluded("my-cache"));
+        assert!(is_profile_copy_excluded("bin"));
+        assert!(!is_profile_copy_excluded("binaries"));
+    }
+
+    // ── deep clean ──────────────────────────────────────────────────────────────
+
+    /// A node reset wipes only the DATA dir, so these roots survive it. Pinned as
+    /// a list because each one is several gigabytes or carries real config, and a
+    /// user who clicked "reset node" reasonably expects them gone.
+    #[test]
+    fn deep_clean_targets_the_roots_a_node_reset_never_reaches() {
+        let home = std::path::Path::new("/home/tester");
+        let config = std::path::Path::new("/home/tester/.config");
+        let roots = auxiliary_roots(home, Some(config), "-canary");
+        let paths: Vec<String> = roots
+            .iter()
+            .map(|(_, p)| p.to_string_lossy().into_owned())
+            .collect();
+        assert!(paths.contains(&"/home/tester/.shadow".to_string()));
+        assert!(paths.contains(&"/home/tester/.ghost".to_string()));
+        // The config dir IS profile-suffixed — clearing release's must never take
+        // canary's gateway.toml with it.
+        assert!(paths.contains(&"/home/tester/.config/ryu-canary".to_string()));
+        assert!(!paths.contains(&"/home/tester/.config/ryu".to_string()));
+    }
+
+    /// Deleting a real tree, and proving the home-containment guard bites.
+    #[test]
+    fn deep_clean_removes_only_paths_inside_home() {
+        let base = std::env::temp_dir().join(format!("ryu-dc-{}", uniq()));
+        let home = base.join("home");
+        let config = home.join(".config");
+        std::fs::create_dir_all(home.join(".shadow/media")).unwrap();
+        std::fs::create_dir_all(home.join(".ghost")).unwrap();
+        std::fs::create_dir_all(config.join("ryu")).unwrap();
+        std::fs::write(home.join(".shadow/media/a.wav"), b"audio").unwrap();
+        std::fs::write(config.join("ryu/gateway.toml"), b"[gateway]").unwrap();
+        // Must survive: not one of the auxiliary roots.
+        std::fs::create_dir_all(home.join(".ryu")).unwrap();
+
+        let removed = deep_clean(&home, Some(&config), "");
+        assert_eq!(removed.len(), 3, "shadow + ghost + config dir");
+        assert!(!home.join(".shadow").exists());
+        assert!(!home.join(".ghost").exists());
+        assert!(!config.join("ryu").exists());
+        assert!(
+            home.join(".ryu").exists(),
+            "the DATA dir is the node reset's job, not deep-clean's"
+        );
+
+        // Second run is a no-op rather than an error.
+        assert!(deep_clean(&home, Some(&config), "").is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The predicate tests above prove intent; this proves the COPY. Excluded
+    /// entries must be absent from the target and user content must arrive byte
+    /// for byte — "data intact" is the entire point of the feature.
+    #[test]
+    fn copy_tree_filtered_drops_identity_files_and_preserves_content() {
+        let base = std::env::temp_dir().join(format!("ryu-cpf-{}", uniq()));
+        let from = base.join("src");
+        let to = base.join("dst");
+        std::fs::create_dir_all(from.join("bin")).unwrap();
+        std::fs::create_dir_all(from.join("media/clips")).unwrap();
+        std::fs::create_dir_all(from.join("plugins/acme/cache")).unwrap();
+
+        // Must NOT travel.
+        std::fs::write(from.join("core.token"), b"node-identity").unwrap();
+        std::fs::write(from.join("nodes.json"), b"{\"url\":\"127.0.0.1:7980\"}").unwrap();
+        std::fs::write(from.join("ryu-core.pid"), b"1234").unwrap();
+        std::fs::write(from.join("bin/ryu-core"), b"ELF").unwrap();
+
+        // Must travel.
+        let db = b"SQLite format 3\0payload";
+        std::fs::write(from.join("conversations.db"), db).unwrap();
+        std::fs::write(from.join("catalog-cache.json"), b"{}").unwrap();
+        std::fs::write(from.join("media/clips/a.mp4"), b"video-bytes").unwrap();
+        // A plugin's OWN nested cache is its business — top-level exclusion only.
+        std::fs::write(from.join("plugins/acme/cache/warm"), b"warm").unwrap();
+
+        let mut copied = 0u64;
+        let mut sink = |_: u64| {};
+        copy_tree_filtered(&from, &to, &mut copied, &mut sink).unwrap();
+
+        for gone in ["core.token", "nodes.json", "ryu-core.pid", "bin"] {
+            assert!(
+                !to.join(gone).exists(),
+                "'{gone}' must not be copied between profiles"
+            );
+        }
+        assert_eq!(
+            std::fs::read(to.join("conversations.db")).unwrap(),
+            db,
+            "user content must arrive byte for byte"
+        );
+        assert!(to.join("catalog-cache.json").exists(), "substring != exclusion");
+        assert_eq!(
+            std::fs::read(to.join("media/clips/a.mp4")).unwrap(),
+            b"video-bytes"
+        );
+        assert!(
+            to.join("plugins/acme/cache/warm").exists(),
+            "a NESTED cache dir belongs to the plugin and must survive"
+        );
+        assert!(copied > 0, "byte counter must advance");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Copying onto a profile that already has data is refused. `check_target`
+    /// enforces it, but assert it here too: this is the path a user reaches from a
+    /// Settings button, where "it merged into my existing canary" is unrecoverable.
+    #[test]
+    fn copying_into_a_non_empty_profile_is_refused() {
+        let tmp = std::env::temp_dir().join(format!(
+            "ryu-copy-profile-test-{}",
+            std::process::id()
+        ));
+        let from = tmp.join("src");
+        let to = tmp.join("dst");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(to.join("conversations.db"), b"existing").unwrap();
+
+        let result = validate_target(&from, &to, false);
+        assert!(!result.ok, "a non-empty target must be refused");
+        let err = result.error.expect("an error message");
+        assert!(
+            err.to_lowercase().contains("empty"),
+            "error should explain the target is not empty, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

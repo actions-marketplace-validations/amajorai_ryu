@@ -3,10 +3,17 @@
   "name": "Headroom Compression",
   "version": "1.0.0",
   "description": "Context compression (chopratejas/headroom): compress tool outputs, logs, files, and RAG chunks. 60-95% fewer tokens, reversible retrieval. Requires headroom-ai[mcp].",
-  "keywords": [
-    "context",
-    "compression"
-  ],
+  "keywords": ["context", "compression"],
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "full" },
+    "mobile": { "support": "full" },
+    "extension": { "support": "full" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "runnables": [
     {
       "id": "policy-headroom-compression",
@@ -30,13 +37,7 @@
         "kind": "local",
         "command": "headroom",
         "command_env": "RYU_HEADROOM_BIN",
-        "args": [
-          "proxy",
-          "--host",
-          "127.0.0.1",
-          "--port",
-          "8787"
-        ]
+        "args": ["proxy", "--host", "127.0.0.1", "--port", "8787"]
       },
       "port": 8787,
       "health_path": "/health"

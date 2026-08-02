@@ -2074,18 +2074,56 @@ pub async fn report_credential_read_audit(
     }
 }
 
+/// The Gateway version last seen on a successful `/health`, or `None` before the
+/// first probe succeeds.
+///
+/// Core and the Gateway ship from ONE release train, so drift here means a stale
+/// binary — most often a Gateway left in `~/.ryu/bin` after the app self-updated.
+/// Detecting that needs the Gateway's *observed* version, and the readiness probe
+/// is the only place Core already talks to it. Caching what that probe sees keeps
+/// `/api/version` honest without adding a network round-trip to every call.
+static OBSERVED_GATEWAY_VERSION: std::sync::RwLock<Option<String>> =
+    std::sync::RwLock::new(None);
+
+/// The Gateway version last observed on `/health`. `None` until a probe succeeds
+/// (or if the Gateway reported no version, e.g. an older build).
+pub fn observed_gateway_version() -> Option<String> {
+    OBSERVED_GATEWAY_VERSION
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
 /// GET `{base}/health`; returns true on a 2xx response.
+///
+/// The body — which carries `version` — used to be discarded, which is why nothing
+/// in Core could ever notice a version mismatch with the Gateway it spawned. It is
+/// now read and cached, but ONLY as an observation: a malformed or version-less
+/// body still counts as healthy, because liveness and version agreement are
+/// separate questions and conflating them would make a stale-but-working Gateway
+/// look dead.
 async fn health_check(base_url: &str) -> bool {
     let endpoint = format!("{}/health", base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
-    matches!(
-        client
-            .get(&endpoint)
-            .timeout(Duration::from_millis(500))
-            .send()
-            .await,
-        Ok(resp) if resp.status().is_success()
-    )
+    let Ok(resp) = client
+        .get(&endpoint)
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    if let Ok(body) = resp.json::<serde_json::Value>().await {
+        if let Some(v) = body.get("version").and_then(|v| v.as_str()) {
+            if let Ok(mut slot) = OBSERVED_GATEWAY_VERSION.write() {
+                *slot = Some(v.to_string());
+            }
+        }
+    }
+    true
 }
 
 /// Shared, poison-tolerant lock serializing EVERY test — in ANY module — that

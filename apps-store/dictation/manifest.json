@@ -3,6 +3,16 @@
   "name": "Dictation",
   "version": "1.0.0",
   "description": "System-wide dictation and agent-ask via the Island companion: speak anywhere to type a transcript, or ask an agent and paste the answer into the focused app.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

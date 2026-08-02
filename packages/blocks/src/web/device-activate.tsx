@@ -1,7 +1,6 @@
 "use client";
 
 import { Button } from "@ryu/ui/components/button";
-import { Logo } from "@ryu/ui/components/logo";
 import PageHeader from "@ryu/ui/components/page-header";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 
@@ -40,7 +39,6 @@ export default function DeviceActivate({
 	return (
 		<div className="flex min-h-[calc(100vh-5rem)] items-center justify-center px-4">
 			<div className="w-full max-w-md space-y-8">
-				<Logo size="32px" variant="outline" />
 				<PageHeader
 					subtitle="Enter the code displayed on your device to sign in"
 					title="Activate device"

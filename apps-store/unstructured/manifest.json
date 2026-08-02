@@ -6,6 +6,16 @@
   "tagline": "Sixty formats, element-typed output",
   "keywords": ["document", "parse", "pdf", "docx", "ocr", "extraction"],
   "category": "Knowledge",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "full" },
+    "mobile": { "support": "full" },
+    "extension": { "support": "full" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },

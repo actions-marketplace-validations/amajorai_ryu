@@ -4,7 +4,7 @@
 //! ISOLATED alongside a release install on one machine: a distinct Core port, a
 //! distinct data dir (`~/.ryu-dev`), and a distinct island control port, so the
 //! two stacks never bleed into each other. The distinct bundle identifier
-//! (`dev.ryu.desktop.dev`, set in `tauri.dev.conf.json`) gives it its own
+//! (`ai.amajor.ryu.desktop.dev`, set in `tauri.dev.conf.json`) gives it its own
 //! single-instance lock and app-data store for free.
 //!
 //! This MUST agree with `apps/core/src/profile.rs`: dev shifts every base port by
@@ -14,19 +14,44 @@
 //! and uses the shifted data dir — so there is one offset convention on both
 //! sides and they can never disagree.
 //!
-//! The active profile comes from, in order: the `RYU_PROFILE` env var (any value
-//! other than `release`/empty ⇒ dev), else the `dev-variant` compile feature (the
-//! packaged "Ryu Dev" build), else release. A release build with neither is
-//! **byte-identical to before**: port 7980, `~/.ryu`, the original bundle id.
+//! The active profile comes from, in order: the `RYU_PROFILE` env var, else the
+//! `dev-variant` compile feature (the packaged "Ryu Dev" build), else release. A
+//! release build with neither is **byte-identical to before**: port 7980,
+//! `~/.ryu`, the original bundle id.
+//!
+//! Every profile has its OWN port offset ([`PROFILE_PORT_OFFSETS`]). This used to
+//! be "release ⇒ 0, anything else ⇒ dev's +1000", which gave `canary` its own data
+//! dir and keychain slot but dev's listeners — two stacks that each believed they
+//! were isolated while sharing one port.
 
 use std::path::PathBuf;
 
 /// Env var naming the active profile. Unset / empty / `release` ⇒ release.
 pub const RYU_PROFILE_ENV: &str = "RYU_PROFILE";
 
-/// Port offset applied to every base port for the dev profile. Must equal Core's
+/// Port offset for the `dev` profile. Must equal Core's
 /// `profile::DEV_PORT_OFFSET`.
 pub const DEV_PORT_OFFSET: u16 = 1000;
+
+/// Mirror of `apps/core/src/profile.rs::PROFILE_PORT_OFFSETS`. The desktop
+/// spawns Core with this same `RYU_PROFILE` and then dials the port it computes
+/// here, so a row that disagrees with Core's table means the desktop adopts a
+/// port nothing is listening on.
+pub const PROFILE_PORT_OFFSETS: &[(&str, u16)] = &[
+	("release", 0),
+	("dev", DEV_PORT_OFFSET),
+	("canary", 2000),
+	("nightly", 3000),
+	("beta", 4000),
+];
+
+/// The port offset for `profile`, or `None` when it is not a known profile.
+pub fn offset_of(profile: &str) -> Option<u16> {
+	PROFILE_PORT_OFFSETS
+		.iter()
+		.find(|(name, _)| *name == profile)
+		.map(|(_, offset)| *offset)
+}
 
 /// The base Core HTTP port (release). `port()` shifts it per profile.
 pub const CORE_BASE_PORT: u16 = 7980;
@@ -59,13 +84,16 @@ pub fn is_dev() -> bool {
 	!is_release()
 }
 
-/// `base + offset`, saturating. release ⇒ `base`; dev ⇒ `base + 1000`.
+/// `base + offset`, saturating. release ⇒ `base`; dev ⇒ `base + 1000`; every
+/// other known profile gets its own offset from [`PROFILE_PORT_OFFSETS`].
+///
+/// An unknown profile falls back to release's zero offset rather than dev's —
+/// Core rejects the name outright at startup, so the desktop would fail to reach
+/// the Core it spawned either way, and aliasing onto dev would have it dial a
+/// *different, running* stack instead. Failing to connect beats connecting to
+/// the wrong stack.
 pub fn port(base: u16) -> u16 {
-	if is_release() {
-		base
-	} else {
-		base.saturating_add(DEV_PORT_OFFSET)
-	}
+	base.saturating_add(offset_of(&name()).unwrap_or(0))
 }
 
 /// The Core HTTP port for this profile: 7980 release, 8980 dev.
@@ -137,4 +165,40 @@ pub fn is_foreign_profile_bin(candidate: &std::path::Path) -> bool {
 	home.file_name()
 		.and_then(|n| n.to_str())
 		.is_some_and(|n| n == ".ryu" || n.starts_with(".ryu-"))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The three `PROFILE_PORT_OFFSETS` mirrors (Core, Gateway, desktop) MUST
+	/// stay identical: the desktop spawns Core and Core spawns the Gateway, all
+	/// with the same `RYU_PROFILE`, so one table drifting means a spawner dials a
+	/// port its child never bound. Each crate asserts the SAME literal rows, so
+	/// editing one mirror without the others fails here.
+	#[test]
+	fn the_profile_table_matches_its_mirrors() {
+		assert_eq!(
+			PROFILE_PORT_OFFSETS,
+			&[
+				("release", 0u16),
+				("dev", 1000),
+				("canary", 2000),
+				("nightly", 3000),
+				("beta", 4000),
+			][..]
+		);
+	}
+
+	#[test]
+	fn canary_no_longer_shares_devs_ports() {
+		// Was: every non-release profile got +1000, so a canary desktop dialled
+		// the dev stack's Core.
+		assert_eq!(offset_of("dev"), Some(1000));
+		assert_eq!(offset_of("canary"), Some(2000));
+		assert_ne!(offset_of("canary"), offset_of("dev"));
+		// An unknown name resolves to release's offset, never dev's — failing to
+		// connect beats connecting to a different, running stack.
+		assert_eq!(offset_of("typo"), None);
+	}
 }

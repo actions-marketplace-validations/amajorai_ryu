@@ -377,6 +377,80 @@ fn restrict_permissions(_path: &PathBuf) {
     // On Windows the file inherits the user-profile ACL; no extra step here.
 }
 
+/// Outcome of copying a profile's master key to another profile's slot.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyCopy {
+    /// The key was read from the source slot and written to the destination.
+    Copied,
+    /// The destination slot ALREADY holds a key. Refused: overwriting it would
+    /// orphan whatever that profile has already sealed.
+    DestinationOccupied,
+    /// The source profile has no key in the keychain, so there is nothing to copy
+    /// and the destination would generate its own — silently orphaning the data
+    /// about to be copied onto it.
+    SourceMissing,
+    /// The keychain could not be read or written at all.
+    Unavailable,
+}
+
+/// Copy the master key from one profile's keychain slot to another's.
+///
+/// **This is what makes copying a data directory between profiles survivable.**
+/// Everything sealed at rest — message bodies, long-term memory, plugin secrets,
+/// the identity vault — is encrypted with a key held per profile in
+/// `master-key{suffix}`. Copy the files without the key and the destination
+/// profile generates a fresh one, at which point:
+///
+///   - every message body reads `[unable to decrypt message]`,
+///   - memory rows are silently DROPPED from recall,
+///   - plugin secrets read as unset,
+///   - the identity vault hard-errors,
+///
+/// while the profile otherwise boots and looks healthy, because all the metadata
+/// (titles, timestamps, ordering) is plaintext. The user experiences it as "the
+/// copy lost my chats", not as a key problem. Worse, new writes seal under the new
+/// key, so the DB becomes irreversibly mixed-key — there is no rekey path anywhere
+/// and the cipher is cached process-wide in a `OnceLock`.
+///
+/// Note `master.key` on disk is NOT a substitute: it is only consulted when the
+/// keychain is unavailable, so on macOS/Windows copying that file achieves
+/// nothing. `memory.key` *is* silently adopted, which is an accident of the legacy
+/// import path rather than a supported transfer.
+///
+/// Refuses rather than overwrites when the destination already holds a key: that
+/// profile may already have sealed data of its own, and clobbering its key would
+/// destroy it in exactly the same silent way.
+pub fn copy_master_key_between_profiles(from_suffix: &str, to_suffix: &str) -> KeyCopy {
+    let from = OsKeychain {
+        account: format!("{KEYRING_ACCOUNT}{from_suffix}"),
+    };
+    let to = OsKeychain {
+        account: format!("{KEYRING_ACCOUNT}{to_suffix}"),
+    };
+    copy_master_key_with(&from, &to)
+}
+
+/// The pure half of [`copy_master_key_between_profiles`], testable without a real
+/// keychain.
+fn copy_master_key_with(from: &dyn Keychain, to: &dyn Keychain) -> KeyCopy {
+    let key = match from.get() {
+        KeychainState::Key(k) => k,
+        KeychainState::Empty => return KeyCopy::SourceMissing,
+        KeychainState::Unavailable => return KeyCopy::Unavailable,
+    };
+    match to.get() {
+        // Never clobber a key that already seals something.
+        KeychainState::Key(_) => return KeyCopy::DestinationOccupied,
+        KeychainState::Unavailable => return KeyCopy::Unavailable,
+        KeychainState::Empty => {}
+    }
+    if to.store(&key) {
+        KeyCopy::Copied
+    } else {
+        KeyCopy::Unavailable
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +544,100 @@ mod tests {
             }
             self.store_ok
         }
+    }
+
+    // ── copy_master_key_between_profiles ────────────────────────────────────
+    //
+    // The single thing that makes a cross-profile data copy survivable. Every case
+    // here is a way the copy can silently produce a profile that boots, looks
+    // healthy, and cannot read its own message bodies.
+
+    #[test]
+    fn copying_a_key_into_an_empty_slot_succeeds() {
+        let key = [7u8; KEY_LEN];
+        let from = FakeKeychain::new(KeychainState::Key(key), true);
+        let to = FakeKeychain::new(KeychainState::Empty, true);
+        assert_eq!(copy_master_key_with(&from, &to), KeyCopy::Copied);
+        // The DESTINATION must end up holding the SOURCE's key byte for byte —
+        // anything else and the copied ciphertext is undecryptable.
+        assert_eq!(*to.stored.borrow(), Some(key));
+    }
+
+    #[test]
+    fn an_occupied_destination_is_refused_not_overwritten() {
+        // That profile may already have sealed data of its own. Clobbering its key
+        // destroys it in exactly the same silent way we are trying to prevent.
+        let from = FakeKeychain::new(KeychainState::Key([1u8; KEY_LEN]), true);
+        let to = FakeKeychain::new(KeychainState::Key([2u8; KEY_LEN]), true);
+        assert_eq!(
+            copy_master_key_with(&from, &to),
+            KeyCopy::DestinationOccupied
+        );
+        assert_eq!(*to.stored.borrow(), None, "must not write");
+    }
+
+    #[test]
+    fn a_source_with_no_key_is_reported_not_silently_skipped() {
+        // The caller MUST abort here. Proceeding copies files onto a profile that
+        // will mint its own key and orphan every one of them.
+        let from = FakeKeychain::new(KeychainState::Empty, true);
+        let to = FakeKeychain::new(KeychainState::Empty, true);
+        assert_eq!(copy_master_key_with(&from, &to), KeyCopy::SourceMissing);
+        assert_eq!(*to.stored.borrow(), None);
+    }
+
+    #[test]
+    fn an_unreachable_keychain_is_reported_on_either_side() {
+        let key = [3u8; KEY_LEN];
+        let unavailable_src = FakeKeychain::new(KeychainState::Unavailable, true);
+        let ok_dst = FakeKeychain::new(KeychainState::Empty, true);
+        assert_eq!(
+            copy_master_key_with(&unavailable_src, &ok_dst),
+            KeyCopy::Unavailable
+        );
+
+        let ok_src = FakeKeychain::new(KeychainState::Key(key), true);
+        let unavailable_dst = FakeKeychain::new(KeychainState::Unavailable, true);
+        assert_eq!(
+            copy_master_key_with(&ok_src, &unavailable_dst),
+            KeyCopy::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_failed_write_is_never_reported_as_copied() {
+        // Reporting Copied here would let the caller proceed with the data copy on
+        // the strength of a key that was never persisted.
+        let from = FakeKeychain::new(KeychainState::Key([9u8; KEY_LEN]), true);
+        let to = FakeKeychain::new(KeychainState::Empty, false);
+        assert_eq!(copy_master_key_with(&from, &to), KeyCopy::Unavailable);
+    }
+
+    #[test]
+    fn a_copied_key_actually_decrypts_the_source_ciphertext() {
+        // The end-to-end property the whole feature rests on.
+        let key = [42u8; KEY_LEN];
+        let sealed = FieldCipher::new(&key)
+            .seal("my message body")
+            .expect("seal");
+
+        let from = FakeKeychain::new(KeychainState::Key(key), true);
+        let to = FakeKeychain::new(KeychainState::Empty, true);
+        assert_eq!(copy_master_key_with(&from, &to), KeyCopy::Copied);
+
+        let landed = to.stored.borrow().expect("key landed");
+        assert_eq!(
+            FieldCipher::new(&landed).open(&sealed).expect("open"),
+            "my message body"
+        );
+
+        // And a DIFFERENT key — what the destination would have minted for itself —
+        // fails outright. This is the silent-failure case in one assertion.
+        let minted = [43u8; KEY_LEN];
+        assert!(
+            FieldCipher::new(&minted).open(&sealed).is_err(),
+            "a freshly minted key must NOT open the source's ciphertext"
+        );
     }
 
     fn paths_in(dir: &std::path::Path) -> KeyPaths {

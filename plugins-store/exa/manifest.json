@@ -4,11 +4,18 @@
   "version": "1.0.0",
   "description": "Neural and keyword web search via the Exa API (https://exa.ai), exposed as two declarative HTTP tools: search and find-similar. Requires a BYOK Exa API key.",
   "tagline": "Neural web search for agents",
-  "keywords": [
-    "search",
-    "web"
-  ],
+  "keywords": ["search", "web"],
   "category": "Search",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
@@ -53,9 +60,7 @@
               "description": "Let Exa rephrase the query for better neural search results (default true)."
             }
           },
-          "required": [
-            "query"
-          ]
+          "required": ["query"]
         }
       }
     },
@@ -68,9 +73,7 @@
         "backend": "http",
         "method": "POST",
         "url": "https://mcp.exa.ai/mcp",
-        "header_params": [
-          "Accept"
-        ],
+        "header_params": ["Accept"],
         "fail_open": true,
         "unwrap_body": true,
         "description": "Web search through Exa's PUBLIC MCP endpoint, which needs no API key. Rate-limited free tier, intended as the zero-setup fallback when RYU_EXA_API_KEY is unset; add a key to use the higher-limit exa__search instead. Speaks JSON-RPC: the caller supplies the whole `tools/call` envelope, and the reply is a text/event-stream frame, so the capability adapter parses it rather than a response map.",
@@ -98,13 +101,7 @@
               "description": "`{name, arguments}` naming the Exa MCP tool to call and its arguments."
             }
           },
-          "required": [
-            "Accept",
-            "jsonrpc",
-            "id",
-            "method",
-            "params"
-          ]
+          "required": ["Accept", "jsonrpc", "id", "method", "params"]
         }
       }
     },
@@ -140,9 +137,7 @@
               "maximum": 100
             }
           },
-          "required": [
-            "url"
-          ]
+          "required": ["url"]
         }
       }
     }
@@ -157,9 +152,7 @@
         "web__search": {
           "tool": "exa__search",
           "adapter": {
-            "tools": [
-              "exa__free_search"
-            ],
+            "tools": ["exa__free_search"],
             "code_file": "adapters/web__search.js"
           }
         }

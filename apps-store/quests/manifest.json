@@ -3,6 +3,16 @@
   "name": "Quests",
   "version": "1.0.0",
   "description": "Quests: auto-detecting todos surfaced from your chats and activity, tracked as a lightweight quest board with progress and completion.",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "full" },
+    "cli": { "support": "list" }
+  },
   "engines": {
     "ryu": ">=0.0.1"
   },
