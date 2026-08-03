@@ -91,13 +91,21 @@ while IFS= read -r f; do
 done < <(git ls-files '*Cargo.toml')
 
 # 2) package.json — the 9 train packages plus the create-ryu-app "^OLD" dep range.
+#
+#    The caret rewrite is scoped to OUR scopes (@ryu/, @ryuhq/). It used to rewrite
+#    every "^OLD" range in the file, which is safe only while no third-party dep
+#    shares the train version — true throughout 0.0.x by luck, and false the moment
+#    the train reached 0.1.0: `@shadcn/react: "^0.1.0"` was rewritten to "^0.1.1",
+#    a version that does not exist, and `bun install` failed outright. A version
+#    bump must never touch a dependency we do not publish.
+#
 #    Selects exactly the files whose "version" (or a "^OLD" internal range) is on
 #    the train; every other package.json is at 0.0.0 / 0.1.0 / 1.0.0 and skipped.
 log "package.json (train packages + caret dep ranges)"
 while IFS= read -r f; do
   perl -0777 -pi -e 'my ($o,$n)=($ENV{OLD},$ENV{NEW});
     s/"version": "\Q$o\E"/"version": "$n"/g;
-    s/"\^\Q$o\E"/"^$n"/g;' "$f"
+    s/("\@ryu(?:hq)?\/[^"]+"\s*:\s*)"\^\Q$o\E"/$1"^$n"/g;' "$f"
 done < <(git ls-files '*package.json')
 
 # 3) tauri.conf.json — the desktop tag driver (web src-tauri is off-train at 0.1.0).
