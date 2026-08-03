@@ -13,7 +13,7 @@
     "cli": { "support": "full" }
   },
   "engines": {
-    "ryu": ">=0.0.1"
+    "ryu": ">=0.1.0"
   },
   "runnables": [],
   "permission_grants": ["hook:side-model"],

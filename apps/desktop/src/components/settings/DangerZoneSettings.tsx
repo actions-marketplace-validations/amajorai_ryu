@@ -16,6 +16,7 @@ import {
 } from "@ryu/ui/components/alert-dialog";
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
+import { Switch } from "@ryu/ui/components/switch";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useState } from "react";
@@ -92,6 +93,13 @@ const CATEGORIES: CategoryDef[] = [
 	},
 ];
 
+/** Profiles a clean can target.
+ *
+ *  Mirrors `PROFILE_PORT_OFFSETS` (apps/core/src/profile.rs) — each has its own
+ *  data folder, gateway config and keychain slot, so cleaning one leaves the
+ *  others untouched. */
+const CLEAN_PROFILES = ["release", "dev", "canary", "nightly", "beta"] as const;
+
 /** Desktop-only flags that survive a Core data wipe and would skip onboarding. */
 const CLIENT_RESET_KEYS = [
 	"ryu_onboarding_complete",
@@ -155,26 +163,53 @@ export function DangerZoneSettings() {
 	const nodeName = getNode().name;
 	const [deepCleanOpen, setDeepCleanOpen] = useState(false);
 	const [deepCleaning, setDeepCleaning] = useState(false);
+	// The same two axes `bun run wipe` exposes: WHICH profile, and HOW MUCH of it.
+	const [cleanProfile, setCleanProfile] = useState("release");
+	const [cleanDepth, setCleanDepth] = useState<"none" | "state" | "full">(
+		"none"
+	);
+	const [cleanShared, setCleanShared] = useState(true);
 	const doDeepClean = useCallback(async () => {
 		setDeepCleaning(true);
 		try {
-			// Core is stopped by the Tauri command before anything is removed.
-			await invoke("deep_clean_node");
-			sileo.success({
-				title: "Removed",
-				description:
-					"Shadow, ghost and the gateway config folder are gone. Your data folder is untouched.",
+			// The Tauri command STOPS Core before removing anything (WAL: a live copy
+			// is a torn snapshot). It does not restart it, so the app is left with no
+			// Core until we bring one back — hence the restart below rather than a
+			// bare toast.
+			await invoke("deep_clean_node", {
+				depth: cleanDepth,
+				profile: cleanProfile,
+				shared: cleanShared,
 			});
+
+			// Deep clean deletes the OS config dir, which holds gateway.toml AND the
+			// data-path pointer. Core resolves both once at startup and caches them,
+			// so a running Core would keep serving state that no longer exists on
+			// disk. The same reasoning as Reset node: clear the client-side
+			// onboarding flags, restart Core, reload — otherwise the app returns to a
+			// node whose configuration was just removed and never re-runs setup.
+			clearClientStateForFreshNode();
+			sileo.success({
+				title: "Deep clean complete",
+				description: "Restarting to pick up the cleared configuration…",
+			});
+			setDeepCleanOpen(false);
+
+			// Only the LOCAL node's Core is ours to restart — a remote node runs on
+			// its own host, exactly as Reset node treats it.
+			if (isLocalNode(getNode())) {
+				await restartRyuCore().catch(() => undefined);
+			}
+			window.location.reload();
 		} catch (e) {
 			sileo.error({
 				title: "Could not deep clean",
 				description: String(e),
 			});
-		} finally {
 			setDeepCleaning(false);
 			setDeepCleanOpen(false);
 		}
-	}, []);
+	}, [getNode, cleanProfile, cleanDepth, cleanShared]);
 	const [resetOpen, setResetOpen] = useState(false);
 	const [resetTyped, setResetTyped] = useState("");
 	const [resetBusy, setResetBusy] = useState(false);
@@ -345,6 +380,51 @@ export function DangerZoneSettings() {
 				<SettingsGroup>
 					<SettingsItem
 						actions={
+							<select
+								className="rounded-md border bg-background px-2 py-1 text-sm"
+								onChange={(e) => setCleanProfile(e.target.value)}
+								value={cleanProfile}
+							>
+								{CLEAN_PROFILES.map((p) => (
+									<option key={p} value={p}>
+										{p}
+									</option>
+								))}
+							</select>
+						}
+						description="Each profile has its own data folder, gateway config and keychain slot"
+						title="Profile to clean"
+					/>
+					<SettingsItem
+						actions={
+							<select
+								className="rounded-md border bg-background px-2 py-1 text-sm"
+								onChange={(e) =>
+									setCleanDepth(e.target.value as "none" | "state" | "full")
+								}
+								value={cleanDepth}
+							>
+								<option value="none">Config only — keep all data</option>
+								<option value="state">Clear data, keep downloads</option>
+								<option value="full">Everything, including downloads</option>
+							</select>
+						}
+						description="'Keep downloads' preserves bin/ and models/, so engines are not re-fetched"
+						title="How much to remove"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								aria-label="Also clear shadow and ghost"
+								checked={cleanShared}
+								onCheckedChange={setCleanShared}
+							/>
+						}
+						description="~/.shadow and ~/.ghost are NOT per-profile — clearing them affects every profile"
+						title="Also clear shadow + ghost"
+					/>
+					<SettingsItem
+						actions={
 							<Button
 								disabled={deepCleaning}
 								onClick={() => setDeepCleanOpen(true)}
@@ -354,8 +434,8 @@ export function DangerZoneSettings() {
 								{deepCleaning ? "Cleaning…" : "Deep clean"}
 							</Button>
 						}
-						description="Removes ~/.shadow, ~/.ghost and the gateway config folder"
-						title="Remove everything outside the data folder"
+						description="Removes the selected scope, then restarts and runs setup again"
+						title="Run deep clean"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
@@ -372,20 +452,31 @@ export function DangerZoneSettings() {
 					<AlertDialogHeader>
 						<AlertDialogTitle>Remove these folders?</AlertDialogTitle>
 						<AlertDialogDescription>
-							Ryu will stop, then permanently delete your shadow captures
-							(~/.shadow), ghost state (~/.ghost), and the gateway config folder
-							— which holds gateway.toml and the pointer to your data folder.
-							This cannot be undone.
+							Ryu will stop, then permanently remove the
+							<strong> {cleanProfile} </strong> profile&apos;s gateway config
+							folder (gateway.toml and the pointer to its data folder)
+							{cleanDepth === "state"
+								? ", and clear its data folder while keeping downloaded engines and models"
+								: null}
+							{cleanDepth === "full"
+								? ", and delete its entire data folder including downloaded engines and models"
+								: null}
+							{cleanShared
+								? ", plus your shadow captures (~/.shadow) and ghost state (~/.ghost)"
+								: null}
+							. Then it restarts and runs setup again. This cannot be undone.
 						</AlertDialogDescription>
 						{/* The one thing a user cannot infer from the folder names: two of
 						    these three are NOT profile-scoped. Their Rust uses a plain
 						    ~/.shadow / ~/.ghost for every profile, so a "clean my canary"
 						    click clears stable's captures with it. */}
 						<AlertDialogDescription className="text-warning">
-							Shadow and ghost are shared by every profile on this machine, not
-							just this one — clearing them here clears them everywhere. Your
-							chats, spaces and memory live in the data folder and are NOT
-							touched; use Reset node for those.
+							{cleanShared
+								? "Shadow and ghost are shared by every profile on this machine, not just the one selected — clearing them here clears them everywhere. "
+								: null}
+							{cleanDepth === "none"
+								? "Chats, spaces and memory live in the data folder and are NOT touched at this setting."
+								: "The encryption key is kept: it is node identity, and there is no way to re-encrypt data without it."}
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>

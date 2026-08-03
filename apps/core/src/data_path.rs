@@ -250,11 +250,22 @@ fn copy_tree_filtered(
 /// `home_dir().join(".shadow")` — so clearing them affects EVERY profile on the
 /// machine, not just this one. That is why they are opt-in and called out
 /// separately rather than folded into the reset.
-pub fn auxiliary_roots(home: &Path, config_dir: Option<&Path>, suffix: &str) -> Vec<(String, PathBuf)> {
-    let mut out = vec![
-        ("shadow captures (all profiles)".to_string(), home.join(".shadow")),
-        ("ghost state (all profiles)".to_string(), home.join(".ghost")),
-    ];
+pub fn auxiliary_roots(
+    home: &Path,
+    config_dir: Option<&Path>,
+    suffix: &str,
+    include_shared: bool,
+) -> Vec<(String, PathBuf)> {
+    // `~/.shadow` and `~/.ghost` are NOT profile-suffixed, so they are opt-in:
+    // clearing them from one profile clears them for every profile on the machine.
+    let mut out = if include_shared {
+        vec![
+            ("shadow captures (all profiles)".to_string(), home.join(".shadow")),
+            ("ghost state (all profiles)".to_string(), home.join(".ghost")),
+        ]
+    } else {
+        Vec::new()
+    };
     if let Some(config) = config_dir {
         out.push((
             "gateway config + data-path pointer".to_string(),
@@ -264,14 +275,95 @@ pub fn auxiliary_roots(home: &Path, config_dir: Option<&Path>, suffix: &str) -> 
     out
 }
 
+/// How much of a profile's DATA dir a clean removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanDepth {
+    /// Leave the data dir alone entirely — only the auxiliary roots go. This is
+    /// what "deep clean" meant before it grew a profile axis.
+    None,
+    /// Clear the data dir but KEEP the multi-GB downloads (`bin/`, `models/`), so
+    /// the next start does not re-fetch engines and models.
+    State,
+    /// Remove the data dir outright — the fresh-install path.
+    Full,
+}
+
+/// Remove a profile's data dir to the requested depth. Returns what was removed.
+///
+/// Deliberately does NOT touch the master key, in either the keychain or
+/// `master.key`. A node reset preserves it for the same reason: the key is node
+/// IDENTITY, and removing it while any sealed data survives anywhere makes that
+/// data permanently unreadable with no rekey path. Clearing a profile's data is
+/// recoverable by re-syncing; losing its key is not.
+pub fn clean_profile_data(home: &Path, suffix: &str, depth: CleanDepth) -> Vec<String> {
+    if depth == CleanDepth::None {
+        return Vec::new();
+    }
+    let dir = home.join(format!(".ryu{suffix}"));
+    if !dir.exists() {
+        return Vec::new();
+    }
+    // Same containment rule as everything else here: computed from a home dir and
+    // a suffix, so a bug in either must not aim a recursive delete elsewhere.
+    if dir.strip_prefix(home).map(|r| r.components().count()) != Ok(1) {
+        eprintln!("data-path clean: refusing {} (outside home)", dir.display());
+        return Vec::new();
+    }
+    let mut removed = Vec::new();
+    match depth {
+        CleanDepth::None => {}
+        CleanDepth::Full => {
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                removed.push(format!("data dir (full) — {}", dir.display()));
+            }
+        }
+        CleanDepth::State => {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                return removed;
+            };
+            let mut cleared = 0usize;
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                // The multi-GB downloads survive a `state` clean — re-fetching an
+                // engine is the slowest possible way to get back to a clean node.
+                if name == "bin" || name == "models" || name == "master.key" {
+                    continue;
+                }
+                let path = entry.path();
+                let ok = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    std::fs::remove_dir_all(&path).is_ok()
+                } else {
+                    std::fs::remove_file(&path).is_ok()
+                };
+                if ok {
+                    cleared += 1;
+                }
+            }
+            if cleared > 0 {
+                removed.push(format!(
+                    "data dir ({cleared} entries, kept bin/models) — {}",
+                    dir.display()
+                ));
+            }
+        }
+    }
+    removed
+}
+
 /// Remove the auxiliary roots above. Returns what was actually removed.
 ///
 /// Every path is re-checked against `$HOME` before deletion: these are computed
 /// from a home dir and a profile suffix, and a bug in either would otherwise aim a
 /// recursive delete somewhere arbitrary.
-pub fn deep_clean(home: &Path, config_dir: Option<&Path>, suffix: &str) -> Vec<String> {
+pub fn deep_clean(
+    home: &Path,
+    config_dir: Option<&Path>,
+    suffix: &str,
+    include_shared: bool,
+) -> Vec<String> {
     let mut removed = Vec::new();
-    for (label, path) in auxiliary_roots(home, config_dir, suffix) {
+    for (label, path) in auxiliary_roots(home, config_dir, suffix, include_shared) {
         if !path.exists() {
             continue;
         }
@@ -555,8 +647,27 @@ pub fn run_cli(args: &[String]) -> bool {
         // are shared by EVERY profile on the machine.
         "deep-clean" => {
             let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-            let suffix = crate::profile::suffix();
-            let removed = deep_clean(&home, dirs::config_dir().as_deref(), &suffix);
+            // Defaults preserve the original behaviour exactly: THIS profile, no
+            // data touched, shared roots included.
+            let profile = flag("--profile").unwrap_or_else(|| crate::profile::profile().to_string());
+            let suffix = crate::profile::suffix_for(&profile);
+            let depth = match flag("--depth").as_deref() {
+                None | Some("none") => CleanDepth::None,
+                Some("state") => CleanDepth::State,
+                Some("full") => CleanDepth::Full,
+                Some(other) => {
+                    eprintln!("data-path deep-clean: --depth must be none|state|full (got '{other}')");
+                    std::process::exit(2);
+                }
+            };
+            let include_shared = !rest.iter().any(|a| a == "--no-shared");
+            let mut removed = clean_profile_data(&home, &suffix, depth);
+            removed.extend(deep_clean(
+                &home,
+                dirs::config_dir().as_deref(),
+                &suffix,
+                include_shared,
+            ));
             if removed.is_empty() {
                 println!("nothing to remove");
             }
@@ -871,7 +982,7 @@ mod tests {
     fn deep_clean_targets_the_roots_a_node_reset_never_reaches() {
         let home = std::path::Path::new("/home/tester");
         let config = std::path::Path::new("/home/tester/.config");
-        let roots = auxiliary_roots(home, Some(config), "-canary");
+        let roots = auxiliary_roots(home, Some(config), "-canary", true);
         let paths: Vec<String> = roots
             .iter()
             .map(|(_, p)| p.to_string_lossy().into_owned())
@@ -898,7 +1009,7 @@ mod tests {
         // Must survive: not one of the auxiliary roots.
         std::fs::create_dir_all(home.join(".ryu")).unwrap();
 
-        let removed = deep_clean(&home, Some(&config), "");
+        let removed = deep_clean(&home, Some(&config), "", true);
         assert_eq!(removed.len(), 3, "shadow + ghost + config dir");
         assert!(!home.join(".shadow").exists());
         assert!(!home.join(".ghost").exists());
@@ -909,7 +1020,62 @@ mod tests {
         );
 
         // Second run is a no-op rather than an error.
-        assert!(deep_clean(&home, Some(&config), "").is_empty());
+        assert!(deep_clean(&home, Some(&config), "", true).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Shared roots are opt-OUT because they are not profile-scoped: clearing
+    /// them from one profile clears them for every profile on the machine.
+    #[test]
+    fn shared_roots_can_be_excluded_while_the_config_dir_still_goes() {
+        let home = std::path::Path::new("/home/t");
+        let config = std::path::Path::new("/home/t/.config");
+        let with = auxiliary_roots(home, Some(config), "-dev", true);
+        let without = auxiliary_roots(home, Some(config), "-dev", false);
+        assert_eq!(with.len(), 3);
+        assert_eq!(without.len(), 1, "only the profile-scoped config dir remains");
+        assert!(without[0].1.ends_with("ryu-dev"));
+    }
+
+    /// `state` keeps the multi-GB downloads; `full` does not. Re-fetching an
+    /// engine is the slowest possible route back to a clean node.
+    #[test]
+    fn a_state_clean_keeps_the_downloads_and_a_full_clean_does_not() {
+        let base = std::env::temp_dir().join(format!("ryu-cd-{}", uniq()));
+        let home = base.join("home");
+        let dir = home.join(".ryu-canary");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("models")).unwrap();
+        std::fs::create_dir_all(dir.join("plugins")).unwrap();
+        std::fs::write(dir.join("conversations.db"), b"db").unwrap();
+        std::fs::write(dir.join("bin/ryu-core"), b"ELF").unwrap();
+        std::fs::write(dir.join("master.key"), b"key").unwrap();
+
+        assert!(!clean_profile_data(&home, "-canary", CleanDepth::State).is_empty());
+        assert!(dir.join("bin/ryu-core").exists(), "bin survives a state clean");
+        assert!(dir.join("models").exists(), "models survive a state clean");
+        assert!(
+            dir.join("master.key").exists(),
+            "the key is node identity and must survive — there is no rekey path"
+        );
+        assert!(!dir.join("conversations.db").exists());
+        assert!(!dir.join("plugins").exists());
+
+        assert!(!clean_profile_data(&home, "-canary", CleanDepth::Full).is_empty());
+        assert!(!dir.exists(), "full removes the data dir outright");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The default depth touches no data at all — the original behaviour before
+    /// deep clean grew a profile axis.
+    #[test]
+    fn depth_none_never_touches_the_data_dir() {
+        let base = std::env::temp_dir().join(format!("ryu-cdn-{}", uniq()));
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join(".ryu/plugins")).unwrap();
+        assert!(clean_profile_data(&home, "", CleanDepth::None).is_empty());
+        assert!(home.join(".ryu/plugins").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 

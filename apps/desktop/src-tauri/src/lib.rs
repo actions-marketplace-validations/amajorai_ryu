@@ -549,11 +549,27 @@ async fn run_data_path_subcommand(
 async fn deep_clean_node(
 	app: tauri::AppHandle,
 	state: tauri::State<'_, CoreState>,
+	profile: Option<String>,
+	depth: Option<String>,
+	shared: Option<bool>,
 ) -> Result<(), String> {
 	let binary =
 		resolve_core_binary().ok_or_else(|| "Could not find ryu-core binary.".to_string())?;
 	stop_core_and_wait(&state).await?;
-	let args = vec!["data-path".to_string(), "deep-clean".to_string()];
+	let mut args = vec!["data-path".to_string(), "deep-clean".to_string()];
+	// Passed EXPLICITLY rather than letting the child infer the profile from its
+	// inherited env — the same trap `copy_data_folder_to_profile` avoids. A user
+	// cleaning `canary` from a release app must not have the child resolve
+	// `release` because that is what RYU_PROFILE happened to say.
+	args.push("--profile".to_string());
+	args.push(profile.unwrap_or_else(crate::profile::name));
+	args.push("--depth".to_string());
+	args.push(depth.unwrap_or_else(|| "none".to_string()));
+	// Shared roots default to INCLUDED, matching the previous behaviour; an
+	// explicit false opts out.
+	if shared == Some(false) {
+		args.push("--no-shared".to_string());
+	}
 	run_data_path_subcommand(&app, &binary, &args).await
 }
 

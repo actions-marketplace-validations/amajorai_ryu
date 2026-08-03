@@ -27,10 +27,15 @@
 # download at install time, which reads to the user as a broken updater rather
 # than a missing build.
 #
-# Usage: assemble-channel-feed.sh <channel> <version> [repo]
-#   channel  rolling tag + feed name (nightly | canary)
-#   version  the version this build stamped (e.g. 0.0.18-nightly.20260802.23)
-#   repo     owner/name, defaults to $GITHUB_REPOSITORY
+# Usage: assemble-channel-feed.sh <channel> <version> [repo] [release-tag]
+#   channel      rolling tag + feed name (nightly | canary), or `stable`
+#   version      the version this build stamped (e.g. 0.0.18-nightly.20260802.23)
+#   repo         owner/name, defaults to $GITHUB_REPOSITORY
+#   release-tag  the tag to READ assets from and publish to. Defaults to <channel>
+#                (correct for the rolling channels, whose tag IS the channel name).
+#                `stable` has no rolling tag, so it MUST be given one — e.g.
+#                `assemble-channel-feed.sh stable 0.1.0 amajorai/ryu v0.1.0`,
+#                which writes `latest.json`, the feed tauri.conf.json points at.
 set -euo pipefail
 
 channel="${1:?usage: assemble-channel-feed.sh <channel> <version> [repo]}"
@@ -40,8 +45,20 @@ repo="${3:-${GITHUB_REPOSITORY:?missing repo}}"
 # Only the rolling channels have their own build train. `beta` deliberately has
 # none and keeps falling back to the Stable feed, so refuse it here rather than
 # publishing an empty feed that would silently stop offering updates.
+release_tag="${4:-$channel}"
+
+# `stable` is the app's own updater feed (`latest.json`), so it is named
+# differently and cannot infer its tag — a stable release has a real version tag,
+# not a rolling pointer.
 case "$channel" in
-	nightly | canary) ;;
+	nightly | canary) feed_name="latest-$channel.json" ;;
+	stable)
+		feed_name="latest.json"
+		if [ "$release_tag" = "stable" ]; then
+			echo "assemble-channel-feed: 'stable' needs an explicit release tag" >&2
+			exit 1
+		fi
+		;;
 	*)
 		echo "assemble-channel-feed: '$channel' has no rolling build train" >&2
 		exit 1
@@ -51,7 +68,7 @@ esac
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-assets="$(gh release view "$channel" -R "$repo" --json assets --jq '.assets[].name')"
+assets="$(gh release view "$release_tag" -R "$repo" --json assets --jq '.assets[].name')"
 
 # Map a Tauri updater platform key to the artifact that serves it. macOS ships
 # the updater bundle as `.app.tar.gz`; the two arch legs would otherwise both be
@@ -59,7 +76,19 @@ assets="$(gh release view "$channel" -R "$repo" --json assets --jq '.assets[].na
 # workflow renames them per-arch before upload and we match that here.
 platform_artifact() {
 	case "$1" in
-		darwin-aarch64) echo 'Ryu-aarch64.app.tar.gz' ;;
+		# Every workflow renames per-arch before upload (two macOS legs would
+		# otherwise both be `Ryu.app.tar.gz` and clobber each other, losing one
+		# arch's updater bundle on every run). The un-suffixed fallback is for
+		# releases cut BEFORE that rename existed — v0.1.0 and earlier carry a
+		# single bundle, and treating it as aarch64 is right because macos-latest
+		# builds ARM. New releases populate both entries.
+		darwin-aarch64)
+			if echo "$assets" | grep -qxF 'Ryu-aarch64.app.tar.gz'; then
+				echo 'Ryu-aarch64.app.tar.gz'
+			else
+				echo 'Ryu.app.tar.gz'
+			fi
+			;;
 		darwin-x86_64) echo 'Ryu-x86_64.app.tar.gz' ;;
 		# Linux and Windows are single-arch in the rolling matrix. Matched by
 		# suffix because the filename carries the version, which changes per build.
@@ -78,7 +107,7 @@ found=0
 for key in darwin-aarch64 darwin-x86_64 linux-x86_64 windows-x86_64; do
 	artifact="$(platform_artifact "$key")"
 	if [ -z "$artifact" ]; then
-		echo "  - $key: no artifact on the '$channel' release — omitted" >&2
+		echo "  - $key: no artifact on the '$release_tag' release — omitted" >&2
 		continue
 	fi
 	if ! echo "$assets" | grep -qxF "$artifact"; then
@@ -93,9 +122,9 @@ for key in darwin-aarch64 darwin-x86_64 linux-x86_64 windows-x86_64; do
 		continue
 	fi
 
-	gh release download "$channel" -R "$repo" -p "$artifact.sig" -D "$work" --clobber
+	gh release download "$release_tag" -R "$repo" -p "$artifact.sig" -D "$work" --clobber
 	signature="$(cat "$work/$artifact.sig")"
-	url="https://github.com/$repo/releases/download/$channel/$artifact"
+	url="https://github.com/$repo/releases/download/$release_tag/$artifact"
 
 	entry="$(jq -n --arg sig "$signature" --arg url "$url" \
 		'{signature: $sig, url: $url}')"
@@ -111,11 +140,11 @@ done
 if [ "$found" -eq 0 ]; then
 	# Publishing an empty feed would make the updater report "no update" forever.
 	# Leaving the previous feed in place keeps the last good build on offer.
-	echo "assemble-channel-feed: no signed artifacts for '$channel' — leaving the existing feed untouched" >&2
+	echo "assemble-channel-feed: no signed artifacts on '$release_tag' — leaving the existing feed untouched" >&2
 	exit 0
 fi
 
-out="$work/latest-$channel.json"
+out="$work/$feed_name"
 jq -n \
 	--arg version "$version" \
 	--arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -123,5 +152,5 @@ jq -n \
 	'{version: $version, pub_date: $pub_date, platforms: $platforms}' >"$out"
 
 cat "$out" >&2
-gh release upload "$channel" -R "$repo" "$out" --clobber
-echo "assemble-channel-feed: published latest-$channel.json ($found platform(s))" >&2
+gh release upload "$release_tag" -R "$repo" "$out" --clobber
+echo "assemble-channel-feed: published $feed_name on $release_tag ($found platform(s))" >&2

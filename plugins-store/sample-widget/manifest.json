@@ -13,6 +13,7 @@
     "web": { "support": "full" },
     "cli": { "support": "list" }
   },
+  "engines": { "ryu": ">=0.1.0" },
   "runnables": [],
   "permission_grants": ["widget:render"],
   "mcp_servers": {

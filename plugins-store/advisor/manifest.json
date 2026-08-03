@@ -13,6 +13,7 @@
     "web": { "support": "full" },
     "cli": { "support": "full" }
   },
+  "engines": { "ryu": ">=0.1.0" },
   "runnables": [
     {
       "id": "tool-advisor-consult",

@@ -12,6 +12,7 @@
     "web": { "support": "full" },
     "cli": { "support": "full" }
   },
+  "engines": { "ryu": ">=0.1.0" },
   "runnables": [],
   "permission_grants": [],
   "activation_events": ["*"],

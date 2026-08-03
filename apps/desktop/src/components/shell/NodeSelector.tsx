@@ -641,9 +641,15 @@ export function AddNodeDialog({
 	};
 
 	const handleAddDiscovered = async (node: DiscoveredNode) => {
-		// Derive a stable, valid node name from the host octet of the URL.
-		const host = node.url.replace(URL_SCHEME, "").split(":")[0] ?? "node";
-		const discoveredName = `node-${host.replace(/\./g, "-")}`;
+		// Name from host AND profile. Host alone was enough while discovery swept a
+		// single port; now that every profile's port is swept, one machine can
+		// return several nodes and a host-only name would collide — the canary node
+		// would silently fail to add because release already took the name.
+		const hostPort = node.url.replace(URL_SCHEME, "");
+		const host = hostPort.split(":")[0] ?? "node";
+		const suffix =
+			node.profile && node.profile !== "release" ? `-${node.profile}` : "";
+		const discoveredName = `node-${host.replace(/\./g, "-")}${suffix}`;
 		try {
 			await addNode(discoveredName, node.url);
 		} catch {
@@ -2201,9 +2207,13 @@ function LayersSection({
 	);
 }
 
-/** A reachable Core found by the LAN sweep (mirrors the Rust DiscoveredNode). */
+/** A reachable Core found by the sweep (mirrors the Rust DiscoveredNode). */
 interface DiscoveredNode {
 	latency_ms: number;
+	/** Which profile answered, derived from the PORT it was found on. Discovery
+	 *  now sweeps every profile's port, so one host can legitimately return
+	 *  several nodes and they must be distinguishable. */
+	profile?: string;
 	url: string;
 }
 

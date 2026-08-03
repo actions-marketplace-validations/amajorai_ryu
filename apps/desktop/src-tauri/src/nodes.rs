@@ -26,6 +26,10 @@ pub struct NodeStatus {
 pub struct DiscoveredNode {
 	pub url: String,
 	pub latency_ms: u64,
+	/// Which profile's Core answered — derived from the PORT it was found on, not
+	/// from anything the node reports. A stable desktop discovering a canary node
+	/// needs to say so, or two entries differing only by port read as duplicates.
+	pub profile: String,
 }
 
 // Port Core listens on (the LAN sweep target). Profile-aware so a dev variant
@@ -265,28 +269,48 @@ pub async fn discover_lan_nodes() -> Result<Vec<DiscoveredNode>, String> {
 		.build()
 		.map_err(|e| e.to_string())?;
 
-	let core_port = crate::profile::core_port();
+	// EVERY profile's port, not just our own. Sweeping a single port meant a
+	// stable desktop (:7980) could never see a canary node (:9980) — not even on
+	// this machine — so "use a stable app against a canary node" was impossible to
+	// set up without hand-entering the URL.
 	let mut tasks = tokio::task::JoinSet::new();
-	for host_octet in 1u8..=MAX_SWEEP_HOSTS {
-		let host = format!("{prefix}.{host_octet}");
-		if host == own_ip {
-			continue;
-		}
+	for (profile, offset) in crate::profile::PROFILE_PORT_OFFSETS {
+		let port = crate::profile::CORE_BASE_PORT.saturating_add(*offset);
+		// Localhost first and always: the common case is a second profile running
+		// on THIS machine, which the /24 sweep skips (it excludes our own IP).
 		let c = client.clone();
+		let p = (*profile).to_string();
 		tasks.spawn(async move {
-			let latency = probe(&c, &host, core_port).await;
-			(host, latency)
+			let latency = probe(&c, "127.0.0.1", port).await;
+			("127.0.0.1".to_string(), port, p, latency)
 		});
+		for host_octet in 1u8..=MAX_SWEEP_HOSTS {
+			let host = format!("{prefix}.{host_octet}");
+			if host == own_ip {
+				continue;
+			}
+			let c = client.clone();
+			let p = (*profile).to_string();
+			tasks.spawn(async move {
+				let latency = probe(&c, &host, port).await;
+				(host, port, p, latency)
+			});
+		}
 	}
 
 	let mut found: Vec<DiscoveredNode> = Vec::new();
-	while let Some(Ok((host, Some(latency_ms)))) = tasks.join_next().await {
+	while let Some(Ok((host, port, profile, Some(latency_ms)))) = tasks.join_next().await {
 		found.push(DiscoveredNode {
-			url: format!("http://{host}:{core_port}"),
+			url: format!("http://{host}:{port}"),
 			latency_ms,
+			profile,
 		});
 	}
 
+	// Deduplicate: 127.0.0.1 and this machine's LAN address can both answer for the
+	// same Core, and listing one node twice reads as two nodes.
+	found.sort_by(|a, b| a.url.cmp(&b.url));
+	found.dedup_by(|a, b| a.url == b.url);
 	found.sort_by_key(|n| n.latency_ms);
 	Ok(found)
 }
@@ -294,6 +318,43 @@ pub async fn discover_lan_nodes() -> Result<Vec<DiscoveredNode>, String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Discovery must cover EVERY profile's port. Sweeping only our own meant a
+	/// stable desktop (:7980) could not see a canary node (:9980) even on this
+	/// machine, so "stable app against a canary node" could not be set up without
+	/// hand-entering a URL.
+	#[test]
+	fn every_profile_port_is_swept() {
+		let ports: Vec<u16> = crate::profile::PROFILE_PORT_OFFSETS
+			.iter()
+			.map(|(_, off)| crate::profile::CORE_BASE_PORT.saturating_add(*off))
+			.collect();
+		assert!(ports.contains(&7980), "release");
+		assert!(ports.contains(&8980), "dev");
+		assert!(ports.contains(&9980), "canary");
+		assert!(ports.contains(&10_980), "nightly");
+		assert!(ports.contains(&11_980), "beta");
+		// Distinct, or two profiles would be reported as one node.
+		let mut sorted = ports.clone();
+		sorted.sort_unstable();
+		sorted.dedup();
+		assert_eq!(sorted.len(), ports.len());
+	}
+
+	/// The profile is derived from the PORT, never from anything the node claims,
+	/// so a discovered entry can always be labelled.
+	#[test]
+	fn a_port_maps_back_to_exactly_one_profile() {
+		for (profile, offset) in crate::profile::PROFILE_PORT_OFFSETS {
+			let port = crate::profile::CORE_BASE_PORT.saturating_add(*offset);
+			let matches: Vec<&str> = crate::profile::PROFILE_PORT_OFFSETS
+				.iter()
+				.filter(|(_, o)| crate::profile::CORE_BASE_PORT.saturating_add(*o) == port)
+				.map(|(n, _)| *n)
+				.collect();
+			assert_eq!(matches, vec![*profile], "port {port} must name one profile");
+		}
+	}
 
 	#[test]
 	fn subnet_prefix_extracts_24() {

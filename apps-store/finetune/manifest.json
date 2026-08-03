@@ -12,6 +12,7 @@
     "web": { "support": "full" },
     "cli": { "support": "list" }
   },
+  "engines": { "ryu": ">=0.1.0" },
   "runnables": [
     {
       "id": "finetune-companion",

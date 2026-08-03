@@ -1,8 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-// Core port Core listens on.
+// Core port Core listens on (the release profile).
 const CORE_PORT: u16 = 7980;
+
+/// Every profile's Core port, mirroring `apps/core/src/profile.rs`'s
+/// PROFILE_PORT_OFFSETS (release +0, dev +1000, canary +2000, nightly +3000,
+/// beta +4000).
+///
+/// Discovery swept ONE port — whichever profile the caller was on — so a stable
+/// client could never find a canary node, not even on this machine. Listing them
+/// here rather than importing keeps `apps/cli` free of a dependency on Core, at
+/// the cost of a table that must move with it; `profile_ports_match_cores_table`
+/// pins the values.
+const PROFILE_PORTS: [(&str, u16); 5] = [
+    ("release", 7980),
+    ("dev", 8980),
+    ("canary", 9980),
+    ("nightly", 10_980),
+    ("beta", 11_980),
+];
 // Bounded sweep: probe at most this many hosts per run to keep latency below ~3 s.
 const MAX_SWEEP_HOSTS: u8 = 254;
 // Per-host connection timeout in milliseconds.
@@ -208,7 +225,12 @@ fn local_ipv4() -> Option<String> {
 /// 1-254) and returns every responding node sorted by ascending latency.
 /// The caller's own address is always excluded.
 pub async fn discover_lan(port: Option<u16>) -> Vec<DiscoveredNode> {
-    let port = port.unwrap_or(CORE_PORT);
+    // An explicit port means "only this one". Otherwise sweep EVERY profile's
+    // port, so a stable client can discover a canary node.
+    let ports: Vec<u16> = match port {
+        Some(p) => vec![p],
+        None => PROFILE_PORTS.iter().map(|(_, p)| *p).collect(),
+    };
     let own_ip = local_ipv4().unwrap_or_default();
     let prefix = match local_ipv4().and_then(|ip| subnet_prefix(&ip)) {
         Some(p) => p,
@@ -221,26 +243,38 @@ pub async fn discover_lan(port: Option<u16>) -> Vec<DiscoveredNode> {
         .unwrap_or_default();
 
     let mut tasks = tokio::task::JoinSet::new();
-    for host_octet in 1u8..=MAX_SWEEP_HOSTS {
-        let host = format!("{prefix}.{host_octet}");
-        if host == own_ip {
-            continue;
-        }
+    for port in ports {
+        // Localhost first: the common case is a second profile on THIS machine,
+        // which the /24 sweep skips because it excludes our own address.
         let c = client.clone();
         tasks.spawn(async move {
-            let latency = probe(&c, &host, port).await;
-            (host, latency)
+            let latency = probe(&c, "127.0.0.1", port).await;
+            ("127.0.0.1".to_string(), port, latency)
         });
+        for host_octet in 1u8..=MAX_SWEEP_HOSTS {
+            let host = format!("{prefix}.{host_octet}");
+            if host == own_ip {
+                continue;
+            }
+            let c = client.clone();
+            tasks.spawn(async move {
+                let latency = probe(&c, &host, port).await;
+                (host, port, latency)
+            });
+        }
     }
 
     let mut found: Vec<DiscoveredNode> = Vec::new();
-    while let Some(Ok((host, Some(latency_ms)))) = tasks.join_next().await {
+    while let Some(Ok((host, port, Some(latency_ms)))) = tasks.join_next().await {
         found.push(DiscoveredNode {
             url: format!("http://{host}:{port}"),
             latency_ms,
         });
     }
 
+    // The same Core can answer on both 127.0.0.1 and this host's LAN address.
+    found.sort_by(|a, b| a.url.cmp(&b.url));
+    found.dedup_by(|a, b| a.url == b.url);
     found.sort_by_key(|n| n.latency_ms);
     found
 }
@@ -421,4 +455,36 @@ mod tests {
         let chosen = select_preferred(&nodes, &[true, true]);
         assert_eq!(chosen.name, "remote");
     }
+
+    /// `apps/cli` deliberately does not depend on Core, so PROFILE_PORTS is a
+    /// hand-copied mirror of `apps/core/src/profile.rs`'s PROFILE_PORT_OFFSETS.
+    /// Pin the values, or the table drifts silently and discovery quietly stops
+    /// finding a profile.
+    #[test]
+    fn profile_ports_match_cores_table() {
+        assert_eq!(
+            PROFILE_PORTS,
+            [
+                ("release", 7980u16),
+                ("dev", 8980),
+                ("canary", 9980),
+                ("nightly", 10_980),
+                ("beta", 11_980),
+            ]
+        );
+        // The release entry must equal the single-port default, or an explicit
+        // `--port` sweep and the default sweep would disagree about release.
+        assert_eq!(PROFILE_PORTS[0].1, CORE_PORT);
+    }
+
+    /// Two profiles sharing a port would be reported as one node.
+    #[test]
+    fn every_profile_port_is_distinct() {
+        let mut ports: Vec<u16> = PROFILE_PORTS.iter().map(|(_, p)| *p).collect();
+        let n = ports.len();
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), n);
+    }
+
 }

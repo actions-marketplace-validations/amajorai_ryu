@@ -268,6 +268,8 @@ jobs:
           args: ${{ matrix.args }}
       - name: Collect desktop installers
         shell: bash
+        env:
+          TAURI_ARGS: ${{ matrix.args }}
         run: |
           set -euo pipefail
           mkdir -p dist-desktop
@@ -276,6 +278,23 @@ jobs:
                -o -name "*.msi" -o -name "*-setup.exe" -o -name "*.app.tar.gz" \
                -o -name "*.sig" \) \
             -not -path "*deps*" -exec cp {} dist-desktop/ \; || true
+          # macOS names the updater bundle `Ryu.app.tar.gz` with NO arch in it, so
+          # the aarch64 and x86_64 legs upload the SAME filename and `--clobber`
+          # keeps only whichever finished last. One arch's updater bundle was lost
+          # on every release, which is why `latest.json` could only ever carry
+          # darwin-aarch64 and Intel Macs were offered no update at all. Stamp the
+          # arch in so both survive. (.dmg/.exe/.AppImage already carry arch or are
+          # single-arch.) Matches the rolling canary/nightly workflows.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            case "$TAURI_ARGS" in
+              *aarch64-apple-darwin*) arch=aarch64 ;;
+              *) arch=x86_64 ;;
+            esac
+            for f in dist-desktop/Ryu.app.tar.gz dist-desktop/Ryu.app.tar.gz.sig; do
+              [ -e "$f" ] || continue
+              mv "$f" "${f/Ryu.app.tar.gz/Ryu-$arch.app.tar.gz}"
+            done
+          fi
           ls -la dist-desktop || true
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
@@ -534,3 +553,34 @@ jobs:
           files=(dist/*)
           if [ ${#files[@]} -eq 0 ]; then echo "no files in dist/ to upload" >&2; exit 1; fi
           gh release upload "$TAG" "${files[@]}" --clobber
+
+  # ── Updater feed ────────────────────────────────────────────────────────────
+  # Assembles `latest.json` from the signed artifacts the desktop job just
+  # uploaded. Without this a release ships installers and `.sig` files but NO
+  # feed, so `tauri.conf.json`'s updater endpoint 404s and the app can never
+  # self-update — which is exactly what happened to every release from v0.0.2
+  # through v0.1.0.
+  #
+  # It cannot be part of the desktop job: that job is a MATRIX, and the feed needs
+  # every platform's artifact present before it can be written.
+  #
+  # `if: always()` is deliberate — one platform failing should still publish a feed
+  # for the platforms that did build, rather than leaving users on a stale one. The
+  # script omits any platform whose `.sig` is missing and refuses to publish an
+  # empty feed at all.
+  updater-feed:
+    needs: desktop
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Assemble and publish latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          bash scripts/release/assemble-channel-feed.sh \
+            stable "$version" "${{ github.repository }}" "$TAG"

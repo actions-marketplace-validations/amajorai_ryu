@@ -16,7 +16,7 @@
     "cli": { "support": "list" }
   },
   "engines": {
-    "ryu": ">=0.0.1"
+    "ryu": ">=0.1.0"
   },
   "runnables": [
     {
