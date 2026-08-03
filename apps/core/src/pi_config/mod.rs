@@ -30,6 +30,10 @@ use serde_json::{json, Map, Value};
 /// models.dev-backed dynamic model catalog (replaces hardcoded model lists).
 pub(crate) mod models_dev;
 
+/// Plugin-contributed Pi extensions (`contributes.pi_extensions`) — the resolver
+/// and privilege gate behind [`sync_app_pi_extensions`].
+pub mod app_extensions;
+
 /// Ryu-namespaced settings key recording whether the managed Pi routes through
 /// the Gateway. Pi ignores unknown settings keys, so this rides along safely in
 /// `settings.json` and survives round-trips.
@@ -537,11 +541,26 @@ pub fn ensure_managed_defaults() -> Result<()> {
         write_settings(&settings)?;
     }
     ensure_gateway_models_json()?;
+    // The three extensions that CANNOT become plugins. Each `ensure_pi_*` fn's own
+    // doc says why in full; in one line each:
+    //
+    // - `ryu-mcp` is the flagship agent's ONLY road to Ryu's tools (pi-acp advertises
+    //   no MCP-server support), so a toggle for it would be a switch that silently
+    //   strips every tool from the default agent.
+    // - `ryu-lsp` IS the binding for `contributes.lsp_servers`; shipping it
+    //   conditionally would let a node declare language servers with nothing to run
+    //   them.
+    // - `ryu-plan` owns the `/plan` sentinel grammar that `plan_mode_sentinel` is
+    //   pinned against at compile time, and the plan pill is advertised on
+    //   "this is the managed Pi", not "the plan extension is installed" — so a
+    //   disabled plan plugin would leave a literal `/plan` reaching the model on
+    //   every turn.
+    //
+    // Everything else Pi omits by design (background bash, sub-agents) now ships as
+    // a plugin through `contributes.pi_extensions`; see [`app_extensions`].
     ensure_pi_mcp_extension()?;
     ensure_pi_lsp_extension()?;
-    ensure_pi_plan_extension()?;
-    ensure_pi_subagent_extension()?;
-    ensure_pi_shell_extension()
+    ensure_pi_plan_extension()
 }
 
 /// The Ryu-MCP Pi extension source, embedded into the Core binary so it ships
@@ -721,57 +740,15 @@ pub fn plan_mode_sentinel(on: bool) -> &'static str {
     }
 }
 
-/// The Ryu-Subagent Pi extension source, embedded for the same reason as
-/// [`PI_MCP_EXTENSION_SRC`]. Pi ships no sub-agents either — same sentence of
-/// `pi/docs/usage.md:309` quoted on [`PI_PLAN_EXTENSION_SRC`] — so the flagship
-/// agent had no way to delegate a bounded, context-isolated job to a child while
-/// every other ACP agent Ryu speaks to does. The extension registers a tool named
-/// exactly `Task`, which is what lands it on the desktop's existing subagent card
-/// and Cowork rail with zero client changes (`acp_tool_ui_name`'s `KNOWN_TOOLS`
-/// match on the ACP title, which pi-acp sets to the raw Pi tool name).
-///
-/// Unlike [`PI_LSP_EXTENSION_SRC`], an absent config here is NOT a no-op: the
-/// extension carries a built-in agent set and the optional
-/// `extensions/ryu-subagents.json` only overrides it. That asymmetry is
-/// deliberate and is documented in the file's own preamble — an LSP tool with no
-/// server is useless, whereas a subagent with default personas is immediately so.
-const PI_SUBAGENT_EXTENSION_SRC: &str = include_str!("../../assets/pi-extensions/ryu-subagent.ts");
-
-/// Absolute path to the managed Pi's Ryu-Subagent extension file. Same folder and
-/// same registration rules as [`pi_mcp_extension_path`].
-fn pi_subagent_extension_path() -> PathBuf {
-    config_dir().join("extensions").join("ryu-subagent.ts")
-}
-
-/// Ship + register the Ryu-Subagent Pi extension into the MANAGED Pi config, with
-/// the same idempotency guarantees as [`ensure_pi_mcp_extension`].
-fn ensure_pi_subagent_extension() -> Result<()> {
-    ship_pi_extension(&pi_subagent_extension_path(), PI_SUBAGENT_EXTENSION_SRC)
-}
-
-/// The Ryu-Shell Pi extension source, embedded for the same reason as
-/// [`PI_MCP_EXTENSION_SRC`]. Background bash is the last of the capabilities
-/// `pi/docs/usage.md:309` says Pi intentionally omits. Pi's built-in `bash` is
-/// synchronous — it holds the turn open for the whole command — so "start the dev
-/// server, then edit a file" was impossible on the flagship agent. This extension
-/// adds `bash_background` / `bash_output` / `bash_kill` beside it.
-///
-/// It deliberately does NOT replace the built-in `bash` tool, and none of its
-/// three tool names may ever be `bash`: pi-acp special-cases that exact name and
-/// would hijack the call into terminal rendering and drop `rawOutput` entirely.
-const PI_SHELL_EXTENSION_SRC: &str = include_str!("../../assets/pi-extensions/ryu-shell.ts");
-
-/// Absolute path to the managed Pi's Ryu-Shell extension file. Same folder and
-/// same registration rules as [`pi_mcp_extension_path`].
-fn pi_shell_extension_path() -> PathBuf {
-    config_dir().join("extensions").join("ryu-shell.ts")
-}
-
-/// Ship + register the Ryu-Shell Pi extension into the MANAGED Pi config, with the
-/// same idempotency guarantees as [`ensure_pi_mcp_extension`].
-fn ensure_pi_shell_extension() -> Result<()> {
-    ship_pi_extension(&pi_shell_extension_path(), PI_SHELL_EXTENSION_SRC)
-}
+// `ryu-subagent.ts` and `ryu-shell.ts` used to be embedded here and shipped
+// unconditionally by the chain above. They now live in their own packages
+// (`plugins-store/pi-subagent`, `plugins-store/pi-shell`) as
+// `contributes.pi_extensions` rows, and reach the managed Pi dir through
+// [`sync_app_pi_extensions`] instead. Both are Core-tier + default-on, so the
+// out-of-the-box agent is unchanged; what is new is that a user can turn either
+// off. Do NOT re-add an `ensure_pi_*_extension` for them: the plugin path is the
+// one with a removal half, and a compiled-in copy would win the file back on the
+// next spawn after a disable.
 
 /// Write `src` to `ext_path` and register that absolute path in the managed
 /// `settings.json`'s `extensions` array — the shared body of every Ryu-owned Pi
@@ -852,14 +829,186 @@ pub fn write_lsp_servers_file(resolution: &crate::lsp::LspResolution) -> Result<
     }
 }
 
+/// The managed Pi's extensions folder — the single directory every Ryu-owned
+/// extension (compiled-in and plugin-contributed alike) is written into, and the
+/// one Pi auto-discovers.
+fn pi_extensions_dir() -> PathBuf {
+    config_dir().join("extensions")
+}
+
+/// Project a resolved plugin-extension set onto the managed Pi's `extensions/`
+/// folder: write what is enabled, delete what is not, and prune `settings.json` to
+/// match.
+///
+/// The binding half of [`app_extensions`], and the reason enable/disable is ONE
+/// reconcile rather than two symmetric hooks: two call sites drift, and the removal
+/// half is the one that actually matters. Pi auto-discovers this directory, so an
+/// orphaned file from an uninstalled plugin keeps loading forever — the plugin is
+/// gone from the Store and its tools are still on the agent.
+///
+/// Three steps, and the ownership rule that makes them safe:
+///
+/// 1. **Write-if-different**, matching [`ship_pi_extension`]'s idempotency — this
+///    runs on every managed-Pi spawn, so an unchanged node must not churn disk.
+/// 2. **Delete every `ext-*.ts` not in the resolution.** Only that prefix
+///    ([`app_extensions::APP_EXTENSION_PREFIX`]) is touched, which is what keeps the
+///    compiled-in `ryu-*.ts` files and anything a user dropped in by hand out of
+///    reach of a resolution that came back empty.
+/// 3. **Prune `settings.json`'s `extensions` array** of any `ext-`-prefixed path
+///    under this folder that is no longer in the keep-set. [`ship_pi_extension`]
+///    only ever appends and whether Pi tolerates a dead absolute path there is
+///    unverified, so this is treated as required rather than cosmetic. Every other
+///    entry — the `ryu-*` paths, anything a user added — is preserved verbatim.
+///
+/// Registration is by directory auto-discovery AND by array entry, the same
+/// belt-and-suspenders [`ship_pi_extension`] uses (Pi dedups by resolved path).
+///
+/// Takes effect on the next Pi **process**, not the next turn; see the restart note
+/// on [`app_extensions`].
+pub fn sync_app_pi_extensions(resolution: &app_extensions::PiExtensionResolution) -> Result<()> {
+    let dir = pi_extensions_dir();
+    let keep = resolution.file_names();
+
+    // REMOVALS RUN FIRST, AND UNCONDITIONALLY. Adds used to come first and used to
+    // `?` on a failed write, which returned before this loop ever ran — so one
+    // unwritable extension meant a REVOKED plugin's `ext-*.ts` stayed on disk and
+    // kept executing inside Pi. The caller only warns, so that was silent. Removal
+    // is the half with a security consequence; a failed add is a feature that does
+    // not appear, and it must never be able to hold revocation hostage.
+    //
+    // A missing directory means there is nothing to remove, so an unreadable
+    // read_dir is not an error here.
+    let mut removal_error: Option<anyhow::Error> = None;
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let ours = name.starts_with(app_extensions::APP_EXTENSION_PREFIX)
+                && name.ends_with(".ts")
+                && !keep.contains(&name);
+            if !ours {
+                continue;
+            }
+            if let Err(e) = fs::remove_file(entry.path()) {
+                // Keep going: one undeletable file must not strand the others.
+                tracing::error!("pi extensions: could not remove revoked {name}: {e}");
+                removal_error.get_or_insert_with(|| anyhow::anyhow!("remove stale {name}: {e}"));
+            }
+        }
+    }
+
+    if !resolution.extensions.is_empty() {
+        fs::create_dir_all(&dir).context("create Pi extensions dir")?;
+    }
+    // Adds are best-effort per file for the same reason: one failure should not
+    // abort the rest of the reconcile, and must not skip the registration prune
+    // below, which is the other half of revocation.
+    let mut write_error: Option<anyhow::Error> = None;
+    for ext in &resolution.extensions {
+        let path = dir.join(&ext.file_name);
+        let needs_write = fs::read_to_string(&path)
+            .map(|existing| existing != ext.source)
+            .unwrap_or(true);
+        if !needs_write {
+            continue;
+        }
+        if let Err(e) = fs::write(&path, &ext.source) {
+            tracing::error!("pi extensions: could not write {}: {e}", path.display());
+            write_error.get_or_insert_with(|| anyhow::anyhow!("write {}: {e}", path.display()));
+        }
+    }
+
+    let prune = prune_app_extension_registrations(&dir, &keep);
+
+    // Surface a revocation failure ahead of an add failure: the caller logs one
+    // error, and "a revoked extension is still on disk" is the one worth reading.
+    if let Some(e) = removal_error {
+        return Err(e);
+    }
+    prune?;
+    if let Some(e) = write_error {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Drop `settings.json` `extensions` entries that name an `ext-*.ts` under `dir`
+/// which the current resolution no longer owns, and append the ones it does.
+///
+/// Split out from [`sync_app_pi_extensions`] so the array surgery — the part that
+/// must not touch a user's own entry — reads as one rule in one place.
+fn prune_app_extension_registrations(
+    dir: &std::path::Path,
+    keep: &std::collections::HashSet<String>,
+) -> Result<()> {
+    let mut settings = read_settings();
+    let entry = settings
+        .extra
+        .entry("extensions".to_owned())
+        .or_insert_with(|| json!([]));
+    if !entry.is_array() {
+        *entry = json!([]);
+    }
+    let Some(arr) = entry.as_array_mut() else {
+        return Ok(());
+    };
+
+    let before = arr.len();
+    arr.retain(|value| {
+        let Some(path) = value.as_str() else {
+            return true;
+        };
+        let candidate = std::path::Path::new(path);
+        // Only ever judge a path that lives in OUR folder and carries OUR prefix.
+        // Anything else — a user's own extension, a `ryu-*.ts` — is not ours to
+        // remove, whatever the resolution says.
+        let Some(name) = candidate
+            .parent()
+            .filter(|parent| *parent == dir)
+            .and_then(|_| candidate.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+        else {
+            return true;
+        };
+        if !name.starts_with(app_extensions::APP_EXTENSION_PREFIX) {
+            return true;
+        }
+        keep.contains(&name)
+    });
+
+    let existing: std::collections::HashSet<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let mut added = 0;
+    let mut names: Vec<&String> = keep.iter().collect();
+    names.sort();
+    for name in names {
+        let abs = dir.join(name).to_string_lossy().into_owned();
+        if !existing.contains(&abs) {
+            arr.push(Value::String(abs));
+            added += 1;
+        }
+    }
+
+    if arr.len() != before || added > 0 {
+        write_settings(&settings)?;
+    }
+    Ok(())
+}
+
 /// Persist a composer-picked model for the managed Pi (QA finding B2).
 ///
 /// pi-acp reports models as `"<provider>/<model-id>"` (split at the FIRST `/`,
 /// mirroring pi-acp's own `setSessionModel` parsing); a bare id is treated as a
-/// model on the current provider. pi-acp spawns a fresh Pi RPC process per
-/// `session/new` — one per chat turn — so a write here (made before the turn's
-/// session is built) takes effect on the very turn that carried the pick, and
+/// model on the current provider. A write here happens before the turn's ACP
+/// session is built, so it takes effect on the very turn that carried the pick and
 /// becomes Pi's `defaultModel` for every later session.
+///
+/// (This used to say "a fresh Pi RPC process per `session/new` — one per chat
+/// turn". That stopped being true when the ACP session moved to being built ONCE
+/// per pooled instance — see `acp::run_acp_instance` — and the pool is keyed on
+/// `(conversation, agent, spawn_cmd, cwd)`. The write is still applied per turn;
+/// only the process cadence changed.)
 ///
 /// In Gateway-routed mode only picks on the gateway-redirected `openai` provider
 /// are persisted (anything else would silently flip Pi onto a direct provider the
@@ -2831,123 +2980,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_subagent_extension_is_shipped_and_registered_idempotently() {
-        with_temp_dir(|| {
-            ensure_pi_subagent_extension().expect("first ensure");
-            let ext_path = pi_subagent_extension_path();
-            let shipped = fs::read_to_string(&ext_path).expect("extension file is shipped");
-            assert_eq!(
-                shipped, PI_SUBAGENT_EXTENSION_SRC,
-                "shipped source matches the embed"
-            );
-
-            let mtime = fs::metadata(&ext_path).unwrap().modified().unwrap();
-            ensure_pi_subagent_extension().expect("second ensure");
-            assert_eq!(
-                fs::metadata(&ext_path).unwrap().modified().unwrap(),
-                mtime,
-                "identical source is not rewritten"
-            );
-
-            let abs = ext_path.to_string_lossy().into_owned();
-            let exts = read_settings()
-                .extra
-                .get("extensions")
-                .and_then(Value::as_array)
-                .cloned()
-                .expect("extensions array present");
-            assert_eq!(
-                exts.iter()
-                    .filter(|v| v.as_str() == Some(abs.as_str()))
-                    .count(),
-                1,
-                "registered exactly once"
-            );
-        });
-    }
-
-    #[test]
-    fn pi_subagent_extension_preserves_unrelated_extensions() {
-        with_temp_dir(|| {
-            let mut settings = read_settings();
-            settings
-                .extra
-                .insert("extensions".to_owned(), json!(["/tmp/other-ext.ts"]));
-            write_settings(&settings).unwrap();
-
-            ensure_pi_subagent_extension().expect("ensure");
-            let exts = read_settings()
-                .extra
-                .get("extensions")
-                .and_then(Value::as_array)
-                .cloned()
-                .expect("extensions array");
-            let abs = pi_subagent_extension_path().to_string_lossy().into_owned();
-            assert!(exts.iter().any(|v| v.as_str() == Some("/tmp/other-ext.ts")));
-            assert!(exts.iter().any(|v| v.as_str() == Some(abs.as_str())));
-        });
-    }
-
-    #[test]
-    fn pi_shell_extension_is_shipped_and_registered_idempotently() {
-        with_temp_dir(|| {
-            ensure_pi_shell_extension().expect("first ensure");
-            let ext_path = pi_shell_extension_path();
-            let shipped = fs::read_to_string(&ext_path).expect("extension file is shipped");
-            assert_eq!(
-                shipped, PI_SHELL_EXTENSION_SRC,
-                "shipped source matches the embed"
-            );
-
-            let mtime = fs::metadata(&ext_path).unwrap().modified().unwrap();
-            ensure_pi_shell_extension().expect("second ensure");
-            assert_eq!(
-                fs::metadata(&ext_path).unwrap().modified().unwrap(),
-                mtime,
-                "identical source is not rewritten"
-            );
-
-            let abs = ext_path.to_string_lossy().into_owned();
-            let exts = read_settings()
-                .extra
-                .get("extensions")
-                .and_then(Value::as_array)
-                .cloned()
-                .expect("extensions array present");
-            assert_eq!(
-                exts.iter()
-                    .filter(|v| v.as_str() == Some(abs.as_str()))
-                    .count(),
-                1,
-                "registered exactly once"
-            );
-        });
-    }
-
-    #[test]
-    fn pi_shell_extension_preserves_unrelated_extensions() {
-        with_temp_dir(|| {
-            let mut settings = read_settings();
-            settings
-                .extra
-                .insert("extensions".to_owned(), json!(["/tmp/other-ext.ts"]));
-            write_settings(&settings).unwrap();
-
-            ensure_pi_shell_extension().expect("ensure");
-            let exts = read_settings()
-                .extra
-                .get("extensions")
-                .and_then(Value::as_array)
-                .cloned()
-                .expect("extensions array");
-            let abs = pi_shell_extension_path().to_string_lossy().into_owned();
-            assert!(exts.iter().any(|v| v.as_str() == Some("/tmp/other-ext.ts")));
-            assert!(exts.iter().any(|v| v.as_str() == Some(abs.as_str())));
-        });
-    }
-
-    #[test]
-    fn managed_defaults_ship_every_ryu_extension() {
+    fn managed_defaults_ship_every_compiled_in_extension() {
         with_temp_dir(|| {
             ensure_managed_defaults().expect("managed defaults");
             assert!(pi_mcp_extension_path().exists());
@@ -2956,8 +2989,6 @@ mod tests {
                 "the LSP binding rides the same spawn-time invariant pass as the MCP bridge"
             );
             assert!(pi_plan_extension_path().exists());
-            assert!(pi_subagent_extension_path().exists());
-            assert!(pi_shell_extension_path().exists());
         });
     }
 
@@ -2991,8 +3022,6 @@ mod tests {
                 pi_mcp_extension_path(),
                 pi_lsp_extension_path(),
                 pi_plan_extension_path(),
-                pi_subagent_extension_path(),
-                pi_shell_extension_path(),
             ];
             for path in &paths {
                 fs::write(path, stale).expect("age the installed extension");
@@ -3005,8 +3034,6 @@ mod tests {
                 PI_MCP_EXTENSION_SRC,
                 PI_LSP_EXTENSION_SRC,
                 PI_PLAN_EXTENSION_SRC,
-                PI_SUBAGENT_EXTENSION_SRC,
-                PI_SHELL_EXTENSION_SRC,
             ]) {
                 let on_disk = fs::read_to_string(path).expect("extension still present");
                 assert_ne!(
@@ -3046,13 +3073,21 @@ mod tests {
     /// must actually reach the managed Pi dir when Core runs its spawn-time
     /// invariant pass.
     ///
-    /// **Why this exists.** Unlike the sandboxed plugin code table
-    /// (`builtin_code_table_matches_package_manifests`), nothing forced a new
-    /// pi-extension asset to be wired up. Dropping a `.ts` into that folder without
-    /// an `include_str!` + `ensure_pi_*_extension()` + a line in
-    /// [`ensure_managed_defaults`] compiles, ships nothing, and fails **silently**
-    /// at runtime — the feature looks landed and is simply absent. That is exactly
-    /// how `ryu-plan.ts` / `ryu-subagent.ts` / `ryu-shell.ts` could have gone in.
+    /// **Why this exists.** Nothing forces a new pi-extension asset to be wired up.
+    /// Dropping a `.ts` into that folder without an `include_str!` +
+    /// `ensure_pi_*_extension()` + a line in [`ensure_managed_defaults`] compiles,
+    /// ships nothing, and fails **silently** at runtime — the feature looks landed
+    /// and is simply absent. That is exactly how `ryu-plan.ts` could have gone in.
+    ///
+    /// This guard now covers only the **compiled-in** road. The plugin road
+    /// (`contributes.pi_extensions`) has its own pair in
+    /// [`crate::plugin_manifest`]: `builtin_pi_extension_table_matches_package_manifests`
+    /// (declared ⇄ embedded) and `packaged_pi_extension_files_are_all_declared`
+    /// (nothing on disk is undeclared), plus
+    /// [`super::app_extensions_round_trip_writes_then_removes`] for the bytes
+    /// actually reaching the managed dir. The three assets left here are the ones
+    /// that must never become plugins; see the chain comment in
+    /// [`ensure_managed_defaults`].
     ///
     /// Three properties, and all three are load-bearing:
     /// 1. it drives [`ensure_managed_defaults`], not the individual `ensure_pi_*`
@@ -3079,9 +3114,10 @@ mod tests {
                 .collect();
             assets.sort();
 
-            // Every extension shipped by `ensure_managed_defaults` today. Bump this
-            // deliberately when adding one — that is the whole point of the guard.
-            const EXPECTED_ASSETS: usize = 5;
+            // Every extension shipped by `ensure_managed_defaults` today. Change
+            // this deliberately when adding one — or when moving one out to a
+            // plugin package, which is what took it from 5 to 3.
+            const EXPECTED_ASSETS: usize = 3;
             assert_eq!(
                 assets.len(),
                 EXPECTED_ASSETS,
@@ -3099,9 +3135,12 @@ mod tests {
                 let shipped_src = fs::read_to_string(&shipped).unwrap_or_else(|err| {
                     panic!(
                         "{name} is a pi-extension asset but ensure_managed_defaults never \
-                         shipped it ({err}) — add a PI_*_EXTENSION_SRC include_str!, a \
-                         pi_*_extension_path(), an ensure_pi_*_extension() and a line in \
-                         the ensure_managed_defaults chain"
+                         shipped it ({err}). Two valid answers: if it must be compiled in \
+                         (see the chain comment in ensure_managed_defaults), add a \
+                         PI_*_EXTENSION_SRC include_str!, a pi_*_extension_path(), an \
+                         ensure_pi_*_extension() and a chain line. Otherwise it belongs in a \
+                         plugin package as a contributes.pi_extensions row — move the file to \
+                         plugins-store/<pkg>/pi-extensions/ and drop EXPECTED_ASSETS by one."
                     )
                 });
                 let asset_src = fs::read_to_string(asset).expect("read asset source");
@@ -3111,6 +3150,168 @@ mod tests {
                      points at the wrong file"
                 );
             }
+        });
+    }
+
+    /// One resolved plugin extension, as [`app_extensions::resolve_pi_extensions`]
+    /// would produce it.
+    fn resolved_ext(plugin: &str, id: &str, source: &str) -> app_extensions::PiExtensionResolution {
+        app_extensions::PiExtensionResolution {
+            extensions: vec![app_extensions::ResolvedPiExtension {
+                plugin_id: plugin.to_owned(),
+                extension_id: id.to_owned(),
+                file_name: format!(
+                    "ext-{}-{id}.ts",
+                    crate::plugin_manifest::plugin_dir_name(plugin)
+                ),
+                source: source.to_owned(),
+            }],
+            skipped: vec![],
+        }
+    }
+
+    /// The whole point of the seam: an enabled plugin's extension is WRITTEN with
+    /// its own bytes and registered, and disabling that plugin (an empty
+    /// resolution) takes both the file and its `settings.json` entry away again.
+    ///
+    /// The byte compare is not decoration. A wrong file name or a prefix mismatch
+    /// in the reconciler would still satisfy the table⇄manifest bijection tests
+    /// while the extension silently never loads — which is the exact failure
+    /// `every_pi_extension_asset_is_shipped` exists to prevent on the other road.
+    #[test]
+    fn app_extensions_round_trip_writes_then_removes() {
+        with_temp_dir(|| {
+            let source = "// background bash\nexport default {};\n";
+            sync_app_pi_extensions(&resolved_ext("@ryu/pi-shell", "shell", source))
+                .expect("materialize");
+
+            let path = pi_extensions_dir().join("ext-@ryu+pi-shell-shell.ts");
+            assert_eq!(
+                fs::read_to_string(&path).expect("extension written"),
+                source,
+                "the materialized file must carry the resolved source verbatim"
+            );
+            let abs = path.to_string_lossy().into_owned();
+            let registered = |settings: &PiSettings| {
+                settings
+                    .extra
+                    .get("extensions")
+                    .and_then(Value::as_array)
+                    .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(abs.as_str())))
+            };
+            assert!(registered(&read_settings()), "path registered in settings");
+
+            // Disable: the reconcile is driven by the resolution, so an empty one is
+            // exactly what an uninstall or a disable produces.
+            sync_app_pi_extensions(&app_extensions::PiExtensionResolution::default())
+                .expect("reconcile empty");
+            assert!(
+                !path.exists(),
+                "disabling the plugin must delete the file — Pi auto-discovers this \
+                 directory, so an orphan keeps loading forever"
+            );
+            assert!(
+                !registered(&read_settings()),
+                "the settings.json registration must be pruned with the file"
+            );
+        });
+    }
+
+    /// The ownership boundary: the reconciler owns `ext-*.ts` and NOTHING else.
+    ///
+    /// This is the invariant whose failure bricks the flagship agent — an empty
+    /// resolution (every extension-contributing plugin disabled) must not be able
+    /// to delete `ryu-mcp.ts`, which is the managed Pi's only road to Ryu's tools.
+    #[test]
+    fn the_reconciler_never_touches_files_it_does_not_own() {
+        with_temp_dir(|| {
+            ensure_managed_defaults().expect("managed defaults");
+            let dir = pi_extensions_dir();
+            let hand_written = dir.join("my-own.ts");
+            fs::write(&hand_written, "// dropped in by hand\n").expect("write");
+
+            // A user entry in the array that is not even in this folder.
+            let mut settings = read_settings();
+            let elsewhere = "/somewhere/else/mine.ts";
+            settings
+                .extra
+                .entry("extensions".to_owned())
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .expect("array")
+                .push(Value::String(elsewhere.to_owned()));
+            write_settings(&settings).expect("write settings");
+
+            sync_app_pi_extensions(&app_extensions::PiExtensionResolution::default())
+                .expect("reconcile empty");
+
+            assert!(
+                dir.join("ryu-mcp.ts").exists(),
+                "compiled-in extension kept"
+            );
+            assert!(
+                dir.join("ryu-lsp.ts").exists(),
+                "compiled-in extension kept"
+            );
+            assert!(
+                dir.join("ryu-plan.ts").exists(),
+                "compiled-in extension kept"
+            );
+            assert!(
+                hand_written.exists(),
+                "a user's own file is not ours to delete"
+            );
+
+            let arr = read_settings()
+                .extra
+                .get("extensions")
+                .and_then(Value::as_array)
+                .cloned()
+                .expect("extensions array");
+            assert!(
+                arr.iter().any(|v| v.as_str() == Some(elsewhere)),
+                "an unrelated registration must survive the prune"
+            );
+            assert_eq!(
+                arr.iter()
+                    .filter(|v| v
+                        .as_str()
+                        .is_some_and(|s| s.contains("ryu-mcp.ts") || s.contains("ryu-plan.ts")))
+                    .count(),
+                2,
+                "the compiled-in registrations must survive the prune"
+            );
+        });
+    }
+
+    /// Re-materializing an unchanged set must not rewrite the file: this runs on
+    /// every managed-Pi spawn, so an unconditional write would churn the disk on
+    /// every new chat. Same content-compare contract as [`ship_pi_extension`].
+    #[test]
+    fn app_extensions_are_written_only_when_they_change() {
+        with_temp_dir(|| {
+            let resolution = resolved_ext("@ryu/pi-shell", "shell", "// v1\n");
+            sync_app_pi_extensions(&resolution).expect("first");
+            let path = pi_extensions_dir().join("ext-@ryu+pi-shell-shell.ts");
+            let first = fs::metadata(&path)
+                .expect("stat")
+                .modified()
+                .expect("mtime");
+
+            sync_app_pi_extensions(&resolution).expect("second");
+            assert_eq!(
+                fs::metadata(&path)
+                    .expect("stat")
+                    .modified()
+                    .expect("mtime"),
+                first,
+                "an unchanged resolution must not rewrite the file"
+            );
+
+            // A changed source DOES land, so idempotency never becomes staleness.
+            sync_app_pi_extensions(&resolved_ext("@ryu/pi-shell", "shell", "// v2\n"))
+                .expect("upgrade");
+            assert_eq!(fs::read_to_string(&path).expect("read"), "// v2\n");
         });
     }
 

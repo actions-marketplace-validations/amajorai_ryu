@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { sileo } from "sileo";
 import { WEB_URL } from "@/lib/app-urls.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { ColorStep } from "@/src/components/onboarding/ColorStep.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import { track } from "@/src/lib/analytics.ts";
@@ -52,9 +53,9 @@ const withAgentLogo = (entry: AgentCatalogEntry) => ({
 	logo: <AgentCatalogLogo entry={entry} size="20px" />,
 });
 
-// The 'agents', 'features', and 'mic' phases are interactive: the user picks which
-// extra agents to add, chooses which features to keep on, then optionally enables
-// the microphone. Every other phase auto-advances.
+// The 'agents', 'features', 'mic', and 'theme' phases are interactive: the user
+// picks which extra agents to add, chooses which features to keep on, optionally
+// enables the microphone, then sets the look. Every other phase auto-advances.
 type Phase =
 	| "starting"
 	| "choose"
@@ -62,6 +63,7 @@ type Phase =
 	| "agents"
 	| "features"
 	| "mic"
+	| "theme"
 	| "finishing"
 	| "done";
 
@@ -72,15 +74,17 @@ const PHASE_TITLES: Record<Phase, string> = {
 	agents: "Add your agents",
 	features: "Choose your features",
 	mic: "Allow Ryu to access microphone",
+	// The theme step renders its own header; this entry only satisfies the map.
+	theme: "Make it yours",
 	finishing: "Welcome to Ryu",
 	done: "You're all set",
 };
 
 const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
 	choose: "Run AI on this device, or let us host it for you",
-	agents: "Pick which ones to add — you can install more later",
-	features: "Turn features on or off — you can change this anytime",
-	mic: "So you can talk to your agents — skip anytime, change later in Settings",
+	agents: "Pick which ones to add, and install more later",
+	features: "Turn features on or off, and change this anytime",
+	mic: "So you can talk to your agents. Skip anytime, change later in Settings",
 	done: "Ready to go",
 };
 
@@ -132,6 +136,8 @@ const POLL_INTERVAL_MS = 2000;
 // running in the background and the Models / Getting-Started surfaces track the
 // rest. Better to drop them into the app than to freeze the setup screen.
 const MAX_BLOCK_MS = 45 * 1000;
+// How long the mic step waits on the OS permission dialog before moving on.
+const MIC_PROMPT_MAX_MS = 30 * 1000;
 const LOCAL_STACK = "llamacpp";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -574,16 +580,23 @@ export default function OnboardingPage() {
 		goToFeatures(Array.from(selected));
 	}, [goToFeatures, selected]);
 
-	// Finish from the mic step. Skip jumps straight to finish; Allow requests
-	// mic access first (non-blocking — a denial still completes onboarding).
+	// The mic answer (either way) hands off to the look-and-feel step, so the user
+	// lands in an app that already looks like theirs. Clearing `submitting` matters:
+	// the mic step sets it while the OS prompt is up, and leaving it pinned would
+	// render the theme step's Continue disabled.
+	const goToTheme = useCallback(() => {
+		setSubmitting(false);
+		setPhase("theme");
+	}, []);
+
+	// Leave the mic step. Skip goes straight on; Allow requests mic access first
+	// (non-blocking: a denial still completes onboarding).
 	const handleSkipMic = useCallback(() => {
 		if (submitting) {
 			return;
 		}
-		setSubmitting(true);
-		const target = toTarget(getActiveNode());
-		finish(target, pendingAgents);
-	}, [submitting, getActiveNode, finish, pendingAgents]);
+		goToTheme();
+	}, [submitting, goToTheme]);
 
 	const handleAllowMic = useCallback(async () => {
 		if (submitting) {
@@ -591,12 +604,29 @@ export default function OnboardingPage() {
 		}
 		setSubmitting(true);
 		try {
-			await ensureMicPermission();
+			// `getUserMedia` only settles when the OS prompt is answered, so an
+			// ignored (or focus-lost) TCC dialog leaves it pending forever. With both
+			// mic buttons disabled while `submitting`, that used to be a dead end;
+			// race it so onboarding always moves on. The grant still lands if the
+			// user answers later — we just stop waiting for them.
+			await Promise.race([ensureMicPermission(), sleep(MIC_PROMPT_MAX_MS)]);
 		} catch {
-			// Permission prompt denied or unavailable — still finish onboarding.
+			// Permission prompt denied or unavailable — still continue onboarding.
 		}
-		const target = toTarget(getActiveNode());
-		finish(target, pendingAgents);
+		if (cancelledRef.current) {
+			return;
+		}
+		goToTheme();
+	}, [submitting, goToTheme]);
+
+	// The theme step already persisted every pick as it was made, so finishing is
+	// just the agent installs plus the hand-off to chat.
+	const handleFinishTheme = useCallback(() => {
+		if (submitting) {
+			return;
+		}
+		setSubmitting(true);
+		finish(toTarget(getActiveNode()), pendingAgents);
 	}, [submitting, getActiveNode, finish, pendingAgents]);
 
 	if (coreFailed) {
@@ -617,6 +647,17 @@ export default function OnboardingPage() {
 				<Button onClick={handleRestart} size="sm">
 					Restart Ryu
 				</Button>
+			</div>
+		);
+	}
+
+	// The theme step is desktop-only (it drives the desktop's own theme setters and
+	// preset store), so it renders here rather than through the shared block, whose
+	// `OnboardingStep` union has no member for it.
+	if (phase === "theme") {
+		return (
+			<div className="size-full" data-tauri-drag-region="true">
+				<ColorStep busy={submitting} onContinue={handleFinishTheme} />
 			</div>
 		);
 	}
@@ -650,7 +691,7 @@ export default function OnboardingPage() {
 				subtitle={subtitle}
 				suggestedAgents={suggestedAgents.map(withAgentLogo)}
 				title={title}
-			/>{" "}
+			/>
 		</div>
 	);
 }

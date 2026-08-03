@@ -3,6 +3,7 @@
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { CSSProperties } from "react";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
+import { StaggerLines } from "./stagger-lines.tsx";
 
 interface Tool {
 	href: string;
@@ -73,13 +74,13 @@ export default function WorksWith() {
 	return (
 		<section className="py-16 md:py-20">
 			<div className="container mx-auto px-4">
-				<div className="mx-auto max-w-5xl text-center">
+				<StaggerLines className="mx-auto max-w-5xl text-center">
 					<SectionTitle title="Bring the agents you already use" />
 					<p className={cn(sectionSubtitleClass, "max-w-5xl")}>
 						Ryu is not another closed agent. It is the interface and control
 						layer for the agents, models, providers, and tools you already run.
 					</p>
-				</div>
+				</StaggerLines>
 			</div>
 
 			<div className="group relative mt-10 w-full overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_4%,black_96%,transparent)]">

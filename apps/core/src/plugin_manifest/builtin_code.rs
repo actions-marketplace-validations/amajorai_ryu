@@ -1,5 +1,10 @@
-//! Sandboxed JS a built-in plugin's manifest references by `code_file`, embedded
-//! at compile time.
+//! Files a built-in plugin's manifest references by path, embedded at compile time.
+//!
+//! Two tables, because a built-in plugin carries two kinds of code with very
+//! different privilege: [`BUILTIN_CODE_FILES`] holds the **sandboxed** JS a
+//! `code_file` names, and [`BUILTIN_PI_EXTENSIONS`] holds the **unsandboxed**
+//! TypeScript a `contributes.pi_extensions[].file` names. They must not be merged;
+//! see the second table's own doc.
 //!
 //! # Why a table and not a directory read
 //!
@@ -130,6 +135,12 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "hooks/start.js",
         include_str!("../../../../plugins-store/hook-session-context/hooks/start.js"),
     ),
+    // plan-continue
+    (
+        "@ryu/plan-continue",
+        "hooks/loop.js",
+        include_str!("../../../../plugins-store/plan-continue/hooks/loop.js"),
+    ),
     // proof
     (
         "@ryu/proof",
@@ -170,4 +181,52 @@ pub(crate) fn lookup(plugin_id: &str, rel: &str) -> Option<&'static str> {
         .iter()
         .find(|(id, path, _)| *id == plugin_id && *path == rel)
         .map(|(_, _, code)| *code)
+}
+
+/// `(plugin id, plugin-root-relative path, file contents)` for every
+/// `contributes.pi_extensions[].file` a `plugins-store` manifest references.
+///
+/// # Why a SECOND table and not more rows in [`BUILTIN_CODE_FILES`]
+///
+/// Same embedding problem, different privilege — and the separation is the point:
+///
+/// - A `code_file` is **sandboxed** JS. Core splices it into a deny-by-default Deno
+///   IIFE where every side effect goes through a capability-gated `host.*` call.
+/// - A `pi_extensions[].file` is **unsandboxed** TypeScript loaded by the managed Pi
+///   process itself, with that process's full privilege. It is gated like a manifest
+///   `mcp_servers` entry (`pi_config::app_extensions::may_ship_pi_extensions`), not
+///   like a hook.
+///
+/// One table would also break the other one's guard: `builtin_code_table_matches_package_manifests`
+/// asserts a bijection over [`super::PluginManifest::code_file_refs`], which by
+/// construction never yields a `.ts`. Each table therefore has its own bijection
+/// test. Everything else about the mechanism — hand-written `include_str!` so
+/// `tools/mirror-public.sh` step 3b can grep the literal paths, and a `None` lookup
+/// being a visible skip rather than an empty file — is identical.
+pub(crate) const BUILTIN_PI_EXTENSIONS: &[(&str, &str, &str)] = &[
+    // pi-shell
+    (
+        "@ryu/pi-shell",
+        "pi-extensions/ryu-shell.ts",
+        include_str!("../../../../plugins-store/pi-shell/pi-extensions/ryu-shell.ts"),
+    ),
+    // pi-subagent
+    (
+        "@ryu/pi-subagent",
+        "pi-extensions/ryu-subagent.ts",
+        include_str!("../../../../plugins-store/pi-subagent/pi-extensions/ryu-subagent.ts"),
+    ),
+];
+
+/// The embedded contents of `rel` for built-in plugin `plugin_id`, or `None` when
+/// nothing in [`BUILTIN_PI_EXTENSIONS`] matches.
+///
+/// `None` sends the resolver to the plugin's on-disk directory, which is the right
+/// answer for a Community plugin and a visible skip for a built-in (whose package
+/// dir is not on the user's machine).
+pub(crate) fn lookup_pi_extension(plugin_id: &str, rel: &str) -> Option<&'static str> {
+    BUILTIN_PI_EXTENSIONS
+        .iter()
+        .find(|(id, path, _)| *id == plugin_id && *path == rel)
+        .map(|(_, _, source)| *source)
 }

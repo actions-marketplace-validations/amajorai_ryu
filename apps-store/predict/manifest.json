@@ -2,6 +2,8 @@
   "id": "@ryu/predict",
   "name": "Autocomplete",
   "version": "1.0.0",
+  "icon": "ai-magic",
+  "iconDither": { "from": 249, "to": 283, "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

@@ -2,6 +2,8 @@
   "id": "@ryu/finetune",
   "name": "Fine-tuning",
   "version": "1.0.0",
+  "icon": "ai-brain-01",
+  "iconDither": { "from": 240, "to": 274, "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

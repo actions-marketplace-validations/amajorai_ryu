@@ -1,0 +1,41 @@
+{
+  "id": "@ryu/plan-continue",
+  "name": "Plan Continue",
+  "version": "1.0.0",
+  "icon": "task-01",
+  "iconDither": { "from": 198, "to": 232, "direction": "down" },
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "full" },
+    "cli": { "support": "full" }
+  },
+  "engines": { "ryu": ">=0.1.0" },
+  "runnables": [],
+  "permission_grants": ["storage:kv"],
+  "activation_events": ["*"],
+  "contributes": {
+    "slash_commands": [
+      {
+        "id": "plan-continue.toggle",
+        "command": "/plan-continue",
+        "description": "Turn the plan-mode auto-continue off or on for this chat ('/plan-continue off' | '/plan-continue on')."
+      }
+    ],
+    "turn_hooks": [
+      {
+        "id": "plan-continue.loop",
+        "on": "post_assistant_turn",
+        "match": {
+          "flag": "ryu.plan",
+          "commands": ["/plan-continue"]
+        },
+        "code_file": "hooks/loop.js"
+      }
+    ]
+  }
+}

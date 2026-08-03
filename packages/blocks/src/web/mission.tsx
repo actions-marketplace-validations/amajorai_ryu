@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { landingSurfaceCardFlexXlClass } from "./landing-card-tones.ts";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
+import { StaggerLines } from "./stagger-lines.tsx";
 
 function CollaborationViz() {
 	const [step, setStep] = useState(0);
@@ -217,7 +218,7 @@ export default function Mission() {
 	return (
 		<div className="container mx-auto px-4">
 			<div className="mx-auto max-w-4xl">
-				<div className="mb-10">
+				<StaggerLines className="mb-10">
 					<SectionTitle
 						className="max-w-xl"
 						title="The missing layer between an agent demo and production."
@@ -226,7 +227,7 @@ export default function Mission() {
 						Ryu gives people and agents one interface, one context, and one
 						control layer.
 					</p>
-				</div>
+				</StaggerLines>
 
 				<div className="grid grid-cols-1 gap-3 md:grid-cols-3">
 					{panels.map((panel) => (

@@ -176,13 +176,16 @@ export function definePlugin(options: DefinePluginOptions): PluginManifest {
 		settings_tabs: options.settingsTabs ?? [],
 		slash_commands: options.slashCommands ?? [],
 		lsp_servers: options.lspServers ?? {},
-		// A turn-hook plugin contributes no app widgets, sidebar entries or dock
-		// panels; the fields are required on the resolved `Contributes` type (zod
-		// defaults applied), so set them explicitly.
+		// A turn-hook plugin contributes no app widgets, sidebar entries, dock
+		// panels, danger-zone categories or Pi extensions; the fields are required
+		// on the resolved `Contributes` type (zod defaults applied), so set them
+		// explicitly.
 		widgets: [],
 		sidebar_sections: [],
 		sidebar_buttons: [],
 		dock_panels: [],
+		data_categories: [],
+		pi_extensions: [],
 	};
 	// Ship each inline tool as a `kind:"tool"` runnable (Core's `inline_deno`
 	// backend). Shipping tools requires the `tool:execute` grant; add it once.

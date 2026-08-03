@@ -3,6 +3,8 @@
   "name": "Self-Healing",
   "version": "1.0.0",
   "description": "Self-healing: failed runs are diagnosed by a Gateway side-model and proposed fixes are delivered to the approvals inbox for human review before they apply.",
+  "icon": "health",
+  "iconDither": { "from": 270, "to": 304, "direction": "up" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

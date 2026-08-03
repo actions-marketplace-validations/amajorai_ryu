@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	APP_QUOTAS,
 	type CachedEntitlement,
 	capabilityTier,
 	channelUserLimitForEntitlement,
@@ -15,11 +16,15 @@ import {
 	emailQuotaForPlan,
 	FREE_TIER_LIMITS,
 	GATED_CAPABILITIES,
+	KERNEL_QUOTAS,
 	MAIL_LIFECYCLE,
 	managedInferenceAvailable,
 	PLANS,
+	type PlanLimitField,
 	type PolarBinding,
 	planLimit,
+	QUOTAS,
+	quotaOwner,
 	resolveEntitlement,
 	resolveInboxLifecycle,
 	resolveProductId,
@@ -604,6 +609,101 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 		expect(planLimit("pro", "spaceStorageLimitGb")).toBe(20);
 		expect(planLimit("max", "spaceStorageLimitGb")).toBe(50);
 		expect(planLimit("teams", "spaceStorageLimitGb")).toBe(50);
+	});
+
+	/**
+	 * The whole tier × key matrix, written out. The registry derives every paid
+	 * row from {@link QuotaSpec.paid} defaulting to unbounded, so a mistyped
+	 * `paid` map is a REPRICING that no per-key assertion above would catch — this
+	 * is the guard that moving a key between registries never moves a number.
+	 */
+	it("pins every tier × quota number", () => {
+		const INF = Number.POSITIVE_INFINITY;
+		const matrix: Record<
+			PlanLimitField,
+			[free: number, license: number, pro: number, max: number, teams: number]
+		> = {
+			maxAgents: [10, INF, INF, INF, INF],
+			maxConcurrentRuns: [1, 3, 3, 3, 8],
+			maxEvalRunsMonthly: [20, INF, INF, INF, INF],
+			maxMcpServers: [5, INF, INF, INF, INF],
+			maxMonitors: [5, INF, INF, INF, INF],
+			maxOpenTabs: [8, INF, INF, INF, INF],
+			maxPlugins: [10, INF, INF, INF, INF],
+			maxRemoteNodes: [1, INF, INF, INF, INF],
+			maxSchedules: [3, INF, INF, INF, INF],
+			maxSkills: [10, INF, INF, INF, INF],
+			maxSpaces: [5, INF, INF, INF, INF],
+			maxWorkflows: [10, INF, INF, INF, INF],
+			meetingRetentionDays: [30, INF, INF, INF, INF],
+			spaceStorageLimitGb: [2, 20, 20, 50, 50],
+		};
+		// Every declared key is in the matrix, and vice versa: a new quota that
+		// forgot its numbers fails here rather than shipping a silent Infinity.
+		expect(Object.keys(matrix).sort()).toEqual(Object.keys(QUOTAS).sort());
+		for (const [field, [free, license, pro, max, teams]] of Object.entries(
+			matrix
+		) as [PlanLimitField, [number, number, number, number, number]][]) {
+			expect(planLimit(null, field)).toBe(free);
+			expect(planLimit("desktop-license", field)).toBe(license);
+			expect(planLimit("pro", field)).toBe(pro);
+			expect(planLimit("max", field)).toBe(max);
+			expect(planLimit("teams", field)).toBe(teams);
+		}
+	});
+});
+
+describe("quota ownership — kernel-compiled vs app-declared", () => {
+	it("leaves shell and Core-subsystem quotas unowned", () => {
+		// These have no package home under `apps-store/`, so there is no app whose
+		// absence could lift them; `maxSpaces` also matches Core's own taxonomy,
+		// where `spaces` is a KERNEL data category an app may not claim.
+		for (const field of [
+			"maxOpenTabs",
+			"maxRemoteNodes",
+			"maxPlugins",
+			"maxSpaces",
+			"maxAgents",
+			"maxSkills",
+			"maxSchedules",
+			"maxMcpServers",
+			"maxConcurrentRuns",
+			"maxEvalRunsMonthly",
+			"spaceStorageLimitGb",
+			// Workflows too: `@ryu/workflows` gates only the CRUD routes, while
+			// Core's executor keeps running workflows off the scheduler with the
+			// app disabled, so this quota must not disappear with it.
+			"maxWorkflows",
+		] as const) {
+			expect(quotaOwner(field)).toBeNull();
+			expect(KERNEL_QUOTAS).toHaveProperty(field);
+		}
+	});
+
+	it("attributes each app-owned quota to the app that declares it", () => {
+		expect(quotaOwner("maxMonitors")).toBe("@ryu/monitors");
+		expect(quotaOwner("meetingRetentionDays")).toBe("@ryu/meetings");
+	});
+
+	it("carries a label and a unit on every key, so surfaces need no table", () => {
+		for (const spec of Object.values(QUOTAS)) {
+			expect(spec.label.trim().length).toBeGreaterThan(0);
+			expect(["count", "days", "gigabytes"]).toContain(spec.unit);
+		}
+		// The unit is what distinguishes a count from a retention window — the
+		// declaration that lets a manifest-declared key render without a lookup.
+		expect(QUOTAS.meetingRetentionDays.unit).toBe("days");
+		expect(QUOTAS.spaceStorageLimitGb.unit).toBe("gigabytes");
+		expect(QUOTAS.maxMonitors.unit).toBe("count");
+	});
+
+	it("keeps the two registries disjoint (one owner per key)", () => {
+		for (const field of Object.keys(APP_QUOTAS)) {
+			expect(KERNEL_QUOTAS).not.toHaveProperty(field);
+		}
+		expect(Object.keys(QUOTAS)).toHaveLength(
+			Object.keys(KERNEL_QUOTAS).length + Object.keys(APP_QUOTAS).length
+		);
 	});
 });
 

@@ -488,6 +488,40 @@ export interface Contributes {
 	 */
 	composer_controls?: unknown[];
 	/**
+	 * **Deletable data categories** the app owns — one "Delete all X" row in
+	 * Settings → Danger Zone (see [`DataCategoryContribution`]).
+	 *
+	 * The danger zone used to be two hardcoded lists that had to be edited
+	 * together: a `DataCategory` enum in Core and a `CATEGORIES` array carrying the
+	 * user-facing copy in the closed desktop source. Monitors and Meetings are
+	 * app-owned data, so both lists named apps — which meant a node where Monitors
+	 * was never enabled still offered to delete monitors, and the count was always
+	 * 0. Declaring the category here makes the owning app the single source of both
+	 * its existence and its wording, and makes the row appear and disappear with
+	 * the app instead of with a client-side feature-detect.
+	 *
+	 * # Core-interpreted, so a typed struct — and NOT on the contributions endpoint
+	 *
+	 * Core has to resolve the id to something that can actually count and delete
+	 * the rows, so per this type's own doc comment this gets a typed struct rather
+	 * than opaque JSON, and it is gathered at its consumption site
+	 * (`GET /api/data/counts`, which serves each category's descriptor next to its
+	 * live count) rather than at `GET /api/plugins/contributions` — the same
+	 * disposition as [`Contributes::tool_filters`] and [`Contributes::lsp_servers`].
+	 *
+	 * # Declaration, not implementation
+	 *
+	 * A declared category is served only when Core knows how to clear it; an id
+	 * Core does not implement is skipped with a warn rather than being offered as a
+	 * button that 400s. That split is deliberate and not a stepping stone to a
+	 * generic HTTP truncate: clearing monitors has to tear down each monitor's
+	 * backing scheduler job, and clearing meetings has to broadcast on the meetings
+	 * SSE stream, so a blind `DELETE /monitors` would leave jobs ticking forever.
+	 * The manifest owns *whether the row exists and what it says*; Core owns *what
+	 * deleting actually entails*.
+	 */
+	data_categories?: DataCategoryContribution[];
+	/**
 	 * App-registered **workspace dock panels** — a tab in the desktop's bottom or
 	 * right dock (Terminal / Code Review / Browser / Simulator live there today).
 	 * This is the seam that lets an app OWN its dock tab instead of the shell
@@ -582,6 +616,45 @@ export interface Contributes {
 	lsp_servers?: {
 		[k: string]: LspServerContribution;
 	};
+	/**
+	 * **Pi extensions** the plugin ships — TypeScript files the managed `ryu` (Pi)
+	 * agent loads at process start:
+	 *
+	 * ```json
+	 * "pi_extensions": [
+	 *   { "id": "shell", "file": "pi-extensions/ryu-shell.ts",
+	 *     "description": "background bash for the managed Pi agent" }
+	 * ]
+	 * ```
+	 *
+	 * Pi ships none of plan mode, sub-agents, permission prompts or background bash
+	 * and says so deliberately in its own docs — "you can build or install those
+	 * workflows as extensions or packages". This surface is that seam: the
+	 * capabilities Core used to hardcode into the spawn path become plugins the user
+	 * can enable and disable, and a third party can ship one at all.
+	 *
+	 * # This is UNSANDBOXED code, and the tier gate is not optional
+	 *
+	 * A [`Contributes::turn_hooks`] body runs in the deny-by-default Deno sandbox
+	 * behind capability-gated `host.*` calls. A file named here runs **inside the Pi
+	 * process** with full host privilege: the first-party ones spawn children and
+	 * POST to Core. That is the same arbitrary-code-execution class as
+	 * [`PluginManifest::mcp_servers`], so Core gates it identically — Core tier is
+	 * auto-allowed, Community tier needs an operator-allowlisted grant, and the gate
+	 * sits at the materializer, because writing the file is what makes it run.
+	 *
+	 * # Core-interpreted, so a typed struct — and NOT on the contributions endpoint
+	 *
+	 * Core resolves each `file` and projects it into the managed Pi's config dir, so
+	 * per this type's own doc comment it gets a typed struct and is gathered at its
+	 * consumption site (`pi_config::app_extensions`) rather than served from
+	 * `GET /api/plugins/contributions` — the same disposition as
+	 * [`Contributes::lsp_servers`].
+	 *
+	 * The `file` is deliberately NOT hydrated into an inline string the way a
+	 * `code_file` is; see [`PluginManifest::pi_extension_refs`] for why.
+	 */
+	pi_extensions?: PiExtensionContribution[];
 	/**
 	 * Gateway policies the plugin contributes (referenced by runnable id).
 	 */
@@ -698,6 +771,42 @@ export interface ContributionId {
 	 * Optional display title (e.g. the palette label for a command).
 	 */
 	title?: string | null;
+}
+/**
+ * One **deletable data category** an app owns (see [`Contributes::data_categories`]).
+ *
+ * Everything the Danger Zone needs to draw and arm one destructive row, so the copy
+ * lives with the app whose data it describes rather than in the desktop's source.
+ */
+export interface DataCategoryContribution {
+	/**
+	 * The word the user must type to arm the delete. Absent = the [`noun`], which is
+	 * the right default often enough that requiring it would just be ceremony.
+	 * Matched case-insensitively by the client.
+	 *
+	 * [`noun`]: DataCategoryContribution::noun
+	 */
+	confirm_word?: string | null;
+	/**
+	 * Exactly what disappears, shown in the confirm dialog. Required, and required
+	 * to be specific: this is the last thing the user reads before an irreversible
+	 * delete, and "this cannot be undone" tells them nothing they did not know.
+	 */
+	detail: string;
+	/**
+	 * Stable id — this is the `category` a `POST /api/data/clear` names, so it is
+	 * the app's half of the delete contract and renaming it breaks the button.
+	 */
+	id: string;
+	/**
+	 * Plural noun for the live count line ("42 monitors" / "No monitors") and the
+	 * "N deleted" toast. Lower-case: it is used mid-sentence.
+	 */
+	noun: string;
+	/**
+	 * The destructive button label and confirm-dialog title ("Delete all monitors").
+	 */
+	title: string;
 }
 /**
  * One app-registered **workspace dock panel** — a tab in the desktop's bottom or
@@ -954,6 +1063,31 @@ export interface LspServerContribution {
 	 * somewhere" are different instructions.
 	 */
 	workspaceFolder?: string | null;
+}
+/**
+ * One **Pi extension** a plugin ships (a [`Contributes::pi_extensions`] row).
+ *
+ * Carries a path, never a body: unlike [`TurnHookContribution`] there is no inline
+ * `code` twin, because nothing downstream reads the source as a string.
+ */
+export interface PiExtensionContribution {
+	/**
+	 * Optional human-facing one-liner (what the extension adds to the agent).
+	 */
+	description?: string | null;
+	/**
+	 * Path to the TypeScript source, relative to the plugin root — exactly
+	 * `pi-extensions/<name>.ts`. See [`validate_pi_extension_path`].
+	 */
+	file: string;
+	/**
+	 * Stable id for this extension within the plugin (`[a-z0-9][a-z0-9._-]*`).
+	 *
+	 * Part of the materialized file name, so it is what makes one plugin's
+	 * extensions distinguishable from another's on disk — and why it is validated
+	 * with the same alphabet as an event name rather than left free-form.
+	 */
+	id: string;
 }
 /**
  * One **settings tab** a plugin contributes (see [`Contributes::settings_tabs`]).

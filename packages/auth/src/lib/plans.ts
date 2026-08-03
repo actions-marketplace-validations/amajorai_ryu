@@ -127,43 +127,6 @@ export interface Plan {
 	readonly id: PlanId;
 	/** Whether this plan includes Ryu-managed inference (a credit pool). */
 	readonly managedInference: boolean;
-	/* ---------------------------------------------------------------------- *
-	 * Bucket-3 numeric caps (free-tier gating plan, 2026-07-11). Deliberately
-	 * GENEROUS and SYMBOLIC: enforced only on the managed path + desktop client,
-	 * never in OSS core/gateway (self-host stays uncapped). Every paid row sets
-	 * {@link Number.POSITIVE_INFINITY} unless a per-plan number is noted; the FREE
-	 * (null-plan) baseline lives in {@link FREE_TIER_LIMITS} and is read through
-	 * {@link planLimit}. Mirrors the {@link emailStorageLimitGb} pattern.
-	 * ---------------------------------------------------------------------- */
-	/** Max agents the user may create (free 10). */
-	readonly maxAgents: number;
-	/**
-	 * Max concurrent background / parallel runs — the one REAL compute lever, so
-	 * it stays finite even on paid rows (free 1 · pro/max 3 · teams 8).
-	 */
-	readonly maxConcurrentRuns: number;
-	/** Max offline eval runs per calendar month (free 20). */
-	readonly maxEvalRunsMonthly: number;
-	/** Max connected MCP servers (free 5). */
-	readonly maxMcpServers: number;
-	/** Max website monitors (free 5). */
-	readonly maxMonitors: number;
-	/** Max simultaneously open chat tabs (free 8). */
-	readonly maxOpenTabs: number;
-	/** Max installed plugins / apps (free 10). */
-	readonly maxPlugins: number;
-	/** Max remote (non-local) nodes the user may attach (free 1). */
-	readonly maxRemoteNodes: number;
-	/** Max scheduled automations (free 3; pairs with `local-background-runs`). */
-	readonly maxSchedules: number;
-	/** Max installed skills (free 10). */
-	readonly maxSkills: number;
-	/** Max spaces (free 5). */
-	readonly maxSpaces: number;
-	/** Max workflows (free 10). */
-	readonly maxWorkflows: number;
-	/** Meeting-note retention in days (free 30). */
-	readonly meetingRetentionDays: number;
 	/**
 	 * Included monthly credit pool in micro-USD, DERIVED from the price by the
 	 * single 50%-default rule ({@link includedCreditPoolMicroUsd}); 0 for plans
@@ -185,12 +148,6 @@ export interface Plan {
 	readonly name: string;
 	/** Seat model — single entitlement vs per-seat org plan. */
 	readonly seatModel: SeatModel;
-	/**
-	 * Space blob-storage cap in whole GB — a real storage cost, so it stays
-	 * finite even on paid rows (free 2 · pro 20 · max/teams 50). Mirrors
-	 * {@link emailStorageLimitGb}.
-	 */
-	readonly spaceStorageLimitGb: number;
 }
 
 /**
@@ -349,23 +306,6 @@ export const PLANS: Record<PlanId, Plan> = {
 		emailMonthlySendLimit: 0,
 		emailStorageLimitGb: 0,
 		emailBrandingRemovable: false,
-		// Lifetime bands into the "pro" capability tier, so its symbolic caps
-		// mirror Pro's generous set (concurrent runs + space storage at the Pro
-		// level; everything else unbounded).
-		maxOpenTabs: Number.POSITIVE_INFINITY,
-		maxAgents: Number.POSITIVE_INFINITY,
-		maxWorkflows: Number.POSITIVE_INFINITY,
-		maxSpaces: Number.POSITIVE_INFINITY,
-		maxMonitors: Number.POSITIVE_INFINITY,
-		maxMcpServers: Number.POSITIVE_INFINITY,
-		maxPlugins: Number.POSITIVE_INFINITY,
-		maxSkills: Number.POSITIVE_INFINITY,
-		maxSchedules: Number.POSITIVE_INFINITY,
-		maxConcurrentRuns: 3,
-		maxEvalRunsMonthly: Number.POSITIVE_INFINITY,
-		meetingRetentionDays: Number.POSITIVE_INFINITY,
-		spaceStorageLimitGb: 20,
-		maxRemoteNodes: Number.POSITIVE_INFINITY,
 		seatModel: { kind: "single" },
 		bindings: {
 			// One-time $99 with a Polar license-key benefit + 7-day trial. Defaults
@@ -396,22 +336,6 @@ export const PLANS: Record<PlanId, Plan> = {
 		emailStorageLimitGb: 5,
 		// Paid: may drop the "Sent from Ryu" footer (per-inbox toggle, off by default).
 		emailBrandingRemovable: true,
-		// Pro: unbounded symbolic caps; the two real-cost levers stay finite
-		// (3 concurrent runs, 20 GB space storage).
-		maxOpenTabs: Number.POSITIVE_INFINITY,
-		maxAgents: Number.POSITIVE_INFINITY,
-		maxWorkflows: Number.POSITIVE_INFINITY,
-		maxSpaces: Number.POSITIVE_INFINITY,
-		maxMonitors: Number.POSITIVE_INFINITY,
-		maxMcpServers: Number.POSITIVE_INFINITY,
-		maxPlugins: Number.POSITIVE_INFINITY,
-		maxSkills: Number.POSITIVE_INFINITY,
-		maxSchedules: Number.POSITIVE_INFINITY,
-		maxConcurrentRuns: 3,
-		maxEvalRunsMonthly: Number.POSITIVE_INFINITY,
-		meetingRetentionDays: Number.POSITIVE_INFINITY,
-		spaceStorageLimitGb: 20,
-		maxRemoteNodes: Number.POSITIVE_INFINITY,
 		seatModel: { kind: "single" },
 		bindings: {
 			monthly: {
@@ -444,21 +368,6 @@ export const PLANS: Record<PlanId, Plan> = {
 		emailMonthlySendLimit: 25_000,
 		emailStorageLimitGb: 10,
 		emailBrandingRemovable: true,
-		// Max: unbounded symbolic caps; 3 concurrent runs, 50 GB space storage.
-		maxOpenTabs: Number.POSITIVE_INFINITY,
-		maxAgents: Number.POSITIVE_INFINITY,
-		maxWorkflows: Number.POSITIVE_INFINITY,
-		maxSpaces: Number.POSITIVE_INFINITY,
-		maxMonitors: Number.POSITIVE_INFINITY,
-		maxMcpServers: Number.POSITIVE_INFINITY,
-		maxPlugins: Number.POSITIVE_INFINITY,
-		maxSkills: Number.POSITIVE_INFINITY,
-		maxSchedules: Number.POSITIVE_INFINITY,
-		maxConcurrentRuns: 3,
-		maxEvalRunsMonthly: Number.POSITIVE_INFINITY,
-		meetingRetentionDays: Number.POSITIVE_INFINITY,
-		spaceStorageLimitGb: 50,
-		maxRemoteNodes: Number.POSITIVE_INFINITY,
 		// Max is seat-scalable (unlike Pro, which stays strictly single-seat): a
 		// team can buy N Max seats. Billing and the credit pool both scale per
 		// seat, exactly like Teams — `seatsFor` reads the Polar quantity and
@@ -495,22 +404,6 @@ export const PLANS: Record<PlanId, Plan> = {
 		emailMonthlySendLimit: 100_000,
 		emailStorageLimitGb: 20,
 		emailBrandingRemovable: true,
-		// Teams: unbounded symbolic caps; 8 concurrent runs (org parallelism),
-		// 50 GB space storage.
-		maxOpenTabs: Number.POSITIVE_INFINITY,
-		maxAgents: Number.POSITIVE_INFINITY,
-		maxWorkflows: Number.POSITIVE_INFINITY,
-		maxSpaces: Number.POSITIVE_INFINITY,
-		maxMonitors: Number.POSITIVE_INFINITY,
-		maxMcpServers: Number.POSITIVE_INFINITY,
-		maxPlugins: Number.POSITIVE_INFINITY,
-		maxSkills: Number.POSITIVE_INFINITY,
-		maxSchedules: Number.POSITIVE_INFINITY,
-		maxConcurrentRuns: 8,
-		maxEvalRunsMonthly: Number.POSITIVE_INFINITY,
-		meetingRetentionDays: Number.POSITIVE_INFINITY,
-		spaceStorageLimitGb: 50,
-		maxRemoteNodes: Number.POSITIVE_INFINITY,
 		seatModel: { kind: "per_seat", minSeats: 2 },
 		bindings: {
 			monthly: {
@@ -533,62 +426,192 @@ export const PLANS: Record<PlanId, Plan> = {
 /** All plans as an array, for iteration. */
 export const ALL_PLANS: readonly Plan[] = Object.values(PLANS);
 
+/* -------------------------------------------------------------------------- *
+ * Bucket-3 numeric quotas (free-tier gating plan, 2026-07-11)
+ *
+ * Deliberately GENEROUS and SYMBOLIC: enforced only on the managed path +
+ * desktop client, never in OSS core/gateway (self-host stays uncapped).
+ *
+ * These used to be fourteen hand-written fields on {@link Plan}, repeated once
+ * per tier, plus a hand-written union that had to be kept in sync with the free
+ * baseline by eye. That made a quota a CORE-AUTH concern: shipping an app with a
+ * limit meant editing the billing catalog, which is the same hardcoding the
+ * `data_categories` contribution removed from the Danger Zone. So a quota is now
+ * a DECLARATION ({@link QuotaSpec}) and the tiers are derived from it.
+ *
+ * The split mirrors `data_categories` exactly, and for the same reason: the
+ * manifest owns *whether the key exists and what it means*, this file owns *what
+ * the numbers are*. Numbers must never move into a manifest — an app that could
+ * write its own tier row would simply grant itself unlimited everything.
+ * -------------------------------------------------------------------------- */
+
 /**
- * The Bucket-3 numeric-cap fields on {@link Plan}. Every one is a soft, symbolic
- * cap enforced only on the managed path + desktop client (self-host is uncapped
- * by design). Keep this union in sync with {@link FREE_TIER_LIMITS} — the type
- * system does the checking.
+ * What a quota's number counts, so a surface can render it without a lookup
+ * table of its own: "5 monitors" vs "30 days" vs "2 GB".
+ */
+export type QuotaUnit = "count" | "days" | "gigabytes";
+
+/** One numeric quota: what it means, who owns the key, and its per-tier numbers. */
+export interface QuotaSpec {
+	/** The FREE (null-plan) baseline — the deliberately generous gating number. */
+	readonly free: number;
+	/** Human label for upgrade prompts and the pricing grid ("Website monitors"). */
+	readonly label: string;
+	/**
+	 * The app id whose manifest declares this key, or `null` when the KERNEL owns
+	 * it. A kernel quota is a shell/runtime concern with no app to uninstall, so it
+	 * always applies; an app-owned quota applies only while that app is installed
+	 * and enabled (the client resolves that — see the desktop `planCapBridge`).
+	 */
+	readonly owner: string | null;
+	/**
+	 * Per-plan numbers. A plan absent from this map is UNBOUNDED
+	 * ({@link Number.POSITIVE_INFINITY}) — which is the symbolic-cap default, so
+	 * only a quota with a real per-tier cost writes a row here.
+	 */
+	readonly paid?: Partial<Record<PlanId, number>>;
+	readonly unit: QuotaUnit;
+}
+
+/**
+ * Quotas the KERNEL owns: no app declares them, so they stay compiled in here.
+ *
+ * Each of these gates a shell or runtime concern that survives uninstalling
+ * every app — tabs and remote nodes are the desktop shell itself, `maxPlugins`
+ * caps the app list so it cannot be owned by an entry in that list, and agents /
+ * MCP servers / skills / schedules / spaces / concurrency are Core subsystems
+ * with no package home under `apps-store/`. `maxSpaces` in particular matches
+ * the kernel's own taxonomy: `spaces` is in Core's `KERNEL_DATA_CATEGORY_IDS`,
+ * the list of data categories an app is forbidden to claim.
+ *
+ * `maxWorkflows` looks like an obvious mover and is not. `@ryu/workflows` is a
+ * GATE-ONLY governance shell: Core's own executor runs workflows dispatched by
+ * the scheduler whether or not the app is enabled, and the public per-workflow
+ * webhook stays mounted regardless. A quota that vanished with that app would
+ * stop counting entities the kernel is still running. Contrast Monitors, which
+ * really is out-of-process (the `ryu-monitors` sidecar owns the data).
+ */
+export const KERNEL_QUOTAS = {
+	maxAgents: { free: 10, label: "Agents", owner: null, unit: "count" },
+	maxConcurrentRuns: {
+		free: 1,
+		label: "Concurrent runs",
+		owner: null,
+		// The one REAL compute lever, so it stays finite even on paid rows.
+		paid: { "desktop-license": 3, pro: 3, max: 3, teams: 8 },
+		unit: "count",
+	},
+	maxEvalRunsMonthly: {
+		free: 20,
+		label: "Eval runs per month",
+		owner: null,
+		unit: "count",
+	},
+	maxMcpServers: { free: 5, label: "MCP servers", owner: null, unit: "count" },
+	maxOpenTabs: { free: 8, label: "Open tabs", owner: null, unit: "count" },
+	maxPlugins: {
+		free: 10,
+		label: "Installed apps and plugins",
+		owner: null,
+		unit: "count",
+	},
+	maxRemoteNodes: {
+		free: 1,
+		label: "Remote nodes",
+		owner: null,
+		unit: "count",
+	},
+	maxSchedules: {
+		free: 3,
+		label: "Scheduled automations",
+		owner: null,
+		unit: "count",
+	},
+	maxSkills: { free: 10, label: "Skills", owner: null, unit: "count" },
+	maxSpaces: { free: 5, label: "Spaces", owner: null, unit: "count" },
+	maxWorkflows: { free: 10, label: "Workflows", owner: null, unit: "count" },
+	spaceStorageLimitGb: {
+		free: 2,
+		label: "Space storage",
+		owner: null,
+		// Real storage cost, so finite on paid rows too.
+		paid: { "desktop-license": 20, pro: 20, max: 50, teams: 50 },
+		unit: "gigabytes",
+	},
+} as const satisfies Record<string, QuotaSpec>;
+
+/**
+ * Quotas an APP owns, keyed to the app that declares the key in its
+ * `contributes.quotas` manifest block. The `owner` id is the load-bearing half:
+ * a node where the app is not installed or not enabled must not carry its limit
+ * (requirement of the same "the row appears and disappears with the app" rule
+ * the Danger Zone categories follow).
+ */
+export const APP_QUOTAS = {
+	maxMonitors: {
+		free: 5,
+		label: "Website monitors",
+		owner: "@ryu/monitors",
+		unit: "count",
+	},
+	meetingRetentionDays: {
+		free: 30,
+		label: "Meeting-note retention",
+		owner: "@ryu/meetings",
+		unit: "days",
+	},
+} as const satisfies Record<string, QuotaSpec>;
+
+/**
+ * Every declared quota key. DERIVED from the two registries above — never
+ * hand-written, and never widened to `string`: call sites pass string literals
+ * (`guard("maxSpaces", n)`), so a widened union would keep every one of them
+ * compiling while silently losing the typo check that is the point.
  */
 export type PlanLimitField =
-	| "maxAgents"
-	| "maxConcurrentRuns"
-	| "maxEvalRunsMonthly"
-	| "maxMcpServers"
-	| "maxMonitors"
-	| "maxOpenTabs"
-	| "maxPlugins"
-	| "maxRemoteNodes"
-	| "maxSchedules"
-	| "maxSkills"
-	| "maxSpaces"
-	| "maxWorkflows"
-	| "meetingRetentionDays"
-	| "spaceStorageLimitGb";
+	| keyof typeof KERNEL_QUOTAS
+	| keyof typeof APP_QUOTAS;
 
-/**
- * The FREE (null-plan) baseline for every numeric cap. These are the deliberately
- * generous "free tier" numbers from the gating plan; the paid rows in {@link PLANS}
- * carry {@link Number.POSITIVE_INFINITY} except the two real-cost levers
- * (`maxConcurrentRuns`, `spaceStorageLimitGb`). This is the ONE place the free
- * baseline is written; read it through {@link planLimit}, never inline.
- */
-export const FREE_TIER_LIMITS: Record<PlanLimitField, number> = {
-	maxOpenTabs: 8,
-	maxAgents: 10,
-	maxWorkflows: 10,
-	maxSpaces: 5,
-	maxMonitors: 5,
-	maxMcpServers: 5,
-	maxPlugins: 10,
-	maxSkills: 10,
-	maxSchedules: 3,
-	maxConcurrentRuns: 1,
-	maxEvalRunsMonthly: 20,
-	meetingRetentionDays: 30,
-	spaceStorageLimitGb: 2,
-	maxRemoteNodes: 1,
+/** The merged registry: kernel-owned keys plus every app-declared one. */
+export const QUOTAS: Readonly<Record<PlanLimitField, QuotaSpec>> = {
+	...KERNEL_QUOTAS,
+	...APP_QUOTAS,
 };
 
+/** The app that owns `field`, or `null` when the kernel does. */
+export const quotaOwner = (field: PlanLimitField): string | null =>
+	QUOTAS[field].owner;
+
 /**
- * The effective numeric limit for `field` on `plan`. A null plan (the free
- * baseline) falls back to {@link FREE_TIER_LIMITS}; any real plan reads its own
- * row (paid rows are mostly {@link Number.POSITIVE_INFINITY}). Single source of
- * truth for every count/quota gate — enforce with this, never a literal.
+ * The FREE (null-plan) baseline for every quota, projected out of {@link QUOTAS}.
+ * Kept as an exported record because consumers iterate it; the numbers themselves
+ * live on each {@link QuotaSpec}. Read it through {@link planLimit}, never inline.
+ */
+export const FREE_TIER_LIMITS: Readonly<Record<PlanLimitField, number>> =
+	Object.fromEntries(
+		Object.entries(QUOTAS).map(([field, spec]) => [field, spec.free])
+	) as Record<PlanLimitField, number>;
+
+/**
+ * The effective numeric limit for `field` on `plan`. A null plan gets the free
+ * baseline; a paid plan gets its {@link QuotaSpec.paid} row, defaulting to
+ * unbounded. Single source of truth for every count/quota gate — enforce with
+ * this, never a literal.
+ *
+ * This answers "what does this tier allow", NOT "does this quota apply at all".
+ * An app-owned key on a node without that app is the client's call, because only
+ * the client knows what is installed; see the desktop `resolveCapLimit`.
  */
 export const planLimit = (
 	plan: PlanId | null,
 	field: PlanLimitField
-): number => (plan ? PLANS[plan][field] : FREE_TIER_LIMITS[field]);
+): number => {
+	const spec = QUOTAS[field];
+	if (!plan) {
+		return spec.free;
+	}
+	return spec.paid?.[plan] ?? Number.POSITIVE_INFINITY;
+};
 
 /** Bytes in one gibibyte; the unit the storage cap is expressed against. */
 const BYTES_PER_GB = 1024 ** 3;

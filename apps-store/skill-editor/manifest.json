@@ -3,6 +3,8 @@
   "name": "Skill Editor",
   "version": "1.0.0",
   "description": "Author a user-owned Agent Skill (SKILL.md): front-matter fields (name / description / allowed tools / always-on), a markdown body editor, debounced autosave, and server-backed undoable version history.",
+  "icon": "sparkles",
+  "iconDither": { "from": 308, "to": 342, "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

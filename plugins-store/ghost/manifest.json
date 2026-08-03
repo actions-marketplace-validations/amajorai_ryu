@@ -3,6 +3,8 @@
   "name": "Ghost",
   "version": "1.0.0",
   "description": "Desktop automation: 29 screen perception and input control tools. Windows-first.",
+  "icon": "cursor-01",
+  "iconDither": { "from": 354, "to": 320, "direction": "right" },
   "keywords": ["automation", "desktop"],
   "surfaces": {
     "gateway": { "support": "none" },

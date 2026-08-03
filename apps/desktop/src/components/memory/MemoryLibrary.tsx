@@ -68,6 +68,20 @@ import { MemoryEditor } from "./MemoryEditor.tsx";
 
 const ALL = "all";
 
+// A Select's closed trigger takes its text from `items`, so the sentinel row has
+// to be in here too — otherwise the filter reads "all"/"preference" once picked.
+const SCOPE_FILTER_ITEMS = [
+	{ label: "All scopes", value: ALL },
+	...MEMORY_SCOPES.map((s) => ({ label: MEMORY_SCOPE_LABELS[s], value: s })),
+];
+const CATEGORY_FILTER_ITEMS = [
+	{ label: "All categories", value: ALL },
+	...MEMORY_CATEGORIES.map((c) => ({
+		label: MEMORY_CATEGORY_LABELS[c],
+		value: c,
+	})),
+];
+
 /** A single memory row: content, metadata badges, tags, and hover actions. */
 function MemoryRow({
 	memory,
@@ -230,6 +244,15 @@ export function MemoryLibrary() {
 		return [...set].sort((a, b) => a.localeCompare(b));
 	}, [memories]);
 
+	// Labels carry the "#" the dropdown rows show, so trigger and list agree.
+	const tagFilterItems = useMemo(
+		() => [
+			{ label: "All tags", value: ALL },
+			...presentTags.map((tag) => ({ label: `#${tag}`, value: tag })),
+		],
+		[presentTags]
+	);
+
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
 		return memories.filter((m) => {
@@ -289,6 +312,7 @@ export function MemoryLibrary() {
 							/>
 						</div>
 						<Select
+							items={SCOPE_FILTER_ITEMS}
 							onValueChange={(v) =>
 								setScopeFilter(v as MemoryScope | typeof ALL)
 							}
@@ -307,6 +331,7 @@ export function MemoryLibrary() {
 							</SelectContent>
 						</Select>
 						<Select
+							items={CATEGORY_FILTER_ITEMS}
 							onValueChange={(v) =>
 								setCategoryFilter(v as MemoryCategory | typeof ALL)
 							}
@@ -326,6 +351,7 @@ export function MemoryLibrary() {
 						</Select>
 						{presentTags.length > 0 ? (
 							<Select
+								items={tagFilterItems}
 								onValueChange={(v) => setTagFilter(v as string)}
 								value={tagFilter}
 							>

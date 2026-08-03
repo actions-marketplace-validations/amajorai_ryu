@@ -49,6 +49,21 @@ const IMPORTANCE_LEVELS: { value: number; label: string }[] = [
 	{ value: 1, label: "1 — Minimal" },
 ];
 
+// A Select's closed trigger resolves its text through `items`; without it Base UI
+// falls back to printing the raw stored value ("user", "preference", "3").
+const SCOPE_ITEMS = MEMORY_SCOPES.map((s) => ({
+	label: MEMORY_SCOPE_LABELS[s],
+	value: s,
+}));
+const CATEGORY_ITEMS = MEMORY_CATEGORIES.map((c) => ({
+	label: MEMORY_CATEGORY_LABELS[c],
+	value: c,
+}));
+const IMPORTANCE_ITEMS = IMPORTANCE_LEVELS.map((level) => ({
+	label: level.label,
+	value: String(level.value),
+}));
+
 /** Parse the comma-separated tag input into a clean, de-duplicated list. */
 function parseTags(raw: string): string[] {
 	const seen = new Set<string>();
@@ -212,6 +227,7 @@ export function MemoryEditor({
 							<div className="flex flex-col gap-1.5">
 								<Label htmlFor="memory-scope">Scope</Label>
 								<Select
+									items={SCOPE_ITEMS}
 									onValueChange={(v) => setScope(v as MemoryScope)}
 									value={scope}
 								>
@@ -231,6 +247,7 @@ export function MemoryEditor({
 							<div className="flex flex-col gap-1.5">
 								<Label htmlFor="memory-category">Category</Label>
 								<Select
+									items={CATEGORY_ITEMS}
 									onValueChange={(v) => setCategory(v as MemoryCategory)}
 									value={category}
 								>
@@ -265,6 +282,7 @@ export function MemoryEditor({
 						<div className="flex flex-col gap-1.5">
 							<Label htmlFor="memory-importance">Importance</Label>
 							<Select
+								items={IMPORTANCE_ITEMS}
 								onValueChange={(v) => setImportance(Number(v))}
 								value={String(importance)}
 							>

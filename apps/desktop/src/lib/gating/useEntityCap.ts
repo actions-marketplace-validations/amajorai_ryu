@@ -11,11 +11,16 @@
 // `planCapBridge` singleton in sync so the zustand `useNodeStore` can enforce its
 // own cap and open the same upgrade modal.
 
-import { type PlanLimitField, planLimit } from "@ryu/auth/lib/plans";
+import {
+	type PlanLimitField,
+	planLimit,
+	quotaOwner,
+} from "@ryu/auth/lib/plans";
 import { useCallback, useEffect } from "react";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { hasBillingAuth } from "@/src/lib/api/billing.ts";
 import { effectivePlan, syncPlanCapState } from "./planCapBridge.ts";
+import { useEnabledApps } from "./useEnabledApps.ts";
 
 export interface EntityCapGuard {
 	/**
@@ -32,17 +37,29 @@ export interface EntityCapGuard {
 export function useEntityCap(): EntityCapGuard {
 	const { verdict, requestUpgrade } = useEntitlementContext();
 	const plan = effectivePlan(verdict);
+	const enabledApps = useEnabledApps();
 
 	// Keep the non-React bridge (used by the zustand node store) in sync so it can
 	// enforce its cap and surface the same upgrade modal.
 	useEffect(() => {
-		syncPlanCapState(plan, requestUpgrade);
-	}, [plan, requestUpgrade]);
+		syncPlanCapState(plan, requestUpgrade, enabledApps);
+	}, [enabledApps, plan, requestUpgrade]);
 
 	const limitFor = useCallback(
-		(field: PlanLimitField): number =>
-			hasBillingAuth() ? planLimit(plan, field) : Number.POSITIVE_INFINITY,
-		[plan]
+		(field: PlanLimitField): number => {
+			if (!hasBillingAuth()) {
+				return Number.POSITIVE_INFINITY;
+			}
+			// An app-declared quota binds only while its app is installed and
+			// enabled; unknown (list still loading) counts as not binding, matching
+			// the bridge's fail-open. See `useEnabledApps`.
+			const owner = quotaOwner(field);
+			if (owner !== null && !enabledApps?.has(owner)) {
+				return Number.POSITIVE_INFINITY;
+			}
+			return planLimit(plan, field);
+		},
+		[enabledApps, plan]
 	);
 
 	const guard = useCallback(

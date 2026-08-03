@@ -71,6 +71,7 @@ import { useAppStore } from "../../store/useAppStore.ts";
 import { DownloadCenter } from "../downloads/DownloadCenter.tsx";
 import { InboxCenter } from "../inbox/InboxCenter.tsx";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
+import { CreateMenu } from "./CreateMenu.tsx";
 import { UpdatesSubmenu } from "./UpdatesSubmenu.tsx";
 
 const TRAILING_SLASH_RE = /\/$/;
@@ -567,8 +568,7 @@ export function NavUser({
 					)}
 
 					<div className="ml-auto flex items-center gap-0.5">
-						{/* Create menu ("+") temporarily hidden per request. Restore by
-						    re-adding the CreateMenu import and <CreateMenu /> here. */}
+						<CreateMenu />
 						{showInbox && (
 							<ContextMenu>
 								<ContextMenuTrigger>

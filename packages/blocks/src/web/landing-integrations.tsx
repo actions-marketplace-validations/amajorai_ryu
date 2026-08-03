@@ -3,6 +3,7 @@
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { landingSubheadlineClass } from "./landing-typography.ts";
 import { SectionTitle } from "./section-title.tsx";
+import { StaggerLines } from "./stagger-lines.tsx";
 
 // Bundled locally under apps/web/public/logos (originally from svgl.app).
 const SVGL = "/logos";
@@ -105,7 +106,7 @@ export default function LandingIntegrations() {
 						))}
 					</div>
 
-					<div className="border-border/60 border-y bg-muted/30 px-6 py-10 text-center sm:px-10 sm:py-12">
+					<StaggerLines className="border-border/60 border-y bg-muted/30 px-6 py-10 text-center sm:px-10 sm:py-12">
 						<SectionTitle
 							suffix={
 								<span className="text-muted-foreground">
@@ -120,7 +121,7 @@ export default function LandingIntegrations() {
 							to the tools you already use. Routing, policy, budgets, and audit
 							stay in the path.
 						</p>
-					</div>
+					</StaggerLines>
 
 					<div className="grid grid-cols-2 sm:grid-cols-7">
 						{secondRow.map((integration, index) => (

@@ -307,7 +307,10 @@ export function SettingsDialog({
 								</SidebarGroup>
 							</>
 						}
-						storageKey="ryu.settings.sidebar-layout"
+						// v2: the persisted divider position wins over
+						// DEFAULT_SIDEBAR_SIZE, so widening the default only reaches
+						// people who have never dragged it unless the key changes with it.
+						storageKey="ryu.settings.sidebar-layout.v2"
 					/>
 				</DialogContent>
 			</Dialog>

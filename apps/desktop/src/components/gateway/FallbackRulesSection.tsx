@@ -98,6 +98,25 @@ function conditionForSource(
 	};
 }
 
+// Option lists live next to the form, not inline in the dropdown, because the
+// closed trigger resolves its text through the Select's `items` prop: split the
+// two and the trigger goes back to printing "subscription_window".
+//
+// "any" is the stored empty string — "whichever window is most consumed" is the
+// honest default, since vendors name and count their windows differently and a
+// rule matching nothing looks broken.
+const WINDOW_OPTIONS: { value: string; label: string }[] = [
+	{ value: "any", label: "Whichever bites first" },
+	{ value: "session", label: "Session (5h)" },
+	{ value: "weekly", label: "Weekly" },
+];
+
+const SOURCE_OPTIONS: { value: RoutingCondition["source"]; label: string }[] = [
+	{ value: "ryu_credits", label: "Ryu credit runs low" },
+	{ value: "provider_credits", label: "A provider key's credit runs low" },
+	{ value: "subscription_window", label: "A subscription window runs low" },
+];
+
 function sourceLabel(source: RoutingCondition["source"]): string {
 	if (source === "ryu_credits") {
 		return "Ryu credit";
@@ -154,6 +173,7 @@ function ConditionFields({
 					<Label className="text-xs">Provider</Label>
 					<Select
 						disabled={disabled}
+						items={creditProviders.map((id) => ({ label: id, value: id }))}
 						onValueChange={(provider_id) =>
 							onChange({ ...condition, provider_id: provider_id ?? "" })
 						}
@@ -199,6 +219,7 @@ function ConditionFields({
 				<Label className="text-xs">Agent</Label>
 				<Select
 					disabled={disabled}
+					items={subscriptionAgents.map((id) => ({ label: id, value: id }))}
 					onValueChange={(agent_id) =>
 						onChange({ ...condition, agent_id: agent_id ?? "" })
 					}
@@ -220,6 +241,7 @@ function ConditionFields({
 				<Label className="text-xs">Window</Label>
 				<Select
 					disabled={disabled}
+					items={WINDOW_OPTIONS}
 					onValueChange={(window) =>
 						onChange({
 							...condition,
@@ -232,12 +254,11 @@ function ConditionFields({
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
-						{/* "" means "whichever window is most consumed" — the honest
-						    default, since vendors name and count their windows
-						    differently and a rule matching nothing looks broken. */}
-						<SelectItem value="any">Whichever bites first</SelectItem>
-						<SelectItem value="session">Session (5h)</SelectItem>
-						<SelectItem value="weekly">Weekly</SelectItem>
+						{WINDOW_OPTIONS.map((opt) => (
+							<SelectItem key={opt.value} value={opt.value}>
+								{opt.label}
+							</SelectItem>
+						))}
 					</SelectContent>
 				</Select>
 			</div>
@@ -336,6 +357,7 @@ function RuleCard({
 				<Label className="text-xs">When</Label>
 				<Select
 					disabled={disabled}
+					items={SOURCE_OPTIONS}
 					onValueChange={(source) =>
 						onChange({
 							...rule,
@@ -352,13 +374,11 @@ function RuleCard({
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
-						<SelectItem value="ryu_credits">Ryu credit runs low</SelectItem>
-						<SelectItem value="provider_credits">
-							A provider key's credit runs low
-						</SelectItem>
-						<SelectItem value="subscription_window">
-							A subscription window runs low
-						</SelectItem>
+						{SOURCE_OPTIONS.map((opt) => (
+							<SelectItem key={opt.value} value={opt.value}>
+								{opt.label}
+							</SelectItem>
+						))}
 					</SelectContent>
 				</Select>
 			</div>

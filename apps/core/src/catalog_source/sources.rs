@@ -5116,5 +5116,4 @@ mod tests {
         let manifest = parse_marketplace(raw).expect("parses");
         assert_eq!(plugins_as_items(&manifest, "acme/m").len(), 1);
     }
-
 }

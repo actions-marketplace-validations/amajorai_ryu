@@ -27,6 +27,7 @@
 // asserted before any `syncPlanCapState`.
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { QUOTAS } from "@ryu/auth/lib/plans";
 
 let billingAuthOn = false;
 
@@ -106,6 +107,59 @@ describe("resolveCapLimit — after sync", () => {
 		syncPlanCapState("pro", () => undefined);
 		billingAuthOn = true;
 		expect(resolveCapLimit("maxAgents")).toBe(Number.POSITIVE_INFINITY);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// App-declared quotas. `maxMonitors` is declared by `@ryu/monitors`, so it is a
+// limit only on a node that actually has Monitors — the same "the row appears
+// and disappears with the app" rule the Danger Zone categories follow. Kernel
+// keys (`maxAgents`) have no app to uninstall and must be unaffected by all of
+// this, which is what makes these two assertions a pair.
+// ---------------------------------------------------------------------------
+describe("resolveCapLimit — app-declared quotas follow their app", () => {
+	test("an app-owned key is uncapped when its app is not enabled", () => {
+		syncPlanCapState(null, () => undefined, new Set(["@ryu/mail"]));
+		billingAuthOn = true;
+		expect(resolveCapLimit("maxMonitors")).toBe(Number.POSITIVE_INFINITY);
+		// The kernel key alongside it still binds.
+		expect(resolveCapLimit("maxAgents")).toBe(10);
+	});
+
+	test("an app-owned key binds once its app is enabled", () => {
+		syncPlanCapState(null, () => undefined, new Set(["@ryu/monitors"]));
+		billingAuthOn = true;
+		// FREE_TIER_LIMITS.maxMonitors === 5.
+		expect(resolveCapLimit("maxMonitors")).toBe(5);
+	});
+
+	test("a retention window is a quota like any other (days, not a count)", () => {
+		syncPlanCapState(null, () => undefined, new Set(["@ryu/meetings"]));
+		billingAuthOn = true;
+		expect(resolveCapLimit("meetingRetentionDays")).toBe(30);
+		expect(QUOTAS.meetingRetentionDays.unit).toBe("days");
+	});
+
+	test("an unsynced app list leaves app-owned keys uncapped (fail open)", () => {
+		// No app list passed at all — the plan is known but installs are not, and
+		// guessing "not installed" would cap a user who does have the app.
+		syncPlanCapState(null, () => undefined);
+		billingAuthOn = true;
+		expect(resolveCapLimit("maxMonitors")).toBe(Number.POSITIVE_INFINITY);
+	});
+
+	test("enforcePlanCap never throws for an app that is not enabled", () => {
+		let upgrades = 0;
+		syncPlanCapState(
+			null,
+			() => {
+				upgrades += 1;
+			},
+			new Set<string>()
+		);
+		billingAuthOn = true;
+		expect(() => enforcePlanCap("maxMonitors", 10_000)).not.toThrow();
+		expect(upgrades).toBe(0);
 	});
 });
 

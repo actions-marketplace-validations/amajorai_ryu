@@ -6591,7 +6591,9 @@ export function GatewayDialog({
 							</SidebarGroup>
 						</>
 					}
-					storageKey="ryu.gateway.sidebar-layout"
+					// v2 for the same reason as the app Settings dialog: a persisted
+					// divider position takes precedence over the widened default.
+					storageKey="ryu.gateway.sidebar-layout.v2"
 				/>
 			</DialogContent>
 		</Dialog>

@@ -1,8 +1,16 @@
 // Settings → Danger Zone. Irreversible bulk "delete all X" actions for the user
-// data Core holds on this node: chats, spaces, long-term memory, website
-// monitors, and meetings. Purely a visual layer — every delete is performed by
-// Core (`/api/data/clear`, see apps/core/src/server/data_admin.rs). Each action
+// data Core holds on this node. Purely a visual layer — every delete is performed
+// by Core (`/api/data/clear`, see apps/core/src/server/data_admin.rs). Each action
 // is guarded by a type-to-confirm dialog and shows a live item count first.
+//
+// WHICH rows exist is Core's answer, not ours. This file used to carry a
+// `CATEGORIES` array holding the id, title, noun, confirm word and copy of all
+// five categories — a second hardcoded list that had to be edited in lockstep with
+// Core's `DataCategory` enum, and that named apps (Monitors, Meetings) from the
+// closed desktop source. An app now declares its own category in its manifest
+// (`contributes.data_categories`) and Core serves the enabled ones with their live
+// counts, so a row appears and disappears with its app and the copy lives with the
+// team that owns the data.
 
 import {
 	AlertDialog,
@@ -15,7 +23,23 @@ import {
 	AlertDialogTitle,
 } from "@ryu/ui/components/alert-dialog";
 import { Button } from "@ryu/ui/components/button";
+import { Checkbox } from "@ryu/ui/components/checkbox";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@ryu/ui/components/dialog";
 import { Input } from "@ryu/ui/components/input";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select";
 import { Switch } from "@ryu/ui/components/switch";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
@@ -28,70 +52,116 @@ import {
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
-import { ApiError, toTarget } from "@/src/lib/api/client.ts";
 import {
-	clearDataCategory,
-	type DataCategory,
-	type DataCounts,
-	fetchDataCounts,
-	resetNode,
-} from "@/src/lib/api/data-admin.ts";
-import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
+	ApiError,
+	type ApiTarget,
+	request,
+	toTarget,
+} from "@/src/lib/api/client.ts";
+import { resetNode } from "@/src/lib/api/data-admin.ts";
 import { isLocalNode } from "@/src/store/useNodeStore.ts";
 
-interface CategoryDef {
-	/** The exact word the user must type to arm this delete (e.g. "Meetings"). */
-	confirmWord: string;
-	/** What exactly gets removed, shown in the dialog. */
+/**
+ * One deletable row, exactly as Core serves it in `GET /api/data/counts`.
+ *
+ * Snake_case because these are wire fields, not ours to rename: a category is
+ * either compiled into Core (chats/spaces/memory — no app owns that data) or
+ * declared by an app's `contributes.data_categories`, and both arrive through the
+ * same descriptor so this component cannot tell, or need to tell, them apart.
+ */
+interface DangerCategory {
+	/** The word the user must type to arm this delete (e.g. "Meetings"). */
+	confirm_word: string;
+	/** Live item count, so the dialog can say "This will delete 42 monitors". */
+	count: number;
+	/** What exactly disappears, shown in the confirm dialog. */
 	detail: string;
-	key: DataCategory;
-	/** Noun for the live count line and confirmation copy. */
+	/** Wire id — the `category` a clear names. */
+	id: string;
+	/** Plural noun for the count line and the "N deleted" toast. */
 	noun: string;
+	/** Owning app, or `null` for a kernel category that has none. */
+	plugin: null | string;
 	/** The destructive button + dialog title. */
 	title: string;
 }
 
-const CATEGORIES: CategoryDef[] = [
+/** The `/api/data/counts` body: descriptors, plus the legacy flat count keys. */
+interface DataCountsPayload {
+	categories?: DangerCategory[];
+	chats?: number;
+	memory?: number;
+	spaces?: number;
+}
+
+/**
+ * What to draw when the node's Core predates the `categories` payload.
+ *
+ * Only the kernel three, and deliberately: those are the categories every Core
+ * that has ever shipped can clear, so listing them from an older node is safe. The
+ * app-owned ones are omitted rather than guessed — an older Core cannot tell us
+ * whether Monitors is enabled here, and offering a delete for data the node may
+ * not hold is the failure this whole change removes.
+ */
+const LEGACY_KERNEL_CATEGORIES = [
 	{
-		key: "chats",
+		id: "chats",
 		title: "Delete all chats",
 		noun: "chats",
-		confirmWord: "Chats",
+		confirm_word: "Chats",
 		detail:
 			"Every conversation and all of its messages will be permanently deleted.",
 	},
 	{
-		key: "spaces",
+		id: "spaces",
 		title: "Delete all spaces",
 		noun: "spaces",
-		confirmWord: "Spaces",
+		confirm_word: "Spaces",
 		detail:
 			"Every Space, including all of its documents and their search data, will be permanently deleted. System spaces (Artifacts, Uploads, Meetings, …) are left untouched.",
 	},
 	{
-		key: "memory",
+		id: "memory",
 		title: "Clear all memory",
 		noun: "memory entries",
-		confirmWord: "Memory",
+		confirm_word: "Memory",
 		detail: "Every long-term memory entry will be permanently forgotten.",
 	},
-	{
-		key: "monitors",
-		title: "Delete all monitors",
-		noun: "monitors",
-		confirmWord: "Monitors",
-		detail:
-			"Every website monitor will be deleted and its scheduled checks will stop.",
-	},
-	{
-		key: "meetings",
-		title: "Delete all meetings",
-		noun: "meetings",
-		confirmWord: "Meetings",
-		detail:
-			"Every meeting record and its transcript will be permanently deleted.",
-	},
-];
+] as const;
+
+/**
+ * Read the danger-zone rows for a node.
+ *
+ * Goes through `request` rather than the `data-admin.ts` helpers because the set
+ * of categories is now open-ended — apps contribute to it — and those helpers
+ * normalise the response down to five fixed numeric keys, which would drop the
+ * descriptors on the floor.
+ */
+async function fetchDangerCategories(
+	target: ApiTarget
+): Promise<DangerCategory[]> {
+	const json = await request<DataCountsPayload>(target, "/api/data/counts");
+	if (Array.isArray(json.categories)) {
+		return json.categories;
+	}
+	return LEGACY_KERNEL_CATEGORIES.map((def) => ({
+		...def,
+		count: json[def.id as "chats" | "memory" | "spaces"] ?? 0,
+		plugin: null,
+	}));
+}
+
+/** Irreversibly delete every item in one category; resolves to the count removed. */
+async function clearCategory(
+	target: ApiTarget,
+	category: string
+): Promise<number> {
+	const json = await request<{ removed?: number }>(target, "/api/data/clear", {
+		method: "POST",
+		body: { category },
+	});
+	return json?.removed ?? 0;
+}
 
 /** Profiles a clean can target.
  *
@@ -100,27 +170,65 @@ const CATEGORIES: CategoryDef[] = [
  *  others untouched. */
 const CLEAN_PROFILES = ["release", "dev", "canary", "nightly", "beta"] as const;
 
-/** Desktop-only flags that survive a Core data wipe and would skip onboarding. */
-const CLIENT_RESET_KEYS = [
-	"ryu_onboarding_complete",
-	"ryu_setup_seen",
-	"ryu_default_agent",
-	STORAGE_KEYS.lightPreset,
-	STORAGE_KEYS.darkPreset,
-	STORAGE_KEYS.uiFont,
-	STORAGE_KEYS.headingFont,
-	STORAGE_KEYS.codeFont,
-	STORAGE_KEYS.contrast,
-	STORAGE_KEYS.radius,
-	STORAGE_KEYS.spacing,
-	STORAGE_KEYS.scale,
-	STORAGE_KEYS.cardSpacing,
-	STORAGE_KEYS.chatWidth,
+/** How much of each selected profile's data folder goes.
+ *
+ *  Mirrors `CleanDepth` (apps/core/src/data_path.rs). The labels say what
+ *  SURVIVES, not just what goes: "config only" sounds thorough until you notice
+ *  it is the one setting that leaves every chat, space and app in place. */
+const CLEAN_DEPTHS = [
+	{
+		value: "state",
+		label: "Clear data, keep downloads",
+		description:
+			"Deletes chats, spaces, memory, installed apps and plugin state. Keeps bin/ and models/, so engines are not re-fetched.",
+	},
+	{
+		value: "full",
+		label: "Everything, including downloads",
+		description:
+			"Deletes the whole data folder, engines and models included. The next start re-downloads them.",
+	},
+	{
+		value: "none",
+		label: "Config only — keep all data",
+		description:
+			"Removes only the gateway config and the data-folder pointer. Chats, spaces, memory, apps and plugins are all left alone.",
+	},
 ] as const;
 
+/**
+ * Drop every scrap of desktop-local state, so a wiped node comes back up looking
+ * like a first launch.
+ *
+ * # Why this is a clear(), not a key list
+ *
+ * This used to be a 15-key allowlist (onboarding flags plus the `STORAGE_KEYS`
+ * theme entries). That is the wrong shape for "fresh install" and it silently
+ * decayed: the desktop writes localStorage from dozens of call sites — the
+ * workspace folder (`ryu_workspace_folder`), pinned dock tabs
+ * (`ryu_pinned_dock_tabs`), the getting-started checklist (`ryu:getting-started`),
+ * the library view, the ACP config, the agent/model selection, and a long tail of
+ * unprefixed per-setting keys (`theme`, `colorTheme`, `auto-updates`,
+ * `context.*`, `agent-*`, …). None of those were in the list, so after a wipe the
+ * app reopened its old tabs and workspace against a node that no longer had any
+ * of the underlying records. That is the "I deep cleaned and Home / my Spaces /
+ * my canvas are all still there" report: the data WAS gone server-side, the shell
+ * was replaying stale client state on top of it.
+ *
+ * An allowlist can only ever be as current as the last person who remembered to
+ * append to it, and every miss looks like "the wipe didn't work". Nothing in
+ * localStorage is authoritative — node identity and the node list live in Core's
+ * data dir (`nodes.json`), not here — so clearing all of it loses no state that
+ * a fresh install would have had anyway.
+ */
 function clearClientStateForFreshNode(): void {
-	for (const key of CLIENT_RESET_KEYS) {
-		localStorage.removeItem(key);
+	try {
+		localStorage.clear();
+		sessionStorage.clear();
+	} catch {
+		// Storage can be unavailable (private mode / locked-down webview). The wipe
+		// itself already happened server-side; failing here must not turn a
+		// successful clean into an error toast.
 	}
 }
 
@@ -154,33 +262,52 @@ function resetFailureReason(e: unknown): string {
 export function DangerZoneSettings() {
 	const getNode = useActiveNodeGetter();
 	const queryClient = useQueryClient();
-	const [active, setActive] = useState<CategoryDef | null>(null);
+	const [active, setActive] = useState<DangerCategory | null>(null);
 	const [typed, setTyped] = useState("");
 	const [busy, setBusy] = useState(false);
 
 	// Reset node: a full wipe of this node (own type-to-confirm on the node name,
 	// separate from the per-category deletes above).
 	const nodeName = getNode().name;
+	/** Options sheet (what to remove) — step 1. */
+	const [deepCleanOptionsOpen, setDeepCleanOptionsOpen] = useState(false);
+	/** Type-to-confirm on the chosen scope — step 2. */
 	const [deepCleanOpen, setDeepCleanOpen] = useState(false);
 	const [deepCleaning, setDeepCleaning] = useState(false);
 	// The same two axes `bun run wipe` exposes: WHICH profile, and HOW MUCH of it.
-	const [cleanProfile, setCleanProfile] = useState("release");
+	// Profiles are a SET: cleaning dev and canary together is the common case when
+	// resetting a dev machine, and doing it one dialog at a time meant one Core
+	// stop + restart per profile.
+	const [cleanProfiles, setCleanProfiles] = useState<string[]>(["release"]);
+	// Defaults to `state`, NOT `none`. `none` removes the gateway config and
+	// nothing else, so a button labelled "Deep clean" left at its default deleted
+	// no chats, no spaces, no apps and no plugins — it read as "deep clean is
+	// broken" rather than as "you left the depth on config-only". `state` is what
+	// the label promises while still keeping the multi-GB engine/model downloads.
 	const [cleanDepth, setCleanDepth] = useState<"none" | "state" | "full">(
-		"none"
+		"state"
 	);
 	const [cleanShared, setCleanShared] = useState(true);
+	const toggleCleanProfile = useCallback((profile: string, on: boolean) => {
+		setCleanProfiles((prev) =>
+			on ? [...new Set([...prev, profile])] : prev.filter((p) => p !== profile)
+		);
+	}, []);
 	const doDeepClean = useCallback(async () => {
 		setDeepCleaning(true);
 		try {
-			// The Tauri command STOPS Core before removing anything (WAL: a live copy
-			// is a torn snapshot). It does not restart it, so the app is left with no
-			// Core until we bring one back — hence the restart below rather than a
-			// bare toast.
-			await invoke("deep_clean_node", {
-				depth: cleanDepth,
-				profile: cleanProfile,
-				shared: cleanShared,
-			});
+			// One invoke per profile, sequentially: the Tauri command STOPS Core
+			// before removing anything (WAL: a live copy is a torn snapshot) and each
+			// call targets exactly one data dir. It does not restart Core, so the app
+			// is left with none until we bring one back — hence the single restart
+			// after the whole set, rather than one restart per profile.
+			for (const profile of cleanProfiles) {
+				await invoke("deep_clean_node", {
+					depth: cleanDepth,
+					profile,
+					shared: cleanShared,
+				});
+			}
 
 			// Deep clean deletes the OS config dir, which holds gateway.toml AND the
 			// data-path pointer. Core resolves both once at startup and caches them,
@@ -194,6 +321,7 @@ export function DangerZoneSettings() {
 				description: "Restarting to pick up the cleared configuration…",
 			});
 			setDeepCleanOpen(false);
+			setDeepCleanOptionsOpen(false);
 
 			// Only the LOCAL node's Core is ours to restart — a remote node runs on
 			// its own host, exactly as Reset node treats it.
@@ -209,7 +337,7 @@ export function DangerZoneSettings() {
 			setDeepCleaning(false);
 			setDeepCleanOpen(false);
 		}
-	}, [getNode, cleanProfile, cleanDepth, cleanShared]);
+	}, [getNode, cleanProfiles, cleanDepth, cleanShared]);
 	const [resetOpen, setResetOpen] = useState(false);
 	const [resetTyped, setResetTyped] = useState("");
 	const [resetBusy, setResetBusy] = useState(false);
@@ -250,21 +378,19 @@ export function DangerZoneSettings() {
 	};
 
 	const {
-		data: counts,
+		data: categories,
 		isPending,
 		isError,
 		refetch,
-	} = useQuery<DataCounts>({
+	} = useQuery<DangerCategory[]>({
 		queryKey: ["data-counts", getNode().url],
-		queryFn: () => fetchDataCounts(toTarget(getNode())),
+		queryFn: () => fetchDangerCategories(toTarget(getNode())),
 	});
 
-	const openConfirm = (def: CategoryDef) => {
+	const openConfirm = (def: DangerCategory) => {
 		setTyped("");
 		setActive(def);
 	};
-
-	const countFor = (key: DataCategory): number => counts?.[key] ?? 0;
 
 	const runClear = async () => {
 		if (!active) {
@@ -272,7 +398,7 @@ export function DangerZoneSettings() {
 		}
 		setBusy(true);
 		try {
-			const removed = await clearDataCategory(toTarget(getNode()), active.key);
+			const removed = await clearCategory(toTarget(getNode()), active.id);
 			await queryClient.invalidateQueries({ queryKey: ["data-counts"] });
 			sileo.success({
 				title: "Deleted",
@@ -293,7 +419,7 @@ export function DangerZoneSettings() {
 
 	const armed =
 		active !== null &&
-		typed.trim().toLowerCase() === active.confirmWord.toLowerCase();
+		typed.trim().toLowerCase() === active.confirm_word.toLowerCase();
 
 	return (
 		<div className="flex flex-col gap-6">
@@ -319,19 +445,14 @@ export function DangerZoneSettings() {
 					</div>
 				) : (
 					<SettingsGroup>
-						{CATEGORIES.map((def) => {
-							const n = countFor(def.key);
-							let description: string;
-							if (isPending) {
-								description = "Loading…";
-							} else {
-								description = n === 0 ? `No ${def.noun}` : `${n} ${def.noun}`;
-							}
-							return (
+						{isPending ? (
+							<SettingsItem description="Loading…" title="Checking this node" />
+						) : (
+							(categories ?? []).map((def) => (
 								<SettingsItem
 									actions={
 										<Button
-											disabled={isPending || n === 0}
+											disabled={def.count === 0}
 											onClick={() => openConfirm(def)}
 											size="sm"
 											variant="destructive"
@@ -339,12 +460,16 @@ export function DangerZoneSettings() {
 											{def.title}
 										</Button>
 									}
-									description={description}
-									key={def.key}
+									description={
+										def.count === 0
+											? `No ${def.noun}`
+											: `${def.count} ${def.noun}`
+									}
+									key={def.id}
 									title={def.title}
 								/>
-							);
-						})}
+							))
+						)}
 					</SettingsGroup>
 				)}
 			</SettingsSection>
@@ -377,68 +502,138 @@ export function DangerZoneSettings() {
 				caption="Reset node clears this node's data folder — and nothing else. Shadow captures, ghost state and the gateway config live OUTSIDE it and survive, which is why a 'reset' node can still be several gigabytes. This removes those too."
 				title="Deep clean"
 			>
+				{/* One button, and every option behind it. The scope controls used to sit
+				    inline as three sibling SettingsItems above the button, which read as
+				    unrelated node settings rather than as arguments TO the button — so
+				    people clicked "Deep clean" without ever seeing that the depth was
+				    still on its config-only default and nothing they cared about was
+				    being removed. */}
 				<SettingsGroup>
-					<SettingsItem
-						actions={
-							<select
-								className="rounded-md border bg-background px-2 py-1 text-sm"
-								onChange={(e) => setCleanProfile(e.target.value)}
-								value={cleanProfile}
-							>
-								{CLEAN_PROFILES.map((p) => (
-									<option key={p} value={p}>
-										{p}
-									</option>
-								))}
-							</select>
-						}
-						description="Each profile has its own data folder, gateway config and keychain slot"
-						title="Profile to clean"
-					/>
-					<SettingsItem
-						actions={
-							<select
-								className="rounded-md border bg-background px-2 py-1 text-sm"
-								onChange={(e) =>
-									setCleanDepth(e.target.value as "none" | "state" | "full")
-								}
-								value={cleanDepth}
-							>
-								<option value="none">Config only — keep all data</option>
-								<option value="state">Clear data, keep downloads</option>
-								<option value="full">Everything, including downloads</option>
-							</select>
-						}
-						description="'Keep downloads' preserves bin/ and models/, so engines are not re-fetched"
-						title="How much to remove"
-					/>
-					<SettingsItem
-						actions={
-							<Switch
-								aria-label="Also clear shadow and ghost"
-								checked={cleanShared}
-								onCheckedChange={setCleanShared}
-							/>
-						}
-						description="~/.shadow and ~/.ghost are NOT per-profile — clearing them affects every profile"
-						title="Also clear shadow + ghost"
-					/>
 					<SettingsItem
 						actions={
 							<Button
 								disabled={deepCleaning}
-								onClick={() => setDeepCleanOpen(true)}
+								onClick={() => setDeepCleanOptionsOpen(true)}
 								size="sm"
 								variant="destructive"
 							>
-								{deepCleaning ? "Cleaning…" : "Deep clean"}
+								{deepCleaning ? "Cleaning…" : "Deep clean…"}
 							</Button>
 						}
-						description="Removes the selected scope, then restarts and runs setup again"
+						description="Choose which profiles and how much to remove, then restart into setup"
 						title="Run deep clean"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+
+			<Dialog
+				onOpenChange={(open) => {
+					if (!open) {
+						setDeepCleanOptionsOpen(false);
+					}
+				}}
+				open={deepCleanOptionsOpen}
+			>
+				<DialogContent className="sm:max-w-lg">
+					<DialogHeader>
+						<DialogTitle>Deep clean</DialogTitle>
+						<DialogDescription>
+							Pick what to remove. Every profile has its own data folder,
+							gateway config and keychain slot, so cleaning one leaves the
+							others untouched.
+						</DialogDescription>
+					</DialogHeader>
+
+					<div className="flex flex-col gap-5 py-1">
+						<div className="flex flex-col gap-2">
+							<span className="font-medium text-sm">Profiles to clean</span>
+							<div className="grid grid-cols-2 gap-2">
+								{CLEAN_PROFILES.map((p) => (
+									<label
+										className="flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm"
+										htmlFor={`clean-profile-${p}`}
+										key={p}
+									>
+										<Checkbox
+											checked={cleanProfiles.includes(p)}
+											id={`clean-profile-${p}`}
+											onCheckedChange={(checked) =>
+												toggleCleanProfile(p, checked === true)
+											}
+										/>
+										{p}
+									</label>
+								))}
+							</div>
+						</div>
+
+						<div className="flex flex-col gap-2">
+							<span className="font-medium text-sm">How much to remove</span>
+							<Select
+								items={CLEAN_DEPTHS.map((d) => ({
+									label: d.label,
+									value: d.value,
+								}))}
+								onValueChange={(v) =>
+									setCleanDepth(v as "none" | "state" | "full")
+								}
+								value={cleanDepth}
+							>
+								<SelectTrigger className="w-full">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{CLEAN_DEPTHS.map((d) => (
+										<SelectItem key={d.value} value={d.value}>
+											{d.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+							<span className="text-muted-foreground text-xs">
+								{CLEAN_DEPTHS.find((d) => d.value === cleanDepth)?.description}
+							</span>
+						</div>
+
+						<label
+							className="flex items-start justify-between gap-4"
+							htmlFor="clean-shared"
+						>
+							<span className="flex flex-col gap-0.5">
+								<span className="font-medium text-sm">
+									Also clear shadow + ghost
+								</span>
+								<span className="text-muted-foreground text-xs">
+									~/.shadow and ~/.ghost are NOT per-profile — clearing them
+									affects every profile on this machine
+								</span>
+							</span>
+							<Switch
+								aria-label="Also clear shadow and ghost"
+								checked={cleanShared}
+								id="clean-shared"
+								onCheckedChange={setCleanShared}
+							/>
+						</label>
+					</div>
+
+					<DialogFooter>
+						<Button
+							onClick={() => setDeepCleanOptionsOpen(false)}
+							variant="outline"
+						>
+							Cancel
+						</Button>
+						<Button
+							disabled={cleanProfiles.length === 0 || deepCleaning}
+							onClick={() => setDeepCleanOpen(true)}
+							variant="destructive"
+						>
+							Continue
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 
 			<AlertDialog
 				onOpenChange={(open) => {
@@ -453,8 +648,9 @@ export function DangerZoneSettings() {
 						<AlertDialogTitle>Remove these folders?</AlertDialogTitle>
 						<AlertDialogDescription>
 							Ryu will stop, then permanently remove the
-							<strong> {cleanProfile} </strong> profile&apos;s gateway config
-							folder (gateway.toml and the pointer to its data folder)
+							<strong> {cleanProfiles.join(", ")} </strong>
+							{cleanProfiles.length === 1 ? "profile's" : "profiles'"} gateway
+							config folder (gateway.toml and the pointer to its data folder)
 							{cleanDepth === "state"
 								? ", and clear its data folder while keeping downloaded engines and models"
 								: null}
@@ -558,7 +754,7 @@ export function DangerZoneSettings() {
 						<AlertDialogTitle>{active?.title}?</AlertDialogTitle>
 						<AlertDialogDescription>
 							{active
-								? `This will delete ${countFor(active.key)} ${active.noun}. ${active.detail} This cannot be undone.`
+								? `This will delete ${active.count} ${active.noun}. ${active.detail} This cannot be undone.`
 								: ""}
 						</AlertDialogDescription>
 					</AlertDialogHeader>
@@ -567,14 +763,14 @@ export function DangerZoneSettings() {
 						<span className="text-muted-foreground text-xs">
 							Type{" "}
 							<span className="font-medium text-foreground">
-								{active?.confirmWord}
+								{active?.confirm_word}
 							</span>{" "}
 							to confirm.
 						</span>
 						<Input
 							autoComplete="off"
 							onChange={(e) => setTyped(e.target.value)}
-							placeholder={active?.confirmWord}
+							placeholder={active?.confirm_word}
 							value={typed}
 						/>
 					</div>

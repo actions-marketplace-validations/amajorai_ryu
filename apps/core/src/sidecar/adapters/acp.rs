@@ -2052,6 +2052,14 @@ pub async fn run_acp_instance(
         // loop below to "fix" that; there is nothing to send that would make a
         // running Pi re-read, so it would be pure disk churn.
         crate::lsp::ensure_lsp_servers_materialized().await;
+
+        // Same cadence, same argument, one directory over: project every enabled
+        // plugin's `contributes.pi_extensions` onto the managed Pi's `extensions/`
+        // folder, adding what is enabled and DELETING what is not. The removal half
+        // is why it is a reconcile and not an enable hook — Pi auto-discovers that
+        // folder, so an uninstalled plugin's file would otherwise keep loading
+        // forever.
+        crate::pi_config::app_extensions::ensure_pi_extensions_materialized().await;
     }
 
     let agent = AcpAgent::from_str(&spawn_cmd)

@@ -128,7 +128,7 @@ export function SetupStep({ nodeUrl, token, onInstall }: SetupStepProps) {
 			if (!cancelled) {
 				setLoadError(
 					navigator.onLine
-						? "Could not load available installs — check your connection"
+						? "Could not load available installs. Check your connection."
 						: "No internet connection. Connect to the internet to download dependencies."
 				);
 				setLoading(false);
@@ -325,7 +325,7 @@ export function SetupStep({ nodeUrl, token, onInstall }: SetupStepProps) {
 							<span className="font-medium">{item.displayName}</span>
 							{item.description && (
 								<span className="truncate text-muted-foreground">
-									— {item.description}
+									{item.description}
 								</span>
 							)}
 						</div>

@@ -3,6 +3,8 @@
   "name": "Headroom Compression",
   "version": "1.0.0",
   "description": "Context compression (chopratejas/headroom): compress tool outputs, logs, files, and RAG chunks. 60-95% fewer tokens, reversible retrieval. Requires headroom-ai[mcp].",
+  "icon": "arrow-shrink-02",
+  "iconDither": { "from": 228, "to": 262, "direction": "left" },
   "keywords": ["context", "compression"],
   "surfaces": {
     "gateway": { "support": "none" },

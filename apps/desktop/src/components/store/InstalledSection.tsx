@@ -33,6 +33,7 @@ import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import { RequiredPluginsSection } from "@ryu/marketplace/catalog/detail/dependency-graph";
 import { ListingDetailTabs } from "@ryu/marketplace/catalog/detail/listing-detail-tabs";
 import type { CatalogEntry } from "@ryu/marketplace/catalog/types";
 import {
@@ -193,11 +194,6 @@ export default function InstalledSection() {
 	const [pending, setPending] = useState<Record<string, boolean>>({});
 	const [sidecarStatus, setSidecarStatus] = useState<Record<string, boolean>>(
 		{}
-	);
-
-	const displayName = useCallback(
-		(id: string) => apps.find((a) => a.id === id)?.name ?? id,
-		[apps]
 	);
 
 	const pollSidecarStatus = useCallback(async () => {
@@ -432,7 +428,6 @@ export default function InstalledSection() {
 						<InstalledAppDetail
 							app={selectedApp}
 							busy={pending[selectedApp.id] ?? false}
-							displayName={displayName}
 							onClearToggleError={clearToggleError}
 							onGrantsChanged={reload}
 							onInstall={handleInstall}
@@ -646,7 +641,6 @@ function PermissionsEditor({
 interface InstalledAppDetailProps {
 	app: AppInfo;
 	busy: boolean;
-	displayName: (id: string) => string;
 	onClearToggleError: () => void;
 	onGrantsChanged: () => void;
 	onInstall: (app: AppInfo) => Promise<void>;
@@ -672,6 +666,20 @@ function installedAppAsEntry(app: AppInfo): CatalogEntry {
 		id: app.id,
 		kinds: [...new Set(app.runnables.map((r) => r.kind))],
 		name: app.name,
+		// The one exception to "synthesise nothing": the installed record IS the
+		// authority on what this app requires, and the catalog detail is not — Core's
+		// catalog source only emits `requires` when it has it, which is why
+		// `useAppsCatalog` falls back to the record too. Carried as `apps` only:
+		// `requires.grants` feeds the scorecard's permission-breadth check, and a
+		// synthesised value there would grade a listing on a field it never declared.
+		requires: app.requires
+			? {
+					apps: app.requires.apps.map((dep) => ({
+						id: dep.id,
+						min_version: dep.minVersion,
+					})),
+				}
+			: null,
 		tags: [],
 		version: app.version,
 	};
@@ -683,9 +691,11 @@ function installedAppAsEntry(app: AppInfo): CatalogEntry {
  *  Installing an app used to make its documentation disappear: the store rendered
  *  the full tabbed panel, and Store → Installed rendered a separate view with none
  *  of it. Fetched lazily and rendered only once it resolves, so the lifecycle
- *  controls above are never blocked on a network round-trip, and a listing with no
- *  catalog presence (a local-only app) simply shows nothing extra rather than an
- *  error. */
+ *  controls above are never blocked on a network round-trip.
+ *
+ *  A local-only app has no catalog listing and so no tabs — but its dependency
+ *  chain comes off the installed record, not the catalog, so that one section is
+ *  rendered on its own rather than lost with the rest. */
 function InstalledAppTabs({
 	app,
 	target,
@@ -703,7 +713,13 @@ function InstalledAppTabs({
 		staleTime: 5 * 60 * 1000,
 	});
 	if (!detail) {
-		return null;
+		return (
+			<RequiredPluginsSection
+				apps={entry.requires?.apps ?? []}
+				subjectId={app.id}
+				subjectName={app.name}
+			/>
+		);
 	}
 	return (
 		<ListingDetailTabs detail={detail} entry={entry} Markdown={Markdown} />
@@ -713,7 +729,6 @@ function InstalledAppTabs({
 function InstalledAppDetail({
 	app,
 	busy,
-	displayName,
 	onInstall,
 	onLaunch,
 	onToggle,
@@ -727,7 +742,6 @@ function InstalledAppDetail({
 	const isInstalled = app.installed;
 	const agentId = primaryAgentId(app);
 	const hasSettings = isInstalled && settingsTabs.length > 0;
-	const dependencies = app.requires?.apps ?? [];
 	const [confirmUninstall, setConfirmUninstall] = useState(false);
 
 	return (
@@ -829,23 +843,11 @@ function InstalledAppDetail({
 				</section>
 			) : null}
 
-			{/* Plugin-to-plugin dependencies (`requires.apps`). */}
-			{dependencies.length > 0 ? (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">Requires</h3>
-					<div className="flex flex-wrap gap-1">
-						{dependencies.map((dep) => (
-							<Badge key={dep.id} variant="secondary">
-								{displayName(dep.id)}
-								{dep.minVersion ? ` ${dep.minVersion}+` : ""}
-							</Badge>
-						))}
-					</div>
-					<p className="text-muted-foreground text-xs">
-						Enabling {app.name} enables these first.
-					</p>
-				</section>
-			) : null}
+			{/* Plugin-to-plugin dependencies are NOT rendered here: they are the
+			    Dependencies tab's subject, and this page mounts those tabs below. A
+			    compact "Requires" badge row used to sit here as well, which meant the
+			    same chain was told twice on one page, in two shapes, from two code
+			    paths. */}
 
 			{/* Permission grants, in plain English, with per-grant revoke toggles. */}
 			{app.permissionGrants.length > 0 ? (

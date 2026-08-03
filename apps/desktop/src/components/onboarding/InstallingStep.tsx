@@ -220,7 +220,7 @@ export function InstallingStep({
 								: item.status === "done"
 									? `${item.displayName} is ready`
 									: item.status === "failed"
-										? `Something went wrong with ${item.displayName} — retry from Services`
+										? `Something went wrong with ${item.displayName}. Retry from Services.`
 										: item.displayName}
 						</span>
 					</div>

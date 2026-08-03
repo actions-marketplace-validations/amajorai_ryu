@@ -410,12 +410,35 @@
 	--text-swap-translate-y: 4px;
 	--text-swap-blur: 2px;
 	--text-swap-ease: ease-in-out;
+	/* Staggered text reveal */
+	--stagger-dur: 500ms;
+	--stagger-distance: 12px;
+	--stagger-stagger: 40ms;
+	--stagger-blur: 3px;
+	--stagger-ease: cubic-bezier(0.22, 1, 0.36, 1);
 	/* Menu dropdown */
 	--dropdown-open-dur: 250ms;
 	--dropdown-close-dur: 150ms;
 	--dropdown-pre-scale: 0.97;
 	--dropdown-closing-scale: 0.99;
 	--dropdown-ease: cubic-bezier(0.22, 1, 0.36, 1);
+	/* Plus-to-menu morph. The open size is a pair of custom props rather than a
+	   literal because our menus differ in size — a consumer sets --morph-open-w /
+	   --morph-open-h on its own .t-morph and the reference values below are only
+	   the fallback. */
+	--morph-open-dur: 350ms;
+	--morph-close-dur: 250ms;
+	--morph-ease: cubic-bezier(0.34, 1.25, 0.64, 1);
+	--morph-close-ease: cubic-bezier(0.22, 1, 0.36, 1);
+	--morph-r-closed: 40px;
+	--morph-r-open: 20px;
+	--morph-fade-dur: 200ms;
+	--morph-slide: 40px;
+	--morph-rotate: 45deg;
+	--morph-scale: 0.97;
+	--morph-blur: 2px;
+	--morph-open-w: 183px;
+	--morph-open-h: 172px;
 	/* Modal open / close */
 	--modal-open-dur: 250ms;
 	--modal-close-dur: 150ms;
@@ -801,6 +824,131 @@
 	--tier-border-dur: 1.4s;
 }
 
+/* --- Staggered text reveal — lines rise, sharpen and fade in one after the
+   other, so a heading reads as being written rather than pasted. The parent
+   carries .is-shown; the delay lives on the line so the browser drives the
+   cascade without a per-line timer. --- */
+.t-stagger-line {
+	display: block;
+	opacity: 0;
+	filter: blur(var(--stagger-blur));
+	transform: translateY(var(--stagger-distance));
+	transition:
+		transform var(--stagger-dur) var(--stagger-ease),
+		filter var(--stagger-dur) var(--stagger-ease),
+		opacity var(--stagger-dur) var(--stagger-ease);
+	will-change: transform, filter, opacity;
+}
+.t-stagger.is-shown .t-stagger-line {
+	opacity: 1;
+	filter: blur(0);
+	transform: translateY(0);
+}
+/* --1 is a no-op, but consumers generate `--${i + 1}` over a list, so the 1-4
+   contract is spelled out rather than implied. */
+.t-stagger-line--1 {
+	transition-delay: 0s;
+}
+.t-stagger-line--2 {
+	transition-delay: var(--stagger-stagger);
+}
+.t-stagger-line--3 {
+	transition-delay: calc(var(--stagger-stagger) * 2);
+}
+.t-stagger-line--4 {
+	transition-delay: calc(var(--stagger-stagger) * 3);
+}
+/* Leaving is deliberately not the entrance played backwards: a staggered,
+   blurring exit reads as a glitch when the copy is about to be replaced. The
+   lines just fade out together, in place, with the cascade cancelled. */
+.t-stagger.is-hiding .t-stagger-line {
+	opacity: 0;
+	filter: blur(0);
+	transform: translateY(0);
+	transition:
+		opacity 200ms ease,
+		transform 0s,
+		filter 0s;
+	transition-delay: 0s;
+}
+
+/* --- Plus-to-menu morph — the trigger IS the panel: a 40x40 circle grows into
+   the menu box rather than spawning one next to itself. Overflow hidden is what
+   sells it, clipping the menu until the container is big enough to hold it.
+   Open and close are asymmetric (springy out, calm back), so the base rule owns
+   the close and [data-open] owns the open, as with the dropdown above. --- */
+.t-morph {
+	position: relative;
+	width: 40px;
+	height: 40px;
+	overflow: hidden;
+	border-radius: var(--morph-r-closed);
+	transition:
+		width var(--morph-close-dur) var(--morph-close-ease),
+		height var(--morph-close-dur) var(--morph-close-ease),
+		border-radius var(--morph-close-dur) var(--morph-close-ease);
+	will-change: width, height, border-radius;
+}
+.t-morph[data-open="true"] {
+	width: var(--morph-open-w);
+	height: var(--morph-open-h);
+	border-radius: var(--morph-r-open);
+	transition:
+		width var(--morph-open-dur) var(--morph-ease),
+		height var(--morph-open-dur) var(--morph-ease),
+		border-radius var(--morph-open-dur) var(--morph-ease);
+}
+.t-morph-plus {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	width: 40px;
+	height: 40px;
+	opacity: 1;
+	transform: translateY(0);
+	transition:
+		opacity var(--morph-fade-dur) var(--morph-close-ease),
+		transform var(--morph-fade-dur) var(--morph-close-ease);
+	will-change: opacity, transform;
+}
+.t-morph-plus svg {
+	transform: rotate(0deg);
+	transition: transform var(--morph-fade-dur) var(--morph-close-ease);
+}
+.t-morph[data-open="true"] .t-morph-plus {
+	pointer-events: none;
+	opacity: 0;
+	transform: translateY(calc(var(--morph-slide) * -1));
+}
+/* The plus keeps turning while it leaves, so the icon hands off to the menu
+   instead of blinking out. */
+.t-morph[data-open="true"] .t-morph-plus svg {
+	transform: rotate(var(--morph-rotate));
+}
+.t-morph-menu {
+	pointer-events: none;
+	opacity: 0;
+	filter: blur(var(--morph-blur));
+	transform: translateY(var(--morph-slide)) scale(var(--morph-scale));
+	transform-origin: top left;
+	transition:
+		opacity var(--morph-fade-dur) var(--morph-close-ease),
+		filter var(--morph-fade-dur) var(--morph-close-ease),
+		transform var(--morph-fade-dur) var(--morph-close-ease);
+	will-change: opacity, filter, transform;
+}
+.t-morph[data-open="true"] .t-morph-menu {
+	pointer-events: auto;
+	opacity: 1;
+	filter: blur(0);
+	transform: translateY(0) scale(1);
+	transition:
+		opacity var(--morph-fade-dur) var(--morph-ease),
+		filter var(--morph-fade-dur) var(--morph-ease),
+		transform var(--morph-open-dur) var(--morph-ease);
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.t-badge,
 	.t-badge-dot,
@@ -815,8 +963,22 @@
 	.t-plan-badge-sheen,
 	.t-plan-badge-border,
 	.t-pro-card-border,
-	.t-card-border-spin {
+	.t-card-border-spin,
+	.t-stagger-line,
+	.t-morph,
+	.t-morph-plus,
+	.t-morph-plus svg,
+	.t-morph-menu {
 		transition: none !important;
 		animation: none !important;
+	}
+	/* Stagger lines rest at opacity 0 and only become visible when the consumer
+	   adds .is-shown — often on scroll. Killing the transition alone would leave
+	   the copy permanently invisible if that trigger never fires, so put the
+	   lines at rest outright. */
+	.t-stagger-line {
+		opacity: 1;
+		filter: none;
+		transform: none;
 	}
 }

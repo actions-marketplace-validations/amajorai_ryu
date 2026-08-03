@@ -277,7 +277,11 @@ pub fn channel_of(version: &str) -> String {
 /// fallback is how someone on `canary` quietly gets moved to stable.
 pub fn pick_version_for_channel<'a>(versions: &[&'a str], channel: &str) -> Option<&'a str> {
     let want = channel.trim().to_ascii_lowercase();
-    let want = if want.is_empty() { STABLE_CHANNEL } else { &want };
+    let want = if want.is_empty() {
+        STABLE_CHANNEL
+    } else {
+        &want
+    };
     versions
         .iter()
         .filter(|tag| channel_of(tag) == want)
@@ -1551,7 +1555,10 @@ mod version_gate_tests {
             pick_version_for_channel(&v, "nightly"),
             Some("v1.3.0-nightly.20260803.7")
         );
-        assert_eq!(pick_version_for_channel(&v, "canary"), Some("v1.3.0-canary.2"));
+        assert_eq!(
+            pick_version_for_channel(&v, "canary"),
+            Some("v1.3.0-canary.2")
+        );
         assert_eq!(pick_version_for_channel(&v, "rc"), Some("v1.2.0-rc.1"));
     }
 

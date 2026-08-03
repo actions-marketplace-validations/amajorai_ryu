@@ -2,6 +2,8 @@
   "id": "@ryu/whiteboard",
   "name": "Whiteboard",
   "version": "1.0.0",
+  "icon": "shapes",
+  "iconDither": { "from": 2, "to": 328, "direction": "right" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

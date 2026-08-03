@@ -16,6 +16,13 @@ import {
 	type PlanTier,
 	planTierConicGradient,
 } from "@ryu/ui/components/plan-badge";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select.tsx";
 import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
 import {
 	ArrowLeft,
@@ -1071,18 +1078,25 @@ export function PricingInstancePicker({
 					>
 						Region
 					</label>
-					<select
-						className="rounded-lg border bg-background px-3 py-2 text-sm"
-						id="ryu-cloud-location"
-						onChange={(event) => onLocationChange(event.target.value)}
+					<Select
+						items={locations.map((loc) => ({
+							label: `${loc.city}, ${loc.country}`,
+							value: loc.id,
+						}))}
+						onValueChange={onLocationChange}
 						value={location}
 					>
-						{locations.map((loc) => (
-							<option key={loc.id} value={loc.id}>
-								{loc.city}, {loc.country}
-							</option>
-						))}
-					</select>
+						<SelectTrigger className="w-56" id="ryu-cloud-location">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{locations.map((loc) => (
+								<SelectItem key={loc.id} value={loc.id}>
+									{loc.city}, {loc.country}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
 				</div>
 			) : null}
 			<div className="grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">

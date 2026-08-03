@@ -21,7 +21,6 @@ import { Badge } from "@ryu/ui/components/badge.tsx";
 import type { ComponentType } from "react";
 import { useState } from "react";
 import { grantDescription, grantLabel } from "../grant-labels.ts";
-import { prettyPluginId } from "../plugin-id.ts";
 import { safeHttpUrl } from "../safe-url.ts";
 import { surfaceLabel } from "../surface-labels.ts";
 import type {
@@ -29,6 +28,7 @@ import type {
 	PluginCatalogDetail,
 	VersionSnapshot,
 } from "../types.ts";
+import { RequiredPluginsSection } from "./dependency-graph.tsx";
 
 /** Render an ISO timestamp as a short absolute date. Absolute rather than
  *  relative on purpose: "2 years ago" is the health tab's job, a version table
@@ -399,40 +399,14 @@ export function DependenciesPanel({
 
 	return (
 		<div className="flex flex-col gap-6">
-			{apps.length > 0 ? (
-				<section className="flex flex-col gap-2">
-					<h3 className="flex items-center gap-1.5 font-medium text-sm">
-						<HugeiconsIcon
-							className="size-4 text-muted-foreground"
-							icon={Link01Icon}
-						/>
-						Requires these plugins
-					</h3>
-					<ul className="flex flex-col gap-1.5">
-						{apps.map((dep) => (
-							<li
-								className="flex items-center gap-2.5 rounded-md border px-3 py-2"
-								key={dep.id}
-							>
-								<span className="min-w-0 flex-1 truncate text-sm">
-									{prettyPluginId(dep.id)}
-								</span>
-								{dep.min_version ? (
-									<span className="shrink-0 text-muted-foreground text-xs">
-										≥ {dep.min_version}
-									</span>
-								) : null}
-								<code className="shrink-0 truncate font-mono text-muted-foreground text-xs">
-									{dep.id}
-								</code>
-							</li>
-						))}
-					</ul>
-					<p className="text-muted-foreground text-xs">
-						Enabling this plugin turns these on automatically.
-					</p>
-				</section>
-			) : null}
+			{/* Resolves the declared ids into the tree Core walks, with each entry's
+			    live install/enable state when the host can supply it — see
+			    dependency-graph.tsx. Renders nothing when nothing is declared. */}
+			<RequiredPluginsSection
+				apps={apps}
+				subjectId={entry.id}
+				subjectName={entry.name}
+			/>
 
 			{grants.length > 0 ? (
 				<section className="flex flex-col gap-2">

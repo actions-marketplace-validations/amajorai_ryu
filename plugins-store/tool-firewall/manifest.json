@@ -2,6 +2,8 @@
   "id": "@ryu/tool-firewall",
   "name": "Tool Firewall",
   "version": "1.0.0",
+  "icon": "shield-ban",
+  "iconDither": { "from": 14, "to": 340, "direction": "left" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

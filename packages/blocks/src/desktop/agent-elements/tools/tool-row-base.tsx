@@ -7,6 +7,7 @@ import { cn } from "@ryu/ui/lib/utils";
 import { IconChevronRight } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 import { TextShimmer } from "../text-shimmer.tsx";
+import { ToolTiming } from "./tool-timing.tsx";
 
 export interface ToolRowBaseProps {
 	children?: ReactNode;
@@ -19,6 +20,13 @@ export interface ToolRowBaseProps {
 	isAnimating: boolean;
 	onToggleExpand?: () => void;
 	shimmerLabel?: string;
+	/**
+	 * Set false to suppress the elapsed/took badge for a row where it would be
+	 * noise rather than information — a row that represents state rather than
+	 * work, for instance. Defaults on: every tool call is worth timing, and the
+	 * badge hides itself anyway when there is nothing honest to show.
+	 */
+	showTiming?: boolean;
 	trailingContent?: ReactNode;
 }
 
@@ -33,6 +41,7 @@ export function ToolRowBase({
 	expanded,
 	defaultOpen = false,
 	onToggleExpand,
+	showTiming = true,
 	children,
 }: ToolRowBaseProps) {
 	const isComplete = !isAnimating;
@@ -71,6 +80,9 @@ export function ToolRowBase({
 					</span>
 				)}
 				{trailingContent}
+				{/* Last in the row so a ticking counter grows into empty space
+				    instead of pushing the label and detail around. */}
+				{showTiming && <ToolTiming isRunning={isAnimating} />}
 			</div>
 			{expandable && (isComplete || isExpanded || isAnimating) && (
 				<div>

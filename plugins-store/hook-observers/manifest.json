@@ -2,6 +2,8 @@
   "id": "@ryu/hook-observers",
   "name": "Hook Observers",
   "version": "1.0.0",
+  "icon": "eye",
+  "iconDither": { "from": 267, "to": 301, "direction": "right" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

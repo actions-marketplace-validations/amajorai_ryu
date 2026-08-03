@@ -1,6 +1,7 @@
 mod core;
 mod hardware;
 mod identifier_migration;
+mod mcp_bridge;
 mod nodes;
 mod permissions;
 mod profile;
@@ -1190,6 +1191,32 @@ fn toggle_devtools(window: tauri::WebviewWindow) {
 	}
 }
 
+/// Toggle the calling window between OS fullscreen and windowed — the Electron
+/// `setFullScreen` analogue behind the global right-click menu's View group.
+///
+/// A command rather than the JS `WebviewWindow.setFullscreen()` API because
+/// `core:window:allow-set-fullscreen` is not in `capabilities/default.json`, and
+/// every capability there scopes to a fixed window label (`main`, `companion`),
+/// so the `tab-{n}` windows `open_tab_window` spawns would be denied. Commands
+/// registered in `generate_handler!` are not capability-gated (see
+/// `toggle_devtools`), so this works from any window.
+///
+/// Returns the state the window ended up in, so callers do not need a second
+/// (also gated) `is_fullscreen()` read to update their menu item.
+#[tauri::command]
+fn toggle_fullscreen(window: tauri::WebviewWindow) -> Result<bool, String> {
+	let next = !window.is_fullscreen().map_err(|e| e.to_string())?;
+	window.set_fullscreen(next).map_err(|e| e.to_string())?;
+	Ok(next)
+}
+
+/// Read the calling window's fullscreen state. Same capability reasoning as
+/// `toggle_fullscreen` — the JS `isFullscreen()` is granted for `main` only.
+#[tauri::command]
+fn is_fullscreen(window: tauri::WebviewWindow) -> Result<bool, String> {
+	window.is_fullscreen().map_err(|e| e.to_string())
+}
+
 /// Read a UTF-8 text file by absolute path — backs the in-app markdown editor
 /// opening project files from the active workspace folder.
 #[tauri::command]
@@ -1301,10 +1328,27 @@ pub fn run() {
 			Some(vec![startup::AUTOSTART_ARG]),
 		));
 
-	// MCP bridge (Tauri MCP server) is a dev/test-only tool — never ship in release.
-	#[cfg(debug_assertions)]
-	{
-		builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+	// MCP bridge (Tauri MCP server): a socket that can run JS in the webview and
+	// invoke IPC, so it exists only when the user has turned Developer Mode on —
+	// in every build, debug included. Gating on the persisted opt-in rather than
+	// `debug_assertions` is the whole point: attaching an agent to a *stable*
+	// build is what this is for. Bound to loopback, never the plugin's `0.0.0.0`
+	// default. See `mcp_bridge.rs` for the posture and the wire-auth gap.
+	if mcp_bridge::take_enabled() {
+		// Resolve the port with the plugin's own scan first: it walks forward from
+		// its base when that port is busy, and the settings tab has to hand the
+		// user the port it will really listen on, not the one we asked for.
+		let port = tauri_plugin_mcp_bridge::discovery::find_available_port(
+			"127.0.0.1",
+			profile::mcp_bridge_port(),
+		);
+		builder = builder.plugin(
+			tauri_plugin_mcp_bridge::Builder::new()
+				.bind_address("127.0.0.1")
+				.base_port(port)
+				.build(),
+		);
+		mcp_bridge::mark_live(port);
 	}
 
 	builder.setup(|app| {
@@ -1511,9 +1555,13 @@ pub fn run() {
             startup::set_start_hidden,
             shell_execute,
             toggle_devtools,
+            toggle_fullscreen,
+            is_fullscreen,
             read_project_file,
             write_project_file,
             list_project_markdown,
+            mcp_bridge::mcp_bridge_status,
+            mcp_bridge::set_mcp_bridge_enabled,
             hardware::get_hardware_info,
             hardware::get_system_usage,
             nodes::list_nodes,

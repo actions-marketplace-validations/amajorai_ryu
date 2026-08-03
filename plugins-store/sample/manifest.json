@@ -2,6 +2,8 @@
   "id": "@example/research-assistant",
   "name": "Research Assistant",
   "version": "1.0.0",
+  "icon": "book-search",
+  "iconDither": { "from": 243, "to": 277, "direction": "up" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },
@@ -52,7 +54,7 @@
   "permission_grants": ["mcp:web_search", "mcp:file_read"],
   "companion": {
     "label": "Research Assistant",
-    "icon": "magnifying-glass",
+    "icon": "book-search",
     "shortcut": "ctrl+shift+r"
   }
 }

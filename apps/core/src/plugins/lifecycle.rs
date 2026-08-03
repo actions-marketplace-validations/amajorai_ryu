@@ -1180,10 +1180,14 @@ fn stub_may_approve(grant: &str) -> bool {
 ///   - `runtime:external` — create a venv and `pip install` declared packages
 ///   - `mcp:server`       — register a manifest-declared MCP server, which is spawned
 ///                          with the manifest's `command`/`args` on the next tool listing
+///   - `pi:extension`     — write a manifest-declared TypeScript file into the managed
+///                          Pi's extensions dir, where the agent process loads it
+///                          UNSANDBOXED on its next boot
 fn is_arbitrary_code_execution_grant(grant: &str) -> bool {
     grant == crate::sidecar::manifest_sidecar::GRANT_SIDECAR_PROCESS
         || grant == crate::sidecar::external_runtime::GRANT_EXTERNAL_RUNTIME
         || grant == crate::sidecar::mcp::GRANT_MCP_SERVER
+        || grant == crate::pi_config::app_extensions::GRANT_PI_EXTENSION
 }
 
 #[cfg(test)]
@@ -1207,6 +1211,7 @@ mod tests {
             crate::sidecar::manifest_sidecar::GRANT_SIDECAR_PROCESS,
             crate::sidecar::external_runtime::GRANT_EXTERNAL_RUNTIME,
             crate::sidecar::mcp::GRANT_MCP_SERVER,
+            crate::pi_config::app_extensions::GRANT_PI_EXTENSION,
         ] {
             assert!(
                 is_arbitrary_code_execution_grant(grant),

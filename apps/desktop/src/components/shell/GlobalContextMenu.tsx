@@ -1,9 +1,11 @@
 import {
+	ArrowShrink02Icon,
 	Bug01Icon,
 	ClipboardPasteIcon,
 	ComputerIcon,
 	ConsoleIcon,
 	Copy01Icon,
+	FullScreenIcon,
 	MinusSignIcon,
 	Moon01Icon,
 	PlusSignIcon,
@@ -42,6 +44,7 @@ import {
 	isConsoleCaptureActive,
 } from "@/src/lib/console-buffer.ts";
 import { getCrashRoute } from "@/src/lib/crash-context.ts";
+import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
 import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
 import { openFeedbackWidget } from "@/src/lib/userjot.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
@@ -151,6 +154,7 @@ function buildBugReportContext(): string {
 export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 	const { theme, resolvedTheme, setTheme } = useTheme();
 	const openSettings = useSettingsDialog((s) => s.openSettings);
+	const isFullscreen = useFullscreen();
 	const [hasSelection, setHasSelection] = useState(false);
 	const [editableFocused, setEditableFocused] = useState(false);
 	const [showDevTools, setShowDevTools] = useState(
@@ -234,6 +238,16 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 	};
 	const handleZoomReset = () => {
 		setScale(DEFAULT_SCALE);
+	};
+
+	// Real OS fullscreen (Electron's View → Toggle Full Screen), not a zoom or a
+	// DOM overlay — see lib/fullscreen.ts for why it goes through a command.
+	const handleToggleFullscreen = async () => {
+		try {
+			await toggleFullscreen();
+		} catch {
+			toast.error("Couldn't toggle full screen in this window.");
+		}
 	};
 
 	const handleReload = () => {
@@ -362,6 +376,17 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 						<ContextMenuItem onClick={handleZoomReset}>
 							Actual Size
 							<ContextMenuShortcut>{mod}+0</ContextMenuShortcut>
+						</ContextMenuItem>
+						<ContextMenuItem onClick={() => void handleToggleFullscreen()}>
+							<HugeiconsIcon
+								icon={isFullscreen ? ArrowShrink02Icon : FullScreenIcon}
+							/>
+							{isFullscreen ? "Exit Full Screen" : "Enter Full Screen"}
+							{/* F11, not ⌃⌘F: eventToChord folds Ctrl and Cmd into one `Mod`
+							    token, so a Cmd+Ctrl chord can never match a real keydown
+							    (packages/hotkeys/src/chord.ts). Rebindable in Settings →
+							    Keyboard Shortcuts; this label shows the default. */}
+							<ContextMenuShortcut>F11</ContextMenuShortcut>
 						</ContextMenuItem>
 						<ContextMenuSub>
 							<ContextMenuSubTrigger>

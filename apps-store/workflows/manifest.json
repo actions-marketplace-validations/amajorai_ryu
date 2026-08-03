@@ -3,6 +3,8 @@
   "name": "Workflows",
   "version": "1.0.0",
   "description": "Workflows: petgraph DAG automation with triggers, durable execution, and a natural-language workflow builder.",
+  "icon": "workflow-square-01",
+  "iconDither": { "from": 299, "to": 333, "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

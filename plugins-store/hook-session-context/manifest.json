@@ -2,6 +2,8 @@
   "id": "@ryu/session-context",
   "name": "Session Context",
   "version": "1.0.0",
+  "icon": "sticky-note-01",
+  "iconDither": { "from": 359, "to": 325, "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

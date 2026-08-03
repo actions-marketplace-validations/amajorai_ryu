@@ -3,6 +3,8 @@
   "name": "Activity",
   "version": "1.0.0",
   "description": "The unified activity feed: everything happening on this node — monitor alerts, finished tasks, runs, approvals, meetings, and notes — newest first, grouped by day.",
+  "icon": "activity-03",
+  "iconDither": { "from": 210, "to": 244, "direction": "up" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },
@@ -31,6 +33,6 @@
   "permission_grants": ["activity:read", "shell:integrate"],
   "companion": {
     "label": "Activity",
-    "icon": "activity"
+    "icon": "activity-03"
   }
 }

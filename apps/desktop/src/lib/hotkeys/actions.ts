@@ -33,6 +33,16 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 		category: "General",
 		defaultBinding: "Mod+B",
 	},
+	{
+		id: "window.fullscreen-toggle",
+		label: "Toggle full screen",
+		category: "General",
+		// F11, not the macOS ⌃⌘F: `eventToChord` collapses ctrlKey and metaKey
+		// into a single `Mod` token, so a Cmd+Ctrl chord is unrepresentable in
+		// this format and would never fire. F11 works on every platform.
+		defaultBinding: "F11",
+		description: "Enter or leave OS fullscreen, like a browser or Electron.",
+	},
 	// --- Tabs ---
 	{
 		id: "tab.new",

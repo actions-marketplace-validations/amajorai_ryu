@@ -79,6 +79,61 @@ pub fn validate_code_file_path(rel: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The ONE directory a manifest `pi_extensions[].file` may name, one segment deep.
+///
+/// A sibling of [`CODE_FILE_DIRS`] rather than a member of it, because the two
+/// carry different things and must not be interchangeable: a `code_file` is
+/// sandboxed JS Core splices into a Deno IIFE, whereas a file under here is
+/// TypeScript loaded by the managed Pi process with full host privilege. Same
+/// flatness requirement for the same reason — `tools/mirror-public.sh` vendors
+/// these with a literal `plugins-store/*/pi-extensions/*.ts` glob, and a nested
+/// layout would make that glob accidentally rather than provably sufficient.
+pub const PI_EXTENSION_DIR: &str = "pi-extensions";
+
+/// Validate a `pi_extensions[].file` path: exactly `pi-extensions/<name>.ts`.
+///
+/// Deliberately a near-copy of [`validate_code_file_path`] rather than a call into
+/// it with a wider dir/extension allowlist. Merging them would let a `code_file`
+/// name a `.ts` (which the sandbox cannot run) or a `pi_extensions` entry name a
+/// `hooks/*.js` (which would ship sandboxed code into the unsandboxed Pi process).
+/// The two allowlists are the gate; one shared, parameterised gate is one edit away
+/// from being neither.
+pub fn validate_pi_extension_path(rel: &str) -> Result<(), String> {
+    if rel.is_empty() {
+        return Err("pi extension file must not be empty".to_string());
+    }
+    let mut segments = rel.split('/');
+    let (Some(dir), Some(file), None) = (segments.next(), segments.next(), segments.next()) else {
+        return Err(format!(
+            "pi extension file '{rel}' must be exactly '{PI_EXTENSION_DIR}/<name>.ts'"
+        ));
+    };
+    if dir != PI_EXTENSION_DIR {
+        return Err(format!(
+            "pi extension file '{rel}' must live under '{PI_EXTENSION_DIR}/'"
+        ));
+    }
+    if !(file.ends_with(".ts") || file.ends_with(".mts")) {
+        return Err(format!(
+            "pi extension file '{rel}' must name a .ts or .mts file"
+        ));
+    }
+    let stem_ok = file
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+    if !stem_ok {
+        return Err(format!(
+            "pi extension file '{rel}' contains illegal characters (allowed: a-z A-Z 0-9 . - _)"
+        ));
+    }
+    if file.contains("..") || file.starts_with('.') {
+        return Err(format!(
+            "pi extension file '{rel}' must not traverse or start with '.'"
+        ));
+    }
+    Ok(())
+}
+
 /// Hydrate one code-bearing node: enforce exactly-one-of `code`/`code_file`,
 /// resolve the path, move the contents into `code`, and clear `code_file` so the
 /// hydrated manifest is byte-indistinguishable from an inline one.
@@ -844,6 +899,35 @@ impl PluginManifest {
         out
     }
 
+    /// Every plugin-root-relative `pi_extensions[].file` path this manifest
+    /// declares, in walk order.
+    ///
+    /// The [`Self::code_file_refs`] analogue for the OTHER carriage path, and
+    /// deliberately a separate list: `code_file_refs` is the input to the
+    /// sandboxed-JS embed table's bijection, and folding unsandboxed `.ts` into it
+    /// would both break that bijection and conflate two things with very different
+    /// privilege.
+    ///
+    /// # Why there is no `hydrate_pi_extensions` twin
+    ///
+    /// A `code_file` hydrates into `code` because every consumer downstream of
+    /// parsing — the sandbox host, the capability facade, the Gateway-signed pack
+    /// bundle — reads one inline string, so the file has to become part of the
+    /// signed surface. A Pi extension has no such consumer: it is a **file Pi opens
+    /// by path** at process start, and the only thing Core does with it is copy the
+    /// bytes into the managed Pi's `extensions/` dir. Hydrating would push a 50 KB
+    /// TypeScript program into a JSON string on `GET /api/plugins` and into every
+    /// manifest clone, which is exactly what
+    /// `packaged_plugin_manifests_declare_no_inline_sandbox_code` exists to prevent.
+    /// The path→bytes resolution therefore happens once, at the materializer.
+    pub fn pi_extension_refs(&self) -> Vec<String> {
+        self.contributes
+            .iter()
+            .flat_map(|c| c.pi_extensions.iter())
+            .map(|ext| ext.file.clone())
+            .collect()
+    }
+
     /// Replace every `code_file` reference with the file's contents, in place.
     ///
     /// # The invariant this encodes
@@ -969,6 +1053,9 @@ impl PluginManifest {
                 .map_err(|e| format!("plugin '{}': {e}", self.id))?;
             contributes
                 .validate_hook_events(&self.id)
+                .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+            contributes
+                .validate_pi_extensions()
                 .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         }
         if let Some(permissions) = &self.permissions {
@@ -1379,6 +1466,40 @@ pub struct Contributes {
     #[serde(default)]
     pub dock_panels: Vec<DockPanelContribution>,
 
+    /// **Deletable data categories** the app owns — one "Delete all X" row in
+    /// Settings → Danger Zone (see [`DataCategoryContribution`]).
+    ///
+    /// The danger zone used to be two hardcoded lists that had to be edited
+    /// together: a `DataCategory` enum in Core and a `CATEGORIES` array carrying the
+    /// user-facing copy in the closed desktop source. Monitors and Meetings are
+    /// app-owned data, so both lists named apps — which meant a node where Monitors
+    /// was never enabled still offered to delete monitors, and the count was always
+    /// 0. Declaring the category here makes the owning app the single source of both
+    /// its existence and its wording, and makes the row appear and disappear with
+    /// the app instead of with a client-side feature-detect.
+    ///
+    /// # Core-interpreted, so a typed struct — and NOT on the contributions endpoint
+    ///
+    /// Core has to resolve the id to something that can actually count and delete
+    /// the rows, so per this type's own doc comment this gets a typed struct rather
+    /// than opaque JSON, and it is gathered at its consumption site
+    /// (`GET /api/data/counts`, which serves each category's descriptor next to its
+    /// live count) rather than at `GET /api/plugins/contributions` — the same
+    /// disposition as [`Contributes::tool_filters`] and [`Contributes::lsp_servers`].
+    ///
+    /// # Declaration, not implementation
+    ///
+    /// A declared category is served only when Core knows how to clear it; an id
+    /// Core does not implement is skipped with a warn rather than being offered as a
+    /// button that 400s. That split is deliberate and not a stepping stone to a
+    /// generic HTTP truncate: clearing monitors has to tear down each monitor's
+    /// backing scheduler job, and clearing meetings has to broadcast on the meetings
+    /// SSE stream, so a blind `DELETE /monitors` would leave jobs ticking forever.
+    /// The manifest owns *whether the row exists and what it says*; Core owns *what
+    /// deleting actually entails*.
+    #[serde(default)]
+    pub data_categories: Vec<DataCategoryContribution>,
+
     /// **Language servers** the plugin declares, keyed by server name — the
     /// agent-neutral mirror of Claude Code's `.lsp.json` / `lspServers`, so a config
     /// written for either host loads in the other:
@@ -1423,6 +1544,67 @@ pub struct Contributes {
     /// the same node always resolves it the same way and says who won.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lsp_servers: BTreeMap<String, LspServerContribution>,
+
+    /// **Pi extensions** the plugin ships — TypeScript files the managed `ryu` (Pi)
+    /// agent loads at process start:
+    ///
+    /// ```json
+    /// "pi_extensions": [
+    ///   { "id": "shell", "file": "pi-extensions/ryu-shell.ts",
+    ///     "description": "background bash for the managed Pi agent" }
+    /// ]
+    /// ```
+    ///
+    /// Pi ships none of plan mode, sub-agents, permission prompts or background bash
+    /// and says so deliberately in its own docs — "you can build or install those
+    /// workflows as extensions or packages". This surface is that seam: the
+    /// capabilities Core used to hardcode into the spawn path become plugins the user
+    /// can enable and disable, and a third party can ship one at all.
+    ///
+    /// # This is UNSANDBOXED code, and the tier gate is not optional
+    ///
+    /// A [`Contributes::turn_hooks`] body runs in the deny-by-default Deno sandbox
+    /// behind capability-gated `host.*` calls. A file named here runs **inside the Pi
+    /// process** with full host privilege: the first-party ones spawn children and
+    /// POST to Core. That is the same arbitrary-code-execution class as
+    /// [`PluginManifest::mcp_servers`], so Core gates it identically — Core tier is
+    /// auto-allowed, Community tier needs an operator-allowlisted grant, and the gate
+    /// sits at the materializer, because writing the file is what makes it run.
+    ///
+    /// # Core-interpreted, so a typed struct — and NOT on the contributions endpoint
+    ///
+    /// Core resolves each `file` and projects it into the managed Pi's config dir, so
+    /// per this type's own doc comment it gets a typed struct and is gathered at its
+    /// consumption site (`pi_config::app_extensions`) rather than served from
+    /// `GET /api/plugins/contributions` — the same disposition as
+    /// [`Contributes::lsp_servers`].
+    ///
+    /// The `file` is deliberately NOT hydrated into an inline string the way a
+    /// `code_file` is; see [`PluginManifest::pi_extension_refs`] for why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pi_extensions: Vec<PiExtensionContribution>,
+}
+
+/// One **Pi extension** a plugin ships (a [`Contributes::pi_extensions`] row).
+///
+/// Carries a path, never a body: unlike [`TurnHookContribution`] there is no inline
+/// `code` twin, because nothing downstream reads the source as a string.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PiExtensionContribution {
+    /// Stable id for this extension within the plugin (`[a-z0-9][a-z0-9._-]*`).
+    ///
+    /// Part of the materialized file name, so it is what makes one plugin's
+    /// extensions distinguishable from another's on disk — and why it is validated
+    /// with the same alphabet as an event name rather than left free-form.
+    pub id: String,
+
+    /// Path to the TypeScript source, relative to the plugin root — exactly
+    /// `pi-extensions/<name>.ts`. See [`validate_pi_extension_path`].
+    pub file: String,
+
+    /// Optional human-facing one-liner (what the extension adds to the agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// One **declarative view** contribution (the Raycast tier — see [`Contributes::views`]).
@@ -2498,6 +2680,106 @@ pub fn validate_tool_filter(filter: &ToolFilterContribution) -> Result<(), Strin
     Ok(())
 }
 
+/// Category ids the **kernel** owns, and which an app therefore may not claim.
+///
+/// These name data no app created — conversations, Spaces, long-term memory — so
+/// there is no manifest that could legitimately declare them, and Core clears each
+/// with the owning store's transactional `clear_all`. An app that claimed `chats`
+/// would get its Danger Zone row wired to that truncate, which is a plugin
+/// deleting every conversation on the node from a manifest string; the loader
+/// rejects the claim instead.
+pub const KERNEL_DATA_CATEGORY_IDS: &[&str] = &["chats", "spaces", "memory"];
+
+/// One **deletable data category** an app owns (see [`Contributes::data_categories`]).
+///
+/// Everything the Danger Zone needs to draw and arm one destructive row, so the copy
+/// lives with the app whose data it describes rather than in the desktop's source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DataCategoryContribution {
+    /// Stable id — this is the `category` a `POST /api/data/clear` names, so it is
+    /// the app's half of the delete contract and renaming it breaks the button.
+    pub id: String,
+
+    /// The destructive button label and confirm-dialog title ("Delete all monitors").
+    pub title: String,
+
+    /// Plural noun for the live count line ("42 monitors" / "No monitors") and the
+    /// "N deleted" toast. Lower-case: it is used mid-sentence.
+    pub noun: String,
+
+    /// The word the user must type to arm the delete. Absent = the [`noun`], which is
+    /// the right default often enough that requiring it would just be ceremony.
+    /// Matched case-insensitively by the client.
+    ///
+    /// [`noun`]: DataCategoryContribution::noun
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_word: Option<String>,
+
+    /// Exactly what disappears, shown in the confirm dialog. Required, and required
+    /// to be specific: this is the last thing the user reads before an irreversible
+    /// delete, and "this cannot be undone" tells them nothing they did not know.
+    pub detail: String,
+}
+
+impl DataCategoryContribution {
+    /// The word to type to arm this delete — the declared one, or the [`noun`].
+    ///
+    /// [`noun`]: DataCategoryContribution::noun
+    pub fn confirm_word(&self) -> &str {
+        self.confirm_word
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .unwrap_or(&self.noun)
+    }
+}
+
+/// Validate one [`DataCategoryContribution`].
+///
+/// The `id` rule is the strict one because the id is interpolated nowhere but
+/// compared everywhere: it is the wire value of `POST /api/data/clear`, the key the
+/// desktop renders rows by, and the name Core resolves to a clear implementation. A
+/// lowercase `[a-z0-9][a-z0-9._-]*` allowlist keeps it unambiguous in all three
+/// places, and [`KERNEL_DATA_CATEGORY_IDS`] is refused outright.
+pub fn validate_data_category(category: &DataCategoryContribution) -> Result<(), String> {
+    let id = category.id.trim();
+    if id.is_empty() {
+        return Err("data category has an empty 'id'".to_string());
+    }
+    if id != category.id {
+        return Err(format!(
+            "data category id '{}' has leading/trailing whitespace",
+            category.id
+        ));
+    }
+    let mut chars = id.chars();
+    let legal = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_'));
+    if !legal {
+        return Err(format!(
+            "data category id '{id}' must be lower-case '[a-z0-9][a-z0-9._-]*' — it is the wire value of POST /api/data/clear"
+        ));
+    }
+    if KERNEL_DATA_CATEGORY_IDS.contains(&id) {
+        return Err(format!(
+            "data category id '{id}' is owned by the kernel and cannot be claimed by an app"
+        ));
+    }
+    for (label, value) in [
+        ("title", &category.title),
+        ("noun", &category.noun),
+        ("detail", &category.detail),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("data category '{id}' has an empty '{label}'"));
+        }
+    }
+    Ok(())
+}
+
 /// Validate one [`SettingsTabContribution`] and every field it declares.
 ///
 /// This is the Rust twin of the schema an SDK author gets from `manifest.ts`: the
@@ -2788,7 +3070,8 @@ impl Contributes {
             .collect()
     }
 
-    /// Hold `settings_tabs` and `tool_filters` to their typed contracts.
+    /// Hold `settings_tabs`, `tool_filters` and `data_categories` to their typed
+    /// contracts.
     ///
     /// `settings_tabs` is stored as raw JSON (see [`Contributes::settings_tabs`]),
     /// so this is where it is actually parsed as [`SettingsTabContribution`] — the
@@ -2822,6 +3105,18 @@ impl Contributes {
         for filter in &self.tool_filters {
             validate_tool_filter(filter)?;
         }
+
+        // Two categories sharing an id would put two "Delete all X" buttons in the
+        // danger zone that POST the same `category`, so one of them deletes something
+        // other than what its copy promised — the one failure mode an irreversible
+        // action must not have.
+        let mut seen_category_ids: BTreeSet<&str> = BTreeSet::new();
+        for category in &self.data_categories {
+            validate_data_category(category)?;
+            if !seen_category_ids.insert(category.id.as_str()) {
+                return Err(format!("duplicate data category id '{}'", category.id));
+            }
+        }
         Ok(())
     }
 
@@ -2847,6 +3142,41 @@ impl Contributes {
             if !seen.insert(event.id.as_str()) {
                 return Err(format!("duplicate hook event id '{}'", event.id));
             }
+        }
+        Ok(())
+    }
+
+    /// Cross-validate [`Contributes::pi_extensions`]: unique ids in the id alphabet,
+    /// and a `file` that is a legal [`PI_EXTENSION_DIR`] path.
+    ///
+    /// Runs at LOAD, not at spawn, on purpose. The materializer is best-effort and
+    /// fail-open (a bad extension must never take the agent down), so a typo checked
+    /// only there would surface as a warn line on a Pi spawn nobody is watching. The
+    /// duplicate-id half matters for the same reason the path half does: the id is
+    /// part of the materialized file name, so two rows sharing one would silently
+    /// overwrite each other on disk.
+    pub fn validate_pi_extensions(&self) -> Result<(), String> {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for ext in &self.pi_extensions {
+            let valid_id = ext
+                .id
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && ext.id.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                });
+            if !valid_id {
+                return Err(format!(
+                    "pi_extensions[{}]: id must match [a-z0-9][a-z0-9._-]*",
+                    ext.id
+                ));
+            }
+            if !seen.insert(ext.id.as_str()) {
+                return Err(format!("duplicate pi extension id '{}'", ext.id));
+            }
+            validate_pi_extension_path(&ext.file)
+                .map_err(|e| format!("pi_extensions[{}]: {e}", ext.id))?;
         }
         Ok(())
     }
@@ -3858,6 +4188,105 @@ mod tests {
             .is_ok());
     }
 
+    // ── data categories (danger zone) ────────────────────────────────────────
+
+    fn category(id: &str) -> DataCategoryContribution {
+        DataCategoryContribution {
+            id: id.to_owned(),
+            title: format!("Delete all {id}"),
+            noun: id.to_owned(),
+            confirm_word: None,
+            detail: format!("Every {id} record will be permanently deleted."),
+        }
+    }
+
+    /// The whole point of the surface: a well-formed app declaration loads.
+    #[test]
+    fn a_well_formed_data_category_validates() {
+        let contributes = Contributes {
+            data_categories: vec![category("monitors")],
+            ..Default::default()
+        };
+        assert!(contributes.validate_settings_contributions().is_ok());
+    }
+
+    /// An app claiming a kernel id would get its danger-zone row wired to the
+    /// kernel's truncate — a manifest string that deletes every conversation on the
+    /// node. Refused at load, for every kernel id.
+    #[test]
+    fn an_app_cannot_claim_a_kernel_owned_category() {
+        for id in KERNEL_DATA_CATEGORY_IDS {
+            let contributes = Contributes {
+                data_categories: vec![category(id)],
+                ..Default::default()
+            };
+            let err = contributes.validate_settings_contributions().unwrap_err();
+            assert!(
+                err.contains("owned by the kernel"),
+                "expected '{id}' to be refused as kernel-owned, got: {err}"
+            );
+        }
+    }
+
+    /// The id is the wire value of `POST /api/data/clear` and the desktop's row key,
+    /// so it stays a lower-case slug in all three places.
+    #[test]
+    fn data_category_ids_are_lower_case_slugs() {
+        for bad in ["Monitors", "web monitors", "", " monitors", "-monitors"] {
+            let contributes = Contributes {
+                data_categories: vec![category(bad)],
+                ..Default::default()
+            };
+            assert!(
+                contributes.validate_settings_contributions().is_err(),
+                "expected id '{bad}' to be rejected"
+            );
+        }
+    }
+
+    /// Two rows POSTing the same `category` means one of them deletes something
+    /// other than what its copy promised.
+    #[test]
+    fn duplicate_data_category_ids_are_rejected() {
+        let contributes = Contributes {
+            data_categories: vec![category("monitors"), category("monitors")],
+            ..Default::default()
+        };
+        let err = contributes.validate_settings_contributions().unwrap_err();
+        assert!(err.contains("duplicate data category id"), "got: {err}");
+    }
+
+    /// Empty copy renders a confirm dialog that says nothing before an irreversible
+    /// delete, so each of the three required strings is checked.
+    #[test]
+    fn data_category_copy_is_required() {
+        for mutate in [
+            (|c: &mut DataCategoryContribution| c.title = "  ".to_owned()) as fn(&mut _),
+            |c: &mut DataCategoryContribution| c.noun = String::new(),
+            |c: &mut DataCategoryContribution| c.detail = String::new(),
+        ] {
+            let mut declared = category("monitors");
+            mutate(&mut declared);
+            let contributes = Contributes {
+                data_categories: vec![declared],
+                ..Default::default()
+            };
+            assert!(contributes.validate_settings_contributions().is_err());
+        }
+    }
+
+    /// An absent (or blank) `confirm_word` falls back to the noun rather than to an
+    /// empty string — which would arm the delete on an empty input box.
+    #[test]
+    fn confirm_word_falls_back_to_the_noun() {
+        let mut declared = category("monitors");
+        assert_eq!(declared.confirm_word(), "monitors");
+        declared.confirm_word = Some("   ".to_owned());
+        assert_eq!(declared.confirm_word(), "monitors");
+        declared.confirm_word = Some("Monitors".to_owned());
+        assert_eq!(declared.confirm_word(), "Monitors");
+    }
+
     // ── code_file hydration ──────────────────────────────────────────────────
 
     /// A manifest with one turn hook and one capability adapter, both declaring
@@ -4015,6 +4444,89 @@ mod tests {
                 "'{bad}' must be rejected"
             );
         }
+    }
+
+    /// Same traversal-sink argument as the `code_file` allowlist above, plus the
+    /// cross-check that the two allowlists do NOT overlap: a `code_file` must never
+    /// name a `.ts` (the sandbox cannot run it) and a pi extension must never name a
+    /// `hooks/*.js` (that would ship sandboxed code into the unsandboxed Pi process).
+    #[test]
+    fn pi_extension_path_allowlist_rejects_traversal_and_stray_dirs() {
+        assert!(validate_pi_extension_path("pi-extensions/ryu-shell.ts").is_ok());
+        assert!(validate_pi_extension_path("pi-extensions/x.mts").is_ok());
+        for bad in [
+            "",
+            "ryu-shell.ts",                      // no dir segment
+            "pi-extensions/nested/ryu-shell.ts", // not flat: breaks the mirror's glob
+            "hooks/ryu-shell.ts",                // wrong dir
+            "pi-extensions/../../../etc/passwd",
+            "../pi-extensions/x.ts",
+            "/etc/passwd",
+            "pi-extensions\\x.ts", // Windows separator
+            "C:/pi-extensions/x.ts",
+            "pi-extensions/x.js", // sandboxed-JS extension, not a Pi extension
+            "pi-extensions/.hidden.ts",
+        ] {
+            assert!(
+                validate_pi_extension_path(bad).is_err(),
+                "'{bad}' must be rejected"
+            );
+        }
+        // The two allowlists are disjoint in both directions.
+        assert!(validate_code_file_path("pi-extensions/ryu-shell.ts").is_err());
+        assert!(validate_pi_extension_path("hooks/loop.js").is_err());
+    }
+
+    /// A malformed `pi_extensions` declaration must fail at LOAD, not at spawn:
+    /// the materializer is best-effort and fail-open, so a typo checked only there
+    /// would surface as a warn line on a Pi spawn nobody is watching.
+    #[test]
+    fn a_malformed_pi_extension_declaration_fails_validation() {
+        let manifest = |pi_extensions: serde_json::Value| {
+            serde_json::json!({
+                "id": "@example/x",
+                "name": "X",
+                "version": "1.0.0",
+                "runnables": [],
+                "contributes": { "pi_extensions": pi_extensions },
+            })
+            .to_string()
+        };
+
+        let bad_path = manifest(serde_json::json!([
+            { "id": "shell", "file": "../../etc/passwd" }
+        ]));
+        let err = PluginManifest::parse_and_validate_with_code(&bad_path, |_| unreachable!())
+            .unwrap_err();
+        assert!(err.contains("pi extension file"), "got: {err}");
+
+        let bad_id = manifest(serde_json::json!([
+            { "id": "Shell!", "file": "pi-extensions/a.ts" }
+        ]));
+        let err =
+            PluginManifest::parse_and_validate_with_code(&bad_id, |_| unreachable!()).unwrap_err();
+        assert!(err.contains("[a-z0-9]"), "got: {err}");
+
+        // Two rows sharing an id would flatten onto ONE file name on disk, so one
+        // would silently overwrite the other.
+        let dup = manifest(serde_json::json!([
+            { "id": "shell", "file": "pi-extensions/a.ts" },
+            { "id": "shell", "file": "pi-extensions/b.ts" }
+        ]));
+        let err =
+            PluginManifest::parse_and_validate_with_code(&dup, |_| unreachable!()).unwrap_err();
+        assert!(err.contains("duplicate pi extension id"), "got: {err}");
+
+        let ok = manifest(serde_json::json!([
+            { "id": "shell", "file": "pi-extensions/ryu-shell.ts" }
+        ]));
+        let parsed = PluginManifest::parse_and_validate_with_code(&ok, |_| unreachable!())
+            .expect("a well-formed declaration loads");
+        assert_eq!(
+            parsed.pi_extension_refs(),
+            vec!["pi-extensions/ryu-shell.ts".to_owned()],
+            "the file is enumerated, never hydrated into the manifest"
+        );
     }
 
     #[test]

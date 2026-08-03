@@ -163,3 +163,80 @@ describe("customTokensToVariant / variantToCustomTokens", () => {
 		});
 	});
 });
+
+// ── Brand colour ────────────────────────────────────────────────────────────
+
+/**
+ * Convert an `oklch(L C H)` token to a `#rrggbb` string.
+ *
+ * The tokens are authored in OKLCH, but the brand is specified in hex, so a
+ * test that compares token strings would only ever prove the token equals
+ * itself. Converting is what makes "this token IS #0099ff" checkable, and it
+ * catches the failure that actually happened: a token holding a *different*
+ * blue that nobody notices because both render as "blue".
+ */
+function oklchToHex(token: string): string {
+	const m = token.match(/^oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\)$/);
+	if (!m) {
+		throw new Error(`not a plain oklch() token: ${token}`);
+	}
+	const [L, C, Hdeg] = [Number(m[1]), Number(m[2]), Number(m[3])];
+	const h = (Hdeg * Math.PI) / 180;
+	const a = C * Math.cos(h);
+	const b = C * Math.sin(h);
+
+	const l_ = L + 0.396_337_777_4 * a + 0.215_803_757_3 * b;
+	const m_ = L - 0.105_561_345_8 * a - 0.063_854_172_8 * b;
+	const s_ = L - 0.089_484_177_5 * a - 1.291_485_548 * b;
+	const [lin_l, lin_m, lin_s] = [l_ ** 3, m_ ** 3, s_ ** 3];
+
+	const rgb = [
+		4.076_741_662_1 * lin_l - 3.307_711_591_3 * lin_m + 0.230_969_929_2 * lin_s,
+		-1.268_438_004_6 * lin_l +
+			2.609_757_401_1 * lin_m -
+			0.341_319_396_5 * lin_s,
+		-0.004_196_086_3 * lin_l - 0.703_418_614_7 * lin_m + 1.707_614_701 * lin_s,
+	];
+
+	return `#${rgb
+		.map((c) => {
+			const srgb =
+				c <= 0.003_130_8 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
+			const byte = Math.max(0, Math.min(255, Math.round(srgb * 255)));
+			return byte.toString(16).padStart(2, "0");
+		})
+		.join("")}`;
+}
+
+describe("Ryu brand colour", () => {
+	const BRAND = "#0099ff";
+
+	test("oklchToHex round-trips the known brand token", () => {
+		expect(oklchToHex("oklch(0.6690 0.1837 248.81)")).toBe(BRAND);
+	});
+
+	// Every token in the default Ryu presets that is supposed to BE the brand.
+	// `--sidebar-primary` is here because it silently held Tailwind blue-600
+	// (#155dfc light) and blue-500 (#2b7fff dark) instead: close enough to read
+	// as "blue" at a glance, wrong enough that the app never actually showed the
+	// brand colour in its most prominent chrome. Neutral tokens (--ring,
+	// --border, the greys) are deliberately NOT brand and are not listed.
+	const BRAND_TOKENS = ["--primary", "--sidebar-primary"] as const;
+
+	for (const id of [DEFAULT_LIGHT_ID, DEFAULT_DARK_ID]) {
+		for (const token of BRAND_TOKENS) {
+			test(`${id} ${token} is exactly ${BRAND}`, () => {
+				const variant = findVariantIn(id);
+				expect(variant).toBeDefined();
+				const value = variant?.tokens[token];
+				expect(value).toBeDefined();
+				expect(oklchToHex(value as string)).toBe(BRAND);
+			});
+		}
+
+		test(`${id} preview.primary is exactly ${BRAND}`, () => {
+			const variant = findVariantIn(id);
+			expect(variant?.preview.primary.toLowerCase()).toBe(BRAND);
+		});
+	}
+});

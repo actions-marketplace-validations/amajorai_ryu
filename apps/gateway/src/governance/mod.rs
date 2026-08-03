@@ -150,6 +150,18 @@ fn reserved_namespaces() -> Vec<String> {
         "tool",
         "tools",
         "mcp",
+        // `pi:extension` ships a .ts file into the managed Pi agent's extension
+        // directory, where Pi loads it IN-PROCESS with full host privilege — the
+        // same arbitrary-execution class as `mcp:server`, and the reason Core
+        // gates it on tier (`may_ship_pi_extensions`). Reserving the namespace is
+        // the half that makes that gate real: without it, Rule 2's owner-scoped
+        // self-grant approves `pi:extension` with no allowlist entry for any
+        // plugin whose id's last segment is `pi` (`@evil/pi`, `com.evil.pi`,
+        // bare `pi`), so a Community plugin could grant itself the capability and
+        // Core would then honour it. `mcp` is on this list for exactly this
+        // reason; `pi` was omitted, which made the "operator-only" claim in
+        // pi_config/app_extensions.rs false until now.
+        "pi",
         // Turn-hook phases, host-shell integration, the app KV store, the
         // follow-up-message verb, sandboxed widget promotion, media engines,
         // native-desktop capture/replay, and Core's own listing verbs.

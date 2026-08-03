@@ -2082,16 +2082,12 @@ pub async fn report_credential_read_audit(
 /// Detecting that needs the Gateway's *observed* version, and the readiness probe
 /// is the only place Core already talks to it. Caching what that probe sees keeps
 /// `/api/version` honest without adding a network round-trip to every call.
-static OBSERVED_GATEWAY_VERSION: std::sync::RwLock<Option<String>> =
-    std::sync::RwLock::new(None);
+static OBSERVED_GATEWAY_VERSION: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 /// The Gateway version last observed on `/health`. `None` until a probe succeeds
 /// (or if the Gateway reported no version, e.g. an older build).
 pub fn observed_gateway_version() -> Option<String> {
-    OBSERVED_GATEWAY_VERSION
-        .read()
-        .ok()
-        .and_then(|g| g.clone())
+    OBSERVED_GATEWAY_VERSION.read().ok().and_then(|g| g.clone())
 }
 
 /// GET `{base}/health`; returns true on a 2xx response.

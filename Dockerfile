@@ -15,7 +15,29 @@
 # crates), so expect 10-15 min on a cold cache; it is cached afterwards.
 
 # ---- builder ------------------------------------------------------------------
-FROM rust:1-bookworm AS builder
+#
+# TRIXIE, not bookworm, and the runtime stage must move with it.
+#
+# `voice-parakeet` links ONNX Runtime through `ort`/`ort-sys`, and the prebuilt ORT
+# archive `ort-sys` downloads is compiled against a NEWER glibc than Debian 12
+# ships (bookworm is glibc 2.36). Linking it on bookworm fails at the very last
+# step of a ~34-minute build with:
+#
+#   rust-lld: error: undefined symbol: __isoc23_strtoll
+#   rust-lld: error: undefined symbol: __isoc23_strtoull
+#   rust-lld: error: undefined symbol: __isoc23_strtol
+#
+# Those `__isoc23_*` entry points are glibc 2.38+ (the C23 strtol family); on 2.36
+# they simply do not exist, so every ORT object referencing them is unresolvable.
+# Nothing in this repo can fix that from the Rust side — the symbols are baked into
+# a binary we download — so the builder has to be at least as new as whatever built
+# it. Trixie (Debian 13) is glibc 2.41.
+#
+# The runtime stage below is trixie-slim for the matching reason and must stay in
+# lockstep: a binary linked against 2.41 will not start on a 2.36 image, so
+# downgrading either stage alone converts a build failure into a container that
+# builds fine and then dies on exec.
+FROM rust:1-trixie AS builder
 
 # Core and Gateway build deps. cmake + a C/C++ toolchain are needed for Core's
 # vendored audio codec (audiopus_sys builds libopus via CMake); protobuf-compiler
@@ -55,13 +77,13 @@ RUN cargo build --release --manifest-path apps/gateway/Cargo.toml \
  && cp target/release/ryu-core /usr/local/bin/ryu-core
 
 # ---- runtime ------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 # libstdc++6 is defensive cover for the `voice-parakeet` feature, which links ONNX
 # Runtime (C++) in. `ort` links its prebuilt copy STATICALLY — verified on macOS
 # aarch64, where `otool -L` on a feature-built ryu-core shows no libonnxruntime — so
 # no ORT .so needs copying, but a statically linked C++ library still resolves the
-# C++ runtime dynamically. NOT verified: whether bookworm-slim already carries
+# C++ runtime dynamically. NOT verified: whether trixie-slim already carries
 # libstdc++6 (it may, making this a no-op) and whether the Linux ORT static bundle
 # actually needs it. Listed anyway because the failure mode if it is missing is the
 # container refusing to start at all, and one apt name is cheap insurance.

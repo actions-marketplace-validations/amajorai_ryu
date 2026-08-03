@@ -336,6 +336,14 @@
           "items": true,
           "type": "array"
         },
+        "data_categories": {
+          "default": [],
+          "description": "**Deletable data categories** the app owns — one \"Delete all X\" row in\nSettings → Danger Zone (see [`DataCategoryContribution`]).\n\nThe danger zone used to be two hardcoded lists that had to be edited\ntogether: a `DataCategory` enum in Core and a `CATEGORIES` array carrying the\nuser-facing copy in the closed desktop source. Monitors and Meetings are\napp-owned data, so both lists named apps — which meant a node where Monitors\nwas never enabled still offered to delete monitors, and the count was always\n0. Declaring the category here makes the owning app the single source of both\nits existence and its wording, and makes the row appear and disappear with\nthe app instead of with a client-side feature-detect.\n\n# Core-interpreted, so a typed struct — and NOT on the contributions endpoint\n\nCore has to resolve the id to something that can actually count and delete\nthe rows, so per this type's own doc comment this gets a typed struct rather\nthan opaque JSON, and it is gathered at its consumption site\n(`GET /api/data/counts`, which serves each category's descriptor next to its\nlive count) rather than at `GET /api/plugins/contributions` — the same\ndisposition as [`Contributes::tool_filters`] and [`Contributes::lsp_servers`].\n\n# Declaration, not implementation\n\nA declared category is served only when Core knows how to clear it; an id\nCore does not implement is skipped with a warn rather than being offered as a\nbutton that 400s. That split is deliberate and not a stepping stone to a\ngeneric HTTP truncate: clearing monitors has to tear down each monitor's\nbacking scheduler job, and clearing meetings has to broadcast on the meetings\nSSE stream, so a blind `DELETE /monitors` would leave jobs ticking forever.\nThe manifest owns *whether the row exists and what it says*; Core owns *what\ndeleting actually entails*.",
+          "items": {
+            "$ref": "#/$defs/DataCategoryContribution"
+          },
+          "type": "array"
+        },
         "dock_panels": {
           "default": [],
           "description": "App-registered **workspace dock panels** — a tab in the desktop's bottom or\nright dock (Terminal / Code Review / Browser / Simulator live there today).\nThis is the seam that lets an app OWN its dock tab instead of the shell\nwelding the app into a closed `TabKind` union: `@ryu/browser` and\n`@ryu/simulator` are apps, and their tabs are contributions, not enum\nvariants. Self-contained + opaque `spec` (see [`DockPanelContribution`]), so a\nnew panel capability needs no Core change; served + tagged with the owning\n`plugin` id at `GET /api/plugins/contributions`.",
@@ -358,6 +366,13 @@
           },
           "description": "**Language servers** the plugin declares, keyed by server name — the\nagent-neutral mirror of Claude Code's `.lsp.json` / `lspServers`, so a config\nwritten for either host loads in the other:\n\n```json\n\"lsp_servers\": {\n  \"go\": { \"command\": \"gopls\", \"args\": [\"serve\"], \"extensionToLanguage\": { \".go\": \"go\" } }\n}\n```\n\nOnly the container key is Ryu's (`lsp_servers`, snake_case like every sibling\nhere); every key INSIDE a server entry is Claude's own camelCase spelling\nverbatim, because that body is what actually travels between the two hosts.\nNo `lspServers` alias is accepted on purpose. `lsp_servers` — this exact\nspelling — is registered in the SDK's zod mirror (`ContributesSchema` in\n`packages/sdk/src/manifest.ts`), and that mirror STRIPS every key it does not\nlist. An alias would therefore parse here and be silently deleted at\n`ryu pack` time, before the manifest is signed, which is a worse failure than\na key that never parsed at all. One spelling, registered in both places.\n\nThe plugin ships CONFIG ONLY, never the server binary — `command` is resolved\nfrom `PATH` at spawn time and a missing binary is a visible skip, not a load\nerror. Core spawns and supervises these processes itself, so unlike the\nclient-rendered surfaces above this one is fully typed\n([`LspServerContribution`]) and is NOT served from\n`GET /api/plugins/contributions`; it is gathered at the spawn site, the same\ndisposition as [`Contributes::tool_filters`].\n\n# Ordering is part of the contract\n\nRegistration is **first-registration-wins per file extension**: if two enabled\nservers both claim `.go`, the first one registered owns it, the others never\nstart for that extension, and the spawn site warns naming the owner. That rule\nis only reproducible if iteration order is, so this is a [`BTreeMap`] — it\niterates lexicographically by server key, never in hash order and never in\nJSON authoring order. The full resolved invariant across a node is\n**(plugin enable order, then server key ascending)**.\n\nNote this makes the tie-break deterministic, not byte-identical to Claude\nCode's, which falls out of JS object insertion order. Two servers fighting\nover one extension is a misconfiguration in either host; what matters is that\nthe same node always resolves it the same way and says who won.",
           "type": "object"
+        },
+        "pi_extensions": {
+          "description": "**Pi extensions** the plugin ships — TypeScript files the managed `ryu` (Pi)\nagent loads at process start:\n\n```json\n\"pi_extensions\": [\n  { \"id\": \"shell\", \"file\": \"pi-extensions/ryu-shell.ts\",\n    \"description\": \"background bash for the managed Pi agent\" }\n]\n```\n\nPi ships none of plan mode, sub-agents, permission prompts or background bash\nand says so deliberately in its own docs — \"you can build or install those\nworkflows as extensions or packages\". This surface is that seam: the\ncapabilities Core used to hardcode into the spawn path become plugins the user\ncan enable and disable, and a third party can ship one at all.\n\n# This is UNSANDBOXED code, and the tier gate is not optional\n\nA [`Contributes::turn_hooks`] body runs in the deny-by-default Deno sandbox\nbehind capability-gated `host.*` calls. A file named here runs **inside the Pi\nprocess** with full host privilege: the first-party ones spawn children and\nPOST to Core. That is the same arbitrary-code-execution class as\n[`PluginManifest::mcp_servers`], so Core gates it identically — Core tier is\nauto-allowed, Community tier needs an operator-allowlisted grant, and the gate\nsits at the materializer, because writing the file is what makes it run.\n\n# Core-interpreted, so a typed struct — and NOT on the contributions endpoint\n\nCore resolves each `file` and projects it into the managed Pi's config dir, so\nper this type's own doc comment it gets a typed struct and is gathered at its\nconsumption site (`pi_config::app_extensions`) rather than served from\n`GET /api/plugins/contributions` — the same disposition as\n[`Contributes::lsp_servers`].\n\nThe `file` is deliberately NOT hydrated into an inline string the way a\n`code_file` is; see [`PluginManifest::pi_extension_refs`] for why.",
+          "items": {
+            "$ref": "#/$defs/PiExtensionContribution"
+          },
+          "type": "array"
         },
         "policies": {
           "default": [],
@@ -466,6 +481,41 @@
       },
       "required": [
         "id"
+      ],
+      "type": "object"
+    },
+    "DataCategoryContribution": {
+      "description": "One **deletable data category** an app owns (see [`Contributes::data_categories`]).\n\nEverything the Danger Zone needs to draw and arm one destructive row, so the copy\nlives with the app whose data it describes rather than in the desktop's source.",
+      "properties": {
+        "confirm_word": {
+          "description": "The word the user must type to arm the delete. Absent = the [`noun`], which is\nthe right default often enough that requiring it would just be ceremony.\nMatched case-insensitively by the client.\n\n[`noun`]: DataCategoryContribution::noun",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "description": "Exactly what disappears, shown in the confirm dialog. Required, and required\nto be specific: this is the last thing the user reads before an irreversible\ndelete, and \"this cannot be undone\" tells them nothing they did not know.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable id — this is the `category` a `POST /api/data/clear` names, so it is\nthe app's half of the delete contract and renaming it breaks the button.",
+          "type": "string"
+        },
+        "noun": {
+          "description": "Plural noun for the live count line (\"42 monitors\" / \"No monitors\") and the\n\"N deleted\" toast. Lower-case: it is used mid-sentence.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The destructive button label and confirm-dialog title (\"Delete all monitors\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "noun",
+        "detail"
       ],
       "type": "object"
     },
@@ -1017,6 +1067,31 @@
           "type": "array"
         }
       },
+      "type": "object"
+    },
+    "PiExtensionContribution": {
+      "description": "One **Pi extension** a plugin ships (a [`Contributes::pi_extensions`] row).\n\nCarries a path, never a body: unlike [`TurnHookContribution`] there is no inline\n`code` twin, because nothing downstream reads the source as a string.",
+      "properties": {
+        "description": {
+          "description": "Optional human-facing one-liner (what the extension adds to the agent).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file": {
+          "description": "Path to the TypeScript source, relative to the plugin root — exactly\n`pi-extensions/<name>.ts`. See [`validate_pi_extension_path`].",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable id for this extension within the plugin (`[a-z0-9][a-z0-9._-]*`).\n\nPart of the materialized file name, so it is what makes one plugin's\nextensions distinguishable from another's on disk — and why it is validated\nwith the same alphabet as an event name rather than left free-form.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "file"
+      ],
       "type": "object"
     },
     "ProviderRegistrationSpec": {

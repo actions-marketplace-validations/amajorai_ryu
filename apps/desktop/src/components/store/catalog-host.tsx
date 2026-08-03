@@ -14,6 +14,7 @@
 import { Markdown } from "@ryu/blocks/desktop/agent-elements/markdown";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
 import { fitStyle } from "@ryu/blocks/desktop/model-catalog";
+import { DependencyLookupProvider } from "@ryu/marketplace/catalog/detail/dependency-graph";
 import {
 	type CatalogHost,
 	CatalogHostProvider,
@@ -25,6 +26,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo } from "react";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { ActiveModelControl } from "@/src/components/store/ActiveModelControl.tsx";
+import { useDesktopDependencyLookup } from "@/src/components/store/dependency-lookup.ts";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { SKILL_EDITOR_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
@@ -106,6 +108,12 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 	// page it opens can never disagree.
 	const skillEditorOwner = useCompanionAlias(SKILL_EDITOR_ALIAS);
 
+	// Node-scoped answer to "is this dependency already here?", read by the shared
+	// Dependencies tab through its own context rather than the host object: the
+	// host must stay a stable module-shaped value (rules of hooks), and this is
+	// live query data that changes as apps are installed and enabled.
+	const dependencyLookup = useDesktopDependencyLookup();
+
 	const host = useMemo<CatalogHost>(
 		() => ({
 			canAuthorSkills: skillEditorOwner !== null,
@@ -139,5 +147,14 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 		[navigate, skillEditorOwner, activeNode.url, activeNode.token]
 	);
 
-	return <CatalogHostProvider host={host}>{children}</CatalogHostProvider>;
+	return (
+		<CatalogHostProvider host={host}>
+			{/* Lets the Dependencies tab resolve declared ids against THIS node —
+			    names, install/enable state, and each dependency's own dependencies.
+			    Web mounts no lookup, so its tab degrades to the declared list. */}
+			<DependencyLookupProvider lookup={dependencyLookup}>
+				{children}
+			</DependencyLookupProvider>
+		</CatalogHostProvider>
+	);
 }

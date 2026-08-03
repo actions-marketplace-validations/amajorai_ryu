@@ -4,6 +4,7 @@ import Link from "next/link";
 import { landingSurfaceCardXlClass } from "./landing-card-tones.ts";
 import { Reveal } from "./reveal.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
+import { StaggerLines } from "./stagger-lines.tsx";
 
 const steps = [
 	{
@@ -30,10 +31,15 @@ export default function WhyRyu() {
 			<div className="mx-auto grid max-w-6xl gap-10 lg:grid-cols-2 lg:gap-16">
 				{/* Left, pinned statement */}
 				<div className="lg:sticky lg:top-28 lg:self-start">
-					<SectionTitle title="The layer that gets agents into production." />
-					<p className={sectionSubtitleClass}>
-						One interface and one control layer for every agent a company runs.
-					</p>
+					{/* Wraps only the title and its supporting line: the button row below
+					    is a flex layout and `.t-stagger-line` would force it to block. */}
+					<StaggerLines>
+						<SectionTitle title="The layer that gets agents into production." />
+						<p className={sectionSubtitleClass}>
+							One interface and one control layer for every agent a company
+							runs.
+						</p>
+					</StaggerLines>
 					<div className="mt-8 flex flex-col gap-3 sm:flex-row">
 						<Link
 							className={cn(buttonVariants({ variant: "default" }))}

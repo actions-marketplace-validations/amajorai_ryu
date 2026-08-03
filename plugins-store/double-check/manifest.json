@@ -2,6 +2,8 @@
   "id": "@ryu/double-check",
   "name": "Double Check",
   "version": "1.0.0",
+  "icon": "tick-double-01",
+  "iconDither": { "from": 276, "to": 310, "direction": "right" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

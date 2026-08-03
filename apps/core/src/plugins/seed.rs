@@ -534,6 +534,35 @@ pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
     // opens one has no reason to carry them.
     crate::plugin_manifest::WHITEBOARD_PLUGIN_ID,
     crate::plugin_manifest::CANVAS_PLUGIN_ID,
+    // Every remaining opt-in companion. These were already default-OFF, so this
+    // changes nothing about what RUNS on a fresh install — only about what the
+    // Store claims is on the machine.
+    //
+    // Why they are here now: default-off still left each one holding a DISABLED
+    // record (written by `seed_companion_ui` purely to carry its compiled-in
+    // bundle), so a brand-new machine listed eleven apps nobody had asked for
+    // under *Installed*, and an uninstall was silently undone by the next boot's
+    // re-seed. The reported version of that: "I did a full reset and Workflows is
+    // STILL installed." It was — by design, and the design was wrong. An app the
+    // user has never enabled should not appear on their machine at all.
+    //
+    // Safe for the same two reasons `whiteboard`/`canvas` were: `install_app`
+    // sources the compiled-in bundle via `compiled_in_ui_code`, so Install →
+    // Enable from the Store still mounts a real UI with no seeded record; and
+    // none of these ids is in `SYSTEM_PLUGINS` or `CORE_DEFAULT_ON`, so
+    // `is_uninstall_protected` was already false for all of them — this is what
+    // makes their uninstall STICK across a reboot.
+    crate::plugin_manifest::FINETUNE_PLUGIN_ID,
+    crate::plugins::builtins::MEETINGS_PLUGIN_ID,
+    crate::plugins::builtins::MONITORS_PLUGIN_ID,
+    crate::plugins::builtins::WORKFLOWS_PLUGIN_ID,
+    crate::plugins::builtins::QUESTS_PLUGIN_ID,
+    crate::plugins::builtins::ACTIVITY_PLUGIN_ID,
+    crate::plugins::builtins::APPROVALS_PLUGIN_ID,
+    crate::plugins::builtins::TIMELINE_PLUGIN_ID,
+    crate::plugins::builtins::SKILL_EDITOR_PLUGIN_ID,
+    crate::plugins::builtins::MAIL_PLUGIN_ID,
+    crate::plugins::builtins::WARMUP_PLUGIN_ID,
 ];
 
 /// Make sure every built-in companion's compiled-in `ui_code` bundle actually
@@ -1145,7 +1174,11 @@ mod migration_tests {
     }
 
     const LEARNING: &str = crate::plugins::builtins::LEARNING_PLUGIN_ID;
-    const QUESTS: &str = crate::plugins::builtins::QUESTS_PLUGIN_ID;
+    /// A default-OFF built-in that is still PRE-INSTALLED — i.e. one the v3
+    /// `unseed_not_pre_installed` step leaves alone. It used to be `quests`, which
+    /// moved into [`NOT_PRE_INSTALLED`]; a not-pre-installed id is useless here
+    /// because v3 deletes the very record the test inserts to watch.
+    const OPT_IN_BUILTIN: &str = crate::plugins::builtins::HEALING_PLUGIN_ID;
 
     /// THE consent-surface regression (v2). Learning was default-OFF until its two
     /// consent switches moved onto its app-registered settings tab, so essentially
@@ -1230,10 +1263,11 @@ mod migration_tests {
     #[tokio::test]
     async fn the_learning_migration_enables_no_other_app() {
         assert!(
-            crate::plugins::builtins::CORE_PLUGINS.contains(&QUESTS)
-                && !CORE_DEFAULT_ON.contains(&QUESTS),
-            "'{QUESTS}' must be a built-in that is NOT default-on for this test to mean \
-             anything"
+            crate::plugins::builtins::CORE_PLUGINS.contains(&OPT_IN_BUILTIN)
+                && !CORE_DEFAULT_ON.contains(&OPT_IN_BUILTIN)
+                && !NOT_PRE_INSTALLED.contains(&OPT_IN_BUILTIN),
+            "'{OPT_IN_BUILTIN}' must be a pre-installed built-in that is NOT default-on for \
+             this test to mean anything"
         );
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let store = PluginStore::open_in_memory().unwrap();
@@ -1244,7 +1278,7 @@ mod migration_tests {
         store.insert(RECIPES, "1.0.0").await.unwrap();
         store.set_disabled(RECIPES).await.unwrap();
         // A default-OFF built-in, never enabled.
-        store.insert(QUESTS, "1.0.0").await.unwrap();
+        store.insert(OPT_IN_BUILTIN, "1.0.0").await.unwrap();
 
         run_one_time_migrations(&store, &manifests).await;
 
@@ -1254,7 +1288,7 @@ mod migration_tests {
             "another default-on app the user disabled must stay disabled"
         );
         assert!(
-            !store.get(QUESTS).await.unwrap().unwrap().enabled,
+            !store.get(OPT_IN_BUILTIN).await.unwrap().unwrap().enabled,
             "a default-off built-in must never be enabled by this migration"
         );
     }
@@ -1535,6 +1569,42 @@ mod tests {
         assert!(skipped.is_empty(), "absent != unsatisfiable");
     }
 
+    /// A fresh install must seed the two Pi-extension plugins INSTALLED + ENABLED.
+    ///
+    /// Pinned separately from the lockstep check below because the failure is
+    /// invisible: `pi_config::app_extensions` resolves over the *enabled record set*,
+    /// so an id that never gets an enabled record materializes nothing and the
+    /// flagship agent silently loses background bash and sub-agents. Before these
+    /// were plugins, Core shipped both unconditionally — a fresh install losing them
+    /// would be a pure regression, with a missing tool as its only symptom.
+    ///
+    /// Two axes have to hold, and they are genuinely separate (see
+    /// [`NOT_PRE_INSTALLED`]): the id is in `CORE_DEFAULT_ON` (so `default_on_specs`
+    /// yields a spec, which the seed loop inserts + enables), and it is NOT in
+    /// `NOT_PRE_INSTALLED` (which would keep the record absent entirely).
+    #[test]
+    fn the_pi_extension_plugins_are_seeded_enabled_on_a_fresh_install() {
+        let specs = default_on_specs();
+        for id in ["@ryu/pi-shell", "@ryu/pi-subagent"] {
+            assert!(
+                specs.iter().any(|s| s.id == id),
+                "'{id}' has no default-on seed spec, so a fresh install would never create \
+                 an enabled record — and its Pi extension would never be materialized"
+            );
+            assert!(
+                !NOT_PRE_INSTALLED.contains(&id),
+                "'{id}' must be pre-installed: default-on and pre-installed are separate \
+                 axes, and an absent record is as silent as a disabled one here"
+            );
+            assert!(
+                crate::plugins::builtins::tier_for(id) == crate::plugin_manifest::PluginTier::Core,
+                "'{id}' must be Core-tier: may_ship_pi_extensions auto-allows only Core, \
+                 and a Community-tier built-in would need the operator-only \
+                 'pi:extension' grant to ship anything at all"
+            );
+        }
+    }
+
     /// The seed table stays in lockstep with `CORE_DEFAULT_ON`: every default-on id
     /// gets exactly one spec, and the three companions carry their grants + UI code.
     #[test]
@@ -1609,37 +1679,30 @@ mod tests {
         assert!(!store.get("@ryu/durable").await.unwrap().unwrap().enabled);
     }
 
-    /// The W7 Mail-companion extraction rests on this: mail is the first OPT-IN
-    /// built-in companion, so the default-on seed loop never touches it, yet its
-    /// `ui_code` MUST be present when the user enables it (nothing else — not
-    /// `install_app`, not `enable_app` — seeds a built-in's `ui_code`). This drives
-    /// the REAL `seed_default_on` over the REAL manifest set and asserts the end
-    /// state: mail has a record with `ui_code` set, but stays DISABLED (opt-in, no
-    /// sidecar spawn on fresh install). If this fails, enabling mail mounts a broken
-    /// "no runnable UI" companion.
+    /// The W7 Mail-companion extraction used to rest on mail being PRE-SEEDED: it was
+    /// the first opt-in built-in companion, so the default-on loop never touched it,
+    /// and a disabled record existed purely to carry its `ui_code`.
+    ///
+    /// Mail is now in [`NOT_PRE_INSTALLED`], so a fresh store carries no mail record at
+    /// all and the bundle arrives from `lifecycle::install_app` instead. The property
+    /// the extraction actually needs is unchanged and still pinned here: whatever path
+    /// puts mail on the machine, the compiled-in bundle must come with it, or enabling
+    /// mail mounts a broken "no runnable UI" companion.
     #[tokio::test]
-    async fn the_real_seed_seeds_mail_ui_code_but_leaves_it_disabled() {
+    async fn mail_is_not_pre_installed_but_still_carries_its_bundle() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let store = PluginStore::open_in_memory().unwrap();
 
         seed_default_on(&store, &manifests).await;
 
         let mail_id = crate::plugins::builtins::MAIL_PLUGIN_ID;
-        let mail = store
-            .get(mail_id)
-            .await
-            .unwrap()
-            .expect("the seed must install a mail record (disabled)");
         assert!(
-            !mail.enabled,
-            "mail must stay opt-in (DISABLED) — it must not be auto-enabled / its \
-             sidecar auto-spawned on a fresh install"
+            store.get(mail_id).await.unwrap().is_none(),
+            "mail must not be pre-installed — an unconfigured inbox has no business \
+             appearing as Installed on a fresh machine"
         );
-        let ui = store
-            .get_ui_code(mail_id)
-            .await
-            .unwrap()
-            .expect("mail's companion ui_code must be seeded so enable mounts the UI");
+        let ui = compiled_in_ui_code(mail_id)
+            .expect("mail must still ship a compiled-in bundle for install_app to source");
         assert!(
             ui.len() > 10_000 && ui.contains('<'),
             "mail ui_code must be the real inlined companion bundle, got {} bytes",
@@ -1647,94 +1710,71 @@ mod tests {
         );
     }
 
-    /// THE A3 regression, generalized from the mail case above: ELEVEN default-off
-    /// built-in companions carried a real, size-guarded `ui_code` in `seed_overrides`
-    /// that NOTHING ever wrote — the only opt-in carriage was a hardcoded
-    /// one-element array holding mail, and neither `install_app` nor `enable_app`
-    /// sources a bundle. Enabling any of them from the Store therefore mounted
-    /// "this app has no interface" (the contributions payload's `has_ui` reads
-    /// `has_ui_code`), with the native pages they replaced already deleted.
+    /// THE A3 regression, re-pointed. ELEVEN default-off built-in companions once
+    /// carried a real, size-guarded `ui_code` in `seed_overrides` that NOTHING ever
+    /// wrote, so enabling any of them from the Store mounted "this app has no
+    /// interface" (the contributions payload's `has_ui` reads `has_ui_code`).
     ///
-    /// Drives the REAL `seed_default_on` over the REAL manifest set and asserts the
-    /// end state for EVERY pre-seeded opt-in companion: a record, DISABLED (still
-    /// opt-in, no spawn on a fresh install), carrying its bundle — which is exactly
-    /// what makes the Store's Enable (`enable_app`, which only flips the bit) mount a
-    /// real UI.
+    /// The fix then was to pre-seed a DISABLED record carrying the bundle. That is no
+    /// longer the posture: every one of those ids is now in [`NOT_PRE_INSTALLED`], so a
+    /// fresh store has no record for them and `lifecycle::install_app` carries the
+    /// bundle at Install time instead.
     ///
-    /// The [`NOT_PRE_INSTALLED`] ids are deliberately excluded: they get NO record at
-    /// all now, and their bundle arrives from `lifecycle::install_app` instead. The
-    /// sibling `not_pre_installed_apps_get_no_record_but_stay_fully_installable` owns
-    /// that end state, so the A3 guard here is not weakened — it is re-pointed.
+    /// What must never come back is the limbo state in between — an app that is
+    /// pre-installed, disabled, and bundle-less. So this asserts the INVARIANT rather
+    /// than a list: every compiled-in companion bundle is reachable by exactly one of
+    /// the two live carriages (default-on seed, or install-time sourcing), and no
+    /// companion sits in a third state where neither runs.
     #[tokio::test]
-    async fn the_real_seed_seeds_every_optin_companion_ui_code_but_leaves_them_disabled() {
-        use crate::plugins::builtins::{
-            ACTIVITY_PLUGIN_ID, APPROVALS_PLUGIN_ID, MAIL_PLUGIN_ID, MEETINGS_PLUGIN_ID,
-            MONITORS_PLUGIN_ID, QUESTS_PLUGIN_ID, SKILL_EDITOR_PLUGIN_ID, TIMELINE_PLUGIN_ID,
-            WORKFLOWS_PLUGIN_ID,
-        };
-
+    async fn every_companion_bundle_has_a_live_carriage() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let store = PluginStore::open_in_memory().unwrap();
 
         seed_default_on(&store, &manifests).await;
 
-        let optin: Vec<&str> = companion_ui_specs()
-            .into_iter()
-            .map(|s| s.id)
-            .filter(|id| !CORE_DEFAULT_ON.contains(id) && !NOT_PRE_INSTALLED.contains(id))
-            .collect();
+        // Non-vacuous: there are companion bundles to account for at all.
+        let specs = companion_ui_specs();
+        assert!(
+            specs.len() >= 10,
+            "expected the real companion bundle set, got {}",
+            specs.len()
+        );
 
-        // Non-vacuous, and named: the nine still-pre-seeded default-off companions
-        // plus mail. If a companion legitimately moves into CORE_DEFAULT_ON it leaves
-        // this list — and then the default-on loop carries its bundle, which the
-        // sibling `default_on_specs_cover_core_default_on_exactly` pins. Whiteboard and
-        // Canvas are absent BY DESIGN (`NOT_PRE_INSTALLED`).
-        for id in [
-            MAIL_PLUGIN_ID,
-            crate::plugin_manifest::FINETUNE_PLUGIN_ID,
-            MEETINGS_PLUGIN_ID,
-            MONITORS_PLUGIN_ID,
-            WORKFLOWS_PLUGIN_ID,
-            QUESTS_PLUGIN_ID,
-            APPROVALS_PLUGIN_ID,
-            ACTIVITY_PLUGIN_ID,
-            TIMELINE_PLUGIN_ID,
-            SKILL_EDITOR_PLUGIN_ID,
-        ] {
+        for spec in specs {
+            let id = spec.id;
+            let default_on = CORE_DEFAULT_ON.contains(&id);
+            let not_pre_installed = NOT_PRE_INSTALLED.contains(&id);
             assert!(
-                optin.contains(&id),
-                "'{id}' ships a compiled-in companion bundle and is default-off, so it must \
-                 be in the opt-in carriage list, got {optin:?}"
+                default_on ^ not_pre_installed,
+                "'{id}' must be carried by exactly one of the two live paths — default-on \
+                 (seeded enabled, bundle written by the seed loop) or NOT_PRE_INSTALLED \
+                 (no record, bundle sourced by install_app). Being in neither puts it back \
+                 in the pre-installed-but-disabled limbo this test exists to prevent; being \
+                 in both is a contradiction."
             );
-        }
 
-        for id in optin {
-            let record = store
-                .get(id)
-                .await
-                .unwrap()
-                .unwrap_or_else(|| panic!("the seed must install a '{id}' record (disabled)"));
-            assert!(
-                !record.enabled,
-                "'{id}' must stay opt-in (DISABLED) — seeding its UI must not turn it on"
-            );
-            assert!(
-                record.approved_grants.is_empty(),
-                "'{id}' is not enabled, so no grants may be persisted (the Gateway approves \
-                 them at enable), got {:?}",
-                record.approved_grants
-            );
-            let ui = store.get_ui_code(id).await.unwrap().unwrap_or_else(|| {
-                panic!(
-                    "'{id}' must carry its compiled-in ui_code so enabling it from the Store \
-                     mounts a real UI instead of \"this app has no interface\""
-                )
-            });
+            // Whichever path owns it, the bundle itself must be real.
+            let ui = compiled_in_ui_code(id)
+                .unwrap_or_else(|| panic!("'{id}' must ship a compiled-in bundle"));
             assert!(
                 ui.len() > 10_000 && ui.contains('<'),
                 "'{id}' ui_code must be the real inlined companion bundle, got {} bytes",
                 ui.len()
             );
+
+            if not_pre_installed {
+                assert!(
+                    store.get(id).await.unwrap().is_none(),
+                    "'{id}' is not-pre-installed, so a fresh store must carry no record"
+                );
+            } else {
+                let record = store
+                    .get(id)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("default-on '{id}' must be seeded"));
+                assert!(record.enabled, "default-on '{id}' must be seeded enabled");
+            }
         }
     }
 

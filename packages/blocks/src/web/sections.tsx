@@ -10,6 +10,7 @@ import { landingSurfaceCardFlexXlClass } from "./landing-card-tones.ts";
 import { landingSubheadlineClass } from "./landing-typography.ts";
 import { Reveal } from "./reveal.tsx";
 import { SectionTitle } from "./section-title.tsx";
+import { StaggerLines } from "./stagger-lines.tsx";
 
 export interface CtaLink {
 	external?: boolean;
@@ -107,7 +108,7 @@ export function SectionHeading({
 	className?: string;
 }) {
 	return (
-		<div
+		<StaggerLines
 			className={cn(
 				"mb-10 max-w-2xl",
 				align === "center" && "mx-auto text-center",
@@ -116,7 +117,7 @@ export function SectionHeading({
 		>
 			<SectionTitle title={title} />
 			{subtitle ? <p className={sectionSubtitleClass}>{subtitle}</p> : null}
-		</div>
+		</StaggerLines>
 	);
 }
 
@@ -283,10 +284,14 @@ export function ProductCta({
 	return (
 		<section className="container mx-auto px-4 py-24">
 			<div className="mx-auto max-w-2xl text-center">
-				<SectionTitle className="mx-auto" title={title} />
-				<p className={cn(landingSubheadlineClass, "mx-auto mt-4 max-w-md")}>
-					{subtitle}
-				</p>
+				{/* Only the title and its supporting line stagger — the button row below
+				    is a flex layout and `.t-stagger-line` would force it to block. */}
+				<StaggerLines>
+					<SectionTitle className="mx-auto" title={title} />
+					<p className={cn(landingSubheadlineClass, "mx-auto mt-4 max-w-md")}>
+						{subtitle}
+					</p>
+				</StaggerLines>
 				<div className="mt-8 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
 					<Cta cta={primaryCta} />
 					{secondaryCta ? <Cta cta={secondaryCta} variant="ghost" /> : null}

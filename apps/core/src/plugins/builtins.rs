@@ -435,6 +435,15 @@ pub const CORE_PLUGINS: &[&str] = &[
     // firecrawl) stay Community + opt-in, because each is BYOK-only and would ship
     // a tool that can do nothing until the user pastes a key.
     "@ryu/exa",
+    // The two Pi extensions that stopped being hardcoded: background bash and
+    // sub-agents. Core-tier is a REQUIREMENT, not a promotion, exactly as for
+    // `scrapling` above — `pi_config::app_extensions::may_ship_pi_extensions`
+    // auto-allows a manifest's `pi_extensions` only for compiled-in manifests, and
+    // the Community path needs the approved `pi:extension` grant, which is
+    // operator-only. Both ARE in `CORE_DEFAULT_ON`: they were unconditional before
+    // the move, so anything else is a silent capability regression.
+    "@ryu/pi-shell",
+    "@ryu/pi-subagent",
     // Workspace real-Chromium browser sidecar — core built-in, installable from the
     // Store but NOT default-on (no publishable sidecar asset; see `CORE_DEFAULT_ON`).
     BROWSER_PLUGIN_ID,
@@ -600,6 +609,12 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     "@ryu/proof",
     "@ryu/double-check",
     "@ryu/chat-title",
+    // Background bash + sub-agents for the managed Pi agent. Default-on because
+    // Core shipped both unconditionally before they became plugins; the win of the
+    // move is that they are now DISABLE-able, not that they are off. Turning either
+    // off takes effect in a new chat (Pi reads its extensions at process start).
+    "@ryu/pi-shell",
+    "@ryu/pi-subagent",
     // The default tool apps — auto-installed (record seeded enabled) on a fresh
     // install so they show up like the auto-downloaded default models. The actual
     // process runs through its own sidecar/MCP lifecycle; enabling the record just
@@ -1264,13 +1279,15 @@ mod tests {
             .expect("the seed must install Spaces");
         assert!(spaces.enabled, "Spaces must be seeded ENABLED");
 
+        // Meetings is opt-in AND now `seed::NOT_PRE_INSTALLED`, so the seed writes no
+        // record at all rather than a disabled one. Either way the property under test
+        // is the same: seeding Spaces must not drag its dependents on with it.
         assert!(
-            !store
+            store
                 .get(MEETINGS_PLUGIN_ID)
                 .await
                 .unwrap()
-                .expect("seed::seed_companion_ui seeds a DISABLED meetings record (its bundle)")
-                .enabled,
+                .is_none_or(|record| !record.enabled),
             "Meetings is opt-in (default-off) — the seed must not ENABLE it"
         );
     }
@@ -1395,11 +1412,10 @@ mod tests {
         );
 
         // Spaces is enabled; its former default-on dependents (meetings/whiteboard/
-        // canvas) are now opt-in, so the seed must NOT enable them. Meetings still gets
-        // a disabled record carrying the compiled-in companion `ui_code`
-        // (`seed::seed_companion_ui`) — see the sibling Meetings test. Whiteboard and
-        // Canvas get NO record at all (`seed::NOT_PRE_INSTALLED`): their bundle comes
-        // from `lifecycle::install_app` when the user installs them from the Store.
+        // canvas) are now opt-in, so the seed must NOT enable them. All three get NO
+        // record at all (`seed::NOT_PRE_INSTALLED`): their bundle comes from
+        // `lifecycle::install_app` when the user installs them from the Store, so a
+        // fresh machine lists them as available rather than as "Installed (off)".
         let store = PluginStore::open_in_memory().unwrap();
         crate::plugins::seed::seed_default_on(&store, &manifests).await;
         assert!(
@@ -1411,16 +1427,7 @@ mod tests {
                 .enabled,
             "Spaces must be seeded ENABLED"
         );
-        assert!(
-            !store
-                .get(MEETINGS_PLUGIN_ID)
-                .await
-                .unwrap()
-                .expect("seed::seed_companion_ui seeds a DISABLED record (its bundle)")
-                .enabled,
-            "'{MEETINGS_PLUGIN_ID}' is opt-in (default-off) — the seed must not ENABLE it"
-        );
-        for id in [WHITEBOARD_PLUGIN_ID, CANVAS_PLUGIN_ID] {
+        for id in [MEETINGS_PLUGIN_ID, WHITEBOARD_PLUGIN_ID, CANVAS_PLUGIN_ID] {
             assert!(
                 store.get(id).await.unwrap().is_none(),
                 "'{id}' is not-pre-installed — the seed must write no record for it, let alone \

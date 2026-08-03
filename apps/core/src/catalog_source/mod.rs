@@ -120,10 +120,7 @@ pub async fn enrich_github_repo(
 /// silently mixes "as of that tag" with "as of now" reads as authoritative and is
 /// not. Returns `None` for a non-GitHub reference or a tag with no readable
 /// manifest, which is normal for tags predating packaging.
-pub async fn github_version_detail(
-    repo_reference: &str,
-    tag: &str,
-) -> Option<serde_json::Value> {
+pub async fn github_version_detail(repo_reference: &str, tag: &str) -> Option<serde_json::Value> {
     let (owner, repo) = split_github_repo(repo_reference)?;
     github_enrich::version_detail(&owner, &repo, tag).await
 }

@@ -2,6 +2,8 @@
   "id": "@ryu/chat-title",
   "name": "Chat Title",
   "version": "1.0.0",
+  "icon": "bubble-chat-edit",
+  "iconDither": { "from": 339, "to": 13, "direction": "up" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

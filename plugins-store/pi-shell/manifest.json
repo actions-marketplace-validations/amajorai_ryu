@@ -1,0 +1,30 @@
+{
+  "id": "@ryu/pi-shell",
+  "name": "Background Bash",
+  "version": "1.0.0",
+  "description": "Adds bash_background / bash_output / bash_kill to the managed Pi agent, so a long-running command does not hold the turn open.",
+  "icon": "computer-terminal-02",
+  "iconDither": { "from": 196, "to": 232, "direction": "right" },
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "full" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "limited" },
+    "cli": { "support": "full" }
+  },
+  "engines": { "ryu": ">=0.1.0" },
+  "runnables": [],
+  "activation_events": ["*"],
+  "contributes": {
+    "pi_extensions": [
+      {
+        "id": "shell",
+        "file": "pi-extensions/ryu-shell.ts",
+        "description": "Background bash for the managed Pi agent."
+      }
+    ]
+  }
+}

@@ -3,6 +3,7 @@ import {
 	Add01Icon,
 	ArrowLeft01Icon,
 	ArrowRight01Icon,
+	ArrowShrink02Icon,
 	ArrowShrinkIcon,
 	ArrowTurnBackwardIcon,
 	AudioWave01Icon,
@@ -16,6 +17,7 @@ import {
 	DeliverySecure01Icon,
 	Download01Icon,
 	Folder01Icon,
+	FullScreenIcon,
 	GridIcon,
 	Home01Icon,
 	InboxIcon,
@@ -67,6 +69,7 @@ import { Icon } from "@ryu/ui/components/icon.tsx";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
 import { ProgressiveBlur } from "@ryu/ui/components/progressive-blur";
 import { useSidebar } from "@ryu/ui/components/sidebar";
+import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import {
 	Tooltip,
@@ -111,6 +114,7 @@ import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { setTabSizing, useTabSizing } from "@/src/hooks/useTabSizing.ts";
 import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import { setTitlebarHidden } from "@/src/lib/decorumTitlebar.ts";
+import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
@@ -1263,7 +1267,17 @@ export function TitleBar() {
 	// off on mobile — there's no hover-peek equivalent and the Sheet already
 	// owns navigation chrome.
 	const [autoHideTitleBar, setAutoHideTitleBar] = useAutoHideTitleBar();
-	const effectiveAutoHide = autoHideTitleBar && !isMobile;
+	// Fullscreen forces the same reveal-on-hover behaviour without touching the
+	// saved preference, so an Electron-style fullscreen actually clears the chrome
+	// instead of leaving a fake titlebar painted across the top of the display.
+	// Hover still peeks it, so tabs stay reachable.
+	const isFullscreen = useFullscreen();
+	const effectiveAutoHide = (autoHideTitleBar || isFullscreen) && !isMobile;
+	const handleToggleFullscreen = () => {
+		toggleFullscreen().catch(() => {
+			toast.error("Couldn't toggle full screen in this window.");
+		});
+	};
 	const [titleBarPeeked, setTitleBarPeeked] = useState(false);
 	const [titleBarMenuOpen, setTitleBarMenuOpen] = useState(false);
 	const titleBarMenuOpenRef = useRef(false);
@@ -1581,6 +1595,13 @@ export function TitleBar() {
 									<HugeiconsIcon className="size-4" icon={SidebarTopIcon} />
 									Auto-hide title bar
 								</ContextMenuCheckboxItem>
+								<ContextMenuItem onClick={handleToggleFullscreen}>
+									<HugeiconsIcon
+										className="size-4"
+										icon={isFullscreen ? ArrowShrink02Icon : FullScreenIcon}
+									/>
+									{isFullscreen ? "Exit full screen" : "Enter full screen"}
+								</ContextMenuItem>
 								<ContextMenuSeparator />
 								<ContextMenuItem onClick={() => setTabLayout("horizontal")}>
 									<HugeiconsIcon className="size-4" icon={SidebarLeftIcon} />
@@ -1750,6 +1771,13 @@ export function TitleBar() {
 									<HugeiconsIcon className="size-4" icon={SidebarTopIcon} />
 									Auto-hide title bar
 								</ContextMenuCheckboxItem>
+								<ContextMenuItem onClick={handleToggleFullscreen}>
+									<HugeiconsIcon
+										className="size-4"
+										icon={isFullscreen ? ArrowShrink02Icon : FullScreenIcon}
+									/>
+									{isFullscreen ? "Exit full screen" : "Enter full screen"}
+								</ContextMenuItem>
 								<ContextMenuSeparator />
 								<ContextMenuItem
 									disabled={tabs.findIndex((t) => t.id === activeTabId) === 0}

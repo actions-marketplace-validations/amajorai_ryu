@@ -8143,8 +8143,7 @@ async fn plugin_catalog_version_detail(
     // published yet" rather than quietly handing back stable.
     let resolved_tag: Option<String> = match params.get("channel").filter(|s| !s.is_empty()) {
         Some(channel) => {
-            let channels =
-                crate::catalog_source::github_listing_channels(repo, None).await;
+            let channels = crate::catalog_source::github_listing_channels(repo, None).await;
             match channels.iter().find(|(name, _)| name == channel) {
                 Some((_, tag)) => Some(tag.clone()),
                 None => {

@@ -8,6 +8,7 @@ import {
 } from "./landing-card-tones.ts";
 import { Reveal } from "./reveal.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
+import { StaggerLines } from "./stagger-lines.tsx";
 
 /**
  * The risk contrast: an agent can work in a demo and still lack the controls
@@ -99,13 +100,13 @@ export default function SecureByDefault() {
 	return (
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-5xl">
-				<div className="max-w-2xl">
+				<StaggerLines className="max-w-2xl">
 					<SectionTitle title="Governance is the deal" />
 					<p className={sectionSubtitleClass}>
 						Ryu puts audit, redaction, budgets, and approvals in the path of
 						every call.
 					</p>
-				</div>
+				</StaggerLines>
 
 				<div className="mt-14 grid gap-6 md:grid-cols-2">
 					<Reveal>
@@ -126,13 +127,13 @@ export default function SecureByDefault() {
 				</p>
 
 				<div className="mt-16 md:mt-20">
-					<div className="max-w-2xl">
+					<StaggerLines className="max-w-2xl">
 						<SectionTitle title="One gateway in front of every agent" />
 						<p className={sectionSubtitleClass}>
 							Routing, firewall, PII/DLP, budgets, and audit sit between your
 							agents and the model providers.
 						</p>
-					</div>
+					</StaggerLines>
 					<Reveal>
 						<div className="mx-auto mt-10 max-w-3xl">
 							<GatewayMock />

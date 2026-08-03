@@ -2,6 +2,8 @@
   "id": "@ryu/canvas",
   "name": "Canvas",
   "version": "1.0.0",
+  "icon": "ai-image",
+  "iconDither": { "from": 225, "to": 259, "direction": "right" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

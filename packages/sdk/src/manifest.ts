@@ -239,6 +239,41 @@ export const HookEventContributionSchema = z.object({
 
 export type HookEventContribution = z.infer<typeof HookEventContributionSchema>;
 
+// ── PiExtensionContribution ───────────────────────────────────────────────────
+
+/**
+ * One Pi extension the plugin ships — a TypeScript file the managed `ryu` (Pi)
+ * agent loads at process start. Mirrors Rust `PiExtensionContribution`.
+ *
+ * Carries a PATH, never a body: unlike `turn_hooks` there is no inline `code`
+ * twin, because nothing downstream reads the source as a string.
+ *
+ * That makes it a SIDECAR FILE, and `ryu pack` emits a single JSON bundle — so a
+ * plugin installed from a packed bundle arrives without its `pi-extensions/`
+ * directory and Core resolves the declaration to a visible skip. Same open gap as
+ * `skills/**`, which the bundle likewise does not carry. Today the path that works
+ * is a plugin whose directory is on disk (a built-in, a satellite checkout, a dev
+ * tree). Do not "fix" this by inlining the source into the manifest: a 50 KB
+ * TypeScript program escaped into a JSON string is the unauditable form the whole
+ * `code_file` extraction exists to prevent.
+ *
+ * Note this is UNSANDBOXED code: it runs inside the agent process with full host
+ * privilege, so Core gates it behind the operator-only `pi:extension` grant for
+ * any non-built-in plugin.
+ */
+export const PiExtensionContributionSchema = z.object({
+	/** Stable id for this extension within the plugin (`[a-z0-9][a-z0-9._-]*`). */
+	id: z.string().min(1),
+	/** Path to the source, relative to the plugin root: `pi-extensions/<name>.ts`. */
+	file: z.string().min(1),
+	/** Optional one-liner describing what the extension adds to the agent. */
+	description: z.string().optional(),
+});
+
+export type PiExtensionContribution = z.infer<
+	typeof PiExtensionContributionSchema
+>;
+
 // ── WidgetContribution (Ryu Apps) ─────────────────────────────────────────────
 
 /** Default widget MIME dialect. Mirrors Core `default_widget_mime`. */
@@ -335,6 +370,14 @@ export const ContributesSchema = z.object({
 	 *  Rust-side `Contributes.dock_panels`; without it the CLI's zod parse would
 	 *  strip the dock panel an app declares here. */
 	dock_panels: z.array(z.record(z.string(), z.unknown())).default([]),
+	/** Deletable data categories the app owns — one "Delete all X" row in Settings
+	 *  → Danger Zone. Mirrors the Rust-side `Contributes.data_categories`; without
+	 *  it the CLI's zod parse would strip the declaration before signing, and the
+	 *  app's danger-zone row would simply never appear on any node that installed
+	 *  the packed bundle. Loosely typed here for the same reason as the surfaces
+	 *  above — Core is the layer that types it, because Core is the layer that has
+	 *  to resolve the id to something that can actually delete the rows. */
+	data_categories: z.array(z.record(z.string(), z.unknown())).default([]),
 	/** Language servers the plugin declares, keyed by server name — the mirror of
 	 *  Claude Code's `.lsp.json` / `lspServers`, so a config written for either host
 	 *  loads in the other. Mirrors the Rust-side `Contributes.lsp_servers`; without
@@ -350,6 +393,15 @@ export const ContributesSchema = z.object({
 	lsp_servers: z
 		.record(z.string(), z.record(z.string(), z.unknown()))
 		.default({}),
+	/** Pi extensions the plugin ships — TypeScript the managed `ryu` (Pi) agent
+	 *  loads at process start. Mirrors the Rust-side `Contributes.pi_extensions`;
+	 *  without it the CLI's zod parse would strip the declaration before signing,
+	 *  and the packed plugin would ship a `pi-extensions/` folder nothing loads.
+	 *
+	 *  Typed (not a loose record) because Ryu owns this vocabulary — three fields,
+	 *  all of them Core-interpreted — unlike `lsp_servers`, whose entry shape is
+	 *  Claude Code's to extend. */
+	pi_extensions: z.array(PiExtensionContributionSchema).default([]),
 });
 
 export type Contributes = z.infer<typeof ContributesSchema>;

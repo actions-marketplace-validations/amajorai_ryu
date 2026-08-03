@@ -13,11 +13,16 @@ import { useCallback, useState } from "react";
 
 const SIDEBAR_PANEL_ID = "sidebar";
 const CONTENT_PANEL_ID = "content";
-const DEFAULT_SIDEBAR_SIZE = 15;
-const DEFAULT_CONTENT_SIZE = 85;
+// 15% of an 85vw dialog left the nav column narrow enough that ordinary section
+// labels ("Appearance", "Notifications", "Agent defaults") wrapped or truncated,
+// which is what made both settings dialogs read as cramped. 22% fits the longest
+// shipped label on a laptop screen without taking real space from the content
+// pane, and the divider is still draggable either way.
+const DEFAULT_SIDEBAR_SIZE = 22;
+const DEFAULT_CONTENT_SIZE = 78;
 // Keep the sidebar usable but bounded: the content panel's minSize caps how
 // wide the sidebar can grow (100 - CONTENT_MIN_SIZE).
-const SIDEBAR_MIN_SIZE = 10;
+const SIDEBAR_MIN_SIZE = 16;
 const CONTENT_MIN_SIZE = 55;
 
 type Layout = Record<string, number>;

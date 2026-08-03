@@ -3,6 +3,8 @@
   "name": "Warmup",
   "version": "1.0.0",
   "description": "Starts your subscription agents' rolling usage windows on your own schedule: a one-word ping to each subscription agent, on its cheapest model, at the times of day you choose (05:00 / 10:00 / 15:00 / 20:00 by default) — so a window is already open when you sit down to work.",
+  "icon": "sun-03",
+  "iconDither": { "from": 323, "to": 357, "direction": "left" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

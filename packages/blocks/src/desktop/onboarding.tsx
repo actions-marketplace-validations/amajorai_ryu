@@ -408,7 +408,7 @@ function FeatureStep({
 			</div>
 
 			<p className="text-muted-foreground text-xs">
-				Turn it off and it's simply hidden from the sidebar — you can turn it
+				Turn it off and it's simply hidden from the sidebar. You can turn it
 				back on anytime in Settings → Features.
 			</p>
 
@@ -525,7 +525,7 @@ function ChooseStep({
 					{showProBadge ? <PlanBadge plan="pro" size="sm" /> : null}
 				</div>
 				<p className="mt-1 text-muted-foreground text-sm">
-					We host AI for you in the cloud — always on, on your own server. More
+					We host AI for you in the cloud, always on, on your own server. More
 					secure than running it on your computer.
 				</p>
 				{showProBadge ? (
@@ -597,11 +597,10 @@ export function OnboardingView(props: OnboardingViewProps) {
 		const detectedCount = props.agents?.length ?? 0;
 		if (detectedCount > 0) {
 			headerTitle = "We found agents on this device";
-			headerSubtitle = "Pick which ones to add — you can install more later";
+			headerSubtitle = "Pick which ones to add, and install more later";
 		} else {
 			headerTitle = "Add your agents";
-			headerSubtitle =
-				"Pick any you'd like to set up — you can install more later";
+			headerSubtitle = "Pick any you'd like to set up, and install more later";
 		}
 	}
 

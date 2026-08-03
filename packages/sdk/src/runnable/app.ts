@@ -228,6 +228,10 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		// takes no `contributes` passthrough. An app that wants to declare language
 		// servers writes them in a hand-authored `manifest.json`.
 		lsp_servers: {},
+		// Same reason again: a danger-zone category and a Pi extension are both
+		// hand-authored declarations, not something derivable from runnables.
+		data_categories: [],
+		pi_extensions: [],
 		widgets,
 	};
 

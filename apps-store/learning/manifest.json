@@ -3,6 +3,8 @@
   "name": "Learning",
   "version": "1.0.0",
   "description": "Learning loop: turn chats and runs into reusable skills, gated by the approval Inbox, with an experience log of what was learned.",
+  "icon": "mortarboard-01",
+  "iconDither": { "from": 342, "to": 308, "direction": "left" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

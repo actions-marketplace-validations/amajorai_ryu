@@ -79,6 +79,18 @@ pub fn hydrate_manifest_code_files(
     })
 }
 
+/// The compiled-in source of a built-in plugin's `contributes.pi_extensions[].file`,
+/// or `None` when nothing embeds that path.
+///
+/// The pi-extension half of [`hydrate_manifest_code_files`]'s built-in branch,
+/// exposed as a lookup rather than a hydration step: a Pi extension is a file the
+/// agent opens by path, so its bytes are needed exactly once, at the materializer
+/// (`pi_config::app_extensions`), and never inside the manifest. See
+/// [`PluginManifest::pi_extension_refs`] for why that asymmetry is deliberate.
+pub fn builtin_pi_extension(plugin_id: &str, rel: &str) -> Option<&'static str> {
+    builtin_code::lookup_pi_extension(plugin_id, rel)
+}
+
 /// The running Core version, as a parsed [`semver::Version`]. Authoritative
 /// source for the `engines.ryu` version-pin gate. Derived from the crate version
 /// (`CARGO_PKG_VERSION`), which is the single version of record for Core.
@@ -383,6 +395,30 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // judge, each round spawns an INDEPENDENT verifier sub-agent (grant
     // `hook:run-agent`) that gathers real evidence with tools before deciding.
     include_str!("../../../../plugins-store/proof/manifest.json"),
+    // `plan-continue` keeps a plan moving while the composer's plan-mode pill is
+    // on, by injecting its own follow-up turn when one finishes. Community and
+    // NOT in `CORE_DEFAULT_ON` for the reason the others are on: this one spends
+    // the user's tokens unattended, so it has to be a thing they asked for. Its
+    // hook still pre-gates on `match.flag`, and the flag is the completeness
+    // signal too — an approved `ExitPlanMode` writes it back off.
+    include_str!("../../../../plugins-store/plan-continue/manifest.json"),
+    // The two Pi capabilities Core used to hardcode into every managed-Pi spawn,
+    // now plugins the user can turn off: `pi-shell` (background bash) and
+    // `pi-subagent` (the `Task` tool). Each ships ONE `contributes.pi_extensions`
+    // row pointing at the TypeScript in its own package; `pi_config::app_extensions`
+    // materializes it into `~/.ryu/pi-agent/extensions/` for the next Pi process.
+    //
+    // Core-tier is a REQUIREMENT here, not a promotion, and for the same reason
+    // `scrapling`'s note above gives: `may_ship_pi_extensions` auto-allows a
+    // manifest's `pi_extensions` only for compiled-in manifests, while a
+    // Community-tier plugin needs the approved `pi:extension` grant — off the
+    // Gateway's default allowlist and in a reserved namespace, so operator-only. A
+    // Community-tier version of either would materialize nothing and be dead on
+    // arrival. Both are also in `CORE_DEFAULT_ON`, because they were unconditional
+    // before this move and default-off would silently strip background bash and
+    // sub-agents from the flagship agent on every fresh install.
+    include_str!("../../../../plugins-store/pi-shell/manifest.json"),
+    include_str!("../../../../plugins-store/pi-subagent/manifest.json"),
     // `rtk` surfaces the built-in RTK (Rust Token Killer) command-wrapping tool
     // (`rtk__run`) as an installable plugin. Like `spider`, it is a fully
     // declarative `command`-backend tool: the fixture CARRIES its runnable (the
@@ -1394,6 +1430,149 @@ mod tests {
         }
     }
 
+    /// Walk `plugins-store` and `apps-store`, returning `(plugin id, package dir,
+    /// pi extension file)` for every `contributes.pi_extensions[].file` a package
+    /// manifest references. Same runtime-read, empty-in-the-OSS-mirror posture as
+    /// [`packaged_code_file_refs`].
+    fn packaged_pi_extension_refs() -> Vec<(String, String, String)> {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let mut refs = Vec::new();
+        for root in ["apps-store", "plugins-store"] {
+            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
+                continue; // OSS mirror: this root is not shipped.
+            };
+            let mut dirs: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.join("manifest.json").is_file())
+                .collect();
+            dirs.sort();
+            for dir in dirs {
+                let path = dir.join("manifest.json");
+                let raw = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+                let manifest: PluginManifest = serde_json::from_str(&raw)
+                    .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
+                let name = dir
+                    .file_name()
+                    .expect("package dir has a name")
+                    .to_string_lossy()
+                    .into_owned();
+                for rel in manifest.pi_extension_refs() {
+                    refs.push((manifest.id.clone(), name.clone(), rel));
+                }
+            }
+        }
+        refs
+    }
+
+    /// [`builtin_code::BUILTIN_PI_EXTENSIONS`] and the `contributes.pi_extensions`
+    /// references in the package manifests must be a BIJECTION.
+    ///
+    /// The unsandboxed-carriage twin of
+    /// [`builtin_code_table_matches_package_manifests`], and it exists for the same
+    /// reason: a built-in plugin's package directory is not on the user's machine,
+    /// so a declared extension with no embedded row resolves to nothing and the
+    /// capability is silently absent — the feature looks landed and is not there.
+    /// An orphan row is the milder half (dead embedded code, and the signal that an
+    /// extension was renamed or deleted without cleaning up).
+    #[test]
+    fn builtin_pi_extension_table_matches_package_manifests() {
+        let refs = packaged_pi_extension_refs();
+        if refs.is_empty() {
+            assert!(
+                builtin_code::BUILTIN_PI_EXTENSIONS.is_empty()
+                    || !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../plugins-store")
+                        .is_dir(),
+                "no package manifest declares a pi extension, but BUILTIN_PI_EXTENSIONS has \
+                 {} row(s) — they embed code nothing can reach",
+                builtin_code::BUILTIN_PI_EXTENSIONS.len()
+            );
+            return;
+        }
+
+        let declared: HashSet<(&str, &str)> = builtin_code::BUILTIN_PI_EXTENSIONS
+            .iter()
+            .map(|(id, rel, _)| (*id, *rel))
+            .collect();
+
+        for (id, dir, rel) in &refs {
+            assert!(
+                declared.contains(&(id.as_str(), rel.as_str())),
+                "{dir}/manifest.json declares pi extension '{rel}' but \
+                 plugin_manifest::builtin_code has no row for ('{id}', '{rel}'). A built-in \
+                 ships only its manifest — its package directory is NOT on the user's machine \
+                 — so without an include_str! row the extension does not exist at runtime. \
+                 Add:\n    (\n        \"{id}\",\n        \"{rel}\",\n        \
+                 include_str!(\"../../../../plugins-store/{dir}/{rel}\"),\n    ),"
+            );
+        }
+
+        let referenced: HashSet<(&str, &str)> = refs
+            .iter()
+            .map(|(id, _, rel)| (id.as_str(), rel.as_str()))
+            .collect();
+        for (id, rel, _) in builtin_code::BUILTIN_PI_EXTENSIONS {
+            assert!(
+                referenced.contains(&(*id, *rel)),
+                "plugin_manifest::builtin_code embeds pi extension ('{id}', '{rel}'), which no \
+                 package manifest declares any more. Remove the row (and the file, if it is dead)."
+            );
+        }
+    }
+
+    /// Every `.ts` sitting in a package's `pi-extensions/` folder must be DECLARED
+    /// by that package's own manifest.
+    ///
+    /// The bijection above is keyed on references, so it cannot see a file nobody
+    /// references — and an undeclared `pi-extensions/foo.ts` is exactly the silent
+    /// failure `every_pi_extension_asset_is_shipped` guards against on the
+    /// compiled-in road: the file is committed, reviewed, and never reaches an
+    /// agent. This is that guard, ported to the plugin road.
+    #[test]
+    fn packaged_pi_extension_files_are_all_declared() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let declared: HashSet<(String, String)> = packaged_pi_extension_refs()
+            .into_iter()
+            .map(|(_, dir, rel)| (dir, rel))
+            .collect();
+
+        for root in ["apps-store", "plugins-store"] {
+            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
+                continue; // OSS mirror: this root is not shipped.
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let pkg = entry.path();
+                let Ok(files) = std::fs::read_dir(pkg.join(PI_EXTENSION_DIR)) else {
+                    continue;
+                };
+                let dir_name = pkg
+                    .file_name()
+                    .expect("package dir has a name")
+                    .to_string_lossy()
+                    .into_owned();
+                for file in files.filter_map(Result::ok) {
+                    let name = file.file_name().to_string_lossy().into_owned();
+                    if !name.ends_with(".ts") {
+                        continue;
+                    }
+                    let rel = format!("{PI_EXTENSION_DIR}/{name}");
+                    assert!(
+                        declared.contains(&(dir_name.clone(), rel.clone())),
+                        "{root}/{dir_name}/{rel} exists but {dir_name}/manifest.json declares \
+                         no contributes.pi_extensions entry for it — it would never reach the \
+                         managed Pi agent"
+                    );
+                }
+            }
+        }
+    }
+
     /// No package manifest may carry sandboxed JS INLINE.
     ///
     /// A hook or capability adapter body belongs in `hooks/<name>.js` /
@@ -1641,6 +1820,140 @@ mod tests {
             "companion": { "label": "Research Assistant" }
         }"#;
         assert!(loader_parse(raw).is_ok());
+    }
+
+    // ── deletable data categories (Settings → Danger Zone) ───────────────────
+
+    /// The danger zone's App-owned rows are built from the manifests, so if these
+    /// declarations go missing the rows silently vanish from Settings rather than
+    /// failing anywhere a test would otherwise notice.
+    #[test]
+    fn monitors_and_meetings_declare_their_danger_zone_categories() {
+        for (raw, expected) in [
+            (
+                include_str!("../../../../apps-store/monitors/manifest.json"),
+                "monitors",
+            ),
+            (
+                include_str!("../../../../apps-store/meetings/manifest.json"),
+                "meetings",
+            ),
+        ] {
+            let manifest = loader_parse(raw).expect("packaged manifest must load");
+            let declared = manifest
+                .contributes
+                .as_ref()
+                .expect("manifest declares contributions")
+                .data_categories
+                .iter()
+                .find(|c| c.id == expected)
+                .unwrap_or_else(|| {
+                    panic!("'{expected}' no longer declares its data category — the Danger Zone row for it is gone")
+                });
+            // Copy travels with the declaration; a row with no `detail` is a
+            // confirm dialog that says nothing before an irreversible delete.
+            assert!(!declared.title.trim().is_empty());
+            assert!(!declared.detail.trim().is_empty());
+        }
+    }
+
+    /// The loader is Core's validation chokepoint for the surface — every manifest
+    /// reaches Core through `parse_and_validate`, so a category an app must not own
+    /// is refused here and not just in the contract crate's unit tests.
+    #[test]
+    fn loader_rejects_an_app_claiming_a_kernel_data_category() {
+        let raw = r#"{
+            "id": "com.example.greedy",
+            "name": "Greedy",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "data_categories": [{
+                    "id": "chats",
+                    "title": "Delete all chats",
+                    "noun": "chats",
+                    "detail": "Everything goes."
+                }]
+            }
+        }"#;
+        let err = loader_parse(raw).unwrap_err();
+        assert!(
+            err.contains("owned by the kernel"),
+            "expected the kernel-id claim to be refused, got: {err}"
+        );
+    }
+
+    #[test]
+    fn loader_accepts_an_app_owned_data_category() {
+        let raw = r#"{
+            "id": "com.example.watcher",
+            "name": "Watcher",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "data_categories": [{
+                    "id": "watches",
+                    "title": "Delete all watches",
+                    "noun": "watches",
+                    "confirm_word": "Watches",
+                    "detail": "Every watch and its history will be permanently deleted."
+                }]
+            }
+        }"#;
+        let manifest = loader_parse(raw).expect("a well-formed app category must load");
+        let declared = &manifest.contributes.unwrap().data_categories;
+        assert_eq!(declared.len(), 1);
+        assert_eq!(declared[0].confirm_word(), "Watches");
+    }
+
+    // ── app-declared tier quotas (`contributes.quotas`) ──────────────────────
+
+    /// Plan tier limits used to be a closed key set hand-written into the billing
+    /// catalog (`packages/auth/src/lib/plans.ts`), so shipping an app with a quota
+    /// meant editing core auth code. The key now travels with the app that owns it,
+    /// exactly like [`Contributes::data_categories`]: the manifest declares that the
+    /// key exists and what its number MEANS (a count vs a retention window), while
+    /// the per-tier numbers stay in the catalog — an app that could write its own
+    /// tier row would simply grant itself unlimited everything.
+    ///
+    /// This asserts the raw JSON rather than a parsed field because the typed
+    /// `Contributes::quotas` half lives in `ryu-kernel-contracts`, which this unit
+    /// does not own; until it lands the loader drops the key (no
+    /// `deny_unknown_fields` anywhere in that file). The guard is here anyway
+    /// because the declaration is deletable today and nothing else would notice:
+    /// `@ryu/monitors` losing its row silently un-caps monitors on every free node.
+    #[test]
+    fn packaged_apps_declare_the_tier_quotas_they_own() {
+        for (raw, id, unit) in [
+            (
+                include_str!("../../../../apps-store/monitors/manifest.json"),
+                "maxMonitors",
+                "count",
+            ),
+            (
+                include_str!("../../../../apps-store/meetings/manifest.json"),
+                "meetingRetentionDays",
+                "days",
+            ),
+        ] {
+            let json: serde_json::Value =
+                serde_json::from_str(raw).expect("packaged manifest must be valid JSON");
+            let declared = json["contributes"]["quotas"]
+                .as_array()
+                .and_then(|quotas| quotas.iter().find(|q| q["id"] == id))
+                .unwrap_or_else(|| {
+                    panic!("'{id}' is no longer declared by its owning app — the tier limit is orphaned")
+                });
+            // The id is the wire key the client gates on (`guard("maxMonitors", n)`),
+            // so it is spelled identically to the catalog's `PlanLimitField`.
+            assert_eq!(declared["unit"], unit, "{id} declares the wrong unit");
+            assert!(
+                declared["label"]
+                    .as_str()
+                    .is_some_and(|l| !l.trim().is_empty()),
+                "{id} needs a label — it is what the upgrade prompt says"
+            );
+        }
     }
 
     // ── app id validation (path-traversal hardening) ─────────────────────────
@@ -2488,7 +2801,10 @@ mod tests {
             "an unknown level must not delist a surface the author explicitly listed"
         );
         assert!(m.supports_surface(Surface::Web));
-        assert!(!m.supports_surface(Surface::Mobile), "explicit none excludes");
+        assert!(
+            !m.supports_surface(Surface::Mobile),
+            "explicit none excludes"
+        );
         // Absent key = unsupported (the `surfaces` map inverts the `targets` default).
         assert!(!m.supports_surface(Surface::Cli));
     }

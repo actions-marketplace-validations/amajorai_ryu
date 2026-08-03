@@ -13,6 +13,23 @@
 //! nuke the flagship `ryu` agent or orphan the jobs that monitors/workflows
 //! created. Per the Core-vs-Gateway rule this is all "what runs" data → Core; no
 //! policy decision, so no Gateway involvement.
+//!
+//! # Who decides a category exists
+//!
+//! Two owners, and the split is the point:
+//!
+//! - **Kernel categories** (chats/spaces/memory) are compiled in below. No app
+//!   created that data, so no manifest could declare it and none is asked to.
+//! - **App categories** (monitors/meetings today) are declared by the owning app's
+//!   manifest, in `contributes.data_categories`. They are served ONLY while that app
+//!   is installed and enabled, which is what makes the row appear and disappear with
+//!   the app instead of being permanently welded into the desktop.
+//!
+//! The copy (title, noun, confirm word, the "what disappears" line) travels with
+//! the descriptor either way, so `GET /api/data/counts` returns everything a client
+//! needs to draw the whole section and the desktop holds no per-category list at
+//! all. What Core keeps is the *implementation*: [`clear_category`] is the only
+//! place that knows a monitor delete has to tear down a scheduler job.
 
 use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::Deserialize;
@@ -21,6 +38,11 @@ use serde_json::json;
 use super::ServerState;
 
 /// The data categories a danger-zone clear can target.
+///
+/// Still an enum, and deliberately so: an id only reaches this type once Core has an
+/// implementation for it, so "a category exists" and "Core can actually delete it"
+/// cannot drift apart. The manifest half is a *declaration* — it decides whether a
+/// row is offered and what it says, not what deleting entails (see the module docs).
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DataCategory {
@@ -36,9 +58,84 @@ pub enum DataCategory {
     Meetings,
 }
 
+impl DataCategory {
+    /// Resolve the wire id (`"monitors"`) a manifest declares, or a request names.
+    ///
+    /// The one id↔variant table. `serde` alone is not enough any more: the clear
+    /// request now carries a free-form `String` (see [`ClearRequest`]) precisely so
+    /// an unknown id reaches the handler and gets a diagnostic, instead of being
+    /// rejected as a 422 before the body runs.
+    fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "chats" => Some(Self::Chats),
+            "spaces" => Some(Self::Spaces),
+            "memory" => Some(Self::Memory),
+            "monitors" => Some(Self::Monitors),
+            "meetings" => Some(Self::Meetings),
+            _ => None,
+        }
+    }
+
+    /// Wire id — the value a client puts in `POST /api/data/clear`.
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Chats => "chats",
+            Self::Spaces => "spaces",
+            Self::Memory => "memory",
+            Self::Monitors => "monitors",
+            Self::Meetings => "meetings",
+        }
+    }
+}
+
+/// A kernel category's descriptor — the compiled-in twin of a manifest's
+/// `contributes.data_categories` entry, for the data no app owns.
+struct KernelCategory {
+    category: DataCategory,
+    title: &'static str,
+    noun: &'static str,
+    confirm_word: &'static str,
+    detail: &'static str,
+}
+
+/// The categories with no owning app, in the order the danger zone lists them.
+///
+/// Their ids are refused to manifests by `validate_data_category`, so this list and
+/// the app-declared ones cannot collide.
+const KERNEL_CATEGORIES: &[KernelCategory] = &[
+    KernelCategory {
+        category: DataCategory::Chats,
+        title: "Delete all chats",
+        noun: "chats",
+        confirm_word: "Chats",
+        detail: "Every conversation and all of its messages will be permanently deleted.",
+    },
+    KernelCategory {
+        category: DataCategory::Spaces,
+        title: "Delete all spaces",
+        noun: "spaces",
+        confirm_word: "Spaces",
+        detail: "Every Space, including all of its documents and their search data, will be permanently deleted. System spaces (Artifacts, Uploads, Meetings, …) are left untouched.",
+    },
+    KernelCategory {
+        category: DataCategory::Memory,
+        title: "Clear all memory",
+        noun: "memory entries",
+        confirm_word: "Memory",
+        detail: "Every long-term memory entry will be permanently forgotten.",
+    },
+];
+
 #[derive(Debug, Deserialize)]
 pub struct ClearRequest {
-    pub category: DataCategory,
+    /// The category id, as a raw string.
+    ///
+    /// NOT the [`DataCategory`] enum. Extracting straight into the enum makes axum
+    /// reject an unrecognised id with a 422 *before the handler body runs*, so no
+    /// manifest-declared id could ever reach the resolution below and a category
+    /// this Core cannot clear would look like a malformed request rather than an
+    /// unknown one.
+    pub category: String,
 }
 
 /// `GET /api/data/counts`
@@ -55,29 +152,135 @@ pub struct ClearRequest {
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 pub async fn data_counts(State(state): State<ServerState>) -> Json<serde_json::Value> {
-    let chats = state.conversations.count_conversations().await.unwrap_or(0);
-    let spaces = state.spaces.count_spaces().await.unwrap_or(0);
-    let memory = state.memory.count().await.unwrap_or(0);
-    // Monitors are out-of-process (`ryu-monitors` sidecar); count over the loopback
-    // client (an unreachable sidecar yields an empty list ⇒ 0, matching the old
-    // store-error fallback).
-    let monitors = match crate::monitors_client::global_client() {
-        Some(client) => client.list_monitors().await.map(|m| m.len()).unwrap_or(0) as u64,
-        None => 0,
+    let chats = count_category(&state, DataCategory::Chats).await;
+    let spaces = count_category(&state, DataCategory::Spaces).await;
+    let memory = count_category(&state, DataCategory::Memory).await;
+    // Monitors and meetings are counted even when their app is disabled, because the
+    // flat keys below are read by clients that know nothing about enablement.
+    let monitors = count_category(&state, DataCategory::Monitors).await;
+    let meetings = count_category(&state, DataCategory::Meetings).await;
+    // Every count is taken exactly once above and then read from here — the
+    // descriptors and the flat keys describe the same node, so counting twice would
+    // let them disagree within one response.
+    let count_of = |category: DataCategory| match category {
+        DataCategory::Chats => chats,
+        DataCategory::Spaces => spaces,
+        DataCategory::Memory => memory,
+        DataCategory::Monitors => monitors,
+        DataCategory::Meetings => meetings,
     };
-    let meetings = state
-        .meetings
-        .list()
-        .await
-        .map(|m| m.len() as u64)
-        .unwrap_or(0);
+
+    // The descriptor list — every row the danger zone should draw, kernel-owned
+    // first and then whatever the enabled apps declare, each with its own copy and
+    // live count. Clients build the section from this alone.
+    let mut categories: Vec<serde_json::Value> = Vec::new();
+    for kernel in KERNEL_CATEGORIES {
+        categories.push(json!({
+            "id": kernel.category.id(),
+            "title": kernel.title,
+            "noun": kernel.noun,
+            "confirm_word": kernel.confirm_word,
+            "detail": kernel.detail,
+            "count": count_of(kernel.category),
+            // Explicitly null rather than absent: "no owning app" is the fact that
+            // makes this row permanent, so it is worth stating.
+            "plugin": serde_json::Value::Null,
+        }));
+    }
+    for (plugin_id, declared) in enabled_app_categories(&state).await {
+        // Declaration without implementation. Serving it would put a button in the
+        // danger zone that 400s, so skip it — but say so, because from the app
+        // author's side a silently missing row is indistinguishable from a typo in
+        // the manifest.
+        let Some(category) = DataCategory::from_id(&declared.id) else {
+            tracing::warn!(
+                "app '{plugin_id}' declares data category '{}', which this Core has no clear \
+                 implementation for — the danger-zone row is omitted",
+                declared.id
+            );
+            continue;
+        };
+        categories.push(json!({
+            "id": declared.id,
+            "title": declared.title,
+            "noun": declared.noun,
+            "confirm_word": declared.confirm_word(),
+            "detail": declared.detail,
+            "count": count_of(category),
+            "plugin": plugin_id,
+        }));
+    }
+
     Json(json!({
+        // The flat per-category keys predate `categories` and stay: they are the
+        // shape older desktops parse, and dropping them would blank the counts on
+        // every client that has not been updated alongside this node.
         "chats": chats,
         "spaces": spaces,
         "memory": memory,
         "monitors": monitors,
         "meetings": meetings,
+        "categories": categories,
     }))
+}
+
+/// Every `contributes.data_categories` entry of every **enabled** app, paired with
+/// the id of the app that declared it.
+///
+/// Enablement is checked here, server-side, rather than left to the client: the
+/// desktop used to feature-detect the owning app itself, which meant every other
+/// surface (island, web, a script) either re-implemented the same filter or offered
+/// to delete data from an app the node does not run.
+async fn enabled_app_categories(
+    state: &ServerState,
+) -> Vec<(String, crate::plugin_manifest::DataCategoryContribution)> {
+    let enabled = match super::enabled_plugin_records(state).await {
+        Ok(records) => records,
+        // A store we cannot read is not evidence that nothing is enabled — but the
+        // safe direction for an irreversible action is to offer fewer buttons, not
+        // more, so fail closed to the kernel categories alone.
+        Err(e) => {
+            tracing::warn!(
+                "data/counts: could not read plugin records ({e}) — app-owned categories omitted"
+            );
+            return Vec::new();
+        }
+    };
+    let manifests = state.app_manifests.read().await;
+    let mut out = Vec::new();
+    for manifest in manifests.iter() {
+        if !enabled.contains_key(&manifest.id) {
+            continue;
+        }
+        let Some(contributes) = &manifest.contributes else {
+            continue;
+        };
+        for category in &contributes.data_categories {
+            out.push((manifest.id.clone(), category.clone()));
+        }
+    }
+    out
+}
+
+/// How many items one category holds. Best-effort: an unreachable sidecar or a
+/// store error reads as `0`, so the worst case is an under-count in the confirm
+/// dialog rather than a failed page.
+async fn count_category(state: &ServerState, category: DataCategory) -> u64 {
+    match category {
+        DataCategory::Chats => state.conversations.count_conversations().await.unwrap_or(0),
+        DataCategory::Spaces => state.spaces.count_spaces().await.unwrap_or(0),
+        DataCategory::Memory => state.memory.count().await.unwrap_or(0),
+        DataCategory::Monitors => match crate::monitors_client::global_client() {
+            Some(client) => client.list_monitors().await.map(|m| m.len()).unwrap_or(0) as u64,
+            None => 0,
+        },
+        DataCategory::Meetings => state
+            .meetings
+            .list()
+            .await
+            .map(|m| m.len() as u64)
+            .unwrap_or(0),
+    }
 }
 
 /// `POST /api/data/clear`  body: `{ "category": "chats" }`
@@ -86,6 +289,11 @@ pub async fn data_counts(State(state): State<ServerState>) -> Json<serde_json::V
 /// the number of top-level items deleted. Monitors and meetings are cleared by
 /// looping the existing per-item delete so their side effects (scheduler-job
 /// teardown, SSE) fire; the rest use the store's transactional `clear_all`.
+///
+/// `category` is whatever `GET /api/data/counts` offered — a kernel id, or one an
+/// enabled app declared in its manifest. An app-owned category is refused unless
+/// that app is still enabled, so the authorization matches what the list offered
+/// rather than trusting the client to have filtered.
 #[utoipa::path(
     post,
     path = "/api/data/clear",
@@ -126,7 +334,39 @@ pub async fn data_clear(
         },
     };
 
-    let result: Result<u64, String> = match (req.category, bound_owner.as_deref()) {
+    // ── Resolve the requested id ─────────────────────────────────────────────
+    // Two ways an id fails, and they are different answers. An id no build of Core
+    // implements is a bad request. An id that IS implemented but whose owning app is
+    // not enabled here is a 404: the category exists as a concept, this node just
+    // does not hold that data — and answering 400 would tell a caller to fix a body
+    // that is perfectly well-formed.
+    let Some(category) = DataCategory::from_id(req.category.trim()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("unknown data category '{}'", req.category)
+            })),
+        );
+    };
+    let kernel_owned = KERNEL_CATEGORIES.iter().any(|k| k.category == category);
+    if !kernel_owned
+        && !enabled_app_categories(&state)
+            .await
+            .iter()
+            .any(|(_, declared)| declared.id == category.id())
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!(
+                    "data category '{}' is owned by an app that is not enabled on this node",
+                    category.id()
+                )
+            })),
+        );
+    }
+
+    let result: Result<u64, String> = match (category, bound_owner.as_deref()) {
         // ── Unbound personal node: unchanged behaviour ───────────────────────
         (DataCategory::Chats, None) => state
             .conversations

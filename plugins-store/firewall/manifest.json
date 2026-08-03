@@ -2,6 +2,8 @@
   "id": "@ryu/firewall",
   "name": "Gateway Firewall",
   "version": "1.0.0",
+  "icon": "firewall",
+  "iconDither": { "from": 252, "to": 286, "direction": "up" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

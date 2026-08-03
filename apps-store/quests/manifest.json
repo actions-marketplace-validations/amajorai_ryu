@@ -3,6 +3,8 @@
   "name": "Quests",
   "version": "1.0.0",
   "description": "Quests: auto-detecting todos surfaced from your chats and activity, tracked as a lightweight quest board with progress and completion.",
+  "icon": "target-02",
+  "iconDither": { "from": 294, "to": 328, "direction": "right" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },
@@ -60,7 +62,7 @@
   "permission_grants": ["quests:crud"],
   "companion": {
     "label": "Quests",
-    "icon": "target"
+    "icon": "target-02"
   },
   "contributes": {
     "hook_events": [

@@ -11,6 +11,7 @@ import {
 	SidebarProvider,
 	useSidebar,
 } from "@ryu/ui/components/sidebar.tsx";
+import { toast } from "@ryu/ui/components/sileo";
 import {
 	Tooltip,
 	TooltipContent,
@@ -74,6 +75,7 @@ import {
 	SIDEBAR_WIDTH_KEY,
 } from "@/src/hooks/useThemePreset.ts";
 import { setCrashRoute } from "@/src/lib/crash-context.ts";
+import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
 import { DESKTOP_HOTKEYS } from "@/src/lib/hotkeys/actions.ts";
 import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
@@ -314,8 +316,15 @@ function LayoutContent({
 	const tabLayout = useTabLayout();
 	const [autoHideTitleBar] = useAutoHideTitleBar();
 	// Auto-hide frees the top clearance so content fills the window; the bar
-	// overlays on hover. Mobile never auto-hides (see TitleBar).
-	const titleBarClearsContent = !(autoHideTitleBar && !isMobile);
+	// overlays on hover. Mobile never auto-hides (see TitleBar). Fullscreen forces
+	// the same treatment without touching the saved pref — this predicate has to
+	// stay in lockstep with `effectiveAutoHide` in TitleBar, or the bar slides
+	// away while the row it occupied stays reserved (a blank strip on screen).
+	const isFullscreen = useFullscreen();
+	const titleBarClearsContent = !(
+		(autoHideTitleBar || isFullscreen) &&
+		!isMobile
+	);
 	const [floatOpen, setFloatOpen] = useState(false);
 	const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// The positioned content area; SplitGutters measures it to translate drag
@@ -475,6 +484,18 @@ function LayoutContent({
 	useHotkey("nav.home", () => openTab("/home"));
 	useHotkey("nav.timeline", () => openTab("/timeline"));
 	useHotkey("nav.library", () => openTab("/library"));
+	// allowInInput: the default binding (F11) is a bare key, which the dispatcher
+	// otherwise suppresses while a field has focus — i.e. most of the time, since
+	// the composer holds focus on the main surfaces.
+	useHotkey(
+		"window.fullscreen-toggle",
+		() => {
+			toggleFullscreen().catch(() => {
+				toast.error("Couldn't toggle full screen in this window.");
+			});
+		},
+		{ allowInInput: true }
+	);
 
 	// Where the fixed nav cluster sits: clear of the macOS traffic lights, at
 	// the standard 16px inset elsewhere, and tight into the corner on a phone

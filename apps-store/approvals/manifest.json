@@ -3,6 +3,8 @@
   "name": "Approvals",
   "version": "1.0.0",
   "description": "Approval inbox: a human-in-the-loop queue where agent-proposed actions, edits, and fixes wait for your accept or reject before they take effect.",
+  "icon": "shield-01",
+  "iconDither": { "from": 312, "to": 346, "direction": "right" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

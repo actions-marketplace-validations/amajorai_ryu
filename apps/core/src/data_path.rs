@@ -260,8 +260,14 @@ pub fn auxiliary_roots(
     // clearing them from one profile clears them for every profile on the machine.
     let mut out = if include_shared {
         vec![
-            ("shadow captures (all profiles)".to_string(), home.join(".shadow")),
-            ("ghost state (all profiles)".to_string(), home.join(".ghost")),
+            (
+                "shadow captures (all profiles)".to_string(),
+                home.join(".shadow"),
+            ),
+            (
+                "ghost state (all profiles)".to_string(),
+                home.join(".ghost"),
+            ),
         ]
     } else {
         Vec::new()
@@ -368,14 +374,22 @@ pub fn deep_clean(
             continue;
         }
         // Never delete the home dir itself, and never anything outside it.
-        let inside = path.strip_prefix(home).is_ok_and(|rel| rel.components().count() >= 1);
+        let inside = path
+            .strip_prefix(home)
+            .is_ok_and(|rel| rel.components().count() >= 1);
         if !inside {
-            eprintln!("data-path deep-clean: refusing {} (outside home)", path.display());
+            eprintln!(
+                "data-path deep-clean: refusing {} (outside home)",
+                path.display()
+            );
             continue;
         }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => removed.push(format!("{label} — {}", path.display())),
-            Err(e) => eprintln!("data-path deep-clean: could not remove {}: {e}", path.display()),
+            Err(e) => eprintln!(
+                "data-path deep-clean: could not remove {}: {e}",
+                path.display()
+            ),
         }
     }
     removed
@@ -649,14 +663,17 @@ pub fn run_cli(args: &[String]) -> bool {
             let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
             // Defaults preserve the original behaviour exactly: THIS profile, no
             // data touched, shared roots included.
-            let profile = flag("--profile").unwrap_or_else(|| crate::profile::profile().to_string());
+            let profile =
+                flag("--profile").unwrap_or_else(|| crate::profile::profile().to_string());
             let suffix = crate::profile::suffix_for(&profile);
             let depth = match flag("--depth").as_deref() {
                 None | Some("none") => CleanDepth::None,
                 Some("state") => CleanDepth::State,
                 Some("full") => CleanDepth::Full,
                 Some(other) => {
-                    eprintln!("data-path deep-clean: --depth must be none|state|full (got '{other}')");
+                    eprintln!(
+                        "data-path deep-clean: --depth must be none|state|full (got '{other}')"
+                    );
                     std::process::exit(2);
                 }
             };
@@ -677,8 +694,8 @@ pub fn run_cli(args: &[String]) -> bool {
             Ok(())
         }
         "copy-profile" => {
-            let from_profile = flag("--from-profile")
-                .unwrap_or_else(|| crate::profile::profile().to_string());
+            let from_profile =
+                flag("--from-profile").unwrap_or_else(|| crate::profile::profile().to_string());
             let Some(to_profile) = flag("--to-profile") else {
                 eprintln!(
                     "usage: ryu-core data-path copy-profile --to-profile <name> \
@@ -1033,7 +1050,11 @@ mod tests {
         let with = auxiliary_roots(home, Some(config), "-dev", true);
         let without = auxiliary_roots(home, Some(config), "-dev", false);
         assert_eq!(with.len(), 3);
-        assert_eq!(without.len(), 1, "only the profile-scoped config dir remains");
+        assert_eq!(
+            without.len(),
+            1,
+            "only the profile-scoped config dir remains"
+        );
         assert!(without[0].1.ends_with("ryu-dev"));
     }
 
@@ -1052,7 +1073,10 @@ mod tests {
         std::fs::write(dir.join("master.key"), b"key").unwrap();
 
         assert!(!clean_profile_data(&home, "-canary", CleanDepth::State).is_empty());
-        assert!(dir.join("bin/ryu-core").exists(), "bin survives a state clean");
+        assert!(
+            dir.join("bin/ryu-core").exists(),
+            "bin survives a state clean"
+        );
         assert!(dir.join("models").exists(), "models survive a state clean");
         assert!(
             dir.join("master.key").exists(),
@@ -1120,7 +1144,10 @@ mod tests {
             db,
             "user content must arrive byte for byte"
         );
-        assert!(to.join("catalog-cache.json").exists(), "substring != exclusion");
+        assert!(
+            to.join("catalog-cache.json").exists(),
+            "substring != exclusion"
+        );
         assert_eq!(
             std::fs::read(to.join("media/clips/a.mp4")).unwrap(),
             b"video-bytes"
@@ -1139,10 +1166,8 @@ mod tests {
     /// Settings button, where "it merged into my existing canary" is unrecoverable.
     #[test]
     fn copying_into_a_non_empty_profile_is_refused() {
-        let tmp = std::env::temp_dir().join(format!(
-            "ryu-copy-profile-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("ryu-copy-profile-test-{}", std::process::id()));
         let from = tmp.join("src");
         let to = tmp.join("dst");
         std::fs::create_dir_all(&from).unwrap();

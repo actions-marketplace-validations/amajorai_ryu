@@ -8,6 +8,7 @@ import {
 import { Card } from "@ryu/ui/components/card.tsx";
 import { Signature } from "@ryu/ui/components/signature.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
+import { StaggerLines } from "./stagger-lines.tsx";
 
 const STORY_PARAGRAPHS = [
 	"We spent years shipping agents and kept hitting the same wall: an agent could work in a demo and still fail the first production review.",
@@ -21,13 +22,13 @@ export default function LandingTestimonials() {
 	return (
 		<section className="container mx-auto px-4">
 			<div className="mx-auto max-w-3xl">
-				<div className="mb-10 max-w-2xl">
+				<StaggerLines className="mb-10 max-w-2xl">
 					<SectionTitle title="Built by people who learned this the hard way" />
 					<p className={sectionSubtitleClass}>
 						The demo is easy. The control layer that lets an agent run every day
 						is the part we built.
 					</p>
-				</div>
+				</StaggerLines>
 
 				<Card className="rounded-3xl border border-border/60 bg-card p-8 shadow-sm md:p-12">
 					<div className="space-y-6 text-base text-foreground/90 leading-relaxed md:text-lg md:leading-relaxed">

@@ -208,12 +208,25 @@ pub async fn version_detail(owner: &str, repo: &str, tag: &str) -> Option<serde_
     let readme = fetch_readme_at(owner, repo, tag).await;
 
     let mut out = serde_json::Map::new();
-    out.insert("version".into(), manifest.get("version").cloned().unwrap_or(serde_json::Value::Null));
+    out.insert(
+        "version".into(),
+        manifest
+            .get("version")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
     if let Some((text, url)) = readme {
         out.insert("readme".into(), serde_json::Value::String(text));
         out.insert("readmeUrl".into(), serde_json::Value::String(url));
     }
-    for key in ["description", "license", "engines", "surfaces", "targets", "permissions"] {
+    for key in [
+        "description",
+        "license",
+        "engines",
+        "surfaces",
+        "targets",
+        "permissions",
+    ] {
         if let Some(v) = manifest.get(key) {
             out.insert(key.to_string(), v.clone());
         }

@@ -19,6 +19,11 @@ import {
 	installConsoleCapture,
 	isConsoleCaptureActive,
 } from "@/src/lib/console-buffer.ts";
+import {
+	getMcpBridgeStatus,
+	type McpBridgeStatus,
+	mcpBridgeConfigSnippet,
+} from "@/src/lib/mcp-bridge.ts";
 import { copyDiagnostics } from "@/src/lib/preflight.ts";
 import {
 	SettingsGroup,
@@ -29,6 +34,7 @@ import {
 export function DeveloperTab() {
 	const [devMode, setDevMode] = useDeveloperMode();
 	const [consoleActive, setConsoleActive] = useState(isConsoleCaptureActive);
+	const [bridge, setBridge] = useState<McpBridgeStatus | null>(null);
 	const activeNode = useActiveNode();
 
 	const target: ApiTarget = {
@@ -53,6 +59,28 @@ export function DeveloperTab() {
 	useEffect(() => {
 		setConsoleActive(isConsoleCaptureActive());
 	}, [devMode]);
+
+	// READ-ONLY. Arming the bridge is not this tab's job: startup CONSUMES the
+	// on-disk flag (`take_enabled` in src-tauri/src/mcp_bridge.rs), so it must be
+	// re-written once per launch by something that always runs — `useMcpBridgeArming`,
+	// mounted app-wide. Reconciling from a settings tab instead was the hole: a
+	// user who turned Developer Mode off anywhere else, or never reopened this
+	// tab, would never disarm a bridge that something else had armed.
+	useEffect(() => {
+		getMcpBridgeStatus().then(setBridge);
+	}, [devMode]);
+
+	const handleCopyMcpConfig = useCallback(async () => {
+		if (!bridge) {
+			return;
+		}
+		try {
+			await navigator.clipboard.writeText(mcpBridgeConfigSnippet(bridge));
+			toast.success("MCP config copied to clipboard");
+		} catch {
+			toast.error("Couldn't copy to clipboard");
+		}
+	}, [bridge]);
 
 	const handleCopyDiagnostics = useCallback(async () => {
 		try {
@@ -170,6 +198,51 @@ export function DeveloperTab() {
 						</SettingsGroup>
 					</SettingsSection>
 				</>
+			) : null}
+
+			{/* OUTSIDE the Developer Mode gate on purpose, and keyed on `live` too.
+			    The bridge is registered at startup and keeps listening until the
+			    process exits, so switching Developer Mode off does NOT close the
+			    socket — it only stops it coming back next launch. Hiding this
+			    section at that moment would remove the only place that says a
+			    socket is still open, along with the restart that actually closes
+			    it. */}
+			{bridge && (devMode || bridge.live) ? (
+				<SettingsSection
+					caption={`An MCP server on this machine can attach to Ryu: screenshot it, read its DOM, run JS, invoke Tauri commands. That works against a stable release build, not just a dev build. It binds ${bridge.host} only, and stays up until Ryu exits.`}
+					title="Tauri MCP bridge"
+				>
+					<SettingsGroup>
+						<SettingsItem
+							actions={<Switch checked={bridge.live} disabled />}
+							description={
+								bridge.live
+									? `Listening on ${bridge.host}:${bridge.port}. This socket accepts any local connection without a credential — and a page open in your browser counts as local — so restart Ryu to close it when you are done.`
+									: "Not listening. The bridge is registered while Ryu starts, so it attaches on the next restart with Developer Mode on."
+							}
+							title="Bridge status"
+						/>
+						{bridge.live ? (
+							<SettingsItem
+								actions={
+									<Button
+										onClick={handleCopyMcpConfig}
+										size="sm"
+										variant="outline"
+									>
+										Copy MCP config
+									</Button>
+								}
+								description={`Paste this into your agent's MCP config and attach on port ${bridge.port}. The protocol carries no bearer token, so the port is the whole connection detail — treat it as a credential and keep it off shared machines.`}
+								title="Agent connection"
+							>
+								<pre className="overflow-x-auto rounded-md bg-background/60 p-2.5 font-mono text-[11px] text-muted-foreground leading-relaxed">
+									{mcpBridgeConfigSnippet(bridge)}
+								</pre>
+							</SettingsItem>
+						) : null}
+					</SettingsGroup>
+				</SettingsSection>
 			) : null}
 		</div>
 	);

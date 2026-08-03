@@ -3,6 +3,8 @@
   "name": "Monitors",
   "version": "1.0.0",
   "description": "Website monitors: price, stock, keyword, content, and uptime watches with cross-device notification fan-out.",
+  "icon": "radar-01",
+  "iconDither": { "from": 357, "to": 323, "direction": "up" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },
@@ -61,9 +63,25 @@
   "permission_grants": ["monitors:crud", "tools.invoke"],
   "companion": {
     "label": "Monitors",
-    "icon": "radar"
+    "icon": "radar-01"
   },
   "contributes": {
+    "data_categories": [
+      {
+        "id": "monitors",
+        "title": "Delete all monitors",
+        "noun": "monitors",
+        "confirm_word": "Monitors",
+        "detail": "Every website monitor will be deleted and its scheduled checks will stop."
+      }
+    ],
+    "quotas": [
+      {
+        "id": "maxMonitors",
+        "label": "Website monitors",
+        "unit": "count"
+      }
+    ],
     "hook_events": [
       {
         "id": "@ryu/monitors#alert.raised",

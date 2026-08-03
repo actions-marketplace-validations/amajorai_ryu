@@ -73,6 +73,7 @@ export default function Header({
 	orgSlot,
 	links = MARKETING_LINKS,
 	showCatalogMenus = true,
+	showOpenSource = true,
 	homeHref = "/",
 	githubStargazersCount,
 	signedIn = false,
@@ -95,6 +96,12 @@ export default function Header({
 	 * signed-in Dashboard shortcut now lives in the user menu dropdown.
 	 */
 	showCatalogMenus?: boolean;
+	/**
+	 * Whether to render the "Open Source" GitHub link. It is marketing copy —
+	 * portal surfaces pass `false` so the dashboard header carries only product
+	 * nav, not an outbound link to the repo.
+	 */
+	showOpenSource?: boolean;
 	/** Where the logo links to. Marketing → "/", portal → "/dashboard". */
 	homeHref?: string;
 	/** Cached GitHub star count for the open-source repo (marketing header). */
@@ -311,20 +318,22 @@ export default function Header({
 						</MotionNavigationMenu>
 					)}
 
-					<a
-						className={cn(
-							buttonVariants({ variant: "ghost" }),
-							"gap-2 rounded-4xl px-3 font-medium hover:bg-muted hover:text-foreground"
-						)}
-						href={GITHUB_CORE_URL}
-						rel="noopener noreferrer"
-						target="_blank"
-					>
-						Open Source
-						{githubStargazersCount != null && githubStargazersCount > 0 ? (
-							<GitHubStars stargazersCount={githubStargazersCount} />
-						) : null}
-					</a>
+					{showOpenSource && (
+						<a
+							className={cn(
+								buttonVariants({ variant: "ghost" }),
+								"gap-2 rounded-4xl px-3 font-medium hover:bg-muted hover:text-foreground"
+							)}
+							href={GITHUB_CORE_URL}
+							rel="noopener noreferrer"
+							target="_blank"
+						>
+							Open Source
+							{githubStargazersCount != null && githubStargazersCount > 0 ? (
+								<GitHubStars stargazersCount={githubStargazersCount} />
+							) : null}
+						</a>
+					)}
 
 					{links.map(({ to, label, external }) => {
 						const isActive = !external && pathname.startsWith(to);

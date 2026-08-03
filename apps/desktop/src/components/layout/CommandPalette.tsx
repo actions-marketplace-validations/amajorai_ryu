@@ -5,6 +5,7 @@ import {
 	ComputerIcon,
 	DollarCircleIcon,
 	Download01Icon,
+	FullScreenIcon,
 	Key01Icon,
 	Logout01Icon,
 	Moon01Icon,
@@ -52,6 +53,7 @@ import {
 import { fireActivationEvent } from "@/src/lib/api/plugins.ts";
 import { indexChunk } from "@/src/lib/api/retrieval.ts";
 import { type ShadowSearchResult, searchShadow } from "@/src/lib/api/shadow.ts";
+import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 
 /** Safely read a string field off an opaque plugin-contribution record. */
@@ -326,6 +328,13 @@ export function CommandPalette() {
 		setImportOpen(true);
 	};
 
+	const handleToggleFullscreen = () => {
+		close();
+		toggleFullscreen().catch(() => {
+			toast.error("Couldn't toggle full screen in this window.");
+		});
+	};
+
 	const handleOpenSettings = (section: SettingsSection) => {
 		setSettingsSection(section);
 		setSettingsOpen(true);
@@ -594,6 +603,15 @@ export function CommandPalette() {
 				icon: Add01Icon,
 				shortcut: `${modKey}N`,
 				onSelect: handleNewChat,
+			},
+			{
+				id: "action-toggle-fullscreen",
+				group: "Actions",
+				title: "Toggle Full Screen",
+				value: "fullscreen full screen maximize window presentation f11",
+				icon: FullScreenIcon,
+				shortcut: "F11",
+				onSelect: handleToggleFullscreen,
 			},
 			{
 				id: "action-import-thread",
