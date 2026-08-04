@@ -259,6 +259,13 @@ fn default_grant_allowlist() -> Vec<String> {
         "tool:http-egress:api.firecrawl.dev",
         "tool:http-egress:google.serper.dev",
         "tool:http-egress:scrape.serper.dev",
+        // `parallel` serves `web.search` from two hosts, not one: the keyed Search
+        // API (`api.parallel.ai`) and the keyless free endpoint its binding falls
+        // back to when RYU_PARALLEL_API_KEY is unset (`search.parallel.ai`). Two
+        // hosts, so two exact entries — one covers neither the other nor the
+        // re-enable path that validates the whole declared set.
+        "tool:http-egress:api.parallel.ai",
+        "tool:http-egress:search.parallel.ai",
         // `spidercloud` is the hosted half of the same engine the `spider` CLI plugin
         // shells out to, and the second `web.crawl` provider. It is a declarative
         // `http` plugin, so it needs an egress entry here even though its CLI sibling
