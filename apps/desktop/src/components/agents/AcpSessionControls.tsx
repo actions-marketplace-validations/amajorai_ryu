@@ -77,8 +77,18 @@ function AcpAuthSection({ agentId }: { agentId: string }) {
 				agentId,
 				methodId
 			);
-			if (res.authenticated) {
+			if (res.authenticated && res.verified) {
 				toast.success({ title: `Signed in with ${methodName}` });
+			} else if (res.authenticated) {
+				// Unverified: Core had no credential to check this agent against, so
+				// all that is known is that the agent accepted the request. Agents do
+				// advertise methods that accept it and log nobody in, so this must not
+				// be worded as a completed sign-in.
+				toast.info({
+					title: `${methodName} ran`,
+					description:
+						"The agent accepted the request. If its login happens elsewhere (a browser or terminal), finish it there — this can't confirm you're signed in.",
+				});
 			} else {
 				toast.error({
 					title: `Could not sign in with ${methodName}`,

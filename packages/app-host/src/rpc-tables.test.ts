@@ -113,6 +113,11 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"quests.dismissSuggestion": "quests.crud",
 	"quests.judge": "quests.crud",
 	"quests.openDetectionSettings": "quests.crud",
+	"quests.capture": "quests.crud",
+	"quests.use": "quests.crud",
+	"quests.pin": "quests.crud",
+	"quests.scratchpad": "quests.crud",
+	"quests.setScratchpad": "quests.crud",
 	"activity.list": "activity.read",
 	"activity.openSession": "activity.read",
 	"timeline.list": "timeline.read",
@@ -167,6 +172,10 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"skills.setTitle": "skills.crud",
 	"shell.openTab": "shell.integrate",
 	"shell.themeSubscribe": "shell.integrate",
+	// Host display preferences (the "Friendly names" toggle today). Same capability
+	// and same grant as the theme stream it sits beside: both are read-only reads of
+	// how the shell is currently presenting itself, neither reaches user data.
+	"shell.prefsSubscribe": "shell.integrate",
 	"shell.registerCommand": "shell.integrate",
 	"shell.registerTabIcon": "shell.integrate",
 	"shell.eventsSubscribe": "shell.integrate",
@@ -207,6 +216,7 @@ const OLD_STREAMING_METHODS: readonly string[] = [
 	"agent.run.stream",
 	"finetune.stream",
 	"shell.themeSubscribe",
+	"shell.prefsSubscribe",
 	"shell.registerCommand",
 	"shell.registerTabIcon",
 	"shell.eventsSubscribe",

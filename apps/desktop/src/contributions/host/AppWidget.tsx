@@ -38,6 +38,7 @@ import { useWidgetHost } from "@ryu/blocks/desktop/agent-elements/widget-host-co
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { openExternal as openExternalShell } from "@/lib/tauri-bridge.ts";
+import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 /** A widget CSP (mirrors the blocks `WidgetCsp`); `resource_domains` is ignored
@@ -132,6 +133,9 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 	>(data?.displayMode ?? "inline");
 	const [height, setHeight] = useState<number | null>(null);
 	const [theme, setTheme] = useState<"light" | "dark">(() => detectTheme());
+	// The app-wide "Friendly names" toggle, read here so it can be baked into the
+	// widget's initial globals and pushed on change — see the effects below.
+	const [friendly] = useFriendlyMode();
 
 	// Keep the injected theme in sync with the app root so the widget re-themes.
 	useEffect(() => {
@@ -168,6 +172,7 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 			locale:
 				typeof navigator === "undefined" ? "en" : navigator.language || "en",
 			maxHeight: data.maxHeight ?? null,
+			friendly,
 			safeArea: { bottom: 0, left: 0, right: 0, top: 0 },
 			theme,
 			toolInput: data.toolInput,
@@ -237,6 +242,12 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 	useEffect(() => {
 		pushGlobals({ theme });
 	}, [theme, pushGlobals]);
+	// Friendly names travel exactly like the theme: baked into the initial globals
+	// for first paint, then pushed on every flip so a widget already on screen
+	// re-labels with the rest of the app instead of waiting for a remount.
+	useEffect(() => {
+		pushGlobals({ friendly });
+	}, [friendly, pushGlobals]);
 	useEffect(() => {
 		pushGlobals({ displayMode, maxHeight: data?.maxHeight ?? null });
 	}, [displayMode, data?.maxHeight, pushGlobals]);

@@ -253,6 +253,83 @@ export interface SidebarSectionSpec {
  *  discriminant the desktop dock renderer switches on. Mirrors the vocabulary
  *  documented on the Rust `DockPanelContribution::panel`, which keeps the field a
  *  bare string so an unknown member survives an older Core intact. */
+/** Maps a {@link StoreCatalogItem}'s fields to the response-row keys they read.
+ *  Extends {@link ViewSourceMap} with the card-specific fields a marketplace row
+ *  needs. Defaults: `id` → `"id"`, `title` → `"name"` then `"title"`,
+ *  `description` → `"description"`. */
+export interface StoreItemMap {
+	/** Row key holding a short badge string (a pattern, a duration, a kind). */
+	badge?: string;
+	/** Row key holding the card's supporting text. */
+	description?: string;
+	/** Row key holding a per-item glyph id, overriding the tab's icon. */
+	icon?: string;
+	id?: string;
+	/** Row key holding a boolean "already installed" flag. */
+	installed?: string;
+	/** Row key holding an external "learn more" URL shown in the detail pane. */
+	sourceUrl?: string;
+	/** Row key holding a string[] of tags rendered as outline badges. */
+	tags?: string;
+	title?: string;
+}
+
+/** How a {@link StoreTabSpec} item is installed — one declarative HTTP call plus
+ *  what the shell does with the response. */
+export interface StoreInstallSpec {
+	/** The request. `{{item.<key>}}` resolves against the RAW catalog row. */
+	http: ViewActionHttp;
+	/** Button label; defaults to `"Install"`. */
+	label?: string;
+	/** Route template opened via `openTab` after a successful install. Resolves
+	 *  `{{result.<key>}}` from the response and `{{item.<key>}}` from the row. */
+	openTarget?: string;
+	/** Toast title on success; defaults to `"Installed"`. */
+	successMessage?: string;
+	/** Response key holding the created resource's id, feeding `openTarget`. */
+	targetFrom?: string;
+}
+
+/**
+ * The opaque `spec` of a manifest `store_tabs` contribution (the Rust
+ * `StoreTabContribution`). The desktop Store renders it so an app owns its
+ * marketplace section instead of the shell hardcoding one — the same relationship
+ * {@link SidebarSectionSpec} has to the sidebar, and it reuses the same primitives:
+ * a {@link ViewSource} for the rows, `{{item.*}}` templating for actions, and
+ * {@link ViewAction} for per-item extras.
+ *
+ * What a marketplace section needs beyond a sidebar list is grouping (cards fall
+ * into labelled category rows), search over declared row keys, and an install
+ * affordance with a post-install destination — hence {@link StoreTabSpec.groupBy},
+ * {@link StoreTabSpec.searchFields} and {@link StoreTabSpec.install}.
+ *
+ * Search here is PER-TAB (the section's own search field). The store-wide
+ * cross-realm search is a closed union of first-party realms and does not index
+ * contributed tabs.
+ */
+export interface StoreTabSpec {
+	/** Copy for the empty state. */
+	empty?: { description?: string; title?: string };
+	/** Row key whose value splits the cards into labelled sections. */
+	groupBy?: string;
+	/** Display order + labels for `groupBy` values. A value not listed here still
+	 *  renders, in a trailing group titled by the raw value — an app must never
+	 *  lose rows for forgetting a label. */
+	groups?: { label: string; value: string }[];
+	/** The install affordance. Absent = a browse-only tab. */
+	install?: StoreInstallSpec;
+	/** Extra per-item actions (card context menu + detail pane). */
+	itemActions?: ViewAction[];
+	/** Field-map from the card/detail fields to response-row keys. */
+	map?: StoreItemMap;
+	/** Extra row keys folded into the search haystack, on top of the mapped
+	 *  title/description/tags. */
+	searchFields?: string[];
+	searchPlaceholder?: string;
+	/** Live catalog rows (same primitive a `list-detail` view uses). */
+	source?: ViewSource;
+}
+
 export const DOCK_PANEL_KINDS = ["companion", "view", "native"] as const;
 
 export type DockPanelKind = (typeof DOCK_PANEL_KINDS)[number];
@@ -516,6 +593,144 @@ export function sourceItemsFromResponse(
 		});
 	}
 	return out;
+}
+
+/** One catalog row a {@link StoreTabSpec} renders as a card, plus the RAW response
+ *  row that `{{item.<key>}}` templating resolves against. */
+export interface StoreCatalogItem {
+	badge?: string;
+	description?: string;
+	/** The `groupBy` value this row fell into ("" when the tab is ungrouped). */
+	group: string;
+	icon?: string;
+	id: string;
+	/** True when the row itself reports the item is already installed. */
+	installed: boolean;
+	raw: Record<string, unknown>;
+	sourceUrl?: string;
+	tags: string[];
+	title: string;
+}
+
+function rowStrings(row: Record<string, unknown>, key?: string): string[] {
+	if (!key) {
+		return [];
+	}
+	const value = row[key];
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return value.filter((v): v is string => typeof v === "string");
+}
+
+/**
+ * Map a catalog response to renderable {@link StoreCatalogItem}s per the tab's
+ * `source.items` key and `map`. Forgiving in the same way
+ * {@link sourceItemsFromResponse} is — a row without a usable id/title is skipped
+ * and a non-array payload yields `[]`, so a backend the shell cannot parse degrades
+ * to the empty state rather than a crash.
+ *
+ * `title` falls back through `name` → `title` because catalog payloads across the
+ * first-party apps use both spellings, and an app should not have to declare a `map`
+ * for the common case.
+ */
+export function storeItemsFromResponse(
+	spec: StoreTabSpec,
+	payload: unknown
+): StoreCatalogItem[] {
+	const source = spec.source;
+	let rows: unknown;
+	if (Array.isArray(payload)) {
+		rows = payload;
+	} else if (isRecord(payload)) {
+		rows = source?.items
+			? payload[source.items]
+			: Object.values(payload).find((v) => Array.isArray(v));
+	}
+	if (!Array.isArray(rows)) {
+		return [];
+	}
+	const map = spec.map ?? {};
+	const out: StoreCatalogItem[] = [];
+	for (const row of rows) {
+		if (!isRecord(row)) {
+			continue;
+		}
+		const id = rowText(row, map.id ?? "id");
+		const title =
+			rowText(row, map.title ?? "name") ?? rowText(row, map.title ?? "title");
+		if (!(id && title)) {
+			continue;
+		}
+		out.push({
+			badge: rowText(row, map.badge),
+			description: rowText(row, map.description ?? "description"),
+			group: spec.groupBy ? (rowText(row, spec.groupBy) ?? "") : "",
+			icon: rowText(row, map.icon),
+			id,
+			installed: map.installed ? row[map.installed] === true : false,
+			raw: row,
+			sourceUrl: rowText(row, map.sourceUrl),
+			tags: rowStrings(row, map.tags),
+			title,
+		});
+	}
+	return out;
+}
+
+/** The searchable haystack for one catalog item: its title, description, badge,
+ *  tags and any extra `searchFields` row keys, lowercased and joined. */
+export function storeItemHaystack(
+	spec: StoreTabSpec,
+	item: StoreCatalogItem
+): string {
+	const parts = [item.title, item.description, item.badge, ...item.tags];
+	for (const key of spec.searchFields ?? []) {
+		parts.push(rowText(item.raw, key));
+	}
+	return parts.filter(Boolean).join(" ").toLowerCase();
+}
+
+/** A labelled card section produced by {@link groupStoreItems}. */
+export interface StoreCatalogGroup {
+	items: StoreCatalogItem[];
+	label: string;
+	value: string;
+}
+
+/**
+ * Split items into the tab's declared `groups`, in declared order, then append one
+ * trailing group per `groupBy` value the spec did not declare (labelled by the raw
+ * value). Undeclared values are NEVER dropped: an app that adds a category to its
+ * backend before updating its manifest would otherwise silently lose those cards.
+ * An ungrouped tab yields a single unlabelled group.
+ */
+export function groupStoreItems(
+	spec: StoreTabSpec,
+	items: StoreCatalogItem[]
+): StoreCatalogGroup[] {
+	if (!spec.groupBy) {
+		return items.length ? [{ items, label: "", value: "" }] : [];
+	}
+	const declared = spec.groups ?? [];
+	const seen = new Set(declared.map((g) => g.value));
+	const out: StoreCatalogGroup[] = declared.map((g) => ({
+		items: items.filter((i) => i.group === g.value),
+		label: g.label,
+		value: g.value,
+	}));
+	for (const item of items) {
+		if (seen.has(item.group)) {
+			continue;
+		}
+		seen.add(item.group);
+		out.push({
+			items: items.filter((i) => i.group === item.group),
+			label: item.group || "Other",
+			value: item.group,
+		});
+	}
+	return out.filter((g) => g.items.length > 0);
 }
 
 // ── Validation (pure, dependency-free) ────────────────────────────────────────

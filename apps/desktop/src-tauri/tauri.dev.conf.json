@@ -6,7 +6,8 @@
   "app": {
     "windows": [
       {
-        "title": "Ryu Dev"
+        "title": "Ryu Dev",
+        "zoomHotkeysEnabled": true
       }
     ]
   },

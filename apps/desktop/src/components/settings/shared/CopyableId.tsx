@@ -44,7 +44,7 @@ export function CopyableId({
 			className={`group flex items-center justify-end gap-2 ${className ?? ""}`}
 		>
 			<code
-				className="max-w-[240px] select-all truncate rounded bg-muted px-2 py-1 font-mono text-muted-foreground text-xs blur-[5px] transition-[filter] duration-150 group-focus-within:blur-0 group-hover:blur-0"
+				className="max-w-[240px] select-all truncate rounded bg-muted px-2 py-1 font-mono text-muted-foreground text-xs transition-[filter] duration-150 [filter:blur(5px)] group-focus-within:[filter:blur(0)] group-hover:[filter:blur(0)]"
 				title={value}
 			>
 				{value}

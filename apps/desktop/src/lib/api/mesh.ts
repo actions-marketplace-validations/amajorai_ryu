@@ -42,13 +42,11 @@ export interface MeshStatus {
 	/** Control-plane server URL, when known. */
 	controlServer: string | null;
 	/**
-	 * Mesh opted-in at all. Core's `ryu_mesh::is_enabled()` reads ONLY the
-	 * `RYU_MESH_ENABLED` env var (default false) — there is no pref and no client
-	 * path that sets it, so on a normal desktop install this is always `false`.
-	 * That makes it the one honest gate for every mesh-dependent surface: if it is
-	 * false, the mesh daemon does not run and nothing that configures it can take
-	 * effect. Defaults to `false` in {@link normalizeMeshStatus} so an older Core
-	 * that omits the field also reads as "not relevant".
+	 * Mesh opted-in at all. Core's `ryu_mesh::is_enabled()` reads the `RYU_MESH_ENABLED`
+	 * env var (wins when set) OR the `mesh-enabled` pref, which this client's
+	 * {@link setMeshEnabled} writes via `POST /api/mesh/config` (the Gateway →
+	 * Integrations toggle). Defaults to `false` in {@link normalizeMeshStatus} so an
+	 * older Core that omits the field also reads as "not relevant".
 	 */
 	enabled: boolean;
 	/** This node's MagicDNS name (trailing dot stripped), or null. */
@@ -125,6 +123,43 @@ export async function fetchMeshStatus(
 		signal,
 	});
 	return normalizeMeshStatus(raw);
+}
+
+/**
+ * The result of {@link setMeshEnabled}: the live {@link MeshStatus} after the
+ * change, plus an optional `startError` when enabling persisted but the Tailscale
+ * daemon could not start (e.g. the official `tailscale`/`tailscaled` client is
+ * not installed on this machine). The mesh is still ON in that case — the caller
+ * should reflect the toggle as enabled and surface `startError` as a warning.
+ */
+export interface SetMeshEnabledResult {
+	startError: string | null;
+	status: MeshStatus;
+}
+
+/**
+ * Enable or disable the mesh plane (`POST /api/mesh/config`).
+ *
+ * Writes the `mesh-enabled` pref (survives a Core restart), flips Core's
+ * in-process signal immediately, and starts (enable) or stops (disable) the
+ * Tailscale daemon sidecar. Resolves with the updated status; when enabling, a
+ * daemon-start failure is NOT a rejection — it rides in `startError` while the
+ * mesh stays enabled. Throws (via `ApiError`) only on a genuinely unusable
+ * response (pref write failure, network).
+ */
+export async function setMeshEnabled(
+	target: ApiTarget,
+	enabled: boolean
+): Promise<SetMeshEnabledResult> {
+	const raw = await request<RawMeshStatus & { start_error?: string | null }>(
+		target,
+		"/api/mesh/config",
+		{ method: "POST", body: { enabled } }
+	);
+	return {
+		startError: raw.start_error ?? null,
+		status: normalizeMeshStatus(raw),
+	};
 }
 
 // ── Mesh peers + candidate bearer (`GET /api/mesh/peers`, P7) ──────────────────

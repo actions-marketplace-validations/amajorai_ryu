@@ -2,6 +2,7 @@
   "id": "@ryu/auto-expand",
   "name": "Auto-Expand Prompt",
   "version": "1.0.0",
+  "category": "Productivity",
   "runnables": [],
   "permission_grants": ["hook:side-model"],
   "activation_events": ["*"],

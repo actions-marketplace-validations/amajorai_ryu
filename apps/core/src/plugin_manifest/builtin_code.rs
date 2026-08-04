@@ -135,6 +135,12 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "hooks/start.js",
         include_str!("../../../../plugins-store/hook-session-context/hooks/start.js"),
     ),
+    // parallel
+    (
+        "@ryu/parallel",
+        "adapters/web__search.js",
+        include_str!("../../../../plugins-store/parallel/adapters/web__search.js"),
+    ),
     // plan-continue
     (
         "@ryu/plan-continue",

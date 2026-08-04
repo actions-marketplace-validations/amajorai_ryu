@@ -29,7 +29,9 @@ Zero dependency on `apps/core`. The one kernel coupling — the `tailscale` /
 - `ensure_funnel` / `funnel_url` — the Funnel primitives P6 (webhook ingress)
   consumes for a public URL.
 
-The mesh is **opt-in** (`RYU_MESH_ENABLED`) and never in `startup_order`. When off,
+The mesh is **opt-in** — `RYU_MESH_ENABLED` (env, wins when set) OR the
+`mesh-enabled` pref that Core seeds into `set_pref_enabled` (the desktop's Gateway →
+Integrations toggle writes it through `POST /api/mesh/config`). When off,
 `query_status` returns the all-default object (HTTP 200) **without** touching the
 host, so a build that never installs a host still runs the default (mesh-disabled)
 install correctly.

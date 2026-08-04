@@ -129,6 +129,25 @@ export interface ModelOption {
 	version?: string;
 }
 
+/** A per-message toolbar action contributed by an enabled plugin
+ *  (`contributes.message_actions`), resolved by the shell and passed in
+ *  presentationally. Blocks never fetches the contributions feed. */
+export interface ContributedMessageAction {
+	capability?: string;
+	icon?: string;
+	id: string;
+	kind: string;
+	label: string;
+	plugin: string;
+	states?: {
+		active_icon?: string;
+		icon?: string;
+		label: string;
+		value: string;
+	}[];
+	target: string;
+}
+
 export interface AgentChatProps {
 	/** Avatar node shown beside each assistant turn — the active agent's logo, or
 	 * a fanned stack of member logos for a team. When omitted, no avatar shows. */
@@ -163,6 +182,7 @@ export interface AgentChatProps {
 	currentUser?: {
 		avatar?: string;
 		name?: string;
+		id?: string;
 	};
 	/** Rendered below the composer in the centered empty state (e.g. a recent
 	 * chats list, Codex-style). Ignored once the thread has messages. */
@@ -197,12 +217,24 @@ export interface AgentChatProps {
 		}[];
 	};
 	initialScrollBehavior?: "bottom" | "top";
+	/** Contributed per-message toolbar actions (resolved by the shell from
+	 *  `contributes.message_actions`, filtered to the message's `target`), rendered
+	 *  after the built-in toolbar buttons. Dispatches through
+	 *  {@link AgentChatProps.onContributedMessageAction}. */
+	messageActions?: ContributedMessageAction[];
 	messages: UIMessage[];
 	/** Branch ("fork into new chat") from a message; receives the message id to
 	 * branch from. When omitted, no branch button is shown. */
 	onBranch?: (messageId: string) => void;
 	/** Clear the pending composer quote (dismiss button). */
 	onClearQuote?: () => void;
+	/** Fire a contributed message action: receives the action and, for a
+	 *  `toggle-group` kind, the selected state's `value`. The shell dispatches it
+	 *  through the owning plugin's granted host seam. */
+	onContributedMessageAction?: (
+		action: ContributedMessageAction,
+		value?: string
+	) => void;
 	/** Edit a previously-sent user message into a new version (ChatGPT/Claude-style
 	 * branching); receives the message id and the new text. When omitted, no edit
 	 * affordance is shown. */

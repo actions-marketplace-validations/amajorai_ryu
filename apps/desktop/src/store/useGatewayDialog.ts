@@ -21,6 +21,9 @@ export type GatewaySection =
 	| "budgets"
 	| "keys"
 	| "integrations"
+	// The node's network surface (mesh / Tailscale / Headscale), extracted from
+	// Integrations into its own tab.
+	| "network"
 	| "usage"
 	| "audit"
 	| "evals"

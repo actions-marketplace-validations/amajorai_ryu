@@ -39,8 +39,7 @@ export const DEFAULT_HIDDEN_SECTIONS = [
 	"identities",
 	"skills",
 	"mcp",
-	"plugins",
-	"companions",
+	"tools",
 	"engines",
 ] as const;
 

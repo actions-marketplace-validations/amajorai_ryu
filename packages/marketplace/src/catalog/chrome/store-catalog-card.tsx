@@ -7,6 +7,13 @@
 //
 // The row is NOT a single <button> (that would nest the action button inside it):
 // the icon+text is one button that opens the preview, the action sits beside it.
+//
+// The card carries the MINIMUM that distinguishes one listing from another: icon,
+// name, one-line description, and a stability badge when the listing is unfinished.
+// The platform-surface badges used to sit here too and were the one thing that made
+// a two-column grid of rows look busy — six chips under every app, mostly identical.
+// They now live in the preview's meta strip (`DetailMetaStrip`), which is where the
+// rest of the "will this work for me?" metadata already is.
 
 import {
 	ContextMenu,
@@ -23,12 +30,13 @@ import {
 	isDitherColor,
 } from "@ryu/ui/components/dither-kit/palette.ts";
 import { Icon } from "@ryu/ui/components/icon.tsx";
+import { useSvglIndex } from "@ryu/ui/components/svgl.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { resolveCardIcon } from "../icon-url.ts";
 import { stabilityLabel } from "../stability.ts";
-import { surfaceLabel } from "../surface-labels.ts";
 import type { CardDither } from "../types.ts";
+import BrandOrCoverImage from "./brand-image.tsx";
 
 /** The four gradient directions dither-kit accepts. */
 const DIRECTIONS: GradientDirection[] = ["up", "down", "left", "right"];
@@ -96,7 +104,6 @@ export default function StoreCatalogCard({
 	name,
 	seedId,
 	description,
-	surfaces,
 	stability,
 	selected = false,
 	onClick,
@@ -125,13 +132,6 @@ export default function StoreCatalogCard({
 	 *  (`namespace/name`, a model/skill id, …) when available, else the name. */
 	seedId?: string | null;
 	description?: string | null;
-	/** Host surfaces this listing runs on, already flattened and with any
-	 *  explicitly-unsupported surface removed.
-	 *
-	 *  Absent/empty means NOT DECLARED, which renders as nothing at all — never as
-	 *  "runs nowhere". A card is the first place someone asks "does this work on my
-	 *  phone?", so this is deliberately on the card and not only the detail page. */
-	surfaces?: string[] | null;
 	/** How finished this listing is ("alpha", "beta", …). Absent/stable renders
 	 *  nothing — a finished listing must not sprout a badge. */
 	stability?: string | null;
@@ -143,13 +143,17 @@ export default function StoreCatalogCard({
 	contextMenu?: ReactNode;
 }) {
 	const safeDither = normalizeDither(dither);
+	const svglIndex = useSvglIndex();
 	// Resolve the two icon fields: a raster logo from `icon_url` (any https host),
-	// or a GitHub-image URL pasted into the `icon` field; a non-GitHub URL in the
-	// `icon` field is dropped rather than fetched (see {@link resolveCardIcon}).
-	const { iconId: resolvedIconId, iconUrl: resolvedIconUrl } = resolveCardIcon({
-		icon: iconId,
-		iconUrl,
-	});
+	// an `svgl:<slug>` brand mark, or a GitHub-image URL pasted into the `icon`
+	// field; a non-GitHub URL in the `icon` field is dropped rather than fetched
+	// (see {@link resolveCardIcon}).
+	const {
+		iconId: resolvedIconId,
+		iconUrl: resolvedIconUrl,
+		iconUrlDark: resolvedIconUrlDark,
+		brand: isBrandMark,
+	} = resolveCardIcon({ icon: iconId, iconUrl, svglIndex });
 	// No icon of its own → a generative dither AVATAR seeded from the item's id/name
 	// (deterministic, ~1.5T combinations via {@link DitherAvatar}), so every
 	// placeholder reads as a distinct branded tile, not one repeated grey glyph.
@@ -162,11 +166,10 @@ export default function StoreCatalogCard({
 		iconContent = <Icon icon={resolvedIconId} size={20} />;
 	} else if (resolvedIconUrl) {
 		iconContent = (
-			<img
-				alt=""
-				className="size-full object-cover"
-				loading="lazy"
-				src={resolvedIconUrl}
+			<BrandOrCoverImage
+				brand={isBrandMark === true}
+				dark={resolvedIconUrlDark ?? null}
+				light={resolvedIconUrl}
 			/>
 		);
 	} else if (brandIcon) {
@@ -231,18 +234,6 @@ export default function StoreCatalogCard({
 					<span className="block truncate text-muted-foreground text-xs">
 						{description || "No description provided."}
 					</span>
-					{surfaces && surfaces.length > 0 ? (
-						<span className="mt-1 flex flex-wrap items-center gap-1">
-							{surfaces.map((surface) => (
-								<span
-									className="rounded-sm border px-1 py-px text-[10px] text-muted-foreground leading-tight"
-									key={surface}
-								>
-									{surfaceLabel(surface)}
-								</span>
-							))}
-						</span>
-					) : null}
 				</span>
 			</button>
 			{action ? <div className="shrink-0">{action}</div> : null}

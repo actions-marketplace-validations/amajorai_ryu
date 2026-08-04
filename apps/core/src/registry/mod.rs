@@ -169,8 +169,27 @@ pub const DEFAULT_EMBED_BASE_URL: &str = "http://127.0.0.1:8081";
 pub const DEFAULT_LOCAL_EMBED_MODEL_ID: &str = "nomic-embed-text-v1.5.Q4_K_M";
 
 /// Default local embedding model weight URL. Override via `RYU_LOCAL_EMBED_MODEL_URL`.
+///
+/// # Why every default weight URL pins a commit revision, never `main`
+///
+/// A `/resolve/main/` URL and a hardcoded `*_SHA256` next to it are a contradiction:
+/// the URL tracks whatever the upstream repo's default branch points at *today*,
+/// while the checksum is frozen at whatever it pointed at when the const was
+/// written. The moment upstream re-uploads a quant, every fresh install fails the
+/// download with `checksum mismatch: expected … got …` and the model is
+/// permanently unobtainable — the retry path re-fetches the same new bytes and
+/// fails again. That is not hypothetical: it is exactly what happened to
+/// [`DEFAULT_LOCAL_CHAT_MODEL_URL`] (Gemma), and it is the reason all four of
+/// these now carry a 40-hex commit sha instead.
+///
+/// `/resolve/<commit-sha>/` is a permalink on the HF CDN, so URL and checksum move
+/// together or not at all. When bumping a model, change the revision AND the
+/// checksum in the same edit; read the new value from
+/// `POST /api/models/<repo>/paths-info/<rev>` → `[0].lfs.oid` (the LFS oid IS the
+/// sha256 of the file's contents; the top-level `oid` is a git blob hash and is
+/// NOT what the downloader compares against).
 pub const DEFAULT_LOCAL_EMBED_MODEL_URL: &str =
-    "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf";
+    "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/0188c9bf409793f810680a5a431e7b899c46104c/nomic-embed-text-v1.5.Q4_K_M.gguf";
 
 /// SHA-256 of the default embedding GGUF (from the HF tree API lfs oid).
 /// Override via `RYU_LOCAL_EMBED_MODEL_SHA256` (empty string skips verification).
@@ -198,8 +217,9 @@ pub const DEFAULT_RERANKER_BASE_URL: &str = "http://127.0.0.1:8082";
 pub const DEFAULT_LOCAL_RERANKER_MODEL_ID: &str = "bge-reranker-v2-m3.Q4_K_M";
 
 /// Default local reranker weight URL. Override via `RYU_LOCAL_RERANKER_MODEL_URL`.
+/// Pinned to a commit revision — see [`DEFAULT_LOCAL_EMBED_MODEL_URL`].
 pub const DEFAULT_LOCAL_RERANKER_MODEL_URL: &str =
-    "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf";
+    "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-Q4_K_M.gguf";
 
 /// SHA-256 of the default reranker GGUF (from the HF LFS oid / `x-linked-etag`).
 /// Override via `RYU_LOCAL_RERANKER_MODEL_SHA256` (empty string skips verification).
@@ -224,8 +244,9 @@ pub const DEFAULT_LOCAL_RERANKER_MODEL_SHA256: &str =
 pub const DEFAULT_LOCAL_CLASSIFIER_MODEL_ID: &str = "gemma-3-270m-it-qat-Q4_0";
 
 /// Default local classifier weight URL. Override via `RYU_LOCAL_CLASSIFIER_MODEL_URL`.
+/// Pinned to a commit revision — see [`DEFAULT_LOCAL_EMBED_MODEL_URL`].
 pub const DEFAULT_LOCAL_CLASSIFIER_MODEL_URL: &str =
-    "https://huggingface.co/ggml-org/gemma-3-270m-it-qat-GGUF/resolve/main/gemma-3-270m-it-qat-Q4_0.gguf";
+    "https://huggingface.co/ggml-org/gemma-3-270m-it-qat-GGUF/resolve/7dba9faa7cdb58c7dc44b238c7dbb00e391fbf65/gemma-3-270m-it-qat-Q4_0.gguf";
 
 /// SHA-256 of the default classifier GGUF (241 410 624 bytes; verified reachable
 /// without HF authentication). Override via `RYU_LOCAL_CLASSIFIER_MODEL_SHA256`
@@ -266,13 +287,21 @@ pub const DEFAULT_LOCAL_CHAT_MODEL_ID: &str = "gemma-4-E2B-it-Q4_K_M";
 pub const DEFAULT_AGENT_ID: &str = "ryu";
 
 /// Default local chat model weight URL. Override via `RYU_LOCAL_CHAT_MODEL_URL`.
+///
+/// **Pinned to a commit revision, not `main`** — see the note on
+/// [`DEFAULT_LOCAL_EMBED_MODEL_URL`]. This is the const that proved the point: it
+/// pointed at `/resolve/main/`, unsloth re-uploaded the GGUF, and every fresh
+/// install then failed the download with
+/// `checksum mismatch: expected 9378bc47… got 740185b2…` — the default chat model,
+/// unusable, with no way for a user to tell that upstream had moved.
 pub const DEFAULT_LOCAL_CHAT_MODEL_URL: &str =
-    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf";
+    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/gemma-4-E2B-it-Q4_K_M.gguf";
 
-/// SHA-256 of the default GGUF weight (from git-lfs pointer metadata).
+/// SHA-256 of the default GGUF weight, as published at the pinned revision above
+/// (HF `paths-info` → `lfs.oid`).
 /// Override via `RYU_LOCAL_CHAT_MODEL_SHA256` (use empty string to skip verification).
 pub const DEFAULT_LOCAL_CHAT_MODEL_SHA256: &str =
-    "9378bc471710229ef165709b62e34bfb62231420ddaf6d729e727305b5b8672d";
+    "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8";
 
 // ── Entry types ───────────────────────────────────────────────────────────────
 
@@ -1205,6 +1234,68 @@ const REGISTRY_ENV: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every default weight URL must be pinned to an immutable commit revision.
+    ///
+    /// A `/resolve/main/` URL paired with a frozen `*_SHA256` const is a live
+    /// time-bomb: it keeps working right up until upstream re-uploads the quant,
+    /// and then it fails FOREVER — `finalize` compares the fresh bytes against the
+    /// stale const, rejects them, and every retry re-downloads the same new bytes
+    /// and fails identically. There is no self-healing path and nothing in the
+    /// error points at the real cause (upstream moved), so it reads as a corrupt
+    /// download to everyone who hits it.
+    ///
+    /// It is not hypothetical — this test exists because the default chat model
+    /// (Gemma) sat broken in exactly this state: pinned `9378bc47…`, upstream
+    /// serving `740185b2…`. The four consts are checked together because the bug
+    /// is a property of the URL SHAPE, not of any one model.
+    ///
+    /// If this fails on a URL you just edited: keep `/resolve/<40-hex-commit>/`
+    /// and re-read the checksum from
+    /// `POST /api/models/<repo>/paths-info/<rev>` → `[0].lfs.oid`.
+    #[test]
+    fn every_default_weight_url_is_pinned_to_a_commit_not_a_branch() {
+        for (name, url, sha) in [
+            (
+                "embed",
+                DEFAULT_LOCAL_EMBED_MODEL_URL,
+                DEFAULT_LOCAL_EMBED_MODEL_SHA256,
+            ),
+            (
+                "reranker",
+                DEFAULT_LOCAL_RERANKER_MODEL_URL,
+                DEFAULT_LOCAL_RERANKER_MODEL_SHA256,
+            ),
+            (
+                "classifier",
+                DEFAULT_LOCAL_CLASSIFIER_MODEL_URL,
+                DEFAULT_LOCAL_CLASSIFIER_MODEL_SHA256,
+            ),
+            (
+                "chat",
+                DEFAULT_LOCAL_CHAT_MODEL_URL,
+                DEFAULT_LOCAL_CHAT_MODEL_SHA256,
+            ),
+        ] {
+            let Some((_, tail)) = url.split_once("/resolve/") else {
+                panic!("{name} weight URL is not an HF resolve URL: {url}");
+            };
+            let Some((revision, _)) = tail.split_once('/') else {
+                panic!("{name} weight URL has no revision segment: {url}");
+            };
+            assert!(
+                revision.len() == 40 && revision.chars().all(|c| c.is_ascii_hexdigit()),
+                "{name} weight URL must pin a 40-hex commit revision, not the mutable \
+                 '{revision}' — a moving ref plus a frozen checksum breaks the download \
+                 permanently the next time upstream re-uploads: {url}"
+            );
+            assert!(
+                sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "{name} checksum must be a 64-hex sha256 (the HF `lfs.oid` at the pinned \
+                 revision), got {sha:?}"
+            );
+        }
+    }
 
     #[test]
     fn defaults_are_spec_models() {

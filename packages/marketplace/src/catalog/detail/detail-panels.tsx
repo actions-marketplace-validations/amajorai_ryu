@@ -99,7 +99,11 @@ export function DetailMetaStrip({
 	const updated = formatDate(detail?.updatedAt);
 	const created = formatDate(detail?.createdAt);
 	const downloads = detail?.downloads ?? null;
-	const surfaces = detail?.surfaces ?? [];
+	// Fall back to the CARD's surfaces when the detail fetch has not landed (or the
+	// source serves no detail at all). This is load-bearing now that the card no
+	// longer shows the badges itself: without the fallback, "which platforms does
+	// this run on?" would be unanswerable anywhere for a descriptor-only listing.
+	const surfaces = detail?.surfaces ?? entry.surfaces ?? [];
 
 	const items = [
 		version

@@ -2,6 +2,7 @@
   "id": "@ryu/sandbox",
   "name": "Ephemeral Sandbox",
   "version": "1.0.0",
+  "category": "Sandbox",
   "engines": {
     "ryu": ">=0.0.1"
   },

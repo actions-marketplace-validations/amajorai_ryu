@@ -7,7 +7,7 @@
   "iconDither": { "from": 284, "to": 318, "direction": "right" },
   "tagline": "Sixty formats, element-typed output",
   "keywords": ["document", "parse", "pdf", "docx", "ocr", "extraction"],
-  "category": "Knowledge",
+  "category": "Documents",
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

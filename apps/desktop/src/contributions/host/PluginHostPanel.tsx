@@ -50,6 +50,7 @@ import {
 } from "@/src/contributions/registry.ts";
 import { registerTabIcon } from "@/src/contributions/tab-icon-registry.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { subscribeFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { listActivity } from "@/src/lib/api/activity.ts";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
 import {
@@ -119,15 +120,20 @@ import {
 } from "@/src/lib/api/plugins.ts";
 import {
 	acceptSuggestion as acceptQuestSuggestion,
+	captureQuest,
 	completeQuest,
 	createQuest,
 	deleteQuest,
 	dismissQuest,
 	dismissSuggestion as dismissQuestSuggestion,
+	getScratchpad,
 	judgeQuest,
 	listQuests,
+	pinQuest,
 	type QuestInput,
+	setScratchpad,
 	updateQuest,
+	useQuest,
 } from "@/src/lib/api/quests.ts";
 import {
 	getRecordingStatus,
@@ -912,8 +918,30 @@ export function PluginHostPanel({
 			// auto-detecting-todo orchestration. Host-direct (the monitors pattern): the
 			// host holds the node token and calls the existing `/api/quests/*` client,
 			// forwarding Core's snake_case shapes verbatim over the bridge (quests:crud).
-			questsList: () =>
-				listQuests(toTarget(node)) as unknown as Promise<QuestRecord[]>,
+			questsList: (input) =>
+				listQuests(
+					toTarget(node),
+					input?.kind as Parameters<typeof listQuests>[1]
+				) as unknown as Promise<QuestRecord[]>,
+			questsCapture: (input) =>
+				captureQuest(
+					toTarget(node),
+					input as unknown as Parameters<typeof captureQuest>[1]
+				) as unknown as Promise<QuestRecord>,
+			questsUse: ({ id, complete }) =>
+				useQuest(
+					toTarget(node),
+					id,
+					complete
+				) as unknown as Promise<QuestRecord>,
+			questsPin: ({ id, pinned }) =>
+				pinQuest(
+					toTarget(node),
+					id,
+					pinned ?? true
+				) as unknown as Promise<QuestRecord>,
+			questsScratchpad: () => getScratchpad(toTarget(node)),
+			questsSetScratchpad: ({ text }) => setScratchpad(toTarget(node), text),
 			questsCreate: (input) =>
 				createQuest(
 					toTarget(node),
@@ -1265,6 +1293,32 @@ export function PluginHostPanel({
 					});
 					const done = () => {
 						observer.disconnect();
+						resolve();
+					};
+					if (signal.aborted) {
+						done();
+					} else {
+						signal.addEventListener("abort", done, { once: true });
+					}
+				}),
+			// The host's display preferences. One field today — `friendly`, the
+			// app-wide "Friendly names" toggle — emitted now and on every change, so a
+			// companion's own copy can follow the shell's vocabulary instead of being
+			// the one panel still saying "Graph" while the app around it says
+			// "Connected search". `subscribeFriendlyMode` calls back immediately, which
+			// is what gives the frame the current value on subscribe (the same contract
+			// `shellThemeSubscribe` above keeps with its initial `push()`).
+			shellPrefsSubscribe: (_input, emit, signal) =>
+				new Promise<void>((resolve) => {
+					const dispose = subscribeFriendlyMode((friendly) => {
+						try {
+							emit(JSON.stringify({ friendly }));
+						} catch {
+							// A serialize/post failure is non-fatal — the next change re-emits.
+						}
+					});
+					const done = () => {
+						dispose();
 						resolve();
 					};
 					if (signal.aborted) {

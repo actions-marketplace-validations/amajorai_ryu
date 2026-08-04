@@ -95,6 +95,11 @@ impl From<DependencyError> for EnableError {
 pub enum DisableError {
     /// The app is not installed.
     NotInstalled { id: String },
+    /// The plugin is **mandatory** — required for Core, and refused with no `force`
+    /// escape. Checked before [`Self::LoadBearing`] so the stronger, unforceable
+    /// reason is the one reported for a plugin that is in both sets.
+    /// See [`crate::plugins::builtins::MANDATORY_PLUGINS`].
+    Mandatory { id: String },
     /// The plugin is **load-bearing** (a core subsystem depends on it, e.g.
     /// `engines`/`durable`) and `force` was not set. Disabling it would break a
     /// function every install relies on, so the guard refuses unless the caller
@@ -112,6 +117,11 @@ impl std::fmt::Display for DisableError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotInstalled { id } => write!(f, "app '{id}' is not installed"),
+            Self::Mandatory { id } => write!(
+                f,
+                "app '{id}' is required for Ryu to run and cannot be disabled or \
+                 uninstalled. force=true does not override this."
+            ),
             Self::LoadBearing { id } => write!(
                 f,
                 "app '{id}' is load-bearing and cannot be disabled without force; \
@@ -645,6 +655,14 @@ pub async fn disable_app(
         return Err(DisableError::NotInstalled { id: id.to_owned() });
     }
 
+    // Mandatory guard: required-for-Core plugins are refused outright. Deliberately
+    // NOT behind `!force` — that is the whole difference between this tier and the
+    // load-bearing one below, and a force flag that can switch off the retrieval or
+    // execution plane is a foot-gun with no legitimate caller.
+    if crate::plugins::builtins::is_mandatory(id) {
+        return Err(DisableError::Mandatory { id: id.to_owned() });
+    }
+
     // Load-bearing guard: refuse to disable a core subsystem unless forced. Checked
     // before any bit is flipped, so a refusal is never a partial disable.
     if !force && crate::plugins::builtins::is_load_bearing(id) {
@@ -690,6 +708,21 @@ pub async fn disable_app(
     } else {
         graph::resolve_disable_order(id, &enabled)
     };
+
+    // Mandatory guard across the WHOLE resolved order, for the same reason the
+    // load-bearing one below spans it: a cascade must not reach a required-for-Core
+    // plugin as a collateral dependent. Unconditional, matching the root check —
+    // otherwise `force` would let a cascade do what a direct disable cannot, which
+    // is the exact bypass the unforceable tier exists to close. Reachable today:
+    // `spaces` and `rag` DO sit on `requires` edges other apps declare.
+    if let Some(mandatory) = order
+        .iter()
+        .find(|pid| crate::plugins::builtins::is_mandatory(pid))
+    {
+        return Err(DisableError::Mandatory {
+            id: mandatory.clone(),
+        });
+    }
 
     // Load-bearing guard across the WHOLE resolved order, not just the root: a
     // cascade must not tear down a core subsystem pulled in as a collateral
@@ -845,6 +878,10 @@ pub async fn uninstall_app(
         // Unreachable in practice (load-bearing ⊂ default-on ⊂ protected), but map
         // it to Protected rather than panicking if the invariant ever changes.
         Err(DisableError::LoadBearing { id }) => return Err(UninstallError::Protected { id }),
+        // Also unreachable (mandatory ⊂ default-on ⊂ protected, asserted by
+        // `mandatory_plugins_are_all_default_on`), and mapped rather than panicked
+        // on for the same reason.
+        Err(DisableError::Mandatory { id }) => return Err(UninstallError::Protected { id }),
         Err(DisableError::Other(e)) => return Err(UninstallError::Other(e)),
     };
 

@@ -238,6 +238,8 @@ export function ExtensionHost({
 				};
 				if (req.method === "shell.themeSubscribe") {
 					bindShellStream(servicesRef.current.shellThemeSubscribe);
+				} else if (req.method === "shell.prefsSubscribe") {
+					bindShellStream(servicesRef.current.shellPrefsSubscribe);
 				} else if (req.method === "shell.registerCommand") {
 					bindShellStream(servicesRef.current.shellRegisterCommand);
 				} else if (req.method === "shell.registerTabIcon") {

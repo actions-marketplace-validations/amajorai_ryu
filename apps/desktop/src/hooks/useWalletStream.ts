@@ -14,12 +14,23 @@
 import { useEffect, useState } from "react";
 import {
 	hasCreditsAuth,
+	isTerminalCreditsError,
 	openWalletStream,
 	type WalletUpdate,
 } from "@/src/lib/api/credits.ts";
 
 const INITIAL_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 10_000;
+/**
+ * Retry cadence for a failure that only USER action elsewhere can clear (no
+ * active org, signed out). Still retried rather than abandoned, but at a cadence
+ * that does not repeat the same 409 every few seconds for the life of the
+ * session. Recovery does not depend on this timer being short: `useCreditsWallet`
+ * refetches the wallet on window focus, so the BALANCE is already current when
+ * the user comes back from creating an org — this only decides how long the live
+ * stream stays down afterwards.
+ */
+const TERMINAL_RETRY_MS = 300_000;
 
 /** Pause that resolves early when the stream is torn down. */
 function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -43,18 +54,28 @@ async function runWalletStream(
 ): Promise<void> {
 	let backoff = INITIAL_BACKOFF_MS;
 	while (!signal.aborted) {
+		// Set when the last attempt failed for a reason reconnecting cannot fix.
+		let terminal = false;
 		if (hasCreditsAuth()) {
 			try {
 				for await (const message of openWalletStream(signal)) {
 					onWallet(message.data);
 					backoff = INITIAL_BACKOFF_MS; // a live frame resets the backoff
 				}
-			} catch {
-				// Connect/read failed (sign-out, control-plane restart) — reconnect.
+			} catch (e) {
+				// Connect/read failed. A 409 (no active org) or 401 will keep failing
+				// identically until the user acts, so it drops to the slow cadence
+				// instead of riding the transient backoff up to 10s and staying there.
+				terminal = isTerminalCreditsError(e);
 			}
 		}
 		if (signal.aborted) {
 			break;
+		}
+		if (terminal) {
+			await delay(TERMINAL_RETRY_MS, signal);
+			backoff = INITIAL_BACKOFF_MS;
+			continue;
 		}
 		// When signed out we have no token; wait a full interval before retrying so
 		// a later sign-in is picked up without hot-looping.

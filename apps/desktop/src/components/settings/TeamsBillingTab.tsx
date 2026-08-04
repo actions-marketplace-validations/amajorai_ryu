@@ -81,6 +81,10 @@ export function TeamsBillingTab() {
 		enabled: authed,
 		queryKey: ["teams-wallet"],
 		queryFn: fetchWallet,
+		// Same `retry: false` as the seat query above, for the same reason: the
+		// wallet is org-level, so a caller with no active org gets a 409 that three
+		// more attempts cannot turn into a wallet.
+		retry: false,
 	});
 	const organizationId = seatQuery.data?.organizationId;
 	const roleQuery = useQuery({

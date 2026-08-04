@@ -12,6 +12,7 @@
 import type {
 	DockPanelSpec,
 	SidebarSectionSpec,
+	StoreTabSpec,
 	ViewContribution,
 	ViewSource,
 } from "@ryu/app-host/views";
@@ -60,6 +61,8 @@ interface AppManifestWire {
 	installed: boolean;
 	installed_version: string | null;
 	local_only: boolean;
+	/** Required for Core — Disable/Uninstall are refused (403, no force). */
+	mandatory?: boolean;
 	name: string;
 	permission_grants: string[];
 	/** Plugin-to-plugin dependencies. Absent (`skip_serializing_if`) = none. */
@@ -130,6 +133,11 @@ export interface AppInfo {
 	installed: boolean;
 	installedVersion: string | null;
 	localOnly: boolean;
+	/** Required for Core: never render a Disable switch or an Uninstall button.
+	 *  Core refuses both with a 403 and no force override, so the control could only
+	 *  ever produce an error. Stamped by Core from its own `MANDATORY_PLUGINS`
+	 *  constant, never from the manifest's claim of it. */
+	mandatory: boolean;
 	name: string;
 	permissionGrants: string[];
 	/** Declared dependencies. `null` = none (the common case). */
@@ -282,6 +290,7 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 		installed: w.installed,
 		installedVersion: w.installed_version,
 		localOnly: w.local_only ?? false,
+		mandatory: w.mandatory ?? false,
 		name: w.name,
 		permissionGrants: w.permission_grants,
 		requires: w.requires
@@ -432,6 +441,10 @@ export interface PluginContributions {
 	/** Companion surfaces (overlay/sidebar panels) an enabled plugin declares. */
 	companions: PluginCompanion[];
 	composer_controls: PluginComposerControl[];
+	/** Context-menu rows enabled plugins contribute (`contributes.context_menu_items`),
+	 *  tagged with `plugin`. The declarative replacement for hardcoded shell menu
+	 *  rows like "Make a skill from this chat". */
+	context_menu_items: PluginContextMenuItem[];
 	/** App-registered workspace dock panels (bottom/right dock tabs), tagged with
 	 *  `plugin`. The declarative replacement for the shell's closed `TabKind` union. */
 	dock_panels: PluginDockPanel[];
@@ -440,12 +453,19 @@ export interface PluginContributions {
 	 *  is {@link PluginContributions.turn_hooks}: this is the catalog a user picks
 	 *  from when subscribing a workflow or a hook to "when X happens". */
 	hook_events: PluginHookEvent[];
+	/** Per-message toolbar actions enabled plugins contribute
+	 *  (`contributes.message_actions`), tagged with `plugin`. */
+	message_actions: PluginMessageAction[];
 	settings_tabs: Record<string, unknown>[];
 	/** App-registered sidebar buttons (single nav rows), tagged with `plugin`. */
 	sidebar_buttons: PluginSidebarButton[];
 	/** App-registered sidebar sections (header + live list), tagged with `plugin`. */
 	sidebar_sections: PluginSidebarSection[];
 	slash_commands: Record<string, unknown>[];
+	/** App-registered marketplace tabs, tagged with `plugin` + the app's
+	 *  install/enable state. The ONE family Core serves for disabled and
+	 *  not-installed apps too — see {@link PluginStoreTab}. */
+	store_tabs: PluginStoreTab[];
 	turn_hooks: Record<string, unknown>[];
 	/** Declarative views (the Raycast tier) contributed by enabled plugins. Each is a
 	 *  {@link ViewContribution} the desktop/island renderer maps to native components,
@@ -466,6 +486,33 @@ export interface PluginSidebarSection {
 	plugin: string;
 	spec?: SidebarSectionSpec;
 	title: string;
+}
+
+/** An app-registered marketplace TAB as served by Core (`contributes.store_tabs[]`),
+ *  tagged with its owning `plugin` plus that app's install/enable state.
+ *
+ *  Unlike every sibling family here, store tabs are served for apps that are NOT
+ *  installed or NOT enabled — the Store is where an app gets installed, and the
+ *  built-in feature apps ship un-pre-installed, so an enabled-gated tab would be
+ *  missing exactly when it is needed. `app_installed` / `app_enabled` are what the
+ *  renderer switches on to show an enable prompt instead of an empty catalog. */
+export interface PluginStoreTab {
+	/** Whether the owning app is currently enabled on this node. */
+	app_enabled: boolean;
+	/** Whether the owning app has a store record on this node at all. */
+	app_installed: boolean;
+	/** Nav cluster key (`discover` | `catalog` | `community` | `manage` | `account`). */
+	group?: string;
+	icon?: string;
+	id: string;
+	order?: number;
+	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
+	plugin: string;
+	spec?: StoreTabSpec;
+	subtitle?: string;
+	title: string;
+	/** Named first-party renderer; gated by plugin id, never by this string. */
+	view?: string;
 }
 
 /** An app-registered sidebar BUTTON as served by Core (`contributes.sidebar_buttons[]`),
@@ -577,6 +624,63 @@ export interface PluginChannel {
 	platform: string;
 }
 
+/** A per-message toolbar action an enabled plugin contributes
+ *  (`contributes.message_actions`), tagged with its owning `plugin`.
+ *
+ *  `kind` is the render discriminant and stays a bare string on purpose — a kind
+ *  this build predates still arrives and must be skipped, not break the toolbar.
+ *  The vocabulary today: `"button"` (fire-and-forget dispatch), `"toggle-group"`
+ *  (mutually-exclusive states, what thumbs is), `"menu"`. `target` narrows which
+ *  messages the action attaches to (`"assistant"` | `"user"` | `"any"`).
+ */
+export interface PluginMessageAction {
+	args?: Record<string, unknown>;
+	/** Capability the shell invokes when the action fires, through the owning
+	 *  plugin's granted capability seam (never inline code). */
+	capability?: string;
+	icon?: string;
+	id: string;
+	kind: string;
+	label: string;
+	order?: number;
+	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
+	plugin: string;
+	/** Optional ViewSource polled to hydrate current state (what lights the thumb
+	 *  on reload). */
+	state_source?: ViewSource;
+	/** For `toggle-group`: `{ value, label, icon?, active_icon? }[]`. */
+	states?: {
+		active_icon?: string;
+		icon?: string;
+		label: string;
+		value: string;
+	}[];
+	target: string;
+}
+
+/** A context-menu row an enabled plugin contributes
+ *  (`contributes.context_menu_items`), tagged with its owning `plugin`.
+ *
+ *  `anchor` names the shell menu the row lands in (`"conversation"` |
+ *  `"message"` | `"space"` | `"agent"` | `"project"` | `"workflow"` |
+ *  `"skill"`). `feedback` carries the shell's toast copy: `{ loading, success,
+ *  error }`.
+ */
+export interface PluginContextMenuItem {
+	anchor: string;
+	args?: Record<string, unknown>;
+	/** Capability the shell invokes when the row is clicked, through the owning
+	 *  plugin's granted capability seam. */
+	capability?: string;
+	feedback?: { error?: string; loading?: string; success?: string };
+	icon?: string;
+	id: string;
+	label: string;
+	order?: number;
+	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
+	plugin: string;
+}
+
 /** A companion-surface descriptor contributed by an enabled plugin
  *  (`RunnableKind::Companion`). Mirrors Core's `AppCompanion`. `icon`/`shortcut`
  *  are omitted by serde when null, so they are optional here.
@@ -662,6 +766,8 @@ export async function getPluginContributions(
 	return {
 		composer_controls: json.composer_controls ?? [],
 		settings_tabs: json.settings_tabs ?? [],
+		message_actions: json.message_actions ?? [],
+		context_menu_items: json.context_menu_items ?? [],
 		slash_commands: json.slash_commands ?? [],
 		turn_hooks: json.turn_hooks ?? [],
 		hook_events: json.hook_events ?? [],
@@ -669,8 +775,13 @@ export async function getPluginContributions(
 		sidebar_sections: json.sidebar_sections ?? [],
 		sidebar_buttons: json.sidebar_buttons ?? [],
 		dock_panels: json.dock_panels ?? [],
+		store_tabs: json.store_tabs ?? [],
 		channels: json.channels ?? [],
 		companions: (json.companions ?? []).map(toPluginCompanion),
+		// `widget_apps` is declared non-optional on PluginContributions but was never
+		// carried across this boundary, so every reader saw `undefined` behind an
+		// array type. Defaulted here for the same reason as its siblings.
+		widget_apps: json.widget_apps ?? [],
 	};
 }
 

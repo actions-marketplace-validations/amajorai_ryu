@@ -1,20 +1,20 @@
 import { useChat } from "@ai-sdk/react";
 import { ClipboardIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { StreamedAcpConfig } from "@ryu/blocks/composer/composer-acp-sections";
-import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
+import type { StreamedAcpConfig } from "@ryu/blocks/composer/composer-acp-sections.ts";
+import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts.ts";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,
 	type WidgetHostValue,
-} from "@ryu/blocks/desktop/agent-elements/widget-host-context";
-import { Avatar } from "@ryu/ui/components/avatar";
-import { toast } from "@ryu/ui/components/sileo";
+} from "@ryu/blocks/desktop/agent-elements/widget-host-context.tsx";
+import { Avatar } from "@ryu/ui/components/avatar.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
+} from "@ryu/ui/components/tooltip.tsx";
 import type { JoinAck } from "@ryuhq/core-client/realtime";
 import { DefaultChatTransport } from "ai";
 import type { ReactNode } from "react";
@@ -114,6 +114,7 @@ import {
 	getConversationFeedback,
 	setMessageFeedback,
 } from "@/src/lib/api/message-feedback.ts";
+import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
 import {
 	getDesktopTtsPrefs,
 	getVoiceModeReadbackPrefs,
@@ -1461,6 +1462,49 @@ export default function ChatPage({
 		return out;
 	}, [pluginContributions.slash_commands]);
 
+	// Contributed per-message toolbar actions (`contributes.message_actions`),
+	// passed into blocks presentationally. The shell dispatches each through the
+	// owning plugin's granted host seam when fired.
+	const contributedMessageActions = useMemo(() => {
+		return pluginContributions.message_actions.map((a) => ({
+			id: a.id,
+			label: a.label,
+			icon: a.icon,
+			kind: a.kind,
+			target: a.target,
+			states: a.states,
+			capability: a.capability,
+			plugin: a.plugin,
+		}));
+	}, [pluginContributions.message_actions]);
+
+	const handleContributedMessageAction = useCallback(
+		(
+			action: {
+				capability?: string;
+				icon?: string;
+				id: string;
+				kind: string;
+				label: string;
+				plugin: string;
+				states?: {
+					active_icon?: string;
+					icon?: string;
+					label: string;
+					value: string;
+				}[];
+				target: string;
+			},
+			_value?: string
+		) => {
+			if (!(action.plugin && action.capability)) {
+				return;
+			}
+			void pluginHostInvoke(chatTarget, action.plugin, action.capability, {});
+		},
+		[chatTarget]
+	);
+
 	// Slash commands the active agent advertised over ACP. Core streams the full
 	// list (each update replaces the last) as a `data-ryu-acp-commands` part; we
 	// take the most recent one across the thread. Combined with Ryu's own local
@@ -1926,12 +1970,14 @@ export default function ChatPage({
 	// someone else's. Null when signed out (anonymous) — then own/other is
 	// indistinguishable, but an anonymous author is null too, so nothing inserts.
 	const myUserIdRef = useRef<string | null>(null);
+	const [myUserId, setMyUserId] = useState<string | null>(null);
 	useEffect(() => {
 		let cancelled = false;
 		// `getRealtimeUserId` resolves to null on any failure (never rejects).
 		getRealtimeUserId().then((id) => {
 			if (!cancelled) {
 				myUserIdRef.current = id;
+				setMyUserId(id);
 			}
 		});
 		return () => {
@@ -3683,6 +3729,7 @@ export default function ChatPage({
 							contextSize={contextSize}
 							currentUser={{
 								avatar: oidcUser?.picture,
+								id: myUserId ?? undefined,
 								name: oidcUser?.name || oidcUser?.email,
 							}}
 							emptyStateHeader={
@@ -3717,9 +3764,15 @@ export default function ChatPage({
 								},
 							}}
 							key={`${activeNode.url}-${chatId}`}
+							messageActions={contributedMessageActions}
 							messages={processedMessages}
 							onBranch={activeConversationId ? handleBranch : undefined}
 							onClearQuote={() => setQuote(null)}
+							onContributedMessageAction={
+								activeConversationId
+									? handleContributedMessageAction
+									: undefined
+							}
 							onEditMessage={
 								activeConversationId ? handleEditMessage : undefined
 							}

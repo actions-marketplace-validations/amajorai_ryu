@@ -2,6 +2,7 @@
   "id": "@ryu/predict",
   "name": "Autocomplete",
   "version": "1.0.0",
+  "category": "Automation",
   "icon": "ai-magic",
   "iconDither": {
     "from": 249,

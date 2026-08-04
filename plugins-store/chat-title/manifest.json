@@ -2,6 +2,7 @@
   "id": "@ryu/chat-title",
   "name": "Chat Title",
   "version": "1.0.0",
+  "category": "Productivity",
   "icon": "bubble-chat-edit",
   "iconDither": { "from": 339, "to": 13, "direction": "up" },
   "surfaces": {

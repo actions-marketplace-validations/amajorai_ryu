@@ -32,7 +32,9 @@ import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
-import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreItemAction, {
+	StoreItemOverflowMenu,
+} from "@ryu/marketplace/catalog/chrome/store-item-action";
 import { RequiredPluginsSection } from "@ryu/marketplace/catalog/detail/dependency-graph";
 import { ListingDetailTabs } from "@ryu/marketplace/catalog/detail/listing-detail-tabs";
 import type { CatalogEntry } from "@ryu/marketplace/catalog/types";
@@ -65,6 +67,7 @@ import { useNavigate } from "react-router-dom";
 import { PluginSettingsFields } from "@/src/components/settings/PluginSettingsFields.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
+import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { usePluginSettingsTabs } from "@/src/hooks/usePluginSettingsTabs.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
@@ -188,6 +191,9 @@ export default function InstalledSection() {
 		token: activeNode.token ?? null,
 	};
 	const { byPlugin: settingsByPlugin } = usePluginSettingsTabs();
+	// Where each row's settings live (Gateway dialog vs App Settings, at its own
+	// tab). Resolved once for the whole list and read per row below.
+	const settingsOpener = usePluginSettingsOpener();
 
 	const [query, setQuery] = useState("");
 	const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -360,6 +366,23 @@ export default function InstalledSection() {
 	// regular apps get Enable/Disable + Uninstall.
 	const renderAppAction = (app: AppInfo) => {
 		const busy = pending[app.id] ?? false;
+		// Where this row's own settings live, or null when it declares none. Passed
+		// to every branch below — including the mandatory one, whose lifecycle verbs
+		// are all refused but whose settings are still perfectly reachable.
+		const openSettings = settingsOpener(app.id) ?? undefined;
+		// Required for Core: no lifecycle menu, because every verb in it (disable,
+		// uninstall) is refused server-side. A static badge states the fact instead
+		// of offering three actions that all end in the same 403.
+		if (app.mandatory) {
+			return (
+				<div className="flex shrink-0 items-center gap-1">
+					<Badge className="text-xs" variant="secondary">
+						Required
+					</Badge>
+					<StoreItemOverflowMenu onOpenSettings={openSettings} />
+				</div>
+			);
+		}
 		if (app.builtIn) {
 			return (
 				<StoreItemAction
@@ -376,6 +399,7 @@ export default function InstalledSection() {
 							// Errors surface via the detail panel's state.
 						});
 					}}
+					onOpenSettings={openSettings}
 				/>
 			);
 		}
@@ -394,6 +418,7 @@ export default function InstalledSection() {
 						// Errors surface via the shared toggleError banner.
 					});
 				}}
+				onOpenSettings={openSettings}
 				onUninstall={() => {
 					handleUninstall(app).catch(() => {
 						// Errors surface via the shared toggleError banner.
@@ -752,7 +777,12 @@ function InstalledAppDetail({
 						<h2 className="truncate font-semibold text-xl">{app.name}</h2>
 						<p className="text-muted-foreground text-sm">v{app.version}</p>
 					</div>
-					{isInstalled ? (
+					{/* A mandatory app gets no toggle at all. Core refuses the disable
+					    with a 403 and no force override, so a switch here could only
+					    flip back with an error — and a switch that refuses to move reads
+					    as a bug, not as a policy. The "Required" badge below carries the
+					    explanation instead. */}
+					{isInstalled && !app.mandatory ? (
 						<Switch
 							aria-label={
 								app.enabled ? `Disable ${app.name}` : `Enable ${app.name}`
@@ -771,6 +801,14 @@ function InstalledAppDetail({
 					) : (
 						<Badge variant="secondary">Not installed</Badge>
 					)}
+					{app.mandatory ? (
+						<Badge
+							title="Part of Ryu — required for the app to run."
+							variant="secondary"
+						>
+							Required
+						</Badge>
+					) : null}
 					{app.runnables.some((r) => r.kind === AGENT_KIND) ? (
 						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon className="size-3" icon={BotIcon} />
@@ -814,7 +852,7 @@ function InstalledAppDetail({
 							Install
 						</Button>
 					)}
-					{isInstalled ? (
+					{isInstalled && !app.mandatory ? (
 						<Button
 							className="text-destructive hover:text-destructive"
 							disabled={busy}

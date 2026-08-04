@@ -2,6 +2,7 @@
   "id": "@ryu/meetings",
   "name": "Meetings",
   "version": "1.0.0",
+  "category": "Communication",
   "description": "Meeting notes: record → live transcript → AI notes, auto-saved into the Meetings Space so they stay editable and RAG-searchable.",
   "icon": "mic-01",
   "iconDither": { "from": 318, "to": 352, "direction": "down" },
@@ -59,6 +60,7 @@
           { "path": "/detect" },
           { "path": "/detection-config" },
           { "path": "/templates" },
+          { "path": "/templates/select" },
           { "path": "/import" },
           { "path": "/" },
           { "path": "/:id" },
@@ -163,6 +165,54 @@
         "title": "Meetings",
         "scope": "node",
         "view": "meetings"
+      }
+    ],
+    "store_tabs": [
+      {
+        "id": "meeting-templates",
+        "title": "Meeting Notes",
+        "subtitle": "Note styles tuned to the kind of meeting you're in — pick the one that fits.",
+        "icon": "lucide:notebook-pen",
+        "group": "catalog",
+        "order": 70,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/meetings/templates" },
+            "items": "templates"
+          },
+          "map": {
+            "id": "id",
+            "title": "name",
+            "description": "description",
+            "icon": "icon",
+            "tags": "tags",
+            "installed": "active"
+          },
+          "groupBy": "category",
+          "groups": [
+            { "value": "general", "label": "General" },
+            { "value": "recurring", "label": "Team rituals" },
+            { "value": "revenue", "label": "Sales & customers" },
+            { "value": "hiring", "label": "Hiring" },
+            { "value": "delivery", "label": "Delivery" },
+            { "value": "research", "label": "Research" },
+            { "value": "leadership", "label": "Leadership" }
+          ],
+          "searchPlaceholder": "Search meeting note styles…",
+          "install": {
+            "http": {
+              "method": "POST",
+              "path": "/api/meetings/templates/select",
+              "body": { "template_id": "{{item.id}}" }
+            },
+            "label": "Use",
+            "successMessage": "Note style selected"
+          },
+          "empty": {
+            "title": "No note styles found",
+            "description": "Try a different search."
+          }
+        }
       }
     ],
     "sidebar_sections": [

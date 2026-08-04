@@ -186,6 +186,22 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   `response.fields` but NO `results` path on purpose: a scrape answers with a
 ///   single record (`text` / `markdown`), not an array, which the contract reads as
 ///   "the response itself is the record".
+/// - `parallel.manifest.json` — Parallel search+extract tool plugin (BYOK, but see
+///   below). A fourth `web.search` provider, and the second one after `exa` that
+///   works with NO credential: Parallel publishes a PUBLIC Search MCP endpoint
+///   (`search.parallel.ai/mcp`) alongside the keyed REST API, so the manifest
+///   carries two egress grants and the verb goes through an ADAPTER that falls
+///   back keyed → keyless, exactly as `exa` does. Unlike exa's, that endpoint is
+///   stateless plain JSON-RPC — no `initialize`, no session, no SSE and no
+///   `Accept` header — so the adapter reads `result.structuredContent` instead of
+///   parsing an event-stream frame. Three further things force the adapter:
+///   Parallel search takes an `objective` AND `search_queries`, so ONE canonical
+///   `query` has to fan out to two args; its request bodies are
+///   `additionalProperties: false` and expose NO result-count knob, so `limit` is
+///   applied client-side; and each result's `excerpts` is an ARRAY of markdown
+///   blocks where the canonical `snippet` is a string. `web.extract` needs none of
+///   that and binds declaratively, asking for `advanced_settings.full_content` so
+///   the per-URL record carries one markdown string.
 /// - `ghost.manifest.json` — Ghost desktop-automation MCP tool (system plugin, Windows-first).
 /// - `shadow.manifest.json` — Shadow screen/audio capture + semantic memory (system plugin, Windows-first).
 ///
@@ -361,6 +377,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../plugins-store/tavily/manifest.json"),
     include_str!("../../../../plugins-store/brave/manifest.json"),
     include_str!("../../../../plugins-store/serper/manifest.json"),
+    include_str!("../../../../plugins-store/parallel/manifest.json"),
     include_str!("fixtures/layers.manifest.json"),
     include_str!("../../../../plugins-store/ghost/manifest.json"),
     include_str!("../../../../plugins-store/shadow/manifest.json"),
@@ -379,6 +396,12 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Formerly hardcoded into Island — extracted as an apps-store app so settings
     // register via contributes.settings_tabs like predict.
     include_str!("../../../../apps-store/dictation/manifest.json"),
+    // The Island companion overlay itself — a desktop-owned Electron sidecar the
+    // shell installs and launches (never a Core sidecar), so its record is a pure
+    // settings governance shell: opt-in and NOT pre-seeded (`CORE_PLUGINS` only),
+    // and its Island settings tab registers via contributes.settings_tabs the same
+    // way every other app does, appearing only once the record is installed.
+    include_str!("../../../../apps/island/manifest.json"),
     // Turn-hook plugins (the migrated, formerly-hardcoded features). These ship
     // as built-in fixtures but are built exactly like a third-party plugin would
     // be: a manifest + an inline JS hook reaching Core only through the

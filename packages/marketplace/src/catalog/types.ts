@@ -215,6 +215,16 @@ export interface CatalogEntry {
 	kinds: string[];
 	/** SPDX licence id, when the source reports one. */
 	license?: string | null;
+	/** This listing is REQUIRED FOR CORE: never render a Disable or Uninstall
+	 *  control for it. Both are refused server-side with a 403 `"mandatory"` and no
+	 *  force override, so showing the control only produces a dead button.
+	 *
+	 *  Core stamps this from its own `MANDATORY_PLUGINS` constant, NOT from the
+	 *  manifest's claim of it — "cannot be disabled" is exactly the property a
+	 *  hostile listing would assert about itself, so a remote catalog card that
+	 *  carries this key is asserting something Core never agreed to. Only trust it
+	 *  on a built-in (`source: "built-in"`) entry. */
+	mandatory?: boolean;
 	name: string;
 	/** Who listed this and how much vetting it had. `"community"` = discovered
 	 *  automatically from a public GitHub topic and NOT reviewed by Ryu; absent or

@@ -310,19 +310,25 @@ pub(crate) fn host_is_non_loopback(bind: &str) -> bool {
 /// unwritable home directory yields `None`), and it is the one case that would put
 /// an unauthenticated Core on a public IP. It stays a hard refusal.
 ///
-/// A minted token is per-machine, which matters for exactly one caller: the mesh's
-/// shared-fleet convention, where every node is expected to run the SAME
-/// operator-provisioned `RYU_TOKEN` so peers admit each other. A locally-minted
-/// token silently breaks peer admission, so mesh mode additionally requires the
-/// token to have come from the environment. A plain non-loopback bind does NOT —
-/// a 256-bit random token secures that node perfectly well, and refusing there
-/// would be a regression with no security gain.
+/// Any **strong, non-placeholder** token satisfies the gate — including one this
+/// machine minted for itself. A 256-bit random token secures the node's protected
+/// routes perfectly well; provenance is irrelevant to that guarantee. The mesh's
+/// SHARED-fleet assumption (every node runs the same `RYU_TOKEN` so peers admit
+/// each other) is NOT enforced here: a node running a self-minted token still
+/// exposes a secure node, and the peer-bearer seam (`ryu_mesh::resolve_mesh_bearer`
+/// fed by `node_token::shared_fleet_token`) already reports that state HONESTLY —
+/// `GET /api/mesh/peers` answers `bearer_source:"none"` with a note naming the
+/// shared token to provision, instead of offering a bearer peers would reject. The
+/// old "refuse to start on a self-minted token" branch was dropped because that
+/// silent-failure rationale is obsolete (peer-add is no longer silent) and it made
+/// the desktop's pref-driven mesh enable unusable on a default install, where the
+/// token is always minted.
 ///
 /// Pure + unit-testable: callers pass the resolved token, its provenance, the mesh
 /// flag, and the non-loopback-bind flag.
 pub(crate) fn enforce_remote_auth(
     auth_token: Option<String>,
-    token_source: Option<crate::node_token::TokenSource>,
+    _token_source: Option<crate::node_token::TokenSource>,
     mesh_enabled: bool,
     bind_non_loopback: bool,
 ) -> Result<Option<String>, String> {
@@ -345,18 +351,6 @@ pub(crate) fn enforce_remote_auth(
             return Err(
                 "refusing to start: RYU_TOKEN is still a known placeholder. Generate a strong \
                  random token before exposing Core beyond loopback."
-                    .to_owned(),
-            );
-        }
-        // Mesh only: a minted token is unique to this machine, so peers running
-        // their own would reject it and `resolve_mesh_bearer` would advertise a
-        // bearer that never works. Fail loudly at startup instead.
-        if mesh_enabled && token_source != Some(crate::node_token::TokenSource::Env) {
-            return Err(
-                "refusing to start: RYU_MESH_ENABLED requires an OPERATOR-PROVISIONED RYU_TOKEN. \
-                 This node is running a token it minted for itself, which peers will reject — the \
-                 mesh admits peers on a SHARED node token. Set the same strong RYU_TOKEN on every \
-                 node in the fleet."
                     .to_owned(),
             );
         }
@@ -2479,6 +2473,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // ── Mesh status (#478): opt-in Tailscale/Headscale reachability ───────
         .route("/api/mesh/status", get(mesh_status))
         .route("/api/mesh/peers", get(mesh_peers))
+        .route("/api/mesh/config", post(mesh_config))
         // ── Device-code pairing (protected half) + node-token management ─────
         // Approval is deliberately behind `require_auth`: only a caller that
         // already holds a valid credential may vouch for a new one.
@@ -6033,6 +6028,12 @@ async fn acp_config(
 struct AcpAuthRequest {
     /// One of the `authMethods[].id` values from the agent's `acp-config`.
     method_id: String,
+    /// Optional subscription provider this login is meant to connect
+    /// ("openai-codex" / "claude-pro-max" / "github-copilot"). When present the
+    /// route VERIFIES the outcome against Pi's stored credentials instead of
+    /// trusting the RPC result — see [`acp_authenticate`].
+    #[serde(default)]
+    provider_id: Option<String>,
 }
 
 /// `POST /api/agents/:id/authenticate` — run the ACP Authentication flow for an
@@ -6040,6 +6041,19 @@ struct AcpAuthRequest {
 /// login). The agent subprocess owns the login UX; this issues the ACP
 /// `authenticate` request and waits for completion, then invalidates the cached
 /// `acp-config` so the now-unlocked session config is re-read.
+///
+/// **A successful RPC is not a successful login.** Agents may advertise methods
+/// that merely *describe* how to log in — pi-acp's `pi_terminal_login` ("start pi
+/// in an interactive terminal") answers `authenticate` in about a second having
+/// done nothing — and reporting that as success is how the desktop came to toast
+/// "Connected" for a login that never happened. So when the caller names a
+/// subscription `provider_id`, this compares Pi's stored credential before and
+/// after the call and reports what it OBSERVED:
+///
+/// - `authenticated` — a credential is now present (the only claim worth making).
+/// - `agentAccepted` — the ACP request itself returned without error.
+/// - `verified` — whether ground truth existed to check at all. `false` means
+///   `authenticated` is only the RPC result, and callers must word it as such.
 #[utoipa::path(
     post,
     path = "/api/agents/{id}/authenticate",
@@ -6067,14 +6081,60 @@ async fn acp_authenticate(
         )
             .into_response();
     };
-    match crate::sidecar::adapters::acp::authenticate_acp(spawn_cmd, body.method_id).await {
-        Ok(()) => Json(serde_json::json!({ "authenticated": true })).into_response(),
-        Err(e) => (
+    // Ground truth BEFORE the call, so an already-connected provider is not
+    // credited to a login that did nothing.
+    let before = body
+        .provider_id
+        .as_deref()
+        .and_then(crate::pi_config::subscription_login_present);
+    if let Err(e) = crate::sidecar::adapters::acp::authenticate_acp(spawn_cmd, body.method_id).await
+    {
+        return (
             StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "authenticated": false, "error": e.to_string() })),
+            Json(serde_json::json!({
+                "authenticated": false,
+                "agentAccepted": false,
+                "verified": before.is_some(),
+                "error": e.to_string(),
+            })),
         )
-            .into_response(),
+            .into_response();
     }
+    let Some(was_present) = before else {
+        // No subscription provider named — nothing to check against. Report the
+        // RPC result, flagged unverified so the caller does not claim a login.
+        return Json(serde_json::json!({
+            "authenticated": true,
+            "agentAccepted": true,
+            "verified": false,
+        }))
+        .into_response();
+    };
+    let now_present = body
+        .provider_id
+        .as_deref()
+        .and_then(crate::pi_config::subscription_login_present)
+        .unwrap_or(false);
+    if now_present {
+        return Json(serde_json::json!({
+            "authenticated": true,
+            "agentAccepted": true,
+            "verified": true,
+            // Distinguishes "this call logged you in" from "you already were".
+            "changed": !was_present,
+        }))
+        .into_response();
+    }
+    // The agent accepted the request and no credential appeared: the advertised
+    // method does not perform a login on its own. 200, not an error status — the
+    // request was handled correctly; the LOGIN is what did not happen.
+    Json(serde_json::json!({
+        "authenticated": false,
+        "agentAccepted": true,
+        "verified": true,
+        "error": "The agent accepted the request but no credential was stored, so you are not signed in. This agent's login method has to be completed outside the app.",
+    }))
+    .into_response()
 }
 
 /// `POST /api/agents/:id/logout` — end an ACP agent's authenticated session (ACP
@@ -7718,6 +7778,14 @@ async fn list_apps(
                     "built_in".to_owned(),
                     serde_json::Value::Bool(system.is_some()),
                 );
+                // Required for Core: the installed list must not render a Disable
+                // switch or an Uninstall button for it, because both are refused
+                // (403, no force). From Core's own constant for the same reason
+                // `tier` is — an app cannot self-assert that it is undeletable.
+                obj.insert(
+                    "mandatory".to_owned(),
+                    serde_json::Value::Bool(crate::plugins::builtins::is_mandatory(&m.id)),
+                );
                 // Two-tier registry (#444): Core (first-party, default-on) vs
                 // Community (opt-in). Derived from membership, so a plugin cannot
                 // self-assert Core. Lets the desktop render the Core/Community split.
@@ -8002,13 +8070,30 @@ async fn merged_plugin_catalog_entries(state: &ServerState) -> Vec<serde_json::V
     // group sits above the remote sources so a default-off Core app is classified
     // from its authoritative fixture (companion `type:"app"`) instead of the open
     // catalog's bare plugin card.
-    merge_plugin_catalog_entries(vec![
+    let merged = merge_plugin_catalog_entries(vec![
         manifest_entries,
         BUILTIN_APP_ENTRIES.clone(),
         marketplace_entries,
         git_catalog_entries,
         registry_entries,
-    ])
+    ]);
+
+    // Drop listings marked `hidden`.
+    //
+    // Applied AFTER the merge, not before it, and that ordering is the whole point:
+    // dedup is first-writer-wins, so a hidden built-in manifest must still be the
+    // entry that WINS its id — otherwise a lower-priority remote card for the same
+    // plugin would take the slot and the listing would reappear, unhidden and with
+    // worse metadata. Suppress the winner; never let a loser be promoted.
+    //
+    // This is browse-only. `hidden` says "do not offer this in the Store", not "this
+    // does not exist": an already-installed hidden app keeps working, keeps its
+    // routes, and still shows up in the installed list — which is what makes the
+    // flag safe to set on something that is already shipping.
+    merged
+        .into_iter()
+        .filter(|e| e.get("hidden").and_then(serde_json::Value::as_bool) != Some(true))
+        .collect()
 }
 
 fn plugin_entry_matches_query(entry: &serde_json::Value, needle: &str) -> bool {
@@ -8624,6 +8709,28 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
         }
         if let Some(category) = &m.category {
             obj.insert("category".to_owned(), json!(category));
+        }
+        // Listing-posture keys. Each is emitted ONLY when it is the non-default, so
+        // an ordinary listing's card JSON is byte-identical to what it was before
+        // these existed and no client has to learn three new always-present fields.
+        if m.hidden {
+            obj.insert("hidden".to_owned(), json!(true));
+        }
+        if let Some(stability) = m
+            .stability
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("stable"))
+        {
+            obj.insert("stability".to_owned(), json!(stability.to_lowercase()));
+        }
+        // `mandatory` comes from Core's own constant, NOT the manifest's claim of it.
+        // A card is rendered from untrusted catalog data, and this bit is what makes
+        // the client hide the Disable control — sourcing it from the manifest would
+        // let any listing render itself as undisableable, which is a lie the
+        // lifecycle would then refuse to back up.
+        if crate::plugins::builtins::is_mandatory(&m.id) {
+            obj.insert("mandatory".to_owned(), json!(true));
         }
     }
     entry
@@ -10986,6 +11093,63 @@ fn collect_plugin_slash_commands(
     out
 }
 
+/// Walk the manifests and collect every `store_tabs` entry, tagged with its owning
+/// `plugin` id plus that app's `app_installed` / `app_enabled` bits.
+///
+/// # Why this one is not enabled-filtered
+///
+/// Every sibling contribution family is served only for ENABLED plugins, because a
+/// disabled app must not drive the shell. A marketplace tab is the deliberate
+/// exception: it is the surface you *install the app from*. Every built-in feature
+/// app is `plugins::seed::NOT_PRE_INSTALLED` — absent from the store on a fresh
+/// machine, not merely disabled — so an enabled-gated Workflows tab would vanish on
+/// exactly the profile that has never installed Workflows, taking the workflow
+/// template catalog with it.
+///
+/// This is safe because the tab is a *declaration*, not an authority: the rows it
+/// lists come from the app's own Core path, which keeps its own app-enabled gate
+/// (`/api/workflows/catalog` is inside `workflow_routes`). A tab whose app is off
+/// therefore renders an enable prompt rather than data — the shell learns which from
+/// the two bits stamped here.
+///
+/// The SURFACE filter still applies: a shell the app does not target cannot render
+/// the tab whatever its enabled bit says.
+fn collect_plugin_store_tabs(
+    manifests: &[crate::plugin_manifest::PluginManifest],
+    installed_ids: &std::collections::HashSet<String>,
+    enabled_ids: &std::collections::HashSet<String>,
+    surface: Option<crate::plugin_manifest::Surface>,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for manifest in manifests {
+        if !surface.is_none_or(|s| manifest.supports_surface(s)) {
+            continue;
+        }
+        let Some(c) = &manifest.contributes else {
+            continue;
+        };
+        for tab in &c.store_tabs {
+            let Ok(mut value) = serde_json::to_value(tab) else {
+                continue;
+            };
+            let Some(obj) = value.as_object_mut() else {
+                continue;
+            };
+            obj.insert("plugin".to_string(), serde_json::json!(manifest.id));
+            obj.insert(
+                "app_installed".to_string(),
+                serde_json::json!(installed_ids.contains(&manifest.id)),
+            );
+            obj.insert(
+                "app_enabled".to_string(),
+                serde_json::json!(enabled_ids.contains(&manifest.id)),
+            );
+            out.push(value);
+        }
+    }
+    out
+}
+
 /// `GET /api/plugins/contributions` — the declarative UI contributions (composer
 /// controls, settings tabs, slash commands) of every **enabled** plugin, each
 /// tagged with its owning `plugin` id. The desktop renders the known widget types
@@ -11003,16 +11167,32 @@ async fn plugin_contributions(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
+    // Read the store ONCE and derive both views from it. `store_tabs` needs the
+    // INSTALLED set as well as the enabled one (it is served outside the enabled
+    // filter and tags each tab with both bits), so splitting this into two `list()`
+    // calls would be a second round-trip for the same rows.
+    //
     // Keep the full enabled records (not just ids): the companions payload maps
     // each enabled plugin's companion to that plugin's GATEWAY-APPROVED grants,
     // which live on the record (never the manifest's `permission_grants` claim).
-    let enabled_records = match enabled_plugin_records(&state).await {
+    let all_records = match state.app_store.list().await {
         Ok(records) => records,
-        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
+    let installed_ids: std::collections::HashSet<String> =
+        all_records.iter().map(|r| r.id.clone()).collect();
+    let enabled_records: std::collections::HashMap<String, crate::plugins::PluginRecord> =
+        all_records
+            .into_iter()
+            .filter(|r| r.enabled)
+            .map(|r| (r.id.clone(), r))
+            .collect();
     let enabled_ids: std::collections::HashSet<String> = enabled_records.keys().cloned().collect();
+    let mut store_tabs = Vec::new();
     let mut composer_controls = Vec::new();
     let mut settings_tabs = Vec::new();
+    let mut message_actions = Vec::new();
+    let mut context_menu_items = Vec::new();
     let mut turn_hooks = Vec::new();
     let mut hook_events = Vec::new();
     let mut views = Vec::new();
@@ -11031,6 +11211,18 @@ async fn plugin_contributions(
     // `GET /api/channels/commands` — has to apply exactly the same enabled filter;
     // see [`collect_plugin_slash_commands`].
     let slash_commands = collect_plugin_slash_commands(&manifests, &enabled_ids, surface);
+    // Marketplace tabs — the ONE family collected outside the enabled filter. See
+    // `Contributes::store_tabs`: the Store is where an app gets installed, and every
+    // built-in feature app is `NOT_PRE_INSTALLED`, so an enabled-gated tab would be
+    // absent exactly when the user needs it. The surface filter still applies (a
+    // shell that the app does not target cannot render the tab either way), and the
+    // catalog DATA behind the tab stays gated by the app's own route gate.
+    store_tabs.extend(collect_plugin_store_tabs(
+        &manifests,
+        &installed_ids,
+        &enabled_ids,
+        surface,
+    ));
     for manifest in manifests.iter() {
         if !enabled_ids.contains(&manifest.id) {
             continue;
@@ -11051,6 +11243,12 @@ async fn plugin_contributions(
         };
         composer_controls.extend(c.composer_controls.iter().cloned().map(tag));
         settings_tabs.extend(c.settings_tabs.iter().cloned().map(tag));
+        // Per-message toolbar actions and context-menu rows — the in-conversation
+        // seams. Stored raw + tagged with the owning plugin id, exactly like the
+        // sibling client-rendered families; the renderer owns the `kind`/`anchor`
+        // vocabulary and ignores a member it does not know.
+        message_actions.extend(c.message_actions.iter().cloned().map(tag));
+        context_menu_items.extend(c.context_menu_items.iter().cloned().map(tag));
         // Declarative views (the Raycast tier): serialize each typed contribution to
         // a Value and tag it with its owning plugin, exactly like the sibling families.
         views.extend(
@@ -11203,6 +11401,8 @@ async fn plugin_contributions(
     Json(json!({
         "composer_controls": composer_controls,
         "settings_tabs": settings_tabs,
+        "message_actions": message_actions,
+        "context_menu_items": context_menu_items,
         "slash_commands": slash_commands,
         "turn_hooks": turn_hooks,
         "hook_events": hook_events,
@@ -11210,6 +11410,7 @@ async fn plugin_contributions(
         "sidebar_sections": sidebar_sections,
         "sidebar_buttons": sidebar_buttons,
         "dock_panels": dock_panels,
+        "store_tabs": store_tabs,
         "channels": channels,
         "companions": companions,
         "widget_apps": widget_apps,
@@ -12205,6 +12406,21 @@ async fn disable_app_handler(
             StatusCode::NOT_FOUND,
             format!("app '{id}' is not installed"),
         ),
+        // Mandatory plugin: required for Core, refused with no override. 403 rather
+        // than the 409 below because 409 is the "retry differently" status the
+        // desktop's force/cascade prompts key off, and there is no retry here — the
+        // client should never have offered the control in the first place (the
+        // catalog entry carries `mandatory: true` for exactly that reason).
+        Err(DisableError::Mandatory { id }) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": format!("app '{id}' is required for Ryu to run and cannot be disabled"),
+                "code": "mandatory",
+                "hint": "this app is part of Core; force does not override it",
+            })),
+        )
+            .into_response(),
         // Load-bearing plugin (engines/durable): disabling it breaks a core function
         // every install relies on, so it is refused unless `?force=true`. 409 with a
         // stable machine code so the desktop can render a "force disable?" prompt.
@@ -18121,8 +18337,9 @@ async fn tools_exec_resume(
 /// `GET /api/mesh/status` — opt-in Tailscale/Headscale mesh reachability.
 ///
 /// Returns the canonical Contract 6 superset. When the mesh is disabled
-/// (`RYU_MESH_ENABLED` unset) this is the all-default object with HTTP 200
-/// (never 500), so a vanilla install reports `enabled:false` without amber.
+/// (`ryu_mesh::is_enabled()` false — `RYU_MESH_ENABLED` unset AND the
+/// `mesh-enabled` pref off) this is the all-default object with HTTP 200 (never
+/// 500), so a vanilla install reports `enabled:false` without amber.
 #[utoipa::path(
     get,
     path = "/api/mesh/status",
@@ -18167,6 +18384,84 @@ async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value>
         crate::node_token::shared_fleet_token().as_deref(),
     );
     Json(serde_json::to_value(resp).unwrap_or_default())
+}
+
+/// `POST /api/mesh/config` — enable or disable the mesh plane from the desktop.
+///
+/// Persists the `mesh-enabled` pref (so the choice survives a Core restart),
+/// updates the in-process signal [`ryu_mesh::set_pref_enabled`] immediately, and
+/// starts (enable) or stops (disable) the Tailscale daemon sidecar. Always
+/// answers 200 with the live status so the desktop toggle reflects the PERSISTED
+/// state even when the daemon fails to start; a daemon-start failure rides in a
+/// non-contract `start_error` field (the desktop surfaces it as a warning, not a
+/// rolled-back toggle). The daemon is PATH-adopted — the official
+/// `tailscale`/`tailscaled` client must be installed; a missing client is the
+/// common `start_error`.
+///
+/// Security: enabling mesh makes this Core reachable over the tailnet, so the
+/// fail-closed token gate (`enforce_remote_auth`) requires a strong
+/// non-placeholder `RYU_TOKEN` at next start — a node with no usable token cannot
+/// restart with the mesh on (the failure is loud, at boot). Loopback-admin trust
+/// neutralization follows automatically: the gateway is (re)spawned with
+/// `RYU_MESH_ENABLED=1` once `is_enabled()` reads true.
+#[derive(serde::Deserialize)]
+struct MeshConfigBody {
+    enabled: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/mesh/config",
+    tag = "Nodes",
+    summary = "Enable or disable the mesh plane",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Mesh status after applying the change", body = serde_json::Value))
+)]
+async fn mesh_config(
+    State(state): State<ServerState>,
+    Json(body): Json<MeshConfigBody>,
+) -> axum::response::Response {
+    let value = if body.enabled { "true" } else { "false" };
+    if let Err(e) = state
+        .preferences
+        .set(crate::mesh_host::MESH_ENABLED_PREF_KEY, value)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("failed to persist mesh-enabled pref: {e}") })),
+        )
+            .into_response();
+    }
+    ryu_mesh::set_pref_enabled(body.enabled);
+
+    let mut start_error: Option<String> = None;
+    if body.enabled {
+        // Make the daemon eligible to run, then start it (PATH-adopted). A missing
+        // official `tailscale`/`tailscaled` client is the common failure; the mesh
+        // stays enabled and the desktop surfaces the reason.
+        state.manager.mark_installed("tailscale").await;
+        if let Err(e) = state.manager.start_sidecar("tailscale").await {
+            tracing::warn!("mesh: daemon failed to start after enable: {e}");
+            start_error = Some(e.to_string());
+        }
+    } else {
+        // Best-effort stop — a daemon that never started is not an error for a
+        // disable request, and neither is `tailscale down` on an absent socket.
+        state.manager.unmark_installed("tailscale").await;
+        if let Err(e) = state.manager.stop_sidecar("tailscale").await {
+            tracing::warn!("mesh: stop after disable failed: {e}");
+        }
+    }
+
+    let status = state.mesh.status().await;
+    let mut value = serde_json::to_value(status).unwrap_or_default();
+    if let Some(err) = start_error {
+        // Non-contract field: `MeshStatus` doesn't carry it, but the desktop reads
+        // it to warn without treating the (persisted) enable as a failure.
+        value["start_error"] = serde_json::Value::String(err);
+    }
+    Json(value).into_response()
 }
 
 // ── Webhook ingress seam (#479, P6a) ──────────────────────────────────────────
@@ -27056,29 +27351,49 @@ mod remote_auth_tests {
         }
     }
 
-    /// The mesh admits peers on a SHARED node token. A self-minted one is unique
-    /// to this machine, so every peer would reject it and `resolve_mesh_bearer`
-    /// would hand the desktop a bearer that never works. Fail at startup instead
-    /// of silently at peer-add.
+    /// The mesh exposes this Core to the tailnet, so it still demands a STRONG,
+    /// non-placeholder token. But provenance is no longer the gate: a 256-bit
+    /// self-minted token secures the node's routes perfectly well, and the
+    /// shared-fleet precondition is reported honestly at peer-add
+    /// (`/api/mesh/peers` → `bearer_source:"none"` + note for a minted token)
+    /// rather than by refusing to boot. This is what lets the desktop's
+    /// pref-driven mesh enable work on a default install, where the token is
+    /// always minted.
     #[test]
-    fn mesh_requires_an_operator_provisioned_token() {
-        for source in [TokenSource::File, TokenSource::Minted] {
-            let err = enforce_remote_auth(Some("ryu_deadbeef".to_string()), Some(source), true, false)
-                .expect_err("mesh must refuse a self-minted token");
-            assert!(
-                err.contains("OPERATOR-PROVISIONED"),
-                "the error must tell the operator to provision a shared token: {err}"
-            );
+    fn mesh_accepts_any_strong_non_placeholder_token() {
+        // A strong token — minted, file-persisted, or env-provisioned — is accepted.
+        for source in [TokenSource::File, TokenSource::Minted, TokenSource::Env] {
+            let token = enforce_remote_auth(
+                Some("ryu_deadbeef".to_string()),
+                Some(source),
+                true,
+                false,
+            )
+            .expect("mesh accepts a strong non-placeholder token whatever its provenance");
+            assert_eq!(token.as_deref(), Some("ryu_deadbeef"));
         }
+    }
 
-        // The same token provisioned by an operator is exactly what mesh wants.
+    /// The exposure control is provenance-independent and unchanged: an absent or
+    /// placeholder token is still a hard refusal whenever Core is reachable beyond
+    /// loopback, mesh or not.
+    #[test]
+    fn mesh_still_refuses_tokenless_and_placeholder_tokens() {
+        assert!(enforce_remote_auth(None, None, true, false).is_err());
         assert!(enforce_remote_auth(
-            Some("ryu_deadbeef".to_string()),
+            Some("CHANGE_ME".to_string()),
             Some(TokenSource::Env),
             true,
             false
         )
-        .is_ok());
+        .is_err());
+        assert!(enforce_remote_auth(
+            Some("replace_me".to_string()),
+            Some(TokenSource::Minted),
+            true,
+            false
+        )
+        .is_err());
     }
 }
 
@@ -29262,6 +29577,99 @@ mod pure_helper_tests {
         assert_eq!(
             collect_plugin_slash_commands(&manifests, &enabled, None).len(),
             1
+        );
+    }
+
+    // ── Marketplace tabs (contributes.store_tabs) ────────────────────────────
+
+    fn store_tab_manifest(id: &str, tab_id: &str) -> crate::plugin_manifest::PluginManifest {
+        manifest(json!({
+            "id": id, "name": id, "version": "1.0.0", "runnables": [],
+            "contributes": { "store_tabs": [
+                { "id": tab_id, "title": "Templates", "group": "catalog",
+                  "spec": { "source": { "http": { "path": "/api/x" } } } }
+            ]}
+        }))
+    }
+
+    /// THE invariant of this family, and the reason it is not enabled-filtered like
+    /// every sibling: every built-in feature app is `NOT_PRE_INSTALLED`, so on a
+    /// fresh profile the Workflows app has no store record at all. If its tab were
+    /// gated on that record, the Store would lose the very tab you install workflow
+    /// templates from — on exactly the machine that has never installed one.
+    #[test]
+    fn store_tabs_are_served_for_an_app_that_is_not_installed() {
+        let manifests = vec![store_tab_manifest("@ryu/workflows", "workflows")];
+        let none = enabled_set(&[]);
+        let out = collect_plugin_store_tabs(&manifests, &none, &none, None);
+        assert_eq!(out.len(), 1, "an absent app still contributes its store tab");
+        assert_eq!(out[0]["plugin"], "@ryu/workflows");
+        assert_eq!(out[0]["app_installed"], false);
+        assert_eq!(out[0]["app_enabled"], false);
+    }
+
+    /// Installed-but-disabled is the other half: the tab is listed, and the two bits
+    /// tell the shell to offer "Enable" rather than "Install".
+    #[test]
+    fn store_tabs_report_installed_and_enabled_separately() {
+        let manifests = vec![store_tab_manifest("@ryu/meetings", "meeting-templates")];
+        let installed = enabled_set(&["@ryu/meetings"]);
+        let none = enabled_set(&[]);
+
+        let disabled = collect_plugin_store_tabs(&manifests, &installed, &none, None);
+        assert_eq!(disabled[0]["app_installed"], true);
+        assert_eq!(disabled[0]["app_enabled"], false);
+
+        let on = collect_plugin_store_tabs(&manifests, &installed, &installed, None);
+        assert_eq!(on[0]["app_enabled"], true);
+    }
+
+    /// Dropping the ENABLED filter must not drop the SURFACE filter with it: a shell
+    /// the app does not target cannot render the tab whatever its enabled bit says.
+    #[test]
+    fn store_tabs_still_respect_the_surface_filter() {
+        use crate::plugin_manifest::Surface;
+        let manifests = vec![manifest(json!({
+            "id": "@ryu/workflows", "name": "Workflows", "version": "1.0.0", "runnables": [],
+            "targets": ["desktop"],
+            "contributes": { "store_tabs": [{ "id": "workflows", "title": "Workflows" }] }
+        }))];
+        let none = enabled_set(&[]);
+        assert_eq!(
+            collect_plugin_store_tabs(&manifests, &none, &none, Some(Surface::Desktop)).len(),
+            1
+        );
+        assert_eq!(
+            collect_plugin_store_tabs(&manifests, &none, &none, Some(Surface::Island)).len(),
+            0
+        );
+        // No surface header (a non-desktop reader) means "do not filter".
+        assert_eq!(
+            collect_plugin_store_tabs(&manifests, &none, &none, None).len(),
+            1
+        );
+    }
+
+    /// The packaged manifest is the shipped article, so assert against IT rather than
+    /// a fixture: the Workflows tab must survive the move out of the desktop's
+    /// hardcoded section list, pointed at the catalog route that actually exists.
+    #[test]
+    fn the_workflows_app_registers_its_store_tab() {
+        let manifests: Vec<_> = crate::plugin_manifest::PluginManifestLoader::load()
+            .into_iter()
+            .filter(|m| m.id == "@ryu/workflows")
+            .collect();
+        assert_eq!(manifests.len(), 1, "the Workflows manifest is compiled in");
+        let none = enabled_set(&[]);
+        let out = collect_plugin_store_tabs(&manifests, &none, &none, None);
+        assert_eq!(out.len(), 1, "Workflows registers exactly one store tab");
+        assert_eq!(out[0]["id"], "workflows");
+        assert_eq!(
+            out[0]["spec"]["source"]["http"]["path"], "/api/workflows/catalog",
+            "the tab must point at the catalog route Core actually serves"
+        );
+        assert_eq!(
+            out[0]["spec"]["install"]["http"]["path"], "/api/workflows/catalog/install"
         );
     }
 

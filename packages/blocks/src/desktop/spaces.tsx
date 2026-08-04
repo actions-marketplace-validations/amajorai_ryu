@@ -37,6 +37,7 @@ import { Label } from "@ryu/ui/components/label";
 import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/radio-group";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
+import { useFriendlyMode } from "@ryu/ui/hooks/use-friendly-mode.ts";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 
 /**
@@ -60,22 +61,65 @@ export type SpaceRetrievalMode = "graph" | "vector";
  */
 export const RETRIEVAL_MODE_OPTIONS: readonly {
 	blurb: string;
+	friendlyBlurb: string;
+	friendlyLabel: string;
 	label: string;
 	value: SpaceRetrievalMode;
 }[] = [
 	{
 		value: "vector",
 		label: "Vector",
+		friendlyLabel: "Quick search",
 		blurb:
 			"Fast similarity search. Finds the passages that most resemble your question.",
+		friendlyBlurb:
+			"Fast. Finds the passages that read most like your question.",
 	},
 	{
 		value: "graph",
 		label: "Graph",
+		friendlyLabel: "Connected search",
 		blurb:
 			"Also extracts the entities in each document and how they relate, so it can answer questions that connect facts across documents. Indexing takes longer. An uploaded file is mapped by its name and file type unless its text has been extracted.",
+		friendlyBlurb:
+			"Also notes the people, places and things in each document and how they connect, so it can answer questions that join facts from across documents. Preparing it takes longer. An uploaded file is filed under its name and file type unless its text has been pulled out.",
 	},
 ];
+
+/**
+ * The friendly-mode half of the copy above, and the rule it is written to.
+ *
+ * "Vector" and "Graph" are the names of the algorithms, not of the outcomes. A
+ * user deciding how their own documents should be searched is not choosing a
+ * retrieval architecture; they are choosing between "fast" and "joins facts up".
+ * So friendly mode renames the OPTIONS — Quick search / Connected search — while
+ * the wire values (`vector` / `graph`) and the technical labels are untouched, and
+ * turning the toggle off puts the algorithm names straight back.
+ *
+ * The friendly blurbs are NOT shorter summaries. Friendly mode ships default-ON
+ * (`DEFAULT_FRIENDLY_MODE`), which means this is the copy nearly every user reads,
+ * so every consequence the technical blurb carries has to survive the rewrite:
+ * Graph's cross-document reach, that preparing it takes longer, and that an
+ * uploaded file whose text was never extracted is indexed by name and type alone.
+ * Dropping one of those to sound friendlier would trade a hard word for a wrong
+ * expectation, which is the opposite of the point. `spaces.test.ts` asserts each
+ * of those three claims against the friendly blurb as well as the technical one.
+ *
+ * {@link RETRIEVAL_MODE_SCOPE} deliberately has NO friendly variant: it is already
+ * plain language, it is the sentence this file has twice shipped wrong, and it is
+ * pinned by name in three test suites. One sentence that both modes render is one
+ * sentence that cannot drift into two different promises.
+ */
+export function retrievalModeLabel(
+	mode: SpaceRetrievalMode,
+	friendly: boolean
+): string {
+	const option = RETRIEVAL_MODE_OPTIONS.find((o) => o.value === mode);
+	if (!option) {
+		return String(mode);
+	}
+	return friendly ? option.friendlyLabel : option.label;
+}
 
 /**
  * WHERE the retrieval mode applies — the half of the story this UI has now got
@@ -151,6 +195,12 @@ export function RetrievalModeChoice({
 	onModeChange: (mode: SpaceRetrievalMode) => void;
 }) {
 	const scopeId = `${idPrefix}-scope`;
+	// The app-wide "Friendly names" toggle (Settings → Appearance). Read here, in
+	// the picker, rather than passed down by each caller: both surfaces that offer
+	// this choice get the same vocabulary automatically, exactly as they already
+	// get RETRIEVAL_MODE_SCOPE, and a third surface adopting the picker cannot
+	// forget to thread the preference through.
+	const [friendly] = useFriendlyMode();
 	return (
 		<div className="flex flex-col gap-2">
 			<RadioGroup
@@ -171,9 +221,11 @@ export function RetrievalModeChoice({
 							<RadioGroupItem className="mt-0.5" id={id} value={option.value} />
 							<div className="flex flex-col gap-0.5">
 								<Label className="font-medium text-sm" htmlFor={id}>
-									{option.label}
+									{friendly ? option.friendlyLabel : option.label}
 								</Label>
-								<p className="text-muted-foreground text-xs">{option.blurb}</p>
+								<p className="text-muted-foreground text-xs">
+									{friendly ? option.friendlyBlurb : option.blurb}
+								</p>
 							</div>
 						</div>
 					);
@@ -207,6 +259,24 @@ export function RetrievalModeChoice({
  */
 const RETRIEVAL_MODE_SWITCH_DISCLOSURE =
 	"Changing this rebuilds the entity graph from the documents already in this space; switching back to Vector discards that graph. Documents are never re-embedded, so you can switch back. Switching modes never re-reads an uploaded file's contents.";
+
+/**
+ * The same disclosure in friendly mode — every clause kept, no term of art.
+ *
+ * "Entity graph", "re-embedded" and the bare mode name "Vector" are the three
+ * words in the sentence above that a non-developer cannot act on, and all three
+ * are load-bearing: they are what tells the user this control is reversible, is
+ * not free, and is NOT the re-index button they are probably looking for after
+ * reading {@link FILE_CONTENTS_NOT_INDEXED_NOTE}. So each is replaced by what it
+ * means rather than dropped — "map of how they connect", "read from scratch
+ * again", and the friendly mode name from {@link RETRIEVAL_MODE_OPTIONS}.
+ *
+ * The final clause is the one worth protecting through any future rewrite: a user
+ * who has just been told a file's text is not searchable will try this control
+ * next, and it cannot help them.
+ */
+const RETRIEVAL_MODE_SWITCH_DISCLOSURE_FRIENDLY =
+	"Changing this re-reads the documents already in this space to build a map of how they connect; switching back to Quick search throws that map away. Your documents are never read from scratch again, so you can switch back. Switching never re-opens an uploaded file's contents.";
 
 /**
  * What happened to a file's **contents**. Structurally identical to the desktop
@@ -503,6 +573,7 @@ function DocumentRow({
 }) {
 	const badge = indexBadgeLabel(doc.indexState);
 	const detail = rowDetail(doc);
+	const [friendly] = useFriendlyMode();
 	return (
 		<li>
 			<button
@@ -523,8 +594,18 @@ function DocumentRow({
 					) : null}
 				</span>
 				{badge === null ? (
+					// "Chunk" is the retrieval pipeline's word for a unit of embedded
+					// text, and it appears on EVERY document row — the single most-read
+					// piece of jargon on this page. Friendly mode says "searchable
+					// pieces", which is what the number actually tells the reader: how
+					// much of this document a search can reach. The count itself is
+					// unchanged, so the badge means exactly the same thing in both modes
+					// and the "Name only" replacement below still governs the case where
+					// the count would mislead.
 					<Badge variant="secondary">
-						{doc.chunkCount} {doc.chunkCount === 1 ? "chunk" : "chunks"}
+						{friendly
+							? `${doc.chunkCount} searchable ${doc.chunkCount === 1 ? "piece" : "pieces"}`
+							: `${doc.chunkCount} ${doc.chunkCount === 1 ? "chunk" : "chunks"}`}
 					</Badge>
 				) : (
 					// Replaces the chunk badge rather than joining it — see
@@ -587,6 +668,12 @@ function SpaceDetail(props: SpacesDetailProps) {
 	const ingestDisabled =
 		ingestBusy || !(ingestTitle.trim() && ingestContent.trim());
 
+	// Same app-wide toggle the picker reads; the card's own copy around the picker
+	// (its description, the switch disclosure, the rebuild spinner) has to move
+	// with it, or friendly option names would sit under a heading about algorithms
+	// and above a warning about entity graphs.
+	const [friendly] = useFriendlyMode();
+
 	return (
 		<div className="flex flex-col gap-6 p-4">
 			{canEditRetrieval && retrievalMode !== undefined ? (
@@ -603,8 +690,13 @@ function SpaceDetail(props: SpacesDetailProps) {
 						    space") became an underclaim once chat recall started
 						    delegating to the same search. Naming the algorithm and letting
 						    the scope line own the reach is what stops a third round. */}
+						{/* The friendly wording keeps this line's job — naming the CHOICE,
+						    never its reach — and only drops the word "algorithm", which
+						    is the one term here a non-developer cannot act on. */}
 						<CardDescription>
-							Which algorithm this space is searched with.
+							{friendly
+								? "How this space looks things up."
+								: "Which algorithm this space is searched with."}
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="flex flex-col gap-3">
@@ -615,12 +707,16 @@ function SpaceDetail(props: SpacesDetailProps) {
 							onModeChange={(next) => onRetrievalModeChange?.(next)}
 						/>
 						<p className="text-muted-foreground text-xs">
-							{RETRIEVAL_MODE_SWITCH_DISCLOSURE}
+							{friendly
+								? RETRIEVAL_MODE_SWITCH_DISCLOSURE_FRIENDLY
+								: RETRIEVAL_MODE_SWITCH_DISCLOSURE}
 						</p>
 						{retrievalModeBusy ? (
 							<p className="flex items-center gap-2 text-muted-foreground text-xs">
 								<Spinner className="size-3" />
-								Rebuilding this space's entity graph…
+								{friendly
+									? "Working out how these documents connect…"
+									: "Rebuilding this space's entity graph…"}
 							</p>
 						) : null}
 						{retrievalModeError ? (

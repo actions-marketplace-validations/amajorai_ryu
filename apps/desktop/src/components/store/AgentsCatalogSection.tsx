@@ -13,6 +13,14 @@
 //     a hint that the agent is ready to run locally without a separate install.
 // Recommended agents (the flagship) sort first and carry a "Recommended" badge.
 // The flagship `ryu` is locked: it is always installed and cannot be removed.
+//
+// The list is GROUPED (Workflows/Engines shape): Installed → On this machine →
+// Popular → More agents → Needs manual install. The groups are a presentation of
+// the flags above, never a filter — every catalog row lands in exactly one group,
+// so nothing can silently disappear from the tab. Precedence is top-down, which
+// is what keeps them mutually exclusive (an installed agent that is also detected
+// shows once, under Installed). Searching flattens back to a single grid, the
+// same way the Tools library behaves.
 
 import {
 	Alert01Icon,
@@ -46,6 +54,7 @@ import { Spinner } from "@ryu/ui/components/spinner";
 import { useMemo, useState } from "react";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useAgentsCatalog } from "@/src/hooks/useAgentsCatalog.ts";
+import { groupAgents } from "@/src/lib/agent-catalog-groups.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import type { AgentCatalogEntry } from "@/src/lib/api/agents.ts";
 import { useInstallProgress } from "@/src/store/useDownloadsStore.ts";
@@ -208,10 +217,8 @@ function AgentCardAction({
 	);
 }
 
-function AgentList({
+function AgentCards({
 	agents,
-	loading,
-	error,
 	selectedId,
 	pendingId,
 	onSelect,
@@ -219,42 +226,12 @@ function AgentList({
 	onUninstall,
 }: {
 	agents: AgentCatalogEntry[];
-	loading: boolean;
-	error: string | null;
 	selectedId: string | null;
 	pendingId: string | null;
 	onSelect: (id: string) => void;
 	onInstall: (id: string) => void;
 	onUninstall: (id: string) => void;
 }) {
-	if (loading && agents.length === 0) {
-		return (
-			<div className="flex items-center justify-center p-8 text-muted-foreground">
-				<Spinner className="size-5" />
-			</div>
-		);
-	}
-	if (error && agents.length === 0) {
-		return (
-			<div className="p-4 text-destructive text-sm">
-				Couldn't load agents: {error}
-			</div>
-		);
-	}
-	if (agents.length === 0) {
-		return (
-			<Empty className="h-full p-6">
-				<EmptyHeader>
-					<EmptyMedia variant="icon">
-						<HugeiconsIcon icon={Robot01Icon} />
-					</EmptyMedia>
-					<EmptyTitle>No agents found</EmptyTitle>
-					<EmptyDescription>Try a different search.</EmptyDescription>
-				</EmptyHeader>
-			</Empty>
-		);
-	}
-
 	return (
 		<StoreCardGrid>
 			{agents.map((entry) => (
@@ -292,6 +269,74 @@ function AgentList({
 				/>
 			))}
 		</StoreCardGrid>
+	);
+}
+
+function AgentList({
+	agents,
+	grouped,
+	loading,
+	error,
+	selectedId,
+	pendingId,
+	onSelect,
+	onInstall,
+	onUninstall,
+}: {
+	agents: AgentCatalogEntry[];
+	/** False while searching: results collapse into a single ungrouped grid. */
+	grouped: boolean;
+	loading: boolean;
+	error: string | null;
+	selectedId: string | null;
+	pendingId: string | null;
+	onSelect: (id: string) => void;
+	onInstall: (id: string) => void;
+	onUninstall: (id: string) => void;
+}) {
+	if (loading && agents.length === 0) {
+		return (
+			<div className="flex items-center justify-center p-8 text-muted-foreground">
+				<Spinner className="size-5" />
+			</div>
+		);
+	}
+	if (error && agents.length === 0) {
+		return (
+			<div className="p-4 text-destructive text-sm">
+				Couldn't load agents: {error}
+			</div>
+		);
+	}
+	if (agents.length === 0) {
+		return (
+			<Empty className="h-full p-6">
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						<HugeiconsIcon icon={Robot01Icon} />
+					</EmptyMedia>
+					<EmptyTitle>No agents found</EmptyTitle>
+					<EmptyDescription>Try a different search.</EmptyDescription>
+				</EmptyHeader>
+			</Empty>
+		);
+	}
+
+	const cardProps = { onInstall, onSelect, onUninstall, pendingId, selectedId };
+	if (!grouped) {
+		return <AgentCards agents={agents} {...cardProps} />;
+	}
+	return (
+		<div>
+			{groupAgents(agents).map((group) => (
+				<section className="mb-6" key={group.key}>
+					<h3 className="mb-2 px-1 font-medium text-muted-foreground text-xs uppercase tracking-widest">
+						{group.label}
+					</h3>
+					<AgentCards agents={group.items} {...cardProps} />
+				</section>
+			))}
+		</div>
 	);
 }
 
@@ -443,6 +488,7 @@ export default function AgentsCatalogSection({
 				<AgentList
 					agents={filtered}
 					error={error}
+					grouped={debouncedQuery.trim().length === 0}
 					loading={loading}
 					onInstall={(id) => run(id, () => install(id))}
 					onSelect={setSelectedId}

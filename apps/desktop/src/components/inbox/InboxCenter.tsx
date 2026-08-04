@@ -12,8 +12,8 @@
 // something. Clicking the row body opens the full Inbox; the popover is
 // controlled so those clicks dismiss it.
 //
-// Chrome comes from TrayPopover (plain shadcn Popover + shared row/header
-// primitives), matching the Downloads tray so both read as the same object.
+// Chrome comes from TrayPopover (TrayMorph + shared row/header primitives),
+// matching the Downloads tray so both read as the same object.
 
 import {
 	Calendar04Icon,
@@ -26,13 +26,7 @@ import {
 	Wrench01Icon,
 	ZapIcon,
 } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
-import { Popover, PopoverTrigger } from "@ryu/ui/components/popover";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
+import type { IconSvgElement } from "@hugeicons/react";
 import { useState } from "react";
 import {
 	TrayAction,
@@ -41,12 +35,11 @@ import {
 	TrayFooter,
 	TrayHeader,
 	TrayIconAction,
-	TrayPopoverContent,
+	TrayMorph,
 	TrayRow,
 	TrayScroll,
 	TraySectionLabel,
 	trayMeta,
-	trayTriggerClass,
 } from "@/src/components/shell/TrayPopover.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useApprovals } from "@/src/hooks/useApprovals.ts";
@@ -220,86 +213,78 @@ export function InboxCenter() {
 	}
 
 	return (
-		<Popover onOpenChange={setOpen} open={open}>
-			<Tooltip>
-				<TooltipTrigger
-					render={
-						<PopoverTrigger aria-label="Inbox" className={trayTriggerClass}>
-							<HugeiconsIcon icon={InboxIcon} size={15} />
-							<TrayBadge
-								count={pendingCount}
-								label="items awaiting a decision"
-							/>
-						</PopoverTrigger>
-					}
+		<TrayMorph
+			badge={
+				<TrayBadge count={pendingCount} label="items awaiting a decision" />
+			}
+			icon={InboxIcon}
+			label="Inbox"
+			onOpenChange={setOpen}
+			open={open}
+		>
+			<TrayHeader count={pendingCount} status={status} title="Inbox" />
+			{pendingCount > 0 ? (
+				<TrayScroll>
+					{pending.length > 0 && (
+						<>
+							<TraySectionLabel count={pending.length}>
+								Approvals
+							</TraySectionLabel>
+							{pending.slice(0, PREVIEW_LIMIT).map((approval) => (
+								<ApprovalRow
+									approval={approval}
+									busy={approvals.deciding === approval.id}
+									key={approval.id}
+									onApprove={() => {
+										approvals.approve(approval.id).catch(() => undefined);
+									}}
+									onOpen={openInbox}
+									onReject={() => {
+										approvals.reject(approval.id).catch(() => undefined);
+									}}
+								/>
+							))}
+						</>
+					)}
+					{taskSuggestions.length > 0 && (
+						<>
+							<TraySectionLabel count={taskSuggestions.length}>
+								Tasks
+							</TraySectionLabel>
+							{taskSuggestions.slice(0, PREVIEW_LIMIT).map((quest) => (
+								<SuggestionRow
+									busy={decidingQuest === quest.id}
+									key={quest.id}
+									onAccept={() =>
+										decideQuest(quest.id, quests.acceptSuggestion)
+									}
+									onDismiss={() =>
+										decideQuest(quest.id, quests.dismissSuggestion)
+									}
+									onOpen={openInbox}
+									quest={quest}
+								/>
+							))}
+						</>
+					)}
+					{hidden > 0 && (
+						<button
+							className="rounded-[18px] px-2.5 py-2 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+							onClick={openInbox}
+							type="button"
+						>
+							{hidden} more in the full inbox
+						</button>
+					)}
+				</TrayScroll>
+			) : (
+				<TrayEmpty
+					description="Approvals and task check-offs land here when Ryu needs a decision."
+					icon={InboxIcon}
+					title="You're all caught up"
 				/>
-				<TooltipContent>Inbox</TooltipContent>
-			</Tooltip>
-			<TrayPopoverContent>
-				<TrayHeader count={pendingCount} status={status} title="Inbox" />
-				{pendingCount > 0 ? (
-					<TrayScroll>
-						{pending.length > 0 && (
-							<>
-								<TraySectionLabel count={pending.length}>
-									Approvals
-								</TraySectionLabel>
-								{pending.slice(0, PREVIEW_LIMIT).map((approval) => (
-									<ApprovalRow
-										approval={approval}
-										busy={approvals.deciding === approval.id}
-										key={approval.id}
-										onApprove={() => {
-											approvals.approve(approval.id).catch(() => undefined);
-										}}
-										onOpen={openInbox}
-										onReject={() => {
-											approvals.reject(approval.id).catch(() => undefined);
-										}}
-									/>
-								))}
-							</>
-						)}
-						{taskSuggestions.length > 0 && (
-							<>
-								<TraySectionLabel count={taskSuggestions.length}>
-									Tasks
-								</TraySectionLabel>
-								{taskSuggestions.slice(0, PREVIEW_LIMIT).map((quest) => (
-									<SuggestionRow
-										busy={decidingQuest === quest.id}
-										key={quest.id}
-										onAccept={() =>
-											decideQuest(quest.id, quests.acceptSuggestion)
-										}
-										onDismiss={() =>
-											decideQuest(quest.id, quests.dismissSuggestion)
-										}
-										onOpen={openInbox}
-										quest={quest}
-									/>
-								))}
-							</>
-						)}
-						{hidden > 0 && (
-							<button
-								className="rounded-[18px] px-2.5 py-2 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-								onClick={openInbox}
-								type="button"
-							>
-								{hidden} more in the full inbox
-							</button>
-						)}
-					</TrayScroll>
-				) : (
-					<TrayEmpty
-						description="Approvals and task check-offs land here when Ryu needs a decision."
-						icon={InboxIcon}
-						title="You're all caught up"
-					/>
-				)}
-				<TrayFooter label="Open inbox" onClick={openInbox} />
-			</TrayPopoverContent>
-		</Popover>
+			)}
+			<TrayFooter label="Open inbox" onClick={openInbox} />
+		</TrayMorph>
 	);
 }

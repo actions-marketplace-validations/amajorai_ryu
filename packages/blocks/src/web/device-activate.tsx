@@ -57,9 +57,7 @@ export default function DeviceActivate({
 						type="text"
 						value={userCode}
 					/>
-					{error && (
-						<p className="text-center text-destructive text-sm">{error}</p>
-					)}
+					{error && <p className="text-destructive text-sm">{error}</p>}
 					<Button
 						className="w-full"
 						disabled={isSubmitting || userCode.trim().length < 4}

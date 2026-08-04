@@ -596,6 +596,18 @@ async fn main() {
         // never provisioned (no venv / model), so this has no cost on nodes that
         // don't have the sidecar — TTS falls back to on-demand OuteTTS there.
         "ryutts".into(),
+        // Parakeet (the default STT engine, `default_stt_engine()`) auto-starts for
+        // the same reason: its model is downloaded unconditionally during onboarding,
+        // so a node that has the bits should have the engine loaded rather than
+        // reporting itself dead. Being absent here is what made the Voice settings
+        // row read "Not running — install + start it from Services first" on every
+        // install forever: nothing ever called `start()`, so `loaded` stayed false —
+        // while transcription silently worked anyway, because `transcribe_wav_bytes`
+        // preloads on first use. Listing it here makes `running` mean what it says
+        // and warms the first dictation. `start_all` skips it when the model is not
+        // installed, and a lean build (no `voice-parakeet`) refuses in `start()` and
+        // reports the missing feature — neither reports a false "Running".
+        "parakeet".into(),
         "ollama".into(),
         "vllm".into(),
         "sglang".into(),
@@ -624,6 +636,13 @@ async fn main() {
         "nemoclaw".into(),
         "ironclaw".into(),
         "hermes".into(),
+        // Mesh daemon (Tailscale/Headscale, #478). Listed in startup_order so a
+        // mesh-enabled node auto-starts the daemon on boot. It is PATH-adopted
+        // (never downloaded, so never in `versions.json`) — `start_all` skips it
+        // unless it was explicitly marked installed, which `main()` does just
+        // below only when `ryu_mesh::is_enabled()`. A mesh-off install is never
+        // marked and so never runs (nor logs) anything.
+        "tailscale".into(),
     ];
 
     // Keep the names so we can seed the installed set from disk before
@@ -669,6 +688,11 @@ async fn main() {
     // Start HTTP server for setup control
     let catalog = Arc::new(crate::catalog::CatalogManager::new());
     let auth_state = Arc::new(Mutex::new(auth::AuthState::new()));
+    // The registry snapshot below is frozen for the process lifetime, so the ACP
+    // registry cache has to exist BEFORE it is built — otherwise a cold first
+    // launch serves only the hardcoded curated agents until the next restart.
+    // Bounded and best-effort; see `ensure_registry_cached`.
+    crate::sidecar::agents::acp_registry::ensure_registry_cached().await;
     let agent_registry = Arc::new(AcpAgentRegistry::new());
     // Persisted agent config store (SQLite). Seeds the built-in registry agents
     // as durable rows so they survive a restart and stay selectable.
@@ -737,39 +761,45 @@ async fn main() {
     {
         tracing::warn!("failed to ensure Uploads system space: {e:#}");
     }
-    // Ensure the default, undeletable "Clips" system space exists — where the
-    // out-of-process `@ryu/clips` sidecar files recorded clips. The seed lives
-    // here (not in the sidecar) so the Space is present and undeletable on every
-    // fresh install regardless of whether the clips app has run yet; the name must
-    // match the sidecar's `CLIPS_SPACE_NAME` ("Clips") since `ensure_system_space`
-    // is get-or-create by name.
-    if let Err(e) = spaces
-        .ensure_system_space("Clips", Some("Screen and agent recordings"))
-        .await
-    {
-        tracing::warn!("failed to ensure Clips system space: {e:#}");
-    }
-    // Ensure the "Canvas" system space and import any legacy file-store boards into
-    // it as `@ryu/canvas` app documents (the built-in creative canvas was ported
-    // to a Ryu App; see `server::canvas_migrate`). Idempotent — migrated files are
-    // renamed so a restart never re-imports them.
-    match spaces
-        .ensure_system_space("Canvas", Some("Node-based creative canvases"))
-        .await
-    {
-        Ok(space_id) => {
-            server::canvas_migrate::migrate_legacy_canvases(&spaces, &space_id).await;
+    // NOTE — "Clips" / "Canvas" / "Whiteboard" are DELIBERATELY not seeded here.
+    //
+    // All three used to be `ensure_system_space`d unconditionally on every boot,
+    // right next to Artifacts/Uploads. That was wrong in a way the Artifacts and
+    // Uploads seeds are not: those two back **kernel** surfaces that run whatever
+    // the user has installed (agent file output; the ungated `/api/uploads`
+    // mount). Clips/Canvas/Whiteboard back three OPT-IN APPS — `@ryu/clips`,
+    // `@ryu/canvas`, `@ryu/whiteboard`, none of them default-on, all three in
+    // `plugins::seed::NOT_PRE_INSTALLED` — so seeding their Spaces created three
+    // undeletable, permanently empty Spaces on machines whose owner had never
+    // installed the apps and could not delete them (`ensure_system_space` marks
+    // them system ⇒ undeletable). It also survived a full node reset, because the
+    // reset wipes state and this runs on the very next boot, which is what made it
+    // read as "Ryu keeps re-creating Spaces I deleted".
+    //
+    // Nothing needs the eager create; every writer already get-or-creates by name:
+    //   - Canvas/Whiteboard — `server::mod::{list_app_docs, create_app_doc}` call
+    //     `ensure_system_space(app_space_name(id))` on every `/api/apps/:id/docs`
+    //     request, so the Space appears the first time the app lists or creates a
+    //     board and not before.
+    //   - Clips — filing is `ClipsHost::store_clip`, documented as an idempotent
+    //     get-or-create at file-time. Core has no in-process `CoreClipsHost` at
+    //     all any more (see the note above `clips` routes in `server::mod`), so on
+    //     the current build this Space had no writer whatsoever.
+    //
+    // The one thing that genuinely had to run at boot is the legacy-canvas import,
+    // and only for a user who actually has a legacy store — so it is gated on that
+    // instead of on nothing. `has_pending_legacy_canvases` is a cheap directory
+    // read that is false on every install that never used the pre-App canvas.
+    if server::canvas_migrate::has_pending_legacy_canvases() {
+        match spaces
+            .ensure_system_space("Canvas", Some("Node-based creative canvases"))
+            .await
+        {
+            Ok(space_id) => {
+                server::canvas_migrate::migrate_legacy_canvases(&spaces, &space_id).await;
+            }
+            Err(e) => tracing::warn!("failed to ensure Canvas system space: {e:#}"),
         }
-        Err(e) => tracing::warn!("failed to ensure Canvas system space: {e:#}"),
-    }
-    // Ensure the "Whiteboard" system space where `@ryu/whiteboard` app documents
-    // (freeform boards) live. Unlike Canvas there is no legacy file-store to import,
-    // so just ensure the space. Idempotent.
-    if let Err(e) = spaces
-        .ensure_system_space("Whiteboard", Some("Freeform whiteboards"))
-        .await
-    {
-        tracing::warn!("failed to ensure Whiteboard system space: {e:#}");
     }
     // `&spaces` is what lets `RetrievalOptions::space_ids` reach a real Space: the
     // retrieval store delegates the Spaces half of every recall back to the Spaces
@@ -793,6 +823,15 @@ async fn main() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open preferences store: {e:#}"),
     };
+    // Mesh enable (#478): seed the desktop-driven `mesh-enabled` pref into the
+    // process-global that `ryu_mesh::is_enabled()` consults. The `RYU_MESH_ENABLED`
+    // env still wins when set. Placed here — after the prefs store opens and BEFORE
+    // `create_router` (the fail-closed token gate) and the sidecar `start_all`
+    // spawn — so the enabled signal is settled before anything security-relevant
+    // or mesh-relevant reads it. Same pattern as entitlement/claude-config/etc.
+    if let Ok(Some(value)) = preferences.get(crate::mesh_host::MESH_ENABLED_PREF_KEY).await {
+        ryu_mesh::set_pref_enabled(ryu_mesh::parse_enabled(Some(&value)));
+    }
     // Local support-access diagnostic channel (#546, P5): the append-only audit
     // log, plus the startup auto-disable sweep. Re-checking the hard expiry HERE
     // (a real write, not just a read-time gate) is what makes the AC's "auto-
@@ -1818,6 +1857,14 @@ async fn main() {
         // The default chat + embedding GGUFs download through the global
         // DownloadCenter (#456), so they stream to disk and show in the overlay.
         let downloads_ref = download_center.clone();
+        // The voice engines this install just provisioned have to be started HERE.
+        // `start_all` is spawned concurrently with this task and reads the installed
+        // set from `seed_installed_from_disk`, which on a FIRST run is empty for
+        // anything onboarding is still downloading — so it skipped both voice
+        // engines and they stayed down until the user restarted Core. That restart
+        // requirement is invisible and nobody performs it, which is a large part of
+        // why voice reads as broken on a fresh install.
+        let voice_sidecars_ref = Arc::clone(&sidecars);
         tokio::spawn(async move {
             let stack = setup_ref.install_local_stack(&downloads_ref).await;
             // The return value used to be dropped, so a failed first-run install
@@ -1848,6 +1895,21 @@ async fn main() {
                     .set_installed(tool, "builtin".to_string())
                     .await;
             }
+
+            // Bring up the voice engines onboarding just installed, without waiting
+            // for a Core restart (see `voice_sidecars_ref`). Both are idempotent:
+            // `start_sidecar` no-ops when already running (the common case on every
+            // boot after the first, where `seed_installed_from_disk` let `start_all`
+            // handle them), and skips anything still not installed. Best-effort —
+            // a voice engine that will not start is a warning, never a boot failure.
+            for name in ["parakeet", "ryutts"] {
+                if !setup_ref.is_installed(name).await {
+                    continue;
+                }
+                if let Err(e) = voice_sidecars_ref.start_sidecar(name).await {
+                    tracing::warn!("post-onboarding start of {name} failed: {e:#}");
+                }
+            }
         });
     }
 
@@ -1869,6 +1931,17 @@ async fn main() {
     // gateway with no provider and hanging every chat through it (e.g. `ryu`).
     // Awaited (not spawned) so the seed is in place before `start_all` reads it.
     setup.seed_installed_from_disk(&seed_names).await;
+
+    // Mesh daemon: make `start_all` actually start it when the mesh is enabled.
+    // `seed_installed_from_disk` can't cover tailscale (PATH-adopted, never in
+    // `versions.json`), so mark it installed from the SAME signal the rest of
+    // the mesh reads. A mesh-off install stays unmarked → `start_all` skips it
+    // entirely (no daemon, no warning). The desktop's runtime toggle marks it
+    // too via `POST /api/mesh/config`.
+    if ryu_mesh::is_enabled() {
+        setup.mark_installed("tailscale").await;
+        tracing::info!("mesh: enabled, Tailscale daemon will start with the other sidecars");
+    }
 
     // Start sidecars in background (only installed ones will actually start)
     let sidecars_ref = Arc::clone(&sidecars);

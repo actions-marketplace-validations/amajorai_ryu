@@ -6,7 +6,7 @@
   "icon": "browser",
   "iconDither": { "from": 351, "to": 317, "direction": "left" },
   "tagline": "Real-Chromium browser control for agents",
-  "category": "Automation",
+  "category": "Browsers",
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

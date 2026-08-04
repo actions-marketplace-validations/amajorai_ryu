@@ -66,18 +66,32 @@ function copyLiteral(name: string): string {
 	return match[1];
 }
 
-/** Every blurb in `RETRIEVAL_MODE_OPTIONS`, keyed by mode. Throws if a mode is gone. */
-function modeBlurb(value: "graph" | "vector"): string {
+/**
+ * Every blurb in `RETRIEVAL_MODE_OPTIONS`, keyed by mode. Throws if a mode is gone.
+ *
+ * `field` selects the technical blurb or the friendly-mode one. Both are asserted
+ * against the same claims below, because the friendly copy is not a summary of the
+ * technical copy — friendly mode ships default-ON, so it is the copy nearly every
+ * user actually reads, and a consequence dropped from it is a consequence dropped
+ * from the product for almost everybody.
+ */
+function modeBlurb(
+	value: "graph" | "vector",
+	field: "blurb" | "friendlyBlurb" = "blurb"
+): string {
 	const options = SOURCE.slice(
 		SOURCE.indexOf("export const RETRIEVAL_MODE_OPTIONS"),
 		SOURCE.indexOf("export const RETRIEVAL_MODE_SCOPE")
 	);
+	// `blurb:` is matched with a preceding boundary so it cannot also match the
+	// tail of `friendlyBlurb:` (and vice versa) once both fields are present.
 	const match = new RegExp(
-		`value: "${value}",[\\s\\S]*?blurb:\\s*((?:\\s*"(?:[^"\\\\]|\\\\.)*")+)`
+		`value: "${value}",[\\s\\S]*?(?:^|\\s)${field}:\\s*((?:\\s*"(?:[^"\\\\]|\\\\.)*")+)`,
+		"m"
 	).exec(options);
 	if (!match) {
 		throw new Error(
-			`copy test lost its target: no \`${value}\` entry with a blurb in ` +
+			`copy test lost its target: no \`${value}\` entry with a \`${field}\` in ` +
 				`RETRIEVAL_MODE_OPTIONS (${SOURCE_FILE}).`
 		);
 	}
@@ -192,6 +206,39 @@ describe("the retrieval copy as a whole", () => {
 		expect(modeBlurb("graph")).toMatch(/indexing takes longer/i);
 	});
 
+	it("says the same things in friendly mode — plainer words, not less", () => {
+		// The friendly blurbs are what a default-configured install shows
+		// (DEFAULT_FRIENDLY_MODE is true), so every consequence the technical copy
+		// carries is asserted against them too. Losing one here would hide it from
+		// nearly every user while the technical string kept the test green.
+		expect(modeBlurb("vector", "friendlyBlurb")).toMatch(/fast/i);
+		expect(modeBlurb("graph", "friendlyBlurb")).toMatch(/across documents/i);
+		expect(modeBlurb("graph", "friendlyBlurb")).toMatch(/takes longer/i);
+		// The file caveat: Graph indexes an un-extracted upload by name and type
+		// only. This is the clause a "make it friendlier" edit is most likely to
+		// cut, and the one whose absence produces a user searching for text that
+		// was never read.
+		expect(modeBlurb("graph", "friendlyBlurb")).toMatch(/name and file type/i);
+	});
+
+	it("renames the modes in friendly mode without renaming the wire values", () => {
+		// "Vector"/"Graph" name algorithms; the friendly labels name outcomes. The
+		// values Core stores must not move with the labels — a copy change that
+		// reached the wire would be a data bug wearing a vocabulary change's clothes.
+		const options = SOURCE.slice(
+			SOURCE.indexOf("export const RETRIEVAL_MODE_OPTIONS"),
+			SOURCE.indexOf("export const RETRIEVAL_MODE_SCOPE")
+		);
+		expect(options).toContain('value: "vector"');
+		expect(options).toContain('value: "graph"');
+		expect(options).toContain('label: "Vector"');
+		expect(options).toContain('label: "Graph"');
+		expect(options).toMatch(/friendlyLabel: "[^"]+"/);
+		// Neither friendly label may be the algorithm's name — that would make the
+		// toggle look broken rather than absent.
+		expect(options).not.toMatch(/friendlyLabel: "(Vector|Graph)"/);
+	});
+
 	it("renders the scope line from the picker, so both surfaces get it", () => {
 		// `RetrievalModeChoice` is used by the create dialog
 		// (apps/desktop/src/components/spaces/CreateSpaceDialog.tsx) and by the Space
@@ -213,6 +260,21 @@ describe("the retrieval copy as a whole", () => {
 		expect(disclosure).toMatch(/rebuilds the entity graph/i);
 		expect(disclosure).toMatch(/discards that graph/i);
 		expect(disclosure).toMatch(/never re-embedded/i);
+	});
+
+	it("discloses the same switch consequences in friendly mode", () => {
+		// Same three facts as above — reversible, not free, and not a re-index —
+		// stated without "entity graph" or "re-embedded". The friendly disclosure is
+		// the one shown by default, so it is the one that has to be complete.
+		const friendly = copyLiteral("RETRIEVAL_MODE_SWITCH_DISCLOSURE_FRIENDLY");
+		expect(friendly).toMatch(/how they connect/i);
+		expect(friendly).toMatch(/throws that map away/i);
+		expect(friendly).toMatch(/switch back/i);
+		// The clause that heads off the wrong next action after a "Name only" badge.
+		expect(friendly).toMatch(/never re-opens an uploaded file/i);
+		// The words it exists to avoid.
+		expect(friendly).not.toMatch(/entity graph/i);
+		expect(friendly).not.toMatch(/re-embedded/i);
 	});
 });
 

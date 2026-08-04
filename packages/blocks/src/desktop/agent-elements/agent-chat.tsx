@@ -25,6 +25,8 @@ export function AgentChat({
 	onRegenerateMessage,
 	onFeedback,
 	feedback,
+	messageActions,
+	onContributedMessageAction,
 	onSelectVersion,
 	versions,
 	onSpeak,
@@ -215,6 +217,7 @@ export function AgentChat({
 					enableImagePreview={enableImagePreview}
 					feedback={feedback}
 					initialScrollBehavior={initialScrollBehavior}
+					messageActions={messageActions}
 					messages={
 						error
 							? [
@@ -234,6 +237,7 @@ export function AgentChat({
 							: messages
 					}
 					onBranch={onBranch}
+					onContributedMessageAction={onContributedMessageAction}
 					onEditMessage={onEditMessage}
 					onFeedback={onFeedback}
 					onOpenFile={onOpenFile}

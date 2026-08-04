@@ -7,6 +7,18 @@
 // GitHub image CDN. That keeps the surface useful (GitHub is where plugin repos
 // already host their art) without turning an icon field into an arbitrary remote
 // fetch that could phone home or track an install via the image load.
+//
+// A third shape, `svgl:<slug>`, names a brand mark on svgl.app's public CDN (see
+// `@ryu/ui/components/svgl.ts`). It is a fixed, keyless asset host — the same
+// posture as the Iconify host the Icon primitive already fetches from — so a
+// branded listing (Brave, Firecrawl, Notion, …) can carry its real logo without
+// every publisher pasting a raw URL.
+
+import {
+	isSvglIcon,
+	resolveSvglIcon,
+	type SvglRoute,
+} from "@ryu/ui/components/svgl.ts";
 
 /** GitHub image CDN hosts. Every `*.githubusercontent.com` subdomain
  *  (`raw`, `user-images`, `avatars`, `camo`, `objects`, `private-user-images`)
@@ -51,6 +63,12 @@ export function isHttpUrl(value: string | null | undefined): boolean {
  *  a raster `iconUrl` and an Icon-primitive `iconId` (only when `icon` is a real
  *  id, never a URL).
  *
+ *  An `svgl:<slug>` id is neither: it names a BRAND mark, which must keep its own
+ *  colours, so it resolves to the raster slot (a real `<img>`) rather than to the
+ *  Icon primitive, whose CSS mask would flatten it to a `currentColor` silhouette.
+ *  See {@link resolveSvglIcon}; the caller passes the loaded svgl index so a brand
+ *  with a dark-theme variant gets one.
+ *
  *  `icon_url` is the dedicated raster slot — publisher-declared logo art, already
  *  rendered for any `https:` host (the app CSP permits `img-src https:`), so it is
  *  passed through unchanged; that keeps first-party integration logos (Composio,
@@ -61,16 +79,40 @@ export function isHttpUrl(value: string | null | undefined): boolean {
 export function resolveCardIcon({
 	icon,
 	iconUrl,
+	svglIndex = null,
 }: {
 	icon?: string | null;
 	iconUrl?: string | null;
-}): { iconId?: string | null; iconUrl?: string | null } {
+	/** svgl's loaded brand index, or null before it lands — see {@link useSvglIndex}. */
+	svglIndex?: Map<string, SvglRoute> | null;
+}): {
+	/** True when the raster slot holds a BRAND mark, which must be letterboxed
+	 *  (`object-contain`) rather than cropped to fill the tile like a cover image. */
+	brand?: boolean;
+	iconId?: string | null;
+	iconUrl?: string | null;
+	iconUrlDark?: string | null;
+} {
+	// A brand id resolves to the raster slot in the brand's own colours. The
+	// publisher-declared `icon_url` still wins — it is the more specific claim.
+	const svgl = resolveSvglIcon(icon, svglIndex);
+	if (svgl && !iconUrl) {
+		return {
+			iconId: null,
+			iconUrl: svgl.light,
+			iconUrlDark: svgl.dark,
+			brand: true,
+		};
+	}
 	// A GitHub-image URL in the `icon` field is promoted to the raster slot; a
 	// non-GitHub URL there is discarded (never passed on as an Icon id).
 	const rasterFromIcon = isGithubImageUrl(icon) ? icon : null;
-	const resolvedIconId = icon && !isHttpUrl(icon) ? icon : null;
+	const resolvedIconId =
+		icon && !(isHttpUrl(icon) || isSvglIcon(icon)) ? icon : null;
 	return {
 		iconId: resolvedIconId,
 		iconUrl: (iconUrl ?? null) || rasterFromIcon,
+		iconUrlDark: null,
+		brand: false,
 	};
 }

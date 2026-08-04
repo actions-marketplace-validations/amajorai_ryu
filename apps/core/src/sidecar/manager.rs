@@ -615,6 +615,26 @@ impl SidecarManager {
         Ok(())
     }
 
+    /// Mark a sidecar as installed so `start_sidecar` / `start_all` will run it.
+    ///
+    /// PATH-adopted sidecars (e.g. the mesh's `tailscale`, which Ryu never
+    /// downloads and so never records in `versions.json`) are not covered by
+    /// `seed_installed_from_disk`; callers that make one eligible must mark it
+    /// explicitly (Core does at boot when the mesh pref is on, and the
+    /// `POST /api/mesh/config` enable route does at runtime).
+    pub async fn mark_installed(&self, name: &str) {
+        self.setup.mark_installed(name).await;
+    }
+
+    /// Mark a sidecar as NOT installed, so `start_all` stops auto-starting it.
+    ///
+    /// The mirror of [`Self::mark_installed`]: `POST /api/mesh/config` unmarks
+    /// `tailscale` when the mesh is disabled so a mesh-off install doesn't try
+    /// to start (and warn about) a daemon that must not run.
+    pub async fn unmark_installed(&self, name: &str) {
+        self.setup.uninstall(name).await;
+    }
+
     /// Start a single installed sidecar by name and spawn its health monitor.
     pub async fn start_sidecar(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
         if !self.setup.is_installed(name).await {

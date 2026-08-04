@@ -10,7 +10,7 @@ interface PageHeaderProps {
 	style?: CSSProperties;
 	subtitle?: ReactNode;
 	subtitleDelay?: number;
-	title: string;
+	title: ReactNode;
 	titleClassName?: string;
 	titleDelay?: number;
 }

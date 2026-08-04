@@ -95,6 +95,7 @@ import { EmailAlertsSettings } from "@/src/components/settings/EmailAlertsSettin
 import { EntitySettings } from "@/src/components/settings/EntitySettings.tsx";
 import { IntegrationsTab } from "@/src/components/settings/IntegrationsTab.tsx";
 import { LlmProvidersSettings } from "@/src/components/settings/LlmProvidersSettings.tsx";
+import { NetworkSettings } from "@/src/components/settings/NetworkSettings.tsx";
 import { NodeAccessSettings } from "@/src/components/settings/NodeAccessSettings.tsx";
 import { NodePermissionsSettings } from "@/src/components/settings/NodePermissionsSettings.tsx";
 import { PrivacySettings } from "@/src/components/settings/PrivacySettings.tsx";
@@ -5959,6 +5960,13 @@ const GATEWAY_SECTIONS: {
 		icon: Share08Icon,
 		keywords: "integrations composio apps oauth connect",
 	},
+	{
+		value: "network",
+		label: "Network",
+		hint: "The mesh: join this node to a tailnet and reach other Ryu nodes.",
+		icon: Share08Icon,
+		keywords: "network mesh tailscale headscale tailnet vpn remote peers",
+	},
 	// Moved from the App Settings dialog (node-level Core infra, not apps).
 	{
 		value: "connections",
@@ -6199,7 +6207,7 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	},
 	{
 		title: "Connect",
-		items: ["integrations", "connections", "email-alerts"],
+		items: ["network", "integrations", "connections", "email-alerts"],
 	},
 	{ title: "Reports", items: ["usage", "audit", "evals"] },
 	// Node-level Core-infra tabs moved out of the App Settings dialog (not apps —
@@ -6494,6 +6502,7 @@ export function GatewayDialog({
 					</>
 				) : null}
 				{section === "integrations" ? <IntegrationsTab /> : null}
+				{section === "network" ? <NetworkSettings /> : null}
 				{section === "usage" ? (
 					<UsageCostSection
 						configuredProviders={health?.providers ?? []}

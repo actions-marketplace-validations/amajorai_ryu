@@ -2,6 +2,7 @@
   "id": "@ryu/quests",
   "name": "Quests",
   "version": "1.0.0",
+  "category": "Productivity",
   "description": "Quests: auto-detecting todos surfaced from your chats and activity, tracked as a lightweight quest board with progress and completion.",
   "icon": "target-02",
   "iconDither": { "from": 294, "to": 328, "direction": "right" },
@@ -47,8 +48,12 @@
         "routes": [
           { "path": "/events" },
           { "path": "/detection-config" },
+          { "path": "/capture" },
+          { "path": "/scratchpad" },
           { "path": "/" },
           { "path": "/:id" },
+          { "path": "/:id/use" },
+          { "path": "/:id/pin" },
           { "path": "/:id/judge" },
           { "path": "/:id/complete" },
           { "path": "/:id/dismiss" },
@@ -71,6 +76,12 @@
       "label": "Can edit",
       "description": "Create, complete, and delete quests.",
       "implies": ["quests.view"]
+    },
+    {
+      "id": "quests.capture",
+      "label": "Can capture",
+      "description": "Keep selected text, links, and prompts from other apps onto the board, along with the app and page they came from. This is a wider reach than editing the board — it stores content the user selected elsewhere.",
+      "implies": ["quests.edit"]
     }
   ],
   "companion": {
@@ -88,6 +99,23 @@
           "title": "Ship the release notes",
           "detail": "Cover the routing rewrite",
           "completion_condition": "the release notes are published",
+          "created_at": "2026-08-01T09:12:44Z"
+        }
+      },
+      {
+        "id": "@ryu/quests#quest.captured",
+        "title": "Item captured",
+        "description": "Something was kept from the capture gesture or the API — a selection, a link, a prompt to run next, a note. `kind` is what it was filed as; `source` is where it came from and is absent when the item was typed straight in. A captured task fires this AND `quest.created`.",
+        "payload_example": {
+          "id": "quest_1a2b3c4d5e6f708192a3b4c5d6e7f809",
+          "kind": "note",
+          "title": "The retry budget is per-attempt, not per-call",
+          "body": "The retry budget is per-attempt, not per-call — so a 3x retry on a 4-call fan-out is 12 attempts.",
+          "source": {
+            "app": "Claude",
+            "title": "Retry budgets",
+            "url": "https://claude.ai/chat/abc"
+          },
           "created_at": "2026-08-01T09:12:44Z"
         }
       },
@@ -135,7 +163,8 @@
           "items": [],
           "emptyText": "No quests yet.",
           "source": {
-            "http": { "method": "GET", "path": "/api/quests" },
+            "//": "?kind=task ONLY. Captures (notes/links/prompts/clips) are open forever and have no completion condition, so a plain /api/quests here would list them as todos and offer them a Complete action.",
+            "http": { "method": "GET", "path": "/api/quests?kind=task" },
             "items": "quests",
             "map": {
               "subtitle": "detail",

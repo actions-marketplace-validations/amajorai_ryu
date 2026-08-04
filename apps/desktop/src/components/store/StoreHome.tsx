@@ -305,7 +305,14 @@ function HomeSection({ row, onOpen }: { row: HomeRow; onOpen: () => void }) {
 				{row.items.slice(0, 6).map((item: HomeCard) => (
 					<StoreCatalogCard
 						description={item.description}
+						// Home renders the SAME card component as the realm tabs, so it must
+						// also feed it the same icon inputs. Passing only `iconUrl` (which is
+						// null for every app and plugin) sent every row to the generative
+						// placeholder, and made Home — the first tab anyone opens — the one
+						// place the store's icons were wrong.
+						dither={item.dither}
 						icon={initialGlyph(item.name)}
+						iconId={item.iconId}
 						iconUrl={item.iconUrl}
 						key={item.id}
 						name={item.name}

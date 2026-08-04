@@ -23,7 +23,7 @@
 // checkout the UI re-fetches the wallet (the balance may lag a moment behind a
 // completed payment).
 
-import { openSse, type SseMessage } from "@ryuhq/protocol/sse";
+import { openSse, SseConnectError, type SseMessage } from "@ryuhq/protocol/sse";
 import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
 
 /** Micro-USD (millionths of a dollar) per US cent; the server's wallet unit. */
@@ -171,6 +171,44 @@ export class CreditsError extends Error {
 	}
 }
 
+/**
+ * Classify an HTTP status into a {@link CreditsErrorKind} and its fallback copy,
+ * used for both the request path ({@link toError}) and the SSE connect path
+ * (`openWalletStream`), which has no body to read a server message from.
+ */
+function classifyStatus(status: number): {
+	kind: CreditsErrorKind;
+	message: string;
+} {
+	if (status === 401) {
+		return { kind: "auth", message: "Sign in to view credits." };
+	}
+	if (status === 409) {
+		return {
+			kind: "no_org",
+			message:
+				"Credits wallets are org-level. Create or select an organization first.",
+		};
+	}
+	if (status === 503) {
+		return {
+			kind: "billing",
+			message: "Credit top-up is unavailable: billing is not configured.",
+		};
+	}
+	return { kind: "unknown", message: `Request failed: ${status}` };
+}
+
+/** True when this failure will keep failing until the ACCOUNT changes — a retry
+ *  loop must not treat it as a transient blip. `no_org` and `auth` are both
+ *  fixed by user action elsewhere (create/select an org, sign in), never by
+ *  reconnecting. */
+export function isTerminalCreditsError(e: unknown): boolean {
+	return (
+		e instanceof CreditsError && (e.kind === "no_org" || e.kind === "auth")
+	);
+}
+
 async function toError(resp: Response): Promise<CreditsError> {
 	let message: string | undefined;
 	try {
@@ -179,26 +217,8 @@ async function toError(resp: Response): Promise<CreditsError> {
 	} catch {
 		// Non-JSON body.
 	}
-	if (resp.status === 401) {
-		return new CreditsError("auth", message ?? "Sign in to view credits.");
-	}
-	if (resp.status === 409) {
-		return new CreditsError(
-			"no_org",
-			message ??
-				"Credits wallets are org-level. Create or select an organization first."
-		);
-	}
-	if (resp.status === 503) {
-		return new CreditsError(
-			"billing",
-			message ?? "Credit top-up is unavailable: billing is not configured."
-		);
-	}
-	return new CreditsError(
-		"unknown",
-		message ?? `Request failed: ${resp.status}`
-	);
+	const classified = classifyStatus(resp.status);
+	return new CreditsError(classified.kind, message ?? classified.message);
 }
 
 /** Fetch the active org's wallet balance + recent ledger (newest 50). */
@@ -228,16 +248,28 @@ export interface WalletUpdate {
  * Open the org wallet's live-balance stream and async-iterate its frames. Sends
  * the session bearer token in the `Authorization` header (fetch + ReadableStream
  * via `openSse`, not EventSource). Yields one {@link WalletUpdate} per frame and
- * ends when `signal` aborts. Throws on a failed connect so the caller can back
- * off and reconnect.
+ * ends when `signal` aborts.
+ *
+ * A failed connect is re-thrown as a {@link CreditsError} so the reconnect loop
+ * can read the KIND rather than guess: a 409 (`no_org`) is permanent until the
+ * user creates or selects an organization, and retrying it on the transient
+ * cadence was a 409 every few seconds for the whole session.
  */
-export function openWalletStream(
+export async function* openWalletStream(
 	signal: AbortSignal
 ): AsyncGenerator<SseMessage<WalletUpdate>> {
-	return openSse<WalletUpdate>(`${BASE}/wallet/stream`, {
-		token: authToken(),
-		signal,
-	});
+	try {
+		yield* openSse<WalletUpdate>(`${BASE}/wallet/stream`, {
+			token: authToken(),
+			signal,
+		});
+	} catch (e) {
+		if (e instanceof SseConnectError) {
+			const classified = classifyStatus(e.status);
+			throw new CreditsError(classified.kind, classified.message);
+		}
+		throw e;
+	}
 }
 
 export interface TopupInput {

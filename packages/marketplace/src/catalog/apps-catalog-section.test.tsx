@@ -7,7 +7,9 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import AppsCatalogSection from "./apps-catalog-section.tsx";
-import StoreItemAction from "./chrome/store-item-action.tsx";
+import StoreItemAction, {
+	StoreItemOverflowMenu,
+} from "./chrome/store-item-action.tsx";
 import {
 	type CatalogHost,
 	CatalogHostProvider,
@@ -160,5 +162,41 @@ describe("CatalogHost seam — Apps section", () => {
 		expect(html).toContain("Open Sample Plugin in Ryu");
 		// No desktop install button when the surface is read-only.
 		expect(html).not.toContain("Install<");
+	});
+
+	// The Settings route only ever renders when the surface resolved a destination
+	// for the item. A menu row that opens nothing (or a dialog's default page) is
+	// worse than no row, so absence of a handler must mean absence of the control.
+	test("a read-only affordance gets no overflow when nothing can be opened", () => {
+		const html = renderToStaticMarkup(
+			<StoreItemAction
+				affordance={<span>Open Sample Plugin in Ryu</span>}
+				installed={false}
+			/>
+		);
+		expect(html).not.toContain("More actions");
+	});
+
+	test("a settings destination adds the overflow beside a static affordance", () => {
+		const html = renderToStaticMarkup(
+			<StoreItemAction
+				affordance={<span>Open Sample Plugin in Ryu</span>}
+				installed={false}
+				onOpenSettings={() => undefined}
+			/>
+		);
+		expect(html).toContain("More actions");
+	});
+
+	test("a locked (built-in) item still reaches its settings", () => {
+		const html = renderToStaticMarkup(
+			<StoreItemAction installed locked onOpenSettings={() => undefined} />
+		);
+		expect(html).toContain("Built in");
+		expect(html).toContain("More actions");
+	});
+
+	test("StoreItemOverflowMenu renders nothing when it would be empty", () => {
+		expect(renderToStaticMarkup(<StoreItemOverflowMenu />)).toBe("");
 	});
 });

@@ -6,7 +6,7 @@
   "icon": "smart-phone-01",
   "iconDither": { "from": 11, "to": 337, "direction": "right" },
   "tagline": "iOS Simulator & Android Emulator control for agents",
-  "category": "Automation",
+  "category": "Developer Tools",
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

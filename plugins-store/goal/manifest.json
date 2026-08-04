@@ -2,6 +2,7 @@
   "id": "@ryu/goal",
   "name": "Goal",
   "version": "1.0.0",
+  "category": "Productivity",
   "icon": "flag-03",
   "iconDither": { "from": 291, "to": 325, "direction": "down" },
   "surfaces": {

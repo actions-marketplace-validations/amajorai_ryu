@@ -3,9 +3,9 @@
 //! Like whisper.cpp (`whisper-server`) and stable-diffusion.cpp (`sd-server`),
 //! this is an **external runtime Core manages**, not part of the mutually-exclusive
 //! chat-engine swap. The difference is the runtime is a small Python FastAPI
-//! server (`apps/tts-sidecar`) that fronts many TTS engines behind one normalized
-//! HTTP contract (`/generate`, `/engines`, `/health`). Adding an engine is a
-//! registry row in that app — Core never grows a per-engine branch.
+//! server (`apps-store/voice/sidecar`) that fronts many TTS engines behind one
+//! normalized HTTP contract (`/generate`, `/engines`, `/health`). Adding an engine
+//! is a registry row in that app — Core never grows a per-engine branch.
 //!
 //! Placement (Core vs Gateway, CLAUDE.md §1): **Core** — it decides *what runs*
 //! (which local TTS engine renders the audio). Consumed by the Core
@@ -25,6 +25,7 @@ use anyhow::Context;
 use serde_json::Value;
 
 use crate::sidecar::{BoxFuture, HealthStatus, ProcessHandle, Sidecar};
+use crate::win_process::NoWindow;
 
 pub mod kokoro;
 
@@ -88,40 +89,195 @@ pub fn sidecar_dir() -> std::path::PathBuf {
     crate::paths::ryu_dir().join("tts-sidecar")
 }
 
+/// The published `ryu_tts` wheel Core provisions the sidecar from, and the
+/// `amajorai/ryu-voice` satellite release that carries it.
+///
+/// The satellite's release TAG and the wheel's own package VERSION are decoupled
+/// and do NOT match: every `ryu-voice` release so far attaches the same
+/// `ryu_tts_sidecar-0.1.0` wheel, so `v0.1.2` below is the *release* and `0.1.0`
+/// is the *package*. Pinned deliberately rather than `releases/latest/download`:
+/// the sha256 is fixed, so a floating URL is guaranteed to fail the moment the
+/// satellite ships a new wheel. Bumping this means bumping all three together.
+const TTS_SIDECAR_RELEASE_TAG: &str = "v0.1.2";
+const TTS_SIDECAR_WHEEL_FILE: &str = "ryu_tts_sidecar-0.1.0-py3-none-any.whl";
+const TTS_SIDECAR_WHEEL_SHA256: &str =
+    "5b1115a842f4f930e403d0316989ce35af22beea375321c8069e1ee97e0bdfd1";
+
+/// The download URL for [`TTS_SIDECAR_WHEEL_FILE`].
+fn tts_sidecar_wheel_url() -> String {
+    format!(
+        "https://github.com/amajorai/ryu-voice/releases/download/{TTS_SIDECAR_RELEASE_TAG}/{TTS_SIDECAR_WHEEL_FILE}"
+    )
+}
+
+/// The minimum Python the `ryu_tts` wheel accepts (`requires-python = ">=3.10"`).
+const TTS_MIN_PYTHON_MINOR: u32 = 10;
+
+/// Find a Python interpreter new enough to install the sidecar wheel, newest first.
+///
+/// Two reasons this is not just `bootstrap_python()`:
+///
+/// 1. **A bare `python3` is routinely too old.** macOS ships `/usr/bin/python3` as
+///    Python 3.9 — below the wheel's `>=3.10` floor — while a perfectly good
+///    `python3.13` sits next to it from Homebrew. Handing pip the 3.9 would fail
+///    with "requires a different Python", provisioning would report an error, and
+///    TTS would silently stay on OuteTTS on a machine fully capable of running
+///    Kokoro. Probing versioned names first is what makes the default work on a
+///    stock Mac.
+/// 2. **Presence is not usability.** That same `/usr/bin/python3` is a stub that
+///    pops the Xcode Command Line Tools installer when invoked without CLT present,
+///    so a PATH lookup proves nothing. Every candidate is therefore *run*; only an
+///    interpreter that prints its own version is offered.
+///
+/// Returns `None` when nothing suitable exists, which is a skip (fall back to
+/// OuteTTS), not an error.
+async fn resolve_python() -> Option<String> {
+    // Newest first so a node with several installed gets the best one, then the
+    // generic names last as the catch-all (Windows has no `pythonX.Y` shims).
+    let mut candidates: Vec<String> = (TTS_MIN_PYTHON_MINOR..=14)
+        .rev()
+        .map(|m| format!("python3.{m}"))
+        .collect();
+    candidates.push(crate::sidecar::external_runtime::bootstrap_python().to_owned());
+
+    for candidate in candidates {
+        let Ok(out) = tokio::process::Command::new(&candidate)
+            .args(["-c", "import sys; print(sys.version_info[1])"])
+            .no_window()
+            .output()
+            .await
+        else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let minor: u32 = match String::from_utf8_lossy(&out.stdout).trim().parse() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if minor >= TTS_MIN_PYTHON_MINOR {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Best-effort: ensure the sidecar's Python venv exists with the `kokoro` extra
 /// installed, so the default Kokoro engine can actually run.
 ///
 /// Returns `Ok(true)` when the sidecar is provisioned (a venv is present after the
-/// call), `Ok(false)` when the sidecar *code* isn't installed yet — there is nothing
-/// to provision, and dev instead adopts a `bun run dev:tts` process. Errors surface a
-/// real provisioning failure (venv/pip). Idempotent: an existing venv is reused.
+/// call), `Ok(false)` when it cannot be provisioned on this node — no usable Python
+/// — in which case TTS degrades to the always-available OuteTTS engine. Errors
+/// surface a real provisioning failure (venv/pip). Idempotent: an existing venv is
+/// reused, so this is a cheap no-op on every boot after the first.
 ///
-/// This mirrors the OuteTTS/whisper "download the runtime during onboarding" posture,
-/// scoped to the first-party bundled sidecar (so no plugin tier/grant gate applies).
+/// **Where the code comes from.** This used to bail with `Ok(false)` whenever
+/// `~/.ryu/tts-sidecar` did not exist — which was *always*, on every real install:
+/// nothing has ever created that directory. The `ryu_tts` package lives at
+/// `apps-store/voice/sidecar`, reachable only from a repo checkout via
+/// `bun run dev:tts`, and the voice manifest declares no runnable, so the generic
+/// manifest-sidecar loader never shipped it either. Net effect: Kokoro's ~330 MB of
+/// ONNX weights downloaded on every install and were never once served, `ryutts`
+/// never reported installed, and `POST /api/voice/speak` silently fell through to
+/// OuteTTS while `DEFAULT_TTS_ENGINE` claimed `kokoro`.
+///
+/// The fix is not to vendor the app into Core (it is an apps-store satellite; see
+/// AGENTS.md) but to install the wheel that satellite already publishes. The
+/// `amajorai/ryu-voice` release workflow has been building a wheel + sdist all
+/// along — Core simply never pointed at one. We fetch it through the
+/// [`crate::downloads::DownloadCenter`] so the transfer is checksum-verified and
+/// visible in the download overlay, then hand pip the local path plus the extra.
+///
+/// A repo checkout (or a hand-copied tree) that already has a `pyproject.toml` at
+/// `dir` still takes the editable path, so `RYU_TTS_DIR` pointing at
+/// `apps-store/voice/sidecar` keeps working for development.
 pub async fn ensure_kokoro_runtime() -> anyhow::Result<bool> {
     use crate::sidecar::external_runtime::{self, ExternalRuntimeConfig};
 
     let dir = sidecar_dir();
-    if !dir.exists() {
-        return Ok(false);
-    }
     if external_runtime::venv_exists(&dir) {
         return Ok(true);
+    }
+    let Some(python) = resolve_python().await else {
+        tracing::info!(
+            "no Python >= 3.{TTS_MIN_PYTHON_MINOR} on this node — skipping Kokoro TTS \
+             provisioning; spoken output uses the built-in OuteTTS engine"
+        );
+        return Ok(false);
+    };
+
+    let downloads = crate::downloads::DownloadCenter::with_default_client();
+
+    // A source tree already at `dir` (dev checkout via RYU_TTS_DIR, or a manual
+    // copy) installs editable from it; otherwise install the published wheel.
+    let requirements = if dir.join("pyproject.toml").exists() {
+        Vec::new()
+    } else {
+        let wheel = downloads
+            .download_blocking(crate::downloads::DownloadSpec {
+                kind: crate::downloads::DownloadKind::Voice,
+                label: "Ryu TTS sidecar".to_string(),
+                url: tts_sidecar_wheel_url(),
+                dest: dir.join("dist").join(TTS_SIDECAR_WHEEL_FILE),
+                sha256: Some(TTS_SIDECAR_WHEEL_SHA256.to_string()),
+                version_record: None,
+            })
+            .await
+            .context("downloading the Ryu TTS sidecar wheel")?;
+        // `pip install "<path>.whl[kokoro]"` — PEP 508 extras apply to a local
+        // wheel exactly as they do to a named requirement, so this pulls
+        // kokoro-onnx + onnxruntime + soundfile alongside the sidecar itself.
+        vec![format!("{}[kokoro]", wheel.display())]
+    };
+    // Create the venv HERE with the interpreter we vetted, rather than letting
+    // `provision` bootstrap one. `provision` uses the generic `bootstrap_python()`
+    // (`python3`), which on macOS is the 3.9 that cannot install this wheel; it
+    // skips venv creation when one already exists, so seeding it with the right
+    // interpreter is the whole handoff. Everything after — pip, the extras — then
+    // runs against a Python the wheel accepts.
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("creating the TTS sidecar dir at {}", dir.display()))?;
+    let venv = dir.join(".venv");
+    let out = tokio::process::Command::new(&python)
+        .arg("-m")
+        .arg("venv")
+        .arg(&venv)
+        .no_window()
+        .output()
+        .await
+        .with_context(|| format!("spawning `{python} -m venv`"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`{python} -m venv {}` failed: {}",
+            venv.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
 
     let cfg = ExternalRuntimeConfig {
         kind: external_runtime::RUNTIME_PYTHON.to_owned(),
         entry: "ryu_tts".to_owned(),
-        pyproject_extra: Some("kokoro".to_owned()),
+        pyproject_extra: requirements.is_empty().then(|| "kokoro".to_owned()),
+        requirements,
         ..Default::default()
     };
-    // The bundled Kokoro sidecar declares no assets, so the DownloadCenter is
-    // never exercised for a transfer here; a default client suffices.
-    let downloads = crate::downloads::DownloadCenter::with_default_client();
-    external_runtime::provision(&cfg, &dir, &downloads)
-        .await
-        .map(|_| true)
-        .map_err(|e| anyhow::anyhow!("provisioning the Kokoro TTS runtime failed: {e}"))
+    match external_runtime::provision(&cfg, &dir, &downloads).await {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            // Tear the venv back down. It exists but has no `ryu_tts` in it, and
+            // `venv_exists` is this function's "already provisioned" fast path — so
+            // leaving it would make every later boot return `Ok(true)`, mark `ryutts`
+            // installed, and then fail to start, with no path back except the user
+            // deleting the directory by hand. Removing it keeps the failure
+            // retryable on the next boot.
+            let _ = tokio::fs::remove_dir_all(&venv).await;
+            Err(anyhow::anyhow!(
+                "provisioning the Kokoro TTS runtime failed: {e}"
+            ))
+        }
+    }
 }
 
 /// Resolve the Python interpreter to run the sidecar with. Prefers an explicit
@@ -219,9 +375,10 @@ impl Sidecar for RyuTtsManager {
             let dir = sidecar_dir();
             if !dir.exists() {
                 anyhow::bail!(
-                    "Ryu TTS sidecar not found at {}. Install it (copy `apps-store/voice/sidecar` there \
-                     and `pip install -e \".[kitten]\"`), set RYU_TTS_DIR to its path, or run \
-                     `bun run dev:tts` and Core will adopt it.",
+                    "Ryu TTS sidecar not found at {}. Onboarding provisions it there from the \
+                     published wheel when a usable `python3` is present — check the boot log for \
+                     a provisioning warning. Otherwise point RYU_TTS_DIR at a checkout of \
+                     `apps-store/voice/sidecar`, or run `bun run dev:tts` and Core will adopt it.",
                     dir.display()
                 );
             }

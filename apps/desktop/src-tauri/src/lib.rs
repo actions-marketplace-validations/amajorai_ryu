@@ -1068,6 +1068,7 @@ fn toggle_companion_window(app: &tauri::AppHandle) {
 				.always_on_top(true)
 				.skip_taskbar(true)
 				.resizable(false)
+				.zoom_hotkeys_enabled(true)
 				.build()
 			{
 				Ok(win) => {
@@ -1157,6 +1158,7 @@ async fn open_tab_window(
 		// title bar) instead of Tauri intercepting it — mirrors the main window's
 		// `dragDropEnabled: false` in tauri.conf.json.
 		.disable_drag_drop_handler()
+		.zoom_hotkeys_enabled(true)
 		.build()
 		.map_err(|e| e.to_string())?;
 

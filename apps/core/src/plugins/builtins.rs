@@ -431,9 +431,13 @@ pub const CORE_PLUGINS: &[&str] = &[
     "@ryu/scrapling",
     // The default `web.search` provider. Core-tier for the same reason `spider` is:
     // it is a default TOOL app that must exist out of the box, and default-on
-    // requires Core-tier. The other four search providers (tavily, brave, serper,
-    // firecrawl) stay Community + opt-in, because each is BYOK-only and would ship
-    // a tool that can do nothing until the user pastes a key.
+    // requires Core-tier. The other five search providers (tavily, brave, serper,
+    // firecrawl, parallel) stay Community + opt-in, because each needs a key before
+    // it can do anything useful. `parallel` is the one that could argue otherwise —
+    // its public Search MCP endpoint works with no credential, exactly like exa's —
+    // but its extract half is still BYOK, and default-ON is a pick, not a listing:
+    // two default providers of `web.search` would make the choice depend on
+    // manifest ordering. exa keeps it; parallel is the swap you opt into.
     "@ryu/exa",
     // The two Pi extensions that stopped being hardcoded: background bash and
     // sub-agents. Core-tier is a REQUIREMENT, not a promotion, exactly as for
@@ -463,6 +467,14 @@ pub const CORE_PLUGINS: &[&str] = &[
     // (see CORE_DEFAULT_ON) so the previously-hardcoded Island feature keeps
     // working on a fresh install. Enabling the plugin is the single switch.
     "@ryu/dictation",
+    // The Island companion overlay — a desktop-owned Electron sidecar the desktop
+    // shell installs and launches (never a Core sidecar). Core-tier so its record
+    // is installable/governed, but OPT-IN: no release auto-installs the Electron
+    // bundle, so no record is seeded (absent from `CORE_DEFAULT_ON` and carrying no
+    // companion `ui_code`, so nothing pre-seeds it). Its Island settings tab
+    // registers via `contributes.settings_tabs` and appears only after the user
+    // installs the app from the Store — the same posture as shadow's settings.
+    "@ryu/island",
     "@ryu/engines",
     "@ryu/durable",
     "@ryu/goal",
@@ -514,12 +526,15 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Spaces while Meetings is still on, which the graph now refuses.
     SPACES_PLUGIN_ID,
     MEETINGS_PLUGIN_ID,
-    // Five leaf-feature governance shells (research/dashboards/teams/clips/recipes).
-    // Core-tier AND default-on: their `/api/<feature>/*` routes were always-on
-    // before the gate, so a default-on seed is what keeps them reachable on every
-    // existing install (same reasoning as Meetings/Spaces). `clips`→`shadow` and
-    // `recipes`→`ghost` are real `requires` edges; both deps are default-on, so the
-    // fail-closed seeder never skips them.
+    // Five leaf-feature apps (research/dashboards/teams/clips/recipes). Core-tier —
+    // installable and enable-able from the Store — but NO LONGER default-on, and
+    // not pre-installed either (all five are in `seed::NOT_PRE_INSTALLED`). See the
+    // block where they were removed from `CORE_DEFAULT_ON` for why; the short
+    // version is that each now owns an out-of-process sidecar binary that a normal
+    // install does not have, so seeding them enabled shipped five apps nobody asked
+    // for AND made four of them fail on first use. `clips`→`shadow` and
+    // `recipes`→`ghost` are real `requires` edges; both deps are still default-on,
+    // so enabling either from the Store finds its dependency already satisfied.
     RESEARCH_PLUGIN_ID,
     DASHBOARDS_PLUGIN_ID,
     TEAMS_PLUGIN_ID,
@@ -757,18 +772,45 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // `NOT_PRE_INSTALLED` and needs nothing else.
     // Spaces stays default-on (it is a shared dependency, not a leaf feature).
     SPACES_PLUGIN_ID,
-    // The five leaf-feature sidecar Apps (each serves `/api/<feature>/*` out-of-process
-    // via a `public_mount` sidecar + the generic ext-proxy loader), default-on so their
-    // always-on surface stays reachable (the mount is live only while enabled; see
-    // CORE_PLUGINS). `clips`/`recipes` are declared
-    // here alongside their deps (`shadow`/`ghost`, both already default-on); the
-    // hand-written order is irrelevant — `seed::seed_order` topologically reorders
-    // by `requires`, so a dependency is always seeded before its dependent.
-    RESEARCH_PLUGIN_ID,
-    DASHBOARDS_PLUGIN_ID,
-    TEAMS_PLUGIN_ID,
-    CLIPS_PLUGIN_ID,
-    RECIPES_PLUGIN_ID,
+    // REMOVED from the default set: research / dashboards / teams / clips / recipes.
+    //
+    // These five were default-on for a reason that expired. They began as
+    // *governance shells* — the code was in-crate and always ran, and the record
+    // only gated the `/api/<feature>/*` routes, so seeding them enabled preserved
+    // behaviour that already existed and cost nothing. The decomposition then moved
+    // every one of them OUT of process: each is now a `public_mount` sidecar
+    // (`ryu-research`, `ryu-dashboards`, `ryu-teams`, `ryu-clips`, `ryu-recipes`)
+    // reached through the generic ext-proxy. Default-on stopped meaning "a route
+    // that was already live stays live" and started meaning "spawn five binaries",
+    // and nobody moved the membership when the mechanism moved underneath it.
+    //
+    // Both halves of what that produced were reported, repeatedly:
+    //
+    //  - **"I wiped everything and they are all installed again."** They were —
+    //    `seed_default_on` writes an ENABLED record for every id here on a store
+    //    with no rows, which is exactly the state a node reset leaves behind. So
+    //    the reset "did nothing" for five apps the user had already uninstalled,
+    //    and `is_uninstall_protected` keys off `is_default_on`, which meant the
+    //    Store would not let them be uninstalled in the first place.
+    //  - **"app sidecar binary is not installed."** `manifest_sidecar` reports that
+    //    (correctly) whenever a `local` sidecar's `<command>-<os>-<arch>` release
+    //    asset cannot be resolved. Seeding an app enabled is what makes Core try,
+    //    so five apps the user never asked for produced a spawn error each, on
+    //    every boot, in a state the user had no obvious way to leave.
+    //
+    // This is `@ryu/browser`'s argument (see its NOTE above), reached from the
+    // other direction: browser was demoted because its binary does not ship, these
+    // five because they should not have been auto-installed once they grew binaries
+    // at all. Nothing here is deleted — all five remain Core-tier and installable
+    // in `CORE_PLUGINS`, one click from the Store, with `clips`→`shadow` and
+    // `recipes`→`ghost` still satisfied by their default-on deps.
+    //
+    // They are ALSO in `seed::NOT_PRE_INSTALLED`, which is the difference between
+    // "off" and "absent": default-off alone still leaves a disabled record on a
+    // fresh store, so the Store keeps listing them under *Installed* and an
+    // uninstall is silently undone by the next boot. Migration v5 removes the
+    // records that the old default-on seed already wrote on existing machines —
+    // without it this change would only ever reach installs that have not booted.
     // `skills` stays default-on (a shared capability). `quests`/`approvals`/`healing`
     // are default-OFF (see the note above) — `healing` requires `approvals`, so it
     // leaves the default set with its dep, never orphaned.
@@ -928,6 +970,74 @@ pub fn is_load_bearing(manifest_id: &str) -> bool {
     LOAD_BEARING_PLUGINS.contains(&manifest_id)
 }
 
+/// Plugins that are **mandatory**: REQUIRED FOR CORE, never disableable and never
+/// uninstallable, with no `force` escape hatch.
+///
+/// This is the hard tier beside [`LOAD_BEARING_PLUGINS`], and the two are
+/// **disjoint by construction** (asserted by
+/// `mandatory_and_load_bearing_are_disjoint`). They answer different questions:
+///
+/// - Load-bearing: "are you sure?" — refused, but `force = true` goes through, and
+///   the desktop turns the 409 into a *Disable anyway?* prompt.
+/// - Mandatory: "no." — refused at every call site, with no override.
+///
+/// Keeping them disjoint is not tidiness. The mandatory check runs FIRST, so an id
+/// in both sets could never produce `DisableError::LoadBearing` — the softer tier,
+/// its 409, and the prompt built on top of it would all become unreachable code
+/// that still looks alive.
+///
+/// **Why these and not the load-bearing three.** `engines`/`durable`/`agents` fail
+/// LOUDLY: switch off the chat engine and chat stops working, in your face, and you
+/// go turn it back on. They keep their escape hatch because a visible failure is
+/// recoverable and `force` is how an operator digs out of a bad state.
+///
+/// The members here fail SILENTLY, which is what removes the argument for an
+/// override — nothing tells the user, so nothing prompts them to undo it:
+///
+/// - **Data plane** — `spaces` (the workspace/document root every retrieval path
+///   resolves through), `rag`, `layers`. Disabling one does not remove the data, it
+///   removes the *reader*: Space uploads simply stop being retrievable, and chat
+///   answers as if they were never there.
+/// - **Capability plane** — `skills` (the injector both skill roots feed), `media`
+///   (the image/render path), `hardware` (the device probing the engine picker
+///   reads to decide what can run at all). Each degrades into "the feature quietly
+///   does nothing" rather than an error.
+///
+/// Every entry is also a **Core-only** manifest — no package directory under
+/// `apps-store/`, compiled in from `plugin_manifest/fixtures/*.manifest.json`.
+/// They are not apps a user chose to install; they are how Core describes its own
+/// subsystems to the plugin lifecycle, and "uninstall" has no coherent meaning for
+/// something with nothing on disk to remove.
+///
+/// `memory` is deliberately NOT here despite being the same tier of subsystem: it
+/// is default-OFF (see [`MEMORY_PLUGIN_ID`]), and a plugin that ships disabled
+/// cannot also be one the user may never disable. Mandatory is a strict subset of
+/// [`CORE_DEFAULT_ON`], asserted by `mandatory_plugins_are_all_default_on`.
+///
+/// **The manifest's `mandatory: true` does not put anything here.** This constant
+/// is the enforcement set and it is Core-owned; the manifest field is the
+/// declaration, kept in lockstep by
+/// `mandatory_constant_matches_builtin_manifest_declarations`. That direction
+/// matters: a manifest is untrusted input, and "cannot be disabled" is precisely
+/// the property a hostile plugin would claim for itself. Same posture as
+/// [`CORE_PLUGINS`] — privilege is granted by Core, never self-asserted.
+pub const MANDATORY_PLUGINS: &[&str] = &[
+    // Data plane
+    SPACES_PLUGIN_ID,
+    RAG_PLUGIN_ID,
+    LAYERS_PLUGIN_ID,
+    // Capability plane
+    SKILLS_PLUGIN_ID,
+    MEDIA_PLUGIN_ID,
+    HARDWARE_PLUGIN_ID,
+];
+
+/// Whether `manifest_id` is required for Core and may never be disabled or
+/// uninstalled, not even with `force`. See [`MANDATORY_PLUGINS`].
+pub fn is_mandatory(manifest_id: &str) -> bool {
+    MANDATORY_PLUGINS.contains(&manifest_id)
+}
+
 /// Whether `manifest_id` may NOT be uninstalled (it can only be disabled).
 ///
 /// A plugin is uninstall-protected when removing its lifecycle record would be
@@ -954,7 +1064,7 @@ pub fn is_load_bearing(manifest_id: &str) -> bool {
 /// which is a coherent uninstall. User-installed Community plugins are never
 /// protected.
 pub fn is_uninstall_protected(manifest_id: &str) -> bool {
-    is_builtin(manifest_id) || is_default_on(manifest_id)
+    is_mandatory(manifest_id) || is_builtin(manifest_id) || is_default_on(manifest_id)
 }
 
 #[cfg(test)]
@@ -1095,6 +1205,88 @@ mod tests {
     // ── The Meetings → Spaces dependency edge (the first REAL one) ────────────
 
     /// The edge exists in the SHIPPED fixtures, not just in a unit-test fixture.
+    /// `MANDATORY_PLUGINS` (what the lifecycle enforces) and the manifests' own
+    /// `mandatory: true` (what the Store renders) must name the SAME set.
+    ///
+    /// Both directions matter, for different failure modes:
+    ///
+    /// - A constant entry with no manifest declaration = a plugin the UI still
+    ///   offers a Disable button for, which then 403s. The user gets a dead control
+    ///   and an error where an absent control was the whole design.
+    /// - A manifest declaration with no constant entry = a listing that renders as
+    ///   undisableable while the lifecycle happily disables it. That is worse than
+    ///   the first case, because it is the shape a hostile manifest would use to
+    ///   claim a privilege Core never granted.
+    #[test]
+    fn mandatory_constant_matches_builtin_manifest_declarations() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+
+        let declared: std::collections::BTreeSet<&str> = manifests
+            .iter()
+            .filter(|m| m.mandatory)
+            .map(|m| m.id.as_str())
+            .collect();
+        let enforced: std::collections::BTreeSet<&str> =
+            MANDATORY_PLUGINS.iter().copied().collect();
+
+        assert_eq!(
+            declared, enforced,
+            "MANDATORY_PLUGINS and the manifests declaring `mandatory: true` have \
+             drifted. Add `\"mandatory\": true` to the fixture, or drop the id from \
+             the constant — the two are one decision recorded twice."
+        );
+    }
+
+    /// Mandatory ⊂ default-on. A plugin that ships DISABLED cannot also be one the
+    /// user may never disable — the install would boot into a state its own rules
+    /// forbid, and nothing would ever turn it on (`seed_default_on` reseeds exactly
+    /// `CORE_DEFAULT_ON`). This is why `memory`, a subsystem of the same weight as
+    /// `rag`, is deliberately not mandatory: it is default-off.
+    #[test]
+    fn mandatory_plugins_are_all_default_on() {
+        for id in MANDATORY_PLUGINS {
+            assert!(
+                is_default_on(id),
+                "{id} is mandatory but not in CORE_DEFAULT_ON — it would ship \
+                 disabled and could never be enabled"
+            );
+        }
+    }
+
+    /// The two protection tiers must not overlap.
+    ///
+    /// `disable_app` checks mandatory FIRST, so an id in both sets can never yield
+    /// `DisableError::LoadBearing`. That would silently kill the whole softer tier:
+    /// the 409 response, its `code: "load_bearing"`, and the desktop's "disable
+    /// anyway?" prompt would all still be there, all unreachable. An overlap does
+    /// not break anything visibly — it just quietly deletes a feature — which is
+    /// exactly the kind of thing that needs a test rather than a comment.
+    #[test]
+    fn mandatory_and_load_bearing_are_disjoint() {
+        for id in MANDATORY_PLUGINS {
+            assert!(
+                !is_load_bearing(id),
+                "{id} is in BOTH tiers; the mandatory check runs first, so its \
+                 load-bearing membership (and the force-override prompt built on it) \
+                 is dead. Pick one."
+            );
+        }
+    }
+
+    /// Mandatory is the strictly stronger tier, so it must imply the weaker
+    /// protection. Without this, `is_uninstall_protected` could be narrowed and a
+    /// mandatory plugin would become uninstallable through the uninstall path even
+    /// though the disable path refuses it.
+    #[test]
+    fn mandatory_plugins_are_uninstall_protected() {
+        for id in MANDATORY_PLUGINS {
+            assert!(
+                is_uninstall_protected(id),
+                "{id} is mandatory but not uninstall-protected"
+            );
+        }
+    }
+
     /// If this fails, the dependency system is unexercised against real code.
     #[test]
     fn meetings_declares_a_real_requires_edge_on_spaces() {
@@ -1132,12 +1324,19 @@ mod tests {
             .contains(&"spaces:docs".to_owned()));
     }
 
-    /// THE proof the dependency model works end-to-end against real code: Spaces
-    /// cannot be disabled out from under an enabled Meetings, and the refusal NAMES
-    /// the blocker so a UI can say "Disable Meetings first" (or offer a cascade)
+    /// THE proof the dependency model works end-to-end against real code: Approvals
+    /// cannot be disabled out from under an enabled Healing, and the refusal NAMES
+    /// the blocker so a UI can say "Disable Healing first" (or offer a cascade)
     /// without parsing a string.
+    ///
+    /// This used to be written against Spaces←Meetings, which was the obvious pick
+    /// while Spaces was the most-depended-on app. Spaces is now
+    /// [`MANDATORY_PLUGINS`], so a disable of it is refused BEFORE the dependency
+    /// walk ever runs and the test could no longer reach the code it was testing.
+    /// Healing→Approvals is the same shape and equally real: a declared
+    /// `requires.apps` edge between two shipped, non-mandatory apps.
     #[tokio::test]
-    async fn disabling_spaces_is_refused_while_meetings_is_enabled() {
+    async fn disabling_approvals_is_refused_while_healing_is_enabled() {
         use crate::plugins::graph::DependencyError;
         use crate::plugins::lifecycle::{disable_app, DisableError};
         use crate::plugins::PluginStore;
@@ -1146,93 +1345,93 @@ mod tests {
         let store = PluginStore::open_in_memory().unwrap();
 
         // Both enabled, as a fresh install's seed leaves them.
-        for id in [SPACES_PLUGIN_ID, MEETINGS_PLUGIN_ID] {
+        for id in [APPROVALS_PLUGIN_ID, HEALING_PLUGIN_ID] {
             store.insert(id, "1.0.0").await.unwrap();
             store.set_enabled(id, &[]).await.unwrap();
         }
 
         // 1. REFUSED — and the error names the dependent.
-        let err = disable_app(&store, SPACES_PLUGIN_ID, &manifests, false, false)
+        let err = disable_app(&store, APPROVALS_PLUGIN_ID, &manifests, false, false)
             .await
-            .expect_err("disabling Spaces under an enabled Meetings must be refused");
+            .expect_err("disabling Approvals under an enabled Healing must be refused");
         match err {
             DisableError::Dependency(DependencyError::BlockedByDependents {
                 plugin,
                 dependents,
             }) => {
-                assert_eq!(plugin, SPACES_PLUGIN_ID);
+                assert_eq!(plugin, APPROVALS_PLUGIN_ID);
                 assert!(
-                    dependents.contains(&MEETINGS_PLUGIN_ID.to_owned()),
-                    "the refusal must name Meetings, got {dependents:?}"
+                    dependents.contains(&HEALING_PLUGIN_ID.to_owned()),
+                    "the refusal must name Healing, got {dependents:?}"
                 );
             }
             other => panic!("expected BlockedByDependents, got {other:?}"),
         }
 
         // A refused disable changes NOTHING (it is not a partial disable).
-        assert!(store.get(SPACES_PLUGIN_ID).await.unwrap().unwrap().enabled);
         assert!(
             store
-                .get(MEETINGS_PLUGIN_ID)
+                .get(APPROVALS_PLUGIN_ID)
                 .await
                 .unwrap()
                 .unwrap()
                 .enabled
         );
+        assert!(store.get(HEALING_PLUGIN_ID).await.unwrap().unwrap().enabled);
 
-        // 2. Disable the dependent first, and Spaces disables cleanly.
-        disable_app(&store, MEETINGS_PLUGIN_ID, &manifests, false, false)
+        // 2. Disable the dependent first, and Approvals disables cleanly.
+        disable_app(&store, HEALING_PLUGIN_ID, &manifests, false, false)
             .await
-            .expect("Meetings has no dependents, so it disables freely");
-        disable_app(&store, SPACES_PLUGIN_ID, &manifests, false, false)
+            .expect("Healing has no dependents, so it disables freely");
+        disable_app(&store, APPROVALS_PLUGIN_ID, &manifests, false, false)
             .await
-            .expect("with Meetings off, nothing blocks Spaces");
+            .expect("with Healing off, nothing blocks Approvals");
 
-        assert!(!store.get(SPACES_PLUGIN_ID).await.unwrap().unwrap().enabled);
         assert!(
             !store
-                .get(MEETINGS_PLUGIN_ID)
+                .get(APPROVALS_PLUGIN_ID)
                 .await
                 .unwrap()
                 .unwrap()
                 .enabled
         );
+        assert!(!store.get(HEALING_PLUGIN_ID).await.unwrap().unwrap().enabled);
     }
 
     /// The opt-in escape hatch: one cascade disables the dependent *and* the
     /// dependency, dependents-first, so nothing is ever left enabled against a
-    /// disabled dependency.
+    /// disabled dependency. Re-pointed off Spaces for the reason above.
     #[tokio::test]
-    async fn cascading_disable_of_spaces_takes_meetings_with_it() {
+    async fn cascading_disable_of_approvals_takes_healing_with_it() {
         use crate::plugins::lifecycle::disable_app;
         use crate::plugins::PluginStore;
 
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let store = PluginStore::open_in_memory().unwrap();
-        for id in [SPACES_PLUGIN_ID, MEETINGS_PLUGIN_ID] {
+        for id in [APPROVALS_PLUGIN_ID, HEALING_PLUGIN_ID] {
             store.insert(id, "1.0.0").await.unwrap();
             store.set_enabled(id, &[]).await.unwrap();
         }
 
-        let outcome = disable_app(&store, SPACES_PLUGIN_ID, &manifests, true, false)
+        let outcome = disable_app(&store, APPROVALS_PLUGIN_ID, &manifests, true, false)
             .await
             .expect("an explicit cascade is allowed");
 
         let order: Vec<&str> = outcome.disabled.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(
             order,
-            vec![MEETINGS_PLUGIN_ID, SPACES_PLUGIN_ID],
+            vec![HEALING_PLUGIN_ID, APPROVALS_PLUGIN_ID],
             "the dependent must be disabled BEFORE its dependency"
         );
-        assert!(!store.get(SPACES_PLUGIN_ID).await.unwrap().unwrap().enabled);
         assert!(
             !store
-                .get(MEETINGS_PLUGIN_ID)
+                .get(APPROVALS_PLUGIN_ID)
                 .await
                 .unwrap()
                 .unwrap()
                 .enabled
         );
+        assert!(!store.get(HEALING_PLUGIN_ID).await.unwrap().unwrap().enabled);
     }
 
     /// The real default-on set must be fully satisfiable — every default-on plugin's
@@ -1324,14 +1523,22 @@ mod tests {
         }
     }
 
-    /// The refusal names the FULL blast radius, not just the first dependent: with
-    /// Meetings, Whiteboard, and Canvas all enabled, disabling Spaces is refused and
-    /// the error lists all three, so a client can say "disable these first" (or offer
-    /// one cascade) without guessing.
+    /// Spaces is MANDATORY, and no combination of flags gets past it.
+    ///
+    /// This test used to assert the opposite — that disabling Spaces was refused
+    /// with a *dependents* list and that an explicit cascade was then allowed
+    /// through. That was the correct contract while Spaces was merely
+    /// widely-depended-on. It is now required for Core, so the interesting question
+    /// changed from "does the graph name the blockers?" (covered by
+    /// `disabling_approvals_is_refused_while_healing_is_enabled`) to "can ANY caller
+    /// get through?".
+    ///
+    /// All four (cascade × force) combinations are checked, because each is a
+    /// distinct code path — the root guard, the resolved-order guard, and the two
+    /// `force` branches — and a bypass in any one of them is a bypass.
     #[tokio::test]
-    async fn disabling_spaces_is_refused_while_any_space_owning_app_is_enabled() {
+    async fn disabling_spaces_is_refused_however_it_is_asked() {
         use crate::plugin_manifest::{CANVAS_PLUGIN_ID, WHITEBOARD_PLUGIN_ID};
-        use crate::plugins::graph::DependencyError;
         use crate::plugins::lifecycle::{disable_app, DisableError};
         use crate::plugins::PluginStore;
 
@@ -1344,44 +1551,65 @@ mod tests {
             store.set_enabled(id, &[]).await.unwrap();
         }
 
-        let err = disable_app(&store, SPACES_PLUGIN_ID, &manifests, false, false)
-            .await
-            .expect_err("Spaces has three enabled dependents");
-        match err {
-            DisableError::Dependency(DependencyError::BlockedByDependents {
-                plugin,
-                dependents: named,
-            }) => {
-                assert_eq!(plugin, SPACES_PLUGIN_ID);
-                for id in dependents {
-                    assert!(
-                        named.contains(&id.to_owned()),
-                        "the refusal must name '{id}', got {named:?}"
-                    );
-                }
-            }
-            other => panic!("expected BlockedByDependents, got {other:?}"),
+        for (cascade, force) in [(false, false), (true, false), (false, true), (true, true)] {
+            let err = disable_app(&store, SPACES_PLUGIN_ID, &manifests, cascade, force)
+                .await
+                .expect_err("Spaces is mandatory and must never disable");
+            assert!(
+                matches!(err, DisableError::Mandatory { ref id } if id == SPACES_PLUGIN_ID),
+                "cascade={cascade} force={force}: expected Mandatory, got {err:?}"
+            );
         }
 
-        // Nothing was disabled — a refusal is never a partial disable.
+        // Nothing was disabled by any of them — a refusal is never a partial disable,
+        // and in particular a cascade must not take the DEPENDENTS down on its way to
+        // discovering that the target itself is untouchable.
         for id in std::iter::once(SPACES_PLUGIN_ID).chain(dependents) {
             assert!(store.get(id).await.unwrap().unwrap().enabled, "'{id}'");
         }
+    }
 
-        // The cascade takes every dependent with it, and Spaces goes LAST so nothing
-        // is ever enabled against a disabled dependency.
-        let outcome = disable_app(&store, SPACES_PLUGIN_ID, &manifests, true, false)
-            .await
-            .expect("an explicit cascade is allowed");
-        assert_eq!(
-            outcome.disabled.last().map(|r| r.id.as_str()),
-            Some(SPACES_PLUGIN_ID),
-            "the dependency must be disabled LAST, got {:?}",
-            outcome.disabled.iter().map(|r| &r.id).collect::<Vec<_>>()
-        );
-        for id in std::iter::once(SPACES_PLUGIN_ID).chain(dependents) {
-            assert!(!store.get(id).await.unwrap().unwrap().enabled, "'{id}'");
+    /// A cascade must not reach a mandatory plugin as collateral either. Disabling
+    /// Meetings is fine; disabling Meetings *with a cascade that would sweep in its
+    /// Spaces dependency* is not — and the refusal must leave Meetings enabled too.
+    ///
+    /// This is the guard that makes the unforceable tier actually hold: without the
+    /// order-wide check, `force` on some unrelated app would be a back door to
+    /// switching off the data plane.
+    #[tokio::test]
+    async fn a_cascade_cannot_reach_a_mandatory_plugin() {
+        use crate::plugins::lifecycle::{disable_app, DisableError};
+        use crate::plugins::PluginStore;
+
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+        for id in [SPACES_PLUGIN_ID, MEETINGS_PLUGIN_ID] {
+            store.insert(id, "1.0.0").await.unwrap();
+            store.set_enabled(id, &[]).await.unwrap();
         }
+
+        // Meetings alone disables fine — it is the DEPENDENT, and nothing depends on
+        // it, so no mandatory plugin is in its resolved order.
+        disable_app(&store, MEETINGS_PLUGIN_ID, &manifests, true, false)
+            .await
+            .expect("Meetings itself is not mandatory");
+        store.set_enabled(MEETINGS_PLUGIN_ID, &[]).await.unwrap();
+
+        // Going the other way — cascading FROM Spaces — is refused, with Meetings
+        // left untouched.
+        let err = disable_app(&store, SPACES_PLUGIN_ID, &manifests, true, true)
+            .await
+            .expect_err("a cascade from a mandatory root is still refused");
+        assert!(matches!(err, DisableError::Mandatory { .. }), "{err:?}");
+        assert!(
+            store
+                .get(MEETINGS_PLUGIN_ID)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled,
+            "the refused cascade must not have disabled the dependent"
+        );
     }
 
     /// THE silent-brick guard for the new edges.
@@ -1521,6 +1749,11 @@ mod tests {
         // Dictation is Core-tier and default-on (Island surface, previously hardcoded).
         assert!(CORE_PLUGINS.contains(&"@ryu/dictation"));
         assert!(is_default_on("@ryu/dictation"));
+        // The Island companion is Core-tier but OPT-IN: no release auto-installs the
+        // Electron bundle, so its record must never seed enabled (a fresh store has no
+        // Island settings tab until the user installs the app from the Store).
+        assert!(CORE_PLUGINS.contains(&"@ryu/island"));
+        assert!(!is_default_on("@ryu/island"));
     }
 
     // ── Registration integrity: every id in a membership list must exist ──────
@@ -1714,6 +1947,85 @@ mod tests {
         assert!(
             !is_load_bearing(MARKITDOWN_PLUGIN_ID),
             "the default parser is still swappable: default-on, never load-bearing"
+        );
+    }
+
+    /// The third fact behind a working parser picker, and the one that actually
+    /// broke: every `document.parse` provider must be reported to a picker as
+    /// **servable**.
+    ///
+    /// `document.parse` is served by Core calling the provider's sidecar route
+    /// (`crate::document_parse`), never by capability verbs, so all four manifests
+    /// declare zero `tools` — correctly. The desktop layer picker read only
+    /// `serves_verbs` and concluded the opposite: it disabled all four rows,
+    /// including the bound default, and labelled working backends "serves no verbs
+    /// yet", leaving the layer unswappable from the node dropdown while parsing
+    /// worked fine. Nothing failed, because the two halves (a capability with no
+    /// verbs; a picker that gates on verbs) were each individually defensible.
+    ///
+    /// Asserted through [`describe_capabilities`] rather than on the manifests so it
+    /// covers the read model a client actually sees, and mirrors what
+    /// `ext_proxy::resolve_provider_route` requires — declaring a `route` with no
+    /// resolvable `sidecar` must NOT count, since that is the dead-end pick the
+    /// servability flags exist to keep a picker away from.
+    #[test]
+    fn every_document_parse_provider_is_reported_servable() {
+        const CAP: &str = "document.parse";
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let described = crate::plugins::binding::describe_capabilities(
+            &manifests,
+            &manifests,
+            &crate::plugins::binding::BindingConfig::default(),
+        );
+        let parse = described
+            .iter()
+            .find(|c| c.capability == CAP)
+            .expect("document.parse must appear in the capability read model");
+
+        assert!(
+            !parse.providers.is_empty(),
+            "the fixture set must enable at least one parser or this asserts nothing"
+        );
+        for p in &parse.providers {
+            assert!(
+                !p.serves_verbs,
+                "'{}' declares capability verbs — if `document.parse` ever grows a verb \
+                 facade, this test and the pickers' verb-count copy both need revisiting",
+                p.id
+            );
+            assert!(
+                p.serves_route,
+                "'{}' must be reported route-servable: it has no verbs, so a picker that \
+                 asks `serves_verbs || serves_route` would otherwise grey it out and the \
+                 parser layer becomes unswappable. Check that its `provides[]` entry \
+                 declares BOTH `sidecar` and `route`, and that the named sidecar exists \
+                 on the manifest.",
+                p.id
+            );
+        }
+
+        // Keeps the loop above from passing vacuously. `serves_route` is computed, not
+        // declared, and a predicate that returned `true` unconditionally would satisfy
+        // every assertion here while re-opening the hole from the other side — letting
+        // a picker offer a provider the broker cannot route to. `agentbrowser` is the
+        // discriminating case: it serves `browser.control` by verbs with no `sidecar`
+        // and no `route`, so it must come back verb-servable and route-UNservable.
+        let browser = described
+            .iter()
+            .find(|c| c.capability == "browser.control")
+            .expect("browser.control must appear in the capability read model");
+        let agent = browser
+            .providers
+            .iter()
+            .chain(browser.available.iter())
+            .find(|p| p.id == "@ryu/agentbrowser")
+            .expect("agentbrowser must be a registered browser.control provider");
+        assert!(
+            agent.serves_verbs && !agent.serves_route,
+            "'{}' serves by verbs and declares no sidecar route — if this flips, \
+             `serves_route` has stopped discriminating and the assertions above prove \
+             nothing",
+            agent.id
         );
     }
 

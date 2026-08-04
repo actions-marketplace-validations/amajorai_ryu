@@ -10,13 +10,20 @@
 //! `CryptoHost`/`RecipesHost` precedent.
 //!
 //! The install is unconditional (the mesh dep is non-optional): the crate's
-//! enabled-side entry points are only reached when `RYU_MESH_ENABLED` is set, but
-//! Core wires the host anyway so an enabled node always has a live daemon bridge.
+//! enabled-side entry points are only reached when `ryu_mesh::is_enabled()`
+//! (the `RYU_MESH_ENABLED` env OR the `mesh-enabled` pref) is true, but Core
+//! wires the host anyway so an enabled node always has a live daemon bridge.
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use ryu_mesh::MeshHost;
+
+/// The Core preference holding the desktop-driven mesh enable (written by
+/// `POST /api/mesh/config`, seeded into [`ryu_mesh::set_pref_enabled`] at boot).
+/// The `RYU_MESH_ENABLED` env var still wins when set — see
+/// [`ryu_mesh::is_enabled`].
+pub const MESH_ENABLED_PREF_KEY: &str = "mesh-enabled";
 
 /// Install [`CoreMeshHost`] as the process-global mesh host. Idempotent (a second
 /// call is a no-op). Called once from `main` at boot.
@@ -59,9 +66,9 @@ mod tests {
         // An empty/whitespace token is also rejected.
         let r = crate::server::enforce_remote_auth(Some("   ".to_owned()), None, true, false);
         assert!(r.is_err());
-        // A real OPERATOR-PROVISIONED token under mesh is accepted unchanged. The
-        // provenance matters here: the mesh admits peers on a token every node
-        // SHARES, so a self-minted one is refused (see `enforce_remote_auth`).
+        // A real token under mesh is accepted unchanged (provenance no longer
+        // gates startup — see `enforce_remote_auth`; the shared-fleet precondition
+        // is surfaced honestly at peer-add instead).
         let r = crate::server::enforce_remote_auth(
             Some("ryu_secret".to_owned()),
             Some(TokenSource::Env),

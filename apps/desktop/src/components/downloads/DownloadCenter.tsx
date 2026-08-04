@@ -13,17 +13,10 @@
 // stacked above the per-row bars, which made a two-item download look like a
 // loading screen.
 //
-// Chrome comes from TrayPopover (plain shadcn Popover + shared row/header
-// primitives), matching the Inbox tray so the two footer popovers read as one.
+// Chrome comes from TrayPopover (TrayMorph + shared row/header primitives),
+// matching the Inbox tray so the two footer popovers read as one.
 
 import { Download01Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { Popover, PopoverTrigger } from "@ryu/ui/components/popover";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
 import { useCallback, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -31,13 +24,12 @@ import {
 	TrayEmpty,
 	TrayFooter,
 	TrayHeader,
-	TrayPopoverContent,
+	TrayMorph,
 	TrayProgressLine,
 	TrayScroll,
 	TraySectionLabel,
 	TrayTextButton,
 	trayMeta,
-	trayTriggerClass,
 } from "@/src/components/shell/TrayPopover.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useAvailableUpdates } from "@/src/hooks/useAvailableUpdates.ts";
@@ -133,71 +125,64 @@ export function DownloadCenter() {
 	};
 
 	return (
-		<Popover onOpenChange={setOpen} open={open}>
-			<Tooltip>
-				<TooltipTrigger
-					render={
-						<PopoverTrigger aria-label="Downloads" className={trayTriggerClass}>
-							<HugeiconsIcon icon={Download01Icon} size={15} />
-							<TrayBadge
-								count={badgeCount}
-								label={badgeLabel}
-								tone={badgeFailed ? "danger" : "primary"}
-							/>
-						</PopoverTrigger>
-					}
+		<TrayMorph
+			badge={
+				<TrayBadge
+					count={badgeCount}
+					label={badgeLabel}
+					tone={badgeFailed ? "danger" : "primary"}
 				/>
-				<TooltipContent>Downloads</TooltipContent>
-			</Tooltip>
-			<TrayPopoverContent>
-				<TrayHeader
-					actions={
-						finished.length > 0 ? (
-							<TrayTextButton onClick={clearFinished}>
-								Clear finished
-							</TrayTextButton>
-						) : undefined
-					}
-					count={aggregate.inFlight}
-					status={status}
-					title="Downloads"
+			}
+			icon={Download01Icon}
+			label="Downloads"
+			onOpenChange={setOpen}
+			open={open}
+		>
+			<TrayHeader
+				actions={
+					finished.length > 0 ? (
+						<TrayTextButton onClick={clearFinished}>
+							Clear finished
+						</TrayTextButton>
+					) : undefined
+				}
+				count={aggregate.inFlight}
+				status={status}
+				title="Downloads"
+			/>
+			{aggregate.inFlight > 0 && (
+				<TrayProgressLine percent={aggregate.percent} />
+			)}
+			{isEmpty ? (
+				<TrayEmpty
+					description="Installs and updates you start show their progress here."
+					icon={Download01Icon}
+					title="Nothing downloading"
 				/>
-				{aggregate.inFlight > 0 && (
-					<TrayProgressLine percent={aggregate.percent} />
-				)}
-				{isEmpty ? (
-					<TrayEmpty
-						description="Installs and updates you start show their progress here."
-						icon={Download01Icon}
-						title="Nothing downloading"
-					/>
-				) : (
-					<TrayScroll>
-						<AvailableUpdates compact />
-						{active.length > 0 && (
-							<>
-								<TraySectionLabel count={active.length}>
-									Active
-								</TraySectionLabel>
-								{active.map((task) => (
-									<DownloadRow friendly={friendly} key={task.id} task={task} />
-								))}
-							</>
-						)}
-						{finished.length > 0 && (
-							<>
-								<TraySectionLabel count={finished.length}>
-									Finished
-								</TraySectionLabel>
-								{finished.map((task) => (
-									<DownloadRow friendly={friendly} key={task.id} task={task} />
-								))}
-							</>
-						)}
-					</TrayScroll>
-				)}
-				<TrayFooter label="Open downloads" onClick={openFullPage} />
-			</TrayPopoverContent>
-		</Popover>
+			) : (
+				<TrayScroll>
+					<AvailableUpdates compact />
+					{active.length > 0 && (
+						<>
+							<TraySectionLabel count={active.length}>Active</TraySectionLabel>
+							{active.map((task) => (
+								<DownloadRow friendly={friendly} key={task.id} task={task} />
+							))}
+						</>
+					)}
+					{finished.length > 0 && (
+						<>
+							<TraySectionLabel count={finished.length}>
+								Finished
+							</TraySectionLabel>
+							{finished.map((task) => (
+								<DownloadRow friendly={friendly} key={task.id} task={task} />
+							))}
+						</>
+					)}
+				</TrayScroll>
+			)}
+			<TrayFooter label="Open downloads" onClick={openFullPage} />
+		</TrayMorph>
 	);
 }

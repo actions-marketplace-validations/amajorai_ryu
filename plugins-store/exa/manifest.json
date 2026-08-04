@@ -3,7 +3,7 @@
   "name": "Exa Search",
   "version": "1.0.0",
   "description": "Neural and keyword web search via the Exa API (https://exa.ai), exposed as two declarative HTTP tools: search and find-similar. Requires a BYOK Exa API key.",
-  "icon": "ai-search",
+  "iconUrl": "https://avatars.githubusercontent.com/u/77906174?v=4",
   "iconDither": { "from": 213, "to": 247, "direction": "down" },
   "tagline": "Neural web search for agents",
   "keywords": ["search", "web"],

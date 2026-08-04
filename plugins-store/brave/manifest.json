@@ -3,7 +3,7 @@
   "name": "Brave Search",
   "version": "1.0.0",
   "description": "Independent web search via the Brave Search API (https://brave.com/search/api/), exposed as one declarative HTTP tool. Provides the swappable `web.search` layer, so selecting it in the layer picker re-points the stable `web__search` tool at Brave's own crawled index without changing what agents call. Brave is search-only: it deliberately declares neither `web.extract` nor `web.crawl`. Requires a BYOK Brave Search API key.",
-  "icon": "global-search",
+  "icon": "svgl:brave",
   "iconDither": { "from": 300, "to": 334, "direction": "down" },
   "tagline": "Search an index nobody else syndicates",
   "keywords": ["search", "web"],

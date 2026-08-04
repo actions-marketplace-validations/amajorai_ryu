@@ -2,6 +2,7 @@
   "id": "@ryu/rag",
   "name": "RAG (retrieval-augmented generation)",
   "version": "1.0.0",
+  "mandatory": true,
   "runnables": [],
   "requires": {
     "capabilities": [

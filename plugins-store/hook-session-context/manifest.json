@@ -2,6 +2,7 @@
   "id": "@ryu/session-context",
   "name": "Session Context",
   "version": "1.0.0",
+  "category": "Developer Tools",
   "icon": "sticky-note-01",
   "iconDither": { "from": 359, "to": 325, "direction": "down" },
   "surfaces": {

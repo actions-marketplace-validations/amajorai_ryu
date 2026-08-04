@@ -48,7 +48,7 @@ pub struct SpeakRequest {
     pub text: String,
     /// Engine selector. Omitted or `"outetts"` → the built-in OuteTTS engine
     /// (backward compatible). Any other id (e.g. `"kitten"`, `"pocket"`) is
-    /// served by the universal Ryu TTS sidecar (`apps/tts-sidecar`).
+    /// served by the universal Ryu TTS sidecar (`apps-store/voice/sidecar`).
     #[serde(default)]
     pub engine: Option<String>,
     /// Voice id (engine-specific); defaults to the engine's default voice.

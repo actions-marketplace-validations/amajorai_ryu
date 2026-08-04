@@ -32,6 +32,7 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
+import { Icon } from "@ryu/ui/components/icon";
 import { Input } from "@ryu/ui/components/input";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { cn } from "@ryu/ui/lib/utils";
@@ -45,9 +46,23 @@ export interface StoreSectionTab {
 	 * separate grouped-nav component.
 	 */
 	group?: string;
-	icon: IconSvgElement;
+	/**
+	 * The pill glyph. A `IconSvgElement` for the shell's own sections (authored
+	 * against Hugeicons), or a STRING icon id for an app-registered tab, whose
+	 * manifest can only carry a name — resolved through the shared `<Icon>`
+	 * primitive (Iconify `prefix:name`, a bare Hugeicons name, or a URL).
+	 */
+	icon: IconSvgElement | string;
 	label: string;
 	value: string;
+}
+
+/** Render either glyph form of a {@link StoreSectionTab.icon}. */
+function SectionTabIcon({ icon }: { icon: IconSvgElement | string }) {
+	if (typeof icon === "string") {
+		return <Icon className="shrink-0" icon={icon} size={16} />;
+	}
+	return <HugeiconsIcon className="size-4 shrink-0" icon={icon} />;
 }
 
 const noop = () => {
@@ -271,7 +286,7 @@ export function StoreSectionNav({
 								title={s.label}
 								type="button"
 							>
-								<HugeiconsIcon className="size-4 shrink-0" icon={s.icon} />
+								<SectionTabIcon icon={s.icon} />
 								<span
 									className={cn(
 										"grid transition-[grid-template-columns,opacity] duration-300 ease-out",

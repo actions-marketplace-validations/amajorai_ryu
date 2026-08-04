@@ -22,10 +22,15 @@ const COLLAPSE_AT_END_OF_LIFE = Number.MAX_SAFE_INTEGER;
 //     it is on screen. Turning autopilot off entirely — the previous fix — hid
 //     every description behind a hover.
 // Caller-supplied `options` still win via the spread.
+//
+// Deliberately NO `fill` override: sileo pairs its default fills with its own
+// per-theme text colors (dark mode = light `#f2f2f2` surface + black text, light
+// mode = dark `#1a1a1a` surface + white text). Overriding `fill` to `--muted`
+// used to break that pairing — black text on a dark surface — and cost a
+// dependency patch + a CSS cascade fight to undo. Leave the fill alone.
 const DEFAULT_TOASTER_OPTIONS = {
 	autopilot: { collapse: COLLAPSE_AT_END_OF_LIFE, expand: 150 },
 	duration: 6000,
-	fill: "var(--muted)",
 } as const;
 
 const Toaster = ({ options, ...props }: ToasterProps) => {
@@ -145,6 +150,42 @@ if (!patchTarget.__ryuSlotsPatched) {
 	patchTarget.__ryuSlotsPatched = true;
 }
 
+// sileo's own `promise` helper, exposed with the wrapper's `ToastInput`
+// (string-or-options) shape so callers write `loading: "…"` like every other
+// helper here. `success`/`error`/`action` accept either a static input or a
+// function mapping the settled value/error to the terminal toast.
+function toastPromise<T>(
+	promise: Promise<T> | (() => Promise<T>),
+	opts: {
+		action?: ToastInput | ((data: T) => ToastInput);
+		error: ToastInput | ((err: unknown) => ToastInput);
+		loading: ToastInput;
+		success?: ToastInput | ((data: T) => ToastInput);
+	}
+) {
+	return sileo.promise(promise, {
+		loading: asOptions(opts.loading),
+		success:
+			typeof opts.success === "function"
+				? (data: T) => asOptions((opts.success as (d: T) => ToastInput)(data))
+				: asOptions(opts.success ?? opts.loading),
+		error:
+			typeof opts.error === "function"
+				? (err: unknown) =>
+						asOptions((opts.error as (e: unknown) => ToastInput)(err))
+				: asOptions(opts.error),
+		...(opts.action
+			? {
+					action:
+						typeof opts.action === "function"
+							? (data: T) =>
+									asOptions((opts.action as (d: T) => ToastInput)(data))
+							: asOptions(opts.action),
+				}
+			: {}),
+	});
+}
+
 const toast = {
 	show: (input: ToastInput) => sileo.show(asOptions(input)),
 	message: (input: ToastInput) => sileo.show(asOptions(input)),
@@ -153,6 +194,7 @@ const toast = {
 	warning: (input: ToastInput) => sileo.warning(asOptions(input)),
 	info: (input: ToastInput) => sileo.info(asOptions(input)),
 	dismiss: (id: string) => sileo.dismiss(id),
+	promise: toastPromise,
 };
 
 export { Toaster, toast };

@@ -7,12 +7,14 @@
 //! the extracted [`ryu_mesh`] crate (Core bridges to these shell-outs via the
 //! `MeshHost` shim in [`crate::mesh_host`]).
 //!
-//! Opt-in only: `TailscaleManager` is registered in `all_sidecars` but **never**
-//! in `startup_order`. It starts when (and only when) `RYU_MESH_ENABLED` is set
-//! and the user installs/starts it. There is **no auto-download yet** — the
-//! sidecar PATH-adopts an official client install on every platform; the
-//! `required_platforms("tailscale") => ["linux"]` label reserves the future
-//! Linux-only downloader and gates the generic install route there.
+//! Opt-in only: `TailscaleManager` is registered in `all_sidecars` and listed in
+//! `startup_order`, but `start_all` skips it unless `main()` marked it installed —
+//! which happens only when `ryu_mesh::is_enabled()` (the `RYU_MESH_ENABLED` env OR
+//! the `mesh-enabled` pref the desktop's Gateway → Integrations toggle writes). The
+//! daemon is **PATH-adopted** on every platform — an official `tailscale` +
+//! `tailscaled` client install is expected on PATH; the `required_platforms("tailscale") => ["linux"]`
+//! label reserves a future Linux-only downloader and gates the generic install
+//! route there.
 //!
 //! Security (folded review fixes, all HIGH/MED):
 //! - **Userspace mode exposes a local SOCKS5 + HTTP proxy** (`--socks5-server`,
@@ -312,7 +314,7 @@ impl Sidecar for TailscaleManager {
         Box::pin(async move {
             if !ryu_mesh::is_enabled() {
                 anyhow::bail!(
-                    "mesh disabled: set RYU_MESH_ENABLED=1 to start the Tailscale daemon"
+                    "mesh disabled: enable the mesh in the desktop (Gateway → Integrations) or set RYU_MESH_ENABLED=1"
                 );
             }
 

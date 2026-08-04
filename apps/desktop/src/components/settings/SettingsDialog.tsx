@@ -35,11 +35,8 @@ import { BillingTab } from "./BillingTab.tsx";
 import { DeveloperTab } from "./DeveloperTab.tsx";
 import { EntitySettings } from "./EntitySettings.tsx";
 import { GeneralTab } from "./GeneralTab.tsx";
-// # 0.1.0: Island disabled — uncomment with the Island nav item below
-// import { IslandSettings } from "./IslandSettings.tsx";
 import { KeyboardShortcutsTab } from "./KeyboardShortcutsTab.tsx";
 import { SessionsTab } from "./SessionsTab.tsx";
-import { ShadowSettings } from "./ShadowSettings.tsx";
 import { TeamsBillingTab } from "./TeamsBillingTab.tsx";
 import { TtsEngineSettings } from "./TtsEngineSettings.tsx";
 import { VoiceInputSettings } from "./VoiceInputSettings.tsx";
@@ -74,18 +71,15 @@ interface NavGroup {
 // Gateway one updates the node's Core/Gateway binaries, the one here updates this
 // desktop client. They are separate installs that can sit at different versions.
 //
-// KNOWN HYBRID — `island`, `shadow` and `voice` are the three entries below that
-// are NOT the shell's own settings: each belongs to a sidecar app and should
-// arrive through `contributes.settings_tabs` under the dynamic Apps/Plugins
-// headers (as memory/meetings/quests/predict already do), so the tab appears only
-// while its app is enabled instead of always. The manifest vocabulary can express
-// them — a `{"view": …}` tab covers a rich, non-declarative settings UI — so the
-// gap is not the schema; it is that each needs a binding in `EntitySettings`'
-// `SETTINGS_VIEWS` (and Voice needs a wrapper around its five sub-panels, Island
-// needs a manifest at all, since it is a desktop-owned Electron sidecar with no
-// plugin record). Migrating half of that — declaring the tab without the binding —
-// renders an EMPTY settings tab, which is strictly worse than this switch. Do it
-// as one change or not at all.
+// KNOWN HYBRID — `voice` is the one entry below that is NOT the shell's own
+// setting: it belongs to the voice/dictation sidecar stack and could arrive
+// through `contributes.settings_tabs` under the dynamic Apps/Plugins headers
+// (as memory/meetings/quests/predict already do). It is kept here because it is
+// a wrapper around five desktop-client sub-panels that share no single owning
+// app record. `island` and `shadow` were the other two hybrids and are now
+// registered: each declares a manifest `contributes.settings_tabs` view and
+// renders under the dynamic Apps/Plugins headers in the Gateway dialog, so their
+// tabs appear only while the owning app is enabled instead of always.
 const NAV_GROUPS: NavGroup[] = [
 	{
 		items: [
@@ -93,9 +87,6 @@ const NAV_GROUPS: NavGroup[] = [
 			{ value: "appearance", label: "Appearance" },
 			{ value: "keyboard", label: "Keyboard shortcuts" },
 			{ value: "updates", label: "Updates" },
-			// # 0.1.0: Island disabled — uncomment when re-enabling Island settings
-			// { value: "island", label: "Island" },
-			{ value: "shadow", label: "Shadow" },
 			{ value: "voice", label: "Voice" },
 			{ value: "developer", label: "Developer" },
 		],
@@ -135,11 +126,6 @@ function SectionContent({ value }: { value: SectionValue }) {
 			return <KeyboardShortcutsTab />;
 		case "updates":
 			return <AppUpdatesSettings />;
-		// # 0.1.0: Island disabled — uncomment when re-enabling Island settings
-		// case "island":
-		// 	return <IslandSettings />;
-		case "shadow":
-			return <ShadowSettings />;
 		case "billing":
 			return <BillingTab />;
 		case "referrals":
@@ -166,7 +152,9 @@ function SectionContent({ value }: { value: SectionValue }) {
 }
 
 interface SettingsDialogProps {
-	defaultSection?: SectionValue;
+	/** A static {@link SectionValue}, or a dynamic `app:<id>` / `plugin:<id>` entity
+	 *  value (matched by prefix at render time, like the Gateway dialog's). */
+	defaultSection?: SectionValue | (string & {});
 	onOpenChange: (open: boolean) => void;
 	open: boolean;
 }

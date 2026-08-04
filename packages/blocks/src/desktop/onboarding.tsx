@@ -114,13 +114,14 @@ export interface OnboardingViewProps {
 	/** Ids of the currently-selected agents. */
 	selected?: ReadonlySet<string>;
 	step: OnboardingStep;
-	/** Supporting line under the title (login-style PageHeader). Rotating
-	 *  loading copy is swapped in place via TextSwap in the shell. */
+	/** Supporting line under the title (login-style PageHeader). */
 	subtitle?: string;
 	/** A curated set of popular agents the user can opt into, shown under the
 	 *  "Suggested" header on the `agents` step (not pre-selected). */
 	suggestedAgents?: OnboardingAgentOption[];
-	/** Main heading (login-style PageHeader title). */
+	/** Main heading (login-style PageHeader title). On the auto-advancing
+	 *  `starting`/`installing`/`finishing` steps this is the rotating loading
+	 *  copy, swapped in place via TextSwap in the shell. */
 	title: string;
 }
 
@@ -156,10 +157,10 @@ function OnboardingShell({
 						<GhostOrb size="50px" variant="outline" />
 					</div>
 					{/* Same title + muted subtitle stack as LoginView's PageHeader.
-					    TextSwap keeps rotating loading lines from hard-cutting. */}
+				    TextSwap keeps rotating loading lines from hard-cutting. */}
 					<PageHeader
 						subtitle={subtitle ? <TextSwap>{subtitle}</TextSwap> : undefined}
-						title={title}
+						title={<TextSwap>{title}</TextSwap>}
 					/>
 					{children}
 				</StaggerReveal>
@@ -461,9 +462,12 @@ function ChooseStep({
 	const { resolvedTheme } = useTheme();
 	const metalTheme = resolvedTheme === "light" ? "light" : "dark";
 
+	// Inside the MetalFx frame the text color belongs to the shader's root, not
+	// the outline variant — without this pin, the variant's `hover:text-foreground`
+	// snaps the label to the theme's foreground (black in light mode) on hover.
 	const managedButton = (
 		<Button
-			className="w-full"
+			className={showProBadge ? "hover:!text-inherit w-full" : "w-full"}
 			disabled={managedBusy || managedLoading}
 			onClick={onChooseManaged}
 			size="lg"

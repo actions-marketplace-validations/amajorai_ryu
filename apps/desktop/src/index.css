@@ -177,25 +177,84 @@
 }
 
 /* Background customization (Settings → Appearance → Backgrounds). Layers an
-   optional gradient/image OVER the theme's solid surface color. The CSS vars are
-   set on :root by hooks/useBackgroundCustomization.ts; unset → `none` keeps the
-   default flat look. Unlayered so it wins over the Tailwind `bg-*` color
-   utilities (which only set background-color, never background-image). The
-   sidebar surface is `[data-slot="sidebar-inner"]` (docked) plus the floating
-   panel marker; the page surface is the `[data-slot="sidebar-inset"]` main. */
-[data-slot="sidebar-inner"],
-.ryu-sidebar-surface {
+   optional gradient/image OVER the theme's solid surface color, and applies
+   transparency + blur to that layer. The CSS vars are set on :root by
+   hooks/useBackgroundCustomization.ts; unset → `none` keeps the default flat
+   look. The sidebar surface is `[data-slot="sidebar-inner"]` (docked) plus the
+   floating panel marker; the page surface is the `[data-slot="sidebar-inset"]`
+   main.
+
+   While any surface is customized (`html[data-ryu-bg-active]`) the background
+   moves onto a ::before layer instead of the element itself. That is what lets
+   the transparency (opacity) and backdrop blur (filter: blur) apply to the
+   backdrop WITHOUT blurring the surface's own content — a filter on the element
+   would soften the sidebar text too. The surface's own Tailwind `bg-*` color is
+   suppressed so the ::before (z-index -1, under the in-flow content, above the
+   parent background) is the only thing painted; it carries the theme color so
+   the flat look survives transparency. */
+[data-slot="sidebar-inner"]::before,
+.ryu-sidebar-surface::before {
 	background-image: var(--ryu-sidebar-bg-image, none);
 	background-repeat: var(--ryu-sidebar-bg-repeat, repeat);
 	background-position: var(--ryu-sidebar-bg-position, 0 0);
 	background-size: var(--ryu-sidebar-bg-size, auto);
+	opacity: var(--ryu-sidebar-bg-opacity, 1);
+	filter: blur(var(--ryu-sidebar-bg-blur, 0px));
 }
 
-[data-slot="sidebar-inset"] {
+[data-slot="sidebar-inset"]::before {
 	background-image: var(--ryu-page-bg-image, none);
 	background-repeat: var(--ryu-page-bg-repeat, repeat);
 	background-position: var(--ryu-page-bg-position, 0 0);
 	background-size: var(--ryu-page-bg-size, auto);
+	opacity: var(--ryu-page-bg-opacity, 1);
+	filter: blur(var(--ryu-page-bg-blur, 0px));
+}
+
+[data-slot="sidebar-inner"]::before,
+.ryu-sidebar-surface::before,
+[data-slot="sidebar-inset"]::before {
+	position: absolute;
+	inset: 0;
+	z-index: -1;
+	pointer-events: none;
+	/* `content` must be non-none or the pseudo-element generates no box and the
+	   whole background layer silently stops rendering — which is what happened:
+	   under `html[data-ryu-bg-active]` the surface's own color goes transparent
+	   and these ::before layers are the ONLY thing painting it, so the inset
+	   card (and sidebar) vanished to the canvas behind it. */
+	content: "";
+	border-radius: inherit;
+}
+
+/* Theme color behind the backdrop layer — matches each surface's own bg-*
+   utility so transparency reveals the same flat color it replaces. */
+[data-slot="sidebar-inner"]::before {
+	background-color: var(--sidebar);
+}
+
+.ryu-sidebar-surface::before {
+	background-color: var(--card);
+}
+
+[data-slot="sidebar-inset"]::before {
+	background-color: var(--background);
+}
+
+html[data-ryu-bg-active] [data-slot="sidebar-inner"],
+html[data-ryu-bg-active] .ryu-sidebar-surface,
+html[data-ryu-bg-active] [data-slot="sidebar-inset"] {
+	/* The ::before above replaces the surface's own flat color; keep the
+	   element transparent so the layer actually shows. `overflow: clip` (not
+	   hidden — that would turn the main into a scroll container and break
+	   sticky headers) keeps the backdrop blur from bleeding past the surface. */
+	overflow: clip;
+	/* The ::before above replaces the surface's own flat color; keep the
+	   element transparent so the layer actually shows. `overflow: clip` (not
+	   hidden — that would turn the main into a scroll container and break
+	   sticky headers) keeps the backdrop blur from bleeding past the surface. */
+	background-color: transparent !important;
+	isolation: isolate;
 }
 
 @layer utilities {
@@ -252,24 +311,6 @@
 html[data-chrome-shadows="off"] .ryu-chrome-shadow {
 	box-shadow: none !important;
 	filter: none !important;
-}
-
-/* Dialog transparent mode (blur off, default) — no backdrop overlay and no
-   panel shadow on dialogs, alert dialogs, sheets, or drawers. */
-html:not([data-dialog-overlay-blur="on"]) .ryu-dialog-overlay {
-	display: none;
-}
-
-html:not([data-dialog-overlay-blur="on"]) [data-slot="dialog-content"],
-html:not([data-dialog-overlay-blur="on"]) [data-slot="alert-dialog-content"],
-html:not([data-dialog-overlay-blur="on"]) [data-slot="sheet-content"],
-html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"] {
-	border: 1px solid color-mix(in oklch, var(--border) 50%, transparent) !important;
-	box-shadow: none !important;
-}
-
-html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"]::before {
-	box-shadow: none !important;
 }
 
 /* Inverted backgrounds mode — swaps muted/popover overlay backgrounds to

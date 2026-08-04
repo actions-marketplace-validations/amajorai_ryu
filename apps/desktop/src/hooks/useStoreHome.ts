@@ -18,6 +18,7 @@
 // layer (:3000). The featured rail degrades to empty on any error (signed out, no
 // org, network) so a Core-only home is never blocked by the money layer.
 
+import type { CardDither } from "@ryu/marketplace/catalog/types";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { fetchAgentCatalog } from "@/src/lib/api/agents.ts";
@@ -42,6 +43,13 @@ const FEATURED_LIMIT = 12;
 /** One normalized card in a home row, realm-agnostic so rows render uniformly. */
 export interface HomeCard {
 	description: string | null;
+	/** The listing's dithered icon wash (`icon_dither`), when it declares one.
+	 *  Carried so a Home card paints the SAME tile as the card in the realm's own
+	 *  tab — without it every Home row fell back to the generative placeholder and
+	 *  Home, the first tab anyone sees, was the one place the icons were wrong. */
+	dither: CardDither | null;
+	/** Icon-primitive glyph id (`icon`), painted inside the tile. */
+	iconId: string | null;
 	/** Resolvable logo URL, or null to fall back to the item's initial. */
 	iconUrl: string | null;
 	id: string;
@@ -154,7 +162,9 @@ export function useStoreHome(): UseStoreHomeResult {
 				name: s.name,
 				description: s.source || null,
 				tag: "Skill",
+				iconId: null,
 				iconUrl: null,
+				dither: null,
 			}));
 		if (skills.length > 0) {
 			result.push({ realm: "skills", label: "Featured skills", items: skills });
@@ -167,7 +177,9 @@ export function useStoreHome(): UseStoreHomeResult {
 				name: m.name,
 				description: m.author || null,
 				tag: m.format ? m.format.toUpperCase() : null,
+				iconId: null,
 				iconUrl: null,
+				dither: null,
 			}));
 		if (models.length > 0) {
 			result.push({ realm: "models", label: "Popular models", items: models });
@@ -180,7 +192,9 @@ export function useStoreHome(): UseStoreHomeResult {
 				name: a.name,
 				description: a.description,
 				tag: a.engine,
+				iconId: null,
 				iconUrl: a.iconUrl,
+				dither: null,
 			}));
 		if (agents.length > 0) {
 			result.push({ realm: "agents", label: "Agents", items: agents });
@@ -200,7 +214,9 @@ export function useStoreHome(): UseStoreHomeResult {
 				name: e.name,
 				description: e.description || null,
 				tag: e.kinds[0] ?? null,
-				iconUrl: null,
+				iconId: e.icon ?? null,
+				iconUrl: e.icon_url ?? null,
+				dither: e.icon_dither ?? null,
 			}));
 		if (apps.length > 0) {
 			result.push({ realm: "apps", label: "Apps", items: apps });
@@ -214,7 +230,9 @@ export function useStoreHome(): UseStoreHomeResult {
 				name: e.name,
 				description: e.description || null,
 				tag: e.kinds[0] ?? null,
-				iconUrl: null,
+				iconId: e.icon ?? null,
+				iconUrl: e.icon_url ?? null,
+				dither: e.icon_dither ?? null,
 			}));
 		if (plugins.length > 0) {
 			result.push({ realm: "plugins", label: "Plugins", items: plugins });
@@ -227,7 +245,9 @@ export function useStoreHome(): UseStoreHomeResult {
 				name: s.name,
 				description: s.description,
 				tag: s.transports[0] ?? "MCP",
+				iconId: null,
 				iconUrl: null,
+				dither: null,
 			}));
 		if (mcp.length > 0) {
 			result.push({ realm: "mcp", label: "MCP servers", items: mcp });

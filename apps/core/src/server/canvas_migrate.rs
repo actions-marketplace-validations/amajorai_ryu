@@ -22,6 +22,30 @@ fn canvases_dir() -> PathBuf {
     ryu_dir().join("canvases")
 }
 
+/// Whether `~/.ryu/canvases` holds at least one un-migrated `*.json` board.
+///
+/// The **precondition** for the import, hoisted out of [`migrate_legacy_canvases`]
+/// so the caller can decide before doing anything observable. It exists because the
+/// import's only input used to be a Space that boot created unconditionally:
+/// `ensure_system_space("Canvas")` ran on every start, for every user, and THEN the
+/// importer looked for legacy files and almost always found none. The visible cost
+/// of that ordering was an undeletable, empty "Canvas" Space on machines that had
+/// never installed the Canvas app — created fresh on the next boot after any reset.
+///
+/// Same predicate the importer applies (`*.json`, not `*.json.migrated`), so a
+/// `true` here means the pass has real work and a `false` means it would have
+/// migrated nothing. Cheap: one `read_dir`, short-circuiting on the first match,
+/// and an absent directory — the case for every install that post-dates the App
+/// port — is `false` without touching a file.
+pub fn has_pending_legacy_canvases() -> bool {
+    let Ok(entries) = std::fs::read_dir(canvases_dir()) else {
+        return false; // no legacy store — nothing to import.
+    };
+    entries.flatten().any(|entry| {
+        entry.path().extension().and_then(|e| e.to_str()) == Some("json")
+    })
+}
+
 /// Import every legacy canvas file into `space_id` as a `@ryu/canvas` document.
 /// Best-effort: a malformed file is skipped (and left in place) rather than
 /// aborting the whole pass. Returns the number of boards migrated.

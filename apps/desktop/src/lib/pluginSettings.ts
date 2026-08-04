@@ -255,6 +255,64 @@ export function splitScopedTabs(
 	return { apps, plugins };
 }
 
+/** Prefix marking a dynamic Apps-header nav section value (`app:<pluginId>`). */
+export const APP_SECTION_PREFIX = "app:";
+/** Prefix marking a dynamic Plugins-header nav section value (`plugin:<pluginId>`). */
+export const PLUGIN_SECTION_PREFIX = "plugin:";
+
+/** True if a section value addresses a dynamic app/plugin entity tab. */
+export function isEntitySection(value: string): boolean {
+	return (
+		value.startsWith(APP_SECTION_PREFIX) ||
+		value.startsWith(PLUGIN_SECTION_PREFIX)
+	);
+}
+
+/** Which dialog holds an entity's settings, and the section value that selects it. */
+export interface SettingsDestination {
+	/** `"gateway"` = the node dialog, `"app"` = the App Settings dialog. */
+	dialog: "app" | "gateway";
+	/** `app:<id>` / `plugin:<id>` — must match what the nav would have built. */
+	section: string;
+}
+
+/**
+ * Resolve where one plugin's settings live, for a surface that wants to send the
+ * user straight there (the Store's per-listing Settings action).
+ *
+ * The returned `section` must be a value {@link splitScopedTabs} +
+ * `buildEntityNavGroups` would also have produced for this plugin, because the
+ * dialogs look it up in exactly that map and fall back to their default section
+ * when it misses — a wrong prefix or scope is a silent no-op, not an error. Both
+ * are derived here from the same tabs and the same `isApp` predicate the nav
+ * uses, so the two cannot drift.
+ *
+ * A plugin with tabs at BOTH scopes resolves to the node one: `scope` defaults to
+ * `"node"`, so that is where a plugin's ordinary fields (an API key among them)
+ * land, and it is the tab someone hunting for credentials wants.
+ *
+ * Returns `null` when the plugin contributes no settings tab at all — the caller
+ * should then render no affordance rather than one that opens a default page.
+ */
+export function resolveSettingsDestination(
+	tabs: PluginSettingsTab[],
+	isApp: (pluginId: string) => boolean,
+	pluginId: string
+): SettingsDestination | null {
+	const prefix = isApp(pluginId) ? APP_SECTION_PREFIX : PLUGIN_SECTION_PREFIX;
+	const section = `${prefix}${pluginId}`;
+	const scopes = new Set(
+		tabs.filter((t) => t.plugin === pluginId).map((t) => t.scope)
+	);
+	if (scopes.has("node")) {
+		return { dialog: "gateway", section };
+	}
+	if (scopes.has("user")) {
+		return { dialog: "app", section };
+	}
+	return null;
+}
+
 /** Coerce a stored bare-string preference into a boolean (for `toggle` fields). */
 export function prefToBool(raw: string | null, fallback = false): boolean {
 	if (raw === null) {

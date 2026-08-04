@@ -776,6 +776,21 @@ impl SetupManager {
             {
                 Ok(dir) => {
                     self.mark_installed("parakeet").await;
+                    // Persist under the SIDECAR name, not just the model's own
+                    // `parakeet-model:v3-int8` store key. `seed_installed_from_disk`
+                    // looks up `versions.json` by sidecar name, so without this row
+                    // the in-memory `mark_installed` above died at process exit and
+                    // `start_all` skipped parakeet as "not installed" on every
+                    // subsequent boot — the engine then never loaded, and the Voice
+                    // settings row reported "Not running" forever. Same reason
+                    // `ryutts` records one below.
+                    if let Err(e) = crate::sidecar::download_manager::VersionStore::record_persisted(
+                        "parakeet",
+                        crate::sidecar::providers::parakeet::MODEL_DIR_NAME,
+                        "v3-int8",
+                    ) {
+                        tracing::warn!("recording parakeet install failed: {e:#}");
+                    }
                     tracing::info!(
                         "onboarding: parakeet speech model installed at {}",
                         dir.display()
@@ -842,55 +857,55 @@ impl SetupManager {
             }
         };
 
-        // Step 7 — Kokoro 82M (the cross-surface default TTS engine) model artifacts.
+        // Step 7 — Kokoro 82M (the cross-surface default TTS engine): runtime, then
+        // model artifacts.
         //
-        // Kokoro is the default TTS engine id everywhere (`DEFAULT_TTS_ENGINE`). Its
-        // ONNX weights + voice pack are downloaded here, exactly like the Gemma chat
-        // GGUF (Step 2) and the OuteTTS GGUFs (Step 6), so the default voice works
-        // with zero setup. The Python TTS sidecar's `kokoro-onnx` backend only
-        // *serves* these files. When the sidecar runtime can be provisioned (its code
-        // is installed), we also create its venv + mark `ryutts` installed so it
-        // auto-starts and Kokoro is live by default. Non-fatal throughout: any failure
-        // (or an un-provisioned sidecar) degrades to the OuteTTS fallback at runtime.
-        let kokoro_installed =
+        // Kokoro is the default TTS engine id everywhere (`DEFAULT_TTS_ENGINE`), and
+        // the Python TTS sidecar's `kokoro-onnx` backend is the only thing that can
+        // serve it — the ONNX weights + voice pack are inert without it. So the
+        // runtime is provisioned FIRST and the ~330 MB of weights are fetched only
+        // once something can actually play them.
+        //
+        // That ordering is the fix for a real waste: the weights used to download
+        // unconditionally while `ensure_kokoro_runtime` bailed on literally every
+        // install (nothing ever created `~/.ryu/tts-sidecar` — see the WHY on that
+        // function). Every user paid for a model that was never once served. A node
+        // with no usable Python still pays nothing now, and still speaks: the
+        // built-in OuteTTS engine from Step 6 is the runtime fallback, and
+        // `POST /api/voice/speak` falls back to it per-request.
+        //
+        // Non-fatal throughout — chat readiness never depends on any of this.
+        let runtime_ready = match crate::sidecar::providers::ryutts::ensure_kokoro_runtime().await {
+            Ok(ready) => ready,
+            Err(e) => {
+                let msg =
+                    format!("Kokoro TTS runtime provisioning failed (TTS uses OuteTTS): {e:#}");
+                tracing::warn!("{}", msg);
+                warnings.push(msg);
+                false
+            }
+        };
+        let kokoro_installed = if runtime_ready {
             match crate::sidecar::providers::ryutts::kokoro::KokoroDownloader::new()
                 .ensure_installed(downloads)
                 .await
             {
                 Ok(_) => {
-                    match crate::sidecar::providers::ryutts::ensure_kokoro_runtime().await {
-                        Ok(true) => {
-                            self.mark_installed("ryutts").await;
-                            // Persist so a restart re-seeds `ryutts` as installed and
-                            // `start_all` brings the default TTS engine up automatically.
-                            if let Err(e) =
-                                crate::sidecar::download_manager::VersionStore::record_persisted(
-                                    "ryutts",
-                                    "kokoro-82m-v1.0",
-                                    "installed",
-                                )
-                            {
-                                tracing::warn!("recording ryutts install failed: {e:#}");
-                            }
-                            tracing::info!(
-                            "onboarding: Kokoro 82M default TTS installed + sidecar provisioned"
-                        );
-                        }
-                        Ok(false) => {
-                            tracing::info!(
-                            "onboarding: Kokoro 82M model downloaded; TTS sidecar code not \
-                             installed yet — run `bun run dev:tts` (or install it) to serve Kokoro. \
-                             OuteTTS is the runtime fallback until then."
-                        );
-                        }
-                        Err(e) => {
-                            let msg = format!(
-                            "Kokoro TTS runtime provisioning failed (TTS falls back to OuteTTS): {e:#}"
-                        );
-                            tracing::warn!("{}", msg);
-                            warnings.push(msg);
-                        }
+                    self.mark_installed("ryutts").await;
+                    // Persist so a restart re-seeds `ryutts` as installed and
+                    // `start_all` brings the default TTS engine up automatically.
+                    if let Err(e) =
+                        crate::sidecar::download_manager::VersionStore::record_persisted(
+                            "ryutts",
+                            "kokoro-82m-v1.0",
+                            "installed",
+                        )
+                    {
+                        tracing::warn!("recording ryutts install failed: {e:#}");
                     }
+                    tracing::info!(
+                        "onboarding: Kokoro 82M default TTS installed + sidecar provisioned"
+                    );
                     true
                 }
                 Err(e) => {
@@ -901,7 +916,14 @@ impl SetupManager {
                     warnings.push(msg);
                     false
                 }
-            };
+            }
+        } else {
+            tracing::info!(
+                "onboarding: Kokoro TTS sidecar not provisionable on this node — skipping the \
+                 Kokoro model download. Spoken output uses the built-in OuteTTS engine."
+            );
+            false
+        };
 
         // Step 8 — stable-diffusion.cpp image engine (server binary + default model).
         //

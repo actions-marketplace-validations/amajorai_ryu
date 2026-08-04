@@ -2,6 +2,8 @@
   "id": "@ryu/hardware",
   "name": "Hardware Devices",
   "version": "1.0.0",
+  "category": "Core",
+  "mandatory": true,
   "description": "Physical Ryu hardware: pair, manage, and control ESP32-based devices from the node, with device CRUD backed by the local device store.",
   "engines": {
     "ryu": ">=0.0.1"

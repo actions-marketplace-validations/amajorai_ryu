@@ -15,7 +15,7 @@
     "markdown",
     "extraction"
   ],
-  "category": "Knowledge",
+  "category": "Documents",
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

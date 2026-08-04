@@ -162,6 +162,20 @@
       "tsHost": false
     },
     {
+      "capability": "learning.recordFeedback",
+      "grant": "learning:crud",
+      "method": "learning.recordFeedback",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "learning.synthesizeSkill",
+      "grant": "learning:crud",
+      "method": "learning.synthesizeSkill",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
       "capability": "agent.run",
       "grant": "hook:run-agent",
       "method": "agent.run.stream",
@@ -645,6 +659,41 @@
       "tsHost": true
     },
     {
+      "capability": "quests.crud",
+      "grant": "quests:crud",
+      "method": "quests.capture",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "quests.crud",
+      "grant": "quests:crud",
+      "method": "quests.use",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "quests.crud",
+      "grant": "quests:crud",
+      "method": "quests.pin",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "quests.crud",
+      "grant": "quests:crud",
+      "method": "quests.scratchpad",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "quests.crud",
+      "grant": "quests:crud",
+      "method": "quests.setScratchpad",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "activity.read",
       "grant": "activity:read",
       "method": "activity.list",
@@ -1019,6 +1068,13 @@
       "capability": "shell.integrate",
       "grant": "shell:integrate",
       "method": "shell.themeSubscribe",
+      "streaming": true,
+      "tsHost": true
+    },
+    {
+      "capability": "shell.integrate",
+      "grant": "shell:integrate",
+      "method": "shell.prefsSubscribe",
       "streaming": true,
       "tsHost": true
     },

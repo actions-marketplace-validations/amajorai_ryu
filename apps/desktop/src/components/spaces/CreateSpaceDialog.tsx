@@ -1,6 +1,6 @@
 import {
-	RETRIEVAL_MODE_OPTIONS,
 	RetrievalModeChoice,
+	retrievalModeLabel,
 	type SpaceRetrievalMode,
 } from "@ryu/blocks/desktop/spaces";
 import { Button } from "@ryu/ui/components/button";
@@ -16,6 +16,7 @@ import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { useFriendlyMode } from "@ryu/ui/hooks/use-friendly-mode.ts";
 import { type ChangeEvent, type FormEvent, useState } from "react";
 
 /**
@@ -27,12 +28,15 @@ import { type ChangeEvent, type FormEvent, useState } from "react";
  */
 const DEFAULT_MODE: SpaceRetrievalMode = "vector";
 
-/** Human label for a mode, from the one shared copy table. */
-function modeLabel(mode: SpaceRetrievalMode): string {
-	return (
-		RETRIEVAL_MODE_OPTIONS.find((o) => o.value === mode)?.label ?? String(mode)
-	);
-}
+/**
+ * The dialog's own copy is plain already ("A space is a named collection of
+ * documents you can search"), so the only jargon it can leak is the mode name —
+ * and it leaks it through the toast below, not through the picker, which names
+ * the modes itself. `retrievalModeLabel` is the same shared table the picker
+ * reads, so a toast fired while friendly names are on says "Created with
+ * Connected search retrieval" rather than naming an algorithm the user was never
+ * shown.
+ */
 
 /**
  * Create-a-space dialog, shared by the Spaces page and the sidebar's Spaces
@@ -65,6 +69,7 @@ export function CreateSpaceDialog({
 	const [mode, setMode] = useState<SpaceRetrievalMode | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+	const [friendly] = useFriendlyMode();
 
 	const reset = () => {
 		setName("");
@@ -96,8 +101,8 @@ export function CreateSpaceDialog({
 					// A fixed slot id: repeated creates on such a node should replace
 					// this notice, not stack identical copies of it.
 					id: "space-retrieval-mode-default",
-					title: `Created with ${modeLabel(created)} retrieval`,
-					description: `This node's default retrieval mode is ${modeLabel(created)}. You can change it in the space's Retrieval settings.`,
+					title: `Created with ${retrievalModeLabel(created, friendly)} retrieval`,
+					description: `This node's default retrieval mode is ${retrievalModeLabel(created, friendly)}. You can change it in the space's Retrieval settings.`,
 				});
 			}
 			reset();

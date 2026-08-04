@@ -7,6 +7,8 @@ import { sileo } from "sileo";
 import { WEB_URL } from "@/lib/app-urls.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { ColorStep } from "@/src/components/onboarding/ColorStep.tsx";
+import { PreferencesStep } from "@/src/components/onboarding/PreferencesStep.tsx";
+import { PrivacyStep } from "@/src/components/onboarding/PrivacyStep.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import { track } from "@/src/lib/analytics.ts";
@@ -53,9 +55,10 @@ const withAgentLogo = (entry: AgentCatalogEntry) => ({
 	logo: <AgentCatalogLogo entry={entry} size="20px" />,
 });
 
-// The 'agents', 'features', 'mic', and 'theme' phases are interactive: the user
-// picks which extra agents to add, chooses which features to keep on, optionally
-// enables the microphone, then sets the look. Every other phase auto-advances.
+// The 'agents', 'features', 'mic', 'theme', 'preferences', and 'privacy' phases
+// are interactive: the user picks which extra agents to add, optionally enables
+// the microphone, sets the look, then tunes a few general + privacy settings.
+// Every other phase auto-advances.
 type Phase =
 	| "starting"
 	| "choose"
@@ -64,19 +67,21 @@ type Phase =
 	| "features"
 	| "mic"
 	| "theme"
+	| "preferences"
+	| "privacy"
 	| "finishing"
 	| "done";
 
-const PHASE_TITLES: Record<Phase, string> = {
-	starting: "Welcome to Ryu",
+const PHASE_TITLES: Partial<Record<Phase, string>> = {
 	choose: "How do you want to run Ryu?",
-	installing: "Welcome to Ryu",
 	agents: "Add your agents",
 	features: "Choose your features",
 	mic: "Allow Ryu to access microphone",
-	// The theme step renders its own header; this entry only satisfies the map.
+	// The theme/preferences/privacy steps render their own headers; these entries
+	// only satisfy the map.
 	theme: "Make it yours",
-	finishing: "Welcome to Ryu",
+	preferences: "Set your preferences",
+	privacy: "Your privacy",
 	done: "You're all set",
 };
 
@@ -91,7 +96,7 @@ const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
 // The auto-advancing phases (`starting`/`installing`/`finishing`) can sit for a
 // long time — `waitForLocalStack` polls the bundled inference install for up to
 // 30 minutes. A single frozen line reads as "nothing is happening", so on those
-// phases we cycle the PageHeader subtitle to make the wait feel alive.
+// phases we cycle the header line to make the wait feel alive.
 const ROTATING_SUBTITLES: Partial<Record<Phase, string[]>> = {
 	starting: [
 		"Setting things up",
@@ -528,7 +533,7 @@ export default function OnboardingPage() {
 		beginLocalSetup,
 	]);
 
-	// Cycle the PageHeader subtitle while a long auto-advancing phase is on
+	// Cycle the header line while a long auto-advancing phase is on
 	// screen so the view never looks frozen. Resets to the first line whenever
 	// the phase flips, and tears the interval down on any phase the map doesn't
 	// cover.
@@ -549,9 +554,12 @@ export default function OnboardingPage() {
 	// otherwise sit forever on "starting" with a shimmering progress bar and no
 	// way out. We render a dedicated error state with a restart button instead.
 	const coreFailed = coreStatus === "stopped";
-	const subtitle =
-		ROTATING_SUBTITLES[phase]?.[rotateIndex] ?? PHASE_SUBTITLES[phase];
-	const title = PHASE_TITLES[phase];
+	// On the auto-advancing phases the rotating copy IS the headline; everywhere
+	// else the static title/subtitle pair carries the step. Every non-rotating
+	// phase has a PHASE_TITLES entry, so the fallthrough is always defined.
+	const rotating = ROTATING_SUBTITLES[phase]?.[rotateIndex];
+	const subtitle = rotating ? undefined : PHASE_SUBTITLES[phase];
+	const title = rotating ?? PHASE_TITLES[phase]!;
 
 	// Restart the whole app so it re-attempts startup from scratch; fall back to a
 	// plain reload if the Tauri process plugin isn't reachable.
@@ -619,9 +627,29 @@ export default function OnboardingPage() {
 		goToTheme();
 	}, [submitting, goToTheme]);
 
-	// The theme step already persisted every pick as it was made, so finishing is
-	// just the agent installs plus the hand-off to chat.
-	const handleFinishTheme = useCallback(() => {
+	// The theme step already persisted every pick as it was made, so Continue
+	// just hands off to the general-settings step.
+	const goToPreferences = useCallback(() => {
+		if (submitting) {
+			return;
+		}
+		setSubmitting(false);
+		setPhase("preferences");
+	}, [submitting]);
+
+	// The preferences step persists each toggle as it's flipped, so Continue just
+	// hands off to the privacy step.
+	const goToPrivacy = useCallback(() => {
+		if (submitting) {
+			return;
+		}
+		setSubmitting(false);
+		setPhase("privacy");
+	}, [submitting]);
+
+	// The privacy step already persisted every consent as it was made, so
+	// finishing is just the agent installs plus the hand-off to chat.
+	const handleFinishPrivacy = useCallback(() => {
 		if (submitting) {
 			return;
 		}
@@ -651,13 +679,30 @@ export default function OnboardingPage() {
 		);
 	}
 
-	// The theme step is desktop-only (it drives the desktop's own theme setters and
-	// preset store), so it renders here rather than through the shared block, whose
-	// `OnboardingStep` union has no member for it.
+	// The theme/preferences/privacy steps are desktop-only (they drive the
+	// desktop's own theme setters, appearance toggles, autostart registration,
+	// and Core privacy prefs), so they render here rather than through the shared
+	// block, whose `OnboardingStep` union has no member for them.
 	if (phase === "theme") {
 		return (
 			<div className="size-full" data-tauri-drag-region="true">
-				<ColorStep busy={submitting} onContinue={handleFinishTheme} />
+				<ColorStep busy={submitting} onContinue={goToPreferences} />
+			</div>
+		);
+	}
+
+	if (phase === "preferences") {
+		return (
+			<div className="size-full" data-tauri-drag-region="true">
+				<PreferencesStep busy={submitting} onContinue={goToPrivacy} />
+			</div>
+		);
+	}
+
+	if (phase === "privacy") {
+		return (
+			<div className="size-full" data-tauri-drag-region="true">
+				<PrivacyStep busy={submitting} onContinue={handleFinishPrivacy} />
 			</div>
 		);
 	}

@@ -2,6 +2,7 @@
   "id": "@ryu/workflows",
   "name": "Workflows",
   "version": "1.0.0",
+  "category": "Automation",
   "description": "Workflows: petgraph DAG automation with triggers, durable execution, and a natural-language workflow builder.",
   "icon": "workflow-square-01",
   "iconDither": {
@@ -84,5 +85,56 @@
   "companion": {
     "label": "Workflows",
     "icon": "workflow-square-01"
+  },
+  "contributes": {
+    "store_tabs": [
+      {
+        "id": "workflows",
+        "title": "Workflows",
+        "subtitle": "Ready-made automation templates built on proven agent patterns.",
+        "icon": "workflow-square-01",
+        "group": "catalog",
+        "order": 60,
+        "view": "workflow-templates",
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/workflows/catalog" },
+            "items": "templates"
+          },
+          "map": {
+            "id": "id",
+            "title": "name",
+            "description": "description",
+            "badge": "pattern",
+            "tags": "tags",
+            "sourceUrl": "source_url"
+          },
+          "groupBy": "category",
+          "groups": [
+            { "value": "research", "label": "Research" },
+            { "value": "orchestration", "label": "Orchestration" },
+            { "value": "quality", "label": "Quality" },
+            { "value": "automation", "label": "Automation" }
+          ],
+          "searchFields": ["pattern"],
+          "searchPlaceholder": "Search workflow templates…",
+          "install": {
+            "http": {
+              "method": "POST",
+              "path": "/api/workflows/catalog/install",
+              "body": { "template_id": "{{item.id}}" }
+            },
+            "label": "Install",
+            "successMessage": "Workflow created",
+            "targetFrom": "workflow_id",
+            "openTarget": "/workflows/{{result.id}}"
+          },
+          "empty": {
+            "title": "No templates found",
+            "description": "Try a different search."
+          }
+        }
+      }
+    ]
   }
 }

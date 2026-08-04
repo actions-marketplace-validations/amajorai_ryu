@@ -3,7 +3,7 @@
 //! exactly like the Gemma chat GGUF and the OuteTTS GGUFs.
 //!
 //! Kokoro runs through the Python TTS sidecar's `kokoro-onnx` backend
-//! (`apps/tts-sidecar/ryu_tts/backends/kokoro.py`), which reads these files via the
+//! (`apps-store/voice/sidecar/ryu_tts/backends/kokoro.py`), which reads these files via the
 //! `RYU_KOKORO_MODEL` / `RYU_KOKORO_VOICES` env vars Core injects at spawn. Onboarding
 //! is the single owner of the download (the sidecar only *serves* the files, it never
 //! downloads them) — the same "onboarding downloads, engine serves" split the

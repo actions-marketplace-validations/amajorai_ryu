@@ -2575,27 +2575,74 @@ mod tests {
     }
 
     /// A **default-on** caller never goes through `enable_app` on a fresh install —
-    /// `plugins::seed` writes its record directly with a hardcoded grant list. So the
-    /// seed table must carry the grant its kernel capability requires, or the app ships
-    /// broken out of the box (403 on every call) with no user-visible cause. Recipes is
-    /// the default-on caller here; monitors/meetings are opt-in and get their grants
-    /// from the Gateway-validated enable path instead.
+    /// `plugins::seed` writes its record directly with a hardcoded grant list. So if a
+    /// default-on app's sidecar declares a `host_api` grant, the SEED table must carry
+    /// that same grant, or the app ships broken out of the box: 403 on every call to
+    /// its kernel capability, with no user-visible cause and nothing pointing at the
+    /// seed as the reason.
+    ///
+    /// Derived over `CORE_DEFAULT_ON` rather than naming an app. It used to name
+    /// `recipes`, which was the only default-on caller — and when recipes left the
+    /// default set this test failed on its `expect`, reporting a premise that had
+    /// simply expired rather than a defect. The property is about the default-on SET,
+    /// so it is now computed from it: today no default-on app declares a `host_api`
+    /// grant and the loop body runs zero times, which is correct and stays correct.
+    /// Promote any grant-declaring app back into `CORE_DEFAULT_ON` without adding its
+    /// grants to `seed_overrides` and this turns red immediately.
     #[test]
     fn default_on_callers_are_seeded_with_their_kernel_capability_grant() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        for spec in crate::plugins::seed::default_on_specs() {
+            let Some(manifest) = manifests.iter().find(|m| m.id == spec.id) else {
+                continue;
+            };
+            for needed in manifest
+                .sidecars
+                .iter()
+                .flat_map(|s| s.host_api.iter())
+                .flat_map(|h| h.grants.iter())
+            {
+                assert!(
+                    spec.grants.contains(&needed.as_str()),
+                    "'{}' is default-on and its sidecar declares host_api grant \
+                     '{needed}', but the seed writes {:?}. A default-on record is written \
+                     directly by `plugins::seed` and never passes through `enable_app`, so \
+                     the grant must be in `seed_overrides` — otherwise a fresh install 403s \
+                     on every call to that capability",
+                    spec.id,
+                    spec.grants
+                );
+            }
+        }
+    }
+
+    /// The other half of the same rule, and the one that made the test above stop
+    /// naming `recipes`: an OPT-IN app must NOT depend on the seed for its grants. It
+    /// is enabled through `enable_app`, which validates against the Gateway and
+    /// persists the approved set, so what it needs is the grant in its manifest's
+    /// `permission_grants` — a seed row would be inert (`default_on_specs` never looks
+    /// up an id outside `CORE_DEFAULT_ON`) and is not a substitute.
+    #[test]
+    fn an_opt_in_caller_carries_its_grant_in_the_manifest_not_the_seed() {
+        let id = crate::plugins::builtins::RECIPES_PLUGIN_ID;
+        assert!(
+            !crate::plugins::builtins::CORE_DEFAULT_ON.contains(&id),
+            "'{id}' is opt-in — if it is default-on again, this test is testing nothing \
+             and the sibling above is the one that must cover it"
+        );
         let grant = kernel_capability("ghost.replay")
             .expect("ghost.replay is a kernel capability")
             .grant
             .expect("ghost.replay is grant-gated");
-        let specs = crate::plugins::seed::default_on_specs();
-        let recipes = specs
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let manifest = manifests
             .iter()
-            .find(|s| s.id == crate::plugins::builtins::RECIPES_PLUGIN_ID)
-            .expect("recipes is default-on, so it must be in the seed table");
+            .find(|m| m.id == id)
+            .expect("recipes is a compiled-in built-in");
         assert!(
-            recipes.grants.contains(&grant),
-            "the default-on seed for recipes must include '{grant}' \
-             (seeded grants were {:?}) or a fresh install 403s on every replay/record",
-            recipes.grants
+            manifest.permission_grants.iter().any(|g| g == grant),
+            "'{id}' must declare '{grant}' in permission_grants — that is the ONLY thing \
+             `enable_app` can approve from, and every replay/record call 403s without it"
         );
     }
 }

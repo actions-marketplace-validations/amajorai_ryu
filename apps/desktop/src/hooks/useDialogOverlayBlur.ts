@@ -1,50 +1,21 @@
-import { useEffect, useState } from "react";
+// apps/desktop/src/hooks/useDialogOverlayBlur.ts
+//
+// Re-export of THE shared "Blur dialog backgrounds" toggle, which now lives in
+// `@ryu/ui` (`hooks/use-dialog-overlay-blur.ts`) so the desktop, `apps/web` and
+// any other surface read one module-level store rather than a copy each.
+//
+// This file stays as the desktop's import path because several surfaces already
+// import it (App boot, the Appearance tab, the settings registry). It
+// deliberately holds no logic: the previous local copy kept its own listener
+// set, and since the `storage` event never fires in the writing document, a
+// duplicate store elsewhere would not re-render when the Appearance toggle
+// flips. Re-adding logic here re-opens that split.
 
-const KEY = "ryu_dialog_overlay_blur";
-const ENABLED_BACKGROUND = "rgb(0 0 0 / 30%)";
-const DISABLED_BACKGROUND = "rgb(0 0 0 / 0)";
-const ENABLED_BLUR = "8px";
-const DISABLED_BLUR = "0px";
-
-function applyOverlayVars(enabled: boolean) {
-	const root = document.documentElement;
-	root.style.setProperty(
-		"--ryu-dialog-overlay-background",
-		enabled ? ENABLED_BACKGROUND : DISABLED_BACKGROUND
-	);
-	root.style.setProperty(
-		"--ryu-dialog-overlay-blur",
-		enabled ? ENABLED_BLUR : DISABLED_BLUR
-	);
-	if (enabled) {
-		root.setAttribute("data-dialog-overlay-blur", "on");
-	} else {
-		root.removeAttribute("data-dialog-overlay-blur");
-	}
-}
-
-export function initDialogOverlayBlur() {
-	applyOverlayVars(localStorage.getItem(KEY) === "true");
-}
-
-export function useDialogOverlayBlur(): boolean {
-	const [enabled, setEnabled] = useState(
-		() => localStorage.getItem(KEY) === "true"
-	);
-
-	useEffect(() => {
-		const handler = () => {
-			setEnabled(localStorage.getItem(KEY) === "true");
-		};
-		window.addEventListener("storage", handler);
-		return () => window.removeEventListener("storage", handler);
-	}, []);
-
-	return enabled;
-}
-
-export function setDialogOverlayBlur(enabled: boolean) {
-	localStorage.setItem(KEY, String(enabled));
-	applyOverlayVars(enabled);
-	window.dispatchEvent(new Event("storage"));
-}
+export {
+	DEFAULT_DIALOG_OVERLAY_BLUR,
+	DIALOG_OVERLAY_BLUR_STORAGE_KEY,
+	initDialogOverlayBlur,
+	readDialogOverlayBlur,
+	setDialogOverlayBlur,
+	useDialogOverlayBlur,
+} from "@ryu/ui/hooks/use-dialog-overlay-blur.ts";

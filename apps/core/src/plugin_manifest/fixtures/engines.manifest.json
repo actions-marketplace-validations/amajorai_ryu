@@ -2,6 +2,7 @@
   "id": "@ryu/engines",
   "name": "Local Engines",
   "version": "1.0.0",
+  "category": "Core",
   "engines": {
     "ryu": ">=0.0.1"
   },

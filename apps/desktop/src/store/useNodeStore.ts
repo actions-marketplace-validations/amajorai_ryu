@@ -489,12 +489,18 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 		// collide with a local node's name in the picker. Carry the per-org
 		// data-plane token (WS4) so the node authenticates to the hosted gateway;
 		// it degrades to null on an older control plane that doesn't mint one yet.
-		const cloud: Node[] = managed.map((m) => ({
-			name: `cloud-${m.name}`,
-			url: m.url,
-			token: m.token ?? null,
-			managed: true,
-		}));
+		// A managed node that advertised no reachable URL is DROPPED, not carried
+		// with `url: ""`. An empty base makes `apiUrl` throw before it fetches, so
+		// such a node would sit in the picker looking selectable and then fail every
+		// call with "No node URL configured" — worse than not offering it at all.
+		const cloud: Node[] = managed
+			.filter((m) => Boolean(m.url?.trim()))
+			.map((m) => ({
+				name: `cloud-${m.name}`,
+				url: m.url,
+				token: m.token ?? null,
+				managed: true,
+			}));
 		set((s) => ({
 			cloudNodes: cloud,
 			// Added cloud nodes decorate as "Cloud"; the rest surface as suggestions

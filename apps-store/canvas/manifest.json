@@ -2,6 +2,7 @@
   "id": "@ryu/canvas",
   "name": "Canvas",
   "version": "1.0.0",
+  "category": "Creative",
   "icon": "ai-image",
   "iconDither": { "from": 225, "to": 259, "direction": "right" },
   "surfaces": {

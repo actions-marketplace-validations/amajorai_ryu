@@ -13,9 +13,20 @@ import { useCallback, useMemo } from "react";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginSettingsTabs } from "@/src/hooks/usePluginSettingsTabs.ts";
 import {
+	APP_SECTION_PREFIX,
+	PLUGIN_SECTION_PREFIX,
 	type PluginSettingsTab,
 	type SettingsScope,
 	splitScopedTabs,
+} from "@/src/lib/pluginSettings.ts";
+
+// The section-value vocabulary lives in the pure lib beside the tab parser (it is
+// the same contract, and a resolver there needs it without pulling React in).
+// Re-exported here because this hook is where both dialogs already read it from.
+export {
+	APP_SECTION_PREFIX,
+	isEntitySection,
+	PLUGIN_SECTION_PREFIX,
 } from "@/src/lib/pluginSettings.ts";
 
 /** One entity's nav entry: a stable id, a display label, and its settings tabs. */
@@ -33,19 +44,6 @@ export interface ScopedSettingsNav {
 	/** Plain plugins (no companion). */
 	plugins: ScopedNavEntity[];
 	reload: () => void;
-}
-
-/** Prefix marking a dynamic Apps-header nav section value (`app:<pluginId>`). */
-export const APP_SECTION_PREFIX = "app:";
-/** Prefix marking a dynamic Plugins-header nav section value (`plugin:<pluginId>`). */
-export const PLUGIN_SECTION_PREFIX = "plugin:";
-
-/** True if a section value addresses a dynamic app/plugin entity tab. */
-export function isEntitySection(value: string): boolean {
-	return (
-		value.startsWith(APP_SECTION_PREFIX) ||
-		value.startsWith(PLUGIN_SECTION_PREFIX)
-	);
 }
 
 /** A rendered nav group: an optional header + `{value,label}` items. */

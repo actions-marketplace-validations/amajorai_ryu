@@ -48,6 +48,24 @@ export type DitherAvatarProps = {
 
 type Rgb = [number, number, number]
 
+export type DitherAvatarSeedUser = {
+  id?: string | null
+  email?: string | null
+  name?: string | null
+}
+
+/**
+ * Canonical dither seed for a human. Every surface that renders a person's
+ * dither avatar must derive the seed from THIS precedence — stable user id,
+ * then email, then display name — so one human gets one avatar everywhere.
+ * Ids are what the rest of the app keys on; emails and display names both
+ * collide, so a seed that falls back past the id will not match that human's
+ * avatar elsewhere.
+ */
+export function ditherAvatarSeed(user: DitherAvatarSeedUser): string {
+  return user.id ?? user.email ?? user.name ?? "ryu"
+}
+
 type AvatarModel = {
   on: boolean[]
   density: number[]

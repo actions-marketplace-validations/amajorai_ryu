@@ -298,13 +298,34 @@ pub struct CapabilityProvider {
     pub is_default: bool,
     /// The capability verbs it can serve (keys of [`ProvidesEntry::tools`]).
     pub verbs: Vec<String>,
-    /// Whether this provider actually serves anything. A provider may legitimately
-    /// declare a capability with no verb bindings yet — `agentbrowser` does, because
-    /// its tool names live in an npm package and cannot be known from the repo — but
-    /// SELECTING such a provider makes every verb of that layer disappear with no
-    /// error. Surfaced so a picker can mark it unselectable instead of offering a
-    /// choice that silently turns the layer off.
+    /// Whether this provider binds any capability verb. A provider may legitimately
+    /// declare a capability with no verb bindings, but SELECTING one that serves
+    /// nothing at all makes every verb of that layer disappear with no error.
+    /// Surfaced so a picker can mark such a provider unselectable instead of offering
+    /// a choice that silently turns the layer off.
+    ///
+    /// **Not sufficient on its own to answer "can this be picked"** — see
+    /// [`Self::serves_route`]. Reading this flag alone is what disabled every
+    /// `document.parse` provider in the desktop picker.
     pub serves_verbs: bool,
+    /// Whether this provider serves the capability over a **broker-proxyable HTTP
+    /// route** instead of verb bindings.
+    ///
+    /// The other half of "does selecting this actually do anything", and NOT a
+    /// refinement of [`Self::serves_verbs`]: the two are alternative serving
+    /// surfaces, and a capability may be built entirely on this one. `document.parse`
+    /// is — Core resolves the binding and then calls the provider's sidecar route
+    /// directly (`crate::document_parse`), so all four of its providers declare zero
+    /// `tools` and are perfectly functional. A picker that reads only `serves_verbs`
+    /// concluded the opposite and disabled every row, which is the bug this exists to
+    /// close; the honest question a picker must ask is `serves_verbs || serves_route`.
+    ///
+    /// Mirrors what [`crate::sidecar::ext_proxy::resolve_provider_route`] actually
+    /// requires — `sidecar` AND `route` declared, and the named sidecar present on
+    /// this manifest — rather than the weaker `route.is_some()`. A route with no
+    /// resolvable sidecar is exactly the dead-end the `serves_verbs` gate was built to
+    /// prevent, so it must not be laundered into "selectable" here.
+    pub serves_route: bool,
     /// What this provider acts on, when the capability controls a machine or an
     /// environment ([`crate::plugin_manifest::ProvidesEntry::target`]). `None` =
     /// not applicable or undeclared.
@@ -341,6 +362,43 @@ pub struct CapabilityInfo {
     /// Set when the current binding comes from an explicit user override rather than
     /// the automatic pick.
     pub overridden: bool,
+}
+
+/// Whether `entry` names a broker-proxyable HTTP route on `manifest`.
+///
+/// Deliberately mirrors [`crate::sidecar::ext_proxy::resolve_provider_route`]'s
+/// preconditions instead of the weaker `entry.route.is_some()`: that function 501s
+/// unless BOTH `sidecar` and `route` are declared, and 500s unless the manifest
+/// actually carries a sidecar by that name. Reporting a route the broker would
+/// refuse to resolve would hand a picker the same dead-end pick that
+/// [`CapabilityProvider::serves_verbs`] exists to keep it away from.
+fn serves_route(manifest: &PluginManifest, entry: &crate::plugin_manifest::ProvidesEntry) -> bool {
+    let (Some(sidecar), Some(_route)) = (&entry.sidecar, &entry.route) else {
+        return false;
+    };
+    manifest.sidecars.iter().any(|s| &s.name == sidecar)
+}
+
+/// One provider row for the read model.
+///
+/// Shared by the `providers` (enabled) and `available` (installable) lists so a flag
+/// added to one cannot silently go missing from the other — the two lists are
+/// rendered by the same picker and any asymmetry reads as a difference in the
+/// provider rather than in the code that built the row.
+fn provider_row(
+    manifest: &PluginManifest,
+    entry: &crate::plugin_manifest::ProvidesEntry,
+) -> CapabilityProvider {
+    CapabilityProvider {
+        id: manifest.id.clone(),
+        name: manifest.name.clone(),
+        version: entry.version.clone(),
+        is_default: entry.default_provider,
+        serves_verbs: !entry.tools.is_empty(),
+        serves_route: serves_route(manifest, entry),
+        target: entry.target,
+        verbs: entry.tools.keys().cloned().collect(),
+    }
 }
 
 /// Describe every capability provided anywhere in `candidates`, with its providers
@@ -380,15 +438,7 @@ pub fn describe_capabilities(
                     m.provided_capabilities()
                         .iter()
                         .find(|p| p.capability == capability)
-                        .map(|p| CapabilityProvider {
-                            id: m.id.clone(),
-                            name: m.name.clone(),
-                            version: p.version.clone(),
-                            is_default: p.default_provider,
-                            serves_verbs: !p.tools.is_empty(),
-                            target: p.target,
-                            verbs: p.tools.keys().cloned().collect(),
-                        })
+                        .map(|p| provider_row(m, p))
                 })
                 .collect();
             providers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -405,15 +455,7 @@ pub fn describe_capabilities(
                     m.provided_capabilities()
                         .iter()
                         .find(|p| p.capability == capability)
-                        .map(|p| CapabilityProvider {
-                            id: m.id.clone(),
-                            name: m.name.clone(),
-                            version: p.version.clone(),
-                            is_default: p.default_provider,
-                            serves_verbs: !p.tools.is_empty(),
-                            target: p.target,
-                            verbs: p.tools.keys().cloned().collect(),
-                        })
+                        .map(|p| provider_row(m, p))
                 })
                 .collect();
             available.sort_by(|a, b| a.id.cmp(&b.id));

@@ -14,19 +14,25 @@ export type BackgroundFit = "cover" | "contain" | "fill" | "center" | "tile";
 
 export type BackgroundSurface = "sidebar" | "page";
 
+/** One color stop in a linear gradient, at an arbitrary position. */
+export interface GradientStop {
+	color: string; // hex
+	/** Stop position along the gradient, 0-100 percent. */
+	position: number;
+}
+
 export interface SurfaceBackground {
-	gradientAngle: number; // degrees, 0-360
+	/** Blur radius applied to the background layer itself, px (0 = sharp). */
+	backdropBlur: number;
+	/** Direction of the gradient, degrees 0-360. */
+	gradientAngle: number;
 	/** Layer a linear gradient behind the surface. */
 	gradientEnabled: boolean;
-	gradientFrom: string; // hex
-	/** Transparency of the gradient layer (0 = invisible, 100 = fully opaque). */
-	gradientOpacity: number;
-	gradientTo: string; // hex
+	/** Color stops, in insertion order (sorted when the CSS is built). */
+	gradientStops: GradientStop[];
 	/** Layer a custom image over the gradient/color. */
 	imageEnabled: boolean;
 	imageFit: BackgroundFit;
-	/** Transparency of the image layer (0 = invisible, 100 = fully opaque). */
-	imageOpacity: number;
 	imageScale: number; // percent, only meaningful for center/tile
 	/**
 	 * Runtime object URL for the stored image Blob. NOT persisted — recreated
@@ -36,22 +42,34 @@ export interface SurfaceBackground {
 	/** Tint drawn on top of the image to keep foreground text legible. */
 	overlayColor: string; // hex
 	overlayOpacity: number; // 0-100
+	/** How see-through the whole background layer is (0 = opaque, 100 = gone). */
+	transparency: number;
 }
 
 export const DEFAULT_SURFACE_BACKGROUND: SurfaceBackground = {
 	gradientEnabled: false,
-	gradientFrom: "#0099ff",
-	gradientTo: "#7c3aed",
 	gradientAngle: 135,
-	gradientOpacity: 100,
+	gradientStops: [
+		{ color: "#0099ff", position: 0 },
+		{ color: "#7c3aed", position: 100 },
+	],
 	imageEnabled: false,
 	imageSrc: "",
 	imageFit: "cover",
-	imageOpacity: 100,
 	imageScale: 100,
 	overlayColor: "#000000",
 	overlayOpacity: 30,
+	transparency: 0,
+	backdropBlur: 0,
 };
+
+export function buildGradientCss(stops: GradientStop[], angle: number): string {
+	const sorted = [...stops].sort((a, b) => a.position - b.position);
+	const parts = sorted.map(
+		(s) => `${hexToRgba(s.color, 1)} ${Math.round(s.position)}%`
+	);
+	return `linear-gradient(${angle}deg, ${parts.join(", ")})`;
+}
 
 const STORAGE_KEYS: Record<BackgroundSurface, string> = {
 	sidebar: "ryu:bg:sidebar",
@@ -154,13 +172,59 @@ function setObjectUrl(surface: BackgroundSurface, blob: Blob | null): string {
 
 // --- Config (localStorage) -------------------------------------------------
 
+function isGradientStop(value: unknown): value is GradientStop {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as GradientStop).color === "string" &&
+		typeof (value as GradientStop).position === "number"
+	);
+}
+
+// Legacy persisted shape — pre-stop gradients stored `gradientFrom` /
+// `gradientTo` as top-level fields. `value` is typed as the current shape, so
+// read the legacy keys through an untyped view.
+interface LegacyGradient {
+	gradientFrom?: string;
+	gradientTo?: string;
+}
+
 function normalize(
 	value: Partial<SurfaceBackground> | null
 ): SurfaceBackground {
+	const base = { ...DEFAULT_SURFACE_BACKGROUND };
 	if (!value) {
-		return { ...DEFAULT_SURFACE_BACKGROUND };
+		return base;
 	}
-	return { ...DEFAULT_SURFACE_BACKGROUND, ...value };
+	const merged: SurfaceBackground = { ...base, ...value };
+	const legacy = value as Partial<SurfaceBackground> & LegacyGradient;
+	// Migrate the legacy two-stop shape (gradientFrom/gradientTo) and drop any
+	// malformed stop arrays left in storage. Check `value.gradientStops` — NOT
+	// `merged.gradientStops`, which falls back to the default two-stop array
+	// whenever the key is absent.
+	const storedStops = Array.isArray(value.gradientStops)
+		? value.gradientStops
+		: null;
+	if (!storedStops || storedStops.length < 2) {
+		merged.gradientStops = [
+			{
+				color: legacy.gradientFrom ?? base.gradientStops[0].color,
+				position: 0,
+			},
+			{
+				color: legacy.gradientTo ?? base.gradientStops[1].color,
+				position: 100,
+			},
+		];
+	} else {
+		merged.gradientStops = storedStops
+			.filter(isGradientStop)
+			.map((s) => ({ color: s.color, position: s.position }));
+		if (merged.gradientStops.length < 2) {
+			merged.gradientStops = [...base.gradientStops];
+		}
+	}
+	return merged;
 }
 
 /**
@@ -195,6 +259,9 @@ function persistConfig(surface: BackgroundSurface, bg: SurfaceBackground) {
 }
 
 // --- CSS application -------------------------------------------------------
+
+/** Upper bound of the backdrop blur slider, in px. */
+export const MAX_BACKDROP_BLUR = 60;
 
 const HEX_COLOR_REGEX = /^#?([0-9a-fA-F]{6})$/;
 const BYTE_MODULO = 256;
@@ -261,9 +328,7 @@ function buildLayers(bg: SurfaceBackground): BackgroundLayers | null {
 	}
 
 	if (bg.gradientEnabled) {
-		images.push(
-			`linear-gradient(${bg.gradientAngle}deg, ${bg.gradientFrom}, ${bg.gradientTo})`
-		);
+		images.push(buildGradientCss(bg.gradientStops, bg.gradientAngle));
 		sizes.push("cover");
 		repeats.push("no-repeat");
 		positions.push("center");
@@ -282,20 +347,70 @@ function buildLayers(bg: SurfaceBackground): BackgroundLayers | null {
 }
 
 function applySurface(surface: BackgroundSurface, bg: SurfaceBackground) {
+	appliedBackgrounds[surface] = bg;
 	const root = document.documentElement.style;
 	const prefix = CSS_VAR_PREFIX[surface];
 	const layers = buildLayers(bg);
-	if (!layers) {
+	if (layers) {
+		root.setProperty(`${prefix}-image`, layers.image);
+		root.setProperty(`${prefix}-size`, layers.size);
+		root.setProperty(`${prefix}-repeat`, layers.repeat);
+		root.setProperty(`${prefix}-position`, layers.position);
+	} else {
 		root.removeProperty(`${prefix}-image`);
 		root.removeProperty(`${prefix}-size`);
 		root.removeProperty(`${prefix}-repeat`);
 		root.removeProperty(`${prefix}-position`);
-		return;
 	}
-	root.setProperty(`${prefix}-image`, layers.image);
-	root.setProperty(`${prefix}-size`, layers.size);
-	root.setProperty(`${prefix}-repeat`, layers.repeat);
-	root.setProperty(`${prefix}-position`, layers.position);
+	// Effects apply to the background layer as a whole (via the ::before the
+	// CSS paints the vars on), so they stay set even when no layer is enabled —
+	// a plain translucent/blurred theme color is a valid frosted surface.
+	root.setProperty(
+		`${prefix}-opacity`,
+		`${1 - clampOpacity(bg.transparency) / 100}`
+	);
+	root.setProperty(`${prefix}-blur`, `${clampBlur(bg.backdropBlur)}px`);
+	syncActiveState();
+}
+
+function clampOpacity(v: number): number {
+	return Math.max(0, Math.min(100, Number.isFinite(v) ? v : 0));
+}
+
+function clampBlur(v: number): number {
+	return Math.max(0, Math.min(MAX_BACKDROP_BLUR, Number.isFinite(v) ? v : 0));
+}
+
+function surfaceIsActive(bg: SurfaceBackground): boolean {
+	return (
+		buildLayers(bg) !== null ||
+		clampOpacity(bg.transparency) > 0 ||
+		clampBlur(bg.backdropBlur) > 0
+	);
+}
+
+// Last background applied per surface. applySurface runs before persistConfig,
+// so re-reading storage there would see the previous value and drop the active
+// flag; track the applied value directly instead.
+const appliedBackgrounds: Partial<
+	Record<BackgroundSurface, SurfaceBackground>
+> = {};
+
+// Mirror the active state onto <html> so CSS only routes surfaces through the
+// ::before layer while a surface actually uses it — otherwise every surface
+// would lose its own background-color.
+function syncActiveState() {
+	const active = (["sidebar", "page"] as const).some((surface) =>
+		surfaceIsActive(
+			appliedBackgrounds[surface] ?? loadSurfaceBackground(surface)
+		)
+	);
+	const root = document.documentElement;
+	if (active) {
+		root.setAttribute("data-ryu-bg-active", "true");
+	} else {
+		root.removeAttribute("data-ryu-bg-active");
+	}
 }
 
 // --- Public API ------------------------------------------------------------

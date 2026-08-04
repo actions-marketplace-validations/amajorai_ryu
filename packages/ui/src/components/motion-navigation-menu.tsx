@@ -666,8 +666,16 @@ function MotionNavigationMenuViewport({
 
 	return (
 		<motion.div
-			animate={{ left: context?.viewportX ?? "50%" }}
-			className="absolute top-full isolate z-50 flex -translate-x-1/2 justify-center"
+			// Centered by `left` (viewportX - half width), NOT `-translate-x-1/2`.
+			// Tailwind v4's translate utilities set the individual `translate`
+			// property, and WebKit/Safari then refuses to render the descendant
+			// `backdrop-filter` (the mega-menu appears unblurred). A plain `left`
+			// keeps the same grow-from-center motion with no ancestor transform.
+			animate={{
+				left:
+					context?.viewportX == null ? "50%" : context.viewportX - width / 2,
+			}}
+			className="absolute top-full isolate z-50 flex justify-center"
 			initial={false}
 			transition={context?.spring}
 		>

@@ -4,6 +4,7 @@
 // module is required to stay pure (no document/window/localStorage).
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
 	builtinVariants,
 	type CustomTokens,
@@ -164,8 +165,99 @@ describe("customTokensToVariant / variantToCustomTokens", () => {
 	});
 });
 
-// ── Brand colour ────────────────────────────────────────────────────────────
+// ── Well-known third-party presets ─────────────────────────────────────────
 
+// The third-party themes are authored in hex, so unlike the OKLCH brand tokens
+// there is no conversion needed — the guard is simply "this preset's palette
+// really is the theme's canonical palette". Every value below was verified
+// against the theme's own source (see the comments in presets.ts). In
+// particular, Codex is BLUE (#3A83F7), not the old #10A37F OpenAI green, and
+// Claude's accent is the confirmed clay #D97757.
+describe("well-known third-party presets", () => {
+	const ACCENTS: Record<string, { light?: string; dark?: string }> = {
+		codex: { light: "#2c67c5", dark: "#3a83f7" },
+		claude: { light: "#d97757", dark: "#d97757" },
+		tokyo: { light: "#2e7de9", dark: "#7aa2f7" },
+		catppuccin: { light: "#8839ef", dark: "#cba6f7" },
+		dracula: { light: "#644ac9", dark: "#bd93f9" },
+		github: { light: "#0969da", dark: "#4493f8" },
+		linear: { light: "#5e6ad2", dark: "#5e6ad2" },
+		nord: { light: "#5e81ac", dark: "#88c0d0" },
+		one: { light: "#4078f2", dark: "#61afef" },
+		raycast: { light: "#ff6363", dark: "#ff6363" },
+	};
+
+	for (const [family, expected] of Object.entries(ACCENTS)) {
+		for (const [mode, id] of [
+			["light", `${family}-light`],
+			["dark", `${family}-dark`],
+		] as const) {
+			const accent = expected[mode];
+			if (!accent) {
+				continue;
+			}
+			test(`${family}-${mode} primary is ${accent}`, () => {
+				const v = findVariantIn(id);
+				expect(v).toBeDefined();
+				expect(v?.tokens["--primary"]).toBe(accent);
+				expect(v?.preview.primary).toBe(accent);
+			});
+		}
+	}
+
+	test("tokyo-light uses the real day palette bg (#e1e2e7), not the old #d5d6db", () => {
+		const v = findVariantIn("tokyo-light");
+		expect(v?.tokens["--background"]).toBe("#e1e2e7");
+	});
+
+	test("ayu-dark bg is #10141c (the old #1f2430 was Ayu Mirage)", () => {
+		const v = findVariantIn("ayu-dark");
+		expect(v?.tokens["--background"]).toBe("#10141c");
+	});
+
+	test("codex-dark bg is the near-black #0d0d0d", () => {
+		const v = findVariantIn("codex-dark");
+		expect(v?.tokens["--background"]).toBe("#0d0d0d");
+	});
+});
+
+// The non-accent channels (bg / fg / muted / mutedFg) were audited against the
+// bundled @shikijs/themes JSON and the canonical theme sources; lock in the
+// values that had to be corrected so they can't silently regress.
+describe("well-known third-party preset channels", () => {
+	const CHANNELS: [string, Partial<Record<string, string>>][] = [
+		// tokio-night fg is folke's Normal fg, not the bundle's fg_dark #a9b1d6.
+		[
+			"tokyo-dark",
+			{ "--foreground": "#c0caf5", "--muted-foreground": "#565f89" },
+		],
+		// gruvbox muted text is the palette "gray" #928374 in both modes.
+		["gruvbox-light", { "--muted-foreground": "#928374" }],
+		["gruvbox-dark", { "--muted-foreground": "#928374" }],
+		// monokai muted is the line-highlight #3E3D32; comment is mono3 #75715E.
+		["monokai", { "--muted": "#3e3d32", "--muted-foreground": "#75715e" }],
+		// min-dark foreground is the theme's #888888.
+		["min-dark", { "--foreground": "#888888" }],
+		// material muted-foreground is each flavour's comment colour.
+		["material-theme", { "--muted-foreground": "#546e7a" }],
+		["material-theme-darker", { "--muted-foreground": "#545454" }],
+		["material-theme-ocean", { "--muted-foreground": "#464b5d" }],
+		["material-theme-palenight", { "--muted-foreground": "#676e95" }],
+		// catppuccin muted text is the official subtext0/overlay0.
+		["catppuccin-dark", { "--muted-foreground": "#6c7086" }],
+		["catppuccin-light", { "--muted-foreground": "#6c7086" }],
+	];
+
+	for (const [id, tokens] of CHANNELS) {
+		for (const [token, value] of Object.entries(tokens)) {
+			test(`${id} ${token} is ${value}`, () => {
+				expect(findVariantIn(id)?.tokens[token]).toBe(value);
+			});
+		}
+	}
+});
+
+// ── Brand colour ────────────────────────────────────────────────────────────
 /**
  * Convert an `oklch(L C H)` token to a `#rrggbb` string.
  *
@@ -239,4 +331,49 @@ describe("Ryu brand colour", () => {
 			expect(variant?.preview.primary.toLowerCase()).toBe(BRAND);
 		});
 	}
+
+	// The presets above only reach surfaces that run the theme engine (desktop,
+	// island). web / webapp / extension / fumadocs / storyboard just `@import`
+	// globals.css and never call `applyVariant`, so what they render is the base
+	// `:root` / `.dark` block — which held the shadcn neutral (near-black light,
+	// near-white dark) and showed no brand colour at all. Assert the base block
+	// directly; a preset-only guard cannot see this surface.
+	describe("globals.css base block", () => {
+		const css = readFileSync(
+			new URL("../styles/globals.css", import.meta.url),
+			"utf8"
+		);
+
+		/** Body of the first top-level `selector { … }` block (no nesting inside). */
+		function blockBody(selector: string): string {
+			const start = css.indexOf(`${selector} {`);
+			if (start < 0) {
+				throw new Error(`no \`${selector} {\` block in globals.css`);
+			}
+			const open = css.indexOf("{", start);
+			const end = css.indexOf("}", open);
+			return css.slice(open + 1, end);
+		}
+
+		function declaration(body: string, prop: string): string {
+			const m = body.match(new RegExp(`^\\s*${prop}:\\s*([^;]+);`, "m"));
+			if (!m) {
+				throw new Error(`no \`${prop}\` declaration in block`);
+			}
+			return m[1].trim();
+		}
+
+		for (const [label, selector] of [
+			["light", ":root"],
+			["dark", ".dark"],
+		] as const) {
+			for (const token of BRAND_TOKENS) {
+				test(`${label} base ${token} is exactly ${BRAND}`, () => {
+					expect(oklchToHex(declaration(blockBody(selector), token))).toBe(
+						BRAND
+					);
+				});
+			}
+		}
+	});
 });

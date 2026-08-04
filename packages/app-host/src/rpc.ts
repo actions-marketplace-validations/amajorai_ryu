@@ -82,6 +82,15 @@ export interface HostPush {
  *  optional; only present keys are applied. */
 export interface WidgetGlobalsPatch {
 	displayMode?: "inline" | "fullscreen" | "pip";
+	/** The host's app-wide "Friendly names" preference (Settings → Appearance):
+	 *  `true` when the shell is showing plain language ("Connected search") rather
+	 *  than the technical term ("Graph"). Pushed exactly like `theme`, and for the
+	 *  same reason — a widget renders inside the host's chrome, so it should not be
+	 *  the one surface still speaking the developer vocabulary. A null-origin frame
+	 *  cannot read the host's `localStorage`, so this push is the only way it can
+	 *  know. Absent means "host did not say"; treat it as `true`, which is the
+	 *  host's own default (`DEFAULT_FRIENDLY_MODE`). */
+	friendly?: boolean;
 	locale?: string;
 	maxHeight?: number | null;
 	safeArea?: { bottom: number; left: number; right: number; top: number };
@@ -881,6 +890,15 @@ export interface HostServices {
 
 	/** Accept a detection suggestion (`POST /api/quests/:id/suggestion/accept`). */
 	questsAcceptSuggestion?(input: { id: string }): Promise<QuestRecord>;
+	/** Keep a captured selection / link / prompt / note (`POST /api/quests/capture`).
+	 *  `body` is the only required field; the kind and the title are inferred from it
+	 *  when absent. */
+	questsCapture?(input: {
+		body: string;
+		kind?: string;
+		title?: string;
+		source?: { app?: string; title?: string; url?: string };
+	}): Promise<QuestRecord>;
 	/** Mark a quest done (`POST /api/quests/:id/complete`). */
 	questsComplete?(input: { id: string }): Promise<QuestRecord>;
 	/** Create a quest (`POST /api/quests`). Returns the created record. */
@@ -893,16 +911,25 @@ export interface HostServices {
 	questsDismissSuggestion?(input: { id: string }): Promise<QuestRecord>;
 	/** Ask Ryu to check a quest now (`POST /api/quests/:id/judge`). */
 	questsJudge?(input: { id: string }): Promise<QuestJudgeResult>;
-	/** List all quests (`GET /api/quests`). */
-	questsList?(): Promise<QuestRecord[]>;
+	/** List quests, optionally one kind (`GET /api/quests?kind=`). */
+	questsList?(input?: { kind?: string }): Promise<QuestRecord[]>;
 	/** Open the shell Settings dialog at the Quests (detection) tab. A pure shell-
 	 *  navigation verb (no Core call); fire-and-forget from the frame's view. */
 	questsOpenDetectionSettings?(): void;
+	/** Pin or unpin an item (`POST /api/quests/:id/pin`). */
+	questsPin?(input: { id: string; pinned?: boolean }): Promise<QuestRecord>;
+	/** Read the freeform brain-dump buffer (`GET /api/quests/scratchpad`). */
+	questsScratchpad?(): Promise<string>;
+	/** Overwrite the brain-dump buffer (`PUT /api/quests/scratchpad`). */
+	questsSetScratchpad?(input: { text: string }): Promise<void>;
 	/** Update a quest (`PUT /api/quests/:id`). Returns the updated record. */
 	questsUpdate?(input: {
 		id: string;
 		input: QuestInputPayload;
 	}): Promise<QuestRecord>;
+	/** Record that an item was copied back out, optionally checking it off
+	 *  (`POST /api/quests/:id/use`). */
+	questsUse?(input: { id: string; complete?: boolean }): Promise<QuestRecord>;
 	/** Accept (or reject) the plugin's claim to render its own route. The concrete
 	 *  implementation is pluginId-scoped (see {@link validatePluginRoute}); it must
 	 *  reject any path that is not this plugin's own `/plugin/<id>` surface. */
@@ -990,6 +1017,20 @@ export interface HostServices {
 		/** Entity glyph (same GlyphValue shape the sidebar uses). */
 		icon?: unknown;
 	}): Promise<void>;
+	/** Subscribe to the host's LIVE display preferences. Emits the current set now and
+	 *  again on every change (each `emit` is a JSON object; today `{ friendly: boolean }`
+	 *  — the app-wide "Friendly names" toggle); resolves when `signal` aborts (frame
+	 *  unmount / dispose).
+	 *
+	 *  Deliberately an OBJECT rather than a bare boolean, and named for the category
+	 *  rather than the field: a future display preference is one more key that an
+	 *  older plugin ignores, instead of another verb through the contract, the
+	 *  capability table, the dispatch switch and the frame bridge. */
+	shellPrefsSubscribe?(
+		input: Record<string, unknown>,
+		emit: (delta: string) => void,
+		signal: AbortSignal
+	): Promise<void>;
 	/** Contribute Cmd+K palette commands. `input.commands` is `{ id, title, group?,
 	 *  keywords? }[]`; each invocation emits the invoked command id (a JSON string) back
 	 *  to the frame. The commands are removed from the palette when `signal` aborts. */
@@ -1189,6 +1230,11 @@ export interface HostServices {
 	workflowsDelete?(input: { id: string }): Promise<void>;
 	/** Read one workflow definition (`GET /workflows/:id`). */
 	workflowsGet?(input: { id: string }): Promise<unknown>;
+	/** Node-config picker: every app event an enabled app declares in its manifest
+	 *  `contributes.hook_events` (`GET /api/plugins/contributions` → `hook_events`).
+	 *  Backs the `event` trigger's picker, so a user chooses a real event instead of
+	 *  typing a fully-qualified id from memory. */
+	workflowsHookEvents?(): Promise<unknown>;
 	/** List all workflows (`GET /workflows`). */
 	workflowsList?(): Promise<unknown>;
 	/** Node-config picker: MCP servers + their tools (`GET /api/mcp/*`). */
@@ -1208,11 +1254,6 @@ export interface HostServices {
 	workflowsSchedules?(): Promise<unknown>;
 	/** Node-config picker: installed skills (`GET /api/skills`). */
 	workflowsSkills?(): Promise<unknown>;
-	/** Node-config picker: every app event an enabled app declares in its manifest
-	 *  `contributes.hook_events` (`GET /api/plugins/contributions` → `hook_events`).
-	 *  Backs the `event` trigger's picker, so a user chooses a real event instead of
-	 *  typing a fully-qualified id from memory. */
-	workflowsHookEvents?(): Promise<unknown>;
 	/** Fetch one workflow template's detail (`GET /api/workflows/catalog/:id`). */
 	workflowsTemplateGet?(input: { id: string }): Promise<unknown>;
 	/** Install a workflow template (`POST /api/workflows/catalog/install`). Returns
@@ -2491,7 +2532,80 @@ export async function dispatchRpc(
 			if (!services.questsList) {
 				throw new CodedRpcError("server_error", "quests.list is not available");
 			}
-			return await services.questsList();
+			return await services.questsList(asQuestListArg(args[0]));
+		case "quests.capture": {
+			const input = asQuestCaptureArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"quests.capture requires a { body: string } object"
+				);
+			}
+			if (!services.questsCapture) {
+				throw new CodedRpcError(
+					"server_error",
+					"quests.capture is not available"
+				);
+			}
+			return await services.questsCapture(input);
+		}
+		case "quests.use": {
+			const input = asQuestIdArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"quests.use requires a { id: string }"
+				);
+			}
+			if (!services.questsUse) {
+				throw new CodedRpcError("server_error", "quests.use is not available");
+			}
+			return await services.questsUse({
+				...input,
+				complete: asOptionalBoolean(args[0], "complete"),
+			});
+		}
+		case "quests.pin": {
+			const input = asQuestIdArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"quests.pin requires a { id: string }"
+				);
+			}
+			if (!services.questsPin) {
+				throw new CodedRpcError("server_error", "quests.pin is not available");
+			}
+			return await services.questsPin({
+				...input,
+				pinned: asOptionalBoolean(args[0], "pinned"),
+			});
+		}
+		case "quests.scratchpad":
+			if (!services.questsScratchpad) {
+				throw new CodedRpcError(
+					"server_error",
+					"quests.scratchpad is not available"
+				);
+			}
+			return await services.questsScratchpad();
+		case "quests.setScratchpad": {
+			const text = asQuestScratchpadArg(args[0]);
+			if (text === null) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"quests.setScratchpad requires a { text: string } object"
+				);
+			}
+			if (!services.questsSetScratchpad) {
+				throw new CodedRpcError(
+					"server_error",
+					"quests.setScratchpad is not available"
+				);
+			}
+			await services.questsSetScratchpad({ text });
+			return null;
+		}
 		case "quests.create": {
 			const input = asQuestInputArg(args[0]);
 			if (!input) {
@@ -3941,6 +4055,85 @@ export function asQuestIdArg(data: unknown): { id: string } | null {
 		return null;
 	}
 	return { id: o.id };
+}
+
+/** Read an optional boolean field off a loose arg object. Anything that is not a
+ *  real boolean is dropped so the host applies its own default rather than
+ *  coercing a truthy string into `true`. */
+function asOptionalBoolean(data: unknown, key: string): boolean | undefined {
+	if (typeof data !== "object" || data === null) {
+		return undefined;
+	}
+	const v = (data as Record<string, unknown>)[key];
+	return typeof v === "boolean" ? v : undefined;
+}
+
+/** Narrow an optional `{ kind?: string }` for `quests.list`. A missing or blank
+ *  kind means "every kind", which is what the board asks for. */
+export function asQuestListArg(data: unknown): { kind?: string } {
+	if (typeof data !== "object" || data === null) {
+		return {};
+	}
+	const kind = (data as Record<string, unknown>).kind;
+	if (typeof kind !== "string" || kind.trim().length === 0) {
+		return {};
+	}
+	return { kind };
+}
+
+/** Narrow a `quests.capture` arg. Only `body` is required; `kind`/`title` are
+ *  inferred server-side when absent, and a source with no usable field is dropped
+ *  rather than forwarded as an empty object. */
+export function asQuestCaptureArg(data: unknown): {
+	body: string;
+	kind?: string;
+	title?: string;
+	source?: { app?: string; title?: string; url?: string };
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (typeof o.body !== "string" || o.body.trim().length === 0) {
+		return null;
+	}
+	const out: {
+		body: string;
+		kind?: string;
+		title?: string;
+		source?: { app?: string; title?: string; url?: string };
+	} = { body: o.body };
+	if (typeof o.kind === "string" && o.kind.length > 0) {
+		out.kind = o.kind;
+	}
+	if (typeof o.title === "string" && o.title.length > 0) {
+		out.title = o.title;
+	}
+	if (typeof o.source === "object" && o.source !== null) {
+		const s = o.source as Record<string, unknown>;
+		const source: { app?: string; title?: string; url?: string } = {};
+		for (const key of ["app", "title", "url"] as const) {
+			const v = s[key];
+			if (typeof v === "string" && v.length > 0) {
+				source[key] = v;
+			}
+		}
+		if (Object.keys(source).length > 0) {
+			out.source = source;
+		}
+	}
+	return out;
+}
+
+/** Narrow a `quests.setScratchpad` arg to its text. An empty string is VALID
+ *  (that is how the buffer is cleared), so this returns `null` only when the
+ *  argument is not a `{ text: string }` at all. */
+export function asQuestScratchpadArg(data: unknown): string | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const text = (data as Record<string, unknown>).text;
+	return typeof text === "string" ? text : null;
 }
 
 /** Narrow an optional `{ limit?: number }` for `activity.list`. Missing/invalid

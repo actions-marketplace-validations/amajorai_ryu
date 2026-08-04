@@ -2,6 +2,7 @@
   "id": "@ryu/security-guidance",
   "name": "Security Guidance",
   "version": "1.0.0",
+  "category": "Security",
   "icon": "shield-key",
   "iconDither": { "from": 320, "to": 354, "direction": "up" },
   "surfaces": {

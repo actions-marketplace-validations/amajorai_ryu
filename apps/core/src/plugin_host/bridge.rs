@@ -34,6 +34,10 @@ const GRANT_NAVIGATE: &str = "shell:navigate";
 const GRANT_SET_TITLE: &str = "conversation:set-title";
 /// Grant required to call `host.getPreference`.
 const GRANT_PREFERENCES_READ: &str = "preferences:read";
+/// Grant required to call `host.recordFeedback` (the Learning message-action seam).
+const GRANT_LEARNING_FEEDBACK: &str = "learning:crud";
+/// Grant required to call `host.synthesizeSkill` (the Learning context-menu seam).
+const GRANT_LEARNING_SYNTHESIZE: &str = "learning:crud";
 
 /// Map a kernel-contracts host-API method name (dotted, e.g. `"model.complete"`,
 /// `"storage.get"`, `"spaces.createDoc"`) to the closed `host.<...>` path
@@ -68,6 +72,8 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "finetune.merge" => "host.finetune_merge",
         "conversation.setTitle" => "host.setConversationTitle",
         "preferences.get" => "host.getPreference",
+        "learning.recordFeedback" => "host.recordFeedback",
+        "learning.synthesizeSkill" => "host.synthesizeSkill",
         _ => return None,
     })
 }
@@ -108,6 +114,8 @@ impl PluginHookBridge {
             | "finetune_merge" => self.finetune(method, args).await,
             "setConversationTitle" => self.set_conversation_title(args).await,
             "getPreference" => self.get_preference(args).await,
+            "recordFeedback" => self.record_feedback(args).await,
+            "synthesizeSkill" => self.synthesize_skill(args).await,
             "navigate" => self.navigate(args),
             other => err(format!("unknown host capability '{other}'")),
         }
@@ -179,6 +187,78 @@ impl PluginHookBridge {
         match self.state.preferences.get(key).await {
             Ok(Some(v)) => ok(json!(v)),
             Ok(None) => ok(Value::Null),
+            Err(e) => err(e.to_string()),
+        }
+    }
+
+    /// `host.recordFeedback({ conversation_id, message_id, rating })` — record a
+    /// thumbs vote on an assistant turn. `rating` is `"up"` / `"down"` or `null`
+    /// (clear). Wraps `crate::learning::apply_message_feedback` (learning reward +
+    /// RAG-memory sinks), the same logic the `/api/conversations/.../feedback`
+    /// route uses — one implementation, reached by the message-action seam.
+    async fn record_feedback(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_LEARNING_FEEDBACK) {
+            return err(format!(
+                "capability '{GRANT_LEARNING_FEEDBACK}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let conversation_id = args
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if conversation_id.is_empty() {
+            return err("host.recordFeedback requires a non-empty 'conversation_id'".to_string());
+        }
+        let message_id = args
+            .get("message_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if message_id.is_empty() {
+            return err("host.recordFeedback requires a non-empty 'message_id'".to_string());
+        }
+        let rating = match args.get("rating") {
+            Some(Value::Null) | None => None,
+            Some(v) => v.as_str(),
+        };
+        match rating {
+            Some("up") | Some("down") | None => {}
+            Some(other) => {
+                return err(format!(
+                    "host.recordFeedback rating must be 'up', 'down' or null, got '{other}'"
+                ))
+            }
+        }
+        let outcome =
+            crate::learning::apply_message_feedback(&self.state, conversation_id, message_id, rating)
+                .await;
+        ok(json!(outcome))
+    }
+
+    /// `host.synthesizeSkill({ conversation_id, force? })` — distill a skill from a
+    /// conversation and propose it in the approval inbox. The "make a skill from
+    /// this chat" context-menu row dispatches through this verb; it wraps
+    /// `ryu_learning::synthesize_skill`, the same logic as the `/api/learn/synthesize`
+    /// route. No caller identity travels on the host bridge (the shell holds the
+    /// node token), so `requested_by` is `None`; the force/consent semantics are
+    /// identical to the HTTP route.
+    async fn synthesize_skill(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_LEARNING_SYNTHESIZE) {
+            return err(format!(
+                "capability '{GRANT_LEARNING_SYNTHESIZE}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let cid = args
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if cid.is_empty() {
+            return err("host.synthesizeSkill requires a non-empty 'conversation_id'".to_string());
+        }
+        let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+        match ryu_learning::synthesize_skill(&crate::learning::learning_ctx(&self.state), cid, force, None).await {
+            Ok(outcome) => ok(json!(outcome)),
             Err(e) => err(e.to_string()),
         }
     }
@@ -740,6 +820,8 @@ mod tests {
                 | "finetune_merge"
                 | "setConversationTitle"
                 | "getPreference"
+                | "recordFeedback"
+                | "synthesizeSkill"
                 | "navigate"
         )
     }

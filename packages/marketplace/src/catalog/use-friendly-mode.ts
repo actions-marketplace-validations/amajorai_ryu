@@ -1,66 +1,20 @@
 // packages/marketplace/src/catalog/use-friendly-mode.ts
 //
-// One shared, persisted toggle for the app-wide "Friendly names" mode, moved into
-// the shared catalog package so the Skills (and, later, Models) section reads it
-// the same way on every surface. On by default: names are Title-Cased and
-// sizes/quants show plain-language labels. Backed by localStorage and broadcast
-// through a tiny external store so every surface reading it stays in sync the
-// instant any of them flips it.
+// Re-export of THE shared "Friendly names" toggle, which lives in `@ryu/ui`
+// (`hooks/use-friendly-mode.ts`).
 //
-// The storage key keeps its historical `ryu.catalog.*` name so it shares the exact
-// same preference the desktop `useFriendlyMode` hook reads/writes — the two are
-// interchangeable and never diverge for a given user.
+// This file used to carry its own copy of the store — same `ryu.catalog.friendly`
+// key as the desktop's, but a separate `listeners` Set. Because the `storage`
+// event does not fire in the document that wrote it, a toggle flipped from the
+// desktop's Appearance tab never reached a catalog section rendered from this
+// package in the same window. One key with two stores can only be half-connected;
+// the copy is gone and both paths now share one store. Do not re-inline it.
 
-import { useCallback, useSyncExternalStore } from "react";
-
-const STORAGE_KEY = "ryu.catalog.friendly";
-
-const listeners = new Set<() => void>();
-
-function read(): boolean {
-	try {
-		// Default ON: only an explicit "false" turns it off.
-		return localStorage.getItem(STORAGE_KEY) !== "false";
-	} catch {
-		return true;
-	}
-}
-
-function subscribe(cb: () => void): () => void {
-	listeners.add(cb);
-	const onStorage = (e: StorageEvent) => {
-		if (e.key === STORAGE_KEY) {
-			cb();
-		}
-	};
-	if (typeof window !== "undefined") {
-		window.addEventListener("storage", onStorage);
-	}
-	return () => {
-		listeners.delete(cb);
-		if (typeof window !== "undefined") {
-			window.removeEventListener("storage", onStorage);
-		}
-	};
-}
-
-/**
- * `[friendly, setFriendly]`. Persisted, default `true`, shared across every
- * surface (and window) that reads the `ryu.catalog.friendly` key.
- */
-export function useFriendlyMode(): [boolean, (v: boolean) => void] {
-	const friendly = useSyncExternalStore(subscribe, read, () => true);
-
-	const setFriendly = useCallback((v: boolean) => {
-		try {
-			localStorage.setItem(STORAGE_KEY, v ? "true" : "false");
-		} catch {
-			// Non-fatal: persistence is best-effort.
-		}
-		for (const cb of listeners) {
-			cb();
-		}
-	}, []);
-
-	return [friendly, setFriendly];
-}
+export {
+	DEFAULT_FRIENDLY_MODE,
+	FRIENDLY_MODE_STORAGE_KEY,
+	readFriendlyMode,
+	setFriendlyMode,
+	subscribeFriendlyMode,
+	useFriendlyMode,
+} from "@ryu/ui/hooks/use-friendly-mode.ts";

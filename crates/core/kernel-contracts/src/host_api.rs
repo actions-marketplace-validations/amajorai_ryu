@@ -181,6 +181,25 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         false,
     ),
+    // Record a thumbs vote on an assistant turn — the `message_actions` seam's
+    // dispatch verb for the Learning app's rating toggle. Wraps Core's
+    // `apply_message_feedback` (learning reward + RAG-memory sinks). Rust-bridge-only.
+    m(
+        "learning.recordFeedback",
+        "learning.recordFeedback",
+        Some("learning:crud"),
+        false,
+        false,
+    ),
+    // Distill a skill from a conversation (the "make a skill from this chat"
+    // context-menu row). Wraps `synthesize_skill`. Rust-bridge-only.
+    m(
+        "learning.synthesizeSkill",
+        "learning.synthesizeSkill",
+        Some("learning:crud"),
+        false,
+        false,
+    ),
     m(
         "agent.run.stream",
         "agent.run",
@@ -671,6 +690,29 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         true,
     ),
     m(
+        "quests.capture",
+        "quests.crud",
+        Some("quests:crud"),
+        false,
+        true,
+    ),
+    m("quests.use", "quests.crud", Some("quests:crud"), false, true),
+    m("quests.pin", "quests.crud", Some("quests:crud"), false, true),
+    m(
+        "quests.scratchpad",
+        "quests.crud",
+        Some("quests:crud"),
+        false,
+        true,
+    ),
+    m(
+        "quests.setScratchpad",
+        "quests.crud",
+        Some("quests:crud"),
+        false,
+        true,
+    ),
+    m(
         "activity.list",
         "activity.read",
         Some("activity:read"),
@@ -1029,6 +1071,25 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m(
         "shell.themeSubscribe",
+        "shell.integrate",
+        Some("shell:integrate"),
+        true,
+        true,
+    ),
+    // The host's DISPLAY PREFERENCES, streamed the same way and under the same
+    // grant as the theme. Today it carries one field, `friendly` — the app-wide
+    // "Friendly names" toggle (Settings → Appearance) that decides whether a
+    // surface shows plain language ("Connected search") or the technical term
+    // ("Graph"). A sandboxed frame is null-origin and so cannot read the host's
+    // `localStorage`, which is where that preference lives; being told is the only
+    // way a plugin can match the vocabulary of the app it is embedded in.
+    //
+    // Named for the CATEGORY, not the field. A verb per preference would mean a
+    // contract row, a capability lookup, a dispatch branch and a bridge method
+    // every time the shell gains one; `prefsSubscribe` emits a JSON object, so the
+    // next preference is one more key that old plugins simply ignore.
+    m(
+        "shell.prefsSubscribe",
         "shell.integrate",
         Some("shell:integrate"),
         true,

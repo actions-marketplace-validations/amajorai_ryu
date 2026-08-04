@@ -17,11 +17,16 @@
 //! mirroring the `CryptoHost`/`RecipesHost` precedent). So this crate has ZERO
 //! dependency on apps/core.
 //!
-//! The mesh is **opt-in** (`RYU_MESH_ENABLED`), never in `startup_order`. When it
-//! is off, [`query_status`] returns the all-default object (HTTP 200, never 500)
-//! WITHOUT touching the host, so a build with no host installed still behaves
-//! correctly for the default (mesh-disabled) install.
+//! The mesh is **opt-in**. The enabled signal is `RYU_MESH_ENABLED` (env) OR the
+//! `mesh-enabled` pref (seeded by Core at boot into [`set_pref_enabled`] — the
+//! desktop's Gateway → Integrations toggle writes the pref through
+//! `POST /api/mesh/config`). The env wins when set (operator override → pref,
+//! matching the `mesh-login-server`/ingress-URL precedence). When off,
+//! [`query_status`] returns the all-default object (HTTP 200, never 500) WITHOUT
+//! touching the host, so a build with no host installed still behaves correctly
+//! for the default (mesh-disabled) install.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
@@ -121,18 +126,45 @@ impl MeshHandle {
     }
 }
 
+/// The pref-driven half of the mesh-enabled signal. Core seeds this once at boot
+/// from its `mesh-enabled` preference (and `POST /api/mesh/config` updates it at
+/// runtime), so [`is_enabled`] reads `env || pref` without an async store. Kept
+/// in lockstep with the gateway's `tools::mesh_enabled()` so the loopback-trust
+/// neutralization (B-9) and Core fail-closed gate agree on the same signal — the
+/// gateway child is spawned with `RYU_MESH_ENABLED=1` whenever this reads true.
+static MESH_PREF_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Seed the pref half of the mesh-enabled signal (env wins when set). Mirrors
+/// the entitlement / claude-config / untrusted pref seeders in Core's `main`.
+/// Also called by the runtime `POST /api/mesh/config` handler so an enable/disable
+/// takes effect without a restart.
+pub fn set_pref_enabled(enabled: bool) {
+    MESH_PREF_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether a string parses as a truthy mesh-enabled value — the SAME truthiness
+/// [`is_enabled`] applies to `RYU_MESH_ENABLED`, exposed so Core can parse its
+/// `mesh-enabled` pref with the identical semantics instead of a second copy.
+pub fn parse_enabled(value: Option<&str>) -> bool {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("0") | Some("false") | Some("no") => false,
+        Some(_) => true,
+    }
+}
+
 /// Whether the mesh is enabled for this node. Opt-in via `RYU_MESH_ENABLED`
-/// (truthy = anything but empty/`0`/`false`/`no`). Kept in lockstep with the
-/// gateway's `tools::mesh_enabled()` so the loopback-trust neutralization (B-9)
-/// and Core fail-closed gate agree on the same signal.
+/// (truthy = anything but empty/`0`/`false`/`no`) OR the `mesh-enabled` pref
+/// (seeded into [`MESH_PREF_ENABLED`]). The env wins when SET — including an
+/// explicit `RYU_MESH_ENABLED=0`, which overrides the pref — so an operator can
+/// always force the mesh off; only when the env is unset does the pref decide.
+/// Kept in lockstep with the gateway's `tools::mesh_enabled()` so the
+/// loopback-trust neutralization (B-9) and Core fail-closed gate agree on the
+/// same signal.
 pub fn is_enabled() -> bool {
-    std::env::var("RYU_MESH_ENABLED")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "" | "0" | "false" | "no")
-        })
-        .unwrap_or(false)
+    match std::env::var("RYU_MESH_ENABLED").ok() {
+        Some(v) => parse_enabled(Some(&v)),
+        None => MESH_PREF_ENABLED.load(Ordering::Relaxed),
+    }
 }
 
 /// A peer node on the tailnet, as surfaced in Contract 6. Carries both the P7
@@ -539,6 +571,32 @@ pub fn build_peers_response(status: &MeshStatus, node_token: Option<&str>) -> Me
 mod tests {
     use super::*;
 
+    // Serializes get/restore of RYU_MESH_ENABLED against parallel runs (this
+    // crate's own module-local lock; env vars are process-global).
+    static MESH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        MESH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    struct EnvGuard {
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("RYU_MESH_ENABLED", v),
+                None => std::env::remove_var("RYU_MESH_ENABLED"),
+            }
+        }
+    }
+
     fn running_status_json() -> serde_json::Value {
         serde_json::json!({
             "BackendState": "Running",
@@ -642,10 +700,66 @@ mod tests {
 
     #[test]
     fn is_enabled_default_off() {
-        // In the test process RYU_MESH_ENABLED is unset → off.
+        // In the test process RYU_MESH_ENABLED is unset → off (the pref global
+        // is off by default and no prior test in this process turned it on).
         if std::env::var("RYU_MESH_ENABLED").is_err() {
             assert!(!is_enabled());
         }
+    }
+
+    /// A drop guard restoring the pref global, so a pref-flipping test never
+    /// leaks its value into the parallel tests of this same process.
+    struct PrefGuard {
+        prev: bool,
+    }
+    impl PrefGuard {
+        fn set(v: bool) -> Self {
+            let prev = MESH_PREF_ENABLED.load(Ordering::Relaxed);
+            set_pref_enabled(v);
+            Self { prev }
+        }
+    }
+    impl Drop for PrefGuard {
+        fn drop(&mut self) {
+            set_pref_enabled(self.prev);
+        }
+    }
+
+    #[test]
+    fn pref_enable_drives_is_enabled_when_env_unset() {
+        let _lock = lock_env();
+        if std::env::var("RYU_MESH_ENABLED").is_err() {
+            let _p = PrefGuard::set(true);
+            assert!(is_enabled());
+            set_pref_enabled(false);
+            assert!(!is_enabled());
+        }
+    }
+
+    #[test]
+    fn env_wins_over_pref() {
+        let _lock = lock_env();
+        let _p = PrefGuard::set(true);
+        // Env set to an explicit off wins over a pref that says on.
+        let _e = EnvGuard::set("RYU_MESH_ENABLED", "0");
+        assert!(!is_enabled());
+        // Env set to on wins over a pref that says off.
+        let _e = EnvGuard::set("RYU_MESH_ENABLED", "1");
+        assert!(is_enabled());
+    }
+
+    #[test]
+    fn parse_enabled_matches_env_truthiness() {
+        assert!(!parse_enabled(None));
+        assert!(!parse_enabled(Some("")));
+        assert!(!parse_enabled(Some("0")));
+        assert!(!parse_enabled(Some("false")));
+        assert!(!parse_enabled(Some("FALSE")));
+        assert!(!parse_enabled(Some("no")));
+        assert!(parse_enabled(Some("1")));
+        assert!(parse_enabled(Some("true")));
+        assert!(parse_enabled(Some("yes")));
+        assert!(parse_enabled(Some(" 1 ")));
     }
 
     #[test]
@@ -743,6 +857,8 @@ mod tests {
         // With mesh disabled (default in the test process), query_status returns
         // the all-default object WITHOUT a host installed — the mesh-off install
         // path must never depend on the daemon host being wired.
+        let _lock = lock_env();
+        let _p = PrefGuard::set(false);
         if std::env::var("RYU_MESH_ENABLED").is_err() {
             let status = query_status().await;
             assert_eq!(status, MeshStatus::default());

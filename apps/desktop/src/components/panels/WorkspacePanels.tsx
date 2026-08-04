@@ -102,6 +102,7 @@ import {
 	sidebarFloatingChrome,
 	useSidebarVariant,
 } from "@/src/hooks/useSidebarVariant.ts";
+import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
 import { apiUrl, makeHeaders } from "@/src/lib/api/client.ts";
 import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
@@ -3208,6 +3209,16 @@ export function WorkspacePanels({
 	// flush inside the already-carded SidebarInset canvas — no nested chrome.
 	const [sidebarVariant] = useSidebarVariant();
 	const floatingChrome = sidebarVariant === "floating";
+	// Docked panels start below the frosted titlebar (floating chrome clears its
+	// top-2 offset at 58px; inset chrome sits flush under h-12). When the bar
+	// auto-hides the panels take the full height instead — no leftover gap.
+	const titleBarClearsContent = useTitleBarClearsContent();
+	const dockTop =
+		titleBarClearsContent && floatingChrome
+			? "top-[58px]"
+			: titleBarClearsContent
+				? "top-12"
+				: "top-0";
 	const panelChrome = cn(
 		"flex flex-1 flex-col overflow-hidden bg-sidebar",
 		floatingChrome && sidebarFloatingChrome
@@ -3447,10 +3458,7 @@ export function WorkspacePanels({
 			    over it. display:none when hidden, same as the bottom panel, so it
 			    never flashes on first mount. */}
 			<div
-				className={cn(
-					"absolute bottom-0 z-10",
-					floatingChrome ? "top-[58px]" : "top-12"
-				)}
+				className={cn("absolute bottom-0 z-10", dockTop)}
 				style={{
 					right: rightDockWidth,
 					width: pinnedColumnWidth,
@@ -3474,7 +3482,10 @@ export function WorkspacePanels({
 			    it back. */}
 			{pinnedFloating && (
 				<div
-					className="pointer-events-none absolute top-[64px] z-20"
+					className={cn(
+						"pointer-events-none absolute z-20",
+						titleBarClearsContent ? "top-[64px]" : "top-0"
+					)}
 					style={{ right: rightDockWidth + PANEL_GUTTER }}
 				>
 					{renderPinnedSummary?.({ floating: true })}
@@ -3489,10 +3500,7 @@ export function WorkspacePanels({
 			    button that hides it. Floating chrome clears the titlebar's top-2
 			    offset (58px); inset chrome sits flush under h-12. */}
 			<div
-				className={cn(
-					"absolute right-0 bottom-0 z-20 flex flex-row",
-					floatingChrome ? "top-[58px]" : "top-12"
-				)}
+				className={cn("absolute right-0 bottom-0 z-20 flex flex-row", dockTop)}
 				onMouseEnter={rightOpen || isMobile ? undefined : showRightPeek}
 				onMouseLeave={rightOpen || isMobile ? undefined : hideRightPeek}
 				style={{
@@ -3512,10 +3520,7 @@ export function WorkspacePanels({
 			    where it would also swallow the edge-swipe back gesture. */}
 			{!(rightOpen || isMobile) && (
 				<div
-					className={cn(
-						"absolute right-0 bottom-0 z-30 w-2",
-						floatingChrome ? "top-[58px]" : "top-12"
-					)}
+					className={cn("absolute right-0 bottom-0 z-30 w-2", dockTop)}
 					onMouseEnter={showRightPeek}
 					onMouseLeave={hideRightPeek}
 				/>

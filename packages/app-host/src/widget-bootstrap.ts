@@ -98,6 +98,15 @@ const CSS_URL_RE = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
  *  `window.openai.toolOutput` see real data. */
 export interface WidgetInitialGlobals {
 	displayMode: "inline" | "fullscreen" | "pip";
+	/** The host's app-wide "Friendly names" preference — `true` when the shell is
+	 *  showing plain language rather than technical terms. Baked in synchronously
+	 *  alongside `theme` so a widget that renders its own labels at module top-level
+	 *  gets the right vocabulary on FIRST paint; a later push would show the widget
+	 *  saying "Graph" for a frame inside an app that says "Connected search".
+	 *  Optional so an older host that omits it defaults to the host's own default
+	 *  (`true`) rather than to `undefined`-as-false, which would silently turn the
+	 *  preference off for every widget on that host. */
+	friendly?: boolean;
 	locale: string;
 	maxHeight: number | null;
 	safeArea: { bottom: number; left: number; right: number; top: number };
@@ -192,6 +201,9 @@ function bridgeSource(
     toolResponseMetadata: G.toolResponseMetadata, widgetState: G.widgetState,
     theme: G.theme, locale: G.locale, displayMode: G.displayMode,
     maxHeight: G.maxHeight, safeArea: G.safeArea,
+    // Absent means "host did not say", which is NOT the same as off — default to the
+    // host's own default (on) so an older host does not silently disable it here.
+    friendly: (G.friendly !== false),
     // window.openai parity globals (Apps-SDK). Present (never undefined) so a widget
     // that reads them at module top-level does not crash; host-pushable via setGlobals.
     view: (G.view != null ? G.view : { displayMode: G.displayMode, maxHeight: G.maxHeight }),

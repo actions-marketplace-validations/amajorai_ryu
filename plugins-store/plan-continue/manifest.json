@@ -2,6 +2,7 @@
   "id": "@ryu/plan-continue",
   "name": "Plan Continue",
   "version": "1.0.0",
+  "category": "Productivity",
   "icon": "task-01",
   "iconDither": { "from": 198, "to": 232, "direction": "down" },
   "surfaces": {

@@ -64,15 +64,15 @@ import {
 	AlertDialogFooter,
 	AlertDialogHeader,
 	AlertDialogTitle,
-} from "@ryu/ui/components/alert-dialog";
-import { BorderBeam } from "@ryu/ui/components/border-beam";
+} from "@ryu/ui/components/alert-dialog.tsx";
+import { BorderBeam } from "@ryu/ui/components/border-beam.tsx";
 import {
 	ContextMenu,
 	ContextMenuContent,
 	ContextMenuItem,
 	ContextMenuSeparator,
 	ContextMenuTrigger,
-} from "@ryu/ui/components/context-menu";
+} from "@ryu/ui/components/context-menu.tsx";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -84,16 +84,16 @@ import {
 	DropdownMenuSubContent,
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
-} from "@ryu/ui/components/dropdown-menu";
+} from "@ryu/ui/components/dropdown-menu.tsx";
 import { asGlyphValue, type GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
-import { Icon } from "@ryu/ui/components/icon";
-import { Logo } from "@ryu/ui/components/logo";
+import { Icon } from "@ryu/ui/components/icon.tsx";
+import { Logo } from "@ryu/ui/components/logo.tsx";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
-} from "@ryu/ui/components/popover";
+} from "@ryu/ui/components/popover.tsx";
 import {
 	Sidebar,
 	SidebarContent,
@@ -105,19 +105,19 @@ import {
 	SidebarMenuButton,
 	SidebarMenuItem,
 	SidebarRail,
-} from "@ryu/ui/components/sidebar";
-import { toast } from "@ryu/ui/components/sileo";
-import { Spinner } from "@ryu/ui/components/spinner";
+} from "@ryu/ui/components/sidebar.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import {
 	type IconComponent,
 	TabsSubtle,
 	TabsSubtleItem,
-} from "@ryu/ui/components/tabs-subtle";
+} from "@ryu/ui/components/tabs-subtle.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
+} from "@ryu/ui/components/tooltip.tsx";
 import { useQuery } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
@@ -204,10 +204,10 @@ import {
 	setConversationPinned,
 	type TitleHistoryEntry,
 } from "@/src/lib/api/conversation-flags.ts";
-import { synthesizeSkill } from "@/src/lib/api/learn.ts";
-import type {
-	PluginSidebarButton,
-	PluginSidebarSection,
+import {
+	type PluginSidebarButton,
+	type PluginSidebarSection,
+	pluginHostInvoke,
 } from "@/src/lib/api/plugins.ts";
 import { listSkills } from "@/src/lib/api/skills.ts";
 import type { Space, SpaceDocument } from "@/src/lib/api/spaces.ts";
@@ -289,17 +289,38 @@ const CHROME_ORDER_KEY = "ryu:sidebar-chrome-order";
 // the section-reorder drag, which uses "text/plain"). The payload is the agent id.
 const AGENT_DND_FORMAT = "application/x-ryu-agent";
 
-// Sidebar sections whose backing routes are gated by a Core App (the two Core
-// wraps in `require_app_enabled`: /api/meetings/* and /api/spaces/*). When that
-// App is disabled the routes 503, so we hide the section rather than leave a nav
-// entry that leads to a dead page. Ids mirror `apps/core/src/plugins/builtins.rs`
-// (MEETINGS_PLUGIN_ID / SPACES_PLUGIN_ID).
+// Sidebar sections whose backing routes are gated by a Core App (`require_app_enabled`
+// / the ext-proxy mount, both of which refuse while the owning app is off). When that
+// App is disabled or absent the routes fail, so we hide the section rather than leave
+// a nav entry that leads to a dead page. Ids mirror
+// `apps/core/src/plugins/builtins.rs`.
 const SECTION_PLUGIN_OWNER: Partial<Record<SectionKey, string>> = {
 	// meetings/canvas/whiteboard are NOT here anymore — each is a fully app-registered
 	// `sidebar_sections` contribution (com.ryu.{meetings,canvas,whiteboard}), so its
 	// visibility follows the contributions feed (served only when the app is enabled),
-	// not a hardcoded owner gate. Only Spaces stays a hardcoded, owner-gated section.
+	// not a hardcoded owner gate.
 	spaces: "@ryu/spaces",
+	// Teams and Workflows are owner-gated for the same reason, arrived at the hard
+	// way. Both are entries in `BUILTIN_SECTIONS`, which is the CLOSED half of the
+	// vocabulary — "the shell's own pages, they ship compiled in" — so both rendered
+	// unconditionally, on every install, whether or not their app existed. Each one
+	// is really an app surface: `@ryu/teams` owns `/api/teams/*` (the `ryu-teams`
+	// sidecar) and `@ryu/workflows` owns the workflow store. With the apps default-off
+	// the sections stayed in the sidebar and every row inside them failed against a
+	// route the App gate refuses — which is what "I uninstalled Workflows and it is
+	// still there" describes. `sidebar-sections.ts` states the rule they were
+	// breaking: "if a new section needs a Core app to exist, it belongs in that app's
+	// manifest, not in BUILTIN_SECTIONS."
+	//
+	// This gate, not a move to `sidebar_sections` contributions, because the two
+	// sections are real compiled-in components (`TeamsSection`/`WorkflowsSection`,
+	// with their own hooks, drag-and-drop and context menus) that the generic
+	// declarative plugin-panel path cannot render. The gate buys the whole
+	// user-visible half of that move — absent app ⇒ absent section — at one line
+	// each; rehoming the UI is a separate change and can happen later without
+	// touching this.
+	teams: "@ryu/teams",
+	workflows: "@ryu/workflows",
 };
 
 // Pin/archive/unread state is local-first: persisted in localStorage rather than
@@ -1121,6 +1142,24 @@ function ChatRow({
 	const archiveIcon = isArchived ? ArchiveRestoreIcon : Archive01Icon;
 	const readLabel = isUnread ? "Mark as read" : "Mark as unread";
 
+	// App-registered conversation-menu rows from the contributions feed, filtered
+	// to the `conversation` anchor. The "Make a skill from this chat" row is a
+	// Learning contribution, not a hardcoded menu item — disabling the app removes
+	// the row. Each row dispatches its declared capability through the owning
+	// plugin's granted host seam (`pluginHostInvoke`), never inline code.
+	const { context_menu_items } = usePluginContributions();
+	const contributedMenuRows = useMemo(
+		() =>
+			context_menu_items
+				.filter((item) => item.anchor === "conversation")
+				.sort(
+					(a, b) =>
+						(a.order ?? Number.MAX_SAFE_INTEGER) -
+						(b.order ?? Number.MAX_SAFE_INTEGER)
+				),
+		[context_menu_items]
+	);
+
 	// Inline rename: when `isEditing`, the title is replaced by a text input.
 	// Commit on Enter / blur, cancel on Escape. Seeded from the current title.
 	const [isEditing, setIsEditing] = useState(false);
@@ -1446,27 +1485,49 @@ function ChatRow({
 									/>
 									{archiveLabel}
 								</DropdownMenuItem>
-								<DropdownMenuItem
-									onClick={(e) => {
-										e.stopPropagation();
-										toast.promise(synthesizeSkill(target, conv.id), {
-											loading: "Making a skill from this chat…",
-											success: (outcome) =>
-												outcome.created
-													? `Learned skill: ${outcome.slug}`
-													: (outcome.reason ??
-														"Nothing reusable found in this chat"),
-											error: "Couldn't create a skill from this chat",
-										});
-									}}
-								>
-									<HugeiconsIcon
-										className="mr-2"
-										icon={Mortarboard01Icon}
-										size={12}
-									/>
-									Make a skill from this chat
-								</DropdownMenuItem>
+								{contributedMenuRows.length > 0 && <DropdownMenuSeparator />}
+								{contributedMenuRows.map((item) => (
+									<DropdownMenuItem
+										key={item.id}
+										onClick={(e) => {
+											e.stopPropagation();
+											const feedback = item.feedback;
+											const run = () =>
+												pluginHostInvoke(
+													target,
+													item.plugin,
+													item.capability ?? "",
+													{
+														...item.args,
+														conversation_id: conv.id,
+													}
+												);
+											if (feedback) {
+												toast.promise(run(), {
+													loading: feedback.loading ?? item.label,
+													success: feedback.success ?? item.label,
+													error: feedback.error ?? `${item.label} failed`,
+												});
+											} else {
+												toast.promise(run(), {
+													loading: item.label,
+													error: `${item.label} failed`,
+												});
+											}
+										}}
+									>
+										{item.icon ? (
+											<Icon className="mr-2" icon={item.icon} size={12} />
+										) : (
+											<HugeiconsIcon
+												className="mr-2"
+												icon={MoreHorizontalIcon}
+												size={12}
+											/>
+										)}
+										{item.label}
+									</DropdownMenuItem>
+								))}
 								<DropdownMenuSeparator />
 								<DropdownMenuItem
 									className="text-destructive"

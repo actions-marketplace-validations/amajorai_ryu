@@ -375,6 +375,28 @@ export function thirdPartyPluginSrcdoc(
             h.promise.catch(function () {});
             return { dispose: h.cancel };
           },
+          // The host's display preferences, streamed like the theme. onChange gets
+          // { friendly: boolean } now and on every change. friendly is the app-wide
+          // "Friendly names" toggle: true means the shell is showing plain language,
+          // so a companion should say "Connected search", not "Graph". The frame is
+          // null-origin and cannot read the host's storage, so this is the only route.
+          // Also mirrored onto <html data-ryu-friendly> so a companion can branch in
+          // CSS alone, the same way it already themes off the injected tokens.
+          subscribePrefs: function (opts) {
+            opts = opts || {};
+            var h = callStream("shell.prefsSubscribe", [{}], function (d) {
+              var prefs;
+              try { prefs = JSON.parse(d); } catch (e) { return; }
+              try {
+                document.documentElement.setAttribute(
+                  "data-ryu-friendly", prefs && prefs.friendly === false ? "false" : "true"
+                );
+              } catch (e) {}
+              if (opts.onChange) { try { opts.onChange(prefs); } catch (e) {} }
+            });
+            h.promise.catch(function () {});
+            return { dispose: h.cancel };
+          },
           registerCommand: function (commands, opts) {
             opts = opts || {};
             var h = callStream("shell.registerCommand", [{ commands: commands || [] }], function (d) {
@@ -772,6 +794,11 @@ function htmlCompanionHeadFragment(
         acceptSuggestion: function (a) { return call("quests.acceptSuggestion", [a || {}]); },
         dismissSuggestion: function (a) { return call("quests.dismissSuggestion", [a || {}]); },
         judge: function (a) { return call("quests.judge", [a || {}]); },
+        capture: function (a) { return call("quests.capture", [a || {}]); },
+        use: function (a) { return call("quests.use", [a || {}]); },
+        pin: function (a) { return call("quests.pin", [a || {}]); },
+        scratchpad: function () { return call("quests.scratchpad", []); },
+        setScratchpad: function (a) { return call("quests.setScratchpad", [a || {}]); },
         openDetectionSettings: function () { return call("quests.openDetectionSettings", []); }
       },
       // Activity feed (needs grant activity:read). The @ryu/activity companion
@@ -887,6 +914,25 @@ function htmlCompanionHeadFragment(
           opts = opts || {};
           var h = callStream("shell.themeSubscribe", [{}], function (d) {
             if (opts.onChange) { try { opts.onChange(JSON.parse(d)); } catch (e) {} }
+          });
+          h.promise.catch(function () {});
+          return { dispose: h.cancel };
+        },
+        // Host display preferences — see the sibling bridge above. Kept in step with
+        // it deliberately: the two builders serve the two companion mount paths
+        // (Path A ESM module, Path B self-contained HTML bundle), and a verb present
+        // in only one is a verb whose availability depends on how the app was built.
+        subscribePrefs: function (opts) {
+          opts = opts || {};
+          var h = callStream("shell.prefsSubscribe", [{}], function (d) {
+            var prefs;
+            try { prefs = JSON.parse(d); } catch (e) { return; }
+            try {
+              document.documentElement.setAttribute(
+                "data-ryu-friendly", prefs && prefs.friendly === false ? "false" : "true"
+              );
+            } catch (e) {}
+            if (opts.onChange) { try { opts.onChange(prefs); } catch (e) {} }
           });
           h.promise.catch(function () {});
           return { dispose: h.cancel };

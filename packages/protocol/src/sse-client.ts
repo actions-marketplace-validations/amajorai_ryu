@@ -23,6 +23,22 @@ export interface SseMessage<T> {
 	event: string;
 }
 
+/**
+ * Thrown by {@link openSse} when the CONNECT fails (non-2xx, or a 2xx with no
+ * body). Carries the HTTP `status` so a reconnect loop can tell a transient
+ * failure from a permanent refusal — a 409 that will keep being a 409 does not
+ * deserve the same retry cadence as a restarting server. The `message` is
+ * unchanged from the plain `Error` this replaced.
+ */
+export class SseConnectError extends Error {
+	readonly status: number;
+	constructor(status: number) {
+		super(`sse stream failed: ${status}`);
+		this.name = "SseConnectError";
+		this.status = status;
+	}
+}
+
 export interface OpenSseOptions {
 	/** Cookie policy for browser callers using session auth (e.g. "include"). */
 	credentials?: RequestInit["credentials"];
@@ -58,8 +74,9 @@ function parseFrame(frame: string): { event: string; data: string } | null {
 /**
  * Open an SSE stream and async-iterate its parsed events. Yields one
  * {@link SseMessage} per frame; keepalive comments and payload-less frames are
- * skipped. Ends when the stream closes or `signal` aborts. Throws on a non-2xx
- * connect so the caller can decide whether to reconnect.
+ * skipped. Ends when the stream closes or `signal` aborts. Throws an
+ * {@link SseConnectError} (carrying the HTTP status) on a non-2xx connect so the
+ * caller can decide whether — and how fast — to reconnect.
  *
  *   for await (const msg of openSse<RedemptionEvent>(url, { token })) {
  *     handle(msg.data);
@@ -81,7 +98,7 @@ export async function* openSse<T = unknown>(
 		signal: options.signal,
 	});
 	if (!(resp.ok && resp.body)) {
-		throw new Error(`sse stream failed: ${resp.status}`);
+		throw new SseConnectError(resp.status);
 	}
 
 	const reader = resp.body.getReader();

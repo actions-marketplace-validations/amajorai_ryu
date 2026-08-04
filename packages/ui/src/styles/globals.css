@@ -16,8 +16,14 @@
 	   surfaces layer bg-card against bg-muted and need the two to differ.) */
 	--popover: var(--muted);
 	--popover-foreground: var(--foreground);
-	--primary: oklch(0.205 0 0);
-	--primary-foreground: oklch(0.985 0 0);
+	/* Ryu brand blue #0099ff. This base block — not the presets — is what
+	   surfaces without the theme engine actually render: web, webapp, extension,
+	   fumadocs and storyboard all `@import` this file but never call
+	   `applyVariant`, so they used to fall through to the shadcn neutral
+	   (near-black light / near-white dark) and showed no brand colour at all.
+	   Keep in sync with `--primary` in packages/ui/src/theme/presets.ts. */
+	--primary: oklch(0.669 0.1837 248.81);
+	--primary-foreground: oklch(0.97 0.014 254.604);
 	--secondary: oklch(0.97 0 0);
 	--secondary-foreground: oklch(0.205 0 0);
 	--muted: oklch(0.97 0 0);
@@ -42,8 +48,8 @@
 	--radius: 0.625rem;
 	--sidebar: oklch(0.985 0 0);
 	--sidebar-foreground: oklch(0.145 0 0);
-	--sidebar-primary: oklch(0.205 0 0);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
+	--sidebar-primary: oklch(0.669 0.1837 248.81);
+	--sidebar-primary-foreground: oklch(0.97 0.014 254.604);
 	--sidebar-accent: oklch(0.97 0 0);
 	--sidebar-accent-foreground: oklch(0.205 0 0);
 	--sidebar-border: oklch(0.922 0 0);
@@ -60,6 +66,27 @@
 	backdrop-filter: blur(var(--ryu-dialog-overlay-blur));
 }
 
+/* Dialog transparent mode (overlay blur off, the default) — no backdrop overlay
+   and no panel shadow on dialogs, alert dialogs, sheets, or drawers. The
+   desktop turns the overlay on via the "Blur dialog backgrounds" Appearance
+   toggle (data-dialog-overlay-blur="on", set by
+   hooks/use-dialog-overlay-blur.ts); every other surface keeps this default. */
+html:not([data-dialog-overlay-blur="on"]) .ryu-dialog-overlay {
+	display: none;
+}
+
+html:not([data-dialog-overlay-blur="on"]) [data-slot="dialog-content"],
+html:not([data-dialog-overlay-blur="on"]) [data-slot="alert-dialog-content"],
+html:not([data-dialog-overlay-blur="on"]) [data-slot="sheet-content"],
+html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"] {
+	border: 1px solid color-mix(in oklch, var(--border) 50%, transparent) !important;
+	box-shadow: none !important;
+}
+
+html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"]::before {
+	box-shadow: none !important;
+}
+
 .dark {
 	--background: oklch(0.145 0 0);
 	--foreground: oklch(0.985 0 0);
@@ -67,8 +94,9 @@
 	--card-foreground: oklch(0.985 0 0);
 	/* --popover inherits the :root reference to var(--muted); --muted below flips
 	   for dark mode, so it tracks it. */
-	--primary: oklch(0.922 0 0);
-	--primary-foreground: oklch(0.205 0 0);
+	/* Brand blue is mode-independent: #0099ff in light and dark alike. */
+	--primary: oklch(0.669 0.1837 248.81);
+	--primary-foreground: oklch(0.97 0.014 254.604);
 	--secondary: oklch(0.269 0 0);
 	--secondary-foreground: oklch(0.985 0 0);
 	--muted: oklch(0.269 0 0);
@@ -92,8 +120,8 @@
 	--chart-5: oklch(0.269 0 0);
 	--sidebar: oklch(0.205 0 0);
 	--sidebar-foreground: oklch(0.985 0 0);
-	--sidebar-primary: oklch(0.488 0.243 264.376);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
+	--sidebar-primary: oklch(0.669 0.1837 248.81);
+	--sidebar-primary-foreground: oklch(0.97 0.014 254.604);
 	--sidebar-accent: oklch(0.269 0 0);
 	--sidebar-accent-foreground: oklch(0.985 0 0);
 	--sidebar-border: oklch(1 0 0 / 10%);
@@ -163,16 +191,6 @@
 		color: var(--background);
 		background-color: var(--foreground);
 	}
-}
-
-/* Sileo toast text color — background uses var(--muted) (set in sileo.tsx
-   `fill`), so text needs var(--foreground) to stay readable in dark mode. */
-[data-sileo-viewport] {
-	--sileo-tone: var(--foreground);
-}
-[data-sileo-title],
-[data-sileo-description] {
-	color: var(--foreground);
 }
 
 /* Color theme variants — applied via data-color-theme attribute on <html> */
@@ -474,6 +492,22 @@
 	--toggle-ov2: 0px;
 	--toggle-track: 150ms;
 	--toggle-ease: cubic-bezier(0.34, 1.35, 0.64, 1);
+	/* Success check (10) — the confirmation icon on terminal success pages
+	   (device activated, email verified, payment complete). */
+	--check-opacity-dur: 500ms;
+	--check-rotate-dur: 500ms;
+	--check-rotate-from: 80deg;
+	--check-bob-dur: 500ms;
+	--check-y-amount: 40px;
+	--check-blur-dur: 500ms;
+	--check-blur-from: 10px;
+	--check-path-dur: 500ms;
+	--check-path-delay: 80ms;
+	--check-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+	--check-ease-opacity: cubic-bezier(0.22, 1, 0.36, 1);
+	--check-ease-rotate: cubic-bezier(0.22, 1, 0.36, 1);
+	--check-ease-bob: cubic-bezier(0.34, 1.35, 0.64, 1);
+	--check-ease-path: cubic-bezier(0.22, 1, 0.36, 1);
 	/* Theme-mapped color tokens (follow light/dark via the app's vars) */
 	--tabs-bar-bg: var(--muted);
 	--tabs-pill-bg: var(--background);
@@ -949,6 +983,76 @@
 		transform var(--morph-open-dur) var(--morph-ease);
 }
 
+/* --- Success check (10) --- */
+/* The wrapper drives fade + rotate + blur + Y-bob and owns no sizing or color,
+   so any icon can be dropped in. `stroke-dasharray` below is only a placeholder:
+   SuccessCheck measures each path with getTotalLength() and writes the real
+   length inline before flipping data-state, so the stroke never pre-reveals. */
+.t-success-check {
+	display: inline-block;
+	opacity: 0;
+	transform-origin: center;
+	will-change: transform, opacity, filter;
+}
+/* overflow: visible keeps the stroke from clipping while it draws; display:
+   block kills the inline whitespace under the SVG. */
+.t-success-check svg {
+	display: block;
+	overflow: visible;
+}
+.t-success-check svg path {
+	stroke-dasharray: 20;
+	stroke-dashoffset: 20;
+}
+.t-success-check[data-state="in"] {
+	animation:
+		t-check-fade var(--check-opacity-dur) var(--check-ease-opacity) forwards,
+		t-check-rotate var(--check-rotate-dur) var(--check-ease-rotate) forwards,
+		t-check-blur var(--check-blur-dur) var(--check-ease-out) forwards,
+		t-check-bob var(--check-bob-dur) var(--check-ease-bob) forwards;
+}
+.t-success-check[data-state="in"] svg path {
+	animation: t-check-draw var(--check-path-dur) var(--check-ease-path)
+		var(--check-path-delay, 0ms) forwards;
+}
+@keyframes t-check-fade {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+@keyframes t-check-rotate {
+	from {
+		transform: rotate(var(--check-rotate-from));
+	}
+	to {
+		transform: rotate(0deg);
+	}
+}
+@keyframes t-check-blur {
+	from {
+		filter: blur(var(--check-blur-from));
+	}
+	to {
+		filter: blur(0);
+	}
+}
+@keyframes t-check-bob {
+	from {
+		translate: 0 var(--check-y-amount);
+	}
+	to {
+		translate: 0 0;
+	}
+}
+@keyframes t-check-draw {
+	to {
+		stroke-dashoffset: 0;
+	}
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.t-badge,
 	.t-badge-dot,
@@ -968,9 +1072,21 @@
 	.t-morph,
 	.t-morph-plus,
 	.t-morph-plus svg,
-	.t-morph-menu {
+	.t-morph-menu,
+	.t-success-check,
+	.t-success-check svg path {
 		transition: none !important;
 		animation: none !important;
+	}
+	/* Same trap as the stagger lines below: the check rests at opacity 0 with an
+	   undrawn stroke and only the animation reveals it. Killing the animation
+	   alone would leave a permanently invisible confirmation icon, so put it at
+	   rest fully drawn instead. */
+	.t-success-check {
+		opacity: 1;
+	}
+	.t-success-check svg path {
+		stroke-dashoffset: 0 !important;
 	}
 	/* Stagger lines rest at opacity 0 and only become visible when the consumer
 	   adds .is-shown — often on scroll. Killing the transition alone would leave

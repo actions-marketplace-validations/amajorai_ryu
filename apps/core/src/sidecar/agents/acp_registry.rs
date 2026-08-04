@@ -223,6 +223,55 @@ pub fn load_registry_agents() -> Vec<RegistryAgent> {
     Vec::new()
 }
 
+/// Bounded fetch used by [`ensure_registry_cached`]. A cold first launch must not
+/// hang boot behind an unreachable CDN, so the wait is capped and failure is
+/// non-fatal (we fall through to the 4 curated agents, as before).
+const COLD_START_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Populate the on-disk registry cache **before** the process builds its
+/// in-memory [`crate::sidecar::adapters::acp::AcpAgentRegistry`].
+///
+/// Why this exists: `AcpAgentRegistry::new()` is built exactly once, at boot, and
+/// its `entries` are frozen into an `Arc` for the process lifetime. It reaches
+/// [`load_registry_agents`] from *inside* the Tokio runtime, where that function
+/// deliberately refuses to block on the network — it kicks a background refresh
+/// and serves the disk cache. On a cold first launch there is no disk cache, so
+/// the registry froze with only the hardcoded curated agents; the background
+/// refresh then wrote a perfectly good 38-agent cache that nothing re-read. The
+/// Store's Agents tab therefore showed ~8 agents *for the rest of that process's
+/// life*, and only a restart fixed it — which is exactly the "the other agents
+/// vanished" report.
+///
+/// Awaiting the first fetch here closes that window: by the time the registry is
+/// constructed the cache exists, so the frozen snapshot is complete. Only the
+/// genuinely-cold case pays the wait (cache absent or unreadable); a warm boot
+/// returns immediately and leaves staleness to the existing background refresh —
+/// a stale cache still yields the full agent list, it just lags CDN *additions*
+/// by one restart.
+pub async fn ensure_registry_cached() {
+    if read_cache().is_some() {
+        return;
+    }
+    match tokio::time::timeout(COLD_START_FETCH_TIMEOUT, fetch_remote()).await {
+        Ok(Ok(file)) => {
+            let count = file.agents.len();
+            match write_cache(&file) {
+                Ok(()) => tracing::info!(count, "seeded ACP registry cache on cold start"),
+                Err(e) => tracing::warn!(error = %e, "could not write ACP registry cache"),
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "cold-start ACP registry fetch failed; agent catalog will be partial until the next launch");
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = COLD_START_FETCH_TIMEOUT.as_secs(),
+                "cold-start ACP registry fetch timed out; agent catalog will be partial until the next launch"
+            );
+        }
+    }
+}
+
 /// Map a registry id to Ryu's stable internal catalog id (preserves installs).
 pub fn canonical_agent_id(registry_id: &str) -> String {
     match registry_id {

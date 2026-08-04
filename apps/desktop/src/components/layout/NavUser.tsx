@@ -7,7 +7,10 @@ import {
 	ContextMenuItem,
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu";
-import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar";
+import {
+	DitherAvatar,
+	ditherAvatarSeed,
+} from "@ryu/ui/components/dither-kit/avatar";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -243,7 +246,11 @@ function AccountList() {
 							<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
 								<DitherAvatar
 									className="size-full"
-									name={account.userId ?? account.email ?? "ryu"}
+									name={ditherAvatarSeed({
+										id: account.userId,
+										email: account.email,
+										name: account.name,
+									})}
 								/>
 							</AvatarFallback>
 						</Avatar>
@@ -334,6 +341,7 @@ export function NavUser({
 		sessionUser ??
 		(oidcUser
 			? {
+					id: undefined,
 					name: oidcUser.name ?? null,
 					email: oidcUser.email ?? null,
 					image: oidcUser.picture ?? null,
@@ -442,9 +450,11 @@ export function NavUser({
 												<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
 													<DitherAvatar
 														className="size-full"
-														name={
-															user?.id ?? user?.email ?? user?.name ?? "ryu"
-														}
+														name={ditherAvatarSeed({
+															id: user?.id,
+															email: user?.email,
+															name: user?.name,
+														})}
 													/>
 												</AvatarFallback>
 											</Avatar>

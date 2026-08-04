@@ -2,6 +2,7 @@
   "id": "@ryu/dictation",
   "name": "Dictation",
   "version": "1.0.0",
+  "category": "Media & Voice",
   "description": "System-wide dictation and agent-ask via the Island companion: speak anywhere to type a transcript, or ask an agent and paste the answer into the focused app.",
   "icon": "voice",
   "iconDither": { "from": 6, "to": 332, "direction": "up" },

@@ -2,6 +2,8 @@
   "id": "@ryu/spaces",
   "name": "Spaces",
   "version": "1.0.0",
+  "category": "Core",
+  "mandatory": true,
   "description": "Document Spaces: the shared store every note, doc, and RAG-indexed file lands in. The dependency target other apps declare when they own Space documents.",
   "engines": {
     "ryu": ">=0.0.1"

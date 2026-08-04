@@ -1,5 +1,6 @@
 import { Logo as OrbLogo } from "@ryu/ui/components/logo.tsx";
 import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
+import { DEFAULT_THEME_MODE } from "@ryu/ui/theme/prefs";
 import { listen } from "@tauri-apps/api/event";
 import { ThemeProvider } from "next-themes";
 import { useEffect, useState } from "react";
@@ -80,7 +81,7 @@ function CompanionOverlay() {
 	return (
 		<ThemeProvider
 			attribute="class"
-			defaultTheme="light"
+			defaultTheme={DEFAULT_THEME_MODE}
 			enableSystem
 			themes={["light", "dark", "system"]}
 		>
@@ -493,7 +494,7 @@ function MainApp() {
 	return (
 		<ThemeProvider
 			attribute="class"
-			defaultTheme="light"
+			defaultTheme={DEFAULT_THEME_MODE}
 			enableSystem
 			themes={["light", "dark", "system"]}
 		>

@@ -86,14 +86,19 @@ function makeAppsState(over: Partial<AppsCatalogState> = {}): AppsCatalogState {
 
 function makeHost(
 	state: AppsCatalogState,
-	install: CatalogInstall | null = MOCK_INSTALL
+	install: CatalogInstall | null = MOCK_INSTALL,
+	communityState: AppsCatalogState = makeAppsState()
 ): CatalogHost {
 	return {
 		install,
 		Markdown: ({ content }) => <div>{content}</div>,
 		openExternal: () => undefined,
 		renderAffordance: (target) => <span>Open {target.name} in Ryu</span>,
-		useAppsCatalog: () => state,
+		// The section calls this hook TWICE — once for the first-party catalog and
+		// once with `origin: "community"` for the shelf. Returning one state for both
+		// would make every community assertion vacuous, so dispatch on the option.
+		useAppsCatalog: (_q, options) =>
+			options?.origin === "community" ? communityState : state,
 		useSkillsCatalog: () => {
 			throw new Error("unused");
 		},
@@ -122,6 +127,7 @@ function makeHost(
 function render(
 	state: AppsCatalogState,
 	opts: {
+		community?: AppsCatalogState;
 		install?: CatalogInstall | null;
 		variant?: "apps" | "plugins" | "all";
 	} = {}
@@ -130,12 +136,33 @@ function render(
 		<CatalogHostProvider
 			host={makeHost(
 				state,
-				opts.install === undefined ? MOCK_INSTALL : opts.install
+				opts.install === undefined ? MOCK_INSTALL : opts.install,
+				opts.community ?? makeAppsState()
 			)}
 		>
 			<AppsCatalogSection variant={opts.variant ?? "all"} />
 		</CatalogHostProvider>
 	);
+}
+
+/** A GitHub topic-discovered listing, carrying the trust triple Core stamps.
+ *  `type` is what the apps/plugins split reads (the community projector derives
+ *  it from the `ryu-app` vs `ryu-plugin` topic), so it is set explicitly here. */
+function makeCommunityItem(
+	type: "app" | "plugin",
+	over: Partial<CatalogEntry> = {}
+): AppCatalogItem {
+	return makeItem({
+		entry: makeEntry({
+			descriptor_only: true,
+			id: `gh:acme/${type}-repo`,
+			name: type === "app" ? "Community App" : "Community Plugin",
+			origin: "community",
+			reviewed: false,
+			type,
+			...over,
+		}),
+	});
 }
 
 describe("AppsCatalogSection — list states", () => {
@@ -249,5 +276,92 @@ describe("AppsCatalogSection — isCompanionApp variant filter", () => {
 		);
 		expect(html).toContain("Legacy Companion");
 		expect(html).not.toContain("Just Plugin");
+	});
+});
+
+// The Community tab was removed; unreviewed GitHub topic-discovered listings now
+// render as a trailing shelf inside Apps and Plugins. These lock in the two things
+// that merge can silently get wrong: the shelf must obey the SAME apps/plugins
+// split as the first-party grid (or one tab swallows everything), and the trust
+// disclosure must travel with it (or unreviewed rows sit beside vetted ones with
+// nothing marking them).
+describe("AppsCatalogSection — community shelf", () => {
+	const firstParty = makeItem({
+		entry: makeEntry({ id: "com.example.first", name: "First Party" }),
+	});
+
+	test("community listings render under their own heading with the trust notice", () => {
+		const html = render(makeAppsState({ items: [firstParty] }), {
+			community: makeAppsState({ items: [makeCommunityItem("plugin")] }),
+			variant: "plugins",
+		});
+		expect(html).toContain("First Party");
+		expect(html).toContain("Community Plugin");
+		expect(html).toContain("From the community");
+		expect(html).toContain("Not reviewed by Ryu");
+	});
+
+	test("the shelf obeys the tab's apps/plugins split", () => {
+		const community = makeAppsState({
+			items: [makeCommunityItem("app"), makeCommunityItem("plugin")],
+		});
+		const appsHtml = render(makeAppsState({ items: [] }), {
+			community,
+			variant: "apps",
+		});
+		expect(appsHtml).toContain("Community App");
+		expect(appsHtml).not.toContain("Community Plugin");
+
+		const pluginsHtml = render(makeAppsState({ items: [] }), {
+			community,
+			variant: "plugins",
+		});
+		expect(pluginsHtml).toContain("Community Plugin");
+		expect(pluginsHtml).not.toContain("Community App");
+	});
+
+	test("an empty community feed renders no shelf at all", () => {
+		const html = render(makeAppsState({ items: [firstParty] }));
+		expect(html).toContain("First Party");
+		expect(html).not.toContain("From the community");
+	});
+
+	test("community rows are browse-only — Details, never Install", () => {
+		const html = render(makeAppsState({ items: [] }), {
+			community: makeAppsState({ items: [makeCommunityItem("plugin")] }),
+			variant: "plugins",
+		});
+		expect(html).toContain("Community Plugin");
+		expect(html).toContain("Details");
+	});
+
+	test("the shelf still shows when the first-party feed is empty or failed", () => {
+		const community = makeAppsState({ items: [makeCommunityItem("plugin")] });
+		const emptyHtml = render(makeAppsState({ items: [] }), {
+			community,
+			variant: "plugins",
+		});
+		expect(emptyHtml).toContain("Community Plugin");
+		// Nothing matched first-party, but the shelf did — so the "nothing here"
+		// empty state must not claim the tab is empty.
+		expect(emptyHtml).not.toContain("No plugins found");
+
+		const errorHtml = render(makeAppsState({ error: "boom", items: [] }), {
+			community,
+			variant: "plugins",
+		});
+		expect(errorHtml).toContain("load plugins: boom");
+		expect(errorHtml).toContain("Community Plugin");
+	});
+
+	test("a community row is never rendered in the first-party grid", () => {
+		// Belt-and-braces: if a source ever leaked an unreviewed row into the
+		// first-party feed, it must be dropped there rather than shown bare.
+		const html = render(
+			makeAppsState({ items: [firstParty, makeCommunityItem("plugin")] }),
+			{ variant: "plugins" }
+		);
+		expect(html).toContain("First Party");
+		expect(html).not.toContain("Community Plugin");
 	});
 });

@@ -660,6 +660,13 @@ pub struct PluginManifest {
     /// the shared `Icon` primitive. Distinct from `icon_url`: this is a GLYPH id the
     /// card masks with `currentColor`, `icon_url` is a raster logo. When absent the
     /// card falls back to `icon_url`, then a default glyph.
+    ///
+    /// One id shape is NOT a glyph: `svgl:<slug>` (or `svgl:<light>|<dark>`) names a
+    /// brand mark on svgl.app, which the card renders as a full-colour image instead
+    /// — masking a brand's logo to `currentColor` would flatten it to a silhouette.
+    /// Prefer it over `icon_url` for a listing that fronts a known product (Brave,
+    /// Firecrawl, Notion, …): it is a stable, versionless id rather than a URL that
+    /// can rot, and svgl's own API supplies the dark-theme variant when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
 
@@ -706,9 +713,53 @@ pub struct PluginManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<serde_json::Value>,
 
-    /// Free-text category (Claude `category`).
+    /// Free-text category (Claude `category`). The Store groups its Apps and
+    /// Plugins tabs by this string, so two listings that mean the same shelf must
+    /// spell it the same way — see the canonical set in `docs/`-adjacent
+    /// `STORE_CATEGORY_ORDER` (`packages/marketplace/src/catalog/categories.ts`),
+    /// which also decides shelf ORDER. An unrecognised value still renders; it just
+    /// sorts after the known shelves, so a new category needs no client release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+
+    /// Hide this listing from the Store without uninstalling or disabling it.
+    ///
+    /// The listing keeps working for anyone who already has it — this is a
+    /// *catalog* control, not a lifecycle one. It exists so an app that is built
+    /// but not ready to be discovered can ship dark: the manifest stays compiled
+    /// in, the routes stay registered, and the card simply is not offered.
+    ///
+    /// Absent ⇒ visible, matching the identically-named field the published
+    /// `marketplace.json` already carries for third-party indexes
+    /// (`catalog_source::sources`), so both tiers spell "don't list this" the same
+    /// way and a client that predates the field just shows everything.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+
+    /// How finished this listing is: `alpha`, `beta`, `rc`, … Absent or `stable`
+    /// means finished and renders no badge.
+    ///
+    /// Free-form, NOT an enum, for the same reason the marketplace-index copy of
+    /// this field is: an unrecognised tier renders verbatim rather than being
+    /// dropped, so publishing a `canary` needs no client release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability: Option<String>,
+
+    /// This plugin is REQUIRED FOR CORE: the UI must never offer to disable or
+    /// uninstall it, and the lifecycle refuses both — with no `force` escape, which
+    /// is what separates it from the softer
+    /// [`crate::manifest`]-external load-bearing guard.
+    ///
+    /// **Declaring this does not grant it.** A manifest is untrusted input, and an
+    /// undisableable plugin is exactly what a hostile one would ask to be, so the
+    /// enforcement set is a Core-owned constant (`plugins::builtins::
+    /// MANDATORY_PLUGINS`) and this field is only the manifest-side declaration of
+    /// it. A bijection test keeps the two in lockstep, and a third-party manifest
+    /// that sets it is ignored by the lifecycle — it only ever affects how the
+    /// listing renders. Same posture as `CORE_PLUGINS`: privilege is never
+    /// self-asserted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mandatory: bool,
 
     /// Homepage/website URL (Claude `homepage`; emitted as `website`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1283,7 +1334,8 @@ pub struct CompanionSurface {
 /// Most surfaces added since are **self-contained**: they carry their own payload
 /// and reference no runnable at all (`widgets`, `views`, `dock_panels`,
 /// `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
-/// `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`).
+/// `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
+/// `message_actions`, `context_menu_items`).
 ///
 /// # Extending
 ///
@@ -1503,6 +1555,23 @@ pub struct Contributes {
     #[serde(default)]
     pub sidebar_buttons: Vec<SidebarButtonContribution>,
 
+    /// App-registered **marketplace tabs** — one section in the Store's nav bar,
+    /// carrying the app's own installable catalog (workflow templates, meeting-notes
+    /// templates, monitor presets, …). The Store-shaped sibling of
+    /// [`Contributes::dock_panels`]: it lets an app own its browse-and-install
+    /// surface instead of the shell welding the section into a closed `StoreSection`
+    /// union. Self-contained + opaque `spec` (see [`StoreTabContribution`]).
+    ///
+    /// **Served OUTSIDE the enabled filter**, unlike every sibling family here. The
+    /// Store is where an app gets installed, so gating its tab on the app's own
+    /// enabled bit would hide the tab you install the app FROM — and every built-in
+    /// feature app is `NOT_PRE_INSTALLED` on a fresh machine. Each entry is tagged
+    /// with `plugin` plus `app_installed` / `app_enabled` so the renderer can show an
+    /// enable-CTA instead of an empty list. The DATA the tab fetches stays gated by
+    /// the app's own route gate; only the declaration is unconditional.
+    #[serde(default)]
+    pub store_tabs: Vec<StoreTabContribution>,
+
     /// App-registered **workspace dock panels** — a tab in the desktop's bottom or
     /// right dock (Terminal / Code Review / Browser / Simulator live there today).
     /// This is the seam that lets an app OWN its dock tab instead of the shell
@@ -1513,6 +1582,36 @@ pub struct Contributes {
     /// `plugin` id at `GET /api/plugins/contributions`.
     #[serde(default)]
     pub dock_panels: Vec<DockPanelContribution>,
+
+    /// Per-message actions the plugin contributes to the desktop message toolbar
+    /// (thumbs, rate, transform, …). Lets an app own a control in the per-message
+    /// toolbar instead of the shell welding the action into the closed set of
+    /// built-in toolbar buttons. Self-contained + opaque `spec` (see
+    /// [`MessageActionContribution`]), so a new action kind needs no Core change;
+    /// served + tagged with the owning `plugin` id at
+    /// `GET /api/plugins/contributions`. A renderer that does not know a `kind`
+    /// ignores it, so an older shell degrades to "not shown" rather than breaking.
+    ///
+    /// **Stored raw, validated at the chokepoint** — same rule as
+    /// [`Contributes::settings_tabs`]: the desktop forwards the original bytes, so
+    /// a shell newer than this Core build still gets every field it was shipped to
+    /// render.
+    #[serde(default)]
+    #[schemars(with = "Vec<MessageActionContribution>")]
+    pub message_actions: Vec<serde_json::Value>,
+
+    /// Context-menu rows the plugin contributes to a shell entity menu (the
+    /// conversation-row dropdown, a message right-click, a space row). Lets an app
+    /// own a menu row instead of the shell hardcoding it (e.g. "Make a skill from
+    /// this chat" is a Learning contribution, not an `AppSidebar` if). See
+    /// [`ContextMenuContribution`]; served + tagged with the owning `plugin` id at
+    /// `GET /api/plugins/contributions`.
+    ///
+    /// **Stored raw, validated at the chokepoint** — same rule as
+    /// [`Contributes::message_actions`].
+    #[serde(default)]
+    #[schemars(with = "Vec<ContextMenuContribution>")]
+    pub context_menu_items: Vec<serde_json::Value>,
 
     /// **Deletable data categories** the app owns — one "Delete all X" row in
     /// Settings → Danger Zone (see [`DataCategoryContribution`]).
@@ -2120,6 +2219,60 @@ pub struct SidebarSectionContribution {
 
     /// The opaque section spec (source/itemTarget/itemActions/create). Interpreted by
     /// the desktop renderer, never by Core. Absent = a header with no rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<serde_json::Value>,
+}
+
+/// One app-registered **marketplace tab** — a section in the Store's nav bar whose
+/// content is the app's own installable catalog. A typed envelope around an opaque
+/// `spec` (the `StoreTabSpec` in `@ryu/app-host/views`: a `ViewSource` for the rows,
+/// a `groupBy`/`groups` split into card sections, an `install` action, and per-item
+/// actions). Core stores it verbatim and tags it with the owning `plugin` id; the
+/// `spec` stays opaque so a new catalog capability is a renderer change, not a Core
+/// change.
+///
+/// `view` is the escape hatch, mirroring `SettingsTabContribution::view`: a named
+/// first-party renderer for a tab whose detail pane needs more than the declarative
+/// vocabulary (the workflow-template graph preview). Like settings views, the shell
+/// keys its view table on the owning **plugin id**, not on this string, so a
+/// third-party manifest cannot borrow a first-party component by naming it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct StoreTabContribution {
+    /// Stable id for this tab within the plugin. The shell namespaces it into the
+    /// section key as `plugin:<pluginId>:<id>` so two apps can both ship a
+    /// `templates` tab.
+    pub id: String,
+
+    /// Nav-pill label.
+    pub title: String,
+
+    /// One-line description shown under the title in the section header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
+
+    /// Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// Which nav cluster the pill joins — the shell draws a divider wherever the
+    /// group changes. Built-in groups: `discover`, `catalog`, `community`, `manage`,
+    /// `account`. An unknown value gets its own cluster rather than being dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+
+    /// Placement hint within the group (lower = further left).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i64>,
+
+    /// Named first-party renderer for this tab. When set, the shell renders that
+    /// component instead of the declarative `spec` — subject to its own plugin-id
+    /// allowlist. Absent = purely declarative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+
+    /// The opaque tab spec (source/map/groups/search/install/itemActions). Interpreted
+    /// by the desktop renderer, never by Core. Absent alongside an absent `view` = an
+    /// empty tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<serde_json::Value>,
 }
@@ -2863,6 +3016,172 @@ pub fn validate_settings_tab(tab: &SettingsTabContribution) -> Result<(), String
     Ok(())
 }
 
+/// One per-message toolbar action a plugin contributes (see
+/// [`Contributes::message_actions`]).
+///
+/// The `kind` discriminant is deliberately NOT an enum (same reasoning as
+/// [`ViewContribution::view`]): a member an older shell has never heard of must
+/// reach a newer shell intact rather than being rejected at load. Renderers ignore
+/// a `kind` they do not know, so a new kind degrades to "not shown" instead of
+/// breaking the message toolbar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MessageActionContribution {
+    /// Stable id for this action within the plugin (the shell's element key and
+    /// dispatch tag, namespaced as `plugin:<pluginId>:<id>`).
+    pub id: String,
+
+    /// Accessible label (tooltip / aria-label) for the action button.
+    pub label: String,
+
+    /// Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// Which messages the action attaches to: `"assistant"` | `"user"` | `"any"`.
+    /// Open string — an unknown role is ignored, not rejected.
+    pub target: String,
+
+    /// Render mode: `"button"` (fire-and-forget) | `"toggle-group"` (mutually
+    /// exclusive states, what thumbs is) | `"menu"`. Open string.
+    pub kind: String,
+
+    /// For `kind: "toggle-group"`: the states, each `{ value, label, icon?,
+    /// active_icon? }`. Opaque to Core; the renderer owns the shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub states: Option<serde_json::Value>,
+
+    /// The granted capability the shell invokes when the action fires, plus static
+    /// `args`. Never inline code, never a capability the owning plugin was not
+    /// granted — identical to the `action` composer control's dispatch rule.
+    pub capability: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+
+    /// Optional `ViewSource` the shell polls to hydrate current state (what lights
+    /// the thumb on reload). Same `/api/`-path guard as views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_source: Option<serde_json::Value>,
+
+    /// Sort position among contributed actions (ascending).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
+/// One context-menu row a plugin contributes (see
+/// [`Contributes::context_menu_items`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextMenuContribution {
+    /// Stable id for this row within the plugin.
+    pub id: String,
+
+    /// Row label.
+    pub label: String,
+
+    /// Optional glyph id resolved by the shell's Icon primitive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// WHICH menu. Closed-ish enum by convention, open by encoding (same call as
+    /// [`DockPanelPlacement`]): `"conversation"` | `"message"` | `"space"` |
+    /// `"agent"` | `"project"` | `"workflow"` | `"skill"`. The shell owns the anchor
+    /// set; an app cannot conjure a new menu, but an unknown value must not fail the
+    /// load.
+    pub anchor: String,
+
+    /// The granted capability the shell invokes when the row is clicked, plus
+    /// static `args`. Never inline code, never a capability the owning plugin was
+    /// not granted.
+    pub capability: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+
+    /// Optional feedback text for the shell's toast: `{ loading, success, error }`.
+    /// Lets the app own its copy without owning the toast component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<serde_json::Value>,
+
+    /// Sort position among contributed rows (ascending).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
+/// Validate one [`MessageActionContribution`]. The `capability` must be a
+/// non-empty dotted verb (it is dispatched through the host-capability seam, and an
+/// empty capability would render a button that can never do anything).
+pub fn validate_message_action(action: &MessageActionContribution) -> Result<(), String> {
+    if action.id.trim().is_empty() {
+        return Err("message action has an empty 'id'".to_string());
+    }
+    if action.label.trim().is_empty() {
+        return Err(format!(
+            "message action '{}' has an empty 'label'",
+            action.id
+        ));
+    }
+    let target = action.target.trim();
+    if target.is_empty() {
+        return Err(format!(
+            "message action '{}' has an empty 'target'",
+            action.id
+        ));
+    }
+    if !matches!(target, "assistant" | "user" | "any") {
+        return Err(format!(
+            "message action '{}' has an unknown 'target' '{}' (expected 'assistant' | 'user' | 'any')",
+            action.id, target
+        ));
+    }
+    let kind = action.kind.trim();
+    if kind.is_empty() {
+        return Err(format!(
+            "message action '{}' has an empty 'kind'",
+            action.id
+        ));
+    }
+    if !matches!(kind, "button" | "toggle-group" | "menu") {
+        return Err(format!(
+            "message action '{}' has an unknown 'kind' '{}' (expected 'button' | 'toggle-group' | 'menu')",
+            action.id, kind
+        ));
+    }
+    if action.capability.trim().is_empty() {
+        return Err(format!(
+            "message action '{}' declares no 'capability'; a message action dispatches through the host-capability seam",
+            action.id
+        ));
+    }
+    Ok(())
+}
+
+/// Validate one [`ContextMenuContribution`]. Same `capability` rule as
+/// [`validate_message_action`].
+pub fn validate_context_menu_item(item: &ContextMenuContribution) -> Result<(), String> {
+    if item.id.trim().is_empty() {
+        return Err("context menu item has an empty 'id'".to_string());
+    }
+    if item.label.trim().is_empty() {
+        return Err(format!(
+            "context menu item '{}' has an empty 'label'",
+            item.id
+        ));
+    }
+    if item.anchor.trim().is_empty() {
+        return Err(format!(
+            "context menu item '{}' has an empty 'anchor'",
+            item.id
+        ));
+    }
+    if item.capability.trim().is_empty() {
+        return Err(format!(
+            "context menu item '{}' declares no 'capability'; a context menu item dispatches through the host-capability seam",
+            item.id
+        ));
+    }
+    Ok(())
+}
+
 /// Characters a `pref_key` may contain. It is interpolated into the preference
 /// route (`/api/preferences/<key>`), so a `/`, a backslash or a `..` segment would
 /// escape the key space and address an unrelated route; a strict allowlist (not a
@@ -3147,6 +3466,41 @@ impl Contributes {
         for tab in &tabs {
             if !seen_tab_ids.insert(tab.id.as_str()) {
                 return Err(format!("duplicate settings tab id '{}'", tab.id));
+            }
+        }
+
+        // `message_actions` and `context_menu_items` are stored raw (see their
+        // field doc comments) so the contributions endpoint can tag and forward each
+        // entry verbatim; this is where they are actually parsed as their typed
+        // contracts, exactly like `settings_tabs` above.
+        let mut actions: Vec<MessageActionContribution> = Vec::with_capacity(self.message_actions.len());
+        for (index, raw) in self.message_actions.iter().enumerate() {
+            let action: MessageActionContribution = serde_json::from_value(raw.clone())
+                .map_err(|e| format!("message action #{index} is not a valid message action: {e}"))?;
+            validate_message_action(&action)?;
+            actions.push(action);
+        }
+        let mut seen_action_ids: BTreeSet<&str> = BTreeSet::new();
+        for action in &actions {
+            if !seen_action_ids.insert(action.id.as_str()) {
+                return Err(format!("duplicate message action id '{}'", action.id));
+            }
+        }
+
+        let mut menu_items: Vec<ContextMenuContribution> =
+            Vec::with_capacity(self.context_menu_items.len());
+        for (index, raw) in self.context_menu_items.iter().enumerate() {
+            let item: ContextMenuContribution = serde_json::from_value(raw.clone())
+                .map_err(|e| {
+                    format!("context menu item #{index} is not a valid context menu item: {e}")
+                })?;
+            validate_context_menu_item(&item)?;
+            menu_items.push(item);
+        }
+        let mut seen_menu_ids: BTreeSet<&str> = BTreeSet::new();
+        for item in &menu_items {
+            if !seen_menu_ids.insert(item.id.as_str()) {
+                return Err(format!("duplicate context menu item id '{}'", item.id));
             }
         }
 

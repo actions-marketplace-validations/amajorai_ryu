@@ -1,12 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import {
+	groupStoreItems,
 	helloListDetail,
 	helloListDetailContribution,
 	isCoreApiPath,
 	isKnownViewKind,
 	renderActionHttp,
 	renderTemplate,
+	type StoreCatalogItem,
+	type StoreTabSpec,
 	sourceItemsFromResponse,
+	storeItemHaystack,
+	storeItemsFromResponse,
 	VIEW_KINDS,
 	type ViewSource,
 	type ViewSpec,
@@ -206,5 +211,127 @@ describe("source-fetched items", () => {
 				{ id: 1, title: "One" },
 			])
 		).toHaveLength(1);
+	});
+});
+
+// ── Store-tab catalog primitives (contributes.store_tabs) ────────────────────
+
+describe("storeItemsFromResponse", () => {
+	const spec: StoreTabSpec = {
+		source: { http: { path: "/api/meetings/templates" }, items: "templates" },
+		map: { tags: "tags", installed: "active", icon: "icon" },
+		groupBy: "category",
+	};
+
+	it("maps catalog rows, defaulting title to `name`", () => {
+		const items = storeItemsFromResponse(spec, {
+			templates: [
+				{
+					id: "standup",
+					name: "Daily standup",
+					description: "Per-person progress",
+					category: "recurring",
+					icon: "lucide:repeat",
+					tags: ["standup", "scrum"],
+					active: true,
+				},
+			],
+		});
+		expect(items).toHaveLength(1);
+		expect(items[0]?.title).toBe("Daily standup");
+		expect(items[0]?.installed).toBe(true);
+		expect(items[0]?.group).toBe("recurring");
+		expect(items[0]?.tags).toEqual(["standup", "scrum"]);
+		// The RAW row is preserved as the `{{item.<key>}}` templating base.
+		expect(items[0]?.raw.category).toBe("recurring");
+	});
+
+	it("treats a row as not-installed when the spec maps no such flag", () => {
+		const items = storeItemsFromResponse(
+			{ source: { http: { path: "/api/x" } } },
+			[{ id: "a", name: "A", active: true }]
+		);
+		expect(items[0]?.installed).toBe(false);
+	});
+
+	it("degrades a bad payload to empty and skips unusable rows", () => {
+		expect(storeItemsFromResponse(spec, null)).toEqual([]);
+		expect(storeItemsFromResponse(spec, { templates: "nope" })).toEqual([]);
+		expect(
+			storeItemsFromResponse(spec, { templates: [{ name: "no id" }, 42] })
+		).toEqual([]);
+	});
+});
+
+describe("groupStoreItems", () => {
+	const spec: StoreTabSpec = {
+		groupBy: "category",
+		groups: [
+			{ value: "recurring", label: "Team rituals" },
+			{ value: "revenue", label: "Sales & customers" },
+		],
+	};
+	const rows = (...categories: string[]) =>
+		storeItemsFromResponse(
+			{ ...spec, source: { http: { path: "/api/x" } } },
+			categories.map((category, i) => ({
+				id: `id-${i}`,
+				name: `Row ${i}`,
+				category,
+			}))
+		);
+
+	it("orders groups as declared and drops empty ones", () => {
+		const groups = groupStoreItems(spec, rows("revenue", "recurring"));
+		expect(groups.map((g) => g.label)).toEqual([
+			"Team rituals",
+			"Sales & customers",
+		]);
+	});
+
+	it("never drops a row whose category the manifest forgot to label", () => {
+		const groups = groupStoreItems(spec, rows("recurring", "hiring"));
+		expect(groups.map((g) => g.value)).toEqual(["recurring", "hiring"]);
+		// The undeclared one is titled by its raw value rather than vanishing.
+		expect(groups[1]?.label).toBe("hiring");
+	});
+
+	it("yields a single unlabelled group when the tab is ungrouped", () => {
+		const ungrouped: StoreTabSpec = { source: { http: { path: "/api/x" } } };
+		const items = storeItemsFromResponse(ungrouped, [{ id: "a", name: "A" }]);
+		expect(groupStoreItems(ungrouped, items)).toEqual([
+			{ items, label: "", value: "" },
+		]);
+		expect(groupStoreItems(ungrouped, [])).toEqual([]);
+	});
+});
+
+describe("storeItemHaystack", () => {
+	it("folds title, description, badge, tags and extra searchFields", () => {
+		const spec: StoreTabSpec = {
+			source: { http: { path: "/api/x" } },
+			map: { badge: "pattern", tags: "tags" },
+			searchFields: ["author"],
+		};
+		const [item] = storeItemsFromResponse(spec, [
+			{
+				id: "a",
+				name: "Evaluator Optimizer",
+				description: "Draft then critique",
+				pattern: "evaluator-optimizer",
+				tags: ["quality"],
+				author: "Anthropic",
+			},
+		]);
+		const hay = storeItemHaystack(spec, item as StoreCatalogItem);
+		for (const needle of [
+			"evaluator optimizer",
+			"draft then critique",
+			"evaluator-optimizer",
+			"quality",
+			"anthropic",
+		]) {
+			expect(hay).toContain(needle);
+		}
 	});
 });

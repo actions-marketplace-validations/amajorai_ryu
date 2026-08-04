@@ -161,6 +161,7 @@ use utoipa::OpenApi;
         super::identity_api::delete_connection,
         super::mesh_status,
         super::mesh_peers,
+        super::mesh_config,
         super::webhook_ingress_status,
         super::webhook_ingress_get_backend,
         super::webhook_ingress_set_backend,

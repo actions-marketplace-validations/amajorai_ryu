@@ -277,11 +277,16 @@ fn seed_overrides() -> [SeedSpec; 17] {
             // Recipes ships NO frame (no `ui_code`) — it is here purely for the grant.
             // Its out-of-process sidecar proxies replay + the recording session back to
             // Core over the `ghost.{replay,recordStart,recordStatus,recordStop}` kernel
-            // capabilities, which are gated on `ghost:record` (declared ∩ approved). It
-            // is default-on, and the default-on seed writes the record directly, so
-            // without this override it would seed with `grants: &[]` and every
-            // replay/record call would 403 on a fresh install. Mirrors the
-            // `permission_grants` its manifest declares, per the rule above.
+            // capabilities, which are gated on `ghost:record` (declared ∩ approved).
+            //
+            // This row is now INERT, the same way mail's below is: recipes left
+            // `CORE_DEFAULT_ON` (see the block there), so `default_on_specs` never
+            // looks it up and its Enable routes through `enable_app`, which persists
+            // the Gateway-approved set instead. Kept, not deleted, for the reason
+            // stated on mail — it mirrors the manifest's `permission_grants` exactly,
+            // so it is the correct value the instant recipes is ever default-on again,
+            // and deleting it would silently reintroduce the 403-on-every-replay bug
+            // it was added to fix.
             grants: &["ghost:record"],
             ui_code: None,
         },
@@ -563,6 +568,53 @@ pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
     crate::plugins::builtins::SKILL_EDITOR_PLUGIN_ID,
     crate::plugins::builtins::MAIL_PLUGIN_ID,
     crate::plugins::builtins::WARMUP_PLUGIN_ID,
+    // The five demoted leaf-feature sidecar apps. Unlike every id above these were
+    // DEFAULT-ON until now, so they arrive here from the other direction: not
+    // "default-off but still pre-installed", but "auto-installed and enabled on
+    // every fresh store". See the block in `CORE_DEFAULT_ON` where they were
+    // removed for the full account; the reason they belong in THIS list too is
+    // that dropping them from the default set alone would still leave a disabled
+    // record on a fresh store (`seed_companion_ui` writes one for every opt-in
+    // companion), so the Store would keep listing five uninstalled apps as
+    // *Installed* and an uninstall would not survive a reboot.
+    //
+    // These five carry no compiled-in companion bundle — their UI is served by
+    // their own sidecar through the ext-proxy — so the `compiled_in_ui_code`
+    // carriage that makes this posture safe for whiteboard/canvas is not even
+    // needed here. There is nothing left for a seeded record to carry.
+    crate::plugins::builtins::RESEARCH_PLUGIN_ID,
+    crate::plugins::builtins::DASHBOARDS_PLUGIN_ID,
+    crate::plugins::builtins::TEAMS_PLUGIN_ID,
+    crate::plugins::builtins::CLIPS_PLUGIN_ID,
+    crate::plugins::builtins::RECIPES_PLUGIN_ID,
+];
+
+/// The ids migration **v5** un-seeds, frozen as a literal rather than derived.
+///
+/// These are the five apps that [`NOT_PRE_INSTALLED`] gained when they were dropped
+/// from `CORE_DEFAULT_ON`. v5 needs its own list, and it must never become
+/// `NOT_PRE_INSTALLED` itself, for two independent reasons:
+///
+/// 1. **v5 is allowed to remove an ENABLED record and v3 is not** (see
+///    [`unseed_demoted_default_on_apps`] for why that is sound *only* for ids that
+///    were seeded enabled). Pointing v5 at the live list would extend that licence
+///    to every id ever added to `NOT_PRE_INSTALLED` — including whiteboard/canvas,
+///    where an enabled record IS a deliberate user act and v3 deliberately protects
+///    it.
+/// 2. **A migration is a historical statement.** It describes one specific store
+///    transition and runs once. A derived list would silently change meaning for
+///    stores that ran it under the old value, which is the same trap the frozen
+///    `LEGACY_DEFAULT_SECTION_ORDER` snapshot avoids on the desktop side.
+///
+/// Adding an app to `NOT_PRE_INSTALLED` later must NOT touch this constant. If that
+/// app also needs un-seeding on existing stores, it gets its own step and its own
+/// schema version.
+const DEMOTED_FROM_DEFAULT_ON_V5: &[&str] = &[
+    crate::plugins::builtins::RESEARCH_PLUGIN_ID,
+    crate::plugins::builtins::DASHBOARDS_PLUGIN_ID,
+    crate::plugins::builtins::TEAMS_PLUGIN_ID,
+    crate::plugins::builtins::CLIPS_PLUGIN_ID,
+    crate::plugins::builtins::RECIPES_PLUGIN_ID,
 ];
 
 /// Make sure every built-in companion's compiled-in `ui_code` bundle actually
@@ -714,7 +766,9 @@ async fn seed_companion_ui(store: &PluginStore, manifests: &[PluginManifest]) {
 ///   where they were never enabled ([`unseed_not_pre_installed`]).
 /// - v4: re-key records + plugin KV from legacy plugin ids to their scoped form
 ///   ([`rekey_legacy_plugin_ids`]).
-const STORE_SCHEMA_VERSION: i64 = 4;
+/// - v5: drop the records the old default-on seed wrote for the five demoted
+///   leaf-feature sidecar apps ([`unseed_demoted_default_on_apps`]).
+const STORE_SCHEMA_VERSION: i64 = 5;
 
 /// One-time data migrations for ALREADY-INSTALLED stores.
 ///
@@ -765,6 +819,9 @@ const STORE_SCHEMA_VERSION: i64 = 4;
 ///   The seed change alone only fixes FRESH installs (the loop leaves every existing
 ///   record alone), so without this step every current machine keeps listing
 ///   Whiteboard/Canvas as installed forever.
+/// - v5 [`unseed_demoted_default_on_apps`] — the same repair for the five apps
+///   demoted OUT of `CORE_DEFAULT_ON`, which v3 cannot do because it refuses to
+///   touch an enabled record and these were all seeded enabled.
 pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginManifest]) {
     let current = match store.schema_version().await {
         Ok(v) => v,
@@ -788,6 +845,9 @@ pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginMan
     }
     if current < 4 {
         rekey_legacy_plugin_ids(store).await;
+    }
+    if current < 5 {
+        unseed_demoted_default_on_apps(store).await;
     }
 
     if let Err(e) = store.set_schema_version(STORE_SCHEMA_VERSION).await {
@@ -1081,32 +1141,111 @@ async fn unseed_not_pre_installed(store: &PluginStore) {
     }
 }
 
+/// **v5** — remove the records the old default-on seed wrote for the five
+/// leaf-feature sidecar apps in [`DEMOTED_FROM_DEFAULT_ON_V5`], **enabled or not**.
+///
+/// # Why v3 cannot do this
+///
+/// [`unseed_not_pre_installed`] refuses to remove an ENABLED record, on the grounds
+/// that `enabled` can only have come from a deliberate act. For whiteboard/canvas
+/// that is exactly right — nothing ever seeded them enabled, so an enabled record is
+/// proof of a user decision.
+///
+/// For these five it is exactly wrong, and for a mechanical reason: they were IN
+/// `CORE_DEFAULT_ON`, and [`seed_default_on`] writes `enabled = true` for every id in
+/// that list on any store missing the row. So on every existing install all five are
+/// enabled, and not one of those bits records a choice — it records the seed. Reusing
+/// v3's rule here would make the step a no-op on 100% of the machines that have the
+/// problem, which is the failure mode this whole change exists to end: a fix that
+/// only ever reaches installs that do not need it.
+///
+/// # Why removing them loses nothing
+///
+/// Same argument as v3, and it is stronger here because these apps are fully
+/// out-of-process. The record holds `enabled`, `approved_grants` (re-derived by
+/// `enable_app` from the manifest at every enable) and `ui_code` (which these five
+/// do not use at all — their UI is served by their own sidecar over the ext-proxy).
+/// The user's actual data — teams in `teams.db`, dashboards in `dashboards.db`,
+/// recorded clips in the Clips Space, recipes in Ghost's RecipeStore — lives in
+/// stores this never touches, and is still there when the app is re-installed. So
+/// the worst case for someone who wanted one is a single click in the Store, onto an
+/// identical record and their existing data.
+///
+/// # The line it does hold
+///
+/// The id list is frozen (see [`DEMOTED_FROM_DEFAULT_ON_V5`]) and the step is version
+/// gated, so it runs exactly once. A user who installs Teams the day after upgrading
+/// keeps it forever: the gate has already passed and nothing re-runs. That is the
+/// same run-once property `a_later_revocation_is_never_undone_by_a_second_run` pins
+/// for v1 — this step gets it from the gate alone, which is why the test below asserts
+/// a re-install survives repeated boots.
+async fn unseed_demoted_default_on_apps(store: &PluginStore) {
+    for id in DEMOTED_FROM_DEFAULT_ON_V5 {
+        match store.get(id).await {
+            // Already absent — a fresh store, or a user who uninstalled it before
+            // `is_uninstall_protected` started refusing (it keyed off `is_default_on`).
+            Ok(None) => continue,
+            Ok(Some(record)) => {
+                let was_enabled = record.enabled;
+                match store.remove(id).await {
+                    Ok(_) => tracing::info!(
+                        "store migration v5: removed the '{id}' record (enabled={was_enabled}) — \
+                         it was written by the old CORE_DEFAULT_ON seed, not by the user, and \
+                         the app is now install-on-demand from the Store. Its data (teams.db / \
+                         dashboards.db / the Clips Space / Ghost recipes) is untouched and is \
+                         still there if it is re-installed."
+                    ),
+                    Err(e) => tracing::warn!("store migration v5: removing '{id}' failed: {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("store migration v5: lookup '{id}' failed: {e}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod migration_tests {
     use super::*;
 
-    const RECIPES: &str = "@ryu/recipes";
+    /// The v1 subject: a compiled-in built-in whose sidecar declares a `host_api`
+    /// grant that is also in its `permission_grants` — the exact shape
+    /// [`backfill_host_api_grants`] repairs. Its grant is `tools.invoke`.
+    ///
+    /// This used to be `@ryu/recipes`, which is the app the v1 regression was
+    /// actually reported against. Recipes moved into [`DEMOTED_FROM_DEFAULT_ON_V5`],
+    /// and v5 REMOVES those records outright — so every test here that inserts a
+    /// record and then reads it back through the full `run_one_time_migrations`
+    /// would be asserting against a row v5 had just deleted. Monitors is the nearest
+    /// equivalent that survives the whole chain: it is in [`NOT_PRE_INSTALLED`], but
+    /// v3 refuses to touch an ENABLED record and these tests install it enabled.
+    const MONITORS: &str = crate::plugins::builtins::MONITORS_PLUGIN_ID;
+    /// The `host_api` grant [`MONITORS`] declares — what v1 must put back.
+    const MONITORS_HOST_GRANT: &str = "tools.invoke";
 
     /// Reproduces the actual upgrade: a store seeded BEFORE the per-app
-    /// `/api/host/recipes/*` callbacks moved onto the capability seam. Its record is
+    /// `/api/host/<app>/*` callbacks moved onto the capability seam. Its record is
     /// enabled with NO grants, because those routes required none. After the move,
-    /// `ghost.*` needs `ghost:record`, so without this migration every pre-existing
-    /// install 403s on recipe replay/record until the user toggles the app off and on.
+    /// the host callbacks need the manifest's declared grant, so without this
+    /// migration every pre-existing install 403s until the user toggles the app off
+    /// and on.
     #[tokio::test]
     async fn backfills_a_host_api_grant_onto_a_pre_existing_record() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let store = PluginStore::open_in_memory().unwrap();
 
         // The pre-upgrade state: installed + enabled, empty approved_grants.
-        store.insert(RECIPES, "1.0.0").await.unwrap();
-        store.set_enabled(RECIPES, &[]).await.unwrap();
+        store.insert(MONITORS, "1.0.0").await.unwrap();
+        store.set_enabled(MONITORS, &[]).await.unwrap();
 
         run_one_time_migrations(&store, &manifests).await;
 
-        let record = store.get(RECIPES).await.unwrap().unwrap();
+        let record = store.get(MONITORS).await.unwrap().unwrap();
         assert!(
-            record.approved_grants.iter().any(|g| g == "ghost:record"),
-            "recipes must regain the grant its host callbacks now require, got {:?}",
+            record
+                .approved_grants
+                .iter()
+                .any(|g| g == MONITORS_HOST_GRANT),
+            "'{MONITORS}' must regain the grant its host callbacks now require, got {:?}",
             record.approved_grants
         );
         assert!(
@@ -1123,17 +1262,17 @@ mod migration_tests {
     async fn a_later_revocation_is_never_undone_by_a_second_run() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let store = PluginStore::open_in_memory().unwrap();
-        store.insert(RECIPES, "1.0.0").await.unwrap();
-        store.set_enabled(RECIPES, &[]).await.unwrap();
+        store.insert(MONITORS, "1.0.0").await.unwrap();
+        store.set_enabled(MONITORS, &[]).await.unwrap();
 
         run_one_time_migrations(&store, &manifests).await;
         // The user revokes it.
-        store.set_enabled(RECIPES, &[]).await.unwrap();
+        store.set_enabled(MONITORS, &[]).await.unwrap();
         // Every subsequent boot.
         run_one_time_migrations(&store, &manifests).await;
         run_one_time_migrations(&store, &manifests).await;
 
-        let record = store.get(RECIPES).await.unwrap().unwrap();
+        let record = store.get(MONITORS).await.unwrap().unwrap();
         assert!(
             record.approved_grants.is_empty(),
             "a revoked grant must stay revoked, got {:?}",
@@ -1159,8 +1298,8 @@ mod migration_tests {
         // permission_grant — i.e. it has done everything a built-in does.
         let mut manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
             .into_iter()
-            .find(|m| m.id == RECIPES)
-            .expect("recipes fixture");
+            .find(|m| m.id == MONITORS)
+            .expect("monitors fixture");
         manifest.id = evil.to_owned();
 
         run_one_time_migrations(&store, &[manifest]).await;
@@ -1274,9 +1413,18 @@ mod migration_tests {
 
         store.insert(LEARNING, "1.0.0").await.unwrap();
         store.set_disabled(LEARNING).await.unwrap();
-        // A default-ON app the user deliberately turned off.
-        store.insert(RECIPES, "1.0.0").await.unwrap();
-        store.set_disabled(RECIPES).await.unwrap();
+        // A default-ON app the user deliberately turned off. `skills` rather than
+        // `recipes`: recipes is no longer default-on, and v5 deletes its record
+        // outright, so it can no longer stand for "left alone by v2".
+        let still_default_on = crate::plugins::builtins::SKILLS_PLUGIN_ID;
+        assert!(
+            CORE_DEFAULT_ON.contains(&still_default_on)
+                && !NOT_PRE_INSTALLED.contains(&still_default_on),
+            "'{still_default_on}' must be a pre-installed default-on app for this test to \
+             mean anything"
+        );
+        store.insert(still_default_on, "1.0.0").await.unwrap();
+        store.set_disabled(still_default_on).await.unwrap();
         // A default-OFF built-in, never enabled.
         store.insert(OPT_IN_BUILTIN, "1.0.0").await.unwrap();
 
@@ -1284,7 +1432,12 @@ mod migration_tests {
 
         assert!(store.get(LEARNING).await.unwrap().unwrap().enabled);
         assert!(
-            !store.get(RECIPES).await.unwrap().unwrap().enabled,
+            !store
+                .get(still_default_on)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled,
             "another default-on app the user disabled must stay disabled"
         );
         assert!(
@@ -1293,11 +1446,11 @@ mod migration_tests {
         );
     }
 
-    /// Each step is gated on its OWN version, so bumping the schema for v2 must NOT
-    /// drag the v1 grant backfill along for a store that already ran it: re-running it
-    /// would re-grant `ghost:record` to everyone who revoked it between v1 and v2 —
-    /// the same "a reconcile silently overrides the user" bug the version gate exists
-    /// to prevent, invisible to the single-version revocation test above.
+    /// Each step is gated on its OWN version, so bumping the schema for a later step
+    /// must NOT drag the v1 grant backfill along for a store that already ran it:
+    /// re-running it would re-grant the host-api grant to everyone who revoked it
+    /// since — the same "a reconcile silently overrides the user" bug the version
+    /// gate exists to prevent, invisible to the single-version revocation test above.
     #[tokio::test]
     async fn a_v1_store_gets_only_the_v2_step() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
@@ -1305,8 +1458,8 @@ mod migration_tests {
         store.set_schema_version(1).await.unwrap();
 
         // Enabled, and the user revoked the grant the v1 backfill had given it.
-        store.insert(RECIPES, "1.0.0").await.unwrap();
-        store.set_enabled(RECIPES, &[]).await.unwrap();
+        store.insert(MONITORS, "1.0.0").await.unwrap();
+        store.set_enabled(MONITORS, &[]).await.unwrap();
         store.insert(LEARNING, "1.0.0").await.unwrap();
         store.set_disabled(LEARNING).await.unwrap();
 
@@ -1314,7 +1467,7 @@ mod migration_tests {
 
         assert!(
             store
-                .get(RECIPES)
+                .get(MONITORS)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1336,7 +1489,7 @@ mod migration_tests {
 
         run_one_time_migrations(&store, &manifests).await;
 
-        assert!(store.get(RECIPES).await.unwrap().is_none());
+        assert!(store.get(MONITORS).await.unwrap().is_none());
     }
 
     /// **v3** — the upgrade case the seed change cannot reach on its own: every
@@ -1420,6 +1573,118 @@ mod migration_tests {
             store.get(id).await.unwrap().is_some(),
             "'{id}' was installed AFTER v3 ran — the version gate must stop v3 from removing it"
         );
+    }
+
+    // ── v5: the five apps demoted out of CORE_DEFAULT_ON ──────────────────────
+
+    /// THE reported bug, as a test: "I wiped all my state and Teams / Dashboards /
+    /// Clips are still installed."
+    ///
+    /// They were, and v3 could not help, because it refuses to remove an ENABLED
+    /// record and `seed_default_on` had seeded all five ENABLED. This asserts the one
+    /// thing that makes v5 worth a schema bump: it removes them anyway.
+    #[tokio::test]
+    async fn v5_removes_the_demoted_apps_even_though_the_seed_left_them_enabled() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        // Exactly what the old default-on seed wrote on every existing install.
+        for id in DEMOTED_FROM_DEFAULT_ON_V5 {
+            store.insert(id, "1.0.0").await.unwrap();
+            store.set_enabled(id, &[]).await.unwrap();
+            assert!(store.get(id).await.unwrap().unwrap().enabled);
+        }
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        for id in DEMOTED_FROM_DEFAULT_ON_V5 {
+            assert!(
+                store.get(id).await.unwrap().is_none(),
+                "'{id}' was auto-enabled by the old CORE_DEFAULT_ON seed, not by the user — \
+                 v5 must remove the record so the app is genuinely absent"
+            );
+        }
+    }
+
+    /// v5's licence to delete an enabled record must not leak onto v3's ids. The two
+    /// steps disagree about what `enabled` MEANS — seeded, for the demoted five;
+    /// deliberate, for whiteboard/canvas — and that is the entire reason
+    /// [`DEMOTED_FROM_DEFAULT_ON_V5`] is a frozen literal instead of a reference to
+    /// [`NOT_PRE_INSTALLED`]. Wiring v5 to the live list would turn this red.
+    #[tokio::test]
+    async fn v5_leaves_the_v3_ids_alone() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        let whiteboard = crate::plugin_manifest::WHITEBOARD_PLUGIN_ID;
+        assert!(
+            NOT_PRE_INSTALLED.contains(&whiteboard)
+                && !DEMOTED_FROM_DEFAULT_ON_V5.contains(&whiteboard),
+            "'{whiteboard}' must be a v3-only id for this test to mean anything"
+        );
+        store.insert(whiteboard, "1.0.0").await.unwrap();
+        store.set_enabled(whiteboard, &[]).await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        assert!(
+            store.get(whiteboard).await.unwrap().is_some_and(|r| r.enabled),
+            "an ENABLED whiteboard record is a deliberate user act — only the seed ever \
+             enabled the v5 ids, so v5 must not generalize its removal to v3's"
+        );
+    }
+
+    /// Run-once, from the version gate alone: a user who re-installs Teams the day
+    /// after upgrading keeps it through every later boot. Without this the change
+    /// would be worse than the bug — an app the Store could install but never keep.
+    #[tokio::test]
+    async fn v5_does_not_re_run_and_uninstall_a_later_install() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+
+        let id = crate::plugins::builtins::TEAMS_PLUGIN_ID;
+        store.insert(id, "1.0.0").await.unwrap();
+        store.set_enabled(id, &[]).await.unwrap();
+
+        run_one_time_migrations(&store, &manifests).await;
+        run_one_time_migrations(&store, &manifests).await;
+
+        assert!(
+            store.get(id).await.unwrap().is_some_and(|r| r.enabled),
+            "'{id}' was installed AFTER v5 ran — the version gate must stop v5 from \
+             removing it on every later boot"
+        );
+    }
+
+    /// The fresh-install half, which is what a node reset actually exercises: seeding
+    /// an empty store must write NO record for any of the five. A pass here plus
+    /// `v5_removes_…` above is the full claim — "wipe your state and they are gone",
+    /// for new machines and upgraded ones alike.
+    #[tokio::test]
+    async fn a_fresh_seed_writes_no_record_for_the_demoted_apps() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let store = PluginStore::open_in_memory().unwrap();
+
+        seed_default_on(&store, &manifests).await;
+        seed_companion_ui(&store, &manifests).await;
+
+        for id in DEMOTED_FROM_DEFAULT_ON_V5 {
+            assert!(
+                !CORE_DEFAULT_ON.contains(id),
+                "'{id}' must not be back in CORE_DEFAULT_ON — that is what auto-installs it"
+            );
+            assert!(
+                NOT_PRE_INSTALLED.contains(id),
+                "'{id}' must be NOT_PRE_INSTALLED — default-off alone still leaves a \
+                 disabled record, so the Store would keep listing it as *Installed*"
+            );
+            assert!(
+                store.get(id).await.unwrap().is_none(),
+                "a fresh store must carry NO '{id}' record at all"
+            );
+        }
     }
 }
 
@@ -1833,6 +2098,25 @@ mod tests {
                 "install must leave '{id}' DISABLED — Enable is a separate, Gateway-validated \
                  step"
             );
+
+            // The bundle leg applies only to COMPANION apps — the ones whose UI is a
+            // compiled-in `ui_code` blob. The five sidecar apps demoted out of
+            // `CORE_DEFAULT_ON` are also not-pre-installed but ship no such blob:
+            // their UI is served by their own sidecar over the ext-proxy, so there is
+            // no carriage to prove and `get_ui_code` is legitimately None. Keyed off
+            // `compiled_in_ui_code` rather than an id list so it cannot rot, and
+            // asserted in BOTH directions below so the branch can never become a
+            // silent escape hatch for a companion that lost its bundle.
+            let Some(_) = compiled_in_ui_code(id) else {
+                assert!(
+                    DEMOTED_FROM_DEFAULT_ON_V5.contains(id),
+                    "'{id}' has no compiled-in companion bundle, so its Install cannot attach \
+                     one. That is only correct for a sidecar-served app; if '{id}' is a \
+                     companion, this is the A3 regression — it will mount as \"this app has \
+                     no interface\""
+                );
+                continue;
+            };
             let ui = store.get_ui_code(id).await.unwrap().unwrap_or_else(|| {
                 panic!(
                     "installing '{id}' must attach its compiled-in companion bundle, or enabling \

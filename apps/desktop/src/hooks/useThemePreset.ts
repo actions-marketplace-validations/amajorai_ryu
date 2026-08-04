@@ -6,6 +6,7 @@ import {
 	isDarkMode,
 } from "@ryu/ui/theme/apply";
 import {
+	DEFAULT_THEME_MODE,
 	THEME_PREFS_VERSION,
 	type ThemeMode,
 	type ThemePrefs,
@@ -78,6 +79,25 @@ function currentContrast(): number {
 	return Number(localStorage.getItem(STORAGE_KEYS.contrast) ?? "50");
 }
 
+// next-themes owns the `theme` key and seeds it from its own `defaultTheme`
+// prop — but ONLY writes it once the user picks a mode, so on a fresh install
+// the key is absent. Every read here must therefore fall back to the same
+// constant the provider is mounted with (DEFAULT_THEME_MODE), or the two
+// disagree: next-themes puts `.light` on <html> while these readers resolve
+// "system" against a dark OS and paint the DARK preset's tokens over it.
+function storedThemeMode(): ThemeMode {
+	const stored = localStorage.getItem("theme");
+	return stored === "light" || stored === "dark" || stored === "system"
+		? stored
+		: DEFAULT_THEME_MODE;
+}
+
+/** Resolve dark/light from the persisted mode, consulting the OS only for "system". */
+function storedIsDark(): boolean {
+	const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+	return isDarkMode(storedThemeMode(), prefersDark ? "dark" : "light");
+}
+
 function applyVariant(variant: ThemeVariant) {
 	applyVariantDom(variant, currentContrast());
 }
@@ -91,10 +111,10 @@ const PUSH_DEBOUNCE_MS = 400;
 let pushTimer: ReturnType<typeof setTimeout> | undefined;
 
 function buildThemePrefs(): ThemePrefs {
-	const mode = (localStorage.getItem("theme") ?? "system") as ThemeMode;
+	const mode = storedThemeMode();
 	return {
 		version: THEME_PREFS_VERSION,
-		mode: mode === "light" || mode === "dark" ? mode : "system",
+		mode,
 		lightPreset:
 			localStorage.getItem(STORAGE_KEYS.lightPreset) ?? DEFAULT_LIGHT_ID,
 		darkPreset:
@@ -150,10 +170,7 @@ export function initTheme() {
 		localStorage.getItem(STORAGE_KEYS.chatWidth) ?? DEFAULT_CHAT_WIDTH
 	);
 
-	const storedTheme = localStorage.getItem("theme") ?? "system";
-	const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-	const dark = isDarkMode(storedTheme, prefersDark ? "dark" : "light");
-	const variant = findVariant(dark ? darkId : lightId);
+	const variant = findVariant(storedIsDark() ? darkId : lightId);
 	if (variant) {
 		applyVariant(variant);
 	}
@@ -196,10 +213,7 @@ export function useThemePreset() {
 
 export function setLightPreset(id: string) {
 	localStorage.setItem(STORAGE_KEYS.lightPreset, id);
-	const storedTheme = localStorage.getItem("theme") ?? "system";
-	const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-	const dark = isDarkMode(storedTheme, prefersDark ? "dark" : "light");
-	if (!dark) {
+	if (!storedIsDark()) {
 		const variant = findVariant(id);
 		if (variant) {
 			applyVariant(variant);
@@ -210,10 +224,7 @@ export function setLightPreset(id: string) {
 
 export function setDarkPreset(id: string) {
 	localStorage.setItem(STORAGE_KEYS.darkPreset, id);
-	const storedTheme = localStorage.getItem("theme") ?? "system";
-	const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-	const dark = isDarkMode(storedTheme, prefersDark ? "dark" : "light");
-	if (dark) {
+	if (storedIsDark()) {
 		const variant = findVariant(id);
 		if (variant) {
 			applyVariant(variant);
@@ -226,10 +237,7 @@ export function applyCustomTokensLive(
 	mode: "light" | "dark",
 	tokens: CustomTokens
 ) {
-	const storedTheme = localStorage.getItem("theme") ?? "system";
-	const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-	const currentlyDark = isDarkMode(storedTheme, prefersDark ? "dark" : "light");
-	if ((mode === "dark") !== currentlyDark) {
+	if ((mode === "dark") !== storedIsDark()) {
 		return;
 	}
 	const variant = customTokensToVariant("_preview", "_preview", mode, tokens);

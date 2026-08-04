@@ -2,6 +2,7 @@
   "id": "@ryu/activity",
   "name": "Activity",
   "version": "1.0.0",
+  "category": "Productivity",
   "description": "The unified activity feed: everything happening on this node — monitor alerts, finished tasks, runs, approvals, meetings, and notes — newest first, grouped by day.",
   "icon": "activity-03",
   "iconDither": { "from": 210, "to": 244, "direction": "up" },

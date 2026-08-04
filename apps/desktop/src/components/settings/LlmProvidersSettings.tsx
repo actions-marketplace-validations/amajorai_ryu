@@ -74,10 +74,25 @@ const SUBSCRIPTION_METHOD_HINTS: Record<string, string[]> = {
 	"claude-pro-max": ["claude", "anthropic"],
 };
 
+/**
+ * A matched auth method plus whether it is actually THIS provider's login.
+ *
+ * The distinction is load-bearing: pi-acp advertises a single catch-all method
+ * (`pi_terminal_login`, "Launch pi in the terminal") and nothing provider-specific,
+ * so every subscription card matches the SAME method. Presenting that as "Login
+ * with Claude" — and then reporting "Connected Claude" — is a promise the method
+ * does not make. When `specific` is false the UI must say what the method really
+ * is instead of borrowing the provider's name.
+ */
+interface MatchedAuthMethod {
+	method: AcpAuthMethod;
+	specific: boolean;
+}
+
 function matchAuthMethod(
 	providerId: string,
 	authMethods: AcpAuthMethod[]
-): AcpAuthMethod | null {
+): MatchedAuthMethod | null {
 	const hints = SUBSCRIPTION_METHOD_HINTS[providerId] ?? [providerId];
 	const haystack = (m: AcpAuthMethod) => `${m.id} ${m.name}`.toLowerCase();
 	// Prefer a provider-specific method (e.g. a dedicated "claude" / "chatgpt" login).
@@ -85,28 +100,43 @@ function matchAuthMethod(
 		hints.some((h) => haystack(m).includes(h))
 	);
 	if (specific) {
-		return specific;
+		return { method: specific, specific: true };
 	}
-	// Fall back to a GENERIC login method that isn't tied to a DIFFERENT provider.
-	// pi-acp commonly advertises a single catch-all "launch pi in the terminal to
-	// log in" method rather than per-provider OAuth, and that terminal flow logs in
-	// ANY subscription — so the Login button should drive it instead of going dark
-	// with "Login not available" on every card.
+	// Fall back to a GENERIC method that isn't tied to a DIFFERENT provider — it
+	// still beats a dead button, because that catch-all flow does log in any
+	// subscription. It is returned as `specific: false` so the caller labels it
+	// honestly rather than dressing it in this provider's name.
 	const otherProviderHints = Object.entries(SUBSCRIPTION_METHOD_HINTS)
 		.filter(([id]) => id !== providerId)
 		.flatMap(([, hs]) => hs);
-	return (
-		authMethods.find((m) => {
-			const hay = haystack(m);
-			const looksGeneric = /login|terminal|sign.?in|oauth/.test(hay);
-			const tiedToOther = otherProviderHints.some((h) => hay.includes(h));
-			return looksGeneric && !tiedToOther;
-		}) ?? null
-	);
+	const generic = authMethods.find((m) => {
+		const hay = haystack(m);
+		const looksGeneric = /login|terminal|sign.?in|oauth/.test(hay);
+		const tiedToOther = otherProviderHints.some((h) => hay.includes(h));
+		return looksGeneric && !tiedToOther;
+	});
+	return generic ? { method: generic, specific: false } : null;
 }
 
 function errMessage(e: unknown, fallback: string): string {
 	return e instanceof Error ? e.message : fallback;
+}
+
+// The button says what the matched method actually does. A generic catch-all
+// method gets its own name ("Launch pi in the terminal"), never a bare "Login"
+// that reads as a one-click provider sign-in the agent does not implement.
+function loginLabel(
+	busy: boolean,
+	configured: boolean,
+	match: MatchedAuthMethod | null
+): string {
+	if (busy) {
+		return "Connecting…";
+	}
+	if (match && !match.specific) {
+		return match.method.name;
+	}
+	return configured ? "Reconnect" : "Login";
 }
 
 // Order the catalog so the managed provider leads (the recommended default),
@@ -279,7 +309,7 @@ function ProviderCard({
 	const { verdict, requestUpgrade } = useEntitlementContext();
 	const managedNeedsPlan =
 		Boolean(provider.managed) && !(verdict?.managedInference ?? false);
-	const authMethod = isSubscription
+	const authMatch = isSubscription
 		? matchAuthMethod(provider.id, authMethods)
 		: null;
 	const [loggingIn, setLoggingIn] = useState(false);
@@ -377,15 +407,20 @@ function ProviderCard({
 	}, [open, provider.supportsDiscovery]);
 
 	const handleLogin = async () => {
-		if (!authMethod) {
+		if (!authMatch) {
 			return;
 		}
 		setLoggingIn(true);
 		try {
+			// `provider.id` is what makes the result VERIFIED: Core re-reads Pi's
+			// stored credential after the call instead of reporting the RPC result,
+			// so a method that accepts the request without logging anyone in (the
+			// terminal-login hint does exactly that) can no longer read as success.
 			const res = await authenticateAgent(
 				toTarget(activeNode),
 				RYU_AGENT_ID,
-				authMethod.id
+				authMatch.method.id,
+				provider.id
 			);
 			if (res.authenticated) {
 				sileo.success({ title: `Connected ${provider.label}` });
@@ -393,9 +428,14 @@ function ProviderCard({
 				onReload();
 			} else {
 				sileo.error({
-					title: `Could not connect ${provider.label}`,
-					description: res.error ?? "The agent rejected the login.",
+					title: `Not connected to ${provider.label}`,
+					description:
+						res.error ??
+						`Finish the login in a terminal with "${authMatch.method.name}", then reopen this page.`,
 				});
+				// Still refresh: a login completed out-of-band since the last read
+				// should show up rather than waiting for the next visit.
+				onReload();
 			}
 		} catch (e) {
 			sileo.error({
@@ -610,25 +650,29 @@ function ProviderCard({
 									</span>
 								</div>
 								<Button
-									disabled={loggingIn || !authMethod}
+									disabled={loggingIn || !authMatch}
 									onClick={handleLogin}
 									size="sm"
 									variant={provider.configured ? "outline" : "default"}
 								>
-									{loggingIn
-										? "Connecting…"
-										: provider.configured
-											? "Reconnect"
-											: "Login"}
+									{loginLabel(loggingIn, provider.configured, authMatch)}
 								</Button>
 							</div>
-							{authMethod ? null : (
+							{authMatch ? null : (
 								<p className="text-muted-foreground text-xs">
 									Login not available for this agent build.
 								</p>
 							)}
-							{/* GitHub Copilot uses a device-code flow: Pi may open a browser
-							    for the user to finish authorizing. */}
+							{/* The agent advertised no login of its own for this provider, only
+							    a catch-all method. Say so, rather than letting the button imply
+							    a one-click provider login the agent never offered. */}
+							{authMatch && !authMatch.specific ? (
+								<p className="text-muted-foreground text-xs">
+									This agent has no built-in {provider.label} login. It offers “
+									{authMatch.method.name}” instead, which you finish yourself —
+									this card turns Connected once the credential is stored.
+								</p>
+							) : null}
 						</div>
 					) : null}
 

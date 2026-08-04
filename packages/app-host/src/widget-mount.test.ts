@@ -19,6 +19,8 @@
 //       call being denied. Host boundary (rpc.ts / ExtensionHost.tsx) is unchanged.
 
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	asRpcRequest,
 	type Capability,
@@ -372,5 +374,40 @@ describe("window.openai parity methods", () => {
 		const result = await call("ui.uploadFile", [{ accept: "image/*" }]);
 		expect(result).toEqual(uploaded);
 		close();
+	});
+});
+
+// ── (F) the "Friendly names" global reaches a widget, default-ON ───────────────
+//
+// The host's app-wide Friendly-names toggle travels to a widget exactly like
+// `theme`: baked into the initial globals for first paint, then pushed as a
+// `WidgetGlobalsPatch` on every flip. Nothing allowlists it away en route —
+// `applyGlobals` copies every own key of the pushed patch onto the bridge object —
+// so what is worth pinning is not that it arrives but the DIRECTION of its default.
+//
+// The preference is default-ON (`DEFAULT_FRIENDLY_MODE`), so a widget mounted by a
+// host that says nothing must read `true`. Seeding it with a plain truthiness check
+// would make an ABSENT value read as `false` and silently turn friendly names off
+// inside every widget — while the app around them kept saying "Connected search".
+// That failure is invisible: no error, no type change, just a widget quietly
+// speaking the developer vocabulary. Hence `!== false` in the bootstrap.
+//
+// Asserted against the bootstrap SOURCE rather than by calling
+// `widgetBootstrapSrcdoc`, which needs `DOMParser` — a webview API that is
+// undefined in Bun and deliberately not polyfilled here (see this file's header).
+describe("friendly-names global (widget bootstrap)", () => {
+	const BOOTSTRAP = readFileSync(
+		join(import.meta.dir, "widget-bootstrap.ts"),
+		"utf8"
+	);
+
+	it("seeds `friendly` onto the widget bridge alongside theme", () => {
+		expect(BOOTSTRAP).toMatch(/friendly:\s*\(G\.friendly/);
+	});
+
+	it("treats an ABSENT preference as ON, not as off", () => {
+		// `!== false`, never a truthiness check: "host did not say" must not read as
+		// "turn it off". This is the whole point of the test.
+		expect(BOOTSTRAP).toContain("friendly: (G.friendly !== false)");
 	});
 });

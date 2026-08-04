@@ -1,0 +1,40 @@
+{
+  "id": "@ryu/island",
+  "name": "Island",
+  "version": "1.0.0",
+  "category": "Productivity",
+  "description": "The Island companion overlay: a device-local floating assistant docked to your screen edge with voice chat, proactive suggestions, and live screen context.",
+  "icon": "bubble-chat-edit",
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "full" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "limited" },
+    "web": { "support": "none" },
+    "cli": { "support": "none" }
+  },
+  "engines": {
+    "ryu": ">=0.1.0"
+  },
+  "runnables": [],
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "island.settings",
+        "title": "Island",
+        "scope": "node",
+        "view": "island"
+      }
+    ]
+  },
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "island.use",
+      "label": "Can use",
+      "description": "Use the Island companion overlay and its voice chat, proactive suggestions, and screen context."
+    }
+  ]
+}

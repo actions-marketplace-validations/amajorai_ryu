@@ -2,6 +2,7 @@
   "id": "@ryu/proof",
   "name": "Proof of Work",
   "version": "1.0.0",
+  "category": "Security",
   "icon": "stamp-01",
   "iconDither": { "from": 306, "to": 340, "direction": "left" },
   "surfaces": {

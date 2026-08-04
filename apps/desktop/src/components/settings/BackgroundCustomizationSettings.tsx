@@ -1,4 +1,9 @@
-import { Delete02Icon, Image01Icon } from "@hugeicons/core-free-icons";
+import {
+	Add01Icon,
+	Cancel01Icon,
+	Delete02Icon,
+	Image01Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -26,8 +31,11 @@ import {
 	type BackgroundFit,
 	type BackgroundSurface,
 	BG_CHANGE_EVENT,
+	buildGradientCss,
 	clearSurfaceImage,
+	type GradientStop,
 	loadSurfaceBackground,
+	MAX_BACKDROP_BLUR,
 	type SurfaceBackground,
 	setSurfaceBackground,
 	setSurfaceImage,
@@ -105,6 +113,108 @@ function FieldRow({
 	);
 }
 
+function GradientStopsEditor({
+	angle,
+	stops,
+	onChange,
+}: {
+	angle: number;
+	stops: GradientStop[];
+	onChange: (stops: GradientStop[]) => void;
+}) {
+	const setColor = (index: number, color: string) => {
+		onChange(stops.map((s, i) => (i === index ? { ...s, color } : s)));
+	};
+
+	const setPosition = (index: number, position: number) => {
+		onChange(stops.map((s, i) => (i === index ? { ...s, position } : s)));
+	};
+
+	const remove = (index: number) => {
+		if (stops.length <= 2) {
+			return;
+		}
+		onChange(stops.filter((_, i) => i !== index));
+	};
+
+	const add = () => {
+		// Drop a new stop in the widest gap between neighbors so it starts
+		// somewhere visible instead of stacking on an existing stop.
+		const sorted = [...stops].sort((a, b) => a.position - b.position);
+		let best = 50;
+		let bestGap = -1;
+		for (let i = 0; i < sorted.length - 1; i++) {
+			const gap = sorted[i + 1].position - sorted[i].position;
+			if (gap > bestGap) {
+				bestGap = gap;
+				best = Math.round(sorted[i].position + gap / 2);
+			}
+		}
+		onChange([
+			...stops,
+			{ color: "#8b8b93", position: Number.isFinite(best) ? best : 50 },
+		]);
+	};
+
+	return (
+		<div className="space-y-2.5">
+			{/* Live preview of the stops at their current positions. */}
+			<div
+				aria-label="Gradient preview"
+				className="h-6 w-full rounded-md border border-border/60"
+				role="img"
+				style={{ backgroundImage: buildGradientCss(stops, angle) }}
+			/>
+			{stops.map((stop, i) => (
+				<div
+					className="flex items-center gap-2"
+					// biome-ignore lint/suspicious/noArrayIndexKey: stops have no
+					// stable identity and rows keep insertion order.
+					key={i}
+				>
+					<span className="w-5 flex-shrink-0 text-center font-mono text-[11px] text-muted-foreground">
+						{i + 1}
+					</span>
+					<ColorSwatch
+						ariaLabel={`Gradient stop ${i + 1} color`}
+						onChange={(color) => setColor(i, color)}
+						value={stop.color}
+					/>
+					<ElasticSlider
+						aria-label={`Gradient stop ${i + 1} position`}
+						formatValue={(v) => `${Math.round(v)}%`}
+						label=""
+						max={100}
+						min={0}
+						onValueChange={(v) => setPosition(i, v)}
+						step={1}
+						value={stop.position}
+					/>
+					<Button
+						aria-label={`Remove gradient stop ${i + 1}`}
+						className="size-7 flex-shrink-0 p-0"
+						disabled={stops.length <= 2}
+						onClick={() => remove(i)}
+						size="sm"
+						variant="ghost"
+					>
+						<HugeiconsIcon icon={Cancel01Icon} size={12} />
+					</Button>
+				</div>
+			))}
+			<Button
+				className="h-7 w-full text-xs"
+				onClick={add}
+				size="sm"
+				variant="secondary"
+			>
+				<HugeiconsIcon className="mr-1" icon={Add01Icon} size={12} />
+				Add stop
+			</Button>
+		</div>
+	);
+}
+
 function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 	const [bg, setBg] = useState<SurfaceBackground>(() =>
 		loadSurfaceBackground(surface)
@@ -176,21 +286,12 @@ function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 					/>
 				</div>
 				{bg.gradientEnabled && (
-					<div className="space-y-2 rounded-lg border border-border/60 p-3">
-						<FieldRow label="From">
-							<ColorSwatch
-								ariaLabel="Gradient start color"
-								onChange={(val) => update({ gradientFrom: val })}
-								value={bg.gradientFrom}
-							/>
-						</FieldRow>
-						<FieldRow label="To">
-							<ColorSwatch
-								ariaLabel="Gradient end color"
-								onChange={(val) => update({ gradientTo: val })}
-								value={bg.gradientTo}
-							/>
-						</FieldRow>
+					<div className="space-y-3 rounded-lg border border-border/60 p-3">
+						<GradientStopsEditor
+							angle={bg.gradientAngle}
+							onChange={(stops) => update({ gradientStops: stops })}
+							stops={bg.gradientStops}
+						/>
 						<ElasticSlider
 							formatValue={(v) => `${Math.round(v)}°`}
 							label="Angle"
@@ -333,6 +434,44 @@ function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 						)}
 					</div>
 				)}
+			</div>
+
+			{/* Effects — blur / transparency for the whole background layer. */}
+			<div className="space-y-2.5">
+				<div>
+					<p className="font-medium text-sm">Effects</p>
+					<p className="text-muted-foreground text-xs">
+						Softens the layer and lets the theme colors show through.
+					</p>
+				</div>
+				<div className="space-y-2.5 rounded-lg border border-border/60 p-3">
+					<ElasticSlider
+						formatValue={(v) => `${Math.round(v)}%`}
+						label="Transparency"
+						max={100}
+						min={0}
+						onValueChange={(v) => update({ transparency: Math.round(v) })}
+						step={1}
+						value={bg.transparency}
+					/>
+					<p className="text-muted-foreground text-xs">
+						Fades the gradient and image so the theme colors (and whatever is
+						behind the surface) show through.
+					</p>
+					<ElasticSlider
+						formatValue={(v) => `${Math.round(v)}px`}
+						label="Backdrop blur"
+						max={MAX_BACKDROP_BLUR}
+						min={0}
+						onValueChange={(v) => update({ backdropBlur: Math.round(v) })}
+						step={1}
+						value={bg.backdropBlur}
+					/>
+					<p className="text-muted-foreground text-xs">
+						Blurs the gradient or image layer into a soft backdrop. Combine with
+						transparency for a frosted look.
+					</p>
+				</div>
 			</div>
 		</div>
 	);

@@ -152,7 +152,7 @@ export default function StoreCatalogLayout({
 					    pins to the top and the scroll-fade appears below it. */}
 					<div className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto">
 						{search ? (
-							<div className="sticky top-0 z-10 mx-auto w-full max-w-4xl bg-background px-4 pt-2 pb-1">
+							<div className="sticky top-0 z-10 mx-auto w-full max-w-4xl bg-background pb-1">
 								<LibraryToolbar
 									filterSlot={
 										filter ? (
@@ -162,9 +162,7 @@ export default function StoreCatalogLayout({
 														<Button
 															className="gap-1.5"
 															size="sm"
-															variant={
-																filter.activeCount ? "secondary" : "outline"
-															}
+															variant="secondary"
 														>
 															<HugeiconsIcon
 																className="size-3.5"
@@ -224,7 +222,12 @@ export default function StoreCatalogLayout({
 					}}
 					open
 				>
-					<DialogContent className="max-h-[85vh] max-w-2xl overflow-hidden p-0">
+					{/* Wider than the default dialog: the preview carries a hero, a meta
+					    strip, a tab bar and long-form README/API panels, and at `max-w-2xl`
+					    every one of them wrapped early. `min(64rem,92vw)` tracks the card
+					    column's own `max-w-4xl` on a roomy window and still leaves a margin
+					    on a small one, where the dialog is the ONLY presentation. */}
+					<DialogContent className="max-h-[85vh] w-[min(64rem,92vw)] max-w-[min(64rem,92vw)] overflow-hidden p-0">
 						<DialogTitle className="sr-only">{detailTitle}</DialogTitle>
 						<div className="scroll-fade-effect-y max-h-[85vh] overflow-auto">
 							{detail}

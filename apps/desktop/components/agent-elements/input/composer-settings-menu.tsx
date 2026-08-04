@@ -395,7 +395,7 @@ export function ComposerSettingsMenu({
 							);
 						})}
 				{footerContent && (
-					<div className="sticky bottom-0 z-10 shrink-0 border-border/50 border-t bg-muted/90 px-2 pt-2 pb-1 backdrop-blur-2xl empty:hidden">
+					<div className="sticky bottom-0 z-10 shrink-0 border-border/50 border-t bg-muted/90 pt-2 pb-1 backdrop-blur-2xl empty:hidden">
 						{footerContent}
 					</div>
 				)}

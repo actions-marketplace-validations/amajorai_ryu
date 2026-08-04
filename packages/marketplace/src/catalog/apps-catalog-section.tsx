@@ -11,6 +11,7 @@ import {
 	PackageIcon,
 	Robot01Icon,
 	ServerStack01Icon,
+	Settings01Icon,
 	SquareLock01Icon,
 	WorkflowSquare01Icon,
 	Wrench01Icon,
@@ -30,12 +31,17 @@ import {
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
+	DitherGradient,
+	type GradientDirection,
+} from "@ryu/ui/components/dither-kit/gradient.tsx";
+import {
 	Empty,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty.tsx";
+import { Icon } from "@ryu/ui/components/icon.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Label } from "@ryu/ui/components/label.tsx";
 import {
@@ -51,18 +57,23 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { useSvglIndex } from "@ryu/ui/components/svgl.ts";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import { useMarketplaceHostOptional } from "../host.tsx";
 import { useOptionalReport } from "../report/report-provider.tsx";
 import { StarRating } from "../star-rating.tsx";
 import { formatPrice } from "../types.ts";
+import { groupByCategory } from "./categories.ts";
+import BrandOrCoverImage from "./chrome/brand-image.tsx";
 import CommunityTrustNotice from "./chrome/community-trust-notice.tsx";
+import { normalizeDither } from "./chrome/dither.ts";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
@@ -70,6 +81,7 @@ import StoreCatalogLayout, {
 } from "./chrome/store-catalog-layout.tsx";
 import StoreItemAction, {
 	StoreItemContextMenuContent,
+	StoreItemOverflowMenu,
 } from "./chrome/store-item-action.tsx";
 import { DetailMetaStrip } from "./detail/detail-panels.tsx";
 import { ListingDetailTabs } from "./detail/listing-detail-tabs.tsx";
@@ -79,7 +91,9 @@ import {
 	type CatalogHost,
 	type CatalogInstall,
 	type CatalogNode,
+	type PluginSettingsOpener,
 	useCatalogHost,
+	useNoSettingsOpener,
 } from "./host.tsx";
 import { resolveCardIcon } from "./icon-url.ts";
 import { REALM_ICONS } from "./realm-icons.ts";
@@ -89,6 +103,7 @@ import { stabilityLabel } from "./stability.ts";
 import type {
 	AddMarketplaceParams,
 	AppCatalogItem,
+	CardDither,
 	CatalogBanner,
 	CatalogEntry,
 	PluginCatalogDetail,
@@ -98,8 +113,15 @@ import type {
 /** Which slice of the plugin catalog a section instance browses. An "app" is a
  *  plugin that bundles a Companion runnable (a full-page UI surface); a "plugin"
  *  is everything else (tools/agents/channels/policies). "all" = the historical
- *  unsplit tab, which web still uses. */
-export type AppsCatalogVariant = "apps" | "plugins" | "all" | "community";
+ *  unsplit tab, which web still uses.
+ *
+ *  There is no "community" variant any more. Community listings are not a
+ *  different KIND of thing — they are apps and plugins that nobody at Ryu
+ *  reviewed — so a whole tab for them split the catalog by provenance and asked
+ *  the user to visit two places to answer one question ("is there a Ryu plugin
+ *  for X?"). They are now a trailing, clearly-labelled shelf inside these same
+ *  tabs; see {@link CommunityShelf}. */
+export type AppsCatalogVariant = "apps" | "plugins" | "all";
 
 /** True when a catalog entry is an "app". Prefers the explicit `type` discriminator
  *  the catalog now emits; falls back to the legacy "ships a Companion runnable"
@@ -145,11 +167,6 @@ const VARIANT_COPY: Record<
 		nounPlural: "plugins",
 		searchPlaceholder: "Search plugins…",
 	},
-	community: {
-		noun: "listing",
-		nounPlural: "community listings",
-		searchPlaceholder: "Search community apps and plugins…",
-	},
 };
 
 /**
@@ -174,12 +191,18 @@ export default function AppsCatalogSection({
 }: {
 	/** Seed the search box (e.g. carried over from the store-wide search). */
 	initialQuery?: string;
-	/** Catalog slice: companion "apps", non-companion "plugins", "all", or
-	 *  "community" (unreviewed GitHub topic-discovered listings — a separate
-	 *  fetch, always rendered with the trust notice). */
+	/** Catalog slice: companion "apps", non-companion "plugins", or "all". */
 	variant?: AppsCatalogVariant;
 } = {}) {
 	const host = useCatalogHost();
+	// One resolver for the whole section, threaded down to the cards + detail
+	// header. Called here rather than per card because a host implementation reads
+	// live node state to answer it — per card that would be one fetch per row.
+	// The host is a stable per-surface value, so this branch never flips between
+	// renders on a given surface (rules of hooks).
+	const usePluginSettingsOpener =
+		host.usePluginSettingsOpener ?? useNoSettingsOpener;
+	const settingsOpener = usePluginSettingsOpener();
 	const {
 		items,
 		loading,
@@ -206,32 +229,63 @@ export default function AppsCatalogSection({
 		selectingSource,
 		addMarketplace,
 		addingMarketplace,
-	} = host.useAppsCatalog(
-		initialQuery,
-		variant === "community" ? { origin: "community" } : undefined
-	);
+	} = host.useAppsCatalog(initialQuery);
+
+	// Community listings ride the SAME tab, from a second fetch. Core keeps
+	// unreviewed topic-discovered listings out of the first-party catalog, so they
+	// cannot be filtered INTO this page — `origin: "community"` addresses that feed
+	// directly. They then render as a trailing shelf under their own heading and
+	// trust notice, instead of the separate Store tab they used to need.
+	const community = host.useAppsCatalog(initialQuery, { origin: "community" });
+
+	// One search box, two feeds. The community hook owns its own debounce, so it is
+	// driven from the primary query rather than given its own input.
+	const communitySetQuery = community.setQuery;
+	useEffect(() => {
+		communitySetQuery(query);
+	}, [query, communitySetQuery]);
 
 	// The apps/plugins split is presentational: one shared catalog fetch, filtered
 	// per variant. Integration descriptors (integrations.sh) stay on the plugins side.
 	//
-	// Community is NOT part of that split — it is a separate FETCH (see the
-	// `origin` option above), because unreviewed topic-discovered listings are
-	// deliberately absent from the first-party pages. The extra `isCommunityEntry`
-	// guards below are belt-and-braces: if a community row ever did leak into a
-	// first-party page, it must not render there without its trust notice.
-	const visibleItems =
-		variant === "community"
-			? items.filter(isCommunityEntry)
-			: items.filter((it) => {
-					if (isCommunityEntry(it)) {
-						return false;
-					}
-					if (variant === "all") {
-						return true;
-					}
-					return variant === "apps" ? isCompanionApp(it) : !isCompanionApp(it);
-				});
+	// The `isCommunityEntry` guard on the first-party list is belt-and-braces: those
+	// rows come from the community fetch below, so one appearing here would mean a
+	// source leaked it — and it must not render without its trust notice.
+	const splitForVariant = (it: AppCatalogItem) => {
+		if (variant === "all") {
+			return true;
+		}
+		return variant === "apps" ? isCompanionApp(it) : !isCompanionApp(it);
+	};
+	const visibleItems = items.filter(
+		(it) => !isCommunityEntry(it) && splitForVariant(it)
+	);
+	const communityItems = community.items
+		.filter(isCommunityEntry)
+		.filter(splitForVariant);
 	const copy = VARIANT_COPY[variant];
+
+	// Which feed owns the current selection. The two hooks each track their own
+	// `selectedId`, so opening a community listing must both point the preview at
+	// the community hook AND clear the first-party one — otherwise two rows would
+	// render as selected and the preview would show whichever hook won.
+	const [communitySelected, setCommunitySelected] = useState(false);
+	const active = communitySelected ? community : null;
+	const selectFirstParty = (id: string) => {
+		setCommunitySelected(false);
+		community.select("");
+		select(id);
+	};
+	const selectCommunity = (id: string) => {
+		setCommunitySelected(true);
+		select("");
+		community.select(id);
+	};
+	const closeDetail = () => {
+		setCommunitySelected(false);
+		community.select("");
+		select("");
+	};
 
 	// Per-card lifecycle without a per-id hook: the hook's install()/setEnabled()
 	// act on the SELECTED item, so a card action selects its item and defers the
@@ -257,33 +311,27 @@ export default function AppsCatalogSection({
 
 	const cardInstall = (id: string) => {
 		setPending({ id, action: "install" });
-		select(id);
+		selectFirstParty(id);
 	};
 	const cardDisable = (id: string) => {
 		setPending({ id, action: "disable" });
-		select(id);
+		selectFirstParty(id);
 	};
 
-	// The Community tab addresses its feed directly (`origin`), which OVERRIDES the
-	// catalog source — so offering a source picker there would be a control that
-	// visibly does nothing. It keeps install-from-URL, which still works.
-	const showSourcePicker = variant !== "community";
 	const filter = host.install
 		? {
-				label: showSourcePicker ? "Source & install" : "Install",
+				label: "Source & install",
 				icon: Link01Icon,
 				panel: (
 					<div className="flex flex-col gap-4 p-4">
-						{showSourcePicker ? (
-							<PluginSourcePicker
-								activeSource={activeSource}
-								addingMarketplace={addingMarketplace}
-								addMarketplace={addMarketplace}
-								selectingSource={selectingSource}
-								selectSource={selectSource}
-								sources={sources}
-							/>
-						) : null}
+						<PluginSourcePicker
+							activeSource={activeSource}
+							addingMarketplace={addingMarketplace}
+							addMarketplace={addMarketplace}
+							selectingSource={selectingSource}
+							selectSource={selectSource}
+							sources={sources}
+						/>
 						<InstallFromUrl install={installFromUrl} />
 					</div>
 				),
@@ -294,27 +342,35 @@ export default function AppsCatalogSection({
 		<StoreCatalogLayout
 			detail={
 				<AppDetailPanel
-					detail={detail}
-					detailError={detailError}
-					detailLoading={detailLoading}
-					error={error}
-					install={install}
-					installing={installing}
+					detail={active ? active.detail : detail}
+					detailError={active ? active.detailError : detailError}
+					detailLoading={active ? active.detailLoading : detailLoading}
+					error={active ? active.error : error}
+					install={active ? active.install : install}
+					installing={active ? active.installing : installing}
 					installLayer={host.install}
-					item={selectedItem}
-					lifecyclePending={lifecyclePending}
+					item={active ? active.selectedItem : selectedItem}
+					lifecyclePending={active ? active.lifecyclePending : lifecyclePending}
 					noun={copy.noun}
 					renderAffordance={host.renderAffordance}
-					selectedId={selectedId}
-					setEnabled={setEnabled}
+					selectedId={active ? active.selectedId : selectedId}
+					setEnabled={active ? active.setEnabled : setEnabled}
+					settingsOpener={settingsOpener}
 				/>
 			}
-			detailTitle={selectedItem?.entry.name ?? copy.noun}
+			detailTitle={
+				(active ? active.selectedItem : selectedItem)?.entry.name ?? copy.noun
+			}
 			filter={filter}
-			hasSelection={selectedItem != null}
+			hasSelection={(active ? active.selectedItem : selectedItem) != null}
 			list={
 				<AppList
 					canInstall={host.install != null}
+					communityFetchNextPage={community.fetchNextPage}
+					communityHasNextPage={community.hasNextPage}
+					communityItems={communityItems}
+					communityLoading={community.loading}
+					communitySelectedId={communitySelected ? community.selectedId : null}
 					error={error}
 					fallbackIcon={REALM_ICONS[variant === "plugins" ? "plugins" : "apps"]}
 					fetchNextPage={fetchNextPage}
@@ -322,20 +378,18 @@ export default function AppsCatalogSection({
 					items={visibleItems}
 					loading={loading}
 					loadingMore={loadingMore}
-					notice={
-						variant === "community" ? (
-							<CommunityTrustNotice tone="banner" />
-						) : null
-					}
 					nounPlural={copy.nounPlural}
 					onDisable={cardDisable}
 					onInstall={cardInstall}
-					onSelect={select}
+					onSelect={selectFirstParty}
+					onSelectCommunity={selectCommunity}
 					pendingId={pending?.id ?? null}
-					selectedId={selectedId}
+					searching={query.trim().length > 0}
+					selectedId={communitySelected ? null : selectedId}
+					settingsOpener={settingsOpener}
 				/>
 			}
-			onCloseDetail={() => select("")}
+			onCloseDetail={closeDetail}
 			search={{
 				value: query,
 				onChange: setQuery,
@@ -558,7 +612,14 @@ function AppList({
 	hasNextPage,
 	nounPlural,
 	fallbackIcon,
-	notice,
+	searching,
+	communityItems,
+	communityLoading,
+	communityHasNextPage,
+	communityFetchNextPage,
+	communitySelectedId,
+	onSelectCommunity,
+	settingsOpener,
 }: {
 	items: AppCatalogItem[];
 	loading: boolean;
@@ -576,76 +637,233 @@ function AppList({
 	/** Realm glyph shown when an item has no icon of its own (apps→grid,
 	 *  plugins→puzzle), sourced from the shared REALM_ICONS so it matches the tab. */
 	fallbackIcon: IconSvgElement;
-	/** Rendered above the grid in EVERY state (loading/error/empty/populated), so
-	 *  the community trust disclosure is never hidden by a slow or empty fetch.
-	 *  It lives here rather than in StoreCatalogLayout because that layout is
-	 *  shared by Models/Skills/MCP/Agents and must not grow a notice slot. */
-	notice?: ReactNode;
+	/** Unreviewed GitHub topic-discovered listings, already narrowed to this tab's
+	 *  apps/plugins slice. Rendered as a trailing shelf under their own heading and
+	 *  trust notice — see {@link CommunityShelf}. */
+	communityItems: AppCatalogItem[];
+	communityLoading: boolean;
+	communityHasNextPage: boolean;
+	communityFetchNextPage: () => void;
+	/** Selected community row, or null when the selection belongs to the
+	 *  first-party feed (the two feeds each track their own selection). */
+	communitySelectedId: string | null;
+	onSelectCommunity: (id: string) => void;
+	/** True while the user has a search query typed. Suppresses category shelves —
+	 *  a result list is ranked by relevance, and slicing it into headed sections
+	 *  fights that. */
+	searching?: boolean;
+	/** Resolves a listing to its "open settings" action (see the host seam). */
+	settingsOpener: PluginSettingsOpener;
 }) {
 	const reportCtx = useOptionalReport();
 	const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
 
+	const card = (it: AppCatalogItem) => (
+		<StoreCatalogCard
+			action={
+				<AppCardAction
+					canInstall={canInstall}
+					item={it}
+					onDisable={() => onDisable(it.entry.id)}
+					onInstall={() => onInstall(it.entry.id)}
+					onOpen={() => onSelect(it.entry.id)}
+					// The live record's id when there is one: settings are keyed by the
+					// MANIFEST id, and only an installed listing is guaranteed to
+					// carry it (the two agree — the catalog join matches on it — but
+					// the record is the authority).
+					onOpenSettings={settingsOpener(it.info?.id ?? it.entry.id)}
+					pending={pendingId === it.entry.id}
+				/>
+			}
+			contextMenu={
+				!it.installed && canInstall ? (
+					<StoreItemContextMenuContent
+						canReport={Boolean(reportTargetForApp(it))}
+						onInstall={() => onInstall(it.entry.id)}
+						onReport={() => reportCtx?.open(reportTargetForApp(it))}
+					/>
+				) : undefined
+			}
+			description={it.entry.description}
+			dither={it.entry.icon_dither}
+			icon={<HugeiconsIcon className="size-5" icon={fallbackIcon} />}
+			iconBackground={it.entry.icon_background ?? undefined}
+			iconId={it.entry.icon}
+			iconUrl={it.entry.icon_url}
+			key={it.entry.id}
+			name={it.entry.name}
+			onClick={() => onSelect(it.entry.id)}
+			seedId={it.entry.id}
+			selected={it.entry.id === selectedId}
+			stability={it.entry.stability}
+		/>
+	);
+
+	// The community shelf is rendered in EVERY state below, including the empty and
+	// error ones: the first-party feed failing or matching nothing is not a reason
+	// to hide the listings that DID match — that was the practical cost of the old
+	// separate tab, where a miss here meant the user never learned the community
+	// feed had the thing.
+	const communityShelf = (
+		<CommunityShelf
+			fallbackIcon={fallbackIcon}
+			fetchNextPage={communityFetchNextPage}
+			hasNextPage={communityHasNextPage}
+			items={communityItems}
+			loading={communityLoading}
+			onSelect={onSelectCommunity}
+			root={scrollEl}
+			selectedId={communitySelectedId}
+		/>
+	);
+
 	if (loading && items.length === 0) {
 		return (
-			<div className="flex flex-col gap-3">
-				{notice}
+			<div className="flex flex-col gap-3" ref={setScrollEl}>
 				<div className="flex items-center justify-center p-8 text-muted-foreground">
 					<Spinner className="size-5" />
 				</div>
+				{communityShelf}
 			</div>
 		);
 	}
 	if (error && items.length === 0) {
 		return (
-			<div className="flex flex-col gap-3">
-				{notice}
+			<div className="flex flex-col gap-3" ref={setScrollEl}>
 				<div className="p-4 text-destructive text-sm">
 					Couldn't load {nounPlural}: {error}
 				</div>
+				{communityShelf}
 			</div>
 		);
 	}
 	if (items.length === 0) {
 		return (
-			<div className="flex flex-col gap-3">
-				{notice}
-				<Empty className="h-full p-6">
-					<EmptyHeader>
-						<EmptyMedia variant="icon">
-							<HugeiconsIcon icon={fallbackIcon} />
-						</EmptyMedia>
-						<EmptyTitle>No {nounPlural} found</EmptyTitle>
-						<EmptyDescription>Try a different search.</EmptyDescription>
-					</EmptyHeader>
-				</Empty>
+			<div className="flex flex-col gap-3" ref={setScrollEl}>
+				{communityItems.length === 0 ? (
+					<Empty className="h-full p-6">
+						<EmptyHeader>
+							<EmptyMedia variant="icon">
+								<HugeiconsIcon icon={fallbackIcon} />
+							</EmptyMedia>
+							<EmptyTitle>No {nounPlural} found</EmptyTitle>
+							<EmptyDescription>Try a different search.</EmptyDescription>
+						</EmptyHeader>
+					</Empty>
+				) : null}
+				{communityShelf}
 			</div>
 		);
 	}
 
+	// Shelve the grid by category, the way Home shelves by realm.
+	//
+	// Two cases deliberately stay FLAT, because a heading would be noise or a lie:
+	//
+	//  - A search is in progress. The user has already told us what they want; the
+	//    answer is a relevance list, and chopping six results across four headed
+	//    shelves makes it harder to read, not easier.
+	//  - Everything landed on one shelf. A single heading above the whole grid says
+	//    nothing that the tab title did not already say.
+	//
+	// Infinite scroll keeps working across shelves: `items` is the full accumulated
+	// page set and is regrouped on every render, so a later page's items file into
+	// the shelves that already exist instead of appending a second copy of them.
+	const sections = searching
+		? []
+		: groupByCategory(items, (it) => it.entry.category);
+	const shelved = sections.length > 1;
+
 	return (
 		<div ref={setScrollEl}>
-			{notice ? <div className="mb-3">{notice}</div> : null}
+			{shelved ? (
+				<div className="flex flex-col gap-6">
+					{sections.map((section) => (
+						<section key={section.label}>
+							<h3 className="mb-2 font-semibold text-base tracking-tight">
+								{section.label}
+							</h3>
+							<StoreCardGrid>{section.items.map(card)}</StoreCardGrid>
+						</section>
+					))}
+				</div>
+			) : (
+				<StoreCardGrid>{items.map(card)}</StoreCardGrid>
+			)}
+			<InfiniteSentinel
+				hasMore={hasNextPage}
+				loading={loadingMore}
+				onLoadMore={fetchNextPage}
+				root={scrollEl}
+			/>
+			{communityShelf}
+		</div>
+	);
+}
+
+/**
+ * The trailing "From the community" shelf: third-party apps and plugins Ryu
+ * discovered from the public GitHub topics, shown inside the Apps and Plugins
+ * tabs instead of in a tab of their own.
+ *
+ * It renders NOTHING at all when the feed is empty — an always-present heading
+ * over a blank grid would just be a permanent reminder of a section that has no
+ * content, which is the failure mode a merged shelf is supposed to avoid.
+ *
+ * The trust notice is part of the shelf rather than the page, which is the whole
+ * reason a merge is safe: an unreviewed listing can never appear beside a
+ * first-party one without the disclosure travelling with it.
+ */
+function CommunityShelf({
+	items,
+	loading,
+	selectedId,
+	onSelect,
+	fallbackIcon,
+	hasNextPage,
+	fetchNextPage,
+	root,
+}: {
+	fallbackIcon: IconSvgElement;
+	fetchNextPage: () => void;
+	hasNextPage: boolean;
+	items: AppCatalogItem[];
+	loading: boolean;
+	onSelect: (id: string) => void;
+	root: HTMLElement | null;
+	selectedId: string | null;
+}) {
+	if (items.length === 0) {
+		return null;
+	}
+	return (
+		<section className="mt-6 flex flex-col gap-3 border-t pt-6">
+			<div>
+				<h3 className="font-semibold text-base tracking-tight">
+					From the community
+				</h3>
+				<p className="text-muted-foreground text-xs">
+					Discovered from public GitHub topics.
+				</p>
+			</div>
+			<CommunityTrustNotice tone="banner" />
 			<StoreCardGrid>
 				{items.map((it) => (
 					<StoreCatalogCard
 						action={
+							// Browse-only, deliberately: Core refuses a catalog install of an
+							// unreviewed listing, so an Install button here could only ever
+							// produce an error. `canInstall={false}` gives the row the same
+							// "Details" affordance a descriptor-only listing gets, and the
+							// preview carries the repository link to review it.
 							<AppCardAction
-								canInstall={canInstall}
+								canInstall={false}
 								item={it}
-								onDisable={() => onDisable(it.entry.id)}
-								onInstall={() => onInstall(it.entry.id)}
+								onDisable={() => undefined}
+								onInstall={() => onSelect(it.entry.id)}
 								onOpen={() => onSelect(it.entry.id)}
-								pending={pendingId === it.entry.id}
+								pending={false}
 							/>
-						}
-						contextMenu={
-							!it.installed && canInstall ? (
-								<StoreItemContextMenuContent
-									canReport={Boolean(reportTargetForApp(it))}
-									onInstall={() => onInstall(it.entry.id)}
-									onReport={() => reportCtx?.open(reportTargetForApp(it))}
-								/>
-							) : undefined
 						}
 						description={it.entry.description}
 						dither={it.entry.icon_dither}
@@ -659,18 +877,33 @@ function AppList({
 						seedId={it.entry.id}
 						selected={it.entry.id === selectedId}
 						stability={it.entry.stability}
-						surfaces={it.entry.surfaces}
 					/>
 				))}
 			</StoreCardGrid>
 			<InfiniteSentinel
 				hasMore={hasNextPage}
-				loading={loadingMore}
+				loading={loading}
 				onLoadMore={fetchNextPage}
-				root={scrollEl}
+				root={root}
 			/>
-		</div>
+		</section>
 	);
+}
+
+/** True when this listing is required for Core and must never be offered a
+ *  Disable/Uninstall control.
+ *
+ *  Gated on `source === "built-in"` as well as the flag. `mandatory` arrives on an
+ *  entry that may have come from a remote catalog, and "you cannot turn this off"
+ *  is precisely the claim a hostile listing would make about itself; Core only ever
+ *  stamps it from its own constant, so a non-built-in entry carrying it is either
+ *  lying or a source bug. Trusting it there would let a third-party listing render
+ *  itself as un-removable — and the lifecycle would not back that up, so the user
+ *  would be stuck looking at an app with no way to remove it and no explanation.
+ *
+ *  Exported for unit tests. */
+export function isMandatoryListing(entry: CatalogEntry): boolean {
+	return entry.mandatory === true && entry.source === "built-in";
 }
 
 /** Card action for an app: Install (inline), Enabled↔Disable morph (Disable
@@ -683,6 +916,7 @@ function AppCardAction({
 	onInstall,
 	onDisable,
 	onOpen,
+	onOpenSettings,
 }: {
 	item: AppCatalogItem;
 	canInstall: boolean;
@@ -690,7 +924,28 @@ function AppCardAction({
 	onInstall: () => void;
 	onDisable: () => void;
 	onOpen: () => void;
+	/** Reveal this listing's settings tab; absent when it declares none. */
+	onOpenSettings?: (() => void) | null;
 }) {
+	// A mandatory listing gets NO lifecycle control at all — not a disabled one.
+	// Core refuses both disable and uninstall for it with a 403 and no force
+	// override, so any button here could only ever produce an error toast. A greyed
+	// button would still read as "there is something to do here"; the honest UI is a
+	// static label saying why the controls are absent.
+	if (isMandatoryListing(item.entry)) {
+		// It still gets a Settings route, though: "cannot be removed" says nothing
+		// about "cannot be configured", and a required app is often the one with the
+		// most to configure. The overflow renders nothing when there is no settings
+		// destination, so the badge stays alone in that case.
+		return (
+			<div className="flex shrink-0 items-center gap-1">
+				<Badge className="text-xs" variant="secondary">
+					Required
+				</Badge>
+				<StoreItemOverflowMenu onOpenSettings={onOpenSettings ?? undefined} />
+			</div>
+		);
+	}
 	if (item.entry.descriptor_only || !canInstall) {
 		return (
 			<div className="flex items-center gap-1.5">
@@ -702,6 +957,7 @@ function AppCardAction({
 						</Button>
 					}
 					installed={false}
+					onOpenSettings={onOpenSettings ?? undefined}
 					reportTarget={reportTargetForApp(item)}
 				/>
 			</div>
@@ -720,6 +976,7 @@ function AppCardAction({
 				onDisable={onDisable}
 				onEnable={onOpen}
 				onInstall={onInstall}
+				onOpenSettings={onOpenSettings ?? undefined}
 				reportTarget={reportTargetForApp(item)}
 			/>
 		</div>
@@ -859,6 +1116,7 @@ function AppActions({
 	error,
 	installLayer,
 	renderAffordance,
+	onOpenSettings,
 }: {
 	item: AppCatalogItem;
 	install: () => Promise<void>;
@@ -868,6 +1126,8 @@ function AppActions({
 	error: string | null;
 	installLayer: CatalogInstall | null;
 	renderAffordance: CatalogHost["renderAffordance"];
+	/** Reveal this listing's settings tab; absent when it declares none. */
+	onOpenSettings?: (() => void) | null;
 }) {
 	const host = useCatalogHost();
 	const node = host.useActiveNode();
@@ -891,7 +1151,18 @@ function AppActions({
 	};
 
 	let action: ReactNode;
-	if (entry.descriptor_only) {
+	if (isMandatoryListing(entry)) {
+		// Required for Core: no lifecycle buttons, and a sentence saying why rather
+		// than a silently empty footer. Checked FIRST so it beats every branch below,
+		// including the install/enable ones — a mandatory app is always already
+		// installed and enabled, so any other branch could only offer a wrong verb.
+		action = (
+			<p className="text-muted-foreground text-sm">
+				Part of Ryu. This app is required for the app to run and can't be
+				disabled or removed.
+			</p>
+		);
+	} else if (entry.descriptor_only) {
 		// integrations.sh ships only a docs link, never a runnable config. For an
 		// MCP directory entry we can still reach a real one-click install: hand off
 		// to the in-app MCP catalog (backed by the official MCP registry),
@@ -994,7 +1265,18 @@ function AppActions({
 
 	return (
 		<div className="flex flex-col gap-2">
-			<div className="flex flex-wrap items-center gap-2">{action}</div>
+			<div className="flex flex-wrap items-center gap-2">
+				{action}
+				{/* Beside the lifecycle verb, not inside it: configuring an app is not
+				    part of installing or disabling it, and this is where a user who
+				    just clicked into the listing looks for its API key. */}
+				{onOpenSettings ? (
+					<Button onClick={onOpenSettings} size="sm" variant="outline">
+						<HugeiconsIcon className="size-4" icon={Settings01Icon} />
+						Settings
+					</Button>
+				) : null}
+			</div>
 			{error && <p className="text-destructive text-sm">{error}</p>}
 
 			{/* Enable confirmation: list grants before enabling. Install-only. */}
@@ -1069,6 +1351,7 @@ function AppDetailPanel({
 	installLayer,
 	noun,
 	renderAffordance,
+	settingsOpener,
 }: {
 	selectedId: string | null;
 	item: AppCatalogItem | null;
@@ -1083,6 +1366,8 @@ function AppDetailPanel({
 	installLayer: CatalogInstall | null;
 	noun: string;
 	renderAffordance: CatalogHost["renderAffordance"];
+	/** Resolves this listing to its "open settings" action (see the host seam). */
+	settingsOpener: PluginSettingsOpener;
 }) {
 	const { Markdown, fetchVersionDetail: hostFetchVersionDetail } =
 		useCatalogHost();
@@ -1276,6 +1561,14 @@ function AppDetailPanel({
 							{stabilityLabel(entry.stability)}
 						</Badge>
 					) : null}
+					{/* Sits ahead of the kind/tag badges: "you cannot remove this" is the
+					    single most consequential thing about the listing, and it explains
+					    the missing Disable button a few rows below. */}
+					{isMandatoryListing(entry) ? (
+						<Badge className="text-xs" variant="secondary">
+							Required
+						</Badge>
+					) : null}
 					{entry.kinds.map((k) => (
 						<Badge className="text-xs" key={k} variant="secondary">
 							{k.toUpperCase()}
@@ -1305,6 +1598,7 @@ function AppDetailPanel({
 				installLayer={installLayer}
 				item={item}
 				lifecyclePending={lifecyclePending}
+				onOpenSettings={settingsOpener(item.info?.id ?? entry.id)}
 				renderAffordance={renderAffordance}
 				setEnabled={setEnabled}
 			/>
@@ -1508,32 +1802,80 @@ function AppInformationSection({
 	);
 }
 
-/** A default gradient used when an entry carries no banner colors / accent. */
-const DEFAULT_HERO_GRADIENT = "linear-gradient(135deg, #6366f1, #4338ca)";
+/** Flip a dither direction. Used so the hero's icon tile washes the opposite way
+ *  from the hero behind it, which is what keeps the two readable as separate
+ *  surfaces when they share a colour. */
+const OPPOSITE_DIRECTION: Record<GradientDirection, GradientDirection> = {
+	up: "down",
+	down: "up",
+	left: "right",
+	right: "left",
+};
 
-/** Self-contained hero background: a smooth gradient from `banner.colors` (or a
- *  solid/gradient fallback), with an optional ordered-noise "dither" overlay
- *  rendered by an inline SVG `feTurbulence` filter. No external dependency;
- *  pure presentational, safe in a plain browser (web) and desktop alike. */
+/** Self-contained hero background.
+ *
+ *  Three tiers, most-specific first:
+ *
+ *  1. **`icon_dither`** — the real ordered-dither wash from dither-kit, the same
+ *     `DitherGradient` the listing's card icon already paints. Every first-party
+ *     manifest declares one, so this is the path a Ryu app actually takes.
+ *  2. **`banner`** — an explicit hero spec (`colors`, optional `feTurbulence`
+ *     noise overlay). Kept for third-party listings that publish one.
+ *  3. **A flat fallback** — `icon_background`/`accent_color`, else the muted
+ *     surface.
+ *
+ *  Tier 1 is new and is the reason the store stopped looking generic: with no
+ *  `banner` (which no first-party manifest has ever declared) every hero painted
+ *  the SAME hardcoded indigo `linear-gradient`, so all 62 detail pages opened with
+ *  an identical purple slab that had nothing to do with the app. The dither each
+ *  manifest already carried — and which its card was already showing — was sitting
+ *  right there unused, so the hero and the card now disagree about nothing. */
 function DitherBanner({
 	banner,
+	dither,
 	fallback,
 }: {
 	banner?: CatalogBanner | null;
+	/** The listing's `icon_dither`, untrusted; validated before paint. */
+	dither?: CardDither | null;
 	fallback?: string | null;
 }) {
 	const filterId = useId();
+	const safeDither = normalizeDither(dither);
 	const colors = banner?.colors?.length ? banner.colors : null;
+	// An explicit `banner` outranks the icon dither: it is the author saying "the
+	// hero is not just my icon, bigger". Absent one, the dither wins over the flat
+	// fallback.
+	const explicitBanner = colors || banner?.style === "dither";
+
+	if (safeDither && !explicitBanner) {
+		return (
+			<div
+				aria-hidden="true"
+				className="absolute inset-0 bg-muted"
+				// `relative`-free: DitherGradient absolutely fills its nearest
+				// positioned ancestor, which is the hero's own `relative` wrapper.
+			>
+				<DitherGradient
+					cell={4}
+					direction={safeDither.direction}
+					from={safeDither.from}
+					to={safeDither.to}
+				/>
+			</div>
+		);
+	}
+
 	const gradient = colors
 		? `linear-gradient(135deg, ${colors.join(", ")})`
-		: (fallback ?? DEFAULT_HERO_GRADIENT);
+		: (fallback ?? undefined);
 	const isDither = banner?.style === "dither";
 
 	return (
 		<div
 			aria-hidden="true"
-			className="absolute inset-0"
-			style={{ background: gradient }}
+			className={cn("absolute inset-0", gradient ? undefined : "bg-muted")}
+			style={gradient ? { background: gradient } : undefined}
 		>
 			{isDither ? (
 				<svg
@@ -1562,34 +1904,64 @@ function DitherBanner({
  *  carry banner/icon/accent presentation metadata. */
 function AppHero({ entry }: { entry: CatalogEntry }) {
 	const fallback = entry.icon_background ?? entry.accent_color ?? null;
-	// Raster logo for the hero: `icon_url` (any https host), or a GitHub-image URL
-	// pasted into the `icon` field (mirrors the card's {@link resolveCardIcon} rule).
-	const { iconUrl: previewIconUrl } = resolveCardIcon({
+	const svglIndex = useSvglIndex();
+	// Raster logo for the hero: `icon_url` (any https host), an `svgl:` brand mark,
+	// or a GitHub-image URL pasted into the `icon` field (the card's
+	// {@link resolveCardIcon} rule, so hero and card never disagree).
+	const {
+		iconId: previewIconId,
+		iconUrl: previewIconUrl,
+		iconUrlDark: previewIconUrlDark,
+		brand: isBrandMark,
+	} = resolveCardIcon({
 		icon: entry.icon,
 		iconUrl: entry.icon_url,
+		svglIndex,
 	});
+	// The tile gets its own dither wash, painted OPPOSITE the banner's direction so
+	// the two do not blend into one flat field — the tile has to read as a tile
+	// sitting on the hero, not as a hole in it. Without this it was a translucent
+	// grey square holding a generic grid glyph, on every app.
+	const tileDither = normalizeDither(entry.icon_dither);
 	return (
 		<div className="relative h-32 overflow-hidden rounded-t-xl rounded-b-lg">
-			<DitherBanner banner={entry.banner} fallback={fallback} />
+			<DitherBanner
+				banner={entry.banner}
+				dither={entry.icon_dither}
+				fallback={fallback}
+			/>
 			<div className="absolute inset-0 flex items-end gap-3 p-3">
 				<span
-					className="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-background/20 text-white shadow-sm ring-1 ring-white/20"
+					className={cn(
+						"relative flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl text-white shadow-sm ring-1 ring-white/20",
+						tileDither ? undefined : "bg-background/20"
+					)}
 					style={
 						entry.icon_background
 							? { background: entry.icon_background }
 							: undefined
 					}
 				>
-					{previewIconUrl ? (
-						<img
-							alt=""
-							className="size-full object-cover"
-							loading="lazy"
-							src={previewIconUrl}
+					{tileDither && !entry.icon_background ? (
+						<DitherGradient
+							direction={OPPOSITE_DIRECTION[tileDither.direction ?? "up"]}
+							from={tileDither.from}
+							to={tileDither.to}
 						/>
-					) : (
-						<HugeiconsIcon className="size-6" icon={GridIcon} />
-					)}
+					) : null}
+					<span className="relative flex items-center justify-center">
+						{previewIconUrl ? (
+							<BrandOrCoverImage
+								brand={isBrandMark === true}
+								dark={previewIconUrlDark ?? null}
+								light={previewIconUrl}
+							/>
+						) : previewIconId ? (
+							<Icon icon={previewIconId} size={26} />
+						) : (
+							<HugeiconsIcon className="size-6" icon={GridIcon} />
+						)}
+					</span>
 				</span>
 				<div className="min-w-0 pb-1">
 					<div className="truncate font-semibold text-base text-white drop-shadow">

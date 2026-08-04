@@ -32,8 +32,8 @@ describe("section vocabulary", () => {
 });
 
 describe("reconcileSectionOrder", () => {
-	it("migrates a stored order that is exactly the legacy default", () => {
-		// Verbatim copy of LEGACY_DEFAULT_SECTION_ORDER (pinned still at the bottom,
+	it("migrates a stored order that is exactly a legacy default", () => {
+		// Verbatim copy of the first legacy snapshot (pinned still at the bottom,
 		// no `companions`) — a user who never customised anything on that build.
 		const legacy = [
 			"tabs",
@@ -52,6 +52,32 @@ describe("reconcileSectionOrder", () => {
 			"tools",
 			"engines",
 			"pinned",
+			"archived",
+		];
+		expect(reconcileSectionOrder(legacy)).toEqual(DEFAULT_SECTION_ORDER);
+	});
+
+	it("migrates the pre-bottom-apps default (plugins/apps still in the middle)", () => {
+		// The default persisted before `plugins`/`companions` moved to the bottom —
+		// a user who never customised anything on that build.
+		const legacy = [
+			"tabs",
+			"agents",
+			"teams",
+			"projects",
+			"pinned",
+			"chats",
+			"spaces",
+			"channels",
+			"integrations",
+			"plugins",
+			"companions",
+			"identities",
+			"workflows",
+			"skills",
+			"mcp",
+			"tools",
+			"engines",
 			"archived",
 		];
 		expect(reconcileSectionOrder(legacy)).toEqual(DEFAULT_SECTION_ORDER);

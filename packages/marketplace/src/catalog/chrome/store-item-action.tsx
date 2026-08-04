@@ -12,6 +12,13 @@
 //
 // Sections without an enable/disable concept (Models per-file, Agents, MCP) pass
 // `enabled={undefined}`; sections that have one (Apps, Skills) pass a boolean.
+//
+// The menu also carries **Settings** whenever the surface can resolve where the
+// item is configured (`onOpenSettings`). That is the only route from a listing to
+// its own credentials/config: a user looking for "where do I paste my Exa API
+// key?" starts on the card they just installed, not in a settings dialog they
+// have to guess the tab of. A surface with no settings destination (web, or an
+// item that declares none) passes nothing and the row does not render.
 
 import {
 	Alert02Icon,
@@ -21,6 +28,7 @@ import {
 	MoreHorizontalIcon,
 	PauseIcon,
 	PlayIcon,
+	Settings01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button.tsx";
@@ -49,8 +57,12 @@ export interface StoreItemActionProps {
 	/** A lifecycle call is in flight — the control shows a spinner and disables. */
 	busy?: boolean;
 	className?: string;
+	/** Overrides the "Disable" menu label (e.g. Engines' "Stop"). */
+	disableLabel?: string;
 	/** `undefined` = the item has no enable/disable concept (install/uninstall only). */
 	enabled?: boolean;
+	/** Overrides the "Enable" menu label (e.g. Engines' "Set as active"). */
+	enableLabel?: string;
 	installed: boolean;
 	/** Locked items (e.g. the flagship agent) can't be removed. */
 	locked?: boolean;
@@ -58,6 +70,9 @@ export interface StoreItemActionProps {
 	onDisable?: () => void;
 	onEnable?: () => void;
 	onInstall?: () => void;
+	/** Reveal this item's own settings (host's settings dialog, at its tab).
+	 *  Omitted when the surface has no settings destination for it. */
+	onOpenSettings?: () => void;
 	/** Explicit report handler; falls back to ReportProvider + reportTarget. */
 	onReport?: () => void;
 	onUninstall?: () => void;
@@ -78,10 +93,13 @@ export default function StoreItemAction({
 	onUninstall,
 	onEnable,
 	onDisable,
+	onOpenSettings,
 	onReport,
 	reportTarget,
 	affordance,
 	className,
+	enableLabel = "Enable",
+	disableLabel = "Disable",
 }: StoreItemActionProps) {
 	const reportCtx = useOptionalReport();
 	const canReport = Boolean(onReport || (reportCtx && reportTarget));
@@ -95,14 +113,26 @@ export default function StoreItemAction({
 		}
 	};
 
+	// Whether the trailing overflow menu has anything to hold at all. Both the
+	// read-only-affordance and the locked paths render a static primary control, so
+	// Settings/Report can only reach the user through that menu.
+	const hasOverflow = canReport || Boolean(onOpenSettings);
+	const overflow = (
+		<StoreItemOverflowMenu
+			className={className}
+			onOpenSettings={onOpenSettings}
+			onReport={canReport ? handleReport : undefined}
+		/>
+	);
+
 	if (affordance) {
-		if (!canReport) {
+		if (!hasOverflow) {
 			return <>{affordance}</>;
 		}
 		return (
 			<div className="flex items-center gap-0.5">
 				{affordance}
-				<ReportButton className={className} onReport={handleReport} />
+				{overflow}
 			</div>
 		);
 	}
@@ -143,7 +173,10 @@ export default function StoreItemAction({
 	}
 
 	if (locked) {
-		if (!canReport) {
+		// Locked = built-in / un-removable. It has no lifecycle verbs, but it is
+		// exactly the kind of item that DOES have settings, so the overflow menu
+		// still renders whenever there is something behind it.
+		if (!hasOverflow) {
 			return (
 				<Button className={className} disabled size="sm" variant="secondary">
 					<HugeiconsIcon
@@ -163,7 +196,7 @@ export default function StoreItemAction({
 					/>
 					{lockedLabel}
 				</Button>
-				<ReportButton className={className} onReport={handleReport} />
+				{overflow}
 			</div>
 		);
 	}
@@ -209,10 +242,13 @@ export default function StoreItemAction({
 			<DropdownMenuContent align="end">
 				<StoreItemMenuItems
 					canReport={canReport}
+					disableLabel={disableLabel}
+					enableLabel={enableLabel}
 					hasEnableConcept={hasEnableConcept}
 					isEnabled={isEnabled}
 					onDisable={onDisable}
 					onEnable={onEnable}
+					onOpenSettings={onOpenSettings}
 					onReport={handleReport}
 					onUninstall={onUninstall}
 				/>
@@ -223,8 +259,8 @@ export default function StoreItemAction({
 
 /**
  * Shared menu items used by both the installed DropdownMenu and the
- * not-installed ContextMenu. Renders Enable/Disable toggle, Report,
- * and Uninstall — each conditionally.
+ * not-installed ContextMenu. Renders Settings, the Enable/Disable toggle,
+ * Report, and Uninstall — each conditionally.
  */
 function StoreItemMenuItems({
 	hasEnableConcept,
@@ -232,31 +268,54 @@ function StoreItemMenuItems({
 	canReport,
 	onEnable,
 	onDisable,
+	onOpenSettings,
 	onReport,
 	onUninstall,
+	enableLabel = "Enable",
+	disableLabel = "Disable",
 }: {
 	canReport: boolean;
+	disableLabel?: string;
+	enableLabel?: string;
 	hasEnableConcept: boolean;
 	isEnabled: boolean;
 	onDisable?: () => void;
 	onEnable?: () => void;
+	onOpenSettings?: () => void;
 	onReport: () => void;
 	onUninstall?: () => void;
 }) {
+	// Whether a toggle row actually renders — an enable concept with no handler for
+	// the CURRENT direction renders nothing, so the separator must not assume one.
+	const hasToggleItem =
+		hasEnableConcept && Boolean(isEnabled ? onDisable : onEnable);
 	return (
 		<>
+			{/* Settings leads the menu: it is the reason a user opens it on an item
+			    that is already installed and working. */}
+			{onOpenSettings ? (
+				<DropdownMenuItem onClick={onOpenSettings}>
+					<HugeiconsIcon className="size-4" icon={Settings01Icon} />
+					Settings
+				</DropdownMenuItem>
+			) : null}
 			{hasEnableConcept &&
 				(isEnabled ? (
-					<DropdownMenuItem onClick={onDisable}>
-						<HugeiconsIcon className="size-4" icon={PauseIcon} />
-						Disable
-					</DropdownMenuItem>
-				) : (
+					// A one-way toggle (an Engines "Text" row can be SWAPPED to, never
+					// switched off) passes no `onDisable` — render nothing rather than a
+					// menu entry that does nothing when clicked.
+					onDisable ? (
+						<DropdownMenuItem onClick={onDisable}>
+							<HugeiconsIcon className="size-4" icon={PauseIcon} />
+							{disableLabel}
+						</DropdownMenuItem>
+					) : null
+				) : onEnable ? (
 					<DropdownMenuItem onClick={onEnable}>
 						<HugeiconsIcon className="size-4" icon={PlayIcon} />
-						Enable
+						{enableLabel}
 					</DropdownMenuItem>
-				))}
+				) : null)}
 			{canReport ? (
 				<DropdownMenuItem onClick={onReport}>
 					<HugeiconsIcon className="size-4" icon={Alert02Icon} />
@@ -265,7 +324,7 @@ function StoreItemMenuItems({
 			) : null}
 			{onUninstall ? (
 				<>
-					{hasEnableConcept || canReport ? <DropdownMenuSeparator /> : null}
+					{hasToggleItem || canReport ? <DropdownMenuSeparator /> : null}
 					<DropdownMenuItem onClick={onUninstall} variant="destructive">
 						<HugeiconsIcon className="size-4" icon={Delete01Icon} />
 						Uninstall
@@ -311,14 +370,29 @@ export function StoreItemContextMenuContent({
 	);
 }
 
-/** Standalone 3-dot report overflow used next to locked / web affordance. */
-function ReportButton({
+/**
+ * Standalone 3-dot overflow for items whose primary control is static — the
+ * locked ("Built in") pill, the read-only web affordance, and the "Required"
+ * badge a mandatory listing renders instead of lifecycle buttons. Holds Settings
+ * and/or Report; renders nothing when it would be empty, so a caller can mount it
+ * unconditionally.
+ *
+ * Exported because the mandatory-listing branch has no StoreItemAction to hang
+ * these off: it deliberately renders no lifecycle control, but a required app is
+ * still configurable and its settings must stay reachable from the card.
+ */
+export function StoreItemOverflowMenu({
+	onOpenSettings,
 	onReport,
 	className,
 }: {
 	className?: string;
-	onReport: () => void;
+	onOpenSettings?: () => void;
+	onReport?: () => void;
 }) {
+	if (!(onOpenSettings || onReport)) {
+		return null;
+	}
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger
@@ -334,10 +408,18 @@ function ReportButton({
 				}
 			/>
 			<DropdownMenuContent align="end">
-				<DropdownMenuItem onClick={onReport}>
-					<HugeiconsIcon className="size-4" icon={Alert02Icon} />
-					Report
-				</DropdownMenuItem>
+				{onOpenSettings ? (
+					<DropdownMenuItem onClick={onOpenSettings}>
+						<HugeiconsIcon className="size-4" icon={Settings01Icon} />
+						Settings
+					</DropdownMenuItem>
+				) : null}
+				{onReport ? (
+					<DropdownMenuItem onClick={onReport}>
+						<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+						Report
+					</DropdownMenuItem>
+				) : null}
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);

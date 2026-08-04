@@ -13,6 +13,7 @@ import {
 	Delete01Icon,
 	DollarCircleIcon,
 	Download04Icon,
+	File01Icon,
 	FileSearchIcon,
 	GlobeIcon,
 	LaptopIcon,
@@ -77,6 +78,7 @@ import { useNodeSystemInfo } from "@/src/hooks/useNodeSystemInfo.ts";
 import { useNodeVersion } from "@/src/hooks/useNodeVersion.ts";
 import {
 	type CapabilityProvider,
+	canServe,
 	describeBindingFailure,
 } from "@/src/lib/api/capability-layers.ts";
 import { type ApiTarget, currentClientId } from "@/src/lib/api/client.ts";
@@ -1985,6 +1987,11 @@ const CAPABILITY_LAYERS: Array<{
 	{ label: "Browser", capability: "browser.control", icon: BrowserIcon },
 	{ label: "Computer", capability: "computer.control", icon: ComputerIcon },
 	{ label: "Memory", capability: "memory", icon: BrainIcon },
+	// Route-backed, not verb-backed (see `providerDetail`). Listed here for the same
+	// reason as the rest: without a row the fallback branch below labels it with the
+	// raw capability string, so the dropdown read `document.parse` next to five
+	// English words.
+	{ label: "Document Parse", capability: "document.parse", icon: File01Icon },
 ];
 
 interface CapabilityLayerRow {
@@ -2036,16 +2043,29 @@ function providerTargetLabel(
 		: "remote desktop";
 }
 
-/** `3 verbs` / `default · 3 verbs` — what this provider actually exposes. */
+/**
+ * `3 verbs` / `default · 3 verbs` — what this provider actually exposes.
+ *
+ * The verb count is stated only by providers that HAVE verbs. A route-backed
+ * provider is served by Core calling its sidecar directly, so it has none by
+ * design — `document.parse`'s four parsers all declare zero — and counting them
+ * printed "no verbs" on four working backends. An empty detail renders as no detail
+ * line at all (`NodeLayerMenu` skips falsy), which is the honest answer when the row
+ * has nothing to add beyond its name.
+ *
+ * No branch for a provider that serves nothing at all: that row is `disabled`, and
+ * `NodeLayerMenu` renders `disabledReason` in place of the detail, so anything
+ * returned here for it could never appear on screen.
+ */
 function providerDetail(
 	provider: CapabilityProvider,
 	siblings: CapabilityProvider[]
 ): string {
-	if (!provider.servesVerbs) {
-		return "no verbs";
+	const parts: string[] = [];
+	if (provider.servesVerbs) {
+		const count = provider.verbs.length;
+		parts.push(`${count} verb${count === 1 ? "" : "s"}`);
 	}
-	const count = provider.verbs.length;
-	const parts = [`${count} verb${count === 1 ? "" : "s"}`];
 	if (provider.isDefault) {
 		parts.unshift("default");
 	}
@@ -2179,15 +2199,27 @@ function LayersSection({
 							label: provider.name,
 							active: provider.id === entry.bound,
 							detail: providerDetail(provider, entry.providers),
-							// A provider that binds no verbs is shown but NOT selectable.
+							// A provider that serves NOTHING is shown but NOT selectable.
 							// Selecting one resolves the capability to it and then finds
 							// nothing to serve, so every tool in the layer disappears —
 							// silently, with no error anywhere. Better to say why it
 							// cannot be picked than to let the layer go dark.
-							disabled: !provider.servesVerbs,
-							disabledReason: provider.servesVerbs
+							//
+							// "Serves nothing" is `canServe`, not `!servesVerbs`: verbs are
+							// one of two serving surfaces, and gating on them alone marked
+							// every route-backed provider dead. `document.parse` is served
+							// entirely by route, so all four of its parsers — including the
+							// bound default — rendered disabled with "serves no verbs yet"
+							// while parsing worked fine, and the layer could not be swapped
+							// from here at all.
+							disabled: !canServe(provider),
+							// Not "serves no verbs yet": verbs are one of two ways to
+							// serve, so naming only that one sent a reader looking for a
+							// missing verb table on a provider whose real problem is that
+							// it declares no serving surface of either kind.
+							disabledReason: canServe(provider)
 								? null
-								: "serves no verbs yet",
+								: "declares no verbs or route",
 							select: () => pick(entry, provider, label),
 						})
 					)}

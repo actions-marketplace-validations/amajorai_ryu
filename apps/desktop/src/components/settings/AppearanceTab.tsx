@@ -1401,7 +1401,15 @@ export function AppearanceTab() {
 								onCheckedChange={setFriendlyNames}
 							/>
 						}
-						description="Show plain-language model and skill names everywhere (catalog, downloads, agent pickers) instead of raw developer strings like “gemma-4-E2B-it-GGUF”. Turn off to see the exact technical names."
+						// The description names the two kinds of thing this now covers,
+						// because they read as one setting but are not: renaming a MODEL is
+						// cosmetic, while renaming an OPTION ("Graph" → "Connected search")
+						// changes the word a user will look for in docs, in support, and in
+						// this app's own settings. Saying so is what makes turning it off a
+						// deliberate choice rather than a mystery, and the last sentence is
+						// there because the setting reaches installed apps and plugins too —
+						// a user who sees a plugin change wording should know why.
+						description="Use everyday wording across the app instead of technical terms. Model and skill names read as plain names rather than raw strings like “gemma-4-E2B-it-GGUF”, and options are named for what they do — a space's retrieval mode reads “Quick search” and “Connected search” rather than “Vector” and “Graph”. Installed apps and plugins follow this too. Turn it off to see the exact technical names everywhere."
 						title="Friendly names"
 					/>
 					<SettingsItem

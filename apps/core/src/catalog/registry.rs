@@ -408,8 +408,10 @@ pub fn static_registry() -> Vec<CatalogEntry> {
             deprecated: false,
             recommended: false,
         },
-        // Universal multi-engine TTS — a small Python sidecar (apps/tts-sidecar)
-        // that fronts many TTS engines (KittenTTS, Pocket TTS, …) behind one
+        // Universal multi-engine TTS — a small Python sidecar
+        // (`apps-store/voice/sidecar`, provisioned into `~/.ryu/tts-sidecar` from
+        // the wheel its satellite publishes) that fronts many TTS engines
+        // (Kokoro, KittenTTS, Pocket TTS, …) behind one
         // contract. Consumed by `POST /api/voice/speak?engine=<id>`; the engine
         // set is whatever the sidecar registry serves (nothing hardcoded).
         CatalogEntry {

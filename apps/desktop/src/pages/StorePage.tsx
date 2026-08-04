@@ -4,18 +4,28 @@ import {
 	GridIcon,
 	Home01Icon,
 	Link01Icon,
-	UserGroupIcon,
 	Wallet01Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
-import { StoreComingSoon, StoreSectionNav } from "@ryu/blocks/desktop/store";
+import {
+	StoreComingSoon,
+	StoreSectionNav,
+	type StoreSectionTab,
+} from "@ryu/blocks/desktop/store";
 import { StoreCatalogHeaderProvider } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
-import { useCallback, useState } from "react";
+import {
+	type ReactElement,
+	useCallback,
+	useEffect,
+	useMemo,
+	useState,
+} from "react";
 import { DesktopMarketplaceHost } from "@/src/components/marketplace/host.tsx";
 import AccountSection from "@/src/components/store/AccountSection.tsx";
 import AgentsCatalogSection from "@/src/components/store/AgentsCatalogSection.tsx";
 import AppsCatalogSection from "@/src/components/store/AppsCatalogSection.tsx";
+import ContributedStoreSection from "@/src/components/store/ContributedStoreSection.tsx";
 import { DesktopCatalogHost } from "@/src/components/store/catalog-host.tsx";
 import EnginesCatalogSection from "@/src/components/store/EnginesCatalogSection.tsx";
 import InstalledSection from "@/src/components/store/InstalledSection.tsx";
@@ -31,11 +41,23 @@ import {
 } from "@/src/components/store/storeToolbar.tsx";
 import WorkflowTemplatesSection from "@/src/components/store/WorkflowTemplatesSection.tsx";
 import {
+	contributedTabForSection,
+	resolveStoreSection,
+	STORE_GROUP_ORDER,
+	storeTabGroup,
+	storeTabSectionValue,
+	useContributedStoreTabs,
+} from "@/src/hooks/useContributedStoreTabs.ts";
+import {
 	type StoreSearchRealm,
 	useStoreSearch,
 } from "@/src/hooks/useStoreSearch.ts";
+import type { PluginStoreTab } from "@/src/lib/api/plugins.ts";
 
-type StoreSection =
+/** The sections the shell itself owns. Everything else in the bar is an
+ *  app-registered `contributes.store_tabs[]` entry — see
+ *  {@link useContributedStoreTabs}. */
+type BuiltinStoreSection =
 	| "home"
 	| "integrations"
 	| "apps"
@@ -44,14 +66,17 @@ type StoreSection =
 	| "skills"
 	| "mcp"
 	| "agents"
-	| "workflows"
 	| "engines"
-	| "community"
 	| "installed"
 	| "account";
 
+/** An active section value: a {@link BuiltinStoreSection}, or a contributed tab's
+ *  `plugin:<pluginId>:<tabId>` key. Deliberately open — the Store's section list is
+ *  no longer a closed union the shell can enumerate at compile time. */
+type StoreSection = string;
+
 const SECTIONS: {
-	value: StoreSection;
+	value: BuiltinStoreSection;
 	label: string;
 	icon: IconSvgElement;
 	group: string;
@@ -101,27 +126,21 @@ const SECTIONS: {
 		icon: REALM_ICONS.agents,
 		group: "catalog",
 	},
-	// Workflow Templates: ready-made agent-pattern workflows (evaluator-optimizer,
-	// routing, orchestrator-workers, the autoresearch git-ledger loop, …).
-	{
-		value: "workflows",
-		label: "Workflows",
-		icon: REALM_ICONS.workflows,
-		group: "catalog",
-	},
+	// Workflow Templates used to sit here as a hardcoded row. It is now registered by
+	// the Workflows app itself (`apps-store/workflows/manifest.json` →
+	// `contributes.store_tabs`) and arrives through `useContributedStoreTabs`, in the
+	// same `catalog` group — the first tab to go through the bridge that lets any app
+	// own a marketplace section.
 	// Engines = all local inference runtimes, grouped inside by modality
 	// (Text · Image · Speech · Embeddings). Voice lives here now, not its own tab.
 	{ value: "engines", label: "Engines", icon: CpuIcon, group: "catalog" },
-	// Community: third-party apps + plugins discovered from the public GitHub
-	// topics `ryu-app` / `ryu-plugin`. Its OWN group, so the nav rail draws a
-	// divider before it — unreviewed listings must read as a separate cluster,
-	// not as a peer of the first-party catalogs above.
-	{
-		value: "community",
-		label: "Community",
-		icon: UserGroupIcon,
-		group: "community",
-	},
+	// Community listings — the third-party apps + plugins discovered from the public
+	// GitHub topics `ryu-app` / `ryu-plugin` — have NO tab of their own. Provenance
+	// is not a category: a community web-scraper plugin answers the same question as
+	// a first-party one, and a separate tab meant a user who searched Plugins and
+	// found nothing never learned the community feed had it. They now render as a
+	// trailing, separately-headed shelf inside Apps and Plugins, carrying the same
+	// "not reviewed by Ryu" notice they carried here (see `CommunityShelf`).
 	// Manage — what you already have installed, and the nodes running it.
 	//
 	// Tools is deliberately NOT here: the MCP servers registered on this node and
@@ -141,8 +160,10 @@ const SECTIONS: {
 	{ value: "account", label: "Account", icon: Wallet01Icon, group: "account" },
 ];
 
-function isStoreSection(value: string): value is StoreSection {
-	return SECTIONS.some((s) => s.value === value);
+const BUILTIN_SECTION_VALUES = SECTIONS.map((s) => s.value);
+
+function isBuiltinSection(value: string): value is BuiltinStoreSection {
+	return (BUILTIN_SECTION_VALUES as string[]).includes(value);
 }
 
 /** Per-section two-line header (title + one-line description), shown above the
@@ -150,7 +171,7 @@ function isStoreSection(value: string): value is StoreSection {
  *  headers (`onboarding.tsx` FeatureStep): a foreground `font-semibold text-lg`
  *  title over a muted `text-sm` subtext, so the whole app reads as one system. */
 const SECTION_HEADERS: Record<
-	StoreSection,
+	BuiltinStoreSection,
 	{ title: string; subtitle: string }
 > = {
 	home: {
@@ -187,19 +208,10 @@ const SECTION_HEADERS: Record<
 		title: "Agents",
 		subtitle: "Prebuilt agents you can install and start using in one click.",
 	},
-	workflows: {
-		title: "Workflows",
-		subtitle: "Ready-made automation templates built on proven agent patterns.",
-	},
 	engines: {
 		title: "Engines",
 		subtitle:
 			"Local inference runtimes for text, image, speech, and embeddings.",
-	},
-	community: {
-		title: "Community",
-		subtitle:
-			"Third-party apps and plugins discovered from GitHub. Not reviewed by Ryu.",
 	},
 	installed: {
 		title: "Installed",
@@ -211,10 +223,33 @@ const SECTION_HEADERS: Record<
 	},
 };
 
-function StoreSectionHeader({ section }: { section: StoreSection }) {
-	const header = SECTION_HEADERS[section];
+/** The header copy for a section: the shell's own table for a built-in, the
+ *  contribution's own `title`/`subtitle` for an app-registered tab. */
+function sectionHeader(
+	section: StoreSection,
+	contributed: PluginStoreTab | null
+): { subtitle: string; title: string } {
+	if (isBuiltinSection(section)) {
+		return SECTION_HEADERS[section];
+	}
+	return {
+		title: contributed?.title ?? "Store",
+		subtitle: contributed?.subtitle ?? "",
+	};
+}
+
+function StoreSectionHeader({
+	section,
+	contributed,
+	compact = false,
+}: {
+	compact?: boolean;
+	contributed: PluginStoreTab | null;
+	section: StoreSection;
+}) {
+	const header = sectionHeader(section, contributed);
 	return (
-		<div className="shrink-0 px-4 pt-4 pb-3">
+		<div className={`shrink-0 px-4 pt-4 ${compact ? "pb-1" : "pb-3"}`}>
 			<p className="font-semibold text-lg">{header.title}</p>
 		</div>
 	);
@@ -224,24 +259,37 @@ function StoreSectionHeader({ section }: { section: StoreSection }) {
  *  card grid with a preview aside. For these the header lives INSIDE the layout
  *  column (via {@link StoreCatalogHeaderProvider}) so title, search and cards
  *  stay aligned even when the aside opens; the rest keep a full-width header. */
-const CATALOG_SECTIONS = new Set<StoreSection>([
+const CATALOG_SECTIONS = new Set<BuiltinStoreSection>([
 	"integrations",
 	"apps",
 	"plugins",
 	"skills",
 	"mcp",
 	"agents",
-	"workflows",
-	// Community renders the same card/preview shape as Apps/Plugins, so its header
-	// belongs INSIDE the centered layout column — omitting it here would render the
-	// title twice (see the note below).
-	"community",
 	// Manage sections converted to the same App Store card/preview shape — their
 	// header lives inside the centered layout column too, so it must NOT also get
 	// the outer full-width StoreSectionHeader (that would render the title twice).
 	"engines",
 	"installed",
 ]);
+
+/** Contributed tabs render through {@link ContributedStoreSection}, which is built
+ *  on the same `StoreCatalogLayout`, so they belong to the centered-column header
+ *  treatment too.
+ *
+ *  The exception is a contributed tab whose app is OFF: that path renders a bare
+ *  enable prompt with no `StoreCatalogLayout`, so nothing consumes the header
+ *  provider and the pane would come out titleless. It takes the full-width header
+ *  instead — the same treatment the non-carded built-in sections get. */
+function usesCatalogLayout(
+	section: StoreSection,
+	contributed: PluginStoreTab | null
+): boolean {
+	if (isBuiltinSection(section)) {
+		return CATALOG_SECTIONS.has(section);
+	}
+	return section !== "home" && (contributed?.app_enabled ?? false);
+}
 
 /**
  * Unified Store shell, App Store-shaped: a full-width content pane above a
@@ -263,9 +311,62 @@ export default function StorePage({
 	 *  integrations.sh → MCP-catalog hand-off pre-filters by server name). */
 	initialQuery?: string;
 }) {
-	const [section, setSection] = useState<StoreSection>(
-		isStoreSection(initialSection) ? initialSection : "home"
+	// App-registered sections. These arrive asynchronously (Core's contributions
+	// endpoint), so `initialSection` is resolved against them in an effect below
+	// rather than once at mount — a deep link to `/store/workflows` must land on the
+	// Workflows tab even though the contribution has not loaded on first render.
+	const contributedTabs = useContributedStoreTabs();
+	const [section, setSection] = useState<StoreSection>(() =>
+		isBuiltinSection(initialSection) ? initialSection : "home"
 	);
+	// The requested section, held until it can be resolved. Cleared once honoured so
+	// a later manual pick is never overridden by a stale deep link.
+	const [pendingSection, setPendingSection] = useState<string | null>(() =>
+		isBuiltinSection(initialSection) ? null : initialSection
+	);
+
+	useEffect(() => {
+		if (!pendingSection) {
+			return;
+		}
+		const resolved = resolveStoreSection(
+			pendingSection,
+			BUILTIN_SECTION_VALUES,
+			contributedTabs
+		);
+		if (resolved) {
+			setSection(resolved);
+			setPendingSection(null);
+		}
+	}, [pendingSection, contributedTabs]);
+
+	const activeContributedTab = useMemo(
+		() => contributedTabForSection(section, contributedTabs),
+		[section, contributedTabs]
+	);
+
+	// The nav bar's full section list: the shell's own sections with each app's
+	// registered tabs spliced into the group it declared, so the divider logic
+	// (adjacent same-group pills cluster) keeps working unchanged.
+	const navSections = useMemo(() => {
+		const out: StoreSectionTab[] = [];
+		for (const group of STORE_GROUP_ORDER) {
+			for (const s of SECTIONS.filter((b) => b.group === group)) {
+				out.push(s);
+			}
+			for (const tab of contributedTabs.filter(
+				(t) => storeTabGroup(t) === group
+			)) {
+				out.push({
+					group,
+					icon: tab.icon ?? "grid",
+					label: tab.title,
+					value: storeTabSectionValue(tab),
+				});
+			}
+		}
+		return out;
+	}, [contributedTabs]);
 
 	// Store-wide search, live from any section via the nav rail. A non-empty
 	// query takes over the content pane with aggregated results.
@@ -288,13 +389,22 @@ export default function StorePage({
 		setSection(realm);
 	};
 
-	const selectSection = useCallback((value: string) => {
-		if (isStoreSection(value)) {
-			setSectionInitialQuery(undefined);
-			setSearchQuery("");
-			setSection(value);
-		}
-	}, []);
+	const selectSection = useCallback(
+		(value: string) => {
+			const resolved = resolveStoreSection(
+				value,
+				BUILTIN_SECTION_VALUES,
+				contributedTabs
+			);
+			if (resolved) {
+				setSectionInitialQuery(undefined);
+				setSearchQuery("");
+				setPendingSection(null);
+				setSection(resolved);
+			}
+		},
+		[contributedTabs]
+	);
 
 	const searching = search.hasQuery || searchQuery.trim().length > 0;
 	// Between the first keystroke and the debounced query firing, show the
@@ -326,15 +436,25 @@ export default function StorePage({
 									    layout column (via the provider); Home renders its own
 									    centered header. Only full-width master-detail sections
 									    (Models, Tools, …) get the inline full-width header here. */}
-									{CATALOG_SECTIONS.has(section) ||
+									{usesCatalogLayout(section, activeContributedTab) ||
 									section === "home" ? null : (
-										<StoreSectionHeader section={section} />
+										<StoreSectionHeader
+											contributed={activeContributedTab}
+											section={section}
+										/>
 									)}
 									<div className="min-h-0 flex-1 overflow-hidden">
 										<StoreCatalogHeaderProvider
-											header={<StoreSectionHeader section={section} />}
+											header={
+												<StoreSectionHeader
+													compact
+													contributed={activeContributedTab}
+													section={section}
+												/>
+											}
 										>
 											<StoreContent
+												contributedTab={activeContributedTab}
 												initialQuery={sectionInitialQuery}
 												onOpenRealm={openRealm}
 												section={section}
@@ -358,7 +478,7 @@ export default function StorePage({
 								onChange: setSearchQuery,
 								placeholder: "Search the whole marketplace…",
 							}}
-							sections={SECTIONS}
+							sections={navSections}
 						/>
 					</div>
 				</StoreToolbarProvider>
@@ -367,11 +487,30 @@ export default function StorePage({
 	);
 }
 
+/**
+ * Named first-party renderers a `store_tabs` entry may claim through its `view`
+ * field, keyed by the OWNING PLUGIN ID — never by the `view` string itself.
+ *
+ * Same trust gate `EntitySettings.SETTINGS_VIEWS` uses, for the same reason: a
+ * third-party manifest can declare `"view": "workflow-templates"` all it likes, but
+ * its plugin id is not a key here, so it falls back to the declarative `spec` and
+ * can never borrow a first-party component (or the data that component reads).
+ */
+const STORE_TAB_VIEWS: Record<
+	string,
+	(props: { initialQuery?: string }) => ReactElement
+> = {
+	"@ryu/workflows": WorkflowTemplatesSection,
+};
+
 function StoreContent({
 	section,
 	initialQuery,
 	onOpenRealm,
+	contributedTab,
 }: {
+	/** The app-registered tab this section belongs to, if it is not a built-in. */
+	contributedTab: PluginStoreTab | null;
 	section: StoreSection;
 	/** Seed query carried over from the store-wide search (searchable realms only). */
 	initialQuery?: string;
@@ -394,11 +533,6 @@ function StoreContent({
 	if (section === "plugins") {
 		return <AppsCatalogSection initialQuery={initialQuery} variant="plugins" />;
 	}
-	if (section === "community") {
-		return (
-			<AppsCatalogSection initialQuery={initialQuery} variant="community" />
-		);
-	}
 	if (section === "models") {
 		return <ModelsCatalogSection initialQuery={initialQuery} />;
 	}
@@ -411,9 +545,6 @@ function StoreContent({
 	if (section === "agents") {
 		return <AgentsCatalogSection initialQuery={initialQuery} />;
 	}
-	if (section === "workflows") {
-		return <WorkflowTemplatesSection initialQuery={initialQuery} />;
-	}
 	if (section === "engines") {
 		return <EnginesCatalogSection />;
 	}
@@ -422,6 +553,28 @@ function StoreContent({
 	}
 	if (section === "account") {
 		return <AccountSection />;
+	}
+	// App-registered tab. A `view` the shell recognises FOR THAT PLUGIN renders its
+	// first-party component (the workflow-template graph preview needs more than the
+	// declarative vocabulary can express); everything else — including a `view` from a
+	// plugin that is not on the allowlist — renders from the declarative spec.
+	if (contributedTab) {
+		// The enablement gate comes FIRST, before the view allowlist: a first-party
+		// component fetches the app's own gated catalog and would render an error when
+		// the app is off. The generic renderer is what knows how to offer the install.
+		const FirstPartyView =
+			contributedTab.view && contributedTab.app_enabled
+				? STORE_TAB_VIEWS[contributedTab.plugin]
+				: undefined;
+		if (FirstPartyView) {
+			return <FirstPartyView initialQuery={initialQuery} />;
+		}
+		return (
+			<ContributedStoreSection
+				initialQuery={initialQuery}
+				tab={contributedTab}
+			/>
+		);
 	}
 	const meta = SECTIONS.find((s) => s.value === section);
 	return (

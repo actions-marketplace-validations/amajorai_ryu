@@ -311,8 +311,55 @@
       ],
       "type": "object"
     },
+    "ContextMenuContribution": {
+      "description": "One context-menu row a plugin contributes (see\n[`Contributes::context_menu_items`]).",
+      "properties": {
+        "anchor": {
+          "description": "WHICH menu. Closed-ish enum by convention, open by encoding (same call as\n[`DockPanelPlacement`]): `\"conversation\"` | `\"message\"` | `\"space\"` |\n`\"agent\"` | `\"project\"` | `\"workflow\"` | `\"skill\"`. The shell owns the anchor\nset; an app cannot conjure a new menu, but an unknown value must not fail the\nload.",
+          "type": "string"
+        },
+        "args": true,
+        "capability": {
+          "description": "The granted capability the shell invokes when the row is clicked, plus\nstatic `args`. Never inline code, never a capability the owning plugin was\nnot granted.",
+          "type": "string"
+        },
+        "feedback": {
+          "description": "Optional feedback text for the shell's toast: `{ loading, success, error }`.\nLets the app own its copy without owning the toast component."
+        },
+        "icon": {
+          "description": "Optional glyph id resolved by the shell's Icon primitive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable id for this row within the plugin.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Row label.",
+          "type": "string"
+        },
+        "order": {
+          "description": "Sort position among contributed rows (ascending).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "anchor",
+        "capability"
+      ],
+      "type": "object"
+    },
     "Contributes": {
-      "description": "VS-Code-style **contribution points** (`contributes` in `package.json`).\n\nThe original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)\nare lists of [`ContributionId`] references into the manifest's `runnables`: the\nplugin *declares* that runnable `X` contributes to that surface. This is\ndeclare-by-id, not a second copy of the runnable — the loader cross-validates\nthat every referenced id exists in `runnables`, so a typo is caught at load.\n\nMost surfaces added since are **self-contained**: they carry their own payload\nand reference no runnable at all (`widgets`, `views`, `dock_panels`,\n`sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,\n`slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`).\n\n# Extending\n\nAdding a surface is two decisions, and getting either wrong is silent:\n\n1. **Id-reference or self-contained?** An id-reference surface is a\n   `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]\n   so the loader can catch a typo. A self-contained surface must be left OUT of\n   it — every id in it names something other than a runnable (a PATH binary, a\n   route, a tool namespace), so including it would reject every valid manifest.\n   `referenced_ids` therefore covers exactly the five original surfaces and\n   nothing else; that omission is deliberate, not an oversight to be tidied up.\n2. **Core-interpreted or client-rendered?** If Core acts on the payload\n   (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed\n   struct, because a key Core does not know is by construction a key Core cannot\n   act on. If a client shell renders it (`views`, `dock_panels`,\n   `sidebar_sections`, `settings_tabs`, `composer_controls`) it stays opaque\n   JSON, because deserializing into a struct here would DROP any key this Core\n   build does not know about and a newer desktop would lose exactly the fields it\n   was shipped to render.\n\nClient-rendered surfaces are then served, tagged with the owning plugin id, from\n`GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —\nthey are gathered at their own consumption site instead.",
+      "description": "VS-Code-style **contribution points** (`contributes` in `package.json`).\n\nThe original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)\nare lists of [`ContributionId`] references into the manifest's `runnables`: the\nplugin *declares* that runnable `X` contributes to that surface. This is\ndeclare-by-id, not a second copy of the runnable — the loader cross-validates\nthat every referenced id exists in `runnables`, so a typo is caught at load.\n\nMost surfaces added since are **self-contained**: they carry their own payload\nand reference no runnable at all (`widgets`, `views`, `dock_panels`,\n`sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,\n`slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,\n`message_actions`, `context_menu_items`).\n\n# Extending\n\nAdding a surface is two decisions, and getting either wrong is silent:\n\n1. **Id-reference or self-contained?** An id-reference surface is a\n   `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]\n   so the loader can catch a typo. A self-contained surface must be left OUT of\n   it — every id in it names something other than a runnable (a PATH binary, a\n   route, a tool namespace), so including it would reject every valid manifest.\n   `referenced_ids` therefore covers exactly the five original surfaces and\n   nothing else; that omission is deliberate, not an oversight to be tidied up.\n2. **Core-interpreted or client-rendered?** If Core acts on the payload\n   (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed\n   struct, because a key Core does not know is by construction a key Core cannot\n   act on. If a client shell renders it (`views`, `dock_panels`,\n   `sidebar_sections`, `settings_tabs`, `composer_controls`) it stays opaque\n   JSON, because deserializing into a struct here would DROP any key this Core\n   build does not know about and a newer desktop would lose exactly the fields it\n   was shipped to render.\n\nClient-rendered surfaces are then served, tagged with the owning plugin id, from\n`GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —\nthey are gathered at their own consumption site instead.",
       "properties": {
         "agents": {
           "default": [],
@@ -334,6 +381,14 @@
           "default": [],
           "description": "Declarative **native** UI widgets the plugin contributes to the desktop\ncomposer. Core stores these verbatim and serves them via\n`GET /api/plugins/contributions` (tagged with the owning `plugin` id); the\ndesktop renders the known control types. Opaque to Core (the renderer owns\ninterpretation) so a new control type needs no Core change — an entry Core has\nnever heard of is forwarded byte-for-byte, so a desktop newer than the node it\ntalks to still gets everything it was shipped to render.\n\n# The control vocabulary\n\nEvery entry is an object carrying `id`, a `type` discriminant, a `label` and a\n`flag`; the remaining keys belong to that type. `flag` is universal because the\nper-request `plugin_flags` map is the composer's ONLY channel to the turn — a\ncontrol the turn hook cannot observe would do nothing. `type` is deliberately NOT\nan enum (same reasoning as [`ViewContribution::view`]): an unknown member must\nreach a newer shell intact rather than being rejected at load by an older Core.\nThe vocabulary the desktop composer understands today:\n\n- `\"toggle\"` — a switch row in the composer \"+\" menu, with an optional\n  `description`. Flipping it puts `flag: true` into `plugin_flags`. This is the\n  original — and until now the ONLY — rendered type.\n- `\"select\"` — a menu/segmented picker. Carries an `options` array of\n  `{ value, label, description?, icon? }` plus an optional `default`. The chosen\n  `value` (a string, not a bool) lands in `plugin_flags[flag]`, so a plugin can\n  offer modes (\"fast\" / \"thorough\") instead of on/off.\n- `\"chip\"` — an inline pill in the composer bar showing a LIVE value rather than\n  a menu row. Carries an optional `icon` and a `source` (the same\n  `@ryu/app-host/views` `ViewSource` a declarative view uses) the shell polls for\n  the displayed text, and exposes/clears its value through `flag`. This is what a\n  rich bespoke control (a recording indicator, a selected-clip pill) needs in\n  order to stop being hand-written host code.\n- `\"action\"` — a button that DISPATCHES rather than holding state. Carries an\n  optional `icon` and a `capability` (+ optional `args`) the shell invokes\n  through the plugin's granted capability seam — never inline code, and never a\n  capability the owning plugin was not granted — then marks `flag` so the turn\n  hook sees that it fired.\n\nA control may also carry `placement` (`\"menu\"`, the default, or `\"bar\"`) and\n`order`; the renderer, not Core, decides what to do with an unknown key.\n\nRenderers MUST ignore an entry whose `type` they do not know (the desktop\nfilters by `type`), so shipping a new control type degrades to \"not shown on\nolder shells\" instead of breaking the composer.",
           "items": true,
+          "type": "array"
+        },
+        "context_menu_items": {
+          "default": [],
+          "description": "Context-menu rows the plugin contributes to a shell entity menu (the\nconversation-row dropdown, a message right-click, a space row). Lets an app\nown a menu row instead of the shell hardcoding it (e.g. \"Make a skill from\nthis chat\" is a Learning contribution, not an `AppSidebar` if). See\n[`ContextMenuContribution`]; served + tagged with the owning `plugin` id at\n`GET /api/plugins/contributions`.\n\n**Stored raw, validated at the chokepoint** — same rule as\n[`Contributes::message_actions`].",
+          "items": {
+            "$ref": "#/$defs/ContextMenuContribution"
+          },
           "type": "array"
         },
         "data_categories": {
@@ -366,6 +421,14 @@
           },
           "description": "**Language servers** the plugin declares, keyed by server name — the\nagent-neutral mirror of Claude Code's `.lsp.json` / `lspServers`, so a config\nwritten for either host loads in the other:\n\n```json\n\"lsp_servers\": {\n  \"go\": { \"command\": \"gopls\", \"args\": [\"serve\"], \"extensionToLanguage\": { \".go\": \"go\" } }\n}\n```\n\nOnly the container key is Ryu's (`lsp_servers`, snake_case like every sibling\nhere); every key INSIDE a server entry is Claude's own camelCase spelling\nverbatim, because that body is what actually travels between the two hosts.\nNo `lspServers` alias is accepted on purpose. `lsp_servers` — this exact\nspelling — is registered in the SDK's zod mirror (`ContributesSchema` in\n`packages/sdk/src/manifest.ts`), and that mirror STRIPS every key it does not\nlist. An alias would therefore parse here and be silently deleted at\n`ryu pack` time, before the manifest is signed, which is a worse failure than\na key that never parsed at all. One spelling, registered in both places.\n\nThe plugin ships CONFIG ONLY, never the server binary — `command` is resolved\nfrom `PATH` at spawn time and a missing binary is a visible skip, not a load\nerror. Core spawns and supervises these processes itself, so unlike the\nclient-rendered surfaces above this one is fully typed\n([`LspServerContribution`]) and is NOT served from\n`GET /api/plugins/contributions`; it is gathered at the spawn site, the same\ndisposition as [`Contributes::tool_filters`].\n\n# Ordering is part of the contract\n\nRegistration is **first-registration-wins per file extension**: if two enabled\nservers both claim `.go`, the first one registered owns it, the others never\nstart for that extension, and the spawn site warns naming the owner. That rule\nis only reproducible if iteration order is, so this is a [`BTreeMap`] — it\niterates lexicographically by server key, never in hash order and never in\nJSON authoring order. The full resolved invariant across a node is\n**(plugin enable order, then server key ascending)**.\n\nNote this makes the tie-break deterministic, not byte-identical to Claude\nCode's, which falls out of JS object insertion order. Two servers fighting\nover one extension is a misconfiguration in either host; what matters is that\nthe same node always resolves it the same way and says who won.",
           "type": "object"
+        },
+        "message_actions": {
+          "default": [],
+          "description": "Per-message actions the plugin contributes to the desktop message toolbar\n(thumbs, rate, transform, …). Lets an app own a control in the per-message\ntoolbar instead of the shell welding the action into the closed set of\nbuilt-in toolbar buttons. Self-contained + opaque `spec` (see\n[`MessageActionContribution`]), so a new action kind needs no Core change;\nserved + tagged with the owning `plugin` id at\n`GET /api/plugins/contributions`. A renderer that does not know a `kind`\nignores it, so an older shell degrades to \"not shown\" rather than breaking.\n\n**Stored raw, validated at the chokepoint** — same rule as\n[`Contributes::settings_tabs`]: the desktop forwards the original bytes, so\na shell newer than this Core build still gets every field it was shipped to\nrender.",
+          "items": {
+            "$ref": "#/$defs/MessageActionContribution"
+          },
+          "type": "array"
         },
         "pi_extensions": {
           "description": "**Pi extensions** the plugin ships — TypeScript files the managed `ryu` (Pi)\nagent loads at process start:\n\n```json\n\"pi_extensions\": [\n  { \"id\": \"shell\", \"file\": \"pi-extensions/ryu-shell.ts\",\n    \"description\": \"background bash for the managed Pi agent\" }\n]\n```\n\nPi ships none of plan mode, sub-agents, permission prompts or background bash\nand says so deliberately in its own docs — \"you can build or install those\nworkflows as extensions or packages\". This surface is that seam: the\ncapabilities Core used to hardcode into the spawn path become plugins the user\ncan enable and disable, and a third party can ship one at all.\n\n# This is UNSANDBOXED code, and the tier gate is not optional\n\nA [`Contributes::turn_hooks`] body runs in the deny-by-default Deno sandbox\nbehind capability-gated `host.*` calls. A file named here runs **inside the Pi\nprocess** with full host privilege: the first-party ones spawn children and\nPOST to Core. That is the same arbitrary-code-execution class as\n[`PluginManifest::mcp_servers`], so Core gates it identically — Core tier is\nauto-allowed, Community tier needs an operator-allowlisted grant, and the gate\nsits at the materializer, because writing the file is what makes it run.\n\n# Core-interpreted, so a typed struct — and NOT on the contributions endpoint\n\nCore resolves each `file` and projects it into the managed Pi's config dir, so\nper this type's own doc comment it gets a typed struct and is gathered at its\nconsumption site (`pi_config::app_extensions`) rather than served from\n`GET /api/plugins/contributions` — the same disposition as\n[`Contributes::lsp_servers`].\n\nThe `file` is deliberately NOT hydrated into an inline string the way a\n`code_file` is; see [`PluginManifest::pi_extension_refs`] for why.",
@@ -410,6 +473,14 @@
           "default": [],
           "description": "Slash commands the plugin contributes (e.g. `/goal`). The desktop maps the\ncommand to a `plugin_flags`/message action; the plugin's turn hook reads\nthe resulting message. Served + rendered the same way.",
           "items": true,
+          "type": "array"
+        },
+        "store_tabs": {
+          "default": [],
+          "description": "App-registered **marketplace tabs** — one section in the Store's nav bar,\ncarrying the app's own installable catalog (workflow templates, meeting-notes\ntemplates, monitor presets, …). The Store-shaped sibling of\n[`Contributes::dock_panels`]: it lets an app own its browse-and-install\nsurface instead of the shell welding the section into a closed `StoreSection`\nunion. Self-contained + opaque `spec` (see [`StoreTabContribution`]).\n\n**Served OUTSIDE the enabled filter**, unlike every sibling family here. The\nStore is where an app gets installed, so gating its tab on the app's own\nenabled bit would hide the tab you install the app FROM — and every built-in\nfeature app is `NOT_PRE_INSTALLED` on a fresh machine. Each entry is tagged\nwith `plugin` plus `app_installed` / `app_enabled` so the renderer can show an\nenable-CTA instead of an empty list. The DATA the tab fetches stays gated by\nthe app's own route gate; only the declaration is unconditional.",
+          "items": {
+            "$ref": "#/$defs/StoreTabContribution"
+          },
           "type": "array"
         },
         "tool_filters": {
@@ -1005,6 +1076,61 @@
       },
       "required": [
         "command"
+      ],
+      "type": "object"
+    },
+    "MessageActionContribution": {
+      "description": "One per-message toolbar action a plugin contributes (see\n[`Contributes::message_actions`]).\n\nThe `kind` discriminant is deliberately NOT an enum (same reasoning as\n[`ViewContribution::view`]): a member an older shell has never heard of must\nreach a newer shell intact rather than being rejected at load. Renderers ignore\na `kind` they do not know, so a new kind degrades to \"not shown\" instead of\nbreaking the message toolbar.",
+      "properties": {
+        "args": true,
+        "capability": {
+          "description": "The granted capability the shell invokes when the action fires, plus static\n`args`. Never inline code, never a capability the owning plugin was not\ngranted — identical to the `action` composer control's dispatch rule.",
+          "type": "string"
+        },
+        "icon": {
+          "description": "Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable id for this action within the plugin (the shell's element key and\ndispatch tag, namespaced as `plugin:<pluginId>:<id>`).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Render mode: `\"button\"` (fire-and-forget) | `\"toggle-group\"` (mutually\nexclusive states, what thumbs is) | `\"menu\"`. Open string.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Accessible label (tooltip / aria-label) for the action button.",
+          "type": "string"
+        },
+        "order": {
+          "description": "Sort position among contributed actions (ascending).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state_source": {
+          "description": "Optional `ViewSource` the shell polls to hydrate current state (what lights\nthe thumb on reload). Same `/api/`-path guard as views."
+        },
+        "states": {
+          "description": "For `kind: \"toggle-group\"`: the states, each `{ value, label, icon?,\nactive_icon? }`. Opaque to Core; the renderer owns the shape."
+        },
+        "target": {
+          "description": "Which messages the action attaches to: `\"assistant\"` | `\"user\"` | `\"any\"`.\nOpen string — an unknown role is ignored, not rejected.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "target",
+        "kind",
+        "capability"
       ],
       "type": "object"
     },
@@ -1853,6 +1979,63 @@
       ],
       "type": "object"
     },
+    "StoreTabContribution": {
+      "description": "One app-registered **marketplace tab** — a section in the Store's nav bar whose\ncontent is the app's own installable catalog. A typed envelope around an opaque\n`spec` (the `StoreTabSpec` in `@ryu/app-host/views`: a `ViewSource` for the rows,\na `groupBy`/`groups` split into card sections, an `install` action, and per-item\nactions). Core stores it verbatim and tags it with the owning `plugin` id; the\n`spec` stays opaque so a new catalog capability is a renderer change, not a Core\nchange.\n\n`view` is the escape hatch, mirroring `SettingsTabContribution::view`: a named\nfirst-party renderer for a tab whose detail pane needs more than the declarative\nvocabulary (the workflow-template graph preview). Like settings views, the shell\nkeys its view table on the owning **plugin id**, not on this string, so a\nthird-party manifest cannot borrow a first-party component by naming it.",
+      "properties": {
+        "group": {
+          "description": "Which nav cluster the pill joins — the shell draws a divider wherever the\ngroup changes. Built-in groups: `discover`, `catalog`, `community`, `manage`,\n`account`. An unknown value gets its own cluster rather than being dropped.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icon": {
+          "description": "Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable id for this tab within the plugin. The shell namespaces it into the\nsection key as `plugin:<pluginId>:<id>` so two apps can both ship a\n`templates` tab.",
+          "type": "string"
+        },
+        "order": {
+          "description": "Placement hint within the group (lower = further left).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "spec": {
+          "description": "The opaque tab spec (source/map/groups/search/install/itemActions). Interpreted\nby the desktop renderer, never by Core. Absent alongside an absent `view` = an\nempty tab."
+        },
+        "subtitle": {
+          "description": "One-line description shown under the title in the section header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "Nav-pill label.",
+          "type": "string"
+        },
+        "view": {
+          "description": "Named first-party renderer for this tab. When set, the shell renders that\ncomponent instead of the declarative `spec` — subject to its own plugin-id\nallowlist. Absent = purely declarative.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
     "Surface": {
       "description": "A host surface a plugin can declare support for via `targets`.\n\n`core` is the headless node (a Core running with no UI at all).\n\nAn **empty/absent** `targets` list means the plugin runs on *every* surface —\nthat is the backward-compatible default and MUST NOT be read as \"hidden\".",
       "oneOf": [
@@ -2131,7 +2314,7 @@
       "type": "array"
     },
     "category": {
-      "description": "Free-text category (Claude `category`).",
+      "description": "Free-text category (Claude `category`). The Store groups its Apps and\nPlugins tabs by this string, so two listings that mean the same shelf must\nspell it the same way — see the canonical set in `docs/`-adjacent\n`STORE_CATEGORY_ORDER` (`packages/marketplace/src/catalog/categories.ts`),\nwhich also decides shelf ORDER. An unrecognised value still renders; it just\nsorts after the known shelves, so a new category needs no client release.",
       "type": [
         "string",
         "null"
@@ -2187,6 +2370,10 @@
       },
       "type": "array"
     },
+    "hidden": {
+      "description": "Hide this listing from the Store without uninstalling or disabling it.\n\nThe listing keeps working for anyone who already has it — this is a\n*catalog* control, not a lifecycle one. It exists so an app that is built\nbut not ready to be discovered can ship dark: the manifest stays compiled\nin, the routes stay registered, and the card simply is not offered.\n\nAbsent ⇒ visible, matching the identically-named field the published\n`marketplace.json` already carries for third-party indexes\n(`catalog_source::sources`), so both tiers spell \"don't list this\" the same\nway and a client that predates the field just shows everything.",
+      "type": "boolean"
+    },
     "homepage": {
       "description": "Homepage/website URL (Claude `homepage`; emitted as `website`).",
       "type": [
@@ -2195,7 +2382,7 @@
       ]
     },
     "icon": {
-      "description": "Icon-primitive id for the listing card (Ryu extension: `icon`). An\nIconify/icons0 `prefix:name`, a bare Hugeicons name, or a URL — resolved by\nthe shared `Icon` primitive. Distinct from `icon_url`: this is a GLYPH id the\ncard masks with `currentColor`, `icon_url` is a raster logo. When absent the\ncard falls back to `icon_url`, then a default glyph.",
+      "description": "Icon-primitive id for the listing card (Ryu extension: `icon`). An\nIconify/icons0 `prefix:name`, a bare Hugeicons name, or a URL — resolved by\nthe shared `Icon` primitive. Distinct from `icon_url`: this is a GLYPH id the\ncard masks with `currentColor`, `icon_url` is a raster logo. When absent the\ncard falls back to `icon_url`, then a default glyph.\n\nOne id shape is NOT a glyph: `svgl:<slug>` (or `svgl:<light>|<dark>`) names a\nbrand mark on svgl.app, which the card renders as a full-colour image instead\n— masking a brand's logo to `currentColor` would flatten it to a silhouette.\nPrefer it over `icon_url` for a listing that fronts a known product (Brave,\nFirecrawl, Notion, …): it is a stable, versionless id rather than a URL that\ncan rot, and svgl's own API supplies the dark-theme variant when one exists.",
       "type": [
         "string",
         "null"
@@ -2235,6 +2422,10 @@
         "string",
         "null"
       ]
+    },
+    "mandatory": {
+      "description": "This plugin is REQUIRED FOR CORE: the UI must never offer to disable or\nuninstall it, and the lifecycle refuses both — with no `force` escape, which\nis what separates it from the softer\n[`crate::manifest`]-external load-bearing guard.\n\n**Declaring this does not grant it.** A manifest is untrusted input, and an\nundisableable plugin is exactly what a hostile one would ask to be, so the\nenforcement set is a Core-owned constant (`plugins::builtins::\nMANDATORY_PLUGINS`) and this field is only the manifest-side declaration of\nit. A bijection test keeps the two in lockstep, and a third-party manifest\nthat sets it is ignored by the lifecycle — it only ever affects how the\nlisting renders. Same posture as `CORE_PLUGINS`: privilege is never\nself-asserted.",
+      "type": "boolean"
     },
     "mcp_servers": {
       "additionalProperties": {
@@ -2337,6 +2528,13 @@
     },
     "source": {
       "description": "Provenance hint for the marketplace index: `\"builtin\"`, an `owner/repo`\nslug, or a git/raw URL an external plugin ships from. Absent ⇒ `\"builtin\"`.\nThis is an index HINT only — Core derives the real trust tier from\n`plugins::builtins` membership at runtime, NOT from this field. Consumed by\nthe marketplace generator (`tools/mirror-plugins.sh`) to populate each\nentry's `source`/`builtin` pair.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stability": {
+      "description": "How finished this listing is: `alpha`, `beta`, `rc`, … Absent or `stable`\nmeans finished and renders no badge.\n\nFree-form, NOT an enum, for the same reason the marketplace-index copy of\nthis field is: an unrecognised tier renders verbatim rather than being\ndropped, so publishing a `canary` needs no client release.",
       "type": [
         "string",
         "null"

@@ -74,7 +74,12 @@ const CAPABILITIES = {
 					name: "MarkItDown",
 					version: "0.1.3",
 					is_default: true,
+					// Both flags, matching the real wire shape: `document.parse` is
+					// served by a sidecar route, never by verbs. A fixture carrying only
+					// the false one describes a provider that serves NOTHING, which is
+					// what a picker would grey out.
 					serves_verbs: false,
+					serves_route: true,
 				},
 			],
 			available: [{ id: "@ryu/docling", name: "Docling", version: "2.0.0" }],

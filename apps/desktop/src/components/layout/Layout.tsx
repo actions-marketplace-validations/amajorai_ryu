@@ -52,7 +52,6 @@ import {
 import { seedBuiltinRoutes } from "@/src/contributions/builtins.ts";
 import { RouteOutlet } from "@/src/contributions/RouteOutlet.tsx";
 import { useApprovalEvents } from "@/src/hooks/useApprovalEvents.ts";
-import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
 import { useDesktopNotificationsStream } from "@/src/hooks/useDesktopNotificationsStream.ts";
 import { useDownloadsStream } from "@/src/hooks/useDownloadsStream.ts";
 import { useEditorUploader } from "@/src/hooks/useEditorUploader.ts";
@@ -74,8 +73,9 @@ import {
 	MIN_SIDEBAR_WIDTH,
 	SIDEBAR_WIDTH_KEY,
 } from "@/src/hooks/useThemePreset.ts";
+import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
 import { setCrashRoute } from "@/src/lib/crash-context.ts";
-import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
+import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { DESKTOP_HOTKEYS } from "@/src/lib/hotkeys/actions.ts";
 import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
@@ -314,17 +314,12 @@ function LayoutContent({
 	} = useTabsContext();
 	const { actions: titleBarActions } = useTitleBarContext();
 	const tabLayout = useTabLayout();
-	const [autoHideTitleBar] = useAutoHideTitleBar();
 	// Auto-hide frees the top clearance so content fills the window; the bar
 	// overlays on hover. Mobile never auto-hides (see TitleBar). Fullscreen forces
-	// the same treatment without touching the saved pref — this predicate has to
-	// stay in lockstep with `effectiveAutoHide` in TitleBar, or the bar slides
-	// away while the row it occupied stays reserved (a blank strip on screen).
-	const isFullscreen = useFullscreen();
-	const titleBarClearsContent = !(
-		(autoHideTitleBar || isFullscreen) &&
-		!isMobile
-	);
+	// the same treatment without touching the saved pref. Shared hook keeps this
+	// in lockstep with `effectiveAutoHide` in TitleBar — or the bar slides away
+	// while the row it occupied stays reserved (a blank strip on screen).
+	const titleBarClearsContent = useTitleBarClearsContent();
 	const [floatOpen, setFloatOpen] = useState(false);
 	const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// The positioned content area; SplitGutters measures it to translate drag

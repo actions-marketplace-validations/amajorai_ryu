@@ -40,6 +40,7 @@ import {
 	sidebarFloatingChrome,
 	useSidebarVariant,
 } from "@/src/hooks/useSidebarVariant.ts";
+import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
 import { respondPermission } from "@/src/lib/api/acp.ts";
 import { chatHeaders, chatStreamUrl } from "@/src/lib/api/chat.ts";
@@ -710,9 +711,12 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	}, [convId, openTab, setConversationId, close]);
 
 	// Docked shell chrome tracks the app sidebar variant (must run before any
-	// early return — bare/closed paths still need a stable hook order).
+	// early return — bare/closed paths still need a stable hook order). The rail
+	// also starts below the frosted titlebar when it's shown; auto-hide frees the
+	// full height instead.
 	const [sidebarVariant] = useSidebarVariant();
 	const floatingChrome = sidebarVariant === "floating";
+	const titleBarClearsContent = useTitleBarClearsContent();
 
 	if (mode === "closed") {
 		return null;
@@ -872,17 +876,22 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	// Docked sidebar: mirrors the left rail + workspace right dock. Floating
 	// variant = inset rounded card (`rounded-3xl` tracks Appearance roundness);
 	// inset variant = flush rail (the main SidebarInset already wears the card).
-	// Below `md` a 380px rail would be wider than the page it sits beside, so the
-	// panel spans the viewport instead — Layout drops its width reservation at
-	// the same breakpoint.
+	// Both start below the titlebar while it's shown; with auto-hide the rail
+	// takes the full window height. Below `md` a 380px rail would be wider than
+	// the page it sits beside, so the panel spans the viewport instead — Layout
+	// drops its width reservation at the same breakpoint.
 	return (
 		<aside
 			aria-label={builder ? "Ryu builder" : "Ask Ryu assistant"}
 			className={cn(
 				"fixed z-[55] flex flex-col overflow-hidden bg-sidebar text-sidebar-foreground md:left-auto md:w-[380px]",
-				floatingChrome
-					? cn("top-12 right-2 bottom-2 left-2", sidebarFloatingChrome)
-					: "inset-y-0 right-0 left-0 md:left-auto"
+				titleBarClearsContent
+					? floatingChrome
+						? cn("top-12 right-2 bottom-2 left-2", sidebarFloatingChrome)
+						: "top-[54px] right-0 bottom-0 left-0 md:left-auto"
+					: floatingChrome
+						? cn("inset-y-0 right-2 bottom-2 left-2", sidebarFloatingChrome)
+						: "inset-y-0 right-0 left-0 md:left-auto"
 			)}
 		>
 			{body}

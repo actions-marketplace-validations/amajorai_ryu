@@ -74,6 +74,8 @@ describe("resolveCardIcon", () => {
 		expect(resolveCardIcon({ icon: "lucide:brain" })).toEqual({
 			iconId: "lucide:brain",
 			iconUrl: null,
+			iconUrlDark: null,
+			brand: false,
 		});
 	});
 
@@ -82,6 +84,8 @@ describe("resolveCardIcon", () => {
 		expect(resolveCardIcon({ icon: url })).toEqual({
 			iconId: null,
 			iconUrl: url,
+			iconUrlDark: null,
+			brand: false,
 		});
 	});
 
@@ -89,6 +93,8 @@ describe("resolveCardIcon", () => {
 		expect(resolveCardIcon({ icon: "https://evil.com/track.png" })).toEqual({
 			iconId: null,
 			iconUrl: null,
+			iconUrlDark: null,
+			brand: false,
 		});
 	});
 
@@ -97,16 +103,92 @@ describe("resolveCardIcon", () => {
 		expect(resolveCardIcon({ iconUrl: url })).toEqual({
 			iconId: null,
 			iconUrl: url,
+			iconUrlDark: null,
+			brand: false,
 		});
 	});
 
 	test("icon_url wins as raster while a real icon id is kept", () => {
 		expect(
 			resolveCardIcon({ icon: "lucide:brain", iconUrl: "https://x/logo.png" })
-		).toEqual({ iconId: "lucide:brain", iconUrl: "https://x/logo.png" });
+		).toEqual({
+			iconId: "lucide:brain",
+			iconUrl: "https://x/logo.png",
+			iconUrlDark: null,
+			brand: false,
+		});
 	});
 
 	test("empty inputs resolve to nulls", () => {
-		expect(resolveCardIcon({})).toEqual({ iconId: null, iconUrl: null });
+		expect(resolveCardIcon({})).toEqual({
+			iconId: null,
+			iconUrl: null,
+			iconUrlDark: null,
+			brand: false,
+		});
+	});
+
+	test("an svgl id resolves to the brand raster, never to an Icon glyph id", () => {
+		expect(resolveCardIcon({ icon: "svgl:brave" })).toEqual({
+			iconId: null,
+			iconUrl: "https://svgl.app/library/brave.svg",
+			iconUrlDark: null,
+			brand: true,
+		});
+	});
+
+	test("an svgl id can spell out its own light|dark pair", () => {
+		expect(resolveCardIcon({ icon: "svgl:firecrawl|firecrawl-dark" })).toEqual({
+			iconId: null,
+			iconUrl: "https://svgl.app/library/firecrawl.svg",
+			iconUrlDark: "https://svgl.app/library/firecrawl-dark.svg",
+			brand: true,
+		});
+	});
+
+	test("the loaded svgl index supplies a dark variant the id omitted", () => {
+		const index = new Map([
+			[
+				"ollama_light",
+				{
+					light: "https://svgl.app/library/ollama_light.svg",
+					dark: "https://svgl.app/library/ollama_dark.svg",
+				},
+			],
+		]);
+		expect(
+			resolveCardIcon({ icon: "svgl:ollama_light", svglIndex: index })
+		).toEqual({
+			iconId: null,
+			iconUrl: "https://svgl.app/library/ollama_light.svg",
+			iconUrlDark: "https://svgl.app/library/ollama_dark.svg",
+			brand: true,
+		});
+	});
+
+	test("a publisher's own icon_url still beats an svgl id", () => {
+		expect(
+			resolveCardIcon({ icon: "svgl:brave", iconUrl: "https://x/logo.png" })
+		).toEqual({
+			iconId: null,
+			iconUrl: "https://x/logo.png",
+			iconUrlDark: null,
+			brand: false,
+		});
+	});
+
+	test("a malformed svgl slug never reaches the CDN as a path", () => {
+		for (const bad of [
+			"svgl:../../etc/passwd",
+			"svgl:https://evil.com/x.svg",
+			"svgl:",
+		]) {
+			expect(resolveCardIcon({ icon: bad })).toEqual({
+				iconId: null,
+				iconUrl: null,
+				iconUrlDark: null,
+				brand: false,
+			});
+		}
 	});
 });

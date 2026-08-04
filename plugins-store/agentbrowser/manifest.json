@@ -7,7 +7,7 @@
   "iconDither": { "from": 3, "to": 329, "direction": "right" },
   "tagline": "A second real browser for the browser.control layer",
   "keywords": ["browser", "automation", "web"],
-  "category": "Automation",
+  "category": "Browsers",
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

@@ -2,6 +2,8 @@
   "id": "@example/research-assistant",
   "name": "Research Assistant",
   "version": "1.0.0",
+  "hidden": true,
+  "category": "Developer Tools",
   "icon": "book-search",
   "iconDither": { "from": 243, "to": 277, "direction": "up" },
   "surfaces": {

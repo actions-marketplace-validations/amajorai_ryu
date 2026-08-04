@@ -2,6 +2,7 @@
   "id": "@ryu/learning",
   "name": "Learning",
   "version": "1.0.0",
+  "category": "Knowledge & Memory",
   "description": "Learning loop: turn chats and runs into reusable skills, gated by the approval Inbox, with an experience log of what was learned.",
   "icon": "mortarboard-01",
   "iconDither": { "from": 342, "to": 308, "direction": "left" },
@@ -63,6 +64,21 @@
         "title": "Learning",
         "scope": "node",
         "view": "learning"
+      }
+    ],
+    "context_menu_items": [
+      {
+        "id": "learning.make-skill",
+        "label": "Make a skill from this chat",
+        "icon": "mortarboard-01",
+        "anchor": "conversation",
+        "capability": "learning.synthesizeSkill",
+        "feedback": {
+          "loading": "Making a skill from this chat…",
+          "success": "Learned skill: ",
+          "error": "Couldn't create a skill from this chat"
+        },
+        "order": 100
       }
     ]
   }

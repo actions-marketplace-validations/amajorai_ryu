@@ -8,7 +8,10 @@ import { create } from "zustand";
 // Desktop-client / user-account sections only. Node-level tabs (meetings, memory,
 // privacy, storage, email-alerts, connections, health, predict, tasks) and the
 // Danger Zone moved to the Gateway dialog (see `GatewaySection`); per-app/plugin
-// user-scoped tabs are dynamic and use `app:<id>` / `plugin:<id>` values.
+// user-scoped tabs are dynamic and use `app:<id>` / `plugin:<id>` values. The
+// Island and Shadow tabs (node-scoped sidecar apps) are dynamic too — each
+// declares a manifest `contributes.settings_tabs` view and renders in the Gateway
+// dialog under the Apps/Plugins headers, so neither has a static value here.
 // `updates` here is the *desktop app's own* updater — the Gateway dialog keeps a
 // separate Updates tab for the node's Core/Gateway binaries.
 export type SettingsSectionValue =
@@ -17,8 +20,6 @@ export type SettingsSectionValue =
 	| "appearance"
 	| "keyboard"
 	| "updates"
-	| "island"
-	| "shadow"
 	| "integrations"
 	| "sessions"
 	| "authorized-apps"
@@ -34,10 +35,15 @@ export type SettingsSectionValue =
 interface SettingsDialogState {
 	/** Whether the App Settings dialog is open. */
 	open: boolean;
-	/** Open the dialog at a section (defaults to general, the dialog's own default). */
-	openSettings: (section?: SettingsSectionValue) => void;
+	/**
+	 * Open the dialog at a section (defaults to general, the dialog's own default).
+	 * A known {@link SettingsSectionValue}, or a dynamic user-scoped app/plugin
+	 * entity value (`app:<id>` / `plugin:<id>`) so the Store can send a user
+	 * straight to a plugin's own settings tab. Mirrors `useGatewayDialog`.
+	 */
+	openSettings: (section?: SettingsSectionValue | (string & {})) => void;
 	/** The section to show when it opens. */
-	section: SettingsSectionValue;
+	section: string;
 	/** Controlled open/close passthrough for the dialog's onOpenChange. */
 	setOpen: (open: boolean) => void;
 }

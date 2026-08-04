@@ -7,7 +7,7 @@
 // a payload split across two enqueued reader chunks: the buffer must stitch it.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { openSse, readSse } from "./sse-client.ts";
+import { openSse, readSse, SseConnectError } from "./sse-client.ts";
 
 const realFetch = globalThis.fetch;
 
@@ -95,6 +95,16 @@ describe("openSse frame parsing", () => {
 		await expect(collect("http://x/stream")).rejects.toThrow(
 			"sse stream failed: 503"
 		);
+	});
+
+	// The status is what lets a reconnect loop tell a restarting server (retry
+	// soon) from a permanent refusal like a 409 (retry rarely, or not at all), so
+	// it has to survive as DATA — matching on the message string does not scale.
+	test("carries the HTTP status on the thrown SseConnectError", async () => {
+		mockFetch(streamResponse([], { status: 409 }));
+		const error = await collect("http://x/stream").catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(SseConnectError);
+		expect((error as SseConnectError).status).toBe(409);
 	});
 });
 

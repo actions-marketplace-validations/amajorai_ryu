@@ -48,12 +48,26 @@ export interface CapabilityProvider {
 	/** Display name. */
 	name: string;
 	/**
+	 * Whether this provider serves the capability over a broker-proxyable HTTP route
+	 * instead of verb bindings.
+	 *
+	 * The alternative serving surface, not a refinement of {@link servesVerbs}.
+	 * `document.parse` is built entirely on it: Core resolves the binding and then
+	 * calls the provider's sidecar route directly, so all four of its providers
+	 * declare zero verbs and every one of them works. Reading `servesVerbs` alone
+	 * marked all four unpickable and left the layer unswappable.
+	 */
+	servesRoute: boolean;
+	/**
 	 * Whether this provider serves any verb at all.
 	 *
-	 * A provider may declare a capability with no verb bindings yet — `agentbrowser`
-	 * does, because its tool names live in an npm package and cannot be read from the
-	 * repo. Selecting one makes every verb of that layer vanish with no error, so the
-	 * picker must not offer it as an equal choice.
+	 * A provider may declare a capability with no verb bindings — selecting one makes
+	 * every verb of that layer vanish with no error, so the picker must not offer it
+	 * as an equal choice.
+	 *
+	 * NOT the whole answer to "can this be picked" — see {@link servesRoute} and
+	 * {@link canServe}. Zero verbs is a fault only when there is also no route, and
+	 * assuming otherwise is exactly what broke the parser picker.
 	 */
 	servesVerbs: boolean;
 	/**
@@ -119,6 +133,7 @@ interface CapabilityProviderWire {
 	id: string;
 	is_default?: boolean;
 	name?: string;
+	serves_route?: boolean;
 	serves_verbs?: boolean;
 	target?: string;
 	verbs?: string[];
@@ -180,6 +195,23 @@ export function describeBindingFailure(
 	return `Couldn't switch to ${providerName}`;
 }
 
+/**
+ * Whether picking this provider would actually make the capability serve.
+ *
+ * The question every layer picker means to ask, and the one no surface should
+ * re-derive: a capability is served EITHER by verb bindings (`web.search` and
+ * friends) OR by a broker-proxyable sidecar route (`document.parse`), and a picker
+ * that checks only the first disables every provider of the second — which is what
+ * shipped, greying out all four document parsers and leaving that layer unswappable.
+ *
+ * False is currently unreachable for every provider shipped in the repo, and that is
+ * the point: it is the guard a third-party manifest declaring a capability it cannot
+ * actually serve must trip, rather than binding and turning the layer off in silence.
+ */
+export function canServe(provider: CapabilityProvider): boolean {
+	return provider.servesVerbs || provider.servesRoute;
+}
+
 /** One wire provider to its typed form. Shared by `providers` and `available`. */
 function toProvider(p: CapabilityProviderWire): CapabilityProvider {
 	return {
@@ -190,6 +222,13 @@ function toProvider(p: CapabilityProviderWire): CapabilityProvider {
 		// that does not send the flag still reports verbs, and treating "unknown" as
 		// serveable is the direction that silently turns a layer off.
 		servesVerbs: p.serves_verbs ?? (p.verbs ?? []).length > 0,
+		// No client-side fallback is possible: the route lives in the provider's
+		// manifest, which only Core reads. A Core too old to send the flag therefore
+		// keeps the pre-fix behaviour for route-backed layers rather than gaining a
+		// guess — and the guess that would "help" here is `true`, which would offer a
+		// pick that resolves to nothing on every verb-backed provider that omits the
+		// field.
+		servesRoute: p.serves_route ?? false,
 		// Only the two values the contract defines. An unknown string from a newer
 		// Core becomes `null` (= "say nothing") rather than being rendered raw, since
 		// this label makes a claim about the user's own machine and a wrong one is

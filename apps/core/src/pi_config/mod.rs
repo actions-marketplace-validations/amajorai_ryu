@@ -1914,6 +1914,25 @@ fn provider_configured(meta: &ProviderMeta) -> bool {
     false
 }
 
+/// Whether a *subscription* provider (ChatGPT / Claude / Copilot) currently has a
+/// login stored in Pi's `auth.json`. `None` when `provider_id` is not a known
+/// subscription provider — i.e. there is no ground truth to check.
+///
+/// This is the observable an ACP `authenticate` call must be judged against. The
+/// RPC returning `Ok` proves only that the agent subprocess did not error; Pi's
+/// `pi_terminal_login` method, for one, answers success immediately without doing
+/// any login at all. `auth.json` gaining a credential is what "logged in" means,
+/// so the authenticate route re-reads this after the call rather than reporting
+/// the RPC result. Uncached by design (`read_auth` hits disk each time), so a
+/// before/after comparison across the call actually observes a change.
+pub fn subscription_login_present(provider_id: &str) -> Option<bool> {
+    let meta = provider_meta(provider_id)?;
+    if meta.auth_kind != "subscription" {
+        return None;
+    }
+    Some(!meta.auth_key.is_empty() && auth_has_any(meta.auth_key))
+}
+
 // ── Public API (consumed by the HTTP handlers) ────────────────────────────────
 
 /// The current Pi configuration, as surfaced to the desktop. Never contains

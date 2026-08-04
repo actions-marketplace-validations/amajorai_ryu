@@ -2,6 +2,7 @@
   "id": "@ryu/durable",
   "name": "Durable Workflows",
   "version": "1.0.0",
+  "category": "Core",
   "engines": {
     "ryu": ">=0.0.1"
   },

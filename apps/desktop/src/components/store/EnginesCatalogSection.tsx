@@ -19,6 +19,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	EngineFootnote,
 	EngineInstallButton,
+	type EngineInstallState,
 	EnginesErrorState,
 	installStateBadge,
 } from "@ryu/blocks/desktop/store-engines";
@@ -26,6 +27,7 @@ import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
+import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
 import { Badge } from "@ryu/ui/components/badge";
 import {
 	Empty,
@@ -71,12 +73,26 @@ const PLATFORM_LABELS: Record<string, string> = {
 type EngineListKind = "text" | "media" | "voice" | "sandbox";
 
 interface EngineListItem {
+	/** False when this node's OS can't run the engine — no Install is offered. */
+	available: boolean;
+	/** Uninstall is withheld while the engine is the resident/running one. */
+	canUninstall: boolean;
 	description: string;
 	displayName: string;
+	/** The node says a newer build is actually reachable (drives forced install). */
+	hasUpdate: boolean;
 	id: string;
+	/** Installed (text/image/speech) or detected on the node (sandbox backends). */
+	installed: boolean;
+	/** Null for rows with no install lifecycle of their own (sandbox backends,
+	 *  which are detected on the node rather than installed by Ryu). */
+	installState: EngineInstallState | null;
 	kind: EngineListKind;
 	name: string;
 	statusLabel: string | null;
+	/** Current toggle position: active (text) / running (image, speech) /
+	 *  default (sandbox). */
+	toggled: boolean;
 }
 
 type PendingKind = "install" | "uninstall" | "toggle";
@@ -175,18 +191,118 @@ function useRowStates() {
 	return { rowState, patchRow, runAction };
 }
 
+/** Per-kind wording for the engine toggle, so the menu says what the toggle
+ *  actually does: a text engine is SWAPPED to (it can never be switched off — the
+ *  node always has a resident engine), image/speech engines start and stop, and a
+ *  sandbox backend is picked as the default. */
+const TOGGLE_LABELS: Record<
+	EngineListKind,
+	{ disable?: string; enable: string }
+> = {
+	text: { enable: "Set as active" },
+	media: { enable: "Start", disable: "Stop" },
+	voice: { enable: "Start", disable: "Stop" },
+	sandbox: { enable: "Set as default" },
+};
+
+/**
+ * The inline lifecycle control on an engine card — the SAME {@link StoreItemAction}
+ * Apps, Plugins, Skills, MCP and Agents cards use, so an engine installs from the
+ * list without first opening its preview.
+ *
+ * Its own component (not a node built in the list's `useMemo`) because the live
+ * download percent comes from a hook, which can't run per-item inside a memo.
+ *
+ * Rows with nothing to offer render a status Badge instead of an empty 3-dot menu:
+ * an engine this node can't run, and one whose only action would be a toggle it is
+ * already in (the resident text engine, the default sandbox — neither can be
+ * switched off, only swapped away from by picking another row).
+ */
+function EngineCardAction({
+	item,
+	busy,
+	onInstall,
+	onUninstall,
+	onToggle,
+}: {
+	busy: boolean;
+	item: EngineListItem;
+	onInstall: (item: EngineListItem) => void;
+	onToggle: (item: EngineListItem, next: boolean) => void;
+	onUninstall: (item: EngineListItem) => void;
+}) {
+	const { percent } = useInstallProgress(
+		["engine", "voice", "media", "embedding"],
+		item.name
+	);
+	const labels = TOGGLE_LABELS[item.kind];
+
+	if (!item.available) {
+		return <Badge variant="secondary">Unavailable</Badge>;
+	}
+
+	if (!item.installed) {
+		// A sandbox backend has no install lifecycle in Ryu — its CLI is detected on
+		// the node or it isn't — so it gets a status, not an Install button that
+		// could not do anything.
+		if (item.installState === null) {
+			return <Badge variant="secondary">Not detected</Badge>;
+		}
+		return (
+			<StoreItemAction
+				busy={busy || item.installState === "installing"}
+				installed={false}
+				onInstall={() => onInstall(item)}
+				percent={percent}
+			/>
+		);
+	}
+
+	const canToggleOn = !item.toggled;
+	const canToggleOff = item.toggled && Boolean(labels.disable);
+	// Nothing left to offer (the resident text engine and the default sandbox can
+	// only be swapped away from, by picking another row) → render nothing rather
+	// than a 3-dot menu that opens empty. The row's status badge, which such a row
+	// always carries ("Active" / "Default"), already says where it stands.
+	if (!(canToggleOn || canToggleOff || item.canUninstall)) {
+		return null;
+	}
+
+	return (
+		<StoreItemAction
+			busy={busy}
+			disableLabel={labels.disable}
+			enabled={item.toggled}
+			enableLabel={labels.enable}
+			installed
+			onDisable={canToggleOff ? () => onToggle(item, false) : undefined}
+			onEnable={canToggleOn ? () => onToggle(item, true) : undefined}
+			onUninstall={item.canUninstall ? () => onUninstall(item) : undefined}
+			percent={percent}
+		/>
+	);
+}
+
 function EngineList({
 	groups,
 	loading,
 	error,
 	selectedId,
 	onSelect,
+	rowState,
+	onInstall,
+	onUninstall,
+	onToggle,
 }: {
 	groups: { kind: EngineListKind; items: EngineListItem[] }[];
 	loading: boolean;
 	error: string | null;
 	selectedId: string | null;
+	onInstall: (item: EngineListItem) => void;
 	onSelect: (id: string) => void;
+	onToggle: (item: EngineListItem, next: boolean) => void;
+	onUninstall: (item: EngineListItem) => void;
+	rowState: (name: string) => RowState;
 }) {
 	const total = groups.reduce((n, g) => n + g.items.length, 0);
 
@@ -229,9 +345,18 @@ function EngineList({
 						{group.items.map((item) => (
 							<StoreCatalogCard
 								action={
-									item.statusLabel ? (
-										<Badge variant="secondary">{item.statusLabel}</Badge>
-									) : undefined
+									<div className="flex items-center gap-2">
+										{item.statusLabel ? (
+											<Badge variant="secondary">{item.statusLabel}</Badge>
+										) : null}
+										<EngineCardAction
+											busy={rowState(item.name).pending !== null}
+											item={item}
+											onInstall={onInstall}
+											onToggle={onToggle}
+											onUninstall={onUninstall}
+										/>
+									</div>
 								}
 								description={item.description}
 								icon={<HugeiconsIcon className="size-5" icon={CpuIcon} />}
@@ -635,31 +760,43 @@ export default function EnginesCatalogSection() {
 				displayName: e.displayName,
 				description: e.description,
 				statusLabel: e.active ? "Active" : null,
+				installState: e.installState,
+				installed: e.installState === "installed",
+				available: e.supported,
+				hasUpdate: hasEngineUpdate(e),
+				toggled: e.active,
+				// The resident engine can't be removed out from under the node.
+				canUninstall: e.installState === "installed" && !e.active,
 			}));
+
+		const runAlongside = (
+			e: VoiceEngineEntry,
+			kind: "media" | "voice"
+		): EngineListItem => ({
+			id: `${kind}:${e.name}`,
+			kind,
+			name: e.name,
+			displayName: e.displayName,
+			description: e.description,
+			statusLabel: e.running ? "Running" : null,
+			installState: e.installState,
+			installed: e.installState === "installed",
+			available: true,
+			hasUpdate: hasEngineUpdate(e),
+			toggled: e.running,
+			// Stop it before removing it, so a live sidecar is never pulled away.
+			canUninstall: e.installState === "installed" && !e.running,
+		});
 
 		const mediaItems: EngineListItem[] = voiceEngines
 			.filter((e) => e.category === "media")
 			.filter((e) => matches(e.displayName, e.description))
-			.map((e) => ({
-				id: `media:${e.name}`,
-				kind: "media" as const,
-				name: e.name,
-				displayName: e.displayName,
-				description: e.description,
-				statusLabel: e.running ? "Running" : null,
-			}));
+			.map((e) => runAlongside(e, "media"));
 
 		const voiceItems: EngineListItem[] = voiceEngines
 			.filter((e) => e.category === "voice")
 			.filter((e) => matches(e.displayName, e.description))
-			.map((e) => ({
-				id: `voice:${e.name}`,
-				kind: "voice" as const,
-				name: e.name,
-				displayName: e.displayName,
-				description: e.description,
-				statusLabel: e.running ? "Running" : null,
-			}));
+			.map((e) => runAlongside(e, "voice"));
 
 		const sandboxItems: EngineListItem[] = sandboxBackends
 			.filter((b) => matches(b.displayName, sandboxDescription(b)))
@@ -670,6 +807,14 @@ export default function EnginesCatalogSection() {
 				displayName: b.displayName,
 				description: sandboxDescription(b),
 				statusLabel: b.isDefault ? "Default" : null,
+				// Ryu never installs a sandbox backend — its runtime is detected on the
+				// node — so the row carries no install lifecycle at all.
+				installState: null,
+				installed: b.detected,
+				available: b.supported,
+				hasUpdate: false,
+				toggled: b.isDefault,
+				canUninstall: false,
 			}));
 
 		return [
@@ -679,6 +824,43 @@ export default function EnginesCatalogSection() {
 			{ kind: "sandbox" as const, items: sandboxItems },
 		].filter((g) => g.items.length > 0);
 	}, [textEngines, voiceEngines, sandboxBackends, debouncedQuery]);
+
+	// Card-level lifecycle, so an engine installs / starts / swaps straight from the
+	// list — the same affordance Apps and Plugins cards have. Each dispatches on the
+	// row's kind to the hook that owns it, and goes through `runAction` so the row's
+	// pending + error state is the one the detail panel already shows.
+	const handleInstall = (item: EngineListItem) => {
+		runAction(item.name, "install", () =>
+			item.kind === "text"
+				? installText(item.name, item.hasUpdate)
+				: installVoice(item.name, item.hasUpdate)
+		);
+	};
+
+	const handleUninstall = (item: EngineListItem) => {
+		runAction(item.name, "uninstall", () =>
+			item.kind === "text"
+				? uninstallText(item.name)
+				: uninstallVoice(item.name)
+		);
+	};
+
+	const handleToggle = (item: EngineListItem, next: boolean) => {
+		runAction(item.name, "toggle", async () => {
+			if (item.kind === "text") {
+				const swap = await activateText(item.name);
+				if (!swap.gatewayRefreshed) {
+					patchRow(item.name, { gatewayStale: true });
+				}
+				return;
+			}
+			if (item.kind === "sandbox") {
+				await selectSandbox(item.name);
+				return;
+			}
+			await setVoiceRunning(item.name, next);
+		});
+	};
 
 	if (error && groups.length === 0 && !loading) {
 		return <EnginesErrorState message={error} />;
@@ -719,7 +901,11 @@ export default function EnginesCatalogSection() {
 					error={error}
 					groups={groups}
 					loading={loading}
+					onInstall={handleInstall}
 					onSelect={setSelectedId}
+					onToggle={handleToggle}
+					onUninstall={handleUninstall}
+					rowState={rowState}
 					selectedId={selectedId}
 				/>
 			}

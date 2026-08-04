@@ -22,6 +22,16 @@
 // is what lets `SECTION_LABELS`/`SECTION_ICONS` be exhaustive records rather than
 // lookups that can miss. The rule for a reviewer: if a new section needs a Core
 // app to exist, it belongs in that app's manifest, not in `BUILTIN_SECTIONS`.
+//
+// Two entries here — `teams` and `workflows` — are grandfathered exceptions to that
+// rule, and being listed here does NOT mean they always render. Both are compiled-in
+// components (`TeamsSection`/`WorkflowsSection`) whose DATA comes from a Core app
+// (`@ryu/teams`, `@ryu/workflows`), so `AppSidebar`'s `SECTION_PLUGIN_OWNER` hides
+// each one unless its app is installed and enabled — otherwise the sidebar offered a
+// section whose every row hit a route the App gate refuses. Presence in this list is
+// therefore the section's IDENTITY (key, label, glyph, default position), not a
+// promise that it is visible. Do not add a third exception: a genuinely new
+// app-backed section belongs in that app's `sidebar_sections` contribution.
 
 import {
 	Archive01Icon,
@@ -71,8 +81,6 @@ export const BUILTIN_SECTIONS = [
 	{ key: "spaces", label: "Spaces", icon: DeliverySecure01Icon },
 	{ key: "channels", label: "Channels", icon: BubbleChatIcon },
 	{ key: "integrations", label: "Integrations", icon: ConnectIcon },
-	{ key: "plugins", label: "Plugins", icon: PuzzleIcon },
-	{ key: "companions", label: "Apps", icon: GridIcon },
 	{ key: "identities", label: "Identities", icon: Key01Icon },
 	{ key: "workflows", label: "Workflows", icon: WorkflowCircle06Icon },
 	{ key: "skills", label: "Skills", icon: Mortarboard01Icon },
@@ -80,6 +88,10 @@ export const BUILTIN_SECTIONS = [
 	{ key: "tools", label: "Tools", icon: Wrench01Icon },
 	{ key: "engines", label: "Engines", icon: CpuIcon },
 	{ key: "archived", label: "Archived", icon: Archive01Icon },
+	// Apps and Plugins sit at the bottom of the default order — the primary
+	// "work" sections come first and the store-adjacent surfaces trail.
+	{ key: "plugins", label: "Plugins", icon: PuzzleIcon },
+	{ key: "companions", label: "Apps", icon: GridIcon },
 ] as const satisfies readonly BuiltinSectionSpec[];
 
 /** The fixed, built-in sidebar sections (always present). */
@@ -100,32 +112,56 @@ export const DEFAULT_SECTION_ORDER: BuiltinSectionKey[] = BUILTIN_SECTIONS.map(
 );
 
 /**
- * The order shipped BEFORE `pinned` was promoted above `chats`. Deliberately a
- * frozen literal rather than something derived: it is a historical snapshot that
+ * Default orders shipped by PREVIOUS versions, each deliberately a frozen
+ * literal rather than something derived: they are historical snapshots that
  * {@link reconcileSectionOrder} compares a stored order against to detect "this
- * user never customised anything, they just have the old default persisted" and
- * migrate them onto the current default. Deriving it would make it track the
- * present and silently stop migrating anyone. Never edit it — add a new snapshot
- * if the default changes again.
+ * user never customised anything, they just have an older default persisted"
+ * and migrate them onto the current default. Deriving them would make them track
+ * the present and silently stop migrating anyone. Never edit an entry — append a
+ * new snapshot if the default changes again.
  */
-const LEGACY_DEFAULT_SECTION_ORDER: BuiltinSectionKey[] = [
-	"tabs",
-	"agents",
-	"teams",
-	"projects",
-	"chats",
-	"spaces",
-	"channels",
-	"integrations",
-	"plugins",
-	"identities",
-	"workflows",
-	"skills",
-	"mcp",
-	"tools",
-	"engines",
-	"pinned",
-	"archived",
+const LEGACY_DEFAULT_SECTION_ORDERS: BuiltinSectionKey[][] = [
+	// BEFORE `pinned` was promoted above `chats` (no `companions`).
+	[
+		"tabs",
+		"agents",
+		"teams",
+		"projects",
+		"chats",
+		"spaces",
+		"channels",
+		"integrations",
+		"plugins",
+		"identities",
+		"workflows",
+		"skills",
+		"mcp",
+		"tools",
+		"engines",
+		"pinned",
+		"archived",
+	],
+	// BEFORE `plugins`/`companions` were moved to the bottom.
+	[
+		"tabs",
+		"agents",
+		"teams",
+		"projects",
+		"pinned",
+		"chats",
+		"spaces",
+		"channels",
+		"integrations",
+		"plugins",
+		"companions",
+		"identities",
+		"workflows",
+		"skills",
+		"mcp",
+		"tools",
+		"engines",
+		"archived",
+	],
 ];
 
 /** Human labels for the built-in sections, shared by the customize dialog. */
@@ -165,8 +201,11 @@ export function isSectionKey(value: string): value is SectionKey {
 export function reconcileSectionOrder(parsed: string[]): SectionKey[] {
 	const order = [...new Set(parsed.filter(isSectionKey))];
 	if (
-		order.length === LEGACY_DEFAULT_SECTION_ORDER.length &&
-		order.every((key, index) => key === LEGACY_DEFAULT_SECTION_ORDER[index])
+		LEGACY_DEFAULT_SECTION_ORDERS.some(
+			(legacy) =>
+				order.length === legacy.length &&
+				order.every((key, index) => key === legacy[index])
+		)
 	) {
 		return [...DEFAULT_SECTION_ORDER];
 	}

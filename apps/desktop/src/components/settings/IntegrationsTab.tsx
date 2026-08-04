@@ -14,10 +14,8 @@ import { sileo } from "sileo";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	fetchIngressBackend,
-	fetchMeshStatus,
 	INGRESS_URL_PREF,
 	ingressLabel,
-	type MeshStatus,
 	setIngressBackend,
 } from "@/src/lib/api/mesh.ts";
 import {
@@ -91,14 +89,6 @@ export function IntegrationsTab() {
 	const [savedIngressUrl, setSavedIngressUrl] = useState("");
 	const [ingressUrlLoaded, setIngressUrlLoaded] = useState(false);
 	const [savingIngressUrl, setSavingIngressUrl] = useState(false);
-	// Headscale: self-hosted Tailscale control server URL.
-	const [headscaleUrl, setHeadscaleUrlValue] = useState("");
-	const [headscaleLoaded, setHeadscaleLoaded] = useState(false);
-	const [savingHeadscale, setSavingHeadscale] = useState(false);
-	// Mesh status, or null when the mesh is not relevant on this node (disabled,
-	// absent from an older Core, or Core unreachable). The Headscale section is
-	// gated on this — see the section itself for why.
-	const [meshStatus, setMeshStatus] = useState<MeshStatus | null>(null);
 
 	const navigate = useNavigate();
 	const openGateway = useGatewayDialog((s) => s.openGateway);
@@ -142,25 +132,6 @@ export function IntegrationsTab() {
 				setIngressUrlLoaded(true);
 			}
 		});
-		getPreference(target, "mesh-login-server").then((val) => {
-			if (!cancelled) {
-				setHeadscaleUrlValue(val ?? "");
-				setHeadscaleLoaded(true);
-			}
-		});
-		// Mesh is a soft dependency too. `GET /api/mesh/status` answers HTTP 200
-		// with `enabled: false` on a mesh-off node (the normal case — nothing in the
-		// desktop can set `RYU_MESH_ENABLED`), and 404s on a Core without the
-		// plane; both map to `null` = "no mesh here", matching `useSystemStatus`.
-		fetchMeshStatus(target)
-			.then((status) => {
-				if (!cancelled) {
-					setMeshStatus(status.enabled ? status : null);
-				}
-			})
-			.catch(() => {
-				// No mesh plane on this node — leave the section hidden.
-			});
 		return () => {
 			cancelled = true;
 		};
@@ -264,22 +235,6 @@ export function IntegrationsTab() {
 			sileo.success({ title: "Artificial Analysis key saved" });
 		} else {
 			sileo.error({ title: "Failed to save Artificial Analysis key" });
-		}
-	};
-
-	const handleSaveHeadscale = async () => {
-		setSavingHeadscale(true);
-		const target = toTarget(useNodeStore.getState().getActiveNode());
-		const ok = await setPreference(target, "mesh-login-server", headscaleUrl);
-		setSavingHeadscale(false);
-		if (ok) {
-			sileo.success({
-				title: "Headscale server saved",
-				description:
-					"Restart the mesh daemon (or this node) for the change to take effect.",
-			});
-		} else {
-			sileo.error({ title: "Failed to save Headscale server URL" });
 		}
 	};
 
@@ -471,63 +426,6 @@ export function IntegrationsTab() {
 					</div>
 				</div>
 			</SettingsSection>
-
-			{/*
-			 * Headscale is only settable where a mesh daemon exists to consume it.
-			 * `mesh-login-server` is read in exactly one place — `tailscale up
-			 * --login-server` during one-shot enrollment — which never runs unless
-			 * Core's `ryu_mesh::is_enabled()` (env `RYU_MESH_ENABLED`, default false)
-			 * lets the sidecar start. On a normal install that is off, the sidecar is
-			 * out of `startup_order` and has no downloader, so the field used to save
-			 * happily and toast "restart the mesh daemon" about a daemon that does not
-			 * exist. Gating on `meshStatus !== null` mirrors how `MeshSection` in the
-			 * node dropdown already hides itself.
-			 *
-			 * Consequence, deliberately accepted: with mesh off you can no longer
-			 * pre-seed the URL before mesh exists. A setting that cannot take effect
-			 * should not be settable; seed it with the pref API or the env var if you
-			 * really need it ahead of time.
-			 *
-			 * This gate is NOT the mesh feature. Making the mesh reachable from the
-			 * desktop (a pref-or-env enable gate instead of env-only, a daemon
-			 * downloader, and a UI toggle) is a separate project — the gate only stops
-			 * this one control from lying in the meantime.
-			 */}
-			{meshStatus !== null && (
-				<SettingsSection
-					caption="Point the mesh at a self-hosted Headscale server instead of Tailscale SaaS. Leave empty to use Tailscale SaaS. Applies when the mesh daemon next enrolls (new node or re-enrollment)."
-					title="Headscale"
-				>
-					<SettingsGroup>
-						<SettingsItem title="Control server URL">
-							<div className="flex items-center gap-2">
-								<Input
-									autoComplete="off"
-									className="h-8 flex-1 text-xs"
-									disabled={!headscaleLoaded}
-									id="headscale-url"
-									onChange={(e) => setHeadscaleUrlValue(e.target.value)}
-									placeholder="https://headscale.example.com"
-									type="url"
-									value={headscaleUrl}
-								/>
-								<Button
-									disabled={!headscaleLoaded || savingHeadscale}
-									onClick={handleSaveHeadscale}
-									size="sm"
-								>
-									{savingHeadscale ? "Saving…" : "Save"}
-								</Button>
-							</div>
-							<p className="text-muted-foreground text-xs">
-								Passed as <code>--login-server</code> to{" "}
-								<code>tailscale up</code>. Leave empty and save to revert to
-								Tailscale SaaS.
-							</p>
-						</SettingsItem>
-					</SettingsGroup>
-				</SettingsSection>
-			)}
 
 			{ingressChoices && ingressChoices.length > 0 && (
 				<SettingsSection

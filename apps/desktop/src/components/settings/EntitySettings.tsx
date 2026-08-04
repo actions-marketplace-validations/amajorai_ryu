@@ -19,12 +19,14 @@ import type { ScopedNavEntity } from "@/src/hooks/useScopedSettingsNav.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { PluginSettingsTab } from "@/src/lib/pluginSettings.ts";
 import { DictationSettings } from "./DictationSettings.tsx";
+import { IslandSettings } from "./IslandSettings.tsx";
 import { LearningSettings } from "./LearningSettings.tsx";
 import { MeetingsSettings } from "./MeetingsSettings.tsx";
 import { MemoryTab } from "./MemoryTab.tsx";
 import { PluginSettingsFields } from "./PluginSettingsFields.tsx";
 import { PredictSettings } from "./PredictSettings.tsx";
 import { QuestsSettings } from "./QuestsSettings.tsx";
+import { ShadowSettings } from "./ShadowSettings.tsx";
 import { SettingsSection } from "./shared/settings-items.tsx";
 
 /**
@@ -41,10 +43,12 @@ import { SettingsSection } from "./shared/settings-items.tsx";
  * settings UI for third-party apps can hang off this same seam later.
  */
 const SETTINGS_VIEWS: Record<string, ComponentType> = {
+	"@ryu/island": IslandSettings,
 	"@ryu/learning": LearningSettings,
 	"@ryu/meetings": MeetingsSettings,
 	"@ryu/memory": MemoryTab,
 	"@ryu/quests": QuestsSettings,
+	"@ryu/shadow": ShadowSettings,
 	dictation: DictationSettings,
 	predict: PredictSettings,
 };

@@ -34,6 +34,7 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAppsCatalog } from "@/src/hooks/useAppsCatalog.ts";
 import { useModelCatalog } from "@/src/hooks/useModelCatalog.ts";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
+import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
 import type { DownloadKind } from "@/src/lib/api/downloads.ts";
 import { estimateLlmfit, listInstalledModels } from "@/src/lib/api/models.ts";
@@ -135,6 +136,10 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			useModelCatalog,
 			useActiveNode: useCatalogNode,
 			usePersistedToggle,
+			// Lets a Store listing lead to its own settings tab (Gateway dialog for
+			// node-scoped tabs, App Settings for user-scoped ones) instead of leaving
+			// the user to find it. Web omits this and the affordance never renders.
+			usePluginSettingsOpener,
 			installSidecar,
 			estimateLlmfit: (node, repo) =>
 				estimateLlmfit({ url: node.url, token: node.token }, repo),

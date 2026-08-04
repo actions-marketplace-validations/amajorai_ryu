@@ -7,7 +7,7 @@
   "iconDither": { "from": 296, "to": 330, "direction": "left" },
   "tagline": "Recall what you have seen and done",
   "keywords": ["capture", "memory"],
-  "category": "Search",
+  "category": "Knowledge & Memory",
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },
@@ -143,5 +143,15 @@
       }
     }
   ],
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "shadow.settings",
+        "title": "Shadow",
+        "scope": "node",
+        "view": "shadow"
+      }
+    ]
+  },
   "permission_grants": ["tool:http-egress:127.0.0.1"]
 }

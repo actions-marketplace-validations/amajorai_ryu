@@ -2,7 +2,7 @@
 //!
 //! A plugin can declare that one of its runnables needs an external language
 //! runtime — today a **Python venv** with pip dependencies and fetched assets —
-//! exactly like the `apps/tts-sidecar` (`RyuTtsManager`) precedent, but as a
+//! exactly like the `apps-store/voice/sidecar` (`RyuTtsManager`) precedent, but as a
 //! reusable, *declarative* spec instead of bespoke per-engine code.
 //!
 //! ## What exists today vs. this scaffold

@@ -70,6 +70,24 @@ export interface CatalogInstall {
 	InstallButton: ComponentType<CatalogInstallButtonProps>;
 }
 
+/** Resolves a plugin id to a "reveal its settings" action, or `null` when that
+ *  plugin has no settings destination on this surface. */
+export type PluginSettingsOpener = (
+	pluginId: string
+) => (() => void) | null | undefined;
+
+/** Stable "nothing is configurable here" resolver. Module-level so a surface
+ *  without {@link CatalogHost.usePluginSettingsOpener} keeps the same identity
+ *  every render and the fallback hook call stays rules-of-hooks clean. */
+const NO_SETTINGS_OPENER: PluginSettingsOpener = () => null;
+
+/** Fallback for {@link CatalogHost.usePluginSettingsOpener} on a host that omits
+ *  it (web). A hook by shape so call sites can pick one or the other and still
+ *  make exactly one hook call per render. */
+export function useNoSettingsOpener(): PluginSettingsOpener {
+	return NO_SETTINGS_OPENER;
+}
+
 /** Props for the host-provided Markdown renderer. The two surfaces render skill
  *  READMEs / bundled files through their own Markdown component (desktop:
  *  Streamdown; web: react-markdown), so the shared sections never pick one. */
@@ -151,6 +169,17 @@ export interface CatalogHost {
 		key: string,
 		defaultValue: boolean
 	) => [boolean, (v: boolean) => void];
+	/** Resolve "where is this plugin configured?" into an opener.
+	 *
+	 *  A hook (called ONCE per section, its resolver threaded down to the cards) so
+	 *  the host can read live state — which plugins declare settings, at which
+	 *  scope — without every card refetching it. The resolver returns `null` for a
+	 *  plugin with no settings destination, and the Settings affordance then does
+	 *  not render, so an item that can't be configured never offers to be.
+	 *
+	 *  Omitted by read-only surfaces (web has no settings dialog to open); the
+	 *  sections fall back to {@link useNoSettingsOpener}. */
+	usePluginSettingsOpener?: () => PluginSettingsOpener;
 	/** The surface's Skills catalog hook (called at component top level). */
 	useSkillsCatalog: (initialQuery: string) => SkillsCatalogState;
 }

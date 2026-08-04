@@ -1,13 +1,16 @@
 // apps/desktop/src/components/shell/TrayPopover.tsx
 //
-// Shared chrome for the sidebar-footer tray popovers (Inbox, Downloads). Both
-// hang a plain shadcn Popover off a 28px icon button, and share one set of
-// headers, rows, empty states, and the "open the full page" footer here.
+// Shared chrome for the sidebar-footer tray panels (Inbox, Downloads). Both hang
+// a TrayMorph off a 28px icon button: the trigger IS the panel, a circle that
+// morphs open into the tray box (`.t-morph` / `.t-morph-plus` / `.t-morph-menu`
+// in globals.css) rather than spawning a popover beside itself — the same motion
+// the sidebar "+" CreateMenu uses. The two trays share one set of headers, rows,
+// empty states, and the "open the full page" footer here.
 //
 // Design rules the two trays obey, so they read as one component:
 //   * One row grid, always: 28px glyph · title + one meta line · action slot.
-//     Rows are inset cards (radius concentric with the panel: 24px panel − 6px
-//     padding = 18px row), never full-bleed `divide-y` slabs.
+//     Rows are inset cards (radius concentric with the panel: 20px panel − 6px
+//     padding = 14px row), never full-bleed `divide-y` slabs.
 //   * One meta line, dot-separated and truncated. Timestamps, sizes, speeds and
 //     risk tags all live there — nothing gets its own stacked line, so every row
 //     is the same height and the list scans as a column.
@@ -19,7 +22,6 @@
 
 import { ArrowUpRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
-import { PopoverContent } from "@ryu/ui/components/popover.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import {
 	Tooltip,
@@ -28,10 +30,11 @@ import {
 } from "@ryu/ui/components/tooltip.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
-	type ComponentProps,
+	type CSSProperties,
 	type ReactNode,
 	useCallback,
 	useEffect,
+	useId,
 	useRef,
 	useState,
 } from "react";
@@ -40,10 +43,22 @@ export type TrayTone = "default" | "danger" | "success" | "primary";
 
 /** The 28px footer icon button both trays hang off. */
 export const trayTriggerClass =
-	"relative flex h-7 w-7 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-[popup-open]:bg-muted data-[popup-open]:text-foreground";
+	"relative flex h-7 w-7 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground";
 
-/** Row radius, concentric with the panel (24px panel − 6px padding). */
-const ROW_RADIUS = "rounded-[18px]";
+/** Row radius, concentric with the panel (20px panel − 6px padding). */
+const ROW_RADIUS = "rounded-[14px]";
+
+/** The morph's open width — the fixed tray width both trays were laid out at. */
+const TRAY_MORPH_OPEN_W = "23rem";
+/**
+ * The morph's open height is measured, not declared, so this is only the value
+ * shown until the always-mounted panel is measured. The CreateMenu comment that
+ * says the open box "has to be declared, not measured" is about feeding the
+ * animated size back into the thing being animated (a loop); here the panel's
+ * height depends only on its own content — never on the container — so measuring
+ * it and writing the container's height is one-way and settles.
+ */
+const TRAY_MORPH_INITIAL_H = 240;
 
 /**
  * The count bubble both triggers overlay. Stays mounted so the
@@ -83,22 +98,150 @@ export function TrayBadge({
 }
 
 /**
- * Plain shadcn PopoverContent sized for a tray list. Same primitive as the rest
- * of the app (SessionsPopover, etc.) — no glass-tray overrides beyond width and
- * padding so the panel matches the house popover.
+ * The sidebar-footer tray morph (Inbox, Downloads): a 28px icon button whose
+ * trigger IS the panel — the closed circle grows into the tray box
+ * (`.t-morph` / `.t-morph-plus` / `.t-morph-menu`) instead of spawning a
+ * popover beside itself, exactly like the "+" CreateMenu in the same footer.
+ * The panel is always mounted (inert when closed) so its height can be measured
+ * while hidden; the box grows to the measured height, so a short list hugs its
+ * rows and a long one caps at the scroller's max.
  */
-export function TrayPopoverContent({
-	className,
-	...props
-}: ComponentProps<typeof PopoverContent>) {
+export function TrayMorph({
+	badge,
+	children,
+	icon,
+	label,
+	onOpenChange,
+	open,
+}: {
+	badge?: ReactNode;
+	/** The tray panel body — TrayHeader, TrayScroll/TrayEmpty, TrayFooter. */
+	children: ReactNode;
+	icon: IconSvgElement;
+	label: string;
+	onOpenChange: (open: boolean) => void;
+	open: boolean;
+}) {
+	const panelId = useId();
+	const rootRef = useRef<HTMLDivElement | null>(null);
+	const triggerRef = useRef<HTMLButtonElement | null>(null);
+	const panelRef = useRef<HTMLDivElement | null>(null);
+	const [openH, setOpenH] = useState(TRAY_MORPH_INITIAL_H);
+
+	// Close on outside pointerdown or Escape — the morph has no backdrop, and
+	// there is no Base UI popover here that would own this for us.
+	useEffect(() => {
+		if (!open) {
+			return;
+		}
+		const onPointerDown = (e: PointerEvent) => {
+			if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+				onOpenChange(false);
+			}
+		};
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				onOpenChange(false);
+			}
+		};
+		window.addEventListener("pointerdown", onPointerDown);
+		window.addEventListener("keydown", onKeyDown);
+		return () => {
+			window.removeEventListener("pointerdown", onPointerDown);
+			window.removeEventListener("keydown", onKeyDown);
+		};
+	}, [onOpenChange, open]);
+
+	// Measure the panel one-way: the box's open height tracks the panel's
+	// content height, which nothing animates, so the observer settles.
+	useEffect(() => {
+		const el = panelRef.current;
+		if (!el || typeof ResizeObserver === "undefined") {
+			return;
+		}
+		const measure = () => setOpenH(el.offsetHeight);
+		measure();
+		const observer = new ResizeObserver(measure);
+		observer.observe(el);
+		return () => observer.disconnect();
+	}, []);
+
+	// Keep the popover's focus behaviour: the panel takes focus when it opens,
+	// and returns it to the trigger when it closes.
+	const wasOpen = useRef(open);
+	useEffect(() => {
+		if (open && !wasOpen.current) {
+			panelRef.current?.focus();
+		} else if (!open && wasOpen.current) {
+			triggerRef.current?.focus();
+		}
+		wasOpen.current = open;
+	}, [open]);
+
+	const morphVars = {
+		"--morph-open-w": TRAY_MORPH_OPEN_W,
+		"--morph-open-h": `${openH}px`,
+	} as CSSProperties;
+
 	return (
-		<PopoverContent
-			align="end"
-			className={cn("w-[23rem] gap-0 p-0", className)}
-			side="top"
-			sideOffset={8}
-			{...props}
-		/>
+		<div className="relative size-7 shrink-0" ref={rootRef}>
+			{/* The tray panel is 23rem — wider than the whole sidebar — so unlike the
+			    create menu it grows UP and to the RIGHT (bottom-left pinned), out over
+			    the content pane, instead of off the window's left edge. */}
+			<div className="absolute -bottom-1.5 -left-1.5 z-50">
+				{/* The lift rides the container, not the panel: `.t-morph` clips its
+				    children, so a shadow on the panel inside would never be painted. */}
+				<div
+					className="t-morph data-[open=true]:shadow-lg"
+					data-open={open}
+					style={morphVars}
+				>
+					{/* `.t-morph-plus` fills the 40px closed box (that is what carries
+					    the fade on open), so the BUTTON is the 28px child centred inside
+					    it. Hanging the click on the 40px box instead would push the hit
+					    area 6px past the slot and onto the neighbours. */}
+					<div className="t-morph-plus">
+						<Tooltip>
+							<TooltipTrigger
+								render={
+									<button
+										aria-controls={panelId}
+										aria-expanded={open}
+										aria-haspopup="true"
+										aria-label={label}
+										className={cn(
+											trayTriggerClass,
+											open && "bg-muted text-foreground"
+										)}
+										onClick={() => onOpenChange(!open)}
+										ref={triggerRef}
+										type="button"
+									>
+										<HugeiconsIcon icon={icon} size={15} />
+										{badge}
+									</button>
+								}
+							/>
+							<TooltipContent>{label}</TooltipContent>
+						</Tooltip>
+					</div>
+					{/* Pinned to the container's bottom-left at its open width, so the
+					    rows sit still while the box grows past them instead of travelling
+					    with its top-left corner. The height is content-sized and always
+					    mounted so the closed tray is measurable. */}
+					<div
+						className="t-morph-menu absolute bottom-0 left-0 flex flex-col rounded-[20px] border border-border/50 bg-popover/70 p-0 backdrop-blur-2xl backdrop-saturate-150"
+						id={panelId}
+						inert={!open}
+						ref={panelRef}
+						style={{ width: "var(--morph-open-w)" }}
+						tabIndex={-1}
+					>
+						{children}
+					</div>
+				</div>
+			</div>
+		</div>
 	);
 }
 

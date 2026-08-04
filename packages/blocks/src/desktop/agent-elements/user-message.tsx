@@ -1,6 +1,9 @@
 ﻿import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
 import { Button } from "@ryu/ui/components/button";
-import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar";
+import {
+	DitherAvatar,
+	ditherAvatarSeed,
+} from "@ryu/ui/components/dither-kit/avatar";
 import {
 	Tooltip,
 	TooltipContent,
@@ -25,6 +28,7 @@ export interface UserMessageProps {
 	currentUser?: {
 		avatar?: string;
 		name?: string;
+		id?: string;
 	};
 	/** When true, the bubble is replaced by an inline editor (ChatGPT/Claude-style
 	 * message editing). Saving calls `onEditSubmit`; Escape/Cancel calls
@@ -413,7 +417,7 @@ export const UserMessage = memo(function UserMessage({
 			<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
 				<DitherAvatar
 					className="size-full"
-					name={author.id || author.name || "ryu"}
+					name={ditherAvatarSeed({ id: author.id, name: author.name })}
 				/>
 			</AvatarFallback>
 		</Avatar>

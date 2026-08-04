@@ -75,6 +75,8 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "finetune.merge" => Some("host.finetune_merge"),
         "conversation.setTitle" => Some("host.setConversationTitle"),
         "preferences.get" => Some("host.getPreference"),
+        "learning.recordFeedback" => Some("host.recordFeedback"),
+        "learning.synthesizeSkill" => Some("host.synthesizeSkill"),
         _ => None,
     }
 }

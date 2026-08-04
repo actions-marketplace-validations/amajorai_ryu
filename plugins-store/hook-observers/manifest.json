@@ -2,6 +2,7 @@
   "id": "@ryu/hook-observers",
   "name": "Hook Observers",
   "version": "1.0.0",
+  "category": "Developer Tools",
   "icon": "eye",
   "iconDither": { "from": 267, "to": 301, "direction": "right" },
   "surfaces": {

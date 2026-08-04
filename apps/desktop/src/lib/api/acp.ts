@@ -157,20 +157,40 @@ export async function respondPermission(
 	});
 }
 
+/** Outcome of {@link authenticateAgent}, as OBSERVED by Core. */
+export interface AcpAuthResult {
+	/** The ACP `authenticate` request itself returned without error. */
+	agentAccepted?: boolean;
+	/** A credential is actually present now. The only field worth celebrating. */
+	authenticated: boolean;
+	/** True when THIS call is what connected it (vs already being connected). */
+	changed?: boolean;
+	error?: string;
+	/**
+	 * Whether Core had ground truth to check. `false` means `authenticated` is
+	 * just the RPC result — an agent can accept the request having done nothing,
+	 * so callers must NOT word an unverified result as "signed in".
+	 */
+	verified?: boolean;
+}
+
 /**
  * Run an agent-advertised authentication method (e.g. "Login with ChatGPT").
- * Core drives the ACP `authenticate` call; a subscription/OAuth agent then
- * becomes usable. Returns `{ authenticated }` plus an optional `error` string.
+ * Core drives the ACP `authenticate` call and — when `providerId` names a
+ * subscription provider — verifies the outcome against Pi's stored credentials
+ * rather than trusting the RPC. Always pass `providerId` where one exists;
+ * without it the result is unverified and cannot be reported as a login.
  */
 export async function authenticateAgent(
 	target: ApiTarget,
 	agentId: string,
-	methodId: string
-): Promise<{ authenticated: boolean; error?: string }> {
-	return await request<{ authenticated: boolean; error?: string }>(
+	methodId: string,
+	providerId?: string
+): Promise<AcpAuthResult> {
+	return await request<AcpAuthResult>(
 		target,
 		`/api/agents/${encodeURIComponent(agentId)}/authenticate`,
-		{ method: "POST", body: { method_id: methodId } }
+		{ method: "POST", body: { method_id: methodId, provider_id: providerId } }
 	);
 }
 

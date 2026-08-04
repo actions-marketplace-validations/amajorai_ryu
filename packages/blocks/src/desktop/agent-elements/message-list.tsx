@@ -85,6 +85,7 @@ export interface MessageListProps {
 	currentUser?: {
 		avatar?: string;
 		name?: string;
+		id?: string;
 	};
 	/**
 	 * When true (default) clicking an attached image in a user message opens
@@ -103,6 +104,9 @@ export interface MessageListProps {
 	 *   or read-only transcripts where the user should read top-to-bottom.
 	 */
 	initialScrollBehavior?: "bottom" | "top";
+	/** Contributed per-message toolbar actions (see {@link ContributedMessageAction}),
+	 *  rendered after the built-ins. Filtered to the message's `target` by the shell. */
+	messageActions?: ContributedMessageAction[];
 	messages: UIMessage[];
 	/**
 	 * Branch ("fork into new chat") a message. When provided, a branch button is
@@ -110,6 +114,11 @@ export interface MessageListProps {
 	 * the message to branch from (history up to and including it is copied).
 	 */
 	onBranch?: (messageId: string) => void;
+	/** Fire a contributed message action (see {@link ContributedMessageAction}). */
+	onContributedMessageAction?: (
+		action: ContributedMessageAction,
+		value?: string
+	) => void;
 	/**
 	 * Edit a previously-sent user message into a new version (ChatGPT/Claude-style
 	 * branching). When provided, a pencil button appears in each user message's
@@ -129,6 +138,10 @@ export interface MessageListProps {
 		rating: "up" | "down" | null,
 		isLatest: boolean
 	) => void;
+	/**
+	 * Open a project file referenced by assistant output or tool summaries.
+	 */
+	onOpenFile?: (path: string) => void;
 	/**
 	 * Quote a text selection made inside a message. When provided, selecting text
 	 * in any message surfaces a floating "Quote" button; clicking it calls this
@@ -159,7 +172,11 @@ export interface MessageListProps {
 		UserMessage?: React.ComponentType<{
 			message: UIMessage;
 			className?: string;
-			currentUser?: { avatar?: string; name?: string };
+			currentUser?: {
+				avatar?: string;
+				name?: string;
+				id?: string;
+			};
 			enableImagePreview?: boolean;
 			editing?: boolean;
 			onEditSubmit?: (text: string) => void;
@@ -658,6 +675,77 @@ function VersionPager({
 // survives reloads. The vote seeds the learning + memory sinks in Core.
 type FeedbackRating = "up" | "down";
 
+/** A presentational per-message toolbar action contributed by an enabled plugin
+ *  (`contributes.message_actions`), as served by `GET /api/plugins/contributions`
+ *  and tagged with its owning `plugin`. Blocks stays presentational: the shell
+ *  resolves the feed and passes resolved actions in; blocks never fetches. */
+export interface ContributedMessageAction {
+	/** Capability the shell dispatches when the action fires (never inline code). */
+	capability?: string;
+	icon?: string;
+	id: string;
+	kind: string;
+	label: string;
+	/** The owning plugin's manifest id (tagged by Core). */
+	plugin: string;
+	/** For `toggle-group`: `{ value, label, icon?, active_icon? }[]`. */
+	states?: {
+		active_icon?: string;
+		icon?: string;
+		label: string;
+		value: string;
+	}[];
+	/** Which messages the action attaches to (`assistant` | `user` | `any`). */
+	target: string;
+}
+
+/** One state button of a contributed `toggle-group` message action. Rendered
+ *  exactly like the built-in thumbs: the active state is lit by `activeValue` and
+ *  clicking the active state again clears it. */
+function ContributedToggleGroupButtons({
+	action,
+	activeValue,
+	onSelect,
+}: {
+	action: ContributedMessageAction;
+	activeValue?: string;
+	onSelect: (value: string) => void;
+}) {
+	if (!action.states || action.states.length === 0) {
+		return null;
+	}
+	return (
+		<>
+			{action.states.map((state) => {
+				const active = activeValue === state.value;
+				return (
+					<Button
+						aria-label={state.label}
+						aria-pressed={active}
+						className={cn(
+							"size-6 rounded-md opacity-50 hover:opacity-100",
+							active && "opacity-100"
+						)}
+						key={state.value}
+						onClick={() => onSelect(state.value)}
+						onMouseDown={(event) => event.stopPropagation()}
+						onPointerDown={(event) => {
+							event.stopPropagation();
+						}}
+						size="icon"
+						tabIndex={-1}
+						title={state.label}
+						type="button"
+						variant="ghost"
+					>
+						{state.label}
+					</Button>
+				);
+			})}
+		</>
+	);
+}
+
 function FeedbackButtons({
 	rating,
 	onFeedback,
@@ -738,6 +826,8 @@ function MessageToolbar({
 	onSpeak,
 	feedbackRating,
 	onFeedback,
+	contributedActions,
+	onContributedAction,
 }: {
 	text?: string;
 	timestamp?: string;
@@ -752,6 +842,14 @@ function MessageToolbar({
 	onSpeak?: () => void;
 	feedbackRating?: FeedbackRating;
 	onFeedback?: (next: FeedbackRating | null) => void;
+	/** Contributed per-message actions rendered AFTER the built-ins. The shell
+	 *  resolves `contributes.message_actions` from the feed and passes them in;
+	 *  blocks never fetches. */
+	contributedActions?: ContributedMessageAction[];
+	onContributedAction?: (
+		action: ContributedMessageAction,
+		value?: string
+	) => void;
 }) {
 	return (
 		<div
@@ -775,6 +873,34 @@ function MessageToolbar({
 			{onSpeak && <SpeakButton onSpeak={onSpeak} />}
 			{onFeedback && (
 				<FeedbackButtons onFeedback={onFeedback} rating={feedbackRating} />
+			)}
+			{contributedActions?.map((action) =>
+				action.kind === "toggle-group" ? (
+					<ContributedToggleGroupButtons
+						action={action}
+						activeValue={feedbackRating}
+						key={action.id}
+						onSelect={(value) => onContributedAction?.(action, value)}
+					/>
+				) : (
+					<Button
+						aria-label={action.label}
+						className="size-6 rounded-md opacity-50 hover:opacity-100"
+						key={action.id}
+						onClick={() => onContributedAction?.(action)}
+						onMouseDown={(event) => event.stopPropagation()}
+						onPointerDown={(event) => {
+							event.stopPropagation();
+						}}
+						size="icon"
+						tabIndex={-1}
+						title={action.label}
+						type="button"
+						variant="ghost"
+					>
+						{action.label}
+					</Button>
+				)
 			)}
 		</div>
 	);
@@ -815,10 +941,13 @@ export const MessageList = memo(function MessageList({
 	onRegenerateMessage,
 	onFeedback,
 	feedback,
+	messageActions,
+	onContributedMessageAction,
 	onSelectVersion,
 	versions,
 	onSpeak,
 	onQuote,
+	onOpenFile,
 	suppressQuestionTool = false,
 	initialScrollBehavior = "bottom",
 	enableImagePreview = true,
@@ -1074,6 +1203,19 @@ export const MessageList = memo(function MessageList({
 												const feedbackRating = branchMsgId
 													? feedback?.[branchMsgId]
 													: undefined;
+												// Contributed per-message actions for this assistant turn,
+												// filtered to `assistant`/`any` targets (the shell resolved the
+												// feed; blocks stays presentational).
+												const assistantActions = messageActions?.filter(
+													(a) => a.target === "assistant" || a.target === "any"
+												);
+												const onContributedActionTurn =
+													onContributedMessageAction
+														? (
+																action: ContributedMessageAction,
+																value?: string
+															) => onContributedMessageAction(action, value)
+														: undefined;
 												const assistantVersion = branchMsgId
 													? versions?.[branchMsgId]
 													: undefined;
@@ -1125,6 +1267,7 @@ export const MessageList = memo(function MessageList({
 																			isStreaming={isStreaming}
 																			key={msg.id}
 																			msg={msg}
+																			onOpenFile={onOpenFile}
 																			suppressQuestionTool={
 																				suppressQuestionTool
 																			}
@@ -1154,6 +1297,7 @@ export const MessageList = memo(function MessageList({
 															{showToolbar ? (
 																<MessageToolbar
 																	alignClass="justify-start"
+																	contributedActions={assistantActions}
 																	feedbackRating={feedbackRating}
 																	heightClass="h-6 w-full"
 																	hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
@@ -1164,6 +1308,7 @@ export const MessageList = memo(function MessageList({
 																		isLastTurn || activeCopyId === copyKey
 																	}
 																	onBranch={onBranchTurn}
+																	onContributedAction={onContributedActionTurn}
 																	onCopied={() => markCopied(copyKey)}
 																	onFeedback={onFeedbackTurn}
 																	onRegenerate={onRegenerateTurn}
@@ -1173,11 +1318,13 @@ export const MessageList = memo(function MessageList({
 															) : activeCopyId === copyKey ? (
 																<MessageToolbar
 																	alignClass="justify-start"
+																	contributedActions={assistantActions}
 																	feedbackRating={feedbackRating}
 																	heightClass="h-6 w-full"
 																	hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
 																	isVisible={true}
 																	onBranch={onBranchTurn}
+																	onContributedAction={onContributedActionTurn}
 																	onCopied={() => markCopied(copyKey)}
 																	onFeedback={onFeedbackTurn}
 																	onRegenerate={onRegenerateTurn}
@@ -1231,6 +1378,7 @@ function AssistantParts({
 	suppressQuestionTool,
 	ToolRendererComponent,
 	toolRenderers,
+	onOpenFile,
 }: {
 	msg: UIMessage;
 	isLast: boolean;
@@ -1238,6 +1386,7 @@ function AssistantParts({
 	suppressQuestionTool: boolean;
 	ToolRendererComponent: React.ComponentType<ToolRendererProps>;
 	toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
+	onOpenFile?: (path: string) => void;
 }) {
 	const { groupToolUses } = useChatDisplayPrefs();
 	const parts = useMemo(
@@ -1311,6 +1460,7 @@ function AssistantParts({
 								citations={citations.length > 0 ? citations : undefined}
 								className="leading-relaxed [&_p]:leading-relaxed"
 								content={text}
+								onOpenFile={onOpenFile}
 							/>
 						</div>
 					);
