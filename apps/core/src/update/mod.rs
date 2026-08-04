@@ -444,14 +444,17 @@ struct GhRelease {
 
 /// The version a release advertises.
 ///
-/// Two shapes exist, because the channels are tagged differently ON PURPOSE:
+/// Two shapes exist, and the tag is now the primary source for BOTH:
 ///
-///   * **Versioned tags** (`v0.0.13`, `v0.0.13-beta.1`) — the tag IS the version.
-///   * **Rolling tags** (`nightly`, `canary`) — the tag is a fixed pointer that
-///     rolls forward each run, so users can always fetch `/releases/tag/nightly`
-///     without a year's worth of dead tags accumulating. The real version lives in
-///     the release TITLE, which the workflow writes as
-///     `Nightly 0.0.13-nightly.20260728.932 (f1a68ac9b05c)`.
+///   * **Versioned tags** (`v0.0.13`, `v0.0.13-beta.1`, and since 2026-08-04 the
+///     rolling channels too — `v0.1.2-canary.20260804.36`) — the tag IS the version.
+///   * **Title fallback** — until 2026-08-04 `canary`/`nightly` published to a fixed
+///     rolling tag carrying no version, so the version had to be read out of the
+///     release TITLE (`Nightly 0.0.13-nightly.20260728.932 (f1a68ac9b05c)`). Those
+///     workflows now stamp a versioned tag per build and keep a bounded window of
+///     history instead of deleting the previous one (docs/RELEASING.md §11), but the
+///     title scan stays: it still parses every release published before the change,
+///     and it is the safety net for a hand-made tag.
 ///
 /// So: try the tag, then scan the title for the first semver-shaped token. Both
 /// sources are workflow-controlled. `None` when neither yields a version.
