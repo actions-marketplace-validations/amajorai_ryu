@@ -1106,6 +1106,44 @@ pub struct RouteSpec {
     /// webhook whose external caller cannot hold the node token).
     #[serde(default)]
     pub auth: RouteAuth,
+
+    /// The [`PluginManifest::permission_levels`] id a caller must hold to reach this
+    /// route. Absent (the default) = ungated: Core forwards exactly as it always did,
+    /// so annotating is opt-in and no existing app changes behaviour.
+    ///
+    /// This is the only place a route→permission mapping can honestly live: Core
+    /// cannot know that an app's `/tabs/:id/close` is destructive, and the sidecar
+    /// cannot enforce it (it never sees the caller's identity, only Core's minted
+    /// hop token). Declaring it HERE — on the same [`RouteSpec`] the proxy already
+    /// matches to decide forward-or-404 — means the gate and the forward can never
+    /// disagree about which route is in play.
+    ///
+    /// Must name a level THIS manifest declares (enforced by
+    /// [`crate::manifest::validate_route_permissions`]); an app cannot gate its
+    /// routes on another app's vocabulary or on a level nobody can see to grant.
+    ///
+    /// Never annotate an [`RouteAuth::Public`] route: a public route exists for a
+    /// caller who holds no identity at all (an external webhook), and on an
+    /// org-bound node an anonymous caller is refused outright — the annotation would
+    /// turn a working inbound webhook into a permanent 403.
+    ///
+    /// [`PluginManifest::permission_levels`]: crate::manifest::PluginManifest::permission_levels
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<String>,
+
+    /// Which `:param` of [`path`] names the resource [`permission`] is checked
+    /// against, so one route can be granted per-object (`"id"` on `/tabs/:id` gates
+    /// each tab separately). Absent = the whole app is the resource, which is what an
+    /// admin grants when the route identifies nothing (a `/settings` POST).
+    ///
+    /// Only meaningful alongside [`permission`], and the named param must actually
+    /// appear in [`path`] — both enforced at validation, because a typo here would
+    /// silently widen a rule the author wrote as per-object into a per-app one.
+    ///
+    /// [`path`]: RouteSpec::path
+    /// [`permission`]: RouteSpec::permission
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_param: Option<String>,
 }
 
 /// The auth posture of a proxied [`RouteSpec`] (serde kebab-case).

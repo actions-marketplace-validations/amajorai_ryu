@@ -178,6 +178,11 @@ pub struct NotifyTargetUser {
     pub email: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
+    /// Display name from the mirrored `user` row. Absent whenever the user row is
+    /// missing (the roster is driven off `member` docs, which carry no name), so
+    /// callers must have a fallback rather than treating this as required.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,6 +233,68 @@ pub async fn resolve_notify_targets(
         .await
         .map_err(|e| anyhow!("notify-targets decode failed: {e}"))?;
     Ok(body.users)
+}
+
+// ── Team roster (grant-editor principal directory) ───────────────────────────
+
+/// One team in the node's bound org.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrgTeam {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamsResponse {
+    #[serde(default)]
+    teams: Vec<OrgTeam>,
+}
+
+/// Resolve the node's org teams, for a grant editor that must offer teams to
+/// target instead of making an admin type raw ids.
+///
+/// FAIL-EMPTY CONTRACT (unlike [`resolve_notify_targets`], which errors): every
+/// failure — unbound node, unreachable control plane, a control plane too old to
+/// serve this route — yields an EMPTY list. A directory is decoration around the
+/// ACL, not part of it: an unbound personal node has no org to enumerate, and
+/// erroring there would leave the editor unable to render at all.
+pub async fn resolve_teams(client: &reqwest::Client) -> Vec<OrgTeam> {
+    let Some(key) = gateway_key() else {
+        return Vec::new();
+    };
+
+    let url = format!(
+        "{}/api/control-plane/gateway/teams",
+        control_plane_url().trim_end_matches('/')
+    );
+    let resp = match client
+        .get(&url)
+        .header("x-gateway-key", key)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::debug!("teams request failed (returning empty directory): {e}");
+            return Vec::new();
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::debug!(
+            "teams returned {} (returning empty directory)",
+            resp.status()
+        );
+        return Vec::new();
+    }
+    match resp.json::<TeamsResponse>().await {
+        Ok(body) => body.teams,
+        Err(e) => {
+            tracing::debug!("teams decode failed (returning empty directory): {e}");
+            Vec::new()
+        }
+    }
 }
 
 // ── Effective-permission resolution (org/team RBAC) ──────────────────────────

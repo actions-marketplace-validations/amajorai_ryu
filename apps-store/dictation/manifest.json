@@ -48,5 +48,12 @@
       }
     ]
   },
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "dictation.use",
+      "label": "Can dictate",
+      "description": "Start system-wide dictation and agent-ask, which records the microphone and types the result into whichever app is focused."
+    }
+  ]
 }

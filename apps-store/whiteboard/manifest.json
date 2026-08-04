@@ -36,6 +36,19 @@
     "grants": ["spaces:docs"]
   },
   "permission_grants": ["spaces:docs", "hook:side-model"],
+  "permission_levels": [
+    {
+      "id": "whiteboard.view",
+      "label": "Can view",
+      "description": "Open whiteboards and read what is on them."
+    },
+    {
+      "id": "whiteboard.edit",
+      "label": "Can edit",
+      "description": "Draw on, rearrange, and delete whiteboards, including the documents they store in Spaces.",
+      "implies": ["whiteboard.view"]
+    }
+  ],
   "companion": {
     "label": "Whiteboard",
     "icon": "shapes"

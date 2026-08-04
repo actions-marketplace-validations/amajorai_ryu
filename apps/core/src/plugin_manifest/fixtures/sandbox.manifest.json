@@ -27,5 +27,12 @@
       }
     ]
   },
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "tool.exec",
+      "label": "Can run code",
+      "description": "Execute commands and code inside an ephemeral sandbox on this node."
+    }
+  ]
 }

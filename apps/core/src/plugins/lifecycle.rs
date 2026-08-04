@@ -241,6 +241,12 @@ impl From<anyhow::Error> for UpdateError {
 /// (`persist_installed_plugin`) calls `set_ui_code` with its verified descriptor
 /// bundle AFTER this, so an explicit bundle still wins.
 pub async fn install_app(store: &PluginStore, manifest: &PluginManifest) -> Result<PluginRecord> {
+    // The ACL vocabulary is assembled from installed manifests and cached, so a
+    // change to the installed set must drop it — otherwise an app's newly
+    // declared permission levels stay unknown until restart and every grant
+    // naming one is rejected as an unknown permission.
+    crate::acl::invalidate_vocabulary();
+
     // Validate semver before persisting (the loader validates it too, but we
     // re-check here so the endpoint never persists a bad version).
     semver::Version::parse(&manifest.version).map_err(|e| {
@@ -317,6 +323,12 @@ pub async fn enable_app(
     gateway_token: Option<&str>,
     http_client: &reqwest::Client,
 ) -> Result<EnableOutcome, EnableError> {
+    // The ACL vocabulary is assembled from installed manifests and cached, so a
+    // change to the installed set must drop it — otherwise an app's newly
+    // declared permission levels stay unknown until restart and every grant
+    // naming one is rejected as an unknown permission.
+    crate::acl::invalidate_vocabulary();
+
     // Check that the app is installed.
     let _record = store
         .get(&manifest.id)
@@ -804,6 +816,12 @@ pub async fn uninstall_app(
     all_manifests: &[PluginManifest],
     cascade: bool,
 ) -> Result<UninstallOutcome, UninstallError> {
+    // The ACL vocabulary is assembled from installed manifests and cached, so a
+    // change to the installed set must drop it — otherwise an app's newly
+    // declared permission levels stay unknown until restart and every grant
+    // naming one is rejected as an unknown permission.
+    crate::acl::invalidate_vocabulary();
+
     // 1. Installed?
     let records = store.list().await.map_err(UninstallError::Other)?;
     if !records.iter().any(|r| r.id == id) {

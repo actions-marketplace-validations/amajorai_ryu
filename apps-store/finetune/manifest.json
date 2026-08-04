@@ -28,6 +28,19 @@
     }
   ],
   "permission_grants": ["finetune:runs"],
+  "permission_levels": [
+    {
+      "id": "finetune.view",
+      "label": "Can view",
+      "description": "See fine-tune jobs, their status, and the adapters they produced."
+    },
+    {
+      "id": "finetune.run",
+      "label": "Can train",
+      "description": "Start and cancel fine-tune jobs, which occupies this node's GPU (or a remote one) for the length of the run.",
+      "implies": ["finetune.view"]
+    }
+  ],
   "contributes": {
     "hook_events": [
       {

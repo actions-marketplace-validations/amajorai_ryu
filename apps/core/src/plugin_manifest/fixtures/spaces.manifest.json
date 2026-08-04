@@ -10,5 +10,22 @@
   "requires": {
     "capabilities": [{ "capability": "rag" }]
   },
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "space.read",
+      "label": "Can read",
+      "description": "Open a space and read its documents, including files other apps filed there."
+    },
+    {
+      "id": "space.write",
+      "label": "Can write",
+      "description": "Add and change documents in a space, which also changes what retrieval feeds back into chat."
+    },
+    {
+      "id": "space.delete",
+      "label": "Can delete",
+      "description": "Permanently remove documents and whole spaces, including anything other apps stored in them."
+    }
+  ]
 }

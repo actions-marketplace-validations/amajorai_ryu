@@ -61,6 +61,19 @@
     }
   ],
   "permission_grants": ["monitors:crud", "tools.invoke"],
+  "permission_levels": [
+    {
+      "id": "monitors.view",
+      "label": "Can view",
+      "description": "See configured website monitors and their check history."
+    },
+    {
+      "id": "monitors.edit",
+      "label": "Can edit",
+      "description": "Create, change, and delete monitors, which decides what this node fetches on a schedule and who gets notified.",
+      "implies": ["monitors.view"]
+    }
+  ],
   "companion": {
     "label": "Monitors",
     "icon": "radar-01"

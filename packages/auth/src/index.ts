@@ -3,7 +3,7 @@ import { expo } from "@better-auth/expo";
 import { checkout, polar, portal } from "@polar-sh/better-auth";
 import { client } from "@ryu/db";
 import { User } from "@ryu/db/models/auth.model";
-import { Member } from "@ryu/db/models/control-plane.model";
+import { Member, Team, TeamMember } from "@ryu/db/models/control-plane.model";
 import {
 	configureContactIdSaver,
 	configureRateLimiting,
@@ -398,6 +398,55 @@ function referredByFromCookie(context: unknown): string | undefined {
 		}
 	}
 	return;
+}
+
+interface OrgClaim {
+	id: string;
+	role: string;
+}
+
+/** Mirrors Core's `TeamMembership` — the keys are a wire contract, keep them short. */
+interface TeamClaim {
+	id: string;
+	org: string;
+	role: string;
+}
+
+/**
+ * Resolves the team claims embedded in a user's JWT, given the org claims already
+ * resolved for the same payload.
+ *
+ * Better Auth's `teamMember` row carries no role of its own (verified against the
+ * organization plugin's schema), so a team's effective role is the user's role in
+ * the team's owning org — hence the join back through `orgs`. A team whose org is
+ * not in `orgs` is dropped: a team is only ever reachable through its org, which
+ * is exactly what Core narrows on, so carrying it would only inflate every token.
+ *
+ * Never throws. Teams are additive to a payload that already works, so a failure
+ * here degrades to "no teams" instead of costing the caller their org claims —
+ * which is what sharing the caller's try/catch would do.
+ */
+async function resolveTeamClaims(
+	userId: string,
+	teamIds: string[],
+	orgs: OrgClaim[]
+): Promise<TeamClaim[]> {
+	if (teamIds.length === 0) {
+		return [];
+	}
+	try {
+		const roleByOrg = new Map(orgs.map((org) => [org.id, org.role]));
+		const teams = await Team.find({ _id: { $in: teamIds } }).lean();
+		return teams.flatMap((team) => {
+			const role = roleByOrg.get(team.organizationId);
+			return role
+				? [{ id: String(team._id), org: team.organizationId, role }]
+				: [];
+		});
+	} catch (error) {
+		console.error("Failed to resolve teams for JWT:", error, { userId });
+		return [];
+	}
 }
 
 export const auth = betterAuth({
@@ -1029,23 +1078,39 @@ export const auth = betterAuth({
 		}),
 		jwt({
 			jwt: {
-				// Enrich the JWT so a node's Core can verify org membership + role
-				// OFFLINE (it validates the signature against the JWKS, no live call to
-				// better-auth). definePayload only receives `user` (not the session), so
-				// we resolve every org the user belongs to from the `member`
-				// collection, the same source of truth the control plane reads from.
-				// Core picks the
-				// membership matching its bound org. Fail-open: a lookup error must
-				// never block token issuance, so we fall back to a user-only payload.
+				// Enrich the JWT so a node's Core can verify org + team membership and
+				// role OFFLINE (it validates the signature against the JWKS, no live call
+				// to better-auth). definePayload only receives `user` (not the session),
+				// so we resolve every org the user belongs to from the `member`
+				// collection, and every team from `teamMember`, the same sources of truth
+				// the control plane reads from. Core narrows both to its bound org.
+				// Fail-open: a lookup error must never block token issuance, so we fall
+				// back to a user-only payload.
 				definePayload: async ({ user }) => {
 					const base = { id: user.id, email: user.email };
 					try {
-						const members = await Member.find({ userId: user.id }).lean();
+						// This runs on every token mint, and the two rosters are independent,
+						// so they overlap. The `catch` keeps a team-roster failure from
+						// rejecting the pair: teams are additive, org claims are not.
+						const [members, teamRows] = await Promise.all([
+							Member.find({ userId: user.id }).lean(),
+							TeamMember.find({ userId: user.id })
+								.lean()
+								.catch((error: unknown) => {
+									console.error("Failed to read team memberships:", error);
+									return [];
+								}),
+						]);
 						const orgs = members.map((member) => ({
 							id: member.organizationId,
 							role: member.role,
 						}));
-						return { ...base, orgs };
+						const teams = await resolveTeamClaims(
+							user.id,
+							teamRows.map((row) => row.teamId),
+							orgs
+						);
+						return { ...base, orgs, teams };
 					} catch (error) {
 						console.error("Failed to embed org memberships in JWT:", error);
 						return base;

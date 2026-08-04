@@ -84,6 +84,19 @@
     "grants": ["spaces:docs"]
   },
   "permission_grants": ["spaces:docs", "meetings:crud"],
+  "permission_levels": [
+    {
+      "id": "meetings.view",
+      "label": "Can view",
+      "description": "Read meeting transcripts and AI notes stored in the Meetings space."
+    },
+    {
+      "id": "meetings.record",
+      "label": "Can record",
+      "description": "Start and stop meeting capture, which records audio and transcribes everyone in the room.",
+      "implies": ["meetings.view"]
+    }
+  ],
   "companion": {
     "label": "Meetings",
     "icon": "mic-01"

@@ -7,5 +7,18 @@
     "ryu": ">=0.0.1"
   },
   "runnables": [],
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "skills.view",
+      "label": "Can view",
+      "description": "Browse the skills installed on this node and read what each instructs an agent to do."
+    },
+    {
+      "id": "skills.install",
+      "label": "Can install",
+      "description": "Install and remove skills, which adds instructions every agent that loads them will follow.",
+      "implies": ["skills.view"]
+    }
+  ]
 }

@@ -47,6 +47,19 @@
     }
   ],
   "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "dashboards.view",
+      "label": "Can view",
+      "description": "Open dashboards and the live data their widgets pull from monitors, meetings, quests, and other node surfaces."
+    },
+    {
+      "id": "dashboards.edit",
+      "label": "Can edit",
+      "description": "Create dashboards and add, configure, or remove their widgets.",
+      "implies": ["dashboards.view"]
+    }
+  ],
   "contributes": {
     "hook_events": [
       {

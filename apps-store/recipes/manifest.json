@@ -70,6 +70,25 @@
     }
   ],
   "permission_grants": ["ghost:record"],
+  "permission_levels": [
+    {
+      "id": "recipes.view",
+      "label": "Can view",
+      "description": "Browse saved desktop-automation recipes and the steps each one replays."
+    },
+    {
+      "id": "recipes.record",
+      "label": "Can record",
+      "description": "Record and save new recipes, which captures every UI action performed while recording.",
+      "implies": ["recipes.view"]
+    },
+    {
+      "id": "recipes.run",
+      "label": "Can replay",
+      "description": "Replay a saved recipe, which drives this machine's real mouse and keyboard against whatever is on screen.",
+      "implies": ["recipes.view"]
+    }
+  ],
   "contributes": {
     "hook_events": [
       {

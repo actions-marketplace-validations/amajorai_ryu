@@ -2554,6 +2554,25 @@ impl SpaceStore {
     /// document row does not exist. These columns are plaintext additive Phase 0
     /// tenancy columns, so a raw `SELECT` compares correctly against a verified
     /// caller's id.
+    /// The space a document ACTUALLY belongs to.
+    ///
+    /// Exists so an authorization gate never trusts a space id supplied in the
+    /// URL. `/api/spaces/:id/documents/:doc_id` lets a caller name ANY space
+    /// alongside a document, so resolving a per-resource ACL against the URL's id
+    /// would let someone bypass a deny on the document's real space by naming a
+    /// different space they can read. Returns `None` when the document does not
+    /// exist, which callers must treat as not-found rather than as permitted.
+    pub async fn document_space_id(&self, doc_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT space_id FROM documents WHERE id = ?1",
+            params![doc_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("reading a document's parent space")
+    }
+
     pub async fn get_access_meta(&self, doc_id: &str) -> Result<Option<DocAccessMeta>> {
         let conn = self.conn.lock().await;
         let meta = conn

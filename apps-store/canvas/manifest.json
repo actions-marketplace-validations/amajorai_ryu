@@ -55,6 +55,25 @@
     "hook:run-agent",
     "hook:side-model"
   ],
+  "permission_levels": [
+    {
+      "id": "canvas.view",
+      "label": "Can view",
+      "description": "Open canvases and read their contents."
+    },
+    {
+      "id": "canvas.edit",
+      "label": "Can edit",
+      "description": "Create and change canvases, including the documents they store in Spaces.",
+      "implies": ["canvas.view"]
+    },
+    {
+      "id": "canvas.generate",
+      "label": "Can generate media",
+      "description": "Produce images and transcriptions inside a canvas, which spends model credits on every generation.",
+      "implies": ["canvas.edit"]
+    }
+  ],
   "companion": {
     "label": "Canvas",
     "icon": "ai-image"

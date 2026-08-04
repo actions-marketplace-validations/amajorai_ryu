@@ -31,6 +31,19 @@
     }
   ],
   "permission_grants": ["webhooks:crud"],
+  "permission_levels": [
+    {
+      "id": "webhooks.view",
+      "label": "Can view",
+      "description": "See registered inbound endpoints, their public URLs, and when each last received a delivery."
+    },
+    {
+      "id": "webhooks.manage",
+      "label": "Can manage",
+      "description": "Register, rotate, and delete inbound endpoints and their secrets, which decides what outside systems may trigger work here.",
+      "implies": ["webhooks.view"]
+    }
+  ],
   "companion": {
     "label": "Webhooks",
     "icon": "webhook"

@@ -8,6 +8,7 @@
 // (the Account/Services tabs can later swap the active target through it).
 
 import type { ApiTarget } from "@ryuhq/core-client/client";
+import { resolveLocalNodeToken } from "@ryuhq/core-client/node-token";
 
 // Profile-aware: under RYU_PROFILE=dev (the repo's `bun dev` default) Core binds
 // :8980 (+1000 offset, matching apps/core/src/profile.rs); release stays :7980.
@@ -19,6 +20,8 @@ export const DEFAULT_CORE_URL =
 
 export const buildTarget = (): ApiTarget => {
 	const url = process.env.RYU_CORE_URL?.trim() || DEFAULT_CORE_URL;
-	const token = process.env.RYU_CORE_TOKEN?.trim() || null;
-	return { url, token };
+	// Falls back to the token Core mints at `<ryu_home>/node-auth.token`: Core
+	// authenticates its local API by default now, and a hand-launched TUI is not
+	// a child of Core, so it does not inherit `RYU_TOKEN` and would 401 without it.
+	return { url, token: resolveLocalNodeToken(url) };
 };

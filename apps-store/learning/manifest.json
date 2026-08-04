@@ -39,6 +39,19 @@
     ]
   },
   "permission_grants": ["learning:crud"],
+  "permission_levels": [
+    {
+      "id": "learning.view",
+      "label": "Can view",
+      "description": "Read the experience log and the skills the learning loop has produced."
+    },
+    {
+      "id": "learning.capture",
+      "label": "Can teach",
+      "description": "Turn a chat or run into a proposed skill, which goes to the approval inbox before any agent can use it.",
+      "implies": ["learning.view"]
+    }
+  ],
   "companion": {
     "label": "Learning",
     "icon": "mortarboard-01"

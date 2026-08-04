@@ -60,6 +60,19 @@
     }
   ],
   "permission_grants": ["quests:crud"],
+  "permission_levels": [
+    {
+      "id": "quests.view",
+      "label": "Can view",
+      "description": "See the quest board and the todos detected from chats and activity."
+    },
+    {
+      "id": "quests.edit",
+      "label": "Can edit",
+      "description": "Create, complete, and delete quests.",
+      "implies": ["quests.view"]
+    }
+  ],
   "companion": {
     "label": "Quests",
     "icon": "target-02"

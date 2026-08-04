@@ -7,5 +7,24 @@
     "ryu": ">=0.0.1"
   },
   "runnables": [],
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "hardware.view",
+      "label": "Can view",
+      "description": "See the paired Ryu devices and their status."
+    },
+    {
+      "id": "hardware.pair",
+      "label": "Can pair",
+      "description": "Pair new devices and unpair existing ones, which decides what physical hardware may talk to this node.",
+      "implies": ["hardware.view"]
+    },
+    {
+      "id": "hardware.control",
+      "label": "Can control",
+      "description": "Send commands and dashboards to a paired device, changing what it shows and does in the room it sits in.",
+      "implies": ["hardware.view"]
+    }
+  ]
 }

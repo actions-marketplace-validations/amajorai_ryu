@@ -66,6 +66,19 @@
     }
   ],
   "permission_grants": ["simulator:control"],
+  "permission_levels": [
+    {
+      "id": "simulator.view",
+      "label": "Can view",
+      "description": "List the iOS Simulators and Android Emulators on this node and screenshot them."
+    },
+    {
+      "id": "simulator.control",
+      "label": "Can control",
+      "description": "Boot devices, install and launch apps, open deep links, and send taps, swipes, and typing to them.",
+      "implies": ["simulator.view"]
+    }
+  ],
   "contributes": {
     "dock_panels": [
       {

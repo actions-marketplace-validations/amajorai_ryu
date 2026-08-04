@@ -452,8 +452,48 @@ pub struct PluginManifest {
     /// Permission grants this app declares it needs (e.g. `"mcp:web_search"`).
     /// These are *declarations only* at this layer — no enforcement happens here;
     /// the Gateway owns grant enforcement.
+    ///
+    /// This is the **app→host** lane and has nothing to do with
+    /// [`permission_levels`], the **app→human** lane. See that field's doc comment
+    /// for the three-way table; conflating the two is the likeliest future bug here.
+    ///
+    /// [`permission_levels`]: PluginManifest::permission_levels
     #[serde(default)]
     pub permission_grants: Vec<String>,
+
+    /// **The user-facing permission vocabulary this app declares** — the set of
+    /// levels ("read", "edit", …) an administrator can later grant to a person or a
+    /// team *inside* this app. Absent/empty = the app declares no vocabulary, which
+    /// is every manifest predating this field.
+    ///
+    /// Spaces declaring `read` and `edit` is what makes "team X may edit in Spaces"
+    /// expressible at all: a grant has to name a level, and a UI has to render a
+    /// list of them. Without a declaration there is nothing to bind to.
+    ///
+    /// # Three lanes, one prefix — do not conflate them
+    ///
+    /// | field | direction | who decides | what it means |
+    /// |---|---|---|---|
+    /// | [`permission_grants`] | app → host | the **Gateway**, at install/enable | which host capabilities the app may *ask* for |
+    /// | [`permissions`] ([`PermissionSet`]) | app → sandbox | **Core**, at spawn/exec | what the app's code may *touch* (FS paths, hosts, subprocess) |
+    /// | `permission_levels` | app → human | an **admin**, per person/team | what a *person* may do inside the app |
+    ///
+    /// Only the first two are enforced today. This field is **declaration only**:
+    /// nothing consumes it yet, so declaring `edit` gates nothing by itself. It is
+    /// the vocabulary the ACL layer will bind grants against.
+    ///
+    /// # Ordering and implication
+    ///
+    /// Declaration order is display order — render the list as written. Strength is
+    /// expressed with [`PermissionLevel::implies`] rather than a separate rank, so
+    /// there is exactly one ordering and it cannot contradict itself: `edit` implying
+    /// `read` means granting `edit` already conveys `read`, and no admin has to grant
+    /// the same person both.
+    ///
+    /// [`permission_grants`]: PluginManifest::permission_grants
+    /// [`permissions`]: PluginManifest::permissions
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_levels: Vec<PermissionLevel>,
 
     /// **Unified, deny-by-default runtime permission set** — the single typed
     /// grammar (`{fs, child_process, network, tool}`) Core lowers to every sandbox
@@ -462,16 +502,20 @@ pub struct PluginManifest {
     /// predating this field), so an app that declares nothing keeps today's exact
     /// zero-permission sandbox posture.
     ///
-    /// # Relationship to [`permission_grants`]
+    /// # Relationship to [`permission_grants`] and [`permission_levels`]
     ///
-    /// These are **two distinct lanes** that must not be conflated:
+    /// These are **three distinct lanes** that must not be conflated:
     /// - [`permission_grants`] are opaque strings the **Gateway** approves at
     ///   install/enable time — the *approval* lane (who is allowed to ask).
     /// - `permissions` is the typed set **Core** lowers into the actual sandbox at
     ///   spawn/exec time — the *runtime-enforcement* lane (what the code can touch).
+    /// - [`permission_levels`] is the app's *user-facing* vocabulary an admin grants
+    ///   to a person or team — it never reaches the sandbox at all.
     ///
     /// A grant says "this app may use the filesystem capability"; `permissions.fs`
     /// says "…and here are the exact read/write paths the sandbox is opened with."
+    ///
+    /// [`permission_levels`]: PluginManifest::permission_levels
     ///
     /// # Altitude (manifest-level, per-runnable override is a followup)
     ///
@@ -1063,6 +1107,10 @@ impl PluginManifest {
                 .validate()
                 .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         }
+        validate_permission_levels(&self.permission_levels)
+            .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+        validate_route_permissions(&self.sidecars, &self.permission_levels)
+            .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         Ok(())
     }
 
@@ -3974,6 +4022,263 @@ impl NetworkPermission {
     }
 }
 
+/// One entry in an app's **user-facing permission vocabulary** — a level an admin
+/// can grant to a person or a team inside that app (see
+/// [`PluginManifest::permission_levels`], which also explains why this is a
+/// different axis from `permission_grants` and `permissions`).
+///
+/// Deliberately self-describing: an admin UI renders the grant picker from `label`
+/// + `description` alone, so a level whose meaning lives only in the app's own docs
+/// cannot exist.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct PermissionLevel {
+    /// Stable machine id (e.g. `"read"`). Lower-case ASCII alphanumerics plus
+    /// `-`, `_` and `.`, at most [`MAX_PLUGIN_ID_LEN`] bytes, and unique within the
+    /// manifest.
+    ///
+    /// The alphabet is narrower than a plugin id's on purpose: these ids end up in
+    /// API paths and in persisted grant strings, so `Read` and `read` must not be
+    /// two levels that look identical to a human granting them.
+    pub id: String,
+
+    /// Short human label for the grant picker (e.g. `"Can edit"`). Required —
+    /// an unlabelled level is unrenderable.
+    pub label: String,
+
+    /// One sentence telling an admin what granting this level actually allows.
+    /// Required for the same reason as [`label`]: the admin deciding is usually
+    /// not the person who wrote the app.
+    ///
+    /// [`label`]: PermissionLevel::label
+    pub description: String,
+
+    /// Ids of other levels in **this same manifest** that this level subsumes.
+    ///
+    /// This is the whole ordering mechanism — there is no separate rank, so the
+    /// order can never contradict itself. `edit` implying `read` means a person
+    /// granted `edit` already holds `read`; granting both is redundant, never
+    /// required. Resolved transitively by
+    /// [`resolve_implied_permission_levels`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub implies: Vec<String>,
+}
+
+/// Validate a declared permission vocabulary: every id is well-formed and unique,
+/// every level is renderable, and the implication graph is closed and acyclic.
+///
+/// Called from [`PluginManifest::validate`] (the SDK/FFI path) and from Core's
+/// manifest loader, so a malformed vocabulary fails where the author can still see
+/// it rather than at the moment an admin tries to grant a level that does not
+/// resolve.
+pub fn validate_permission_levels(levels: &[PermissionLevel]) -> Result<(), String> {
+    let mut index: BTreeMap<&str, usize> = BTreeMap::new();
+    for (position, level) in levels.iter().enumerate() {
+        validate_permission_level_id(&level.id)?;
+        if level.label.trim().is_empty() {
+            return Err(format!(
+                "permission level '{}' has an empty label",
+                level.id
+            ));
+        }
+        if level.description.trim().is_empty() {
+            return Err(format!(
+                "permission level '{}' has an empty description",
+                level.id
+            ));
+        }
+        if index.insert(level.id.as_str(), position).is_some() {
+            return Err(format!("duplicate permission level id '{}'", level.id));
+        }
+    }
+
+    // Closed graph first: a dangling `implies` is the likelier authoring mistake (a
+    // typo), and reporting it as a typo is far more useful than whatever the cycle
+    // walk below would say about an edge that resolves to nothing.
+    for level in levels {
+        for implied in &level.implies {
+            if !index.contains_key(implied.as_str()) {
+                return Err(format!(
+                    "permission level '{}' implies '{implied}', which this manifest does not declare",
+                    level.id
+                ));
+            }
+        }
+    }
+
+    // Three-colour DFS. A cycle is not merely redundant: if `edit` implies `read`
+    // implies `edit`, the two levels are indistinguishable, so granting the weaker
+    // one silently conveys the stronger — an admin cannot express "read only" at
+    // all. Iterative rather than recursive because the level count comes from an
+    // untrusted manifest and a long chain would otherwise blow the stack.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Visit {
+        Unseen,
+        Open,
+        Done,
+    }
+    let mut visit = vec![Visit::Unseen; levels.len()];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for root in 0..levels.len() {
+        if visit[root] != Visit::Unseen {
+            continue;
+        }
+        visit[root] = Visit::Open;
+        stack.push((root, 0));
+        while let Some(&(node, cursor)) = stack.last() {
+            let Some(next) = levels[node].implies.get(cursor) else {
+                visit[node] = Visit::Done;
+                stack.pop();
+                continue;
+            };
+            let top = stack.len() - 1;
+            stack[top].1 = cursor + 1;
+            let child = index[next.as_str()];
+            match visit[child] {
+                // Also catches self-implication (`edit` implies `edit`), which is a
+                // one-node cycle and just as unexpressible.
+                Visit::Open => {
+                    return Err(format!(
+                        "permission level '{}' implies '{}', which closes an implication cycle",
+                        levels[node].id, levels[child].id
+                    ))
+                }
+                Visit::Done => {}
+                Visit::Unseen => {
+                    visit[child] = Visit::Open;
+                    stack.push((child, 0));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every level `id` conveys **transitively**, excluding `id` itself. Empty when
+/// `id` is not declared in `levels`.
+///
+/// This is what makes "granting `edit` already grants `read`" true in one place
+/// instead of at every future call site: with `admin → edit → read`, resolving
+/// `admin` yields `{edit, read}`, so an admin never has to grant a level twice.
+///
+/// Terminates on a cyclic vocabulary even though [`validate_permission_levels`]
+/// rejects one — the visited set is the loop bound — so a caller holding levels
+/// from an unvalidated source cannot hang.
+pub fn resolve_implied_permission_levels(levels: &[PermissionLevel], id: &str) -> BTreeSet<String> {
+    let by_id: BTreeMap<&str, &PermissionLevel> =
+        levels.iter().map(|l| (l.id.as_str(), l)).collect();
+    let mut implied = BTreeSet::new();
+    let Some(root) = by_id.get(id) else {
+        return implied;
+    };
+    let mut pending: Vec<&str> = root.implies.iter().map(String::as_str).collect();
+    while let Some(next) = pending.pop() {
+        if !implied.insert(next.to_string()) {
+            continue;
+        }
+        if let Some(level) = by_id.get(next) {
+            pending.extend(level.implies.iter().map(String::as_str));
+        }
+    }
+    implied
+}
+
+/// The narrow alphabet for a [`PermissionLevel::id`]. See that field for why it is
+/// stricter than [`validate_plugin_id`].
+pub fn validate_permission_level_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("a permission level has an empty id".to_string());
+    }
+    if id.len() > MAX_PLUGIN_ID_LEN {
+        return Err(format!(
+            "permission level id '{id}' is too long ({} bytes, max {MAX_PLUGIN_ID_LEN})",
+            id.len()
+        ));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(format!(
+            "permission level id '{id}' contains illegal characters (allowed: a-z 0-9 . - _)"
+        ));
+    }
+    // The alphabet admits `.`, so it also admits `..` — and these ids are destined
+    // for API paths, where a `..` segment is a traversal escape.
+    if id.contains("..") {
+        return Err(format!(
+            "permission level id '{id}' must not contain a '..' traversal segment"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate every proxied route's permission annotation against the vocabulary the
+/// SAME manifest declares.
+///
+/// A route naming a level nobody declared is a manifest ERROR rather than a route
+/// that quietly never resolves: the id would reach Core's permission registry
+/// undeclared, the resolver would deny it, and the app's route would return 403
+/// forever with the mistake visible nowhere. Failing at load puts it in front of the
+/// author, who is the only person who can fix it.
+pub fn validate_route_permissions(
+    sidecars: &[crate::schema::SidecarSpec],
+    levels: &[PermissionLevel],
+) -> Result<(), String> {
+    for sidecar in sidecars {
+        let Some(http) = &sidecar.http else { continue };
+        for route in &http.routes {
+            let Some(permission) = route.permission.as_deref() else {
+                // A resource param with nothing to gate is dead weight that reads
+                // like a rule, so it is refused rather than ignored.
+                if route.resource_param.is_some() {
+                    return Err(format!(
+                        "route '{}' declares resource_param without a permission",
+                        route.path
+                    ));
+                }
+                continue;
+            };
+            if !levels.iter().any(|level| level.id == permission) {
+                return Err(format!(
+                    "route '{}' requires permission '{permission}', which this manifest does not declare",
+                    route.path
+                ));
+            }
+            // A Public route serves callers who hold NO identity (an inbound
+            // webhook). On an org-bound node an anonymous caller is refused
+            // outright, so the annotation would turn a working webhook into a
+            // permanent 403 — and it would fail at delivery time, on someone
+            // else's infrastructure, long after the manifest was written. The
+            // field's doc comment already forbids this; without the check it was
+            // only a suggestion.
+            if matches!(route.auth, crate::schema::RouteAuth::Public) {
+                return Err(format!(
+                    "route '{}' is public but requires permission '{permission}'; a public route \
+                     has no caller identity to check, so this would deny it outright on an \
+                     org-bound node",
+                    route.path
+                ));
+            }
+            let Some(param) = route.resource_param.as_deref() else {
+                continue;
+            };
+            // Matched against the pattern's own segments, not a substring search: a
+            // param named `id` must not be satisfied by a literal `/ids` segment.
+            let declared = route
+                .path
+                .split('/')
+                .any(|segment| segment.strip_prefix(':') == Some(param));
+            if !declared {
+                return Err(format!(
+                    "route '{}' names resource_param ':{param}', which its path does not contain",
+                    route.path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5656,5 +5961,346 @@ mod tests {
                 "must reject pattern '{bad}'"
             );
         }
+    }
+
+    // ── permission levels (the user-facing vocabulary) ────────────────────────
+
+    fn level(id: &str, implies: &[&str]) -> PermissionLevel {
+        PermissionLevel {
+            id: id.to_owned(),
+            label: format!("Can {id}"),
+            description: format!("Lets a person {id} in this app."),
+            implies: implies.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    /// The back-compat contract: every manifest written before this field existed
+    /// must still deserialize, and must declare an *empty* vocabulary rather than
+    /// failing or defaulting to something granted.
+    #[test]
+    fn a_manifest_without_permission_levels_still_parses_and_declares_none() {
+        let raw = r#"{
+            "id": "com.example.legacy",
+            "name": "Legacy",
+            "version": "1.0.0",
+            "runnables": []
+        }"#;
+        let manifest = PluginManifest::parse_and_validate(raw).expect("legacy manifest must load");
+        assert!(manifest.permission_levels.is_empty());
+        // …and it must not reappear on the wire, or every existing manifest's
+        // canonical encoding (which the Gateway signs) would change.
+        let round_tripped = serde_json::to_value(&manifest).expect("manifest serialises");
+        assert!(round_tripped.get("permission_levels").is_none());
+    }
+
+    /// The shape an app like Spaces actually declares, end to end through serde —
+    /// this is the case the whole field exists for.
+    #[test]
+    fn a_declared_vocabulary_parses_and_keeps_declaration_order() {
+        let raw = r#"{
+            "id": "com.ryu.spaces",
+            "name": "Spaces",
+            "version": "1.0.0",
+            "runnables": [],
+            "permission_levels": [
+                { "id": "read", "label": "Can view", "description": "View spaces." },
+                { "id": "edit", "label": "Can edit", "description": "Edit spaces.", "implies": ["read"] }
+            ]
+        }"#;
+        let manifest = PluginManifest::parse_and_validate(raw).expect("vocabulary must load");
+        let ids: Vec<&str> = manifest
+            .permission_levels
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect();
+        // Declaration order is display order — a set or a map here would lose it.
+        assert_eq!(ids, ["read", "edit"]);
+        assert_eq!(
+            resolve_implied_permission_levels(&manifest.permission_levels, "edit"),
+            BTreeSet::from(["read".to_owned()])
+        );
+    }
+
+    /// Two levels with one id make a grant ambiguous: whichever the reader
+    /// de-duplicates to decides what the grant means.
+    #[test]
+    fn duplicate_permission_level_ids_are_rejected() {
+        let err = validate_permission_levels(&[level("read", &[]), level("read", &[])])
+            .expect_err("a duplicate id must not validate");
+        assert!(err.contains("duplicate permission level id 'read'"), "got: {err}");
+    }
+
+    /// The alphabet is deliberately narrower than a plugin id's: `Read` and `read`
+    /// are indistinguishable to the admin granting them, and `..` is a traversal
+    /// segment once the id reaches an API path.
+    #[test]
+    fn permission_level_ids_are_restricted_to_a_safe_lowercase_charset() {
+        for good in ["read", "edit", "space.read", "read-only", "read_write", "a1"] {
+            assert!(
+                validate_permission_level_id(good).is_ok(),
+                "'{good}' must be accepted"
+            );
+        }
+        for bad in [
+            "",
+            "Read",        // uppercase: a case-collision with `read`
+            "read write",  // space
+            "read/write",  // path separator
+            "read:write",  // grant-string separator
+            "..",          // traversal
+            "space..read", // traversal, interior
+            "read\n",
+        ] {
+            assert!(
+                validate_permission_level_id(bad).is_err(),
+                "'{bad}' must be rejected"
+            );
+        }
+        // The cap is the plugin-id cap because these ids sit beside plugin ids in
+        // API paths; one bound is easier to reason about than two.
+        assert!(validate_permission_level_id(&"a".repeat(MAX_PLUGIN_ID_LEN)).is_ok());
+        assert!(validate_permission_level_id(&"a".repeat(MAX_PLUGIN_ID_LEN + 1)).is_err());
+    }
+
+    /// A level nobody can read or understand cannot be rendered in a grant picker,
+    /// so it is rejected at declaration rather than shown as a blank row.
+    #[test]
+    fn a_permission_level_without_a_label_or_description_is_rejected() {
+        let mut unlabelled = level("read", &[]);
+        unlabelled.label = "   ".to_owned();
+        assert!(validate_permission_levels(&[unlabelled]).is_err());
+
+        let mut undescribed = level("read", &[]);
+        undescribed.description = String::new();
+        assert!(validate_permission_levels(&[undescribed]).is_err());
+    }
+
+    /// A typo'd `implies` would otherwise resolve to nothing — the grant would look
+    /// correct and silently convey less than the author meant.
+    #[test]
+    fn an_implies_reference_to_an_undeclared_level_is_rejected() {
+        let err = validate_permission_levels(&[level("edit", &["raed"])])
+            .expect_err("a dangling implies must not validate");
+        assert!(
+            err.contains("implies 'raed'") && err.contains("does not declare"),
+            "got: {err}"
+        );
+    }
+
+    /// A cycle makes the levels in it indistinguishable, so "read only" stops being
+    /// expressible. Both lengths matter: the self-edge is the one a visited-set-only
+    /// walk would miss.
+    #[test]
+    fn cyclic_implications_are_rejected_including_a_self_edge() {
+        let two = validate_permission_levels(&[level("edit", &["read"]), level("read", &["edit"])])
+            .expect_err("a 2-cycle must not validate");
+        assert!(two.contains("implication cycle"), "got: {two}");
+
+        let three = validate_permission_levels(&[
+            level("admin", &["edit"]),
+            level("edit", &["read"]),
+            level("read", &["admin"]),
+        ])
+        .expect_err("a 3-cycle must not validate");
+        assert!(three.contains("implication cycle"), "got: {three}");
+
+        let itself = validate_permission_levels(&[level("edit", &["edit"])])
+            .expect_err("a self-implication must not validate");
+        assert!(itself.contains("implication cycle"), "got: {itself}");
+    }
+
+    /// A diamond is legal — two levels may imply the same weaker one — and must not
+    /// be mistaken for a cycle by the DFS's already-visited bookkeeping.
+    #[test]
+    fn a_diamond_shaped_vocabulary_is_not_a_cycle() {
+        let levels = [
+            level("admin", &["edit", "share"]),
+            level("edit", &["read"]),
+            level("share", &["read"]),
+            level("read", &[]),
+        ];
+        validate_permission_levels(&levels).expect("a DAG must validate");
+        assert_eq!(
+            resolve_implied_permission_levels(&levels, "admin"),
+            BTreeSet::from(["edit".to_owned(), "share".to_owned(), "read".to_owned()])
+        );
+    }
+
+    /// The point of the field: granting the strongest level must convey everything
+    /// beneath it, so an admin never grants the same person two levels. A two-hop
+    /// chain is the shortest case that fails if resolution is only one hop deep.
+    #[test]
+    fn implication_resolves_transitively_and_excludes_the_level_itself() {
+        let levels = [
+            level("admin", &["edit"]),
+            level("edit", &["read"]),
+            level("read", &[]),
+        ];
+        assert_eq!(
+            resolve_implied_permission_levels(&levels, "admin"),
+            BTreeSet::from(["edit".to_owned(), "read".to_owned()])
+        );
+        assert!(resolve_implied_permission_levels(&levels, "read").is_empty());
+        // An id nobody declared conveys nothing — never a panic, never everything.
+        assert!(resolve_implied_permission_levels(&levels, "delete").is_empty());
+    }
+
+    /// Resolution is reachable from unvalidated input (a manifest read straight off
+    /// the wire), so a cycle must terminate rather than hang the caller.
+    #[test]
+    fn resolution_terminates_on_a_cyclic_vocabulary() {
+        let levels = [level("edit", &["read"]), level("read", &["edit"])];
+        assert_eq!(
+            resolve_implied_permission_levels(&levels, "edit"),
+            BTreeSet::from(["read".to_owned(), "edit".to_owned()])
+        );
+    }
+
+    /// The vocabulary is gated by the same `validate()` every other manifest rule
+    /// runs through — not by a separate call an ingest path could forget.
+    #[test]
+    fn manifest_validation_rejects_a_bad_vocabulary() {
+        let raw = r#"{
+            "id": "com.example.bad",
+            "name": "Bad",
+            "version": "1.0.0",
+            "runnables": [],
+            "permission_levels": [
+                { "id": "edit", "label": "Can edit", "description": "Edit.", "implies": ["read"] }
+            ]
+        }"#;
+        let err = PluginManifest::parse_and_validate(raw)
+            .expect_err("a dangling implies must fail whole-manifest validation");
+        assert!(err.contains("com.example.bad"), "must name the plugin: {err}");
+        assert!(err.contains("implies 'read'"), "got: {err}");
+    }
+
+    // ── route permissions (the vocabulary's consumers) ────────────────────────
+
+    /// A manifest with one sidecar route, so each case below differs only in the
+    /// route JSON and the vocabulary it may or may not declare.
+    fn manifest_with_route(route_json: &str, levels_json: &str) -> String {
+        format!(
+            r#"{{
+                "id": "com.example.gated",
+                "name": "Gated",
+                "version": "1.0.0",
+                "runnables": [],
+                "permission_levels": {levels_json},
+                "sidecars": [{{
+                    "name": "api",
+                    "process": {{ "kind": "local", "command": "gated-api" }},
+                    "port": 9111,
+                    "http": {{ "routes": [{route_json}] }}
+                }}]
+            }}"#
+        )
+    }
+
+    const CLOSE_LEVEL: &str =
+        r#"[{ "id": "tabs.close", "label": "Can close tabs", "description": "Closes tabs." }]"#;
+
+    #[test]
+    fn a_public_route_may_not_require_a_permission() {
+        // The failure this prevents happens at DELIVERY time on someone else's
+        // infrastructure: an annotated public webhook 403s for every external
+        // caller on an org-bound node, long after the manifest was written.
+        let err = PluginManifest::parse_and_validate(&manifest_with_route(
+            r#"{ "path": "/webhook", "auth": "public", "permission": "tabs.close" }"#,
+            CLOSE_LEVEL,
+        ))
+        .expect_err("a public route carrying a permission must be refused");
+        assert!(err.contains("public"), "the error must name the cause: {err}");
+
+        // The same annotation on a non-public route is exactly the supported case.
+        assert!(
+            PluginManifest::parse_and_validate(&manifest_with_route(
+                r#"{ "path": "/webhook", "permission": "tabs.close" }"#,
+                CLOSE_LEVEL,
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_route_permission_naming_a_declared_level_validates_and_round_trips() {
+        let raw = manifest_with_route(
+            r#"{ "path": "/tabs/:id/close", "permission": "tabs.close", "resource_param": "id" }"#,
+            CLOSE_LEVEL,
+        );
+        let manifest = PluginManifest::parse_and_validate(&raw).expect("a declared level validates");
+        let route = &manifest.sidecars[0].http.as_ref().expect("http").routes[0];
+        assert_eq!(route.permission.as_deref(), Some("tabs.close"));
+        assert_eq!(route.resource_param.as_deref(), Some("id"));
+    }
+
+    /// The gate the whole field depends on: an id nothing declares can never be
+    /// granted, so a route requiring it would 403 forever with no visible cause.
+    #[test]
+    fn a_route_requiring_an_undeclared_permission_is_rejected() {
+        let err = PluginManifest::parse_and_validate(&manifest_with_route(
+            r#"{ "path": "/tabs/:id/close", "permission": "tabs.destroy" }"#,
+            CLOSE_LEVEL,
+        ))
+        .expect_err("an undeclared permission must fail validation");
+        assert!(err.contains("com.example.gated"), "must name the plugin: {err}");
+        assert!(err.contains("'tabs.destroy'"), "must name the level: {err}");
+
+        // Including the case where the manifest declares NO vocabulary at all —
+        // the likeliest version of the mistake.
+        assert!(PluginManifest::parse_and_validate(&manifest_with_route(
+            r#"{ "path": "/tabs", "permission": "tabs.close" }"#,
+            "[]",
+        ))
+        .is_err());
+    }
+
+    /// A typo here does not fail loudly at runtime — it silently degrades a rule the
+    /// author wrote as per-object into a per-app one, which is strictly weaker.
+    #[test]
+    fn a_resource_param_the_route_path_does_not_contain_is_rejected() {
+        let err = PluginManifest::parse_and_validate(&manifest_with_route(
+            r#"{ "path": "/tabs/:id/close", "permission": "tabs.close", "resource_param": "tab" }"#,
+            CLOSE_LEVEL,
+        ))
+        .expect_err("a param absent from the path must fail validation");
+        assert!(err.contains(":tab"), "must name the param: {err}");
+
+        // A LITERAL segment of the same name is not a param and must not satisfy it.
+        assert!(PluginManifest::parse_and_validate(&manifest_with_route(
+            r#"{ "path": "/tabs/id", "permission": "tabs.close", "resource_param": "id" }"#,
+            CLOSE_LEVEL,
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn a_resource_param_without_a_permission_is_rejected() {
+        let err = PluginManifest::parse_and_validate(&manifest_with_route(
+            r#"{ "path": "/tabs/:id", "resource_param": "id" }"#,
+            CLOSE_LEVEL,
+        ))
+        .expect_err("a resource param gating nothing must fail validation");
+        assert!(err.contains("resource_param"), "got: {err}");
+    }
+
+    /// The back-compat contract, same as [`a_manifest_without_permission_levels_still_parses_and_declares_none`]:
+    /// an existing manifest must parse unchanged AND re-serialize without the new
+    /// keys, or every shipped manifest's canonical (Gateway-signed) encoding moves.
+    #[test]
+    fn an_unannotated_route_parses_ungated_and_emits_no_new_keys() {
+        let manifest =
+            PluginManifest::parse_and_validate(&manifest_with_route(r#"{ "path": "/tabs" }"#, "[]"))
+                .expect("an unannotated route is still valid");
+        let route = &manifest.sidecars[0].http.as_ref().expect("http").routes[0];
+        assert!(route.permission.is_none());
+        assert!(route.resource_param.is_none());
+
+        let wire = serde_json::to_value(&manifest).expect("manifest serialises");
+        let encoded = wire["sidecars"][0]["http"]["routes"][0]
+            .as_object()
+            .expect("route object");
+        assert!(!encoded.contains_key("permission"), "got: {encoded:?}");
+        assert!(!encoded.contains_key("resource_param"), "got: {encoded:?}");
     }
 }

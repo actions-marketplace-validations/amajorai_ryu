@@ -19,5 +19,17 @@
   "contributes": {
     "workflows": []
   },
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "workflow.view",
+      "label": "Can view runs",
+      "description": "See durable workflow runs and their history."
+    },
+    {
+      "id": "workflow.run",
+      "label": "Can run",
+      "description": "Start a durable workflow and resume a suspended one."
+    }
+  ]
 }

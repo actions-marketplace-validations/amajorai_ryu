@@ -7,5 +7,12 @@
     "ryu": ">=0.0.1"
   },
   "runnables": [],
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "media.generate",
+      "label": "Can generate media",
+      "description": "Generate images and video on this node, which spends GPU time locally or model credits in the cloud."
+    }
+  ]
 }

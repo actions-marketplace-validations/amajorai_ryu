@@ -366,6 +366,7 @@ mod tests {
             email: None,
             org_id: None,
             role: OrgRole::Member,
+            teams: Vec::new(),
         }
     }
 

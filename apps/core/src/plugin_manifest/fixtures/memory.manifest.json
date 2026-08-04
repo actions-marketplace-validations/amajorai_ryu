@@ -234,6 +234,25 @@
     }
   ],
   "permission_grants": ["tool:http-egress:127.0.0.1"],
+  "permission_levels": [
+    {
+      "id": "memory.read",
+      "label": "Can read",
+      "description": "Read stored long-term memories, which can hold anything an agent was ever told to remember."
+    },
+    {
+      "id": "memory.write",
+      "label": "Can write",
+      "description": "Save and edit memories, which changes what every agent recalls in later conversations.",
+      "implies": ["memory.read"]
+    },
+    {
+      "id": "memory.delete",
+      "label": "Can delete",
+      "description": "Permanently remove memories; agents cannot recover them afterwards.",
+      "implies": ["memory.write"]
+    }
+  ],
   "contributes": {
     "settings_tabs": [
       {

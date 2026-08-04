@@ -7,5 +7,22 @@
     "ryu": ">=0.0.1"
   },
   "runnables": [],
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "agent.view",
+      "label": "Can view",
+      "description": "See the agents on this node, their models, and the instructions they run with."
+    },
+    {
+      "id": "agent.run",
+      "label": "Can run",
+      "description": "Start a chat or task with an agent, which spends model credits and lets the agent use its tools."
+    },
+    {
+      "id": "agent.edit",
+      "label": "Can edit",
+      "description": "Create, change, and delete agents, including their instructions, model, and which tools they may call."
+    }
+  ]
 }

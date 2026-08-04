@@ -29,6 +29,11 @@ export type GatewaySection =
 	| "email-alerts"
 	| "privacy"
 	| "storage"
+	// Who may talk to this node: pending device-pairing approvals, already-paired
+	// devices, and the node's own access token.
+	| "access"
+	// Per-resource permission exceptions (which team may do what, where).
+	| "permissions"
 	// Which app extracts text from uploaded documents (the node-wide
 	// `document.parse` binding) and the ceiling it enforces. Node-level, not
 	// per-user: one provider is bound per node and serves every Space and every

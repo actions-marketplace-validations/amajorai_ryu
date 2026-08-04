@@ -12,6 +12,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { resolveLocalNodeToken } from "@ryuhq/core-client/node-token";
 import { app } from "electron";
 import type {
 	EngineSettings,
@@ -97,11 +98,25 @@ function normalizeEngine(
 }
 
 function normalize(partial: Partial<IslandServiceConfig>): IslandServiceConfig {
-	const coreToken = partial.coreToken ?? process.env.RYU_TOKEN ?? null;
+	// `resolveLocalNodeToken` is the last resort, after an explicitly configured
+	// token and an inherited `RYU_TOKEN`. Core authenticates its local API by
+	// default now, and the island is its own Electron process rather than a child
+	// of Core — so without the file fallback it inherits nothing and every Core
+	// call 401s.
+	//
+	// The resolved base URL is passed so the MINTED token can only be sent to a
+	// local Core: `coreBaseUrl` is persisted config and patchable over IPC, so
+	// without the gate a redirected island would ship this machine's node secret
+	// to whatever host it was pointed at.
+	const resolvedCoreBaseUrl = stripTrailingSlash(
+		partial.coreBaseUrl ?? DEFAULT_CONFIG.coreBaseUrl
+	);
+	const coreToken =
+		partial.coreToken ??
+		process.env.RYU_TOKEN ??
+		resolveLocalNodeToken(resolvedCoreBaseUrl);
 	return {
-		coreBaseUrl: stripTrailingSlash(
-			partial.coreBaseUrl ?? DEFAULT_CONFIG.coreBaseUrl
-		),
+		coreBaseUrl: resolvedCoreBaseUrl,
 		// Device-bound: never honour an override. Shadow always points at the
 		// local sidecar regardless of what was persisted or patched in.
 		shadowBaseUrl: DEFAULT_CONFIG.shadowBaseUrl,

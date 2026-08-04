@@ -1,3 +1,4 @@
+mod acl;
 mod activity;
 mod agent_routing;
 mod agent_selection;
@@ -73,6 +74,7 @@ mod model_catalog_host;
 pub use ryu_model_format as model_format;
 mod monitors_client;
 mod native_history;
+mod node_token;
 mod notify;
 /// Re-export shim: the Open Knowledge Format (OKF) primitive now lives in the
 /// `ryu-knowledge` crate. Consumers reference `crate::okf::{Bundle, Concept, …}`
@@ -81,6 +83,7 @@ pub use ryu_knowledge as okf;
 mod dictation;
 mod finetune_client;
 mod openrouter_auth;
+mod pairing;
 mod paths;
 mod pi_config;
 mod plugin_host;
@@ -247,6 +250,34 @@ async fn main() {
     // `release` profile, and any env var the user already set wins. The matching
     // sidecar SPAWN ports are threaded through `profile::port` in `sidecar/**`.
     crate::profile::apply_env_defaults();
+
+    // Node auth token: resolve `RYU_TOKEN` (operator env > persisted file > mint a
+    // fresh one) and EXPORT it back into this process's environment.
+    //
+    // Placed here deliberately — after `apply_env_defaults` so the token file lands
+    // in the right profile's data dir (`~/.ryu-dev` vs `~/.ryu`), and before ANY
+    // sidecar spawn or server thread so that every one of the ~9 direct
+    // `env::var("RYU_TOKEN")` readers, plus every spawned child that inherits the
+    // environment, observes the same value. `sidecar/gateway.rs` copying it into the
+    // gateway child's `CORE_TOKEN` is the load-bearing one: miss it and the
+    // gateway's tool-catalog calls back into Core start 401ing.
+    //
+    // Before this, a default desktop install ran with NO token, and `require_auth`
+    // treats "no token configured" as "allow everything" — so any local process (or
+    // any page from an allowlisted CORS origin) could drive the whole local API.
+    match crate::node_token::resolve_and_export() {
+        Some(resolved) => tracing::info!(
+            source = ?resolved.source,
+            "node auth token resolved; protected routes require a bearer"
+        ),
+        // Not fatal on loopback (Core behaves exactly as it did before this
+        // existed). `enforce_remote_auth` below still REFUSES to expose a tokenless
+        // node beyond loopback, so an unwritable home cannot yield an open node on
+        // a public IP.
+        None => tracing::warn!(
+            "no node auth token could be established; local API is UNAUTHENTICATED"
+        ),
+    }
 
     // Ghost sidecar env: the Ghost MCP server moved from a hardcoded built-in to
     // its plugin manifest's `mcp_servers` (fixtures/ghost.manifest.json). A static
@@ -1501,7 +1532,11 @@ async fn main() {
         // Captured for the public `/api/realtime/ws` handler's in-handler node
         // token enforcement (the public router has no `auth_token` Extension).
         // Same env source the protected router resolves below.
-        node_token: std::env::var("RYU_TOKEN").ok(),
+        // The ACTIVE token (minted or operator-provisioned): the public realtime-WS
+        // handler enforces it in-handler, and a self-minted one is exactly as valid
+        // there as a provisioned one. NOT `shared_fleet_token` — that is the
+        // narrower "same secret across the fleet" notion the mesh needs.
+        node_token: crate::node_token::active_token(),
     };
     // Publish the state for the scheduler's continual-learning job (it has no
     // `State` extractor), mirroring the monitor/quest/identity-health engines.
@@ -1520,7 +1555,7 @@ async fn main() {
         crate::healing_client::HealingClient::new(healing_sidecar_port, server_state.clone());
     crate::healing_client::set_global_client(healing.clone());
     crate::healing_client::spawn(healing, server_state.clone());
-    let auth_token = std::env::var("RYU_TOKEN").ok();
+    let auth_token = crate::node_token::active_token();
 
     // Fire the `onStartup` activation event (#443) now that `ServerState` exists.
     // This is the live runtime driver behind the plugin activation contract: every

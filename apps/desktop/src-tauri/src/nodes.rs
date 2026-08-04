@@ -43,6 +43,40 @@ fn nodes_path() -> PathBuf {
 	crate::profile::ryu_home_dir().join("nodes.json")
 }
 
+/// The file Core mints its node-admittance token into (`apps/core/src/node_token.rs`).
+/// Profile-aware for the same reason `nodes_path` is: a dev Core writes into
+/// `~/.ryu-dev`, and the dev desktop must read THAT token, not the release one.
+fn node_auth_token_path() -> PathBuf {
+	crate::profile::ryu_home_dir().join("node-auth.token")
+}
+
+/// Read the local Core's minted auth token, if it has one.
+///
+/// Core mints this on first boot so a default install is authenticated rather
+/// than serving its whole API to any process on the machine. The desktop is
+/// Core's PARENT, not its child, so it cannot inherit `RYU_TOKEN` from the
+/// environment the way spawned sidecars do — it has to read the file.
+///
+/// `None` when absent (Core has not booted yet, or could not write it). Callers
+/// must treat that as "send no bearer", which is exactly what Core's
+/// `require_auth` accepts when it has no token configured either.
+pub fn read_local_node_token() -> Option<String> {
+	let raw = std::fs::read_to_string(node_auth_token_path()).ok()?;
+	let trimmed = raw.trim();
+	if trimmed.is_empty() {
+		return None;
+	}
+	Some(trimmed.to_owned())
+}
+
+/// True when `url` points at THIS machine's Core (the node whose token lives on
+/// local disk). Compared on the normalized URL so a trailing slash does not
+/// produce a miss. Mirrors `isLocalNode` in `useNodeStore.ts`.
+fn is_local_node_url(url: &str) -> bool {
+	let normalize = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+	normalize(url) == normalize(&crate::profile::core_base_url())
+}
+
 fn load() -> NodesConfig {
 	let path = nodes_path();
 	if let Ok(content) = std::fs::read_to_string(&path) {
@@ -59,16 +93,38 @@ fn load() -> NodesConfig {
 			if migrated {
 				let _ = save(&config);
 			}
+			fill_local_token(&mut config);
 			return config;
 		}
 	}
-	NodesConfig {
+	let mut config = NodesConfig {
 		default: "local".into(),
 		nodes: vec![Node {
 			name: "local".into(),
 			url: crate::profile::core_base_url(),
 			token: None,
 		}],
+	};
+	fill_local_token(&mut config);
+	config
+}
+
+/// Attach the on-disk minted token to any node pointing at THIS machine's Core.
+///
+/// Done at load time rather than persisted into `nodes.json`, deliberately:
+///  - the token is a secret and `nodes.json` is not a secrets file (it has no
+///    restrictive mode, and `data_path` copies it between profiles);
+///  - it stays correct for free after Core rotates the token, with no migration;
+///  - an explicit token already in `nodes.json` still WINS, so an operator who
+///    pinned one by hand (or provisioned `RYU_TOKEN`) is never overridden.
+fn fill_local_token(config: &mut NodesConfig) {
+	let Some(token) = read_local_node_token() else {
+		return;
+	};
+	for node in &mut config.nodes {
+		if node.token.is_none() && is_local_node_url(&node.url) {
+			node.token = Some(token.clone());
+		}
 	}
 }
 
@@ -77,7 +133,23 @@ fn save(config: &NodesConfig) -> anyhow::Result<()> {
 	if let Some(parent) = path.parent() {
 		std::fs::create_dir_all(parent)?;
 	}
-	std::fs::write(&path, serde_json::to_string_pretty(config)?)?;
+	// Undo `fill_local_token` before writing. Every mutating command does
+	// load -> mutate -> save, so without this the injected secret would be
+	// round-tripped into `nodes.json` — a file with no restrictive mode that
+	// `data_path` copies between profiles. Only a token that IS the current
+	// on-disk one is stripped, so a token an operator pinned by hand survives.
+	let mut to_write = NodesConfig {
+		default: config.default.clone(),
+		nodes: config.nodes.clone(),
+	};
+	if let Some(disk_token) = read_local_node_token() {
+		for node in &mut to_write.nodes {
+			if node.token.as_deref() == Some(disk_token.as_str()) && is_local_node_url(&node.url) {
+				node.token = None;
+			}
+		}
+	}
+	std::fs::write(&path, serde_json::to_string_pretty(&to_write)?)?;
 	Ok(())
 }
 
@@ -88,6 +160,30 @@ pub fn list_nodes() -> serde_json::Value {
 		"default": config.default,
 		"nodes": config.nodes,
 	})
+}
+
+/// The local Core's auth token, for the settings UI (show / copy / share with a
+/// browser surface that cannot read the file itself).
+///
+/// Returns `{ token, source }` where `source` is `"env"` when an operator
+/// provisioned `RYU_TOKEN` (in which case rotating the file would have no
+/// effect, and the UI says so), `"file"` when Core minted it, or `"none"` when
+/// there is no token yet.
+#[tauri::command]
+pub fn local_node_token() -> serde_json::Value {
+	// An operator-provisioned RYU_TOKEN wins in Core's own resolution order, so
+	// the UI must report the same precedence or it would offer to rotate a file
+	// that is being ignored.
+	if let Ok(env_token) = std::env::var("RYU_TOKEN") {
+		let trimmed = env_token.trim();
+		if !trimmed.is_empty() {
+			return serde_json::json!({ "token": trimmed, "source": "env" });
+		}
+	}
+	match read_local_node_token() {
+		Some(token) => serde_json::json!({ "token": token, "source": "file" }),
+		None => serde_json::json!({ "token": null, "source": "none" }),
+	}
 }
 
 #[tauri::command]
@@ -367,5 +463,45 @@ mod tests {
 		assert_eq!(subnet_prefix("192.168.1"), None);
 		assert_eq!(subnet_prefix("not-an-ip"), None);
 		assert_eq!(subnet_prefix("1.2.3.4.5"), None);
+	}
+
+	// ── local node auth token ────────────────────────────────────────────────
+
+	#[test]
+	fn local_node_urls_match_regardless_of_trailing_slash_or_case() {
+		let base = crate::profile::core_base_url();
+		assert!(is_local_node_url(&base));
+		assert!(is_local_node_url(&format!("{base}/")));
+		assert!(is_local_node_url(&base.to_uppercase()));
+		// A different host is NOT this machine's Core, so its token file must
+		// never be attached to it.
+		assert!(!is_local_node_url("http://192.168.1.50:7980"));
+		assert!(!is_local_node_url("https://node.example.com"));
+	}
+
+	#[test]
+	fn fill_local_token_never_overrides_an_explicit_token() {
+		// An operator who pinned a token by hand (or a peer's own token) must win
+		// over the on-disk mint, or a hand-configured node silently breaks.
+		let mut config = NodesConfig {
+			default: "local".into(),
+			nodes: vec![
+				Node {
+					name: "local".into(),
+					url: crate::profile::core_base_url(),
+					token: Some("pinned-by-hand".into()),
+				},
+				Node {
+					name: "remote".into(),
+					url: "http://192.168.1.50:7980".into(),
+					token: None,
+				},
+			],
+		};
+		fill_local_token(&mut config);
+		assert_eq!(config.nodes[0].token.as_deref(), Some("pinned-by-hand"));
+		// A REMOTE node never receives this machine's token: it would be a secret
+		// sent to a third party, and that peer would reject it anyway.
+		assert_eq!(config.nodes[1].token, None);
 	}
 }

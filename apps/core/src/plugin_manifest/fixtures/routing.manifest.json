@@ -27,5 +27,17 @@
       }
     ]
   },
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "gateway.view",
+      "label": "Can view routing",
+      "description": "See which model each kind of request is routed to."
+    },
+    {
+      "id": "gateway.configure",
+      "label": "Can change routing",
+      "description": "Change which models requests are routed to, affecting cost and quality for everyone."
+    }
+  ]
 }

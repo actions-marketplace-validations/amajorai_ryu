@@ -158,13 +158,60 @@ export function invitesPerWeek(): number {
  * position (approved, or off the queue). This is an estimate the UI must label as
  * such, never a promise.
  */
+/** Trailing window the observed invite rate is measured over. */
+export const INVITE_RATE_WINDOW_DAYS = 28;
+/**
+ * Approvals needed in the window before the measurement is trusted.
+ *
+ * Below this, one busy afternoon dominates the average and the estimate swings
+ * wildly between reads — worse than the configured constant, because it looks
+ * derived. Under the threshold we fall back rather than publish noise.
+ */
+const MIN_APPROVALS_FOR_RATE = 5;
+const DAYS_PER_WEEK = 7;
+
+/**
+ * Invites per week as actually OBSERVED, or null when there is not enough
+ * history to say.
+ *
+ * `invitesPerWeek()` is a configured constant — what someone once intended to
+ * send, not what is being sent. An estimate built on it drifts from reality the
+ * moment the real pace differs, and it never self-corrects. This measures the
+ * approvals that actually happened in the trailing window instead, so a queue
+ * that speeds up or stalls is reflected on the next read.
+ */
+export function observedInvitesPerWeek(
+	approvalsInWindow: number,
+	windowDays: number = INVITE_RATE_WINDOW_DAYS
+): number | null {
+	if (
+		!Number.isFinite(approvalsInWindow) ||
+		approvalsInWindow < MIN_APPROVALS_FOR_RATE ||
+		windowDays <= 0
+	) {
+		return null;
+	}
+	return (approvalsInWindow / windowDays) * DAYS_PER_WEEK;
+}
+
+/**
+ * A wait estimate for `position`.
+ *
+ * `ratePerWeek` is the measured throughput from {@link observedInvitesPerWeek};
+ * omit it (or pass null) to fall back to the configured {@link invitesPerWeek}.
+ * The caller decides, because only the caller can count approvals.
+ */
 export function waitlistEtaLabel(
-	position: number | null | undefined
+	position: number | null | undefined,
+	ratePerWeek?: number | null
 ): string | null {
 	if (!position || position <= 0) {
 		return null;
 	}
-	const perWeek = invitesPerWeek();
+	const perWeek =
+		typeof ratePerWeek === "number" && ratePerWeek > 0
+			? ratePerWeek
+			: invitesPerWeek();
 	const weeks = Math.ceil(position / perWeek);
 	if (weeks <= 1) {
 		return "less than a week";

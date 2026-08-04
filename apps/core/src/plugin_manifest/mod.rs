@@ -1199,6 +1199,20 @@ impl PluginManifestLoader {
                 .map_err(|e| format!("app '{}': {e} (source: {source})", manifest.id))?;
         }
 
+        // User-facing permission vocabulary gate. Repeated here rather than inherited
+        // from `PluginManifest::validate` because this loader deliberately re-runs the
+        // individual gates instead of the whole superset — the ids become grant
+        // strings and API path segments, so a malformed one must never reach storage.
+        validate_permission_levels(&manifest.permission_levels)
+            .map_err(|e| format!("app '{}': {e} (source: {source})", manifest.id))?;
+
+        // And the routes that CONSUME that vocabulary. Load-time rather than
+        // call-time because a route naming an undeclared level is unsatisfiable: the
+        // ext-proxy would refuse it on every request with the cause visible only in
+        // whatever the resolver logs.
+        validate_route_permissions(&manifest.sidecars, &manifest.permission_levels)
+            .map_err(|e| format!("app '{}': {e} (source: {source})", manifest.id))?;
+
         Ok(manifest)
     }
 }
@@ -2030,6 +2044,95 @@ mod tests {
             err.contains("invalid semver version"),
             "unexpected error: {err}"
         );
+    }
+
+    /// The loader is a separate gate from `PluginManifest::validate` — it re-runs
+    /// each rule individually rather than calling the superset — so the vocabulary
+    /// gate has to be proven HERE, not just in the contract crate. Every built-in
+    /// and every disk-installed manifest reaches Core through this function, and a
+    /// level id becomes a grant string and an API path segment.
+    #[test]
+    fn loader_rejects_a_malformed_permission_vocabulary() {
+        let dangling = r#"{
+            "id": "com.example.levels",
+            "name": "Levels",
+            "version": "1.0.0",
+            "runnables": [],
+            "permission_levels": [
+                { "id": "edit", "label": "Can edit", "description": "Edit.", "implies": ["read"] }
+            ]
+        }"#;
+        let err = loader_parse(dangling).unwrap_err();
+        assert!(err.contains("implies 'read'"), "unexpected error: {err}");
+
+        let uppercase = r#"{
+            "id": "com.example.levels",
+            "name": "Levels",
+            "version": "1.0.0",
+            "runnables": [],
+            "permission_levels": [
+                { "id": "Read", "label": "Can view", "description": "View." }
+            ]
+        }"#;
+        let err = loader_parse(uppercase).unwrap_err();
+        assert!(err.contains("illegal characters"), "unexpected error: {err}");
+    }
+
+    /// The companion case: a well-formed vocabulary must survive the loader intact,
+    /// or the gate above would be indistinguishable from "reject everything".
+    #[test]
+    fn loader_keeps_a_well_formed_permission_vocabulary() {
+        let json = r#"{
+            "id": "com.example.levels-ok",
+            "name": "Levels",
+            "version": "1.0.0",
+            "runnables": [],
+            "permission_levels": [
+                { "id": "read", "label": "Can view", "description": "View." },
+                { "id": "edit", "label": "Can edit", "description": "Edit.", "implies": ["read"] }
+            ]
+        }"#;
+        let manifest = loader_parse(json).expect("a valid vocabulary must load");
+        assert_eq!(manifest.permission_levels.len(), 2);
+        assert_eq!(manifest.permission_levels[1].implies, ["read"]);
+    }
+
+    /// Same argument as `loader_rejects_a_malformed_permission_vocabulary`, for the
+    /// routes that CONSUME the vocabulary: the ext-proxy gates on this annotation,
+    /// so a route naming a level nobody declared must fail to load rather than 403
+    /// on every request for a reason visible in no manifest.
+    #[test]
+    fn loader_rejects_a_route_requiring_an_undeclared_permission() {
+        let sidecar = |extra: &str| {
+            format!(
+                r#"{{
+                    "id": "com.example.gated",
+                    "name": "Gated",
+                    "version": "1.0.0",
+                    "runnables": [],
+                    "permission_levels": [
+                        {{ "id": "tabs.close", "label": "Can close", "description": "Close." }}
+                    ],
+                    "sidecars": [{{
+                        "name": "api",
+                        "process": {{ "kind": "local", "command": "gated-api" }},
+                        "port": 9111,
+                        "http": {{ "routes": [{{ "path": "/tabs/:id/close"{extra} }}] }}
+                    }}]
+                }}"#
+            )
+        };
+
+        let err = loader_parse(&sidecar(r#", "permission": "tabs.destroy""#)).unwrap_err();
+        assert!(err.contains("'tabs.destroy'"), "unexpected error: {err}");
+
+        // The declared one loads, so the gate above is not "reject every route".
+        let manifest = loader_parse(&sidecar(
+            r#", "permission": "tabs.close", "resource_param": "id""#,
+        ))
+        .expect("a declared level must load");
+        let route = &manifest.sidecars[0].http.as_ref().expect("http").routes[0];
+        assert_eq!(route.permission.as_deref(), Some("tabs.close"));
     }
 
     #[test]

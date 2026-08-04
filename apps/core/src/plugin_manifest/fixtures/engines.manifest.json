@@ -34,5 +34,18 @@
       "version": "1.0.0"
     }
   ],
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "engines.view",
+      "label": "Can view",
+      "description": "See the local model engines on this node and whether each is running."
+    },
+    {
+      "id": "engines.manage",
+      "label": "Can manage",
+      "description": "Install, start, and stop local engines, which downloads multi-gigabyte weights and holds this machine's memory while running.",
+      "implies": ["engines.view"]
+    }
+  ]
 }

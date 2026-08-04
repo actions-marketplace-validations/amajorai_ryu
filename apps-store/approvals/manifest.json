@@ -31,6 +31,19 @@
     }
   ],
   "permission_grants": ["approvals:crud", "quests:crud", "shell:integrate"],
+  "permission_levels": [
+    {
+      "id": "approvals.view",
+      "label": "Can view",
+      "description": "Read the approval inbox and see what an agent is waiting to do, without accepting or rejecting anything."
+    },
+    {
+      "id": "approvals.decide",
+      "label": "Can decide",
+      "description": "Accept or reject queued items, which is what lets an agent's proposed action, edit, or fix actually take effect.",
+      "implies": ["approvals.view"]
+    }
+  ],
   "companion": {
     "label": "Inbox",
     "icon": "shield-01"

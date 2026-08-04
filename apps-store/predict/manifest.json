@@ -3,16 +3,36 @@
   "name": "Autocomplete",
   "version": "1.0.0",
   "icon": "ai-magic",
-  "iconDither": { "from": 249, "to": 283, "direction": "down" },
+  "iconDither": {
+    "from": 249,
+    "to": 283,
+    "direction": "down"
+  },
   "surfaces": {
-    "gateway": { "support": "none" },
-    "core": { "support": "full" },
-    "desktop": { "support": "full" },
-    "island": { "support": "limited" },
-    "mobile": { "support": "limited" },
-    "extension": { "support": "limited" },
-    "web": { "support": "full" },
-    "cli": { "support": "full" }
+    "gateway": {
+      "support": "none"
+    },
+    "core": {
+      "support": "full"
+    },
+    "desktop": {
+      "support": "full"
+    },
+    "island": {
+      "support": "limited"
+    },
+    "mobile": {
+      "support": "limited"
+    },
+    "extension": {
+      "support": "limited"
+    },
+    "web": {
+      "support": "full"
+    },
+    "cli": {
+      "support": "full"
+    }
   },
   "engines": {
     "ryu": ">=0.1.0"
@@ -47,5 +67,12 @@
       }
     ]
   },
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "predict.use",
+      "label": "Can use predictions",
+      "description": "Receive predictive suggestions from this app."
+    }
+  ]
 }

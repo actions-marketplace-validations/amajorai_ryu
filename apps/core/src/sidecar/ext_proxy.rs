@@ -221,12 +221,66 @@ fn has_dot_segment(sub_path: &str) -> bool {
         .any(|seg| seg == "." || seg == "..")
 }
 
+/// The value captured by a named `:param` of `pattern` from `actual`, or `None` when
+/// the pattern has no such param (or the paths do not line up). Split out from
+/// [`route_matches`] because only the permission gate needs the captured value, and
+/// the matcher itself stays a pure yes/no on the security-critical 404 path.
+fn captured_param(pattern: &str, actual: &str, name: &str) -> Option<String> {
+    let act: Vec<&str> = actual.trim_start_matches('/').split('/').collect();
+    for (index, segment) in pattern.trim_start_matches('/').split('/').enumerate() {
+        // A wildcard swallows an unknown number of segments, so nothing after it
+        // lines up positionally any more. Give up rather than read whatever
+        // happens to sit at this index — a wrong capture would resolve the ACL
+        // against a resource id the caller effectively chose.
+        if segment.starts_with('*') {
+            return None;
+        }
+        if segment.strip_prefix(':') == Some(name) {
+            return act
+                .get(index)
+                .filter(|value| !value.is_empty())
+                .map(|value| (*value).to_owned());
+        }
+    }
+    None
+}
+
+/// The permission a matched route demands, paired with the resource id it applies
+/// to — `None` for a route the app did not annotate, which is every route shipping
+/// today and must keep proxying exactly as before.
+///
+/// The resource id falls back to the plugin id when the rule names no
+/// [`RouteSpec::resource_param`] (or the param captured nothing), so an admin can
+/// always express "this person may use this app" even for a route that identifies no
+/// object. Pure, so the rule this returns is unit-testable without a server.
+fn required_permission_for(
+    route: &crate::plugin_manifest::schema::RouteSpec,
+    sub_path: &str,
+    plugin_id: &str,
+) -> Option<(String, String)> {
+    let permission = route.permission.clone()?;
+    let resource_id = route
+        .resource_param
+        .as_deref()
+        .and_then(|param| captured_param(&route.path, sub_path, param))
+        .unwrap_or_else(|| plugin_id.to_owned());
+    Some((permission, resource_id))
+}
+
 /// Find the first sidecar on `manifest` whose declared http routes match `sub_path`,
-/// returning the matched sidecar spec, its http spec, and the route's auth posture.
+/// returning the matched sidecar spec, its http spec, and the matched route.
+///
+/// The whole ROUTE comes back rather than just its auth posture: the permission gate
+/// reads the same matched entry the forward decision came from, so the two can never
+/// be resolved against different routes.
 fn resolve_route<'a>(
     manifest: &'a crate::plugin_manifest::PluginManifest,
     sub_path: &str,
-) -> Option<(&'a SidecarSpec, &'a HttpProxySpec, RouteAuth)> {
+) -> Option<(
+    &'a SidecarSpec,
+    &'a HttpProxySpec,
+    &'a crate::plugin_manifest::schema::RouteSpec,
+)> {
     if has_dot_segment(sub_path) {
         return None;
     }
@@ -234,7 +288,7 @@ fn resolve_route<'a>(
         let Some(http) = &spec.http else { continue };
         for route in &http.routes {
             if route_matches(&route.path, sub_path) {
-                return Some((spec, http, route.auth));
+                return Some((spec, http, route));
             }
         }
     }
@@ -486,9 +540,13 @@ async fn proxy_for_plugin(
     let Some(manifest) = manifests.iter().find(|m| m.id == plugin_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some((spec, http, auth)) = resolve_route(manifest, sub_path) else {
+    let Some((spec, http, route)) = resolve_route(manifest, sub_path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let auth = route.auth;
+    // Resolved while the manifest guard is still held, since the gate below runs
+    // after it is dropped.
+    let required = required_permission_for(route, sub_path, plugin_id);
     // Profile-aware: proxy to the SAME shifted port the sidecar was told to bind
     // (identity in release; +offset in dev/custom profiles).
     let port = crate::profile::port(spec.port);
@@ -521,9 +579,41 @@ async fn proxy_for_plugin(
         }
     }
 
-    // Wake-on-demand — STRICTLY AFTER the auth check above, so an unauthenticated
-    // caller can never spin a process. Only sidecars that opted into on-demand start
-    // are touched; a plain eager sidecar (mid-download at enable, say) is left alone.
+    // App-declared per-route permission. Manifest data, because only the app knows
+    // which of its routes are destructive; enforced HERE, because only Core knows who
+    // the caller is (the sidecar sees Core's minted hop token, never a human).
+    //
+    // Runs through the SAME `enforce_permission_on` the kernel's own per-resource
+    // routes use, deliberately not a copy: the anonymous/org rules a personal node
+    // depends on (anonymous + unbound node ⇒ allowed) are exactly the rules that must
+    // not fork, and a second implementation is how they silently would.
+    //
+    // A route the app did not annotate never reaches this branch — no permission
+    // lookup, no JWT verification, no behaviour change for any app shipping today.
+    if let Some((permission, resource_id)) = required {
+        let caller = crate::server::verified_caller_from_headers(req.headers()).await;
+        // The plugin id is the resource KIND, so an app's resource ids live in their
+        // own keyspace and can never be confused with the kernel's (`space:abc`) or
+        // another app's.
+        if let Err(status) = crate::server::enforce_permission_on(
+            state,
+            &caller,
+            &permission,
+            plugin_id,
+            &resource_id,
+        )
+        .await
+        {
+            return status.into_response();
+        }
+    }
+
+    // Wake-on-demand — STRICTLY AFTER the auth and permission checks above, so
+    // neither an unauthenticated nor an unauthorized caller can spin a process
+    // (both also short-circuit before the body is buffered, so a refused caller
+    // cannot push `max_body_bytes` through Core either). Only sidecars that opted
+    // into on-demand start are touched; a plain eager sidecar (mid-download at
+    // enable, say) is left alone.
     // The `_activity` guard pins it alive + feeds its idle clock while Core sets up the
     // forward, making idle-stop real for manifest sidecars. NOTE: `forward_to_sidecar`
     // now returns the response at HEADER-arrival (its body streams), so this guard drops
@@ -1601,6 +1691,203 @@ mod tests {
         assert!(!has_dot_segment(""));
     }
 
+    // ── App-declared route permissions ──────────────────────────────────────────
+
+    fn route(
+        path: &str,
+        permission: Option<&str>,
+        resource_param: Option<&str>,
+    ) -> crate::plugin_manifest::schema::RouteSpec {
+        crate::plugin_manifest::schema::RouteSpec {
+            path: path.to_owned(),
+            auth: Default::default(),
+            permission: permission.map(str::to_owned),
+            resource_param: resource_param.map(str::to_owned),
+        }
+    }
+
+    /// The back-compat property the whole gate rests on: a route nobody annotated
+    /// imposes NOTHING, so every app installed today keeps proxying unchanged.
+    #[test]
+    fn an_unannotated_route_imposes_no_permission() {
+        assert_eq!(
+            required_permission_for(&route("/tabs/:id", None, None), "/tabs/t-42", "com.acme.app"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_no_resource_gates_on_the_app_itself() {
+        // A route that identifies no object (`POST /settings`) is still grantable —
+        // as the app. Without this fallback such a route could only be granted
+        // node-wide or not at all.
+        assert_eq!(
+            required_permission_for(
+                &route("/settings", Some("settings.write"), None),
+                "/settings",
+                "com.acme.app"
+            ),
+            Some(("settings.write".to_owned(), "com.acme.app".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_a_resource_param_gates_on_the_captured_value() {
+        assert_eq!(
+            required_permission_for(
+                &route("/tabs/:id/close", Some("tabs.close"), Some("id")),
+                "/tabs/t-42/close",
+                "com.acme.app"
+            ),
+            Some(("tabs.close".to_owned(), "t-42".to_owned()))
+        );
+        // The param is positional, so a LATER param must not be read off the first
+        // one's segment — that would gate every tab on the wrong id.
+        assert_eq!(
+            required_permission_for(
+                &route("/w/:workspace/tabs/:id", Some("tabs.close"), Some("id")),
+                "/w/main/tabs/t-42",
+                "com.acme.app"
+            ),
+            Some(("tabs.close".to_owned(), "t-42".to_owned()))
+        );
+    }
+
+    /// Validation rejects a `resource_param` its path does not contain, so this is
+    /// the belt-and-braces case (a manifest that reached disk some other way). It
+    /// must degrade to the APP, never to an empty resource id — `"<plugin>:"` would
+    /// be a key an admin cannot see and cannot address.
+    #[test]
+    fn a_resource_param_that_captures_nothing_falls_back_to_the_app() {
+        assert_eq!(
+            required_permission_for(
+                &route("/files/*rest", Some("files.read"), Some("id")),
+                "/files/a/b",
+                "com.acme.app"
+            ),
+            Some(("files.read".to_owned(), "com.acme.app".to_owned()))
+        );
+    }
+
+    /// A `:param` sitting AFTER a wildcard cannot be captured positionally: the
+    /// wildcard swallows an unknown number of segments, so the index the param
+    /// occupies in the pattern no longer corresponds to anything in the actual
+    /// path. Reading whatever happens to sit there would let the CALLER choose
+    /// which resource the ACL is evaluated against — a request could name a
+    /// resource it has an allow on while acting on a different one.
+    ///
+    /// Falling back to the app id is the fail-closed answer: the grant still has
+    /// to exist, it is just scoped to the app rather than to a caller-chosen id.
+    #[test]
+    fn a_param_after_a_wildcard_captures_nothing_rather_than_the_wrong_segment() {
+        assert_eq!(captured_param("/a/*rest/:id", "/a/one/two/three", "id"), None);
+        assert_eq!(
+            required_permission_for(
+                &route("/a/*rest/:id", Some("x.edit"), Some("id")),
+                "/a/one/two/three",
+                "com.acme.app"
+            ),
+            Some(("x.edit".to_owned(), "com.acme.app".to_owned())),
+            "must fall back to the app id, never to a caller-chosen segment"
+        );
+    }
+
+    /// The rule and the forward decision must come from the SAME matched route:
+    /// a request to an app's un-annotated route is not gated by the annotation on a
+    /// sibling route, and the annotated one is.
+    #[test]
+    fn only_the_matched_route_imposes_its_own_rule() {
+        let mut manifest = provider_manifest(9099, None);
+        let http = manifest.sidecars[0]
+            .http
+            .as_mut()
+            .expect("the provider fixture declares http");
+        http.routes = vec![
+            route("/health", None, None),
+            route("/tabs/:id/close", Some("tabs.close"), Some("id")),
+        ];
+
+        let (_, _, health) = resolve_route(&manifest, "/health").expect("declared route resolves");
+        assert_eq!(
+            required_permission_for(health, "/health", &manifest.id),
+            None,
+            "an un-annotated route must not inherit a sibling's rule"
+        );
+
+        let (_, _, close) =
+            resolve_route(&manifest, "/tabs/t-42/close").expect("declared route resolves");
+        assert_eq!(
+            required_permission_for(close, "/tabs/t-42/close", &manifest.id),
+            Some(("tabs.close".to_owned(), "t-42".to_owned()))
+        );
+
+        // And an UNDECLARED path still resolves to nothing at all (404), which is
+        // the gate that runs before any of this.
+        assert!(resolve_route(&manifest, "/tabs/t-42/steal").is_none());
+    }
+
+    /// The other half of the chain: the `(permission, resource_id)` the proxy hands
+    /// to the resolver is one that actually DENIES by default and can be granted
+    /// per-resource. Without this an app could declare a level that no role holds
+    /// and no overwrite can reach — enforcement that is really just a wall.
+    ///
+    /// Drives the pure resolver (no disk, no process-global node-org state); the
+    /// glue in between is `crate::server::enforce_permission_on`, which the kernel's
+    /// own per-resource routes share.
+    #[test]
+    fn an_app_declared_level_denies_a_member_until_it_is_granted_on_the_resource() {
+        use crate::acl::vocabulary::{build_vocabulary, builtin_role_catalog, DeclaredLevel};
+        use crate::acl::{resolve, Decision, Overwrite, OverwriteTarget, Principal, ResourceAcl};
+
+        let plugin_id = "com.acme.app";
+        let (permission, resource_id) = required_permission_for(
+            &route("/tabs/:id/close", Some("tabs.close"), Some("id")),
+            "/tabs/t-42/close",
+            plugin_id,
+        )
+        .expect("the route is annotated");
+
+        let vocab = build_vocabulary(vec![DeclaredLevel {
+            plugin_id: plugin_id.to_owned(),
+            id: permission.clone(),
+            label: "Can close tabs".to_owned(),
+            description: "Closes tabs.".to_owned(),
+            implies: Vec::new(),
+        }]);
+        let catalog = builtin_role_catalog();
+        let member = Principal {
+            user_id: "u1".to_owned(),
+            org_id: Some("org1".to_owned()),
+            team_ids: Default::default(),
+            role_ids: ["member".to_owned()].into_iter().collect(),
+        };
+
+        // No built-in role knows what an app's own level means, so the default is
+        // denial — an app cannot widen its callers' authority by declaring a level.
+        assert_eq!(
+            resolve(
+                &vocab.registry,
+                &catalog,
+                &member,
+                &ResourceAcl::new(),
+                &permission
+            ),
+            Decision::Denied
+        );
+
+        // …and an admin granting it on exactly the resource the proxy computed is
+        // what turns it on. A grant on a DIFFERENT id must not carry over.
+        let granted = ResourceAcl::new().with(
+            Overwrite::new(OverwriteTarget::Member(member.user_id.clone()))
+                .allowing([permission.clone()]),
+        );
+        assert_eq!(resource_id, "t-42");
+        assert_eq!(
+            resolve(&vocab.registry, &catalog, &member, &granted, &permission),
+            Decision::Allowed
+        );
+    }
+
     // ── Kill-isolation (the behavioral seam test) ───────────────────────────────
 
     /// A live sidecar's route works; when the sidecar dies, the SAME route 502s and
@@ -1739,6 +2026,8 @@ mod tests {
                     routes: vec![RouteSpec {
                         path: "/query".to_owned(),
                         auth: Default::default(),
+                        permission: None,
+                        resource_param: None,
                     }],
                     max_body_bytes: None,
                 }),
@@ -1817,6 +2106,8 @@ mod tests {
             http.routes = vec![RouteSpec {
                 path: "/".to_owned(),
                 auth: Default::default(),
+                permission: None,
+                resource_param: None,
             }];
         }
         // A second built-in with the SAME mount still dedups (both the bare and the

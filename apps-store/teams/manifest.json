@@ -43,6 +43,19 @@
     }
   ],
   "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "teams.view",
+      "label": "Can view",
+      "description": "See agent teams and which agents belong to each."
+    },
+    {
+      "id": "teams.manage",
+      "label": "Can manage",
+      "description": "Create teams and change their membership, which decides which agents answer when a team is addressed as one.",
+      "implies": ["teams.view"]
+    }
+  ],
   "contributes": {
     "hook_events": [
       {

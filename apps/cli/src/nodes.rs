@@ -83,12 +83,83 @@ pub fn nodes_path() -> PathBuf {
 
 pub fn load() -> NodesConfig {
     let path = nodes_path();
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(config) = serde_json::from_str(&content) {
-            return config;
+    let mut config = match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| default_config()),
+        Err(_) => default_config(),
+    };
+    fill_local_token(&mut config);
+    config
+}
+
+/// Path to the node-admittance token Core mints on first boot
+/// (`apps/core/src/node_token.rs`).
+fn node_auth_token_path() -> PathBuf {
+    nodes_path()
+        .parent()
+        .map(|dir| dir.join("node-auth.token"))
+        .unwrap_or_else(|| PathBuf::from("node-auth.token"))
+}
+
+/// Read the local node's minted auth token, if present.
+fn read_local_node_token() -> Option<String> {
+    // An operator-provisioned RYU_TOKEN wins, mirroring Core's own precedence.
+    if let Ok(env_token) = std::env::var("RYU_TOKEN") {
+        let trimmed = env_token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
         }
     }
-    default_config()
+    let raw = std::fs::read_to_string(node_auth_token_path()).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+/// True when `url` addresses THIS machine's Core — the only node whose token
+/// lives on local disk. A remote node must never be handed this secret.
+///
+/// Parsed with `reqwest::Url` (the `url` crate, already in the dependency tree)
+/// rather than by trimming prefixes. Hand-rolled parsing gets this wrong in a way
+/// that LEAKS: in `http://localhost:80@evil.com/`, `localhost:80` is USERINFO and
+/// the real host is `evil.com`, but splitting on the last `:` reads the host as
+/// `localhost` and would hand this machine's token to `evil.com`. `Url::host_str`
+/// strips userinfo, so the check sees the authority the request will actually go
+/// to. Fails closed on a URL that will not parse.
+fn is_local_node_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    // `host_str` keeps IPv6 literals bracketed (`[::1]`); a trailing dot is the
+    // DNS root and resolves identically. Normalize both, and lowercase because
+    // host comparison is case-insensitive.
+    let host = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1")
+}
+
+/// Attach the on-disk minted token to any LOCAL node that has none.
+///
+/// Core authenticates its local API by default, and the CLI is not a child of
+/// Core, so without this every `ryu` command against the local node 401s. Done
+/// at load time and stripped again in [`save`], so the secret never lands in
+/// `nodes.json` (which has no restrictive mode). An explicit token already in
+/// the config always wins.
+fn fill_local_token(config: &mut NodesConfig) {
+    let Some(token) = read_local_node_token() else {
+        return;
+    };
+    for node in &mut config.nodes {
+        if node.token.is_none() && is_local_node_url(&node.url) {
+            node.token = Some(token.clone());
+        }
+    }
 }
 
 fn default_config() -> NodesConfig {
@@ -108,7 +179,22 @@ pub fn save(config: &NodesConfig) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(config)?)?;
+    // Undo `fill_local_token` before writing: every mutating path is
+    // load -> mutate -> save, and round-tripping the injected token would copy a
+    // secret into `nodes.json`. Only the CURRENT on-disk token is stripped, so a
+    // token an operator pinned by hand survives untouched.
+    let mut to_write = NodesConfig {
+        default: config.default.clone(),
+        nodes: config.nodes.clone(),
+    };
+    if let Some(disk_token) = read_local_node_token() {
+        for node in &mut to_write.nodes {
+            if node.token.as_deref() == Some(disk_token.as_str()) && is_local_node_url(&node.url) {
+                node.token = None;
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&to_write)?)?;
     Ok(())
 }
 
@@ -487,4 +573,51 @@ mod tests {
         assert_eq!(ports.len(), n);
     }
 
+    #[test]
+    fn local_node_url_detection_resists_the_userinfo_bypass() {
+        // Loopback spellings Core actually binds.
+        assert!(is_local_node_url("http://127.0.0.1:7980"));
+        assert!(is_local_node_url("http://localhost:7980"));
+        assert!(is_local_node_url("http://LOCALHOST:7980/"));
+        assert!(is_local_node_url("http://[::1]:7980"));
+        assert!(is_local_node_url("http://localhost.:7980"));
+
+        // THE LEAK: `localhost:80` here is USERINFO — the real authority is
+        // evil.com. Splitting on the last `:` reads the host as `localhost` and
+        // would hand this machine's node token to evil.com.
+        assert!(!is_local_node_url("http://localhost:80@evil.com/"));
+        assert!(!is_local_node_url("http://127.0.0.1@evil.com/"));
+        assert!(!is_local_node_url("http://user:pass@evil.com/"));
+
+        // Lookalikes and junk fail closed.
+        assert!(!is_local_node_url("http://127.0.0.1.evil.com/"));
+        assert!(!is_local_node_url("http://localhost.evil.com/"));
+        assert!(!is_local_node_url("http://192.168.1.50:7980"));
+        assert!(!is_local_node_url("not a url"));
+        assert!(!is_local_node_url(""));
+    }
+
+    #[test]
+    fn fill_local_token_never_hands_a_remote_node_this_machines_secret() {
+        let mut config = NodesConfig {
+            default: "local".into(),
+            nodes: vec![
+                Node {
+                    name: "remote".into(),
+                    url: "http://192.168.1.50:7980".into(),
+                    token: None,
+                    mesh: None,
+                },
+                Node {
+                    name: "spoofed".into(),
+                    url: "http://localhost:80@evil.com/".into(),
+                    token: None,
+                    mesh: None,
+                },
+            ],
+        };
+        fill_local_token(&mut config);
+        assert_eq!(config.nodes[0].token, None);
+        assert_eq!(config.nodes[1].token, None);
+    }
 }

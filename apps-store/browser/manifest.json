@@ -443,6 +443,19 @@
     }
   ],
   "permission_grants": ["browser:control", "tool:http-egress:127.0.0.1"],
+  "permission_levels": [
+    {
+      "id": "browser.view",
+      "label": "Can view",
+      "description": "Read the browser's open tabs, their titles, screenshots, and accessibility snapshots."
+    },
+    {
+      "id": "browser.control",
+      "label": "Can control",
+      "description": "Open, navigate, and close tabs and drive pages with synthetic clicks, typing, and scrolling, using whatever the browser is already signed in to.",
+      "implies": ["browser.view"]
+    }
+  ],
   "contributes": {
     "dock_panels": [
       {

@@ -6,6 +6,7 @@ import {
 	isAdminEmail,
 	isWaitlistBypassed,
 	isWaitlisted,
+	observedInvitesPerWeek,
 	referralUrlFor,
 	waitlistEtaLabel,
 	webOrigin,
@@ -176,5 +177,52 @@ describe("waitlistEtaLabel", () => {
 		process.env.WAITLIST_INVITES_PER_WEEK = "10";
 		// 25 -> ceil(25/10) = 3 weeks
 		expect(waitlistEtaLabel(25)).toBe("~3 weeks");
+	});
+});
+
+describe("observedInvitesPerWeek", () => {
+	// Below the sample threshold the average is dominated by one busy afternoon,
+	// which is worse than the configured constant because it LOOKS derived.
+	it("returns null until there is enough history", () => {
+		expect(observedInvitesPerWeek(0)).toBeNull();
+		expect(observedInvitesPerWeek(4)).toBeNull();
+	});
+
+	it("converts approvals in the window to a weekly rate", () => {
+		// 28 approvals over 28 days = 7/week.
+		expect(observedInvitesPerWeek(28, 28)).toBeCloseTo(7, 5);
+		// 56 over 28 days = 14/week.
+		expect(observedInvitesPerWeek(56, 28)).toBeCloseTo(14, 5);
+	});
+
+	it("rejects a nonsensical window instead of dividing by it", () => {
+		expect(observedInvitesPerWeek(50, 0)).toBeNull();
+		expect(observedInvitesPerWeek(50, -7)).toBeNull();
+	});
+});
+
+describe("waitlistEtaLabel with a measured rate", () => {
+	it("uses the measured rate over the configured default", () => {
+		// 25 invites/week measured: ceil(100 / 25) = 4 weeks. The configured
+		// default would answer differently, which is the whole point — the label
+		// tracks observed throughput, not the constant.
+		expect(waitlistEtaLabel(100, 25)).toBe("~4 weeks");
+	});
+
+	it("a slower measured rate lengthens the estimate", () => {
+		// Past the weeks threshold the label switches to months, so a slow queue
+		// reads as months rather than an absurd week count.
+		expect(waitlistEtaLabel(100, 10)).toBe("~2 months");
+	});
+
+	it("a faster measured rate shortens the estimate", () => {
+		expect(waitlistEtaLabel(100, 200)).toBe("less than a week");
+	});
+
+	it("falls back to the configured rate when no rate is measurable", () => {
+		// Same answer as the single-argument form, which is the whole point of the
+		// fallback: no history must not mean no estimate.
+		expect(waitlistEtaLabel(150, null)).toBe(waitlistEtaLabel(150));
+		expect(waitlistEtaLabel(150, 0)).toBe(waitlistEtaLabel(150));
 	});
 });

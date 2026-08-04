@@ -131,6 +131,19 @@ pub struct OrgMembership {
     pub role: String,
 }
 
+/// One team membership embedded in the JWT payload (`teams: [{ id, org, role }]`).
+/// Better Auth's `teamMember` row carries no role of its own, so `role` is the
+/// user's role in the team's owning org — the same raw Better Auth role string as
+/// [`OrgMembership::role`], mapped via [`OrgRole::from_ba_str`].
+#[derive(Debug, Clone)]
+pub struct TeamMembership {
+    pub id: String,
+    /// The org that owns this team. A team is only ever meaningful inside its
+    /// org, so this is what [`to_caller_for_org`] narrows on.
+    pub org_id: String,
+    pub role: String,
+}
+
 /// The decoded, signature-verified claims of a Better Auth JWT. This is the raw
 /// verified payload before it is narrowed to a single node's org context (see
 /// [`to_caller_for_org`]).
@@ -141,6 +154,10 @@ pub struct VerifiedClaims {
     pub email: Option<String>,
     /// Every org the user belongs to, as embedded by the `definePayload` hook.
     pub orgs: Vec<OrgMembership>,
+    /// Every team the user belongs to, across all of their orgs. Empty for
+    /// tokens minted before teams were embedded — absence means "no team
+    /// memberships", never an error.
+    pub teams: Vec<TeamMembership>,
 }
 
 /// A caller's verified identity narrowed to THIS node's org. `org_id`/`role`
@@ -153,6 +170,10 @@ pub struct VerifiedCaller {
     pub email: Option<String>,
     pub org_id: Option<String>,
     pub role: OrgRole,
+    /// The caller's teams, narrowed to `org_id`. Teams owned by any other org are
+    /// dropped, so a team id minted in a different org can never satisfy a
+    /// team-scoped check on this node. Empty whenever `org_id` is `None`.
+    pub teams: Vec<TeamMembership>,
 }
 
 /// The access level [`can_access`] resolves for a resource.
@@ -433,7 +454,8 @@ fn jwk_kid(jwk: &Jwk) -> Option<String> {
 // ── JWT verification ─────────────────────────────────────────────────────────
 
 /// Raw JWT payload shape. Better Auth's `definePayload` embeds `id`, `email`,
-/// and `orgs: [{ id, role }]`; `sub` is the standard subject fallback.
+/// `orgs: [{ id, role }]` and `teams: [{ id, org, role }]`; `sub` is the standard
+/// subject fallback.
 #[derive(Debug, Deserialize)]
 struct RawClaims {
     #[serde(default)]
@@ -444,11 +466,29 @@ struct RawClaims {
     email: Option<String>,
     #[serde(default)]
     orgs: Vec<RawOrg>,
+    /// Defaulted so every token minted before teams were embedded still verifies.
+    #[serde(default)]
+    teams: Vec<RawTeam>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawOrg {
     id: String,
+    #[serde(default)]
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTeam {
+    /// Required, mirroring [`RawOrg::id`]: an entry with no id identifies no team
+    /// and only the minter can produce one, so it is a payload bug, not input.
+    id: String,
+    /// Defaulted so an entry missing its org degrades to an unmatchable one
+    /// (`""` matches no node org) rather than being silently treated as global.
+    #[serde(default)]
+    org: String,
+    /// Defaulted to the empty string, which [`OrgRole::from_ba_str`] maps to
+    /// `Viewer` — the least privilege, so a missing role can never widen access.
     #[serde(default)]
     role: String,
 }
@@ -500,10 +540,21 @@ pub async fn verify_jwt(token: &str) -> Result<VerifiedClaims, AuthError> {
         })
         .collect();
 
+    let teams = claims
+        .teams
+        .into_iter()
+        .map(|t| TeamMembership {
+            id: t.id,
+            org_id: t.org,
+            role: t.role,
+        })
+        .collect();
+
     Ok(VerifiedClaims {
         user_id,
         email: claims.email,
         orgs,
+        teams,
     })
 }
 
@@ -524,7 +575,8 @@ fn map_jwt_error(err: jsonwebtoken::errors::Error) -> AuthError {
 /// org matches `node_org_id`: a member yields `org_id = Some(node)` with the
 /// mapped role; a non-member yields `org_id = None` and `Viewer` so an org-scoped
 /// check can never match. When the node is not org-bound (`None`), the caller has
-/// no org context (`org_id = None`, `Viewer`).
+/// no org context (`org_id = None`, `Viewer`). `teams` is narrowed the same way:
+/// only teams owned by the resolved org survive.
 pub fn to_caller_for_org(claims: &VerifiedClaims, node_org_id: Option<&str>) -> VerifiedCaller {
     let (org_id, role) = match node_org_id {
         Some(node) => match claims.orgs.iter().find(|m| m.id == node) {
@@ -537,11 +589,25 @@ pub fn to_caller_for_org(claims: &VerifiedClaims, node_org_id: Option<&str>) -> 
         None => (None, OrgRole::Viewer),
     };
 
+    // Narrow off the ALREADY-narrowed `org_id`, not `node_org_id`: a caller who is
+    // not a member of the node's org resolves to `None` above and so carries no
+    // teams here either, without a second membership check.
+    let teams = match org_id.as_deref() {
+        Some(org) => claims
+            .teams
+            .iter()
+            .filter(|t| t.org_id == org)
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+
     VerifiedCaller {
         user_id: claims.user_id.clone(),
         email: claims.email.clone(),
         org_id,
         role,
+        teams,
     }
 }
 
@@ -647,6 +713,7 @@ mod tests {
             email: None,
             org_id: org.map(str::to_owned),
             role,
+            teams: Vec::new(),
         }
     }
 
@@ -722,6 +789,7 @@ mod tests {
                     role: "viewer".to_owned(),
                 },
             ],
+            teams: Vec::new(),
         };
         let c = to_caller_for_org(&claims, Some("o1"));
         assert_eq!(c.org_id.as_deref(), Some("o1"));
@@ -736,5 +804,91 @@ mod tests {
         let unbound = to_caller_for_org(&claims, None);
         assert_eq!(unbound.org_id, None);
         assert_eq!(unbound.role, OrgRole::Viewer);
+    }
+
+    /// Pins the wire contract against the TypeScript minter: `definePayload`
+    /// emits `teams: [{ id, org, role }]`. If either side renames a key the teams
+    /// silently vanish (they would never match a node org), so this decodes the
+    /// literal JSON shape rather than a struct literal.
+    #[test]
+    fn claims_decode_team_memberships_from_the_payload_shape() {
+        let raw: RawClaims = serde_json::from_str(
+            r#"{"id":"u1","email":"a@b.c",
+                "orgs":[{"id":"o1","role":"admin"}],
+                "teams":[{"id":"t1","org":"o1","role":"admin"}]}"#,
+        )
+        .expect("payload with teams must decode");
+        assert_eq!(raw.teams.len(), 1);
+        assert_eq!(raw.teams[0].id, "t1");
+        assert_eq!(raw.teams[0].org, "o1");
+        assert_eq!(raw.teams[0].role, "admin");
+    }
+
+    /// Back-compat: every token minted before teams were embedded carries no
+    /// `teams` key at all. Absence means "no team memberships" — decoding must
+    /// still succeed, or every live session breaks the moment this ships.
+    #[test]
+    fn claims_without_teams_still_decode_as_no_memberships() {
+        let raw: RawClaims = serde_json::from_str(
+            r#"{"id":"u1","email":"a@b.c","orgs":[{"id":"o1","role":"admin"}]}"#,
+        )
+        .expect("pre-teams token must still decode");
+        assert!(raw.teams.is_empty());
+
+        // A team entry missing `org` is kept but unmatchable rather than fatal:
+        // one malformed row must not reject an otherwise valid token.
+        let partial: RawClaims =
+            serde_json::from_str(r#"{"id":"u1","teams":[{"id":"t1","role":"admin"}]}"#)
+                .expect("team entry without org must not fail the token");
+        assert_eq!(partial.teams[0].org, "");
+    }
+
+    /// The narrowing is what makes a team claim safe to trust: a team is only
+    /// meaningful inside its own org, so anything from another org must be gone
+    /// before a team-scoped check ever sees the caller.
+    #[test]
+    fn to_caller_narrows_teams_to_the_node_org() {
+        let claims = VerifiedClaims {
+            user_id: "u1".to_owned(),
+            email: None,
+            orgs: vec![
+                OrgMembership {
+                    id: "o1".to_owned(),
+                    role: "member".to_owned(),
+                },
+                OrgMembership {
+                    id: "o2".to_owned(),
+                    role: "owner".to_owned(),
+                },
+            ],
+            teams: vec![
+                TeamMembership {
+                    id: "t1".to_owned(),
+                    org_id: "o1".to_owned(),
+                    role: "member".to_owned(),
+                },
+                TeamMembership {
+                    id: "t2".to_owned(),
+                    org_id: "o2".to_owned(),
+                    role: "owner".to_owned(),
+                },
+            ],
+        };
+
+        let c = to_caller_for_org(&claims, Some("o1"));
+        let ids: Vec<&str> = c.teams.iter().map(|t| t.id.as_str()).collect();
+        // t2 is a real membership of this user — but in a DIFFERENT org, so on an
+        // o1-bound node it must not be reachable.
+        assert_eq!(ids, vec!["t1"]);
+        assert_eq!(c.teams[0].role, "member");
+
+        // Non-member of the node's org: no org context and therefore no teams,
+        // even though the user does hold team memberships elsewhere.
+        let outsider = to_caller_for_org(&claims, Some("o3"));
+        assert!(outsider.teams.is_empty());
+
+        // Node not org-bound: no org to narrow against, so no team context.
+        let unbound = to_caller_for_org(&claims, None);
+        assert!(unbound.teams.is_empty());
     }
 }

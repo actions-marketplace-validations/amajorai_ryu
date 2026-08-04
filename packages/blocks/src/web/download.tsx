@@ -15,33 +15,25 @@ import {
 import { cn } from "@ryu/ui/lib/utils";
 import { Download, Globe, RefreshCw, Sparkles, WifiOff } from "lucide-react";
 import type { SVGProps } from "react";
+import {
+	archLabel,
+	type DownloadArch,
+	type DownloadOS,
+	type DownloadState,
+	findReleaseWithAsset,
+	osName,
+	RELEASES_PAGE,
+	type Release,
+	resolveDownloadState,
+} from "./download-assets.ts";
 import { Reveal } from "./reveal.tsx";
 import { Highlights } from "./sections.tsx";
 
-export type DownloadOS = "macos" | "windows" | "linux";
-export type DownloadArch = "intel" | "arm";
-
-export interface ReleaseAsset {
-	browser_download_url: string;
-	name: string;
-}
-
-export interface Release {
-	assets: ReleaseAsset[];
-	draft?: boolean;
-	html_url: string;
-	id: number;
-	name: string;
-	prerelease?: boolean;
-	published_at: string;
-	tag_name: string;
-}
-
-export const GITHUB_RELEASES_REPO = "amajorai/ryu";
-export const RELEASES_PAGE = `https://github.com/${GITHUB_RELEASES_REPO}/releases`;
-export const RELEASES_API = `https://api.github.com/repos/${GITHUB_RELEASES_REPO}/releases`;
-export const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_RELEASES_REPO}/releases/latest`;
-export const GITHUB_REPO = `https://github.com/${GITHUB_RELEASES_REPO}`;
+// Asset resolution (which file a given machine gets, and where releases are
+// fetched from) lives in the JSX-free ./download-assets.ts so it can be unit
+// tested; re-exported here because every consumer imports from this module.
+// biome-ignore lint/performance/noBarrelFile: keeps the long-standing import path working
+export * from "./download-assets.ts";
 
 /** Browser build of the desktop app (apps/webapp). Default :5175 in local dev. */
 export const WEBAPP_URL =
@@ -128,43 +120,31 @@ const LinuxLogo = (props: SVGProps<SVGSVGElement>) => (
 );
 
 interface Platform {
-	archPatterns: Record<DownloadArch, RegExp[]>;
 	description: string;
 	icon: React.ReactNode;
 	id: DownloadOS;
 	name: string;
 }
 
+// Presentation only — the filename patterns live in PLATFORM_ASSET_PATTERNS.
 export const PLATFORMS: Platform[] = [
 	{
 		id: "macos",
 		name: "macOS",
 		description: "Requires macOS 12.0 or later",
 		icon: <AppleLogo className="size-6 fill-current text-foreground" />,
-		archPatterns: {
-			arm: [/aarch64\.dmg$/i, /_aarch64\.dmg$/i],
-			intel: [/x64\.dmg$/i, /_x64\.dmg$/i],
-		},
 	},
 	{
 		id: "windows",
 		name: "Windows",
 		description: "Windows 10 or 11 (64-bit)",
 		icon: <WindowsLogo className="size-6 [&_path]:fill-[#00adef]" />,
-		archPatterns: {
-			arm: [/arm64.*setup\.exe$/i],
-			intel: [/x64-setup\.exe$/i, /x64_en-US\.msi$/i],
-		},
 	},
 	{
 		id: "linux",
 		name: "Linux",
 		description: "Debian, Ubuntu, Fedora, and more",
 		icon: <LinuxLogo className="size-6 text-foreground" />,
-		archPatterns: {
-			arm: [/aarch64\.AppImage$/i, /arm64\.AppImage$/i, /arm64\.deb$/i],
-			intel: [/amd64\.AppImage$/i, /amd64\.deb$/i, /x86_64\.rpm$/i],
-		},
 	},
 ];
 
@@ -194,67 +174,6 @@ const DOWNLOAD_HIGHLIGHTS = [
 		icon: RefreshCw,
 	},
 ];
-
-export function findReleaseAsset(
-	release: Release,
-	platformId: string,
-	arch: DownloadArch
-): ReleaseAsset | null {
-	if (!release.assets?.length) {
-		return null;
-	}
-	const platform = PLATFORMS.find((p) => p.id === platformId);
-	if (!platform) {
-		return null;
-	}
-	for (const pattern of platform.archPatterns[arch]) {
-		const asset = release.assets.find((a) => pattern.test(a.name));
-		if (asset) {
-			return asset;
-		}
-	}
-	return null;
-}
-
-/**
- * Newest release that actually CARRIES the asset for this platform/arch.
- *
- * A GitHub release exists the moment it is tagged, but its binaries are uploaded
- * by a build that can take many minutes — so "latest release" is routinely a
- * release with no desktop assets yet, and linking to it hands the user a dead
- * download. Walk newest-to-oldest and return the first release that really has
- * the file, so a still-building version transparently falls back to the last
- * good one. Returns null only when no release in the list has it.
- */
-export function findReleaseWithAsset(
-	releases: Release[],
-	platformId: string,
-	arch: DownloadArch
-): { release: Release; asset: ReleaseAsset } | null {
-	for (const release of releases) {
-		if (release.draft) {
-			continue;
-		}
-		const asset = findReleaseAsset(release, platformId, arch);
-		if (asset) {
-			return { release, asset };
-		}
-	}
-	return null;
-}
-
-export function getAssetUrl(
-	release: Release,
-	platformId: string,
-	arch: DownloadArch
-) {
-	const asset = findReleaseAsset(release, platformId, arch);
-	if (asset) {
-		return asset.browser_download_url;
-	}
-	// Fallback: link to the release's assets section instead of generic releases page
-	return `${release.html_url}#assets`;
-}
 
 /**
  * Verify a download URL is reachable (HEAD request).
@@ -288,60 +207,6 @@ export function buildDownloadUrl(
 	return null;
 }
 
-/**
- * Fetch releases from GitHub API with retry logic.
- * Handles rate limiting and network errors with exponential backoff.
- */
-export async function fetchReleasesWithRetry(
-	maxRetries = 3,
-	baseDelay = 1000
-): Promise<Release[]> {
-	for (let attempt = 0; attempt < maxRetries; attempt++) {
-		try {
-			const response = await fetch(RELEASES_API);
-			if (response.ok) {
-				const data = await response.json();
-				if (Array.isArray(data)) {
-					return data.filter((r: Release) => !r.draft);
-				}
-				return [];
-			}
-			// If rate limited, wait and retry
-			if (response.status === 403 || response.status === 429) {
-				const delay = baseDelay * 2 ** attempt;
-				await new Promise((resolve) => setTimeout(resolve, delay));
-				continue;
-			}
-			// Other errors, don't retry
-			return [];
-		} catch {
-			// Network error, retry with backoff
-			if (attempt < maxRetries - 1) {
-				const delay = baseDelay * 2 ** attempt;
-				await new Promise((resolve) => setTimeout(resolve, delay));
-			}
-		}
-	}
-	return [];
-}
-
-export function archLabel(platformId: string, arch: DownloadArch) {
-	if (platformId === "macos") {
-		return arch === "arm" ? "Apple Silicon" : "Intel";
-	}
-	return arch === "arm" ? "ARM64" : "x64";
-}
-
-export function osName(os: DownloadOS) {
-	if (os === "windows") {
-		return "Windows";
-	}
-	if (os === "linux") {
-		return "Linux";
-	}
-	return "macOS";
-}
-
 function formatDate(value: string) {
 	const date = new Date(value);
 	return Number.isNaN(date.getTime())
@@ -353,17 +218,68 @@ function formatDate(value: string) {
 			});
 }
 
+/** The sub-label under an arch name, explaining what that row can offer. */
+function archHintFor(state: DownloadState, arch: DownloadArch): string {
+	if (state.kind === "building") {
+		return `${state.version} is still building`;
+	}
+	if (state.kind === "unavailable") {
+		return "Not available";
+	}
+	if (state.kind === "unknown") {
+		return "Browse releases on GitHub";
+	}
+	const processors = arch === "arm" ? "ARM processors" : "Intel / AMD";
+	// During a release window the newest tag has no binaries yet, so name the
+	// version this button really hands over rather than implying it is the newest.
+	return state.supersededByBuilding
+		? `${processors} · ${state.servedVersion}`
+		: processors;
+}
+
 function ArchButtons({
-	release,
+	releases,
 	platformId,
 }: {
-	release: Release;
+	releases: Release[];
 	platformId: string;
 }) {
 	return (
 		<div className="flex w-full flex-col gap-2">
 			{(["arm", "intel"] as const).map((arch) => {
-				const asset = findReleaseAsset(release, platformId, arch);
+				const state = resolveDownloadState(releases, platformId, arch);
+				const body = (
+					<>
+						<span className="flex flex-col items-start text-left">
+							<span className="font-medium text-sm">
+								{archLabel(platformId, arch)}
+							</span>
+							<span className="text-muted-foreground text-xs">
+								{archHintFor(state, arch)}
+							</span>
+						</span>
+						<Download className="size-4 text-muted-foreground" />
+					</>
+				);
+				// Disable ONLY when we know there is nothing to hand over. A release
+				// list we could not read is not knowledge — that case still links to
+				// GitHub, or the download page would be empty on a transient blip.
+				if (state.kind === "unavailable" || state.kind === "building") {
+					return (
+						<Button
+							className="w-full justify-between"
+							disabled
+							key={arch}
+							variant="outline"
+						>
+							{body}
+						</Button>
+					);
+				}
+				const href =
+					state.kind === "ready"
+						? state.asset.browser_download_url
+						: state.href;
 				return (
 					<Button
 						className="w-full justify-between"
@@ -371,24 +287,16 @@ function ArchButtons({
 						nativeButton={false}
 						render={
 							<a
-								download={asset?.name}
-								href={
-									asset?.browser_download_url ?? `${release.html_url}#assets`
-								}
+								href={href}
 								rel="noopener noreferrer"
+								{...(state.kind === "ready"
+									? { download: state.asset.name }
+									: { target: "_blank" })}
 							/>
 						}
 						variant="outline"
 					>
-						<span className="flex flex-col items-start text-left">
-							<span className="font-medium text-sm">
-								{archLabel(platformId, arch)}
-							</span>
-							<span className="text-muted-foreground text-xs">
-								{arch === "arm" ? "ARM processors" : "Intel / AMD"}
-							</span>
-						</span>
-						<Download className="size-4 text-muted-foreground" />
+						{body}
 					</Button>
 				);
 			})}
@@ -396,21 +304,33 @@ function ArchButtons({
 	);
 }
 
-const EMPTY_RELEASE: Release = {
-	id: 0,
-	tag_name: "",
-	name: "",
-	published_at: new Date(0).toISOString(),
-	assets: [],
-	html_url: RELEASES_PAGE,
-};
+/**
+ * The line under the hero CTA. It states the version being handed over — during
+ * a release window that is the last one with binaries, not the just-tagged one
+ * still building — or why there is nothing to hand over yet.
+ */
+function heroStatusNote(state: DownloadState): string {
+	if (state.kind === "building") {
+		return `${state.version} is building now · check back shortly`;
+	}
+	if (state.kind === "unavailable") {
+		return "No build for this machine yet · Free and open to use locally";
+	}
+	if (state.kind === "unknown") {
+		return "Couldn't reach GitHub · grab a build from the releases page";
+	}
+	if (state.supersededByBuilding) {
+		return `${state.servedVersion} · a newer release is still building`;
+	}
+	return `${state.servedVersion} · Free and open to use locally`;
+}
 
 function PlatformCard({
 	platform,
-	release,
+	releases,
 }: {
 	platform: Platform;
-	release: Release;
+	releases: Release[];
 }) {
 	return (
 		<div className="flex h-full flex-col gap-5 rounded-2xl border border-border bg-muted/40 p-6 backdrop-blur-sm transition-colors hover:bg-muted/60">
@@ -428,7 +348,7 @@ function PlatformCard({
 				</div>
 			</div>
 			<div className="mt-auto">
-				<ArchButtons platformId={platform.id} release={release} />
+				<ArchButtons platformId={platform.id} releases={releases} />
 			</div>
 		</div>
 	);
@@ -443,6 +363,16 @@ export interface DownloadProps {
 	os?: DownloadOS;
 	/** Releases fetched from GitHub; the live page fetches them, the storyboard passes static ones. */
 	releases?: Release[];
+	/**
+	 * False while the releases fetch is still in flight.
+	 *
+	 * An empty `releases` means two different things — "not asked yet" and "asked
+	 * and failed" — and the page must not announce the second while it is in the
+	 * first. Without this the hero server-renders "Couldn't reach GitHub" on
+	 * every load (crawlers included) and then flips once the fetch lands.
+	 * Defaults to true so static callers like the storyboard are unaffected.
+	 */
+	releasesLoaded?: boolean;
 }
 
 /**
@@ -460,13 +390,22 @@ export default function DownloadBlock({
 	arch = "intel",
 	os = "macos",
 	isMobile = false,
+	releasesLoaded = true,
 }: DownloadProps) {
-	const latestRelease = releases[0];
+	// Nothing to say yet — not "GitHub is down". Hold the CTA back until we know,
+	// exactly as an unresolved fetch used to.
+	const pendingReleases = !releasesLoaded && releases.length === 0;
 	const previousReleases = releases.slice(1);
 	// The newest release that actually HAS this platform's binary. A freshly
 	// tagged release has no assets until its build finishes, so pointing the CTA
 	// at `releases[0]` hands the user a dead link during every release window.
-	const downloadable = findReleaseWithAsset(releases, os, arch);
+	const hero = resolveDownloadState(releases, os, arch);
+	// The hero CTA always leads somewhere: a real installer when we have one, the
+	// releases page otherwise. It is never rendered as a dead or missing button —
+	// this is the page whose entire job is handing over the app.
+	const heroHref =
+		hero.kind === "ready" ? hero.asset.browser_download_url : RELEASES_PAGE;
+	const heroNote = heroStatusNote(hero);
 
 	return (
 		<div className="pb-8">
@@ -484,24 +423,25 @@ export default function DownloadBlock({
 						required. Available for macOS, Windows, and Linux, and free while
 						we're in beta.
 					</p>
-					{!isMobile && latestRelease && (
+					{!(isMobile || pendingReleases) && (
 						<div className="flex flex-col items-center gap-3">
 							<div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
 								<Button
 									nativeButton={false}
 									render={
 										<a
-											download={downloadable?.asset.name}
-											href={
-												downloadable?.asset.browser_download_url ??
-												`${latestRelease.html_url}#assets`
-											}
+											href={heroHref}
 											rel="noopener noreferrer"
+											{...(hero.kind === "ready"
+												? { download: hero.asset.name }
+												: { target: "_blank" })}
 										/>
 									}
 								>
 									<Download className="mr-2 size-5" />
-									Download for {osName(os)} ({archLabel(os, arch)})
+									{hero.kind === "ready"
+										? `Download for ${osName(os)} (${archLabel(os, arch)})`
+										: "View releases on GitHub"}
 								</Button>
 								<a
 									className={cn(buttonVariants({ variant: "ghost" }))}
@@ -512,13 +452,7 @@ export default function DownloadBlock({
 									All releases
 								</a>
 							</div>
-							<p className="text-muted-foreground/60 text-xs">
-								{/* Show the version actually being downloaded — during a
-								    release window that is the last one with binaries, not
-								    the just-tagged one still building. */}
-								{(downloadable?.release ?? latestRelease).tag_name} · Free and
-								open to use locally
-							</p>
+							<p className="text-muted-foreground/60 text-xs">{heroNote}</p>
 						</div>
 					)}
 				</div>
@@ -559,12 +493,12 @@ export default function DownloadBlock({
 				<section className="container mx-auto px-4 py-12">
 					<div className="mx-auto max-w-6xl">
 						<div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+							{/* The whole list, not just the newest release: a platform whose
+							    build is still uploading falls back to the last release that
+							    really has it instead of showing a dead row. */}
 							{PLATFORMS.map((platform, i) => (
 								<Reveal delay={i * 0.06} key={platform.id}>
-									<PlatformCard
-										platform={platform}
-										release={latestRelease ?? { ...EMPTY_RELEASE }}
-									/>
+									<PlatformCard platform={platform} releases={releases} />
 								</Reveal>
 							))}
 						</div>
@@ -592,11 +526,14 @@ export default function DownloadBlock({
 											</AccordionTrigger>
 											<AccordionContent>
 												<div className="grid grid-cols-1 gap-4 pt-4 md:grid-cols-3">
+													{/* Scoped to this one release — an archived version
+													    must not silently serve a different version's
+													    binary just because its own build lacked one. */}
 													{PLATFORMS.map((platform) => (
 														<PlatformCard
 															key={platform.id}
 															platform={platform}
-															release={release}
+															releases={[release]}
 														/>
 													))}
 												</div>

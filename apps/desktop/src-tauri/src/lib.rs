@@ -1566,6 +1566,7 @@ pub fn run() {
             hardware::get_system_usage,
             nodes::list_nodes,
             nodes::add_node,
+            nodes::local_node_token,
             nodes::remove_node,
             nodes::set_default_node,
             nodes::test_node,

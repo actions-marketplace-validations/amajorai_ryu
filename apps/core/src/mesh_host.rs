@@ -52,27 +52,38 @@ mod tests {
 
     #[test]
     fn core_refuses_tokenless_start_under_mesh() {
+        use crate::node_token::TokenSource;
         // Mesh on + no token → refuse (Err), the fail-closed control.
-        let r = crate::server::enforce_remote_auth(None, true, false);
+        let r = crate::server::enforce_remote_auth(None, None, true, false);
         assert!(r.is_err(), "tokenless start under mesh must be refused");
         // An empty/whitespace token is also rejected.
-        let r = crate::server::enforce_remote_auth(Some("   ".to_owned()), true, false);
+        let r = crate::server::enforce_remote_auth(Some("   ".to_owned()), None, true, false);
         assert!(r.is_err());
-        // A real token under mesh is accepted and returned unchanged.
-        let r = crate::server::enforce_remote_auth(Some("ryu_secret".to_owned()), true, false);
+        // A real OPERATOR-PROVISIONED token under mesh is accepted unchanged. The
+        // provenance matters here: the mesh admits peers on a token every node
+        // SHARES, so a self-minted one is refused (see `enforce_remote_auth`).
+        let r = crate::server::enforce_remote_auth(
+            Some("ryu_secret".to_owned()),
+            Some(TokenSource::Env),
+            true,
+            false,
+        );
         assert_eq!(r.unwrap().as_deref(), Some("ryu_secret"));
     }
 
     #[test]
     fn core_refuses_tokenless_non_loopback_bind() {
-        // Non-loopback bind alone (mesh off) also requires a token.
-        assert!(crate::server::enforce_remote_auth(None, false, true).is_err());
+        // Non-loopback bind alone (mesh off) also requires a token. Core mints one
+        // on first boot, so reaching this needs a data dir it could not write.
+        assert!(crate::server::enforce_remote_auth(None, None, false, true).is_err());
     }
 
     #[test]
     fn loopback_tokenless_start_is_allowed() {
-        // Vanilla install: no mesh, loopback bind, no token → allowed (None).
-        let r = crate::server::enforce_remote_auth(None, false, false);
+        // A loopback Core with no token at all still starts (it behaves exactly as
+        // it did before minting existed). In practice minting means this is the
+        // unwritable-data-dir path, not the common one.
+        let r = crate::server::enforce_remote_auth(None, None, false, false);
         assert!(r.is_ok());
         assert!(r.unwrap().is_none());
     }
@@ -101,7 +112,7 @@ mod tests {
         // missed the flag entirely.
         let exposed = crate::server::host_is_non_loopback("0.0.0.0:7980");
         assert!(exposed);
-        assert!(crate::server::enforce_remote_auth(None, false, exposed).is_err());
+        assert!(crate::server::enforce_remote_auth(None, None, false, exposed).is_err());
     }
 
     #[test]
@@ -113,7 +124,12 @@ mod tests {
         // by construction.
         let bearer = ryu_mesh::resolve_mesh_bearer(Some("ryu_shared_secret")).unwrap();
         assert_eq!(bearer, "ryu_shared_secret");
-        let accepted = crate::server::enforce_remote_auth(Some(bearer.clone()), true, false);
+        let accepted = crate::server::enforce_remote_auth(
+            Some(bearer.clone()),
+            Some(crate::node_token::TokenSource::Env),
+            true,
+            false,
+        );
         assert_eq!(accepted.unwrap().as_deref(), Some("ryu_shared_secret"));
     }
 
@@ -131,7 +147,13 @@ mod tests {
         // Proof the placeholder rejection is not arbitrary: a peer with it refuses
         // to start under mesh, so it could never authenticate anyway.
         assert!(
-            crate::server::enforce_remote_auth(Some("CHANGE_ME".to_owned()), true, false).is_err()
+            crate::server::enforce_remote_auth(
+                Some("CHANGE_ME".to_owned()),
+                Some(crate::node_token::TokenSource::Env),
+                true,
+                false
+            )
+            .is_err()
         );
     }
 }

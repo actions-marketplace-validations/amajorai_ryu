@@ -47,5 +47,17 @@
         ]
       }
     ]
-  }
+  },
+  "permission_levels": [
+    {
+      "id": "gateway.view",
+      "label": "Can view toolkits",
+      "description": "See which providers are bound for search, extraction, crawling and browsing."
+    },
+    {
+      "id": "gateway.configure",
+      "label": "Can change toolkits",
+      "description": "Swap the provider behind a capability for everyone on this node."
+    }
+  ]
 }

@@ -95,6 +95,8 @@ import { EmailAlertsSettings } from "@/src/components/settings/EmailAlertsSettin
 import { EntitySettings } from "@/src/components/settings/EntitySettings.tsx";
 import { IntegrationsTab } from "@/src/components/settings/IntegrationsTab.tsx";
 import { LlmProvidersSettings } from "@/src/components/settings/LlmProvidersSettings.tsx";
+import { NodeAccessSettings } from "@/src/components/settings/NodeAccessSettings.tsx";
+import { NodePermissionsSettings } from "@/src/components/settings/NodePermissionsSettings.tsx";
 import { PrivacySettings } from "@/src/components/settings/PrivacySettings.tsx";
 import { StorageSettings } from "@/src/components/settings/StorageSettings.tsx";
 import {
@@ -5911,6 +5913,22 @@ const GATEWAY_SECTIONS: {
 		keywords: "keys byok api token composio replicate fal secrets",
 	},
 	{
+		value: "access",
+		label: "Devices & access",
+		hint: "Approve devices that ask to connect, and manage this node's access token.",
+		icon: Key01Icon,
+		keywords:
+			"pair pairing device token access approve revoke browser remote security auth",
+	},
+	{
+		value: "permissions",
+		label: "Permissions",
+		hint: "Give a team access to one space, or take it away from someone.",
+		icon: UserGroupIcon,
+		keywords:
+			"permissions acl roles teams grant deny access overwrite rbac who can",
+	},
+	{
 		value: "budgets",
 		label: "Spending limits",
 		hint: "Cap what can be spent, and what happens when a cap is hit.",
@@ -6170,7 +6188,7 @@ function OverviewSection({
  * gateway's own sections.
  */
 const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
-	{ items: ["overview", "workspace", "defaults"] },
+	{ items: ["overview", "workspace", "permissions", "defaults"] },
 	{
 		title: "AI & models",
 		items: ["providers", "keys", "routing"],
@@ -6192,7 +6210,7 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 		// — where they are kept, and what can read them. A section listed in
 		// GATEWAY_SECTIONS but missing from a group here renders NOWHERE, with no
 		// type error and no warning, so the two lists move together.
-		items: ["privacy", "storage", "parsing", "updates", "health"],
+		items: ["privacy", "access", "storage", "parsing", "updates", "health"],
 	},
 	{ title: "Danger", items: ["danger"] },
 ];
@@ -6490,6 +6508,8 @@ export function GatewayDialog({
 				{section === "connections" ? <ConnectionsTab /> : null}
 				{section === "email-alerts" ? <EmailAlertsSettings /> : null}
 				{section === "privacy" ? <PrivacySettings /> : null}
+				{section === "access" ? <NodeAccessSettings /> : null}
+				{section === "permissions" ? <NodePermissionsSettings /> : null}
 				{section === "storage" ? <StorageSettings /> : null}
 				{/* Node-wide `document.parse` binding + the ceiling the node enforces.
 				    Reads the active node directly (`useActiveNode`), like the other

@@ -31,6 +31,25 @@
     }
   ],
   "permission_grants": ["warmup:crud"],
+  "permission_levels": [
+    {
+      "id": "warmup.view",
+      "label": "Can view",
+      "description": "See which subscription agents are warmed, on what schedule, and when each was last pinged."
+    },
+    {
+      "id": "warmup.run",
+      "label": "Can ping now",
+      "description": "Trigger a warmup ping immediately, which opens a usage window on that agent's subscription.",
+      "implies": ["warmup.view"]
+    },
+    {
+      "id": "warmup.configure",
+      "label": "Can configure",
+      "description": "Change which agents are warmed and at what times, which decides how much subscription quota is spent unattended.",
+      "implies": ["warmup.run"]
+    }
+  ],
   "companion": {
     "label": "Warmup",
     "icon": "sun-03"

@@ -44,6 +44,19 @@
     }
   ],
   "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "research.view",
+      "label": "Can view",
+      "description": "Read finished research reports with their findings and sources."
+    },
+    {
+      "id": "research.run",
+      "label": "Can run research",
+      "description": "Start deep-research runs, which fetch from the open web and spend model credits on every step.",
+      "implies": ["research.view"]
+    }
+  ],
   "contributes": {
     "hook_events": [
       {

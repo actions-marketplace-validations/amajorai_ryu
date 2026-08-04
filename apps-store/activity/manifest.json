@@ -31,6 +31,13 @@
     }
   ],
   "permission_grants": ["activity:read", "shell:integrate"],
+  "permission_levels": [
+    {
+      "id": "activity.view",
+      "label": "Can view",
+      "description": "See the node's activity feed: every monitor alert, finished run, approval, meeting, and note."
+    }
+  ],
   "companion": {
     "label": "Activity",
     "icon": "activity-03"

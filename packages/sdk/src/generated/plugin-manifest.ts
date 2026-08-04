@@ -226,8 +226,48 @@ export interface PluginManifest {
 	 * Permission grants this app declares it needs (e.g. `"mcp:web_search"`).
 	 * These are *declarations only* at this layer — no enforcement happens here;
 	 * the Gateway owns grant enforcement.
+	 *
+	 * This is the **app→host** lane and has nothing to do with
+	 * [`permission_levels`], the **app→human** lane. See that field's doc comment
+	 * for the three-way table; conflating the two is the likeliest future bug here.
+	 *
+	 * [`permission_levels`]: PluginManifest::permission_levels
 	 */
 	permission_grants?: string[];
+	/**
+	 * **The user-facing permission vocabulary this app declares** — the set of
+	 * levels ("read", "edit", …) an administrator can later grant to a person or a
+	 * team *inside* this app. Absent/empty = the app declares no vocabulary, which
+	 * is every manifest predating this field.
+	 *
+	 * Spaces declaring `read` and `edit` is what makes "team X may edit in Spaces"
+	 * expressible at all: a grant has to name a level, and a UI has to render a
+	 * list of them. Without a declaration there is nothing to bind to.
+	 *
+	 * # Three lanes, one prefix — do not conflate them
+	 *
+	 * | field | direction | who decides | what it means |
+	 * |---|---|---|---|
+	 * | [`permission_grants`] | app → host | the **Gateway**, at install/enable | which host capabilities the app may *ask* for |
+	 * | [`permissions`] ([`PermissionSet`]) | app → sandbox | **Core**, at spawn/exec | what the app's code may *touch* (FS paths, hosts, subprocess) |
+	 * | `permission_levels` | app → human | an **admin**, per person/team | what a *person* may do inside the app |
+	 *
+	 * Only the first two are enforced today. This field is **declaration only**:
+	 * nothing consumes it yet, so declaring `edit` gates nothing by itself. It is
+	 * the vocabulary the ACL layer will bind grants against.
+	 *
+	 * # Ordering and implication
+	 *
+	 * Declaration order is display order — render the list as written. Strength is
+	 * expressed with [`PermissionLevel::implies`] rather than a separate rank, so
+	 * there is exactly one ordering and it cannot contradict itself: `edit` implying
+	 * `read` means granting `edit` already conveys `read`, and no admin has to grant
+	 * the same person both.
+	 *
+	 * [`permission_grants`]: PluginManifest::permission_grants
+	 * [`permissions`]: PluginManifest::permissions
+	 */
+	permission_levels?: PermissionLevel[];
 	/**
 	 * **Unified, deny-by-default runtime permission set** — the single typed
 	 * grammar (`{fs, child_process, network, tool}`) Core lowers to every sandbox
@@ -236,16 +276,20 @@ export interface PluginManifest {
 	 * predating this field), so an app that declares nothing keeps today's exact
 	 * zero-permission sandbox posture.
 	 *
-	 * # Relationship to [`permission_grants`]
+	 * # Relationship to [`permission_grants`] and [`permission_levels`]
 	 *
-	 * These are **two distinct lanes** that must not be conflated:
+	 * These are **three distinct lanes** that must not be conflated:
 	 * - [`permission_grants`] are opaque strings the **Gateway** approves at
 	 *   install/enable time — the *approval* lane (who is allowed to ask).
 	 * - `permissions` is the typed set **Core** lowers into the actual sandbox at
 	 *   spawn/exec time — the *runtime-enforcement* lane (what the code can touch).
+	 * - [`permission_levels`] is the app's *user-facing* vocabulary an admin grants
+	 *   to a person or team — it never reaches the sandbox at all.
 	 *
 	 * A grant says "this app may use the filesystem capability"; `permissions.fs`
 	 * says "…and here are the exact read/write paths the sandbox is opened with."
+	 *
+	 * [`permission_levels`]: PluginManifest::permission_levels
 	 *
 	 * # Altitude (manifest-level, per-runnable override is a followup)
 	 *
@@ -1504,6 +1548,51 @@ export interface McpServerDecl {
 	};
 }
 /**
+ * One entry in an app's **user-facing permission vocabulary** — a level an admin
+ * can grant to a person or a team inside that app (see
+ * [`PluginManifest::permission_levels`], which also explains why this is a
+ * different axis from `permission_grants` and `permissions`).
+ *
+ * Deliberately self-describing: an admin UI renders the grant picker from `label`
+ * + `description` alone, so a level whose meaning lives only in the app's own docs
+ * cannot exist.
+ */
+export interface PermissionLevel {
+	/**
+	 * One sentence telling an admin what granting this level actually allows.
+	 * Required for the same reason as [`label`]: the admin deciding is usually
+	 * not the person who wrote the app.
+	 *
+	 * [`label`]: PermissionLevel::label
+	 */
+	description: string;
+	/**
+	 * Stable machine id (e.g. `"read"`). Lower-case ASCII alphanumerics plus
+	 * `-`, `_` and `.`, at most [`MAX_PLUGIN_ID_LEN`] bytes, and unique within the
+	 * manifest.
+	 *
+	 * The alphabet is narrower than a plugin id's on purpose: these ids end up in
+	 * API paths and in persisted grant strings, so `Read` and `read` must not be
+	 * two levels that look identical to a human granting them.
+	 */
+	id: string;
+	/**
+	 * Ids of other levels in **this same manifest** that this level subsumes.
+	 *
+	 * This is the whole ordering mechanism — there is no separate rank, so the
+	 * order can never contradict itself. `edit` implying `read` means a person
+	 * granted `edit` already holds `read`; granting both is redundant, never
+	 * required. Resolved transitively by
+	 * [`resolve_implied_permission_levels`].
+	 */
+	implies?: string[];
+	/**
+	 * Short human label for the grant picker (e.g. `"Can edit"`). Required —
+	 * an unlabelled level is unrenderable.
+	 */
+	label: string;
+}
+/**
  * The single, typed, **deny-by-default** permission set a plugin manifest
  * declares, lowered by Core to every sandbox backend.
  *
@@ -2243,6 +2332,44 @@ export interface RouteSpec {
 	 * sidecar's REST routes (`/inboxes/:id`) can be declared faithfully.
 	 */
 	path: string;
+	/**
+	 * The [`PluginManifest::permission_levels`] id a caller must hold to reach this
+	 * route. Absent (the default) = ungated: Core forwards exactly as it always did,
+	 * so annotating is opt-in and no existing app changes behaviour.
+	 *
+	 * This is the only place a route→permission mapping can honestly live: Core
+	 * cannot know that an app's `/tabs/:id/close` is destructive, and the sidecar
+	 * cannot enforce it (it never sees the caller's identity, only Core's minted
+	 * hop token). Declaring it HERE — on the same [`RouteSpec`] the proxy already
+	 * matches to decide forward-or-404 — means the gate and the forward can never
+	 * disagree about which route is in play.
+	 *
+	 * Must name a level THIS manifest declares (enforced by
+	 * [`crate::manifest::validate_route_permissions`]); an app cannot gate its
+	 * routes on another app's vocabulary or on a level nobody can see to grant.
+	 *
+	 * Never annotate an [`RouteAuth::Public`] route: a public route exists for a
+	 * caller who holds no identity at all (an external webhook), and on an
+	 * org-bound node an anonymous caller is refused outright — the annotation would
+	 * turn a working inbound webhook into a permanent 403.
+	 *
+	 * [`PluginManifest::permission_levels`]: crate::manifest::PluginManifest::permission_levels
+	 */
+	permission?: string | null;
+	/**
+	 * Which `:param` of [`path`] names the resource [`permission`] is checked
+	 * against, so one route can be granted per-object (`"id"` on `/tabs/:id` gates
+	 * each tab separately). Absent = the whole app is the resource, which is what an
+	 * admin grants when the route identifies nothing (a `/settings` POST).
+	 *
+	 * Only meaningful alongside [`permission`], and the named param must actually
+	 * appear in [`path`] — both enforced at validation, because a typo here would
+	 * silently widen a rule the author wrote as per-object into a per-app one.
+	 *
+	 * [`path`]: RouteSpec::path
+	 * [`permission`]: RouteSpec::permission
+	 */
+	resource_param?: string | null;
 }
 /**
  * A single downloaded executable: fetched (checksum-verified) into the

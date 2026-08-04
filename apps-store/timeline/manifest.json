@@ -31,6 +31,13 @@
     }
   ],
   "permission_grants": ["timeline:read", "shell:integrate"],
+  "permission_levels": [
+    {
+      "id": "timeline.view",
+      "label": "Can view",
+      "description": "Replay Shadow's captured screen, window, and audio lanes and the work journal built from them, which exposes everything recorded on this machine."
+    }
+  ],
   "companion": {
     "label": "Timeline",
     "icon": "timeline"

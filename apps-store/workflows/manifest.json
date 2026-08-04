@@ -4,16 +4,36 @@
   "version": "1.0.0",
   "description": "Workflows: petgraph DAG automation with triggers, durable execution, and a natural-language workflow builder.",
   "icon": "workflow-square-01",
-  "iconDither": { "from": 299, "to": 333, "direction": "down" },
+  "iconDither": {
+    "from": 299,
+    "to": 333,
+    "direction": "down"
+  },
   "surfaces": {
-    "gateway": { "support": "none" },
-    "core": { "support": "full" },
-    "desktop": { "support": "full" },
-    "island": { "support": "limited" },
-    "mobile": { "support": "limited" },
-    "extension": { "support": "none" },
-    "web": { "support": "full" },
-    "cli": { "support": "list" }
+    "gateway": {
+      "support": "none"
+    },
+    "core": {
+      "support": "full"
+    },
+    "desktop": {
+      "support": "full"
+    },
+    "island": {
+      "support": "limited"
+    },
+    "mobile": {
+      "support": "limited"
+    },
+    "extension": {
+      "support": "none"
+    },
+    "web": {
+      "support": "full"
+    },
+    "cli": {
+      "support": "list"
+    }
   },
   "engines": {
     "ryu": ">=0.1.0"
@@ -35,6 +55,31 @@
     "workflows:runstate",
     "workflows:catalogs",
     "ghost:record"
+  ],
+  "permission_levels": [
+    {
+      "id": "workflow.view",
+      "label": "Can view",
+      "description": "See workflows and their run history, without changing or starting anything."
+    },
+    {
+      "id": "workflow.run",
+      "label": "Can run",
+      "description": "Start a workflow and watch it execute. Implies viewing.",
+      "implies": ["workflow.view"]
+    },
+    {
+      "id": "workflow.edit",
+      "label": "Can edit",
+      "description": "Create and change workflows, including their triggers and steps. Implies running.",
+      "implies": ["workflow.run"]
+    },
+    {
+      "id": "workflow.delete",
+      "label": "Can delete",
+      "description": "Permanently remove a workflow and its run history. Implies editing.",
+      "implies": ["workflow.edit"]
+    }
   ],
   "companion": {
     "label": "Workflows",

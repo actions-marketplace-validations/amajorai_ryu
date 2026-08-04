@@ -19,5 +19,12 @@
     "ryu": ">=0.1.0"
   },
   "runnables": [],
-  "permission_grants": []
+  "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "voice.models.manage",
+      "label": "Can manage voices",
+      "description": "Install and remove text-to-speech voice models, each of which downloads to this node and occupies disk."
+    }
+  ]
 }

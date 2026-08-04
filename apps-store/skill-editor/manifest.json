@@ -31,6 +31,13 @@
     }
   ],
   "permission_grants": ["skills:crud", "shell:integrate"],
+  "permission_levels": [
+    {
+      "id": "skill-editor.edit",
+      "label": "Can edit skills",
+      "description": "Create and rewrite a skill's SKILL.md — its instructions, allowed tools, and always-on flag — which changes what every agent loading that skill does."
+    }
+  ],
   "companion": {
     "label": "Skill Editor",
     "icon": "sparkles"

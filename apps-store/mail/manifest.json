@@ -62,6 +62,25 @@
     }
   ],
   "permission_grants": ["mail:crud"],
+  "permission_levels": [
+    {
+      "id": "mail.read",
+      "label": "Can read",
+      "description": "List agent inboxes and read the messages in them."
+    },
+    {
+      "id": "mail.send",
+      "label": "Can send",
+      "description": "Compose and send mail from an agent inbox, which leaves this node and reaches real recipients.",
+      "implies": ["mail.read"]
+    },
+    {
+      "id": "mail.manage",
+      "label": "Can manage inboxes",
+      "description": "Create and remove agent inboxes, which decides what addresses agents can be reached at.",
+      "implies": ["mail.send"]
+    }
+  ],
   "companion": {
     "label": "Agent Inboxes",
     "icon": "mail-01"

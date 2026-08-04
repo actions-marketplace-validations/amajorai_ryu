@@ -305,10 +305,24 @@ pub(crate) fn host_is_non_loopback(bind: &str) -> bool {
 /// to the tailnet/LAN. A log warning is not a control, so this **refuses** (Err)
 /// rather than silently allowing. Returns the (possibly unchanged) token to use.
 ///
-/// Pure + unit-testable: callers pass the resolved token, the mesh flag, and the
-/// non-loopback-bind flag.
+/// Since Core now MINTS a token on first boot ([`crate::node_token`]), the
+/// "exposed with no token at all" case is rare — but it is still reachable (an
+/// unwritable home directory yields `None`), and it is the one case that would put
+/// an unauthenticated Core on a public IP. It stays a hard refusal.
+///
+/// A minted token is per-machine, which matters for exactly one caller: the mesh's
+/// shared-fleet convention, where every node is expected to run the SAME
+/// operator-provisioned `RYU_TOKEN` so peers admit each other. A locally-minted
+/// token silently breaks peer admission, so mesh mode additionally requires the
+/// token to have come from the environment. A plain non-loopback bind does NOT —
+/// a 256-bit random token secures that node perfectly well, and refusing there
+/// would be a regression with no security gain.
+///
+/// Pure + unit-testable: callers pass the resolved token, its provenance, the mesh
+/// flag, and the non-loopback-bind flag.
 pub(crate) fn enforce_remote_auth(
     auth_token: Option<String>,
+    token_source: Option<crate::node_token::TokenSource>,
     mesh_enabled: bool,
     bind_non_loopback: bool,
 ) -> Result<Option<String>, String> {
@@ -318,8 +332,9 @@ pub(crate) fn enforce_remote_auth(
         if token.is_empty() {
             return Err(
                 "refusing to start: RYU_MESH_ENABLED (or a non-loopback RYU_BIND) exposes this Core \
-                 beyond loopback, but no RYU_TOKEN is set. Set RYU_TOKEN to a strong secret so \
-                 protected routes are authenticated."
+                 beyond loopback, but no RYU_TOKEN is set and none could be minted (check that the \
+                 Ryu data directory is writable). Set RYU_TOKEN to a strong secret so protected \
+                 routes are authenticated."
                     .to_owned(),
             );
         }
@@ -330,6 +345,18 @@ pub(crate) fn enforce_remote_auth(
             return Err(
                 "refusing to start: RYU_TOKEN is still a known placeholder. Generate a strong \
                  random token before exposing Core beyond loopback."
+                    .to_owned(),
+            );
+        }
+        // Mesh only: a minted token is unique to this machine, so peers running
+        // their own would reject it and `resolve_mesh_bearer` would advertise a
+        // bearer that never works. Fail loudly at startup instead.
+        if mesh_enabled && token_source != Some(crate::node_token::TokenSource::Env) {
+            return Err(
+                "refusing to start: RYU_MESH_ENABLED requires an OPERATOR-PROVISIONED RYU_TOKEN. \
+                 This node is running a token it minted for itself, which peers will reject — the \
+                 mesh admits peers on a SHARED node token. Set the same strong RYU_TOKEN on every \
+                 node in the fleet."
                     .to_owned(),
             );
         }
@@ -372,6 +399,17 @@ async fn require_auth(
 
     if let Some(t) = &provided {
         if ct_eq(t, &expected) {
+            return Ok(next.run(req).await);
+        }
+        // Paired-client carve-out: a bearer issued by the device-code pairing
+        // flow ([`crate::pairing`]) is as good as the node token. This is how a
+        // browser surface (the hosted webapp, the extension) and a desktop on
+        // ANOTHER machine authenticate — neither can read `node-auth.token`.
+        //
+        // It does not widen who can get in: a paired token only exists because a
+        // caller that ALREADY held a valid credential approved it, and it can be
+        // revoked individually without rotating the node token.
+        if crate::pairing::is_paired_token(t) {
             return Ok(next.run(req).await);
         }
     }
@@ -630,7 +668,7 @@ const USER_JWT_HEADER: &str = "x-ryu-user-jwt";
 /// is the gate and a missing/invalid user identity must simply be absent, never
 /// spoofable-as-privileged. The JWT is verified entirely offline
 /// (`crate::identity_verify`) and narrowed to THIS node's bound org.
-async fn verified_caller_from_headers(
+pub(crate) async fn verified_caller_from_headers(
     headers: &axum::http::HeaderMap,
 ) -> Option<crate::identity_verify::VerifiedCaller> {
     let token = header_str(headers, USER_JWT_HEADER)?;
@@ -1247,6 +1285,7 @@ mod resource_acl_tests {
             email: None,
             org_id: org.map(str::to_owned),
             role,
+            teams: Vec::new(),
         }
     }
 
@@ -2055,6 +2094,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
     // `--bind=0.0.0.0` flag can no longer bypass the gate (#478 V1).
     let auth_token = match enforce_remote_auth(
         auth_token,
+        crate::node_token::resolve_and_export().map(|r| r.source),
         ryu_mesh::is_enabled(),
         host_is_non_loopback(bind_addr),
     ) {
@@ -2169,7 +2209,15 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // id + the origin server's declared `resource_domains` allowlist, with a
         // fail-closed SSRF guard. It is the img-src analogue of the governed
         // `callTool` lane and the ONLY egress path a widget's passive assets have.
-        .route("/api/widgets/asset", get(widgets::widget_asset));
+        .route("/api/widgets/asset", get(widgets::widget_asset))
+        // ── Device-code pairing (public half) ────────────────────────────────
+        // A client with no bearer asks for a code and polls for the result. Both
+        // MUST be public: having no credential yet is the entire premise. Neither
+        // grants anything on its own — issuing a token requires a human approving
+        // through the PROTECTED half below, so an unauthenticated caller can only
+        // create a pending request that expires unclaimed.
+        .route("/api/pair/code", post(pair_start))
+        .route("/api/pair/token", post(pair_poll));
     // Agent mail (Self-host Agent Inboxes) is now a fully manifest-driven app:
     // `@ryu/mail` declares the `ryu-mail` sidecar + a `/api/mail` `public_mount`,
     // and the generic ext-proxy loader below serves `/api/mail/*` (public inbound +
@@ -2431,6 +2479,22 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // ── Mesh status (#478): opt-in Tailscale/Headscale reachability ───────
         .route("/api/mesh/status", get(mesh_status))
         .route("/api/mesh/peers", get(mesh_peers))
+        // ── Device-code pairing (protected half) + node-token management ─────
+        // Approval is deliberately behind `require_auth`: only a caller that
+        // already holds a valid credential may vouch for a new one.
+        .route("/api/acl/vocabulary", get(acl_vocabulary))
+        .route("/api/acl/principals", get(acl_principals))
+        .route("/api/acl/resources", get(acl_list_resources))
+        .route(
+            "/api/acl/resources/:kind/:id",
+            get(acl_get_resource).put(acl_put_resource),
+        )
+        .route("/api/pair/requests", get(pair_requests))
+        .route("/api/pair/approve", post(pair_approve))
+        .route("/api/pair/deny", post(pair_deny))
+        .route("/api/pair/clients", get(pair_clients))
+        .route("/api/pair/clients/:id", delete(pair_revoke))
+        .route("/api/node/token/rotate", post(node_token_rotate))
         // ── Webhook ingress seam (#479, P6a): public URL status + backend ─────
         .route("/api/webhook-ingress/status", get(webhook_ingress_status))
         .route(
@@ -13391,10 +13455,12 @@ async fn get_agent(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::AGENT_VIEW,
+        crate::acl::KIND_AGENT,
+        &id,
     )
     .await
     .is_err()
@@ -13432,10 +13498,12 @@ async fn update_agent(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(patch): Json<UpdateAgent>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::AGENT_EDIT,
+        crate::acl::KIND_AGENT,
+        &id,
     )
     .await
     .is_err()
@@ -13481,10 +13549,12 @@ async fn delete_agent(
 ) -> (StatusCode, Json<serde_json::Value>) {
     // No `agent.delete` permission in the vocab; deletion is a mutation, gated at
     // the `agent.edit` tier.
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::AGENT_EDIT,
+        crate::acl::KIND_AGENT,
+        &id,
     )
     .await
     .is_err()
@@ -18085,7 +18155,17 @@ async fn mesh_status(State(state): State<ServerState>) -> Json<serde_json::Value
 )]
 async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value> {
     let status = state.mesh.status().await;
-    let resp = ryu_mesh::build_peers_response(&status, state.node_token.as_deref());
+    // SHARED-fleet token, not `state.node_token`. The bearer in this response is
+    // offered to the desktop to authenticate against a PEER, and the mesh admits
+    // peers on a secret every node shares. A token this machine minted for itself
+    // would be rejected by every peer, so advertising it would produce a peer entry
+    // that looks enrollable and always 401s. `shared_fleet_token` returns `None` for
+    // a minted token, which surfaces the existing, accurate "provision the same
+    // RYU_TOKEN on both nodes" affordance instead.
+    let resp = ryu_mesh::build_peers_response(
+        &status,
+        crate::node_token::shared_fleet_token().as_deref(),
+    );
     Json(serde_json::to_value(resp).unwrap_or_default())
 }
 
@@ -18683,10 +18763,15 @@ async fn delete_space(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    // Per-resource: an overwrite on THIS space can deny `space.delete` to someone
+    // whose org role grants it, or grant it to someone whose role does not. The
+    // org-wide `enforce_permission` cannot express either, so this supersedes it.
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_DELETE,
+        crate::acl::KIND_SPACE,
+        &id,
     )
     .await
     .is_err()
@@ -18735,10 +18820,12 @@ async fn set_space_icon(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<SetEntityIconBody>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &id,
     )
     .await
     .is_err()
@@ -18849,10 +18936,12 @@ async fn set_retrieval_mode(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<SetRetrievalModeBody>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &id,
     )
     .await
     .is_err()
@@ -18946,10 +19035,12 @@ async fn list_documents(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_READ,
+        crate::acl::KIND_SPACE,
+        &id,
     )
     .await
     .is_err()
@@ -19120,10 +19211,12 @@ async fn ingest_document(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<IngestBody>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &id,
     )
     .await
     .is_err()
@@ -19189,10 +19282,12 @@ async fn search_space(
     // Coarse RBAC: searching a space requires `space.read` (this also denies a
     // tokenless caller on a bound node). The per-resource tenancy filter below then
     // ensures the returned chunks only come from documents THIS caller may read.
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_READ,
+        crate::acl::KIND_SPACE,
+        &id,
     )
     .await
     .is_err()
@@ -19406,10 +19501,12 @@ async fn create_file(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<CreateFileBody>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &id,
     )
     .await
     .is_err()
@@ -19506,12 +19603,20 @@ async fn create_file(
 async fn get_file_blob(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    axum::extract::Path((_id, doc_id)): axum::extract::Path<(String, String)>,
+    // `_url_space_id` is deliberately unused: it is caller-supplied and the gate
+    // below resolves the document's REAL parent instead.
+    axum::extract::Path((_url_space_id, doc_id)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    // Resolve the TRUE parent space; the URL id is caller-supplied.
+    let Some(owning_space) = document_parent_space(&state, &doc_id).await else {
+        return json_error(StatusCode::NOT_FOUND, "document not found".to_owned());
+    };
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_READ,
+        crate::acl::KIND_SPACE,
+        &owning_space,
     )
     .await
     .is_err()
@@ -19631,13 +19736,21 @@ mod blob_mime_tests {
 async fn get_document(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    axum::extract::Path((_id, doc_id)): axum::extract::Path<(String, String)>,
+    // `_url_space_id` is deliberately unused: it is caller-supplied and the gate
+    // below resolves the document's REAL parent instead.
+    axum::extract::Path((_url_space_id, doc_id)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
     // Org/team RBAC (coarse): reading a document requires `space.read`.
-    if enforce_permission(
+    // Resolve the TRUE parent space; the URL id is caller-supplied.
+    let Some(owning_space) = document_parent_space(&state, &doc_id).await else {
+        return json_error(StatusCode::NOT_FOUND, "document not found".to_owned());
+    };
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_READ,
+        crate::acl::KIND_SPACE,
+        &owning_space,
     )
     .await
     .is_err()
@@ -19683,13 +19796,21 @@ struct UpdateDocumentBody {
 async fn update_document(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    axum::extract::Path((_id, doc_id)): axum::extract::Path<(String, String)>,
+    // `_url_space_id` is deliberately unused: it is caller-supplied and the gate
+    // below resolves the document's REAL parent instead.
+    axum::extract::Path((_url_space_id, doc_id)): axum::extract::Path<(String, String)>,
     Json(body): Json<UpdateDocumentBody>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    // Resolve the TRUE parent space; the URL id is caller-supplied.
+    let Some(owning_space) = document_parent_space(&state, &doc_id).await else {
+        return json_error(StatusCode::NOT_FOUND, "document not found".to_owned());
+    };
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &owning_space,
     )
     .await
     .is_err()
@@ -19739,13 +19860,21 @@ async fn update_document(
 async fn set_document_icon(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    axum::extract::Path((_id, doc_id)): axum::extract::Path<(String, String)>,
+    // `_url_space_id` is deliberately unused: it is caller-supplied and the gate
+    // below resolves the document's REAL parent instead.
+    axum::extract::Path((_url_space_id, doc_id)): axum::extract::Path<(String, String)>,
     Json(body): Json<SetEntityIconBody>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    // Resolve the TRUE parent space; the URL id is caller-supplied.
+    let Some(owning_space) = document_parent_space(&state, &doc_id).await else {
+        return json_error(StatusCode::NOT_FOUND, "document not found".to_owned());
+    };
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_WRITE,
+        crate::acl::KIND_SPACE,
+        &owning_space,
     )
     .await
     .is_err()
@@ -19785,12 +19914,20 @@ async fn set_document_icon(
 async fn delete_document(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    axum::extract::Path((_id, doc_id)): axum::extract::Path<(String, String)>,
+    // `_url_space_id` is deliberately unused: it is caller-supplied and the gate
+    // below resolves the document's REAL parent instead.
+    axum::extract::Path((_url_space_id, doc_id)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    // Resolve the TRUE parent space; the URL id is caller-supplied.
+    let Some(owning_space) = document_parent_space(&state, &doc_id).await else {
+        return json_error(StatusCode::NOT_FOUND, "document not found".to_owned());
+    };
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_DELETE,
+        crate::acl::KIND_SPACE,
+        &owning_space,
     )
     .await
     .is_err()
@@ -19848,12 +19985,20 @@ async fn delete_document(
 async fn get_document_index_status(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    axum::extract::Path((_id, doc_id)): axum::extract::Path<(String, String)>,
+    // `_url_space_id` is deliberately unused: it is caller-supplied and the gate
+    // below resolves the document's REAL parent instead.
+    axum::extract::Path((_url_space_id, doc_id)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
-    if enforce_permission(
+    // Resolve the TRUE parent space; the URL id is caller-supplied.
+    let Some(owning_space) = document_parent_space(&state, &doc_id).await else {
+        return json_error(StatusCode::NOT_FOUND, "document not found".to_owned());
+    };
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_READ,
+        crate::acl::KIND_SPACE,
+        &owning_space,
     )
     .await
     .is_err()
@@ -20133,10 +20278,12 @@ async fn get_space_graph(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> axum::response::Response {
     // Org/team RBAC (coarse): reading the graph requires `space.read`.
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::SPACE_READ,
+        crate::acl::KIND_SPACE,
+        &id,
     )
     .await
     .is_err()
@@ -25707,10 +25854,12 @@ async fn get_workflow(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::WORKFLOW_VIEW,
+        crate::acl::KIND_WORKFLOW,
+        &id,
     )
     .await
     .is_err()
@@ -25742,10 +25891,12 @@ async fn delete_workflow(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::WORKFLOW_DELETE,
+        crate::acl::KIND_WORKFLOW,
+        &id,
     )
     .await
     .is_err()
@@ -25960,10 +26111,12 @@ async fn run_workflow(
     axum::extract::Path(id): axum::extract::Path<String>,
     body: Option<Json<RunWorkflowBody>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if enforce_permission(
+    if enforce_permission_on(
         &state,
         &caller,
         crate::identity_verify::permissions::WORKFLOW_RUN,
+        crate::acl::KIND_WORKFLOW,
+        &id,
     )
     .await
     .is_err()
@@ -26848,10 +27001,11 @@ async fn install_dependencies() -> Json<serde_json::Value> {
 #[cfg(test)]
 mod remote_auth_tests {
     use super::{enforce_remote_auth, host_is_non_loopback};
+    use crate::node_token::TokenSource;
 
     #[test]
     fn loopback_allows_tokenless_local_core() {
-        let token = enforce_remote_auth(None, false, host_is_non_loopback("127.0.0.1:7980"))
+        let token = enforce_remote_auth(None, None, false, host_is_non_loopback("127.0.0.1:7980"))
             .expect("loopback-only Core may be tokenless");
 
         assert_eq!(token, None);
@@ -26859,15 +27013,72 @@ mod remote_auth_tests {
 
     #[test]
     fn exposed_core_requires_a_real_token() {
-        assert!(enforce_remote_auth(None, false, true).is_err());
-        assert!(enforce_remote_auth(Some("   ".to_string()), false, true).is_err());
-        assert!(enforce_remote_auth(Some("CHANGE_ME".to_string()), false, true).is_err());
-        assert!(enforce_remote_auth(Some("replace_me".to_string()), true, false).is_err());
+        assert!(enforce_remote_auth(None, None, false, true).is_err());
+        assert!(enforce_remote_auth(Some("   ".to_string()), None, false, true).is_err());
+        assert!(
+            enforce_remote_auth(Some("CHANGE_ME".to_string()), Some(TokenSource::Env), false, true)
+                .is_err()
+        );
+        assert!(enforce_remote_auth(
+            Some("replace_me".to_string()),
+            Some(TokenSource::Env),
+            true,
+            false
+        )
+        .is_err());
 
-        let token = enforce_remote_auth(Some("strong-random-token".to_string()), false, true)
-            .expect("non-placeholder tokens are accepted");
+        let token = enforce_remote_auth(
+            Some("strong-random-token".to_string()),
+            Some(TokenSource::Env),
+            false,
+            true,
+        )
+        .expect("non-placeholder tokens are accepted");
 
         assert_eq!(token.as_deref(), Some("strong-random-token"));
+    }
+
+    /// A 256-bit token this machine minted secures a plain non-loopback bind
+    /// perfectly well. Refusing here would be a regression with no security gain
+    /// — the mesh's shared-secret assumption is what a mint actually breaks, and
+    /// that is gated separately below.
+    #[test]
+    fn non_loopback_bind_accepts_a_self_minted_token() {
+        for source in [TokenSource::File, TokenSource::Minted] {
+            let token = enforce_remote_auth(
+                Some("ryu_deadbeef".to_string()),
+                Some(source),
+                false,
+                true,
+            )
+            .expect("a minted token is a real secret; a plain remote bind may use it");
+            assert_eq!(token.as_deref(), Some("ryu_deadbeef"));
+        }
+    }
+
+    /// The mesh admits peers on a SHARED node token. A self-minted one is unique
+    /// to this machine, so every peer would reject it and `resolve_mesh_bearer`
+    /// would hand the desktop a bearer that never works. Fail at startup instead
+    /// of silently at peer-add.
+    #[test]
+    fn mesh_requires_an_operator_provisioned_token() {
+        for source in [TokenSource::File, TokenSource::Minted] {
+            let err = enforce_remote_auth(Some("ryu_deadbeef".to_string()), Some(source), true, false)
+                .expect_err("mesh must refuse a self-minted token");
+            assert!(
+                err.contains("OPERATOR-PROVISIONED"),
+                "the error must tell the operator to provision a shared token: {err}"
+            );
+        }
+
+        // The same token provisioned by an operator is exactly what mesh wants.
+        assert!(enforce_remote_auth(
+            Some("ryu_deadbeef".to_string()),
+            Some(TokenSource::Env),
+            true,
+            false
+        )
+        .is_ok());
     }
 }
 
@@ -28409,6 +28620,7 @@ mod pure_helper_tests {
             email: None,
             org_id: org.map(str::to_owned),
             role: crate::identity_verify::OrgRole::Member,
+            teams: Vec::new(),
         }
     }
 
@@ -29129,5 +29341,707 @@ mod pure_helper_tests {
         assert_eq!(flatten_one_line("a\n\tb   c"), "a b c");
         assert_eq!(flatten_one_line("  padded  "), "padded");
         assert_eq!(flatten_one_line(""), "");
+    }
+}
+
+// ── Device-code pairing handlers ─────────────────────────────────────────────
+//
+// See `crate::pairing` for the model. Split across the two routers: the code +
+// poll pair is public (an unpaired client has no bearer), while approve/deny and
+// the client list sit behind `require_auth`, so only an already-trusted caller
+// can turn a pending request into a credential.
+
+#[derive(serde::Deserialize)]
+struct PairStartBody {
+    /// Self-declared, display-only label shown to the approver.
+    #[serde(default)]
+    client_name: Option<String>,
+}
+
+/// `POST /api/pair/code` — begin pairing. PUBLIC.
+async fn pair_start(Json(body): Json<PairStartBody>) -> Json<serde_json::Value> {
+    let req = crate::pairing::start_request(body.client_name.as_deref().unwrap_or_default());
+    Json(json!({
+        "device_code": req.device_code,
+        "user_code": req.user_code,
+        "interval": crate::pairing::PAIRING_POLL_INTERVAL_SECS,
+        "expires_in": crate::pairing::PAIRING_CODE_TTL_SECS,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct PairPollBody {
+    device_code: String,
+}
+
+/// `POST /api/pair/token` — poll for the outcome. PUBLIC.
+///
+/// Mirrors the OAuth device-grant error vocabulary (`authorization_pending`,
+/// `access_denied`, `expired_token`) so a client written against that spec works
+/// unchanged. A pending poll is 200-with-error rather than a 4xx, matching the
+/// grant and keeping it out of clients' error paths.
+async fn pair_poll(Json(body): Json<PairPollBody>) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::pairing::PollOutcome;
+    match crate::pairing::poll(&body.device_code) {
+        PollOutcome::Token(token) => (StatusCode::OK, Json(json!({ "token": token }))),
+        PollOutcome::AuthorizationPending => (
+            StatusCode::OK,
+            Json(json!({ "error": "authorization_pending" })),
+        ),
+        PollOutcome::AccessDenied => {
+            (StatusCode::OK, Json(json!({ "error": "access_denied" })))
+        }
+        PollOutcome::ExpiredToken => {
+            (StatusCode::OK, Json(json!({ "error": "expired_token" })))
+        }
+    }
+}
+
+/// `GET /api/pair/requests` — what a human could approve right now. PROTECTED.
+async fn pair_requests() -> Json<serde_json::Value> {
+    let pending: Vec<serde_json::Value> = crate::pairing::pending_requests()
+        .into_iter()
+        .map(|r| {
+            json!({
+                // `device_code` is deliberately NOT exposed: it is the client's
+                // polling secret, and the approver never needs it.
+                "user_code": r.user_code,
+                "client_name": r.client_name,
+                "created_at": r.created_at,
+            })
+        })
+        .collect();
+    Json(json!({ "requests": pending }))
+}
+
+#[derive(serde::Deserialize)]
+struct PairDecisionBody {
+    user_code: String,
+}
+
+/// `POST /api/pair/approve` — mint a bearer for a pending request. PROTECTED.
+async fn pair_approve(
+    Json(body): Json<PairDecisionBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match crate::pairing::approve(&body.user_code) {
+        crate::pairing::DecisionOutcome::Approved => {
+            (StatusCode::OK, Json(json!({ "approved": true })))
+        }
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no pending pairing request with that code" })),
+        ),
+    }
+}
+
+/// `POST /api/pair/deny` — reject a pending request. PROTECTED.
+async fn pair_deny(Json(body): Json<PairDecisionBody>) -> (StatusCode, Json<serde_json::Value>) {
+    match crate::pairing::deny(&body.user_code) {
+        crate::pairing::DecisionOutcome::Denied => {
+            (StatusCode::OK, Json(json!({ "denied": true })))
+        }
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no pending pairing request with that code" })),
+        ),
+    }
+}
+
+/// `GET /api/pair/clients` — paired clients, for the revoke UI. PROTECTED.
+///
+/// Returns no token material: only the SHA-256 is stored, and even that is not
+/// served — a client is identified by its opaque `id`.
+async fn pair_clients() -> Json<serde_json::Value> {
+    let clients: Vec<serde_json::Value> = crate::pairing::load_paired_clients()
+        .clients
+        .into_iter()
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "name": c.name,
+                "created_at": c.created_at,
+                "last_seen": c.last_seen,
+            })
+        })
+        .collect();
+    Json(json!({ "clients": clients }))
+}
+
+/// `DELETE /api/pair/clients/:id` — revoke one paired client. PROTECTED.
+async fn pair_revoke(Path(id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
+    if crate::pairing::revoke(&id) {
+        (StatusCode::OK, Json(json!({ "revoked": true })))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no paired client with that id" })),
+        )
+    }
+}
+
+/// `POST /api/node/token/rotate` — mint a new node auth token. PROTECTED.
+///
+/// Writes the file only; the running process keeps authenticating the OLD token
+/// until it restarts (see `node_token::rotate`). The response says so explicitly
+/// so the caller can prompt for a restart rather than silently leaving the user
+/// with a token that does not work yet.
+async fn node_token_rotate() -> (StatusCode, Json<serde_json::Value>) {
+    match crate::node_token::rotate() {
+        Ok(token) => (
+            StatusCode::OK,
+            Json(json!({
+                "token": token,
+                "restart_required": true,
+                "message": "Restart Ryu Core for the new token to take effect. \
+                            Paired clients are unaffected.",
+            })),
+        ),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+// ── ACL permission vocabulary ────────────────────────────────────────────────
+
+/// `GET /api/acl/vocabulary` — every permission a grant may name on this node.
+///
+/// This is what makes an app's `permission_levels` declaration REACHABLE. Without
+/// it the declaration would be inert: a surface building a grant picker has no
+/// other way to learn that the Workflows app exposes `workflow.edit`, nor that it
+/// implies `workflow.run`.
+///
+/// Two sources, one flat namespace (see [`crate::acl::vocabulary`]): the kernel's
+/// canonical keys, which are shared byte-for-byte with the control plane, and the
+/// levels each installed app declares. Collisions are REPORTED rather than
+/// silently resolved — an app that tried to redefine a kernel key had its
+/// definition ignored, and the admin granting permissions needs to know that.
+async fn acl_vocabulary() -> Json<serde_json::Value> {
+    use crate::acl::vocabulary::{build_vocabulary, DeclaredLevel};
+
+    let declared: Vec<DeclaredLevel> = crate::plugin_manifest::PluginManifestLoader::load()
+        .into_iter()
+        .flat_map(|manifest| {
+            let plugin_id = manifest.id.clone();
+            manifest
+                .permission_levels
+                .into_iter()
+                .map(move |level| DeclaredLevel {
+                    plugin_id: plugin_id.clone(),
+                    id: level.id,
+                    label: level.label,
+                    description: level.description,
+                    implies: level.implies,
+                })
+        })
+        .collect();
+
+    let vocab = build_vocabulary(declared);
+
+    Json(json!({
+        // The kernel tier, so a picker can group "built-in" apart from per-app.
+        "kernel": crate::identity_verify::permissions::PERMISSIONS,
+        "declared": vocab.declared.iter().map(|l| json!({
+            "plugin_id": l.plugin_id,
+            "id": l.id,
+            "label": l.label,
+            "description": l.description,
+            "implies": l.implies,
+        })).collect::<Vec<_>>(),
+        "collisions": vocab.collisions,
+    }))
+}
+
+// ── Per-resource permission enforcement ──────────────────────────────────────
+
+/// Require that the caller holds `permission` on ONE SPECIFIC resource.
+///
+/// The per-resource sibling of [`enforce_permission`]. That one answers "may this
+/// caller do X anywhere in the org"; this one lets a resource carve an exception
+/// out of that answer in EITHER direction — a deny overwrite removes a permission
+/// the caller's role grants org-wide, and an allow overwrite hands it to someone
+/// whose role does not grant it at all. Neither is expressible without reading
+/// the resource, which is why this cannot be folded into `enforce_permission`.
+///
+/// The org-membership and anonymous rules are copied from `enforce_permission`
+/// deliberately, so the two gates cannot disagree about who is even a candidate:
+///   - anonymous + node UNBOUND -> allowed (a personal node's boundary is its
+///     node token; denying would lock the single local user out of their own data);
+///   - anonymous + node ORG-BOUND -> denied;
+///   - a caller from a different org than the node's -> denied.
+///
+/// `pub(crate)` because the ext-proxy gates app-declared route permissions through
+/// this exact function (`sidecar::ext_proxy`). An app route is not a special case:
+/// it needs the same anonymous/org candidacy rules, and a second copy of them living
+/// in the proxy is precisely how a personal node would end up locked out of one lane
+/// and not the other.
+pub(crate) async fn enforce_permission_on(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    perm: &str,
+    kind: &str,
+    resource_id: &str,
+) -> Result<(), StatusCode> {
+    let node_org = crate::sidecar::control_plane::registered_org().map(|o| o.id);
+
+    let Some(caller) = caller else {
+        return if node_org.is_some() {
+            Err(StatusCode::FORBIDDEN)
+        } else {
+            Ok(())
+        };
+    };
+
+    // UNBOUND node: there is no org to scope roles against, so `to_caller_for_org`
+    // narrows a caller with zero or several memberships to `org_id = None` and the
+    // LEAST privilege. Falling through with that would resolve a Viewer base and
+    // lock the single local user out of their own spaces — the exact trap
+    // `resource_access` documents. `enforce_permission` returns Ok here for the
+    // same reason; the two gates must not disagree about who is a candidate.
+    let Some(node_org) = node_org.as_deref() else {
+        return Ok(());
+    };
+
+    if caller.org_id.as_deref() != Some(node_org) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Custom org roles live in the control plane, not the JWT. A lookup failure
+    // returns an EMPTY set, degrading to the built-in role tier rather than
+    // granting anything.
+    let custom =
+        crate::sidecar::control_plane::resolve_permissions(&state.client, &caller.user_id).await;
+
+    match crate::acl::decide_with_extra(caller, kind, resource_id, perm, &custom) {
+        crate::acl::Decision::Allowed => Ok(()),
+        crate::acl::Decision::Denied => Err(StatusCode::FORBIDDEN),
+    }
+}
+
+
+/// The space a document really belongs to, for authorization.
+///
+/// `/api/spaces/:id/documents/:doc_id` lets a caller name ANY space next to a
+/// document. Resolving a per-resource ACL against that URL id would let someone
+/// bypass a deny on the document's REAL space by naming a different space they
+/// can read, so every document gate resolves the parent from the store instead.
+/// A missing document yields `None`, which callers surface as 404 — never as
+/// permitted.
+async fn document_parent_space(state: &ServerState, doc_id: &str) -> Option<String> {
+    state.spaces.document_space_id(doc_id).await.ok().flatten()
+}
+
+// ── Per-resource ACL CRUD ────────────────────────────────────────────────────
+
+/// `GET /api/acl/resources/:kind/:id` — the overwrites in force on one resource.
+///
+/// Returns the RAW stored rows rather than the resolved view: an editor must show
+/// what is persisted (including a row the resolver drops, e.g. an unknown target
+/// type), or saving would silently delete a rule the admin never saw.
+async fn acl_get_resource(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, axum::response::Response> {
+    // Reading WHO has access is itself sensitive — the rule set names every team
+    // and person with an exception on this resource. Gated on the same permission
+    // as writing it, so a caller who may not change the rules may not enumerate
+    // them either.
+    let caller = verified_caller_from_headers(&headers).await;
+    if enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::ROLES_MANAGE,
+        &kind,
+        &id,
+    )
+    .await
+    .is_err()
+    {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: roles.manage".to_owned(),
+        ));
+    }
+    let rows = crate::acl::store::stored_for(&crate::acl::store::ResourceKey::new(&kind, &id));
+    Ok(Json(json!({
+        "kind": kind,
+        "id": id,
+        "overwrites": rows.iter().map(|r| json!({
+            "target_type": r.target_type,
+            "target_id": r.target_id,
+            "allow": r.allow,
+            "deny": r.deny,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct AclPutBody {
+    #[serde(default)]
+    overwrites: Vec<crate::acl::store::StoredOverwrite>,
+}
+
+/// `PUT /api/acl/resources/:kind/:id` — replace every overwrite on a resource.
+///
+/// Whole-set replacement rather than per-row patching, deliberately: the editing
+/// UI shows the complete list, so a partial update would race a concurrent edit
+/// into a state neither admin chose.
+///
+/// Requires `roles.manage` ON THIS RESOURCE — editing who may do what is itself a
+/// permission, or anyone who could read a resource could grant themselves write.
+async fn acl_put_resource(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+    Json(body): Json<AclPutBody>,
+) -> Result<Json<serde_json::Value>, axum::response::Response> {
+    let caller = verified_caller_from_headers(&headers).await;
+    // Editing WHO may do what is itself a permission, and it is checked ON THIS
+    // RESOURCE — otherwise anyone who could read a space could grant themselves
+    // write on it.
+    if enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::ROLES_MANAGE,
+        &kind,
+        &id,
+    )
+    .await
+    .is_err()
+    {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: roles.manage".to_owned(),
+        ));
+    }
+
+    // Reject unknown permission ids at the EDGE rather than storing them and
+    // letting the resolver drop them silently — a rule that never applies but
+    // renders in the UI reads as a working grant.
+    let vocab = crate::acl::vocabulary::build_vocabulary(crate::acl::declared_levels());
+    for row in &body.overwrites {
+        for permission in row.allow.iter().chain(row.deny.iter()) {
+            if !vocab.registry.is_declared(permission) {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown permission `{permission}`"),
+                ));
+            }
+        }
+    }
+
+    crate::acl::store::set_overwrites(
+        &crate::acl::store::ResourceKey::new(&kind, &id),
+        body.overwrites,
+    )
+    .map_err(|e| json_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `GET /api/acl/resources` — every resource carrying an exception, for an
+/// admin overview ("where have grants been customized?").
+async fn acl_list_resources(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, axum::response::Response> {
+    // The list itself is a disclosure: it names every resource whose access was
+    // customised. Gated ORG-WIDE (`enforce_permission`, not `_on`) because it
+    // spans resources — there is no single resource whose overwrites could carve
+    // an exception for it.
+    let caller = verified_caller_from_headers(&headers).await;
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::ROLES_MANAGE,
+    )
+    .await
+    .is_err()
+    {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: roles.manage".to_owned(),
+        ));
+    }
+    let keys = crate::acl::store::resources_with_overwrites();
+    Ok(Json(json!({
+        "resources": keys.iter().map(|k| json!({ "kind": k.kind, "id": k.id })).collect::<Vec<_>>(),
+    })))
+}
+
+// ── Principal directory (what a grant editor offers to target) ───────────────
+
+/// Shape the principal directory from ALREADY-RESOLVED inputs.
+///
+/// Split from the handler so the degradation contract is a pure unit test: no
+/// env var, no control plane, no clock. The handler's only job is to fetch.
+fn acl_principals_payload(
+    teams: Vec<crate::sidecar::control_plane::OrgTeam>,
+    members: Vec<crate::sidecar::control_plane::NotifyTargetUser>,
+) -> serde_json::Value {
+    // Roles are LOCAL — the same ids `builtin_role_catalog` keys its base sets by.
+    // They must be offered even on an unbound node, where the other two lists are
+    // empty: a role overwrite resolves entirely in-process, so a picker with no
+    // roles would hide the one target type that always works.
+    let roles: Vec<serde_json::Value> = crate::acl::vocabulary::builtin_role_ids()
+        .map(|id| {
+            let mut label = id.to_owned();
+            label[..1].make_ascii_uppercase();
+            json!({ "id": id, "label": label })
+        })
+        .collect();
+
+    json!({
+        // The kinds this node actually enforces per-resource permissions on.
+        // Served rather than hardcoded client-side: the desktop had its own list
+        // that already said only "space" while Core enforced three more, so every
+        // agent and workflow was uneditable and nothing failed to warn about it.
+        "kinds": crate::acl::ENFORCED_KINDS,
+        // The org whose id an `org`-tier overwrite must name. Without it the UI
+        // wrote `Org("")`, which matches no principal — every org-wide rule the
+        // editor produced was silently dead. `None` on an unbound node, where the
+        // org tier is meaningless anyway.
+        "org_id": crate::sidecar::control_plane::registered_org().map(|o| o.id),
+        "roles": roles,
+        "teams": teams
+            .iter()
+            .map(|t| json!({ "id": t.id, "name": t.name.clone().unwrap_or_else(|| t.id.clone()) }))
+            .collect::<Vec<_>>(),
+        "members": members
+            .iter()
+            .map(|m| {
+                // A member row is driven off the org `member` doc, so name and email
+                // are both optional; falling back to the user id keeps every row
+                // selectable instead of rendering a blank, unclickable entry.
+                let name = m.name.clone().or_else(|| {
+                    m.email
+                        .as_deref()
+                        .and_then(|e| e.split('@').next())
+                        .filter(|local| !local.is_empty())
+                        .map(str::to_owned)
+                });
+                json!({
+                    "id": m.user_id,
+                    "name": name.unwrap_or_else(|| m.user_id.clone()),
+                    // Empty rather than null: every field of a directory row is a
+                    // string the picker renders, and a null would land in a hint
+                    // slot typed as one.
+                    "email": m.email.clone().unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// `GET /api/acl/principals` — the roles, teams and members an overwrite may
+/// target, so the grant editor offers a picker instead of a raw-id text field.
+///
+/// Read-only and never an error: both remote lookups degrade to empty (see
+/// [`crate::sidecar::control_plane::resolve_teams`]), so an unbound personal node
+/// and an unreachable control plane render the same editor rather than a failure.
+async fn acl_principals(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, axum::response::Response> {
+    // This is the ORG DIRECTORY: every team, and every member's name and email.
+    // It exists to populate a grant picker, so it is gated on the same permission
+    // as editing grants — without this any holder of the node token could
+    // enumerate the whole roster, which is a disclosure independent of whether
+    // they could change anything.
+    //
+    // ORG-WIDE (`enforce_permission`, not `_on`): the directory spans the org and
+    // names no resource whose overwrites could carve an exception for it. On an
+    // unbound node that helper returns Ok, so a personal node still renders — and
+    // there its teams/members lists are empty anyway.
+    let caller = verified_caller_from_headers(&headers).await;
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::ROLES_MANAGE,
+    )
+    .await
+    .is_err()
+    {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: roles.manage".to_owned(),
+        ));
+    }
+
+    let teams = crate::sidecar::control_plane::resolve_teams(&state.client).await;
+    let members = crate::sidecar::control_plane::resolve_notify_targets(&state.client, None)
+        .await
+        .unwrap_or_default();
+    Ok(Json(acl_principals_payload(teams, members)))
+}
+
+#[cfg(test)]
+mod per_resource_gate_tests {
+    use super::acl_principals_payload;
+
+    /// EVERY `/api/acl/*` read handler must check a permission.
+    ///
+    /// This exists because the same omission happened three times in a row while
+    /// gating these by hand: `acl_get_resource`, `acl_list_resources` and
+    /// `acl_principals` were each shipped ungated and caught one at a time. They
+    /// are not ordinary reads — between them they disclose who has access to what,
+    /// which resources have been customised, and the entire org roster with names
+    /// and emails. A source scan catches the next one on the way in, which
+    /// eyeballing a route list demonstrably does not.
+    ///
+    /// `acl_vocabulary` is deliberately EXEMPT: it lists the permission ids this
+    /// node understands, which is a static capability description carrying no
+    /// tenant data — the equivalent of an OpenAPI schema.
+    #[test]
+    fn every_acl_read_handler_enforces_a_permission() {
+        let src = include_str!("mod.rs");
+        for handler in [
+            "async fn acl_get_resource(",
+            "async fn acl_list_resources(",
+            "async fn acl_principals(",
+        ] {
+            let start = src
+                .find(handler)
+                .unwrap_or_else(|| panic!("{handler} no longer exists; update this guard"));
+            // Scan to the END OF THE FUNCTION, not a fixed byte window. A window
+            // large enough to cover the body also ran past it into this very test
+            // module — whose own source contains the literal being searched for —
+            // so the guard passed with the gate deleted. Verified by mutation
+            // after the fix: removing the gate reddens this.
+            let after = &src[start..];
+            let body_end = after
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("{handler} has no closing brace"));
+            let body = &after[..body_end];
+            // Search for the CALL, not the word: prose mentioning the helper (this
+            // handler's own doc comment does) satisfied a bare substring check, so
+            // the guard passed with the gate deleted. Verified by mutation after
+            // the fix.
+            let gated = body.contains("if enforce_permission(")
+                || body.contains("if enforce_permission_on(");
+            assert!(
+                gated,
+                "{handler} performs no permission check — it discloses tenant data to any \
+                 holder of the node token"
+            );
+        }
+    }
+
+    use crate::sidecar::control_plane::{NotifyTargetUser, OrgTeam};
+
+    fn member(user_id: &str, name: Option<&str>, email: Option<&str>) -> NotifyTargetUser {
+        NotifyTargetUser {
+            user_id: user_id.to_owned(),
+            email: email.map(str::to_owned),
+            role: None,
+            name: name.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn acl_kind_constants_are_frozen_wire_strings() {
+        // These are persisted verbatim (`<kind>:<id>` in `resource-acl.json`) and
+        // travel in `/api/acl/resources/:kind/:id`. Renaming a value orphans every
+        // rule already stored under the old one, so the values are frozen even
+        // though the constants are free to move.
+        assert_eq!(crate::acl::KIND_SPACE, "space");
+        assert_eq!(crate::acl::KIND_CONVERSATION, "conversation");
+        assert_eq!(crate::acl::KIND_AGENT, "agent");
+        assert_eq!(crate::acl::KIND_WORKFLOW, "workflow");
+    }
+
+    #[test]
+    fn per_resource_gates_never_name_a_resource_kind_by_literal() {
+        // A handler that spells its kind as a bare string can drift from the
+        // constant the editor writes under, and the resulting always-empty ACL is
+        // invisible: the request still succeeds, the rule just never applies. The
+        // only non-constant kind allowed is the one the URL carries (`acl_put_resource`).
+        let src = include_str!("mod.rs");
+        // Stop before this module: its own prose mentions the call it is scanning for.
+        let scan_end = src.find("mod per_resource_gate_tests").unwrap();
+        let lines: Vec<&str> = src[..scan_end].lines().collect();
+        let mut checked = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            let head = line.trim_start();
+            if !line.contains("enforce_permission_on(")
+                || head.starts_with("//")
+                || line.contains("fn enforce_permission_on(")
+            {
+                continue;
+            }
+            let args = lines[i + 1..(i + 8).min(lines.len())].join("\n");
+            let kind_arg = args
+                .lines()
+                .find(|a| a.contains("crate::acl::KIND_") || a.trim() == "&kind,");
+            assert!(
+                kind_arg.is_some(),
+                "enforce_permission_on at line {} names its kind by literal:\n{args}",
+                i + 1
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 20,
+            "expected the per-resource gate to be wired on the identified-resource \
+             handlers; found only {checked} call sites"
+        );
+    }
+
+    #[test]
+    fn principals_degrade_to_empty_teams_and_members_but_never_empty_roles() {
+        // An unbound personal node has no org directory, and an unreachable control
+        // plane looks identical. Roles are LOCAL, so they must survive both — a
+        // picker with no targets at all is an unusable editor, not a safe default.
+        let payload = acl_principals_payload(Vec::new(), Vec::new());
+        assert_eq!(payload["teams"].as_array().unwrap().len(), 0);
+        assert_eq!(payload["members"].as_array().unwrap().len(), 0);
+        let roles = payload["roles"].as_array().unwrap();
+        let ids: Vec<&str> = roles.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["owner", "admin", "member", "viewer"]);
+        assert_eq!(roles[0]["label"], "Owner");
+    }
+
+    #[test]
+    fn a_member_row_is_always_selectable_even_with_no_name_or_email() {
+        let payload = acl_principals_payload(
+            Vec::new(),
+            vec![
+                member("u1", Some("Ada"), Some("ada@example.com")),
+                member("u2", None, Some("grace@example.com")),
+                member("u3", None, None),
+            ],
+        );
+        let members = payload["members"].as_array().unwrap();
+        assert_eq!(members[0]["name"], "Ada");
+        // No mirrored name: the email's local part reads better than a raw id.
+        assert_eq!(members[1]["name"], "grace");
+        assert_eq!(members[1]["email"], "grace@example.com");
+        // Neither: the id, never a blank row the admin cannot tell apart.
+        assert_eq!(members[2]["name"], "u3");
+        assert_eq!(members[2]["email"], "");
+        // The id stays the user id in every case — it is what an overwrite targets.
+        assert_eq!(members[1]["id"], "u2");
+    }
+
+    #[test]
+    fn an_unnamed_team_falls_back_to_its_id() {
+        let payload = acl_principals_payload(
+            vec![
+                OrgTeam {
+                    id: "t1".to_owned(),
+                    name: Some("Platform".to_owned()),
+                },
+                OrgTeam {
+                    id: "t2".to_owned(),
+                    name: None,
+                },
+            ],
+            Vec::new(),
+        );
+        let teams = payload["teams"].as_array().unwrap();
+        assert_eq!(teams[0]["name"], "Platform");
+        assert_eq!(teams[1]["name"], "t2");
     }
 }

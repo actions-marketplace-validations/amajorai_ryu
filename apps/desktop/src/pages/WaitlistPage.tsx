@@ -11,6 +11,30 @@ import { clearSessionToken, FRONTEND_URL, signOut } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { fetchWaitlistMe, type WaitlistMe } from "@/src/lib/api/waitlist.ts";
 
+/** How long Refresh stays disabled after a press. */
+const REFRESH_COOLDOWN_MS = 60_000;
+/**
+ * Persisted so the cooldown survives a reload. On the webapp build this page is
+ * an ordinary route, so refreshing the browser would otherwise reset the limit
+ * and make it decorative — the one place a cooldown has to hold is exactly where
+ * reloading is free.
+ */
+const REFRESH_COOLDOWN_KEY = "ryu_waitlist_refresh_until";
+
+function readCooldownUntil(): number {
+	try {
+		const raw = Number(localStorage.getItem(REFRESH_COOLDOWN_KEY) ?? "0");
+		// Must be a FUTURE stamp within one cooldown. A clock that moved backwards,
+		// or a hand-edited value, must not lock the button for hours.
+		const ahead = raw - Date.now();
+		return Number.isFinite(raw) && ahead > 0 && ahead <= REFRESH_COOLDOWN_MS
+			? raw
+			: 0;
+	} catch {
+		return 0;
+	}
+}
+
 // The desktop activation gate a pending account sees instead of the app. Mirrors
 // the device-auth login screen (packages/blocks/src/desktop/login.tsx): the same
 // centered column, the shimmering orb, title + subtitle, a full-width mono
@@ -23,11 +47,25 @@ export default function WaitlistPage({
 	const [me, setMe] = useState<WaitlistMe | null>(null);
 	const [copied, setCopied] = useState(false);
 	const [refreshing, setRefreshing] = useState(false);
+	const [cooldownUntil, setCooldownUntil] = useState<number>(readCooldownUntil);
+	const [now, setNow] = useState(() => Date.now());
+	const cooldownLeftMs = Math.max(0, cooldownUntil - now);
+	const cooldownSeconds = Math.ceil(cooldownLeftMs / 1000);
 	const [signingOut, setSigningOut] = useState(false);
 
 	const loadMe = useCallback(async (opts?: { manual?: boolean }) => {
 		if (opts?.manual) {
 			setRefreshing(true);
+			// Armed on press, not on success: the point is to rate-limit the request,
+			// and a failed read costs the server exactly what a successful one does.
+			const until = Date.now() + REFRESH_COOLDOWN_MS;
+			setCooldownUntil(until);
+			setNow(Date.now());
+			try {
+				localStorage.setItem(REFRESH_COOLDOWN_KEY, String(until));
+			} catch {
+				// Storage unavailable: the in-memory cooldown still holds for this view.
+			}
 		}
 		try {
 			const data = await fetchWaitlistMe();
@@ -55,6 +93,16 @@ export default function WaitlistPage({
 	useEffect(() => {
 		loadMe();
 	}, [loadMe]);
+
+	// Tick only while the cooldown runs, so an idle page is not re-rendering once
+	// a second forever.
+	useEffect(() => {
+		if (cooldownLeftMs <= 0) {
+			return;
+		}
+		const id = setInterval(() => setNow(Date.now()), 500);
+		return () => clearInterval(id);
+	}, [cooldownLeftMs]);
 
 	// The application form is completed in the browser (Apply for early access
 	// opens FRONTEND_URL/waitlist externally). When the user returns to the
@@ -130,49 +178,22 @@ export default function WaitlistPage({
 						</p>
 					</div>
 
-					<div className="flex w-full max-w-xs flex-col items-center gap-3">
-						<Button
-							className="w-full"
-							disabled={refreshing}
-							onClick={() => loadMe({ manual: true })}
-							size="lg"
-							type="button"
-							variant="mono"
-						>
-							{refreshing ? (
-								<span className="flex items-center gap-2">
-									<Spinner className="size-4" />
-									Refreshing…
-								</span>
-							) : (
-								"Refresh"
-							)}
-						</Button>
-
-						{me && !me.hasApplied ? (
-							<Button
-								className="w-full"
-								onClick={() => openExternal(`${FRONTEND_URL}/waitlist`)}
-								size="lg"
-								type="button"
-								variant="mono"
-							>
-								Apply for early access →
-							</Button>
-						) : null}
-					</div>
-
 					{me ? (
-						<div className="w-full max-w-xs rounded-xl bg-muted/40 px-8 py-4 text-center">
-							<p className="text-muted-foreground text-xs">Your position</p>
-							<p className="font-bold text-3xl tabular-nums">
-								#{me.position ?? "—"}
-							</p>
-							<p className="mt-1 text-muted-foreground text-xs">
-								{me.totalWaiting.toLocaleString()} waiting
-							</p>
+						<div className="flex w-full max-w-xs flex-col items-center gap-2">
+							<div className="w-full rounded-xl bg-muted/40 px-8 py-4 text-center">
+								<p className="text-muted-foreground text-xs">Your position</p>
+								<p className="font-bold text-3xl tabular-nums">
+									#{me.position ?? "—"}
+								</p>
+								<p className="mt-1 text-muted-foreground text-xs">
+									{me.totalWaiting.toLocaleString()} waiting
+								</p>
+							</div>
+							{/* Outside the card, and no rule above it: the estimate is a
+							    different kind of fact from the position — softer, and not
+							    something the card should look like it is asserting. */}
 							{me.eta ? (
-								<p className="mt-2 border-border/40 border-t pt-2 text-muted-foreground text-xs">
+								<p className="text-muted-foreground text-xs">
 									Est. wait{" "}
 									<span className="font-medium text-foreground">{me.eta}</span>
 								</p>
@@ -180,11 +201,45 @@ export default function WaitlistPage({
 						</div>
 					) : null}
 
+					<div className="flex w-full max-w-xs flex-col items-center gap-3">
+						{/* Apply leads and is the default variant: it is the one action
+						    that changes the outcome. Refresh only re-reads state, so it
+						    sits under it as secondary. */}
+						{me && !me.hasApplied ? (
+							<Button
+								className="w-full"
+								onClick={() => openExternal(`${FRONTEND_URL}/waitlist`)}
+								size="lg"
+								type="button"
+							>
+								Apply for early access
+							</Button>
+						) : null}
+
+						<Button
+							className="w-full"
+							disabled={refreshing || cooldownLeftMs > 0}
+							onClick={() => loadMe({ manual: true })}
+							size="lg"
+							type="button"
+							variant="secondary"
+						>
+							{refreshing ? (
+								<span className="flex items-center gap-2">
+									<Spinner className="size-4" />
+									Refreshing…
+								</span>
+							) : (
+								`Refresh${cooldownLeftMs > 0 ? ` ${cooldownSeconds}s` : ""}`
+							)}
+						</Button>
+					</div>
+
 					{me?.referralUrl ? (
 						<div className="flex w-full max-w-xs flex-col items-center gap-3">
 							<p className="text-center text-muted-foreground text-xs">
-								Want in faster? Share your link — every friend who joins moves
-								you up.
+								Want in faster? Share your link, and every friend who joins
+								moves you up.
 								{me.referralCount > 0
 									? ` You've referred ${me.referralCount}.`
 									: ""}

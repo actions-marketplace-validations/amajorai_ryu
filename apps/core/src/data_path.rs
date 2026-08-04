@@ -185,6 +185,9 @@ fn copy_tree(
 ///                     `http://127.0.0.1:7980` into a profile that listens on 9980
 ///                     leaves it pointing at the wrong stack — the source's.
 ///   - `auth.json`     device sign-in token, stored in plaintext.
+///   - `node-auth.token` this node's minted `RYU_TOKEN` (see `crate::node_token`).
+///                     A copy would hand another machine THIS node's admittance
+///                     secret — a credential leak, not just a wrong identity.
 ///   - `ryu-core.pid`  the source's live process id.
 ///   - `.reset-pending` a pending node wipe would fire on the target instead.
 ///   - `bin/`          binaries plus `.version` markers keyed to the APP version, so
@@ -199,6 +202,7 @@ const PROFILE_COPY_EXCLUDE: &[&str] = &[
     "bin",
     "cache",
     "core.token",
+    "node-auth.token",
     "nodes.json",
     "ryu-core.pid",
     "tmp",
@@ -940,7 +944,8 @@ mod tests {
     #[test]
     fn node_identity_and_runtime_files_never_travel_between_profiles() {
         for name in [
-            "core.token",     // target would claim the source's node identity (409 on init)
+            "core.token",       // target would claim the source's node identity (409 on init)
+            "node-auth.token",  // this node's minted RYU_TOKEN — copying it leaks the secret
             "nodes.json",     // absolute URLs with the SOURCE profile's hardcoded port
             "auth.json",      // plaintext device sign-in token
             "ryu-core.pid",   // the source's live process id

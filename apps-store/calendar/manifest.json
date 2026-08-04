@@ -31,6 +31,19 @@
     }
   ],
   "permission_grants": ["calendar:crud"],
+  "permission_levels": [
+    {
+      "id": "calendar.view",
+      "label": "Can view",
+      "description": "See past and upcoming scheduled runs for every agent and workflow on this node."
+    },
+    {
+      "id": "calendar.schedule",
+      "label": "Can schedule",
+      "description": "Create, reschedule, and remove automations, which decides what runs unattended on this node and when.",
+      "implies": ["calendar.view"]
+    }
+  ],
   "companion": {
     "label": "Calendar",
     "icon": "calendar-04"

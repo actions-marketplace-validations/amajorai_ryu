@@ -59,6 +59,19 @@
     }
   ],
   "permission_grants": [],
+  "permission_levels": [
+    {
+      "id": "clips.view",
+      "label": "Can view",
+      "description": "Browse and play back recorded clips, including whatever was on screen when they were captured."
+    },
+    {
+      "id": "clips.capture",
+      "label": "Can capture",
+      "description": "Record new clips and ingest external ones, which starts screen capture on this machine.",
+      "implies": ["clips.view"]
+    }
+  ],
   "contributes": {
     "hook_events": [
       {

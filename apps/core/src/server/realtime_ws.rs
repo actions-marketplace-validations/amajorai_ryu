@@ -696,6 +696,7 @@ mod tests {
             email: None,
             org_id: org.map(str::to_owned),
             role,
+            teams: Vec::new(),
         }
     }
 
