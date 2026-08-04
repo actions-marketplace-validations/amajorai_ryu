@@ -2,8 +2,10 @@ name: canary
 
 # Bleeding-edge build of the open-core headless set (core / gateway / cli + the 11
 # feature-app backend sidecars) on EVERY push to main that touches the built sources,
-# published as a rolling `canary` PRERELEASE. This is the fresh-on-merge companion to
-# nightly.yml (the once-a-day snapshot); use canary to test the very latest main.
+# published as a PRERELEASE on its own versioned tag (`v0.1.2-canary.20260804.36`). This is
+# the fresh-on-merge companion to nightly.yml (the once-a-day snapshot); use canary to test
+# the very latest main. The channel keeps the last `RETAIN` builds (see `prepare`); before
+# 2026-08-04 it was a single rolling `canary` tag, so only one build ever existed.
 #
 # Free-minutes note: like nightly.yml this reaches amajorai/ryu via the monorepo overlay
 # (mirror/overlay/) and only ever runs on the public repo, never in ryu-closed.
@@ -36,12 +38,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Roll the `canary` tag + prerelease forward to this push's HEAD before the matrix uploads,
-  # so parallel build jobs upload into an existing release instead of racing to create it.
+  # Create THIS build's own prerelease before the matrix uploads, so parallel build
+  # jobs upload into an existing release instead of racing to create it.
+  #
+  # HISTORY IS KEPT (changed 2026-08-04). This job used to `gh release delete canary
+  # --cleanup-tag` and recreate a single rolling `canary` release, so the channel
+  # only ever held ONE build and every previous canary was destroyed — you could not
+  # look at yesterday's canary, bisect across two of them, or reference the build a
+  # bug report named. Each build now gets its OWN versioned tag (`v<version>`, e.g.
+  # `v0.1.2-canary.20260804.36`) and old ones are pruned to `RETAIN` below.
+  #
+  # This is safe for the updater because Core never resolves a rolling channel by
+  # tag NAME: `select_release` lists the repo's releases, keeps the ones whose
+  # version is on the channel, and takes the semver maximum (`pick_version_for_channel`
+  # in apps/core/src/update/mod.rs). A versioned tag is in fact the STRONGER input —
+  # `release_version` parses the tag first and only falls back to scanning the title,
+  # so the build's identity no longer depends on the release title being well-formed.
   prepare:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -60,28 +77,55 @@ jobs:
           set -euo pipefail
           VERSION="$(node scripts/release/next-version.mjs canary)"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Canary version: $VERSION"
-      - name: Reset the rolling canary tag + prerelease
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Canary version: $VERSION (tag v$VERSION)"
+      - name: Create this canary's prerelease, then prune old ones
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          # How many canary builds to keep. Old ones are deleted tag-and-all, so
+          # this is the channel's entire retention. Keep it small enough that the
+          # releases page stays readable and large enough to bisect across a few
+          # days of merges.
+          RETAIN: "10"
         run: |
           set -e
-          gh release delete canary --yes --cleanup-tag || true
           # Notes must be GENERATED before the release references them — the
           # rolling-build banner, no changelog (mirror history is just sync
           # commits, and no publish step follows to fill one in).
           node scripts/release-notes.mjs --channel canary --repo "$GITHUB_REPOSITORY" --no-changelog > notes.md
-          # TITLE FORMAT IS A CONTRACT, not decoration. `canary` is a ROLLING tag, so
-          # the tag carries no version — Core's updater recovers this build's version
-          # by scanning this title for a semver token (see `release_version` in
-          # apps/core/src/update/mod.rs). Keep the version as a bare whitespace-
-          # delimited token; the commit stays in parens, which the parser strips.
-          gh release create canary \
+          # The tag now CARRIES the version, so `release_version` reads it straight
+          # off the tag. The title keeps the same shape anyway: it is what a human
+          # reads, and it remains the fallback if a tag is ever hand-made.
+          # --prerelease is load-bearing: GitHub's `/releases/latest` excludes
+          # prereleases, which is what stops a stable node auto-updating onto a canary.
+          gh release create "$TAG" \
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Canary $VERSION (${GITHUB_SHA:0:12})" \
             --notes-file notes.md
+
+          # Prune: keep the newest $RETAIN canary releases, delete the rest with
+          # their tags. Selection is by tag shape (`v<x.y.z>-canary.*`), so it can
+          # never touch stable, beta or nightly. `--exclude-drafts` keeps a
+          # half-published build from being counted as the newest.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --exclude-drafts \
+            --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+-canary\\."))]
+                  | sort_by(.createdAt) | reverse | .['"$RETAIN"':][] | .tagName' \
+            > stale.txt || true
+          while read -r old; do
+            [ -n "$old" ] || continue
+            echo "pruning old canary release $old"
+            gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          done < stale.txt
+
+          # The pre-2026-08-04 rolling `canary` release/tag is now obsolete: it is
+          # unversioned, so it can never win `pick_version_for_channel` against a
+          # versioned build, and leaving it up would show a permanently stale
+          # "Canary" entry at the top of the releases page. Remove it once.
+          gh release delete canary --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
 
   # Desktop installers. The source is source-available in this repo (see
   # LICENSE-COMMERCIAL.md), so it builds HERE on free public runners instead of
@@ -203,7 +247,7 @@ jobs:
           shopt -s nullglob
           files=(dist-desktop/*)
           if [ ${#files[@]} -eq 0 ]; then echo "no desktop installers on this platform — skipping" >&2; exit 0; fi
-          gh release upload canary "${files[@]}" --clobber
+          gh release upload "${{ needs.prepare.outputs.tag }}" "${files[@]}" --clobber
 
   # Island companion (Electron). Same rationale as desktop: source-available here,
   # so it builds on free public runners.
@@ -268,7 +312,7 @@ jobs:
           shopt -s nullglob
           files=(dist-island/*)
           if [ ${#files[@]} -eq 0 ]; then echo "no island installers on this platform — skipping" >&2; exit 0; fi
-          gh release upload canary "${files[@]}" --clobber
+          gh release upload "${{ needs.prepare.outputs.tag }}" "${files[@]}" --clobber
 
   build:
     needs: prepare
@@ -421,7 +465,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload canary dist/* --clobber
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" dist/* --clobber
 
   # ── Per-channel updater feed ────────────────────────────────────────────────
   # Without this the desktop's `install_update_from_channel` finds no
@@ -444,5 +488,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 4th arg = the release to read assets from and publish the feed onto.
+          # It used to default to the channel name, which worked only while the
+          # channel WAS a single rolling tag. Builds now carry their own versioned
+          # tag, so the feed has to be told which one this run produced.
           bash scripts/release/assemble-channel-feed.sh \
-            canary "${{ needs.prepare.outputs.version }}" "${{ github.repository }}"
+            canary "${{ needs.prepare.outputs.version }}" "${{ github.repository }}" \
+            "${{ needs.prepare.outputs.tag }}"

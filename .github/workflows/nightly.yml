@@ -12,8 +12,10 @@ name: nightly
 # (ryu-core-<plat>, …), an installed Core node never auto-updates onto a nightly. Only the
 # signed, tagged `v*` releases (release.yml) are ever "latest".
 #
-# The `nightly` git tag + release are rolled forward each run (delete + recreate) so the tag
-# always points at the main it was built from and users can fetch /releases/tag/nightly.
+# Each nightly publishes under its OWN versioned tag (`v0.1.2-nightly.20260804.24`) and the
+# channel keeps the last `RETAIN` builds — see the `prepare` job. Until 2026-08-04 this was a
+# single rolling `nightly` tag that was deleted and recreated every run, so the channel held
+# exactly one build and every earlier nightly was destroyed.
 
 on:
   schedule:
@@ -55,14 +57,23 @@ jobs:
             echo "build=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # Roll the `nightly` tag and prerelease forward to today's main BEFORE the matrix uploads,
-  # so the parallel build jobs upload into an existing release instead of racing to create it.
+  # Create TODAY's prerelease BEFORE the matrix uploads, so the parallel build jobs
+  # upload into an existing release instead of racing to create it.
+  #
+  # HISTORY IS KEPT (changed 2026-08-04) — see the matching block in canary.yml for
+  # the full rationale. In short: this used to `gh release delete nightly
+  # --cleanup-tag` and recreate one rolling release, so only the newest nightly ever
+  # existed and yesterday's was destroyed every day. Each nightly now gets its own
+  # versioned tag (`v<version>`, e.g. `v0.1.2-nightly.20260804.24`), pruned to
+  # `RETAIN`. Safe because Core resolves a channel by listing releases and taking the
+  # semver maximum within it, never by tag name.
   prepare:
     needs: gate
     if: needs.gate.outputs.build == 'true'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -82,30 +93,48 @@ jobs:
           set -euo pipefail
           VERSION="$(node scripts/release/next-version.mjs nightly)"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Nightly version: $VERSION"
-      - name: Reset the rolling nightly tag + prerelease
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: $VERSION (tag v$VERSION)"
+      - name: Create tonight's prerelease, then prune old ones
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          # Nightlies land once a day, so 14 is about two weeks of history.
+          RETAIN: "14"
         run: |
           set -e
-          # Drop the old release AND its tag, then recreate the tag at today's HEAD via
-          # `gh release create --target`. || true keeps the first-ever run (no nightly yet) green.
-          gh release delete nightly --yes --cleanup-tag || true
           # Notes must be GENERATED before the release references them — the
           # rolling-build banner, no changelog (mirror history is just sync
           # commits, and no publish step follows to fill one in).
           node scripts/release-notes.mjs --channel nightly --repo "$GITHUB_REPOSITORY" --no-changelog > notes.md
-          # TITLE FORMAT IS A CONTRACT, not decoration. `nightly` is a ROLLING tag, so
-          # the tag carries no version — Core's updater recovers this build's version by
-          # scanning this title for a semver token (see `release_version` in
-          # apps/core/src/update/mod.rs). Keep the version as a bare whitespace-delimited
-          # token; the commit stays in parens, which the parser strips.
-          gh release create nightly \
+          # The tag now CARRIES the version, so `release_version` reads it off the
+          # tag and only falls back to the title. --prerelease is load-bearing:
+          # `/releases/latest` excludes prereleases, which is what keeps a stable
+          # node from auto-updating onto a nightly.
+          gh release create "$TAG" \
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Nightly $VERSION (${GITHUB_SHA:0:12})" \
             --notes-file notes.md
+
+          # Prune to the newest $RETAIN. Matching on the tag shape
+          # (`v<x.y.z>-nightly.*`) means this can never touch stable, beta or canary.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --exclude-drafts \
+            --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+-nightly\\."))]
+                  | sort_by(.createdAt) | reverse | .['"$RETAIN"':][] | .tagName' \
+            > stale.txt || true
+          while read -r old; do
+            [ -n "$old" ] || continue
+            echo "pruning old nightly release $old"
+            gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          done < stale.txt
+
+          # Retire the pre-2026-08-04 unversioned rolling `nightly` release once: it
+          # can never win `pick_version_for_channel` against a versioned build, so
+          # leaving it up would only pin a stale entry to the releases page.
+          gh release delete nightly --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
 
   # Desktop installers. The source is source-available in this repo (see
   # LICENSE-COMMERCIAL.md), so it builds HERE on free public runners instead of
@@ -227,7 +256,7 @@ jobs:
           shopt -s nullglob
           files=(dist-desktop/*)
           if [ ${#files[@]} -eq 0 ]; then echo "no desktop installers on this platform — skipping" >&2; exit 0; fi
-          gh release upload nightly "${files[@]}" --clobber
+          gh release upload "${{ needs.prepare.outputs.tag }}" "${files[@]}" --clobber
 
   # Island companion (Electron). Same rationale as desktop: source-available here,
   # so it builds on free public runners.
@@ -292,7 +321,7 @@ jobs:
           shopt -s nullglob
           files=(dist-island/*)
           if [ ${#files[@]} -eq 0 ]; then echo "no island installers on this platform — skipping" >&2; exit 0; fi
-          gh release upload nightly "${files[@]}" --clobber
+          gh release upload "${{ needs.prepare.outputs.tag }}" "${files[@]}" --clobber
 
   build:
     needs: [gate, prepare]
@@ -448,7 +477,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload nightly dist/* --clobber
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" dist/* --clobber
 
   # ── Per-channel updater feed ────────────────────────────────────────────────
   # Without this the desktop's `install_update_from_channel` finds no
@@ -471,5 +500,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 4th arg = the release to read assets from and publish the feed onto.
+          # It used to default to the channel name, which only worked while the
+          # channel WAS one rolling tag; builds now carry their own versioned tag.
           bash scripts/release/assemble-channel-feed.sh \
-            nightly "${{ needs.prepare.outputs.version }}" "${{ github.repository }}"
+            nightly "${{ needs.prepare.outputs.version }}" "${{ github.repository }}" \
+            "${{ needs.prepare.outputs.tag }}"
