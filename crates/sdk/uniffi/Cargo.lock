@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-sdk-uniffi"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "futures-util",
  "ryu-sdk",

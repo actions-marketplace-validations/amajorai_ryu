@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Productivity",
   "description": "Quests: auto-detecting todos surfaced from your chats and activity, tracked as a lightweight quest board with progress and completion.",
+  "tagline": "Your todos, found for you",
+  "keywords": ["tasks", "todos", "productivity", "tracking"],
   "icon": "target-02",
   "iconDither": { "from": 294, "to": 328, "direction": "right" },
   "surfaces": {
@@ -64,7 +66,7 @@
       }
     }
   ],
-  "permission_grants": ["quests:crud"],
+  "permission_grants": ["quests:crud", "quests:capture"],
   "permission_levels": [
     {
       "id": "quests.view",
@@ -80,7 +82,7 @@
     {
       "id": "quests.capture",
       "label": "Can capture",
-      "description": "Keep selected text, links, and prompts from other apps onto the board, along with the app and page they came from. This is a wider reach than editing the board — it stores content the user selected elsewhere.",
+      "description": "Keep selected text, links, and prompts from other apps onto the board, along with the app and page they came from. This is a wider reach than editing the board — it stores content the user selected elsewhere, and the `quests.capture` bridge verb is gated by its own `quests:capture` grant.",
       "implies": ["quests.edit"]
     }
   ],

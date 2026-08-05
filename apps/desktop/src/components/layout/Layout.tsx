@@ -447,7 +447,18 @@ function LayoutContent({
 		if (hideTimer.current) {
 			clearTimeout(hideTimer.current);
 		}
-		hideTimer.current = setTimeout(() => setFloatOpen(false), 200);
+		hideTimer.current = setTimeout(() => {
+			// The footer trays (Downloads, Inbox) are portaled to the body — they
+			// are wider than the sidebar, and this panel clips them — so moving the
+			// pointer onto an open tray reads as leaving the panel. Hold the panel
+			// up while one is open and re-check, so it slides away on the tick after
+			// the tray closes instead of vanishing out from under it.
+			if (document.querySelector('[data-sidebar-overlay="open"]')) {
+				scheduleHide();
+				return;
+			}
+			setFloatOpen(false);
+		}, 200);
 	};
 
 	const handleNewConversation = () => {

@@ -13,6 +13,10 @@ import {
 } from "@ryu/ui/components/select.tsx";
 import { useEffect, useState } from "react";
 import { sileo } from "sileo";
+import {
+	updateToastBody,
+	updateToastId,
+} from "@/src/components/updater/ReleaseNotes.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -86,7 +90,16 @@ export function UpdatesSettings() {
 			} else if (verdict.update_available) {
 				sileo.info({
 					title: `Update available — v${verdict.latest}`,
-					description: "A new version of Ryu is ready to install.",
+					// Deliberately NOT gated on the app's own version the way the App
+					// Updates tab is: this tab governs the NODE's Core/Gateway binaries,
+					// so `verdict.current` — the answering Core's version — is exactly
+					// the right thing to compare, even when this app bundle is newer.
+					description: updateToastBody({
+						notes: verdict.notes,
+						htmlUrl: verdict.html_url,
+						fallback: "A new version of Ryu is ready to install.",
+					}),
+					id: updateToastId(verdict.latest),
 				});
 			} else {
 				sileo.success({ title: "Ryu is up to date" });

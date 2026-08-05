@@ -54,6 +54,10 @@ import { Spinner } from "@ryu/ui/components/spinner";
 import { useMemo, useState } from "react";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useAgentsCatalog } from "@/src/hooks/useAgentsCatalog.ts";
+import {
+	type PluginSettingsOpener,
+	usePluginSettingsOpener,
+} from "@/src/hooks/usePluginSettingsOpener.ts";
 import { groupAgents } from "@/src/lib/agent-catalog-groups.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import type { AgentCatalogEntry } from "@/src/lib/api/agents.ts";
@@ -188,15 +192,26 @@ function AgentCardAction({
 	busy,
 	onInstall,
 	onUninstall,
+	onOpenSettings,
 }: {
 	entry: AgentCatalogEntry;
 	busy: boolean;
 	onInstall: () => void;
 	onUninstall: () => void;
+	/** Set only for a listing that is ALSO an installed plugin with settings —
+	 *  most agents are not, and then no Settings row renders. */
+	onOpenSettings?: (() => void) | null;
 }) {
 	const { percent } = useInstallProgress(["agent"], entry.name);
 	if (entry.id === FLAGSHIP_AGENT_ID) {
-		return <StoreItemAction installed locked lockedLabel="Built in" />;
+		return (
+			<StoreItemAction
+				installed
+				locked
+				lockedLabel="Built in"
+				onOpenSettings={onOpenSettings ?? undefined}
+			/>
+		);
 	}
 	if (!(entry.available || entry.added)) {
 		return (
@@ -211,6 +226,7 @@ function AgentCardAction({
 			busy={busy}
 			installed={entry.added}
 			onInstall={onInstall}
+			onOpenSettings={onOpenSettings ?? undefined}
 			onUninstall={onUninstall}
 			percent={percent}
 		/>
@@ -224,6 +240,7 @@ function AgentCards({
 	onSelect,
 	onInstall,
 	onUninstall,
+	settingsOpener,
 }: {
 	agents: AgentCatalogEntry[];
 	selectedId: string | null;
@@ -231,6 +248,9 @@ function AgentCards({
 	onSelect: (id: string) => void;
 	onInstall: (id: string) => void;
 	onUninstall: (id: string) => void;
+	/** Resolves a row to its settings tab; null for anything that is not an
+	 *  installed plugin, which is most agents. */
+	settingsOpener: PluginSettingsOpener;
 }) {
 	return (
 		<StoreCardGrid>
@@ -241,6 +261,7 @@ function AgentCards({
 							busy={pendingId === entry.id}
 							entry={entry}
 							onInstall={() => onInstall(entry.id)}
+							onOpenSettings={settingsOpener(entry.id)}
 							onUninstall={() => onUninstall(entry.id)}
 						/>
 					}
@@ -282,6 +303,7 @@ function AgentList({
 	onSelect,
 	onInstall,
 	onUninstall,
+	settingsOpener,
 }: {
 	agents: AgentCatalogEntry[];
 	/** False while searching: results collapse into a single ungrouped grid. */
@@ -293,6 +315,7 @@ function AgentList({
 	onSelect: (id: string) => void;
 	onInstall: (id: string) => void;
 	onUninstall: (id: string) => void;
+	settingsOpener: PluginSettingsOpener;
 }) {
 	if (loading && agents.length === 0) {
 		return (
@@ -322,7 +345,14 @@ function AgentList({
 		);
 	}
 
-	const cardProps = { onInstall, onSelect, onUninstall, pendingId, selectedId };
+	const cardProps = {
+		onInstall,
+		onSelect,
+		onUninstall,
+		pendingId,
+		selectedId,
+		settingsOpener,
+	};
 	if (!grouped) {
 		return <AgentCards agents={agents} {...cardProps} />;
 	}
@@ -431,6 +461,9 @@ export default function AgentsCatalogSection({
 	const [query, setQuery] = useState(initialQuery);
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
+	// A few catalog rows are ALSO installed plugins that declare settings; the
+	// resolver returns null for the rest, so the row simply has no Settings entry.
+	const settingsOpener = usePluginSettingsOpener();
 	const { agents, loading, error, install, uninstall, pendingId } =
 		useAgentsCatalog();
 	const [errorId, setErrorId] = useState<string | null>(null);
@@ -495,6 +528,7 @@ export default function AgentsCatalogSection({
 					onUninstall={(id) => run(id, () => uninstall(id))}
 					pendingId={pendingId}
 					selectedId={selectedId}
+					settingsOpener={settingsOpener}
 				/>
 			}
 			onCloseDetail={() => setSelectedId(null)}

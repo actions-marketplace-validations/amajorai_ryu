@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Productivity",
   "description": "The Island companion overlay: a device-local floating assistant docked to your screen edge with voice chat, proactive suggestions, and live screen context.",
+  "tagline": "A floating assistant docked to your screen",
+  "keywords": ["island", "overlay", "voice", "companion"],
   "icon": "bubble-chat-edit",
   "surfaces": {
     "gateway": { "support": "none" },

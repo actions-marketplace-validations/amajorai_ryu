@@ -15,7 +15,7 @@ import { WindowFrame } from "./mockups.tsx";
 
 /**
  * A static, non-interactive replica of the desktop app's Gateway dialog
- * (the "moat" surface). Rebuilt from the real desktop look — the two-pane
+ * (the governance surface). Rebuilt from the real desktop look — the two-pane
  * ResizableSettings layout, the up/down status badge, the bg-muted/40 MetricTile
  * grid, and the firewall verdict rows — using the same @ryu/ui theme tokens so it
  * matches the product pixel-for-pixel in light, dark, and midnight.

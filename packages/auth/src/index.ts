@@ -48,6 +48,7 @@ import { TAURI_DESKTOP_ORIGINS } from "./lib/cors-origins.ts";
 import {
 	ensurePersonalOrganization,
 	type OrganizationApi,
+	resolveInitialActiveOrganization,
 } from "./lib/organizations.ts";
 import {
 	ensurePolarCustomer,
@@ -682,18 +683,41 @@ export const auth = betterAuth({
 					// Start every new session scoped to the user's personal org so
 					// org-scoped reads (the control plane reads the `member` collection)
 					// resolve immediately on first login. Earliest membership = the
-					// personal org created at sign-up. Fail-open: a lookup error just
-					// leaves the session without an active org rather than blocking login.
+					// personal org created at sign-up.
+					//
+					// A user with NO membership is repaired here rather than left
+					// unscoped. That state is reachable two ways — an account created
+					// before auto-provisioning landed, or a sign-up whose fail-open
+					// `ensurePersonalOrganization` threw — and it is not a cosmetic
+					// "Select organization" prompt: org-scoped routes REFUSE such a
+					// caller, so `/api/credits/wallet` 409s on every request and every
+					// SSE reconnect until the membership exists.
+					//
+					// Fail-open as before: any error leaves the session without an active
+					// org rather than blocking login.
 					try {
-						const member = await Member.findOne({ userId: session.userId })
-							.sort({ createdAt: 1 })
-							.lean();
-						if (member?.organizationId) {
-							return {
-								data: {
-									...session,
-									activeOrganizationId: member.organizationId,
+						const activeOrganizationId = await resolveInitialActiveOrganization(
+							{
+								userId: session.userId,
+								findEarliestMembership: async (userId) => {
+									const member = await Member.findOne({ userId })
+										.sort({ createdAt: 1 })
+										.lean();
+									return member?.organizationId
+										? String(member.organizationId)
+										: null;
 								},
+								ensureOrganization: async (userId) => {
+									await ensurePersonalOrganization(
+										userId,
+										auth.api as unknown as OrganizationApi
+									);
+								},
+							}
+						);
+						if (activeOrganizationId) {
+							return {
+								data: { ...session, activeOrganizationId },
 							};
 						}
 					} catch (error) {

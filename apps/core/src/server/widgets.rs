@@ -1010,7 +1010,7 @@ async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>,
 }
 
 /// Emit a Gateway exec-audit for a proxied asset fetch so every widget egress is
-/// visible to the moat (the governance property the `connect-src 'none'` lock +
+/// visible to the governance layer (the property the `connect-src 'none'` lock +
 /// this proxy jointly provide). Best-effort; never blocks the response.
 async fn audit_asset(
     record: &WidgetInstance,

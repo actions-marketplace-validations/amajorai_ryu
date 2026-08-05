@@ -56,8 +56,8 @@
 	--sidebar-ring: oklch(0.708 0 0);
 	--background: oklch(1 0 0);
 	--foreground: oklch(0.145 0 0);
-	--ryu-dialog-overlay-background: rgb(0 0 0 / 0);
-	--ryu-dialog-overlay-blur: 0px;
+	--ryu-dialog-overlay-background: rgb(0 0 0 / 30%);
+	--ryu-dialog-overlay-blur: 8px;
 }
 
 .ryu-dialog-overlay {
@@ -66,24 +66,28 @@
 	backdrop-filter: blur(var(--ryu-dialog-overlay-blur));
 }
 
-/* Dialog transparent mode (overlay blur off, the default) — no backdrop overlay
-   and no panel shadow on dialogs, alert dialogs, sheets, or drawers. The
-   desktop turns the overlay on via the "Blur dialog backgrounds" Appearance
-   toggle (data-dialog-overlay-blur="on", set by
-   hooks/use-dialog-overlay-blur.ts); every other surface keeps this default. */
-html:not([data-dialog-overlay-blur="on"]) .ryu-dialog-overlay {
+/* Dialog transparent mode is OPT-OUT — the dimmed, blurred backdrop above is the
+   base state, so it is what every surface paints on the very first frame with no
+   JS involved. Only the desktop's "Blur dialog backgrounds" Appearance toggle can
+   turn it off, by stamping data-dialog-overlay-blur="off" on <html>
+   (hooks/use-dialog-overlay-blur.ts); the off branch drops the backdrop and the
+   panel shadow for a flat transparent look.
+
+   The polarity is load-bearing: an "on"-gated version could only ever blur after
+   an effect ran, which is exactly the flash this avoids. Do not invert it back. */
+html[data-dialog-overlay-blur="off"] .ryu-dialog-overlay {
 	display: none;
 }
 
-html:not([data-dialog-overlay-blur="on"]) [data-slot="dialog-content"],
-html:not([data-dialog-overlay-blur="on"]) [data-slot="alert-dialog-content"],
-html:not([data-dialog-overlay-blur="on"]) [data-slot="sheet-content"],
-html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"] {
+html[data-dialog-overlay-blur="off"] [data-slot="dialog-content"],
+html[data-dialog-overlay-blur="off"] [data-slot="alert-dialog-content"],
+html[data-dialog-overlay-blur="off"] [data-slot="sheet-content"],
+html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"] {
 	border: 1px solid color-mix(in oklch, var(--border) 50%, transparent) !important;
 	box-shadow: none !important;
 }
 
-html:not([data-dialog-overlay-blur="on"]) [data-slot="drawer-content"]::before {
+html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	box-shadow: none !important;
 }
 

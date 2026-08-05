@@ -39,6 +39,7 @@ import {
 	type UpdateCheck,
 	updateCheckFailed,
 } from "@/src/lib/api/update.ts";
+import { getAppVersion, releaseIsNewerThanApp } from "@/src/lib/app-version.ts";
 import { fetchCatalog, installSidecar } from "@/src/lib/services-api.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
@@ -84,6 +85,7 @@ const PLUGINS_CATALOG_KEY = (url: string) =>
 const MODEL_UPDATES_KEY = (url: string) => ["models", "updates", url] as const;
 const SKILL_UPDATES_KEY = (url: string) => ["skills", "updates", url] as const;
 const MCP_UPDATES_KEY = (url: string) => ["mcp", "updates", url] as const;
+const APP_VERSION_KEY = ["app", "version"] as const;
 
 // Upstream version checks are cheap on Core (VersionCache) but still remote;
 // keep them fresh for a minute so re-opening the popup is instant.
@@ -194,23 +196,49 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 				queryFn: () => listMcpUpdates(target),
 				staleTime: UPDATES_STALE_MS,
 			},
+			{
+				// Not node-scoped and it cannot change while the app runs, so it is
+				// keyed globally and never refetched.
+				queryKey: APP_VERSION_KEY,
+				queryFn: () => getAppVersion(),
+				staleTime: Number.POSITIVE_INFINITY,
+			},
 		],
 	});
 
-	const [appQ, agentQ, catalogQ, appsQ, pluginCatalogQ, modelQ, skillQ, mcpQ] =
-		results;
+	const [
+		appQ,
+		agentQ,
+		catalogQ,
+		appsQ,
+		pluginCatalogQ,
+		modelQ,
+		skillQ,
+		mcpQ,
+		appVersionQ,
+	] = results;
 
 	const updates: AvailableUpdate[] = [];
 
 	// App release train (core/gateway/cli/desktop bundled at one version).
+	//
+	// Gated on the APP's own version, not on `verdict.current`. Core answers about
+	// ITSELF, and on macOS `ryu-core` is a separately-downloaded binary under
+	// `~/.ryu/bin` — one left behind at an older version made this row a permanent
+	// "Ryu app 0.0.14 → 0.1.3" that could never clear: its apply reaches
+	// `installUpdate`, the Tauri updater correctly finds nothing newer than the
+	// running 0.1.3 bundle, and the user gets a manual-download toast instead.
 	const appVerdict = appQ.data;
-	if (appVerdict?.update_available) {
+	if (
+		appVerdict?.update_available &&
+		releaseIsNewerThanApp(appVersionQ.data, appVerdict.latest)
+	) {
 		updates.push({
 			key: "app:ryu",
 			kind: "app",
 			id: "ryu",
 			name: "Ryu app",
-			currentVersion: appVerdict.current || null,
+			currentVersion: appVersionQ.data ?? appVerdict.current ?? null,
 			latestVersion: appVerdict.latest || null,
 			notes: appVerdict.notes,
 			appVerdict,

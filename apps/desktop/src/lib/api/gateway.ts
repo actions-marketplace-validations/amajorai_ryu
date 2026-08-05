@@ -439,6 +439,78 @@ export interface EvalRoutingConfig {
  */
 export type RouteStrategy = "llm" | "embedding" | "keyword";
 
+/**
+ * The ONE naming of the three smart-routing strategies, in both vocabularies.
+ *
+ * This table exists because the same picker is rendered in THREE places — the
+ * agent auto-routing editor, the per-agent smart-route override, and the Gateway
+ * dialog's routing section — and each had carried its own private copy of these
+ * six strings. They happened to still agree, which is the state a triplicated copy
+ * table is in right up until it isn't: the copies are what let one surface be
+ * reworded and the other two silently keep promising something else about how an
+ * agent picks a model.
+ *
+ * The technical names describe the MECHANISM ("LLM classifier", "Embedding") and
+ * the friendly names describe the DECISION a user is actually making — "let a
+ * model read it" versus "match on meaning" versus "match on words". `cosine` is
+ * the clearest example of why the split is worth having: it is the precise word
+ * for what the code does and it is meaningless to someone choosing how their own
+ * assistant should route, so friendly mode says "how close the meaning is" and the
+ * technical mode still says cosine for whoever is tuning `similarity_threshold`.
+ *
+ * Costs stay stated in BOTH vocabularies. "Zero cost" and "a cheap model" are the
+ * facts that decide this setting for most people, so the friendly copy keeps them
+ * rather than trading them for a shorter sentence.
+ */
+export const ROUTE_STRATEGY_LABELS: Record<RouteStrategy, string> = {
+	llm: "LLM classifier",
+	embedding: "Embedding",
+	keyword: "Keyword",
+};
+
+export const ROUTE_STRATEGY_FRIENDLY_LABELS: Record<RouteStrategy, string> = {
+	llm: "Let a model decide",
+	embedding: "Match on meaning",
+	keyword: "Match on words",
+};
+
+export const ROUTE_STRATEGY_DESCRIPTIONS: Record<RouteStrategy, string> = {
+	llm: "a cheap model reads the message and picks a rule",
+	embedding: "cosine-match rule text against the message",
+	keyword: "case-insensitive word match, zero cost",
+};
+
+export const ROUTE_STRATEGY_FRIENDLY_DESCRIPTIONS: Record<
+	RouteStrategy,
+	string
+> = {
+	llm: "a small, cheap model reads the message and picks the rule that fits",
+	embedding: "compares what the message means with what each rule describes",
+	keyword: "looks for the rule's words in the message; free and instant",
+};
+
+/**
+ * The label + description pair for each strategy in the caller's current mode.
+ *
+ * Returned as one object so a surface cannot pick a friendly label and leave a
+ * technical description under it — the mismatch that makes a control read as half
+ * translated.
+ */
+export function routeStrategyCopy(friendly: boolean): {
+	descriptions: Record<RouteStrategy, string>;
+	labels: Record<RouteStrategy, string>;
+} {
+	return friendly
+		? {
+				descriptions: ROUTE_STRATEGY_FRIENDLY_DESCRIPTIONS,
+				labels: ROUTE_STRATEGY_FRIENDLY_LABELS,
+			}
+		: {
+				descriptions: ROUTE_STRATEGY_DESCRIPTIONS,
+				labels: ROUTE_STRATEGY_LABELS,
+			};
+}
+
 /** A single smart-routing rule: a plain-language condition + target model. */
 export interface SmartRule {
 	/** Natural-language condition, e.g. "writing or refactoring code". */
@@ -1410,7 +1482,7 @@ export interface GatewayConfigPatch {
 	firewall_org_overlays?: Record<string, GatewayFirewallOverlay>;
 	/**
 	 * Ryu's user-level routing config (persisted; takes effect after gateway restart).
-	 * Runs before any upstream provider routing — this is the moat layer. PUT
+	 * Runs before any upstream provider routing — this is the governance layer. PUT
 	 * replaces the ENTIRE routing object, so always read-modify-write the full
 	 * routing from GET before sending.
 	 */

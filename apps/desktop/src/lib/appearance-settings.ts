@@ -86,7 +86,10 @@ export const APPEARANCE_DEFAULTS = {
 	friendlyNames: DEFAULT_FRIENDLY_MODE,
 	pointerCursor: false,
 	chromeShadows: true,
-	dialogOverlayBlur: false,
+	// Blurred dialog backdrops are the shared default (see
+	// @ryu/ui hooks/use-dialog-overlay-blur.ts); Reset must restore that, not
+	// the flat look.
+	dialogOverlayBlur: true,
 	invertedBackgrounds: false,
 	sidebarMode: DEFAULT_SIDEBAR_MODE,
 	sidebarVariant: DEFAULT_SIDEBAR_VARIANT,

@@ -375,6 +375,13 @@ fn default_grant_allowlist() -> Vec<String> {
         // reserved-namespace rule sends every holder (including `@ryu/quests`)
         // through this reviewed entry rather than the owner-scoped rule.
         "quests:crud",
+        // Keeping text the user selected in ANOTHER app. Split from `quests:crud`
+        // and reviewed separately because the reach is different in kind: board
+        // CRUD touches the app's own records, a capture carries arbitrary content
+        // out of whatever the user was looking at. `@ryu/approvals` holds
+        // `quests:crud` for the inbox's task check-off and deliberately does NOT
+        // hold this.
+        "quests:capture",
         // Shell integration: a companion app that contributes a sidebar section /
         // navigation entry to the host shell declares this. Reaching into the host
         // shell is by definition outside the app's own namespace, so it stays a
@@ -790,6 +797,7 @@ mod tests {
             // cross-app / reserved-namespace holds that stay on the list
             ("@ryu/skill-editor", "skills:crud"),
             ("@ryu/quests", "quests:crud"),
+            ("@ryu/quests", "quests:capture"),
             ("@ryu/approvals", "quests:crud"),
             ("@ryu/browser", "browser:control"),
             // model / network scopes

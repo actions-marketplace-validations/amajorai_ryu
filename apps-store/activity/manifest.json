@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Productivity",
   "description": "The unified activity feed: everything happening on this node — monitor alerts, finished tasks, runs, approvals, meetings, and notes — newest first, grouped by day.",
+  "tagline": "Everything happening on this node, newest first",
+  "keywords": ["activity", "feed", "notifications", "history"],
   "icon": "activity-03",
   "iconDither": { "from": 210, "to": 244, "direction": "up" },
   "surfaces": {

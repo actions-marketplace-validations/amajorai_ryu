@@ -56,3 +56,49 @@ export async function ensurePersonalOrganization(
 
 	return { created: true };
 }
+
+/**
+ * Decide which organization a NEW SESSION starts scoped to, healing the user
+ * first if they have none.
+ *
+ * Every org-scoped read in the control plane resolves membership through the
+ * `member` collection, so a user with zero rows there is not merely unscoped —
+ * they are permanently refused. `GET /api/credits/wallet` answers 409 ("no
+ * active organization") on every request and every SSE reconnect, for the life
+ * of the session, and no client retry can clear it.
+ *
+ * `ensurePersonalOrganization` already runs in the sign-up hook, but that hook
+ * is deliberately FAIL-OPEN — it logs and lets sign-up succeed — so a transient
+ * error there mints an account that is org-less forever. Users created before
+ * auto-provisioning landed are in the same state. Session create is the right
+ * place to repair both: it is the one moment every affected user passes through,
+ * it happens once per login rather than per request, and it fixes every
+ * org-scoped surface at once instead of one route at a time.
+ *
+ * Dependency-injected rather than reaching for `Member` and `auth.api` directly:
+ * the ORDER here (look up → ensure → look up AGAIN) is the entire fix, and the
+ * re-query is easy to drop in a refactor because `ensurePersonalOrganization`
+ * reports only whether it created something, never which org. Injecting lets
+ * that order be asserted without a database.
+ *
+ * Returns null only when the heal itself failed to produce a membership; the
+ * caller stays fail-open and lets the session start unscoped rather than
+ * blocking login.
+ */
+export async function resolveInitialActiveOrganization(deps: {
+	/** Create the user's personal organization if they have no membership. */
+	ensureOrganization: (userId: string) => Promise<void>;
+	/** Earliest membership for the user — the personal org — or null. */
+	findEarliestMembership: (userId: string) => Promise<string | null>;
+	userId: string;
+}): Promise<string | null> {
+	const existing = await deps.findEarliestMembership(deps.userId);
+	if (existing) {
+		// The overwhelmingly common path: one read, no write, on every login.
+		return existing;
+	}
+	await deps.ensureOrganization(deps.userId);
+	// `ensureOrganization` reports creation, not identity, so the id has to come
+	// from a second read.
+	return await deps.findEarliestMembership(deps.userId);
+}

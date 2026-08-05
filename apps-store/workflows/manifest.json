@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Automation",
   "description": "Workflows: petgraph DAG automation with triggers, durable execution, and a natural-language workflow builder.",
+  "tagline": "Automate anything as a durable DAG",
+  "keywords": ["workflows", "automation", "dag", "triggers"],
   "icon": "workflow-square-01",
   "iconDither": {
     "from": 299,

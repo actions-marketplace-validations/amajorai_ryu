@@ -33,6 +33,7 @@ pub(crate) mod models_dev;
 /// Plugin-contributed Pi extensions (`contributes.pi_extensions`) — the resolver
 /// and privilege gate behind [`sync_app_pi_extensions`].
 pub mod app_extensions;
+pub mod oauth_login;
 
 /// Ryu-namespaced settings key recording whether the managed Pi routes through
 /// the Gateway. Pi ignores unknown settings keys, so this rides along safely in
@@ -2762,7 +2763,7 @@ mod tests {
     /// two pi-config users acquire nothing else. Keep it that way — the inverse
     /// order in any new test deadlocks the whole suite, which is far worse than the
     /// flake this closes.
-    fn with_temp_dir<F: FnOnce()>(f: F) {
+    pub(crate) fn with_temp_dir<F: FnOnce()>(f: F) {
         let _guard = lock_pi_config_test_env();
         let _registry_guard = crate::registry::lock_registry_env();
         let dir = std::env::temp_dir().join(format!("ryu-pi-config-test-{}", std::process::id()));

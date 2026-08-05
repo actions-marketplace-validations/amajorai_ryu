@@ -349,8 +349,8 @@ impl ChannelRuntime {
     ///
     /// `POST <core_url>/api/channels/run` with `conversation_id` keyed to the
     /// chat (or packed chat+thread), so multi-turn exchanges share history. Model
-    /// calls still flow Core → Gateway, keeping the moat (firewall, DLP, budgets,
-    /// audit) on path for every bot-initiated call.
+    /// calls still flow Core → Gateway, keeping the governance layer (firewall,
+    /// DLP, budgets, audit) on path for every bot-initiated call.
     ///
     /// # Errors
     /// Returns `Err` on HTTP transport failure or a non-2xx from Core.
@@ -882,7 +882,7 @@ pub async fn handle_turn<C: Channel + 'static>(
     );
 
     // 6. Run the turn: Core's session seam when an agent/team is bound (history
-    //    persists, moat stays on path), else the legacy gateway pipeline.
+    //    persists, governance stays on path), else the legacy gateway pipeline.
     let reply = if runtime.routes_via_core() {
         match runtime
             .run_via_core(

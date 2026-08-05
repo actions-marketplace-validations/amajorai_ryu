@@ -54,6 +54,23 @@ export const MEMORY_SCOPE_LABELS: Record<MemoryScope, string> = {
 	org: "Organization",
 };
 
+/**
+ * The scope levels in everyday words.
+ *
+ * "Node" is the one that actually blocks a reader. It is Ryu's term for one
+ * installation — this laptop, or a cloud machine you added — and it is the word
+ * used everywhere in the product's own plumbing, so it stays as the technical
+ * label. But a person deciding where a remembered fact should live is choosing
+ * "everywhere I go" versus "only here", and "Node" answers neither question. The
+ * rest are already plain and change only enough to read as a set.
+ */
+export const MEMORY_SCOPE_FRIENDLY_LABELS: Record<MemoryScope, string> = {
+	user: "Just me",
+	node: "This device",
+	project: "This project",
+	org: "My organization",
+};
+
 /** Human labels for the categories. */
 export const MEMORY_CATEGORY_LABELS: Record<MemoryCategory, string> = {
 	user_fact: "User fact",
@@ -67,6 +84,43 @@ export const MEMORY_CATEGORY_LABELS: Record<MemoryCategory, string> = {
 	event: "Event",
 	other: "Other",
 };
+
+/**
+ * The categories in everyday words.
+ *
+ * These are the knowledge-representation names for the kinds of thing an agent
+ * can remember, and three of them ("Domain knowledge", "Directive", "Procedure")
+ * read as a taxonomy rather than as a choice. A user filing something they told
+ * their assistant is picking between "a fact about me", "a rule to follow" and
+ * "the steps for doing something" — so friendly mode says that. The technical
+ * names stay reachable for anyone matching them against the API's category values.
+ */
+export const MEMORY_CATEGORY_FRIENDLY_LABELS: Record<MemoryCategory, string> = {
+	user_fact: "About me",
+	preference: "Preference",
+	domain_knowledge: "Subject knowledge",
+	organization: "About my organization",
+	project_context: "About this project",
+	relationship: "People",
+	directive: "Rule to follow",
+	procedure: "How to do something",
+	event: "Something that happened",
+	other: "Other",
+};
+
+/** Scope labels in the caller's current vocabulary. */
+export function memoryScopeLabels(
+	friendly: boolean
+): Record<MemoryScope, string> {
+	return friendly ? MEMORY_SCOPE_FRIENDLY_LABELS : MEMORY_SCOPE_LABELS;
+}
+
+/** Category labels in the caller's current vocabulary. */
+export function memoryCategoryLabels(
+	friendly: boolean
+): Record<MemoryCategory, string> {
+	return friendly ? MEMORY_CATEGORY_FRIENDLY_LABELS : MEMORY_CATEGORY_LABELS;
+}
 
 /** The lowest and highest importance a memory can carry (inclusive). */
 export const MIN_IMPORTANCE = 1;

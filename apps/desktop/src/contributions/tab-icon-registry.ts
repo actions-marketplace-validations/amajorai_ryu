@@ -137,13 +137,23 @@ export function resolveTabIcon(path: string): string | undefined {
  * Derive a tab-icon rule from a sidebar section `itemTarget` template.
  * Templates like `/spaces/{{item.space_id}}/app/@ryu/canvas/{{item.id}}`
  * become `{ pathPrefix: "/spaces", pathIncludes: "/app/@ryu/canvas" }`.
+ *
+ * Returns null when the row's IDENTITY lives in the query string
+ * (`/chat?conversationId={{item.id}}`). Such a target's path is a shared shell
+ * route the app does not own — every one of its rows opens `/chat`, and `openTab`
+ * stores tabs under the bare path — so a rule built from it would repaint EVERY
+ * chat tab in the app with that section's glyph, not just the ones it opened.
  */
 export function ruleFromItemTarget(
 	itemTarget: string,
 	icon: string,
 	id: string
 ): (Omit<TabIconRule, "id"> & { id: string }) | null {
-	const template = itemTarget.split("?")[0]?.trim();
+	const [rawPath, query] = itemTarget.split("?");
+	if (query?.includes("{{")) {
+		return null;
+	}
+	const template = rawPath?.trim();
 	if (!template?.startsWith("/")) {
 		return null;
 	}

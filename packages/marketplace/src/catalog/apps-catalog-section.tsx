@@ -667,11 +667,10 @@ function AppList({
 					onDisable={() => onDisable(it.entry.id)}
 					onInstall={() => onInstall(it.entry.id)}
 					onOpen={() => onSelect(it.entry.id)}
-					// The live record's id when there is one: settings are keyed by the
-					// MANIFEST id, and only an installed listing is guaranteed to
-					// carry it (the two agree — the catalog join matches on it — but
-					// the record is the authority).
-					onOpenSettings={settingsOpener(it.info?.id ?? it.entry.id)}
+					// Settings are keyed by the MANIFEST id, and `entry.id` IS that id
+					// for any installed listing: the catalog↔record join matches on
+					// it, which is what makes the row read "installed" at all.
+					onOpenSettings={settingsOpener(it.entry.id)}
 					pending={pendingId === it.entry.id}
 				/>
 			}
@@ -1598,7 +1597,7 @@ function AppDetailPanel({
 				installLayer={installLayer}
 				item={item}
 				lifecyclePending={lifecyclePending}
-				onOpenSettings={settingsOpener(item.info?.id ?? entry.id)}
+				onOpenSettings={settingsOpener(entry.id)}
 				renderAffordance={renderAffordance}
 				setEnabled={setEnabled}
 			/>

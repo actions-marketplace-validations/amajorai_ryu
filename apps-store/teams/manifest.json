@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Communication",
   "description": "Teams: named groups of agents you can address as one. Governance shell over the in-crate teams store (agent-id membership only); no documents, no external dependencies. Runs the out-of-process ryu-teams sidecar; Core proxies /api/teams/* to it.",
+  "tagline": "Address a group of agents as one",
+  "keywords": ["teams", "agents", "collaboration", "groups"],
   "icon": "user-group",
   "iconDither": { "from": 245, "to": 279, "direction": "left" },
   "surfaces": {

@@ -29,7 +29,7 @@ def main() -> int:
         print("FAIL: '../evil' should have been rejected", file=sys.stderr)
         return 1
 
-    # 2. Gateway egress blocklist: the moat invariant — direct providers blocked.
+    # 2. Gateway egress blocklist: the governance invariant — direct providers blocked.
     ryu_sdk.assert_allowed_egress("http://127.0.0.1:7981")
     try:
         ryu_sdk.assert_allowed_egress("https://api.openai.com")

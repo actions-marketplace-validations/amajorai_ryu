@@ -69,9 +69,12 @@ const ENGINE_LOGOS: Record<string, LogoConfig> = {
 		dark: "/assets/logos/ryu_dark.svg",
 	},
 	openclaw: {
-		kind: "themed",
-		light: "/assets/logos/openclaw_light.svg",
-		dark: "/assets/logos/openclaw_dark.svg",
+		// The lobster mark from openclaw.ai/favicon.svg. Solid brand red on both
+		// themes, so it stays single-asset — the old themed pair was a generic
+		// circle glyph with nothing OpenClaw about it.
+		kind: "single",
+		src: "/assets/logos/openclaw.svg",
+		invert: false,
 	},
 	hermes: {
 		kind: "themed",

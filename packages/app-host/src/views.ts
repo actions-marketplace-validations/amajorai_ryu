@@ -174,6 +174,15 @@ export interface StatCard {
  * This is what makes a CRUD view live without a spec-provider round-trip.
  */
 export interface ViewSource {
+	/**
+	 * Row predicates, ANDed. A spec's `path` is a fixed endpoint, so this is how
+	 * ONE endpoint backs several sections that each show a slice of it — Core's
+	 * `/api/runs`, for instance, takes no query parameters, yet "Working" and
+	 * "Done" are both slices of it by `run_status`. Applied to the RAW response
+	 * row before mapping, so it filters on keys the map never surfaces.
+	 * Undeclared = every row passes.
+	 */
+	filter?: ViewSourceFilter[];
 	http: {
 		/** Defaults to `GET`. */
 		method?: ViewActionHttpMethod;
@@ -183,9 +192,52 @@ export interface ViewSource {
 	/** Key of the row array in the response object. Absent = the response itself
 	 *  is the array, else the first array-valued property is used. */
 	items?: string;
+	/** Keep at most this many rows (after {@link ViewSource.filter}), in response
+	 *  order. For an append-only feed like completed runs, the alternative is a
+	 *  section that grows without bound. Absent/≤0 = every row. */
+	limit?: number;
 	/** Field-map from {@link ViewItem} fields to response-row keys. */
 	map?: ViewSourceMap;
+	/**
+	 * Re-fetch interval in milliseconds. A source-backed surface is otherwise a
+	 * mount-time snapshot, which is wrong for anything live (a run's status
+	 * changes while the sidebar is open). The renderer clamps this to a sane
+	 * floor and pauses it when the surface is not visible; absent = fetch once.
+	 */
+	refreshMs?: number;
 }
+
+/**
+ * One row predicate for {@link ViewSource.filter}. Exactly one comparison is
+ * honoured, checked in the order below; a filter naming a key the row lacks
+ * never matches (so a backend that stops sending a field empties the section
+ * rather than silently showing everything).
+ *
+ * Comparison is against the row value's string form, matching how
+ * {@link ViewSourceMap} reads every other field — a spec is JSON and cannot
+ * express types.
+ */
+export interface ViewSourceFilter {
+	/** Keep the row when its value equals this. */
+	equals?: string;
+	/** Keep the row when its value is one of these. */
+	in?: string[];
+	/** The RAW response-row key to test. */
+	key: string;
+	/** Keep the row when its value is NOT one of these. */
+	notIn?: string[];
+}
+
+/**
+ * A pure text transform a mapped field may declare. Deliberately a closed enum
+ * rather than a pipe syntax in {@link renderTemplate}: that function also renders
+ * every existing manifest's action paths and bodies, and widening its token
+ * grammar would change how they parse.
+ *
+ * - `basename` — the last `/` or `\` segment. What turns a run's absolute
+ *   `folder_path` into the project name a row can actually show.
+ */
+export type ViewTextTransform = "basename";
 
 /** Maps each {@link ViewItem} field to the response-row key it reads. Defaults:
  *  `id` → `"id"`, `title` → `"title"`; the rest are omitted unless mapped. */
@@ -194,7 +246,13 @@ export interface ViewSourceMap {
 	detail?: string;
 	id?: string;
 	subtitle?: string;
+	/** Transform applied to the mapped `subtitle` value. */
+	subtitleTransform?: ViewTextTransform;
 	title?: string;
+	/** Literal text used when the mapped `title` key is empty/absent. Without it
+	 *  such a row is DROPPED (a title is required), which for a live feed means a
+	 *  just-started, not-yet-titled run would be missing from the list. */
+	titleFallback?: string;
 }
 
 /** One source-fetched row: the mapped {@link ViewItem} plus the RAW response row
@@ -210,7 +268,9 @@ export interface SourceItem {
  * an app owns its sidebar section instead of the shell hardcoding it:
  * - `source` supplies the live rows, fetched through the host's authenticated Core
  *   seam and mapped via {@link sourceItemsFromResponse} — the same primitive a
- *   `list-detail` view uses.
+ *   `list-detail` view uses. A row whose mapped `subtitle` resolves non-empty
+ *   renders as a TALLER two-line row (title over subtitle); one without keeps the
+ *   default single-line height, so a section mixing both stays scannable.
  * - `itemTarget` is a route template opened via `openTab`, filled with the clicked
  *   row using {@link renderTemplate} (e.g. `"/spaces/{{item.spaceId}}/canvas/{{item.id}}"`).
  *   Client navigation is not expressible as a {@link ViewAction}, so it lives here.
@@ -226,6 +286,26 @@ export interface SidebarSectionSpec {
 		/** Response key holding the created row's id; feeds `itemTarget` to open it.
 		 *  Absent = create then re-fetch (no auto-open). */
 		targetFrom?: string;
+	};
+	/**
+	 * What the section shows when its source returns no rows. Absent = the whole
+	 * section is hidden, which is right for a passive list (an app with no
+	 * documents should not leave a phantom header) but wrong for a section whose
+	 * emptiness is the ANSWER — "nothing is running" is information, and a user
+	 * who opted an app in expects the sections it promised to exist.
+	 */
+	emptyState?: {
+		/** Muted line under the title. */
+		description?: string;
+		title: string;
+		/**
+		 * Shown INSTEAD of `title` when the source could not be read at all — a
+		 * route gated behind an app the user has not enabled, or a node that is
+		 * down. Both cases return zero rows, and "nothing is waiting on you" is a
+		 * false statement about an endpoint nobody answered. Absent = the ordinary
+		 * empty copy, which is right for a source that cannot fail this way.
+		 */
+		unavailable?: string;
 	};
 	/** Per-row context-menu actions (delete, rename, …). */
 	itemActions?: ViewAction[];
@@ -549,11 +629,57 @@ function rowText(
 	return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
+/** Split on either separator so a Windows path yields its basename too. */
+const PATH_SEPARATOR_RE = /[\\/]/;
+
+/** Apply a {@link ViewTextTransform} to an already-stringified field value. */
+function transformText(
+	value: string | undefined,
+	transform: ViewTextTransform | undefined
+): string | undefined {
+	if (value === undefined || transform !== "basename") {
+		return value;
+	}
+	// Trailing separators would otherwise yield an empty basename.
+	const trimmed = value.replace(/[\\/]+$/, "");
+	const base = trimmed.split(PATH_SEPARATOR_RE).pop();
+	return base === undefined || base === "" ? undefined : base;
+}
+
+/** True when `row` satisfies every declared predicate. A filter whose key is
+ *  absent from the row never matches — see {@link ViewSourceFilter}. */
+function rowMatchesFilters(
+	row: Record<string, unknown>,
+	filters: ViewSourceFilter[] | undefined
+): boolean {
+	if (!filters?.length) {
+		return true;
+	}
+	return filters.every((filter) => {
+		const value = rowText(row, filter.key);
+		if (value === undefined) {
+			return false;
+		}
+		if (filter.equals !== undefined) {
+			return value === filter.equals;
+		}
+		if (filter.in !== undefined) {
+			return filter.in.includes(value);
+		}
+		if (filter.notIn !== undefined) {
+			return !filter.notIn.includes(value);
+		}
+		// A filter naming only a key means "this field must be present".
+		return true;
+	});
+}
+
 /**
  * Map a source-fetch response payload to renderable {@link SourceItem}s per the
- * source's `items` key + field-map. Deliberately forgiving: rows without a
- * usable id/title are skipped, a non-array payload yields `[]` — a bad backend
- * response degrades to the empty state, never a crash.
+ * source's `items` key + field-map, honouring its `filter` and `limit`.
+ * Deliberately forgiving: rows without a usable id/title are skipped, a
+ * non-array payload yields `[]` — a bad backend response degrades to the empty
+ * state, never a crash.
  */
 export function sourceItemsFromResponse(
 	source: ViewSource,
@@ -571,13 +697,15 @@ export function sourceItemsFromResponse(
 		return [];
 	}
 	const map = source.map ?? {};
+	const limit =
+		source.limit !== undefined && source.limit > 0 ? source.limit : undefined;
 	const out: SourceItem[] = [];
 	for (const row of rows) {
-		if (!isRecord(row)) {
+		if (!(isRecord(row) && rowMatchesFilters(row, source.filter))) {
 			continue;
 		}
 		const id = rowText(row, map.id ?? "id");
-		const title = rowText(row, map.title ?? "title");
+		const title = rowText(row, map.title ?? "title") || map.titleFallback;
 		if (!(id && title)) {
 			continue;
 		}
@@ -586,11 +714,17 @@ export function sourceItemsFromResponse(
 			item: {
 				id,
 				title,
-				subtitle: rowText(row, map.subtitle),
+				subtitle: transformText(
+					rowText(row, map.subtitle),
+					map.subtitleTransform
+				),
 				detail: rowText(row, map.detail),
 				accessory: rowText(row, map.accessory),
 			},
 		});
+		if (limit !== undefined && out.length >= limit) {
+			break;
+		}
 	}
 	return out;
 }

@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Developer Tools",
   "description": "Website monitors: price, stock, keyword, content, and uptime watches with cross-device notification fan-out.",
+  "tagline": "Watch a page and get told when it changes",
+  "keywords": ["monitoring", "alerts", "uptime", "scraping"],
   "icon": "radar-01",
   "iconDither": { "from": 357, "to": 323, "direction": "up" },
   "surfaces": {

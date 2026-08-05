@@ -41,4 +41,20 @@ describe("tab-icon-registry", () => {
 			priority: 20,
 		});
 	});
+
+	test("ruleFromItemTarget declines a target whose identity is in the query", () => {
+		// `/chat` is a shared shell route: every row of such a section opens the
+		// same path, so a rule from it would repaint every chat tab in the app.
+		expect(
+			ruleFromItemTarget(
+				"/chat?conversationId={{item.id}}",
+				"lucide:loader-circle",
+				"test:runs"
+			)
+		).toBeNull();
+		// A static query carries no row identity and stays eligible.
+		expect(
+			ruleFromItemTarget("/library?section=agent", "target-01", "test:library")
+		).not.toBeNull();
+	});
 });

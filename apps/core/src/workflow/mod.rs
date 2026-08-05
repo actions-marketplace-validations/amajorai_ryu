@@ -177,7 +177,7 @@ pub enum NodeKind {
         #[serde(default)]
         max_iterations: Option<u64>,
     },
-    /// Routes the incoming text through the Gateway firewall (the moat owns
+    /// Routes the incoming text through the Gateway firewall (the Gateway owns
     /// "what is allowed", per the Core-vs-Gateway rule) and fails the run when a
     /// requested guardrail trips. `checks` is the set of guardrails to enforce
     /// (e.g. `["pii", "jailbreak"]`); on PASS the incoming value is forwarded

@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Knowledge & Memory",
   "description": "Learning loop: turn chats and runs into reusable skills, gated by the approval Inbox, with an experience log of what was learned.",
+  "tagline": "Turn your chats into reusable skills",
+  "keywords": ["learning", "skills", "memory", "improvement"],
   "icon": "mortarboard-01",
   "iconDither": { "from": 342, "to": 308, "direction": "left" },
   "surfaces": {

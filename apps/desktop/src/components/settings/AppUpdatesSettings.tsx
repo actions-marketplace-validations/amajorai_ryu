@@ -19,6 +19,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useState } from "react";
 import { sileo } from "sileo";
 import { installUpdate } from "@/src/components/updater/AutoUpdater.tsx";
+import {
+	updateToastBody,
+	updateToastId,
+} from "@/src/components/updater/ReleaseNotes.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -28,6 +32,7 @@ import {
 	setAutoUpdateEnabled,
 	updateCheckFailed,
 } from "@/src/lib/api/update.ts";
+import { verdictAppliesToApp } from "@/src/lib/app-version.ts";
 import {
 	formatUpdatesCutoff,
 	getUpdatesWindowEnd,
@@ -97,7 +102,13 @@ export function AppUpdatesSettings() {
 				return;
 			}
 			setRestricted(verdict.restricted_by_cutoff === true);
-			if (!verdict.update_available) {
+			// This tab is about the APP bundle — that is why the version above comes
+			// from Tauri rather than Core's `/api/version`. The verdict has to be
+			// held to the same standard: Core reports its OWN version as `current`,
+			// and a `~/.ryu/bin/ryu-core` left behind at an older version made this
+			// check answer "Update available — v0.1.3" to an app already on 0.1.3.
+			const appIsBehind = await verdictAppliesToApp(verdict);
+			if (!appIsBehind) {
 				// An explicit check asks a factual question and must get a factual
 				// answer — not a persistent purchase prompt. Finite duration, both
 				// versions named.
@@ -106,7 +117,10 @@ export function AppUpdatesSettings() {
 						title: "Ryu is up to date for your updates window",
 						description: verdict.cutoff_unresolved
 							? `v${verdict.latest_unrestricted ?? verdict.latest} has been released, after your updates window ended.`
-							: `You're on v${verdict.current}. v${verdict.latest_unrestricted ?? verdict.latest} was released after your updates window ended.`,
+							: // `version` (the app's own, from Tauri) not `verdict.current`
+								// (the answering Core's) — this sentence names the build the
+								// user is looking at in the row right above it.
+								`You're on v${version ?? verdict.current}. v${verdict.latest_unrestricted ?? verdict.latest} was released after your updates window ended.`,
 						duration: 8000,
 						button: {
 							title: "Extend updates",
@@ -125,8 +139,12 @@ export function AppUpdatesSettings() {
 			// automatic updates are off.
 			sileo.info({
 				title: `Update available — v${verdict.latest}`,
-				description:
-					verdict.notes ?? "A new version of Ryu is ready to install.",
+				description: updateToastBody({
+					notes: verdict.notes,
+					htmlUrl: verdict.html_url,
+					fallback: "A new version of Ryu is ready to install.",
+				}),
+				id: updateToastId(verdict.latest),
 				duration: null,
 				button: {
 					title: "Update now",

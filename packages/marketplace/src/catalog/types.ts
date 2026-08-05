@@ -418,6 +418,11 @@ export interface AddMarketplaceParams {
 
 /** A Skill row in the left-hand selector, as the Skills section reads it. */
 export interface SkillCard {
+	/** One-line "what this does". Present for INSTALLED cards (read from the
+	 *  on-disk SKILL.md front matter) and on the detail card; absent for a browse
+	 *  result, because skills.sh's search payload carries no description. Cards
+	 *  fall back to the source + install count when it is missing. */
+	description?: string | null;
 	downloads?: number;
 	id: string;
 	installed: boolean;

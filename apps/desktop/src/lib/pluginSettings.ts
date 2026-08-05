@@ -82,6 +82,19 @@ function parseScope(value: unknown): SettingsScope {
 
 /** A named group of fields a plugin contributes to the settings surface. */
 export interface PluginSettingsTab {
+	/**
+	 * Whether the owning plugin is currently ENABLED (Core's `app_enabled`).
+	 *
+	 * Settings tabs are served for every INSTALLED plugin, enabled or not — you
+	 * configure a plugin in order to make it worth enabling, so gating the tab on
+	 * enablement hid it exactly when it was wanted. False means the values still
+	 * save (they are plain preferences) but nothing reads them until the plugin is
+	 * turned on, and the UI has to say so.
+	 *
+	 * Defaults to `true` when Core doesn't send the bit: an older Core served
+	 * enabled plugins only, so every tab it sends is from one.
+	 */
+	enabled: boolean;
 	fields: PluginSettingsField[];
 	id: string;
 	/** The owning plugin id (manifest id), tagged by Core. */
@@ -192,6 +205,9 @@ export function parseSettingsTabs(
 			id: asString(entry.id) ?? `${plugin}.settings`,
 			title: asString(entry.title) ?? "Settings",
 			scope: parseScope(entry.scope),
+			// Only an explicit `false` means disabled — an older Core omits the bit
+			// and everything it sends is from an enabled plugin.
+			enabled: entry.app_enabled !== false,
 			fields,
 			view,
 		});

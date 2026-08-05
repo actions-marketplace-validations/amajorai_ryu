@@ -21,7 +21,7 @@
 //        proxy origin (`/api/widgets/asset`) that fetches server-side, so the
 //        Gateway sees and allowlists every passive-asset egress (see
 //        `apps/core/src/server/widgets.rs`). Deny-by-default + widen-by-declaration,
-//        the ChatGPT Apps-SDK model, but with Ryu's governed-egress moat intact.
+//        the ChatGPT Apps-SDK model, but with Ryu's governed egress intact.
 //
 // The security boundary is still the null-origin `sandbox="allow-scripts"` iframe
 // (ExtensionHost) plus the host-side capability gate (rpc.ts); this file adds the

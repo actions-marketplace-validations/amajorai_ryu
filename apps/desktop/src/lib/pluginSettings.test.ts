@@ -11,6 +11,7 @@ import {
 	isEntitySection,
 	PLUGIN_SECTION_PREFIX,
 	type PluginSettingsTab,
+	parseSettingsTabs,
 	resolveSettingsDestination,
 	splitScopedTabs,
 } from "./pluginSettings.ts";
@@ -21,6 +22,7 @@ function tab(
 	id = `${plugin}.settings`
 ): PluginSettingsTab {
 	return {
+		enabled: true,
 		fields: [{ type: "secret", prefKey: "KEY", label: "API key", options: [] }],
 		id,
 		plugin,
@@ -34,6 +36,31 @@ function tab(
 const EXA = "@ryu/exa";
 const COMPANION_APP = "com.ryu.learning";
 const isApp = (id: string) => id === COMPANION_APP;
+
+describe("parseSettingsTabs — the app-enabled bit", () => {
+	const raw = (extra: Record<string, unknown>) => ({
+		plugin: EXA,
+		title: "Exa Search",
+		fields: [{ type: "secret", pref_key: "RYU_EXA_API_KEY", label: "Key" }],
+		...extra,
+	});
+
+	test("a tab from a disabled plugin is kept, marked not enabled", () => {
+		// Core serves settings tabs for every INSTALLED plugin now, so the tab must
+		// survive parsing — dropping it would put the API-key field out of reach
+		// exactly when the user is trying to set the plugin up.
+		const [tab] = parseSettingsTabs([raw({ app_enabled: false })]);
+		expect(tab?.enabled).toBe(false);
+		expect(tab?.fields[0]?.prefKey).toBe("RYU_EXA_API_KEY");
+	});
+
+	test("an absent bit means enabled (an older Core serves enabled only)", () => {
+		expect(parseSettingsTabs([raw({})])[0]?.enabled).toBe(true);
+		expect(parseSettingsTabs([raw({ app_enabled: true })])[0]?.enabled).toBe(
+			true
+		);
+	});
+});
 
 describe("resolveSettingsDestination", () => {
 	test("a node-scoped plain plugin resolves to the Gateway dialog", () => {

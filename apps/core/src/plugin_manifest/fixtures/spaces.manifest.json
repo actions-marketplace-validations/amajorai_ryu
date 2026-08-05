@@ -5,6 +5,8 @@
   "category": "Core",
   "mandatory": true,
   "description": "Document Spaces: the shared store every note, doc, and RAG-indexed file lands in. The dependency target other apps declare when they own Space documents.",
+  "tagline": "Where every note, doc, and file lives",
+  "keywords": ["spaces", "documents", "storage", "rag"],
   "engines": {
     "ryu": ">=0.0.1"
   },

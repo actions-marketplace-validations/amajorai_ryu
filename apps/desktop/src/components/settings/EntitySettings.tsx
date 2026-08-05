@@ -14,7 +14,15 @@
 // A `view` only resolves to a first-party component for a BUILT-IN app: a
 // third-party app can't borrow the Memory/Meetings component by naming its key.
 
-import type { ComponentType } from "react";
+import {
+	Alert,
+	AlertAction,
+	AlertDescription,
+	AlertTitle,
+} from "@ryu/ui/components/alert.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
+import { type ComponentType, useState } from "react";
+import { useApps } from "@/src/hooks/useApps.ts";
 import type { ScopedNavEntity } from "@/src/hooks/useScopedSettingsNav.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { PluginSettingsTab } from "@/src/lib/pluginSettings.ts";
@@ -61,6 +69,45 @@ function firstPartyView(tab: PluginSettingsTab): ComponentType | null {
 	return SETTINGS_VIEWS[tab.plugin] ?? null;
 }
 
+/**
+ * Banner shown when the owning app is installed but not enabled.
+ *
+ * Its settings are still editable — they are ordinary preferences, written
+ * through the generic KV store, and configuring a plugin is usually what makes it
+ * worth enabling (an API key being the standard case). What the user must not
+ * conclude is that the plugin is running, so the state is stated outright and the
+ * one action that changes it sits right here rather than back in the Store.
+ */
+function DisabledNotice({ entity }: { entity: ScopedNavEntity }) {
+	const { toggle } = useApps();
+	const [enabling, setEnabling] = useState(false);
+
+	const enable = () => {
+		setEnabling(true);
+		toggle(entity.id, true)
+			.catch(() => {
+				// Failures surface through the shared apps-toggle banner; the tab
+				// simply stays in its disabled state.
+			})
+			.finally(() => setEnabling(false));
+	};
+
+	return (
+		<Alert>
+			<AlertTitle>{entity.label} is turned off</AlertTitle>
+			<AlertDescription>
+				You can set it up now — what you save here is kept and takes effect as
+				soon as you turn it on.
+			</AlertDescription>
+			<AlertAction>
+				<Button disabled={enabling} onClick={enable} size="sm">
+					{enabling ? "Turning on…" : "Turn on"}
+				</Button>
+			</AlertAction>
+		</Alert>
+	);
+}
+
 export function EntitySettings({
 	entity,
 	target,
@@ -73,10 +120,18 @@ export function EntitySettings({
 	const fieldTabs = entity.tabs.filter(
 		(t) => !firstPartyView(t) && t.fields.length > 0
 	);
-	const viewTabs = entity.tabs.filter((t) => firstPartyView(t));
+	// A rich `view` is a live control panel for a RUNNING app — it reads routes
+	// behind that app's own enabled gate, so rendering it for a disabled app would
+	// produce a spinner that resolves into an error. Declarative fields have no
+	// such dependency (they are preference reads/writes), so they still render and
+	// the view is replaced by the notice until the app is on.
+	const viewTabs = entity.enabled
+		? entity.tabs.filter((t) => firstPartyView(t))
+		: [];
 
 	return (
 		<div className="space-y-4">
+			{entity.enabled ? null : <DisabledNotice entity={entity} />}
 			{viewTabs.map((tab) => {
 				const View = firstPartyView(tab);
 				if (!View) {

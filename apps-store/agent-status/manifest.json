@@ -1,0 +1,117 @@
+{
+  "id": "@ryu/agent-status",
+  "name": "Agent Status",
+  "version": "1.0.0",
+  "description": "Splits your agent runs across three sidebar sections — Working, Needs input and Done — each row showing the project it belongs to.",
+  "tagline": "See which agents are working, stuck, or done",
+  "category": "Productivity",
+  "icon": "lucide:activity",
+  "keywords": ["runs", "status", "sidebar", "agents", "inbox"],
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "none" },
+    "mobile": { "support": "none" },
+    "extension": { "support": "none" },
+    "web": { "support": "none" },
+    "cli": { "support": "none" }
+  },
+  "engines": { "ryu": ">=0.1.0" },
+  "runnables": [],
+  "contributes": {
+    "sidebar_sections": [
+      {
+        "id": "working",
+        "title": "Working",
+        "icon": "lucide:loader-circle",
+        "order": 1,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/runs" },
+            "items": "runs",
+            "filter": [{ "key": "run_status", "equals": "running" }],
+            "map": {
+              "id": "id",
+              "title": "title",
+              "titleFallback": "Untitled run",
+              "subtitle": "folder_path",
+              "subtitleTransform": "basename"
+            },
+            "refreshMs": 5000,
+            "limit": 25
+          },
+          "itemTarget": "/chat?conversationId={{item.id}}",
+          "itemPreview": {
+            "meta": [
+              { "label": "Project", "value": "{{item.folder_path}}" },
+              { "label": "Branch", "value": "{{item.branch}}" }
+            ]
+          },
+          "emptyState": {
+            "title": "Nothing running",
+            "description": "Runs appear here while an agent is working."
+          }
+        }
+      },
+      {
+        "id": "needs-input",
+        "title": "Needs input",
+        "icon": "lucide:message-circle-question",
+        "order": 2,
+        "spec": {
+          "source": {
+            "http": {
+              "method": "GET",
+              "path": "/api/approvals?status=pending"
+            },
+            "items": "approvals",
+            "map": { "id": "id", "title": "title" },
+            "refreshMs": 5000,
+            "limit": 25
+          },
+          "itemTarget": "/inbox",
+          "itemPreview": { "description": "{{item.summary}}" },
+          "emptyState": {
+            "title": "Nothing waiting on you",
+            "description": "Requests an agent needs you to decide show up here.",
+            "unavailable": "Enable the Approvals app to see what's waiting."
+          }
+        }
+      },
+      {
+        "id": "done",
+        "title": "Done",
+        "icon": "lucide:circle-check",
+        "order": 3,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/runs" },
+            "items": "runs",
+            "filter": [{ "key": "run_status", "in": ["completed", "failed"] }],
+            "map": {
+              "id": "id",
+              "title": "title",
+              "titleFallback": "Untitled run",
+              "subtitle": "folder_path",
+              "subtitleTransform": "basename"
+            },
+            "refreshMs": 5000,
+            "limit": 15
+          },
+          "itemTarget": "/chat?conversationId={{item.id}}",
+          "itemPreview": {
+            "meta": [
+              { "label": "Project", "value": "{{item.folder_path}}" },
+              { "label": "Branch", "value": "{{item.branch}}" }
+            ]
+          },
+          "emptyState": {
+            "title": "No finished runs yet",
+            "description": "The last 15 completed or failed runs collect here."
+          }
+        }
+      }
+    ]
+  }
+}

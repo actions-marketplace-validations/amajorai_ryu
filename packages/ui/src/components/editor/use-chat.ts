@@ -58,8 +58,9 @@ function createChatTransport({
 }) {
 	return new DefaultChatTransport<ChatMessage>({
 		api,
-		// Every editor model call routes through Ryu's Gateway (the moat: routing /
-		// firewall / budgets / audit) using the host-configured, swappable model.
+		// Every editor model call routes through Ryu's Gateway (the governance
+		// layer: routing / firewall / budgets / audit) using the host-configured,
+		// swappable model.
 		// There is no local `/api/*` AI route and no mock: if the editor AI is not
 		// configured, or the Gateway call fails, the error propagates to the user.
 		fetch: (async (_input, init) => {

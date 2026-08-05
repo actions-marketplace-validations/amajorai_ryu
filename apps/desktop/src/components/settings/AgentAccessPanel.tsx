@@ -12,6 +12,7 @@ import { Label } from "@ryu/ui/components/label";
 import { toast } from "@ryu/ui/components/sileo";
 import { Switch } from "@ryu/ui/components/switch";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import {
 	type Agent,
 	type AgentInput,
@@ -21,9 +22,9 @@ import {
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { fetchMcpTools, type McpTool } from "@/src/lib/api/mcp.ts";
 import {
-	MEMORY_SCOPE_LABELS,
 	MEMORY_SCOPES,
 	type MemoryScope,
+	memoryScopeLabels,
 } from "@/src/lib/api/memory.ts";
 import { fetchSpaces, type Space } from "@/src/lib/api/spaces.ts";
 import {
@@ -102,6 +103,8 @@ const DEFAULT_MEMORY_LEVELS: MemoryScope[] = ["user", "node", "project"];
  * edit uses), so dictation/ask and chat share one source of truth.
  */
 export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
+	const [friendly] = useFriendlyMode();
+	const scopeLabels = memoryScopeLabels(friendly);
 	const [agent, setAgent] = useState<Agent | null>(null);
 	const [spaces, setSpaces] = useState<Space[]>([]);
 	const [tools, setTools] = useState<McpTool[]>([]);
@@ -365,7 +368,7 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 										className="cursor-pointer font-normal text-sm"
 										htmlFor={checkId}
 									>
-										{MEMORY_SCOPE_LABELS[level]}
+										{scopeLabels[level]}
 									</Label>
 								</div>
 							);

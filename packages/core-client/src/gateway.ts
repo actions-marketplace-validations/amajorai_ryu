@@ -464,7 +464,7 @@ export interface GatewayConfigPatch {
 	firewall?: GatewayFirewallConfig;
 	/**
 	 * Ryu's user-level routing config (persisted; takes effect after gateway restart).
-	 * Runs before any upstream provider routing — this is the moat layer.
+	 * Runs before any upstream provider routing — this is the governance layer.
 	 */
 	routing?: GatewayRoutingConfig;
 }

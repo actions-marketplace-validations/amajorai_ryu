@@ -2,8 +2,8 @@
 //!
 //! The [`IdentityStore`] (in `store.rs`) is pure, gateway-agnostic storage: it
 //! seals and opens credential state but enforces no policy. Per `CLAUDE.md` §1,
-//! *whether a credential may be read* is a Gateway concern (the moat: scope +
-//! audit). This module is the thin governance wrapper that ties the two together
+//! *whether a credential may be read* is a Gateway concern (the governance
+//! layer: scope + audit). This module is the thin governance wrapper that ties the two together
 //! so every actual credential read is:
 //!
 //!   1. **grant-gated, fail-closed** — Core asks the Gateway to validate the
@@ -94,7 +94,7 @@ mod tests {
     }
 
     /// With no gateway reachable and fail-closed (the default), a credential read
-    /// is refused — the moat holds even for a connection that has sealed state.
+    /// is refused — the governance layer holds even for a connection that has sealed state.
     #[tokio::test]
     async fn read_is_denied_fail_closed_without_gateway() {
         ensure_test_cipher();

@@ -11,6 +11,7 @@ import StoreCatalogLayout, {
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction, {
 	StoreItemContextMenuContent,
+	StoreItemOverflowMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
@@ -32,6 +33,10 @@ import { Spinner } from "@ryu/ui/components/spinner";
 import { useEffect, useState } from "react";
 import InfiniteSentinel from "@/src/components/store/InfiniteSentinel.tsx";
 import { useMcpCatalog } from "@/src/hooks/useMcpCatalog.ts";
+import {
+	type PluginSettingsOpener,
+	usePluginSettingsOpener,
+} from "@/src/hooks/usePluginSettingsOpener.ts";
 import type {
 	McpCatalogCard,
 	McpCatalogDetail,
@@ -54,6 +59,10 @@ export default function McpCatalogSection({
 	/** Seed the search box (e.g. carried over from the store-wide search). */
 	initialQuery?: string;
 } = {}) {
+	// An MCP server that ships inside a plugin (the plugin declares `mcp_servers`)
+	// is configured through that plugin's settings; a plain registry server has no
+	// settings and resolves to null.
+	const settingsOpener = usePluginSettingsOpener();
 	const {
 		servers,
 		loading,
@@ -145,6 +154,7 @@ export default function McpCatalogSection({
 					onSelect={select}
 					selectedId={selectedId}
 					servers={servers}
+					settingsOpener={settingsOpener}
 				/>
 			}
 			onCloseDetail={() => select("")}
@@ -216,6 +226,7 @@ function McpServerList({
 	onInstall,
 	fetchNextPage,
 	hasNextPage,
+	settingsOpener,
 }: {
 	servers: McpCatalogCard[];
 	loading: boolean;
@@ -227,6 +238,9 @@ function McpServerList({
 	onInstall: (id: string) => void;
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
+	/** Resolves a server to the settings of the plugin that provides it, when one
+	 *  does. A registry server that is not a plugin resolves to null. */
+	settingsOpener: PluginSettingsOpener;
 }) {
 	// The IntersectionObserver root is StoreCatalogLayout's own scroll container,
 	// which wraps this list — so the grid must not add a second scroll region.
@@ -270,6 +284,7 @@ function McpServerList({
 								busy={installing === s.id}
 								card={s}
 								onInstall={() => onInstall(s.id)}
+								onOpenSettings={settingsOpener(s.id)}
 							/>
 						}
 						contextMenu={
@@ -309,24 +324,36 @@ function McpCardAction({
 	card,
 	busy,
 	onInstall,
+	onOpenSettings,
 }: {
 	card: McpCatalogCard;
 	busy: boolean;
 	onInstall: () => void;
+	/** Set when the server is provided by an installed plugin that declares
+	 *  settings; a plain registry server has none and gets no menu. */
+	onOpenSettings?: (() => void) | null;
 }) {
 	if (card.installed) {
 		return (
-			<Button disabled size="sm" variant="secondary">
-				<HugeiconsIcon
-					className="size-3.5 text-success"
-					icon={CheckmarkCircle02Icon}
-				/>
-				Installed
-			</Button>
+			<div className="flex items-center gap-0.5">
+				<Button disabled size="sm" variant="secondary">
+					<HugeiconsIcon
+						className="size-3.5 text-success"
+						icon={CheckmarkCircle02Icon}
+					/>
+					Installed
+				</Button>
+				<StoreItemOverflowMenu onOpenSettings={onOpenSettings ?? undefined} />
+			</div>
 		);
 	}
 	return (
-		<StoreItemAction busy={busy} installed={false} onInstall={onInstall} />
+		<StoreItemAction
+			busy={busy}
+			installed={false}
+			onInstall={onInstall}
+			onOpenSettings={onOpenSettings ?? undefined}
+		/>
 	);
 }
 

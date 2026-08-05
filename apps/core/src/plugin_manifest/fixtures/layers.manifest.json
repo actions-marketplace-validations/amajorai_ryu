@@ -5,6 +5,7 @@
   "mandatory": true,
   "runnables": [],
   "description": "Settings for the swappable capability toolkits — web search, extraction, crawling, browser and computer control. WHICH provider serves a toolkit is chosen in the node selector's Toolkits section; this app owns the settings that apply whichever provider is selected. Each field writes `layer.<capability>.default.<argument>`, which the capability tool facade merges underneath every call to that toolkit's verbs (an argument the caller supplies always wins). Only arguments a provider actually forwards get a field here: `web__extract`'s `format` is deliberately absent because `scrapling` is the only shipped extract provider that forwards it (onto its `extraction_type`) and the other four drop it, so a node-wide default that applies whichever provider is selected would be silently ignored by most of them.",
+  "keywords": ["toolkits", "capabilities", "defaults", "settings"],
   "tagline": "Defaults for the swappable toolkits",
   "category": "Core",
   "engines": {

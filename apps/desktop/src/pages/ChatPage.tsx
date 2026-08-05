@@ -146,8 +146,6 @@ import { useAppStore } from "@/src/store/useAppStore.ts";
 import { useMeetingRecordingStore } from "@/src/store/useMeetingRecordingStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
-const KICKSTART_PROMPT = "Hello! What can you help me with?";
-
 // Stale run threshold: if a message was last updated more than 30 seconds ago
 // and its conversation is still flagged "running", treat it as interrupted.
 const STALE_THRESHOLD_MS = 30_000;
@@ -2561,7 +2559,7 @@ export default function ChatPage({
 		});
 	}, [stop]);
 
-	// Branch ("fork into new chat", ChatGPT-style): copy this conversation's
+	// Branch ("fork into new chat"): copy this conversation's
 	// history up to the chosen message into a fresh conversation and open it in a
 	// new tab. Core persists the copy, so the new tab hydrates from the server.
 	const handleBranch = useCallback(
@@ -2939,37 +2937,6 @@ export default function ChatPage({
 			setBlockedMessages([]);
 		}
 	}, [activeConversationId]);
-
-	// First-run auto-kickstart: send a seed message the first time chat is ready
-	// after onboarding so the user sees a streaming AI response with zero typing.
-	const kickstartFired = useRef(false);
-	const servicesReady = !statusLoading && coreReachable && gatewayReachable;
-	useEffect(() => {
-		if (
-			!servicesReady ||
-			kickstartFired.current ||
-			localStorage.getItem("ryu_first_run_kickstart") !== "true"
-		) {
-			return;
-		}
-		kickstartFired.current = true;
-		localStorage.removeItem("ryu_first_run_kickstart");
-
-		const convId = draftConvId.current;
-		createConversation(convId, agentId ?? undefined);
-		setActiveConversationId(convId);
-
-		const timer = setTimeout(() => {
-			sendMessage({ text: KICKSTART_PROMPT });
-		}, 800);
-		return () => clearTimeout(timer);
-	}, [
-		servicesReady,
-		agentId,
-		createConversation,
-		setActiveConversationId,
-		sendMessage,
-	]);
 
 	// Launchpad auto-send: when this tab was opened from the home composer with a
 	// user-typed prompt (`initialSubmit`), send it as soon as the composer would

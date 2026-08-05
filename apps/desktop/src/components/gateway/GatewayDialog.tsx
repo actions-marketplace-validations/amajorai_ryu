@@ -109,6 +109,7 @@ import {
 import { UpdatesSettings } from "@/src/components/settings/UpdatesSettings.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useAdvancedSettings } from "@/src/hooks/useAdvancedSettings.ts";
+import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { useGatewayStatus } from "@/src/hooks/useGatewayStatus.ts";
 import {
 	APP_SECTION_PREFIX,
@@ -175,6 +176,7 @@ import {
 	fetchGatewayAudit,
 	fetchGatewayConfig,
 	MODALITIES,
+	routeStrategyCopy,
 	routingViewIncludesModalityMap,
 	routingViewIncludesSmartRouting,
 	runGatewayEvals,
@@ -2078,18 +2080,6 @@ interface RuleRow {
 	model: string;
 }
 
-const SMART_STRATEGY_LABELS: Record<RouteStrategy, string> = {
-	llm: "LLM classifier",
-	embedding: "Embedding",
-	keyword: "Keyword",
-};
-
-const SMART_STRATEGY_DESCRIPTIONS: Record<RouteStrategy, string> = {
-	llm: "a cheap model reads the message and picks a rule",
-	embedding: "cosine-match rule text against the message",
-	keyword: "case-insensitive word match, zero cost",
-};
-
 // ── Local classify tier (shared by the two "cheap model" fields) ──────────────
 //
 // Both the guardrail inspector and smart routing want a small, fast, free model
@@ -2218,6 +2208,11 @@ function SmartRoutingCard({
 	/** When false the caller lacks `gateway.configure`; controls read-only. */
 	canConfigure: boolean;
 }) {
+	// The app-wide "Friendly names" toggle picks which of the two vocabularies this
+	// picker speaks. Read per-surface rather than threaded through props: all three
+	// places that render this control now share one copy table, so each just asks.
+	const [friendly] = useFriendlyMode();
+	const strategyCopy = routeStrategyCopy(friendly);
 	const [config, setConfig] = useState<SmartRoutingConfig | null>(null);
 	const [draft, setDraft] = useState<SmartRoutingConfig | null>(null);
 	const [rules, setRules] = useState<RuleRow[]>([]);
@@ -2457,7 +2452,7 @@ function SmartRoutingCard({
 				<div className="flex flex-col gap-1.5">
 					<Label htmlFor="smart-strategy">Strategy</Label>
 					<Select
-						items={SMART_STRATEGY_LABELS}
+						items={strategyCopy.labels}
 						onValueChange={(v) => v && patch({ strategy: v as RouteStrategy })}
 						value={draft?.strategy ?? "llm"}
 					>
@@ -2466,15 +2461,12 @@ function SmartRoutingCard({
 						</SelectTrigger>
 						<SelectContent>
 							{(
-								Object.entries(SMART_STRATEGY_LABELS) as [
-									RouteStrategy,
-									string,
-								][]
+								Object.entries(strategyCopy.labels) as [RouteStrategy, string][]
 							).map(([val, label]) => (
 								<SelectItem key={val} value={val}>
 									<span className="font-medium">{label}</span>
 									<span className="ml-1 text-muted-foreground text-xs">
-										— {SMART_STRATEGY_DESCRIPTIONS[val]}
+										— {strategyCopy.descriptions[val]}
 									</span>
 								</SelectItem>
 							))}

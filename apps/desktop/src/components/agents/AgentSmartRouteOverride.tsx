@@ -26,10 +26,12 @@ import { Switch } from "@ryu/ui/components/switch";
 import { useEffect, useState } from "react";
 import { sileo } from "sileo";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
+import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	DEFAULT_SMART_ROUTING,
 	type RouteStrategy,
+	routeStrategyCopy,
 	type SmartRoutingConfig,
 } from "@/src/lib/api/gateway.ts";
 import {
@@ -43,14 +45,13 @@ interface RuleRow {
 	model: string;
 }
 
-const STRATEGY_LABELS: Record<RouteStrategy, string> = {
-	llm: "LLM classifier",
-	embedding: "Embedding",
-	keyword: "Keyword",
-};
-
 export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 	const getNode = useActiveNodeGetter();
+	// The app-wide "Friendly names" toggle picks which of the two vocabularies this
+	// picker speaks. Read per-surface rather than threaded through props: all three
+	// places that render this control now share one copy table, so each just asks.
+	const [friendly] = useFriendlyMode();
+	const strategyCopy = routeStrategyCopy(friendly);
 	const [enabled, setEnabled] = useState(false);
 	const [draft, setDraft] = useState<SmartRoutingConfig>(DEFAULT_SMART_ROUTING);
 	const [rules, setRules] = useState<RuleRow[]>([]);
@@ -175,9 +176,11 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 			{enabled ? (
 				<>
 					<div className="flex flex-col gap-1.5">
-						<Label htmlFor="agent-smart-route-strategy">Strategy</Label>
+						<Label htmlFor="agent-smart-route-strategy">
+							{friendly ? "How to choose a rule" : "Strategy"}
+						</Label>
 						<Select
-							items={STRATEGY_LABELS}
+							items={strategyCopy.labels}
 							onValueChange={(v) =>
 								v && patch({ strategy: v as RouteStrategy })
 							}
@@ -188,7 +191,10 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 							</SelectTrigger>
 							<SelectContent>
 								{(
-									Object.entries(STRATEGY_LABELS) as [RouteStrategy, string][]
+									Object.entries(strategyCopy.labels) as [
+										RouteStrategy,
+										string,
+									][]
 								).map(([val, label]) => (
 									<SelectItem key={val} value={val}>
 										{label}

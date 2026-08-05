@@ -28,7 +28,7 @@ catch (RyuException)
     // expected
 }
 
-// 2. Gateway egress blocklist: the moat invariant — direct providers blocked.
+// 2. Gateway egress blocklist: the governance invariant — direct providers blocked.
 RyuSdkMethods.AssertAllowedEgress("http://127.0.0.1:7981");
 try
 {

@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Developer Tools",
   "description": "Adds bash_background / bash_output / bash_kill to the managed Pi agent, so a long-running command does not hold the turn open.",
+  "tagline": "Run long commands without holding the turn open",
+  "keywords": ["shell", "bash", "background", "developer"],
   "icon": "computer-terminal-02",
   "iconDither": { "from": 196, "to": 232, "direction": "right" },
   "surfaces": {

@@ -323,7 +323,6 @@ export default function OnboardingPage() {
 			localStorage.setItem("ryu_onboarding_complete", "true");
 			track({ event: "onboarding_completed" });
 			localStorage.setItem("ryu_default_agent", "ryu");
-			localStorage.setItem("ryu_first_run_kickstart", "true");
 
 			await sleep(900);
 			setPhase("done");

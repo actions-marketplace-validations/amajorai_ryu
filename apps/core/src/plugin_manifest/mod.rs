@@ -671,6 +671,14 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // calls them directly, monitors pattern), so this manifest exists only to seed the
     // companion's UI bundle + `skills:crud` grant, not to gate a route surface.
     include_str!("../../../../apps-store/skill-editor/manifest.json"),
+    // The Agent Status app — three sidebar sections (Working / Needs input / Done)
+    // over runs and pending approvals. Opt-in, and the leanest shape an app can
+    // have: PURE MANIFEST. No runnables, no sidecar, no UI bundle and no route
+    // surface of its own — every row is a declarative `sidebar_sections[].spec`
+    // the desktop shell fetches through its own authenticated seam, so nothing
+    // about it exists in Core beyond this registration. It is the reference for
+    // "an app that only rearranges what the shell already knows".
+    include_str!("../../../../apps-store/agent-status/manifest.json"),
     // `sample-widget` — the REFERENCE third-party MCP widget plugin (a dev
     // template; source lives at `plugins-store/sample-widget/`). It declares a
     // local Node MCP server (`node server.mjs`) whose `render` tool advertises

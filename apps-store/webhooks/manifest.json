@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Automation",
   "description": "Inbound webhook endpoint registry: resolved public URLs, secret presence, last-delivery times, and the ingress backend status.",
+  "tagline": "See every inbound webhook this node answers",
+  "keywords": ["webhooks", "integrations", "ingress", "automation"],
   "icon": "webhook",
   "iconDither": { "from": 260, "to": 294, "direction": "up" },
   "surfaces": {

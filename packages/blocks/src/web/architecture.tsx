@@ -533,7 +533,7 @@ function ArchitectureDiagram() {
 				x={495}
 				y={142}
 			>
-				the moat
+				governance
 			</text>
 			<text
 				fill="var(--background)"
@@ -893,7 +893,7 @@ export function ArchitectureStacked() {
 						<h3 className="font-medium text-lg tracking-tight">Ryu Gateway</h3>
 					</div>
 					<span className="rounded-full border border-background/40 px-2 py-0.5 font-medium text-[10px] text-background/70">
-						the moat
+						governance
 					</span>
 				</div>
 				<p className="mt-1 text-background/65 text-xs">

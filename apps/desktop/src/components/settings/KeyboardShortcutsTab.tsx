@@ -45,6 +45,7 @@ import {
 	// setVoiceInputPrefs,
 } from "@/src/lib/api/preferences.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
+import { QuickCaptureSettings } from "./QuickCaptureSettings.tsx";
 import {
 	SettingsGroup,
 	SettingsItem,
@@ -383,6 +384,10 @@ export function KeyboardShortcutsTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+
+			{/* The one "shortcut" that is not an accelerator: a bare-modifier double
+			    tap, owned by the native layer rather than the hotkey registry. */}
+			<QuickCaptureSettings />
 		</div>
 	);
 }

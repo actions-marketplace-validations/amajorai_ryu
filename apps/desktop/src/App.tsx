@@ -230,6 +230,35 @@ function MainApp() {
 	}, []);
 
 	useEffect(() => {
+		// Quick Capture (double-tap Shift). The gesture happens while another app is
+		// frontmost, so the toast is the ONLY feedback that it worked — without it
+		// the user has no way to tell a capture from a missed tap.
+		const unlisteners: (() => void)[] = [];
+		listen<{ title?: string; source?: { app?: string | null } }>(
+			"quick-capture:kept",
+			({ payload }) => {
+				toast.success({
+					title: "Kept",
+					description: payload.source?.app
+						? `${payload.title ?? "Selection"} · from ${payload.source.app}`
+						: (payload.title ?? "Selection"),
+				});
+			}
+		).then((fn) => unlisteners.push(fn));
+		listen<{ error?: string }>("quick-capture:failed", ({ payload }) => {
+			toast.error({
+				title: "Couldn't keep that",
+				description: payload.error ?? "The capture didn't reach Ryu.",
+			});
+		}).then((fn) => unlisteners.push(fn));
+		return () => {
+			for (const fn of unlisteners) {
+				fn();
+			}
+		};
+	}, []);
+
+	useEffect(() => {
 		if (!pendingAuthToken) {
 			return;
 		}

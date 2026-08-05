@@ -9,7 +9,8 @@
 // "gateway" provider => Gateway-routed (governed egress, no keys stored in Pi).
 // Any other provider  => direct egress to that provider (a deliberate bypass).
 
-import { type ApiTarget, request } from "./client.ts";
+import { openSse, type SseMessage } from "@ryuhq/protocol/sse";
+import { type ApiTarget, apiUrl, request } from "./client.ts";
 
 /** The current Pi configuration. Never contains secrets. */
 export interface PiConfig {
@@ -258,5 +259,116 @@ export async function setModelEnabled(
 		target,
 		"/api/pi-config/providers/model-enabled",
 		{ method: "POST", body: input }
+	);
+}
+
+// ── Subscription OAuth login (ChatGPT / Claude / Copilot) ────────────────────
+//
+// A subscription provider is connected by completing a real OAuth flow, not by
+// storing a key. Core drives pi-ai's own flow modules and streams what they
+// produce — an authorization URL, a device code, a prompt awaiting an answer —
+// so the login happens in this app instead of a terminal the user never sees.
+
+/** A question the flow is blocked on until {@link answerProviderLogin}. */
+export interface PiLoginPrompt {
+	message: string;
+	/**
+	 * Present for a `select` prompt. The answer must be the chosen option's
+	 * `id` — the flow matches on the id, not on the label or an index.
+	 */
+	options?: { id: string; label: string }[];
+	placeholder?: string;
+	/** "text" | "select" | "manual_code" | … — anything but `select` is free text. */
+	type: string;
+}
+
+/** One frame of a login flow. `success` and `error` are terminal. */
+export interface PiLoginEvent {
+	/** `prompt`: the id to quote when answering. */
+	id?: string;
+	/** `auth_url`: extra guidance from the provider's flow. */
+	instructions?: string;
+	/** `error`: what went wrong. `progress`/`info`: a status line. */
+	message?: string;
+	prompt?: PiLoginPrompt;
+	/** `success`: the auth.json key that now holds a credential. */
+	provider?: string;
+	type:
+		| "auth_url"
+		| "device_code"
+		| "error"
+		| "info"
+		| "progress"
+		| "prompt"
+		| "success";
+	/** `auth_url`: open this to authorize. */
+	url?: string;
+	/** `device_code`: the code to type on the verification page. */
+	userCode?: string;
+	/** `device_code`: open this, then enter `userCode`. */
+	verificationUri?: string;
+}
+
+/**
+ * Begin a subscription login. Returns the session id to stream from. Starting a
+ * second login for the same provider retires the first — these flows bind fixed
+ * localhost callback ports, so two at once cannot both work.
+ */
+export async function startProviderLogin(
+	target: ApiTarget,
+	providerId: string
+): Promise<{ sessionId: string }> {
+	return await request<{ sessionId: string }>(
+		target,
+		`/api/pi-config/providers/${encodeURIComponent(providerId)}/login`,
+		{ method: "POST" }
+	);
+}
+
+/**
+ * Stream a login's events. Events emitted before this attaches are replayed
+ * first, so the opening URL or prompt is never missed.
+ */
+export function openProviderLoginStream(
+	target: ApiTarget,
+	sessionId: string,
+	signal: AbortSignal
+): AsyncGenerator<SseMessage<PiLoginEvent>> {
+	return openSse<PiLoginEvent>(
+		apiUrl(
+			target,
+			`/api/pi-config/login/${encodeURIComponent(sessionId)}/events`
+		),
+		{ token: target.token, signal }
+	);
+}
+
+/** Answer the prompt the flow is waiting on. */
+export async function answerProviderLogin(
+	target: ApiTarget,
+	sessionId: string,
+	promptId: string,
+	value: string
+): Promise<{ accepted: boolean; error?: string }> {
+	return await request<{ accepted: boolean; error?: string }>(
+		target,
+		`/api/pi-config/login/${encodeURIComponent(sessionId)}/answer`,
+		{ method: "POST", body: { prompt_id: promptId, value } }
+	);
+}
+
+/**
+ * Abandon a login and kill its flow. Always call this when the dialog closes:
+ * a flow left running keeps its callback port bound, and the next attempt then
+ * fails to bind.
+ */
+export async function cancelProviderLogin(
+	target: ApiTarget,
+	sessionId: string
+): Promise<{ cancelled: boolean }> {
+	return await request<{ cancelled: boolean }>(
+		target,
+		`/api/pi-config/login/${encodeURIComponent(sessionId)}/cancel`,
+		{ method: "POST" }
 	);
 }

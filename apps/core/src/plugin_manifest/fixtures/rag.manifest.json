@@ -18,6 +18,7 @@
     }
   ],
   "description": "The default in-process RAG capability: embeds text (via the engines embed sidecar) and serves vector retrieval. A GraphRAG or third-party RAG provider app can bind the `rag` capability to swap the implementation.",
+  "keywords": ["rag", "retrieval", "embeddings", "search"],
   "tagline": "Embeddings + retrieval",
   "category": "Core",
   "permission_grants": [],

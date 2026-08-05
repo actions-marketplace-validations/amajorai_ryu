@@ -38,11 +38,7 @@ import { Switch } from "@ryu/ui/components/switch";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sileo } from "sileo";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
-import { useAcpConfig } from "@/src/hooks/useAcpConfig.ts";
-import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useLlmProviders } from "@/src/hooks/useLlmProviders.ts";
-import { type AcpAuthMethod, authenticateAgent } from "@/src/lib/api/acp.ts";
-import { toTarget } from "@/src/lib/api/client.ts";
 import type {
 	CheckProviderResult,
 	DiscoveredModel,
@@ -52,91 +48,14 @@ import type {
 } from "@/src/lib/api/pi-config.ts";
 import { svglForProvider } from "@/src/lib/provider-brand.tsx";
 import { AgentModelsSettings } from "./AgentModelsSettings.tsx";
+import { ProviderLoginDialog } from "./dialogs/ProviderLoginDialog.tsx";
 import { SettingsCard, SettingsSection } from "./shared/settings-items.tsx";
 
 const GATEWAY = "gateway";
 const DIRECT = "direct";
 const DEFAULT_API = "openai-completions";
-// The flagship agent whose ACP `authMethods` back subscription logins. The ryu
-// agent runs pi-acp via `npx -y pi-acp` (fetched at runtime), so which auth
-// methods it advertises is NOT knowable at build time — that is exactly why the
-// Login button below is gated on the LIVE `authMethods` and disables gracefully
-// when a match is absent, rather than assuming a fixed set.
-const RYU_AGENT_ID = "ryu";
-
-// Best-effort matching of a subscription-provider catalog id to one of the ryu
-// agent's advertised ACP auth methods (matched by substring on the method's
-// id/name, case-insensitive). Nothing hardcoded server-side — this only maps a
-// provider's login intent to whatever method the live agent build exposes.
-const SUBSCRIPTION_METHOD_HINTS: Record<string, string[]> = {
-	"github-copilot": ["copilot", "github"],
-	"openai-codex": ["codex", "chatgpt", "openai"],
-	"claude-pro-max": ["claude", "anthropic"],
-};
-
-/**
- * A matched auth method plus whether it is actually THIS provider's login.
- *
- * The distinction is load-bearing: pi-acp advertises a single catch-all method
- * (`pi_terminal_login`, "Launch pi in the terminal") and nothing provider-specific,
- * so every subscription card matches the SAME method. Presenting that as "Login
- * with Claude" — and then reporting "Connected Claude" — is a promise the method
- * does not make. When `specific` is false the UI must say what the method really
- * is instead of borrowing the provider's name.
- */
-interface MatchedAuthMethod {
-	method: AcpAuthMethod;
-	specific: boolean;
-}
-
-function matchAuthMethod(
-	providerId: string,
-	authMethods: AcpAuthMethod[]
-): MatchedAuthMethod | null {
-	const hints = SUBSCRIPTION_METHOD_HINTS[providerId] ?? [providerId];
-	const haystack = (m: AcpAuthMethod) => `${m.id} ${m.name}`.toLowerCase();
-	// Prefer a provider-specific method (e.g. a dedicated "claude" / "chatgpt" login).
-	const specific = authMethods.find((m) =>
-		hints.some((h) => haystack(m).includes(h))
-	);
-	if (specific) {
-		return { method: specific, specific: true };
-	}
-	// Fall back to a GENERIC method that isn't tied to a DIFFERENT provider — it
-	// still beats a dead button, because that catch-all flow does log in any
-	// subscription. It is returned as `specific: false` so the caller labels it
-	// honestly rather than dressing it in this provider's name.
-	const otherProviderHints = Object.entries(SUBSCRIPTION_METHOD_HINTS)
-		.filter(([id]) => id !== providerId)
-		.flatMap(([, hs]) => hs);
-	const generic = authMethods.find((m) => {
-		const hay = haystack(m);
-		const looksGeneric = /login|terminal|sign.?in|oauth/.test(hay);
-		const tiedToOther = otherProviderHints.some((h) => hay.includes(h));
-		return looksGeneric && !tiedToOther;
-	});
-	return generic ? { method: generic, specific: false } : null;
-}
-
 function errMessage(e: unknown, fallback: string): string {
 	return e instanceof Error ? e.message : fallback;
-}
-
-// The button says what the matched method actually does. A generic catch-all
-// method gets its own name ("Launch pi in the terminal"), never a bare "Login"
-// that reads as a one-click provider sign-in the agent does not implement.
-function loginLabel(
-	busy: boolean,
-	configured: boolean,
-	match: MatchedAuthMethod | null
-): string {
-	if (busy) {
-		return "Connecting…";
-	}
-	if (match && !match.specific) {
-		return match.method.name;
-	}
-	return configured ? "Reconnect" : "Login";
 }
 
 // Order the catalog so the managed provider leads (the recommended default),
@@ -253,8 +172,6 @@ function ProviderBrandMark({
 
 interface ProviderCardProps {
 	activeConfig: PiConfig | null;
-	/** The ryu agent's advertised ACP auth methods (for subscription logins). */
-	authMethods: AcpAuthMethod[];
 	/** Live connectivity probe (latency + model count). */
 	check: ReturnType<typeof useLlmProviders>["check"];
 	discover: ReturnType<typeof useLlmProviders>["discover"];
@@ -284,7 +201,6 @@ interface ProviderCardProps {
 
 function ProviderCard({
 	activeConfig,
-	authMethods,
 	check,
 	discover,
 	onActivate,
@@ -302,17 +218,14 @@ function ProviderCard({
 	const isSubscription =
 		provider.authKind === "subscription" && !provider.managed;
 	const needsKey = provider.authKind === "api-key";
-	const activeNode = useActiveNode();
 	// The managed provider is always `configured` (wallet-gated server-side), so its
 	// upsell gates on the paid-plan entitlement. When the user has no plan, the card
 	// leads with an Upgrade CTA instead of presenting it as ready to use.
 	const { verdict, requestUpgrade } = useEntitlementContext();
 	const managedNeedsPlan =
 		Boolean(provider.managed) && !(verdict?.managedInference ?? false);
-	const authMatch = isSubscription
-		? matchAuthMethod(provider.id, authMethods)
-		: null;
-	const [loggingIn, setLoggingIn] = useState(false);
+	// The subscription login dialog owns the OAuth flow end to end.
+	const [loginOpen, setLoginOpen] = useState(false);
 
 	const activateLabel = (busy: boolean): string => {
 		if (isActive) {
@@ -406,46 +319,10 @@ function ProviderCard({
 		}
 	}, [open, provider.supportsDiscovery]);
 
-	const handleLogin = async () => {
-		if (!authMatch) {
-			return;
-		}
-		setLoggingIn(true);
-		try {
-			// `provider.id` is what makes the result VERIFIED: Core re-reads Pi's
-			// stored credential after the call instead of reporting the RPC result,
-			// so a method that accepts the request without logging anyone in (the
-			// terminal-login hint does exactly that) can no longer read as success.
-			const res = await authenticateAgent(
-				toTarget(activeNode),
-				RYU_AGENT_ID,
-				authMatch.method.id,
-				provider.id
-			);
-			if (res.authenticated) {
-				sileo.success({ title: `Connected ${provider.label}` });
-				// `configured` reflects login state — refresh so it flips to Connected.
-				onReload();
-			} else {
-				sileo.error({
-					title: `Not connected to ${provider.label}`,
-					description:
-						res.error ??
-						`Finish the login in a terminal with "${authMatch.method.name}", then reopen this page.`,
-				});
-				// Still refresh: a login completed out-of-band since the last read
-				// should show up rather than waiting for the next visit.
-				onReload();
-			}
-		} catch (e) {
-			sileo.error({
-				title: `Could not connect ${provider.label}`,
-				description: errMessage(e, "The login request failed."),
-			});
-		} finally {
-			setLoggingIn(false);
-		}
-	};
+	// Opening the dialog IS the login: it starts the OAuth flow, opens the
+	// browser, and streams the flow's prompts. The old path ran the agent's
+	// advertised ACP method, which for pi-acp is a hint that logs nobody in.
+	const handleLogin = () => setLoginOpen(true);
 
 	const handleSaveKey = async () => {
 		setSavingKey(true);
@@ -650,29 +527,20 @@ function ProviderCard({
 									</span>
 								</div>
 								<Button
-									disabled={loggingIn || !authMatch}
 									onClick={handleLogin}
 									size="sm"
 									variant={provider.configured ? "outline" : "default"}
 								>
-									{loginLabel(loggingIn, provider.configured, authMatch)}
+									{provider.configured ? "Reconnect" : "Login"}
 								</Button>
 							</div>
-							{authMatch ? null : (
-								<p className="text-muted-foreground text-xs">
-									Login not available for this agent build.
-								</p>
-							)}
-							{/* The agent advertised no login of its own for this provider, only
-							    a catch-all method. Say so, rather than letting the button imply
-							    a one-click provider login the agent never offered. */}
-							{authMatch && !authMatch.specific ? (
-								<p className="text-muted-foreground text-xs">
-									This agent has no built-in {provider.label} login. It offers “
-									{authMatch.method.name}” instead, which you finish yourself —
-									this card turns Connected once the credential is stored.
-								</p>
-							) : null}
+							<ProviderLoginDialog
+								onOpenChange={setLoginOpen}
+								onSuccess={onReload}
+								open={loginOpen}
+								providerId={provider.id}
+								providerLabel={provider.label.replace(/\s*\([^)]*\)\s*$/, "")}
+							/>
 						</div>
 					) : null}
 
@@ -952,12 +820,6 @@ export function LlmProvidersSettings() {
 		reload,
 	} = useLlmProviders();
 
-	// The ryu agent's advertised ACP auth methods back the subscription-login
-	// buttons. Session-independent (keyed by agent id), so it's available before
-	// any chat exists; empty for agent builds that advertise no login methods.
-	const { config: ryuAcpConfig } = useAcpConfig(RYU_AGENT_ID);
-	const authMethods = ryuAcpConfig?.authMethods ?? [];
-
 	if (loading) {
 		return (
 			<div className="flex items-center gap-2 text-muted-foreground text-sm">
@@ -1022,7 +884,6 @@ export function LlmProvidersSettings() {
 					{ordered.map((provider) => (
 						<ProviderCard
 							activeConfig={config}
-							authMethods={authMethods}
 							check={check}
 							discover={discover}
 							key={provider.id}

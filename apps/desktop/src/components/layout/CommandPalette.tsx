@@ -37,6 +37,7 @@ import { useAuthContext } from "@/contexts/auth-context.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { parseContributedTarget } from "@/src/contributions/contributed-target.ts";
 import { contributionRegistry } from "@/src/contributions/registry.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
@@ -297,8 +298,12 @@ export function CommandPalette() {
 		close();
 	};
 
+	// `to` may be a CONTRIBUTED target, whose allowlisted query parameters belong in
+	// openTab's options rather than its path (a conversation has no route of its
+	// own). Plain built-in paths carry no query and pass through unchanged.
 	const handleNavigate = (to: string, title?: string) => {
-		openTab(to, title ? { title } : undefined);
+		const { path, options } = parseContributedTarget(to);
+		openTab(path, { ...options, ...(title ? { title } : {}) });
 		close();
 	};
 

@@ -2,6 +2,9 @@
   "id": "@ryu/durable",
   "name": "Durable Workflows",
   "version": "1.0.0",
+  "description": "The durable workflow engine: workflow runs survive a crash, a restart, or a machine going to sleep, resuming from where they stopped instead of starting over. The default engine every workflow uses unless another is bound.",
+  "tagline": "Workflow runs that survive a restart",
+  "keywords": ["workflows", "durability", "engine", "automation"],
   "category": "Core",
   "engines": {
     "ryu": ">=0.0.1"

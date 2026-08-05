@@ -26,17 +26,18 @@ import {
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
 import { type ChangeEvent, type FormEvent, useMemo, useState } from "react";
+import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	createMemory,
 	MEMORY_CATEGORIES,
-	MEMORY_CATEGORY_LABELS,
-	MEMORY_SCOPE_LABELS,
 	MEMORY_SCOPES,
 	type Memory,
 	type MemoryCategory,
 	type MemoryScope,
 	type MemoryUpdate,
+	memoryCategoryLabels,
+	memoryScopeLabels,
 	updateMemory,
 } from "@/src/lib/api/memory.ts";
 
@@ -51,14 +52,14 @@ const IMPORTANCE_LEVELS: { value: number; label: string }[] = [
 
 // A Select's closed trigger resolves its text through `items`; without it Base UI
 // falls back to printing the raw stored value ("user", "preference", "3").
-const SCOPE_ITEMS = MEMORY_SCOPES.map((s) => ({
-	label: MEMORY_SCOPE_LABELS[s],
-	value: s,
-}));
-const CATEGORY_ITEMS = MEMORY_CATEGORIES.map((c) => ({
-	label: MEMORY_CATEGORY_LABELS[c],
-	value: c,
-}));
+//
+// Built per render, not once at module scope: the labels follow the app-wide
+// "Friendly names" toggle, and a frozen module constant would leave the closed
+// trigger showing the other vocabulary than the open list.
+const scopeItems = (labels: Record<MemoryScope, string>) =>
+	MEMORY_SCOPES.map((s) => ({ label: labels[s], value: s }));
+const categoryItems = (labels: Record<MemoryCategory, string>) =>
+	MEMORY_CATEGORIES.map((c) => ({ label: labels[c], value: c }));
 const IMPORTANCE_ITEMS = IMPORTANCE_LEVELS.map((level) => ({
 	label: level.label,
 	value: String(level.value),
@@ -93,6 +94,9 @@ export function MemoryEditor({
 	open: boolean;
 	target: ApiTarget;
 }) {
+	const [friendly] = useFriendlyMode();
+	const scopeLabels = memoryScopeLabels(friendly);
+	const categoryLabels = memoryCategoryLabels(friendly);
 	const isEditing = memory !== null;
 
 	// Seed the form from the memory (edit) or sensible defaults (create). Keyed on
@@ -227,7 +231,7 @@ export function MemoryEditor({
 							<div className="flex flex-col gap-1.5">
 								<Label htmlFor="memory-scope">Scope</Label>
 								<Select
-									items={SCOPE_ITEMS}
+									items={scopeItems(scopeLabels)}
 									onValueChange={(v) => setScope(v as MemoryScope)}
 									value={scope}
 								>
@@ -237,7 +241,7 @@ export function MemoryEditor({
 									<SelectContent>
 										{MEMORY_SCOPES.map((s) => (
 											<SelectItem key={s} value={s}>
-												{MEMORY_SCOPE_LABELS[s]}
+												{scopeLabels[s]}
 											</SelectItem>
 										))}
 									</SelectContent>
@@ -247,7 +251,7 @@ export function MemoryEditor({
 							<div className="flex flex-col gap-1.5">
 								<Label htmlFor="memory-category">Category</Label>
 								<Select
-									items={CATEGORY_ITEMS}
+									items={categoryItems(categoryLabels)}
 									onValueChange={(v) => setCategory(v as MemoryCategory)}
 									value={category}
 								>
@@ -257,7 +261,7 @@ export function MemoryEditor({
 									<SelectContent>
 										{MEMORY_CATEGORIES.map((c) => (
 											<SelectItem key={c} value={c}>
-												{MEMORY_CATEGORY_LABELS[c]}
+												{categoryLabels[c]}
 											</SelectItem>
 										))}
 									</SelectContent>

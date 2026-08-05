@@ -2422,6 +2422,22 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             post(set_pi_model_enabled),
         )
         .route("/api/pi-config/providers/:id", delete(delete_pi_provider))
+        .route(
+            "/api/pi-config/providers/:id/login",
+            post(start_pi_provider_login),
+        )
+        .route(
+            "/api/pi-config/login/:session/events",
+            get(pi_provider_login_events),
+        )
+        .route(
+            "/api/pi-config/login/:session/answer",
+            post(answer_pi_provider_login),
+        )
+        .route(
+            "/api/pi-config/login/:session/cancel",
+            post(cancel_pi_provider_login),
+        )
         .route("/api/pi-config/discover-models", post(discover_pi_models))
         // ── Agent teams (collections of agents + a coordination strategy) ──
         // `/api/teams/*` is now served OUT-OF-PROCESS by the `ryu-teams` sidecar via
@@ -6814,7 +6830,7 @@ struct ChannelRunRequest {
 /// Channel bots (Telegram, Slack, WhatsApp, Discord) call this endpoint with a
 /// `(conversation_id, agent_id, text)` turn and receive the assembled reply as a
 /// plain JSON `{ "reply": "..." }`. Model calls still flow Core → Gateway so the
-/// moat (firewall, DLP, budgets, audit) governs every bot-initiated call.
+/// governance layer (firewall, DLP, budgets, audit) governs every bot-initiated call.
 #[utoipa::path(
     post,
     path = "/api/channels/run",
@@ -11150,6 +11166,63 @@ fn collect_plugin_store_tabs(
     out
 }
 
+/// Walk the manifests and collect every `settings_tabs` entry of an **installed**
+/// plugin, tagged with its owning `plugin` id and that app's `app_enabled` bit.
+///
+/// # Why this one is not enabled-filtered
+///
+/// The second deliberate exception, for the same class of reason as
+/// [`collect_plugin_store_tabs`]: an enabled-gated settings tab is absent exactly
+/// when the user goes looking for it. Installing a plugin does not enable it
+/// (`install_app` inserts the record; `enable_app` is a separate call), so the
+/// first thing a user does after installing — open its settings to paste the API
+/// key it needs in order to be worth enabling — hit a plugin whose settings tab
+/// did not exist yet. The configuration and the enablement are two different
+/// questions, and Core was answering the first with the second.
+///
+/// Installed IS still required: settings write preferences for a plugin this node
+/// has, and a listing nobody installed has nothing to configure.
+///
+/// This is safe for the same reason the store tab is: a settings tab is a
+/// declaration, not an authority. Its fields bind to the generic preference KV
+/// (`/api/preferences/:key`), which is not gated on any app being enabled, and a
+/// disabled plugin reads its preferences only once enabled. The shell learns the
+/// state from `app_enabled` and says so rather than pretending the plugin is live.
+///
+/// The SURFACE filter still applies, exactly as for store tabs.
+fn collect_plugin_settings_tabs(
+    manifests: &[crate::plugin_manifest::PluginManifest],
+    installed_ids: &std::collections::HashSet<String>,
+    enabled_ids: &std::collections::HashSet<String>,
+    surface: Option<crate::plugin_manifest::Surface>,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for manifest in manifests {
+        if !installed_ids.contains(&manifest.id) {
+            continue;
+        }
+        if !surface.is_none_or(|s| manifest.supports_surface(s)) {
+            continue;
+        }
+        let Some(c) = &manifest.contributes else {
+            continue;
+        };
+        for tab in &c.settings_tabs {
+            let mut value = tab.clone();
+            let Some(obj) = value.as_object_mut() else {
+                continue;
+            };
+            obj.insert("plugin".to_string(), serde_json::json!(manifest.id));
+            obj.insert(
+                "app_enabled".to_string(),
+                serde_json::json!(enabled_ids.contains(&manifest.id)),
+            );
+            out.push(value);
+        }
+    }
+    out
+}
+
 /// `GET /api/plugins/contributions` — the declarative UI contributions (composer
 /// controls, settings tabs, slash commands) of every **enabled** plugin, each
 /// tagged with its owning `plugin` id. The desktop renders the known widget types
@@ -11223,6 +11296,17 @@ async fn plugin_contributions(
         &enabled_ids,
         surface,
     ));
+    // Settings tabs — the OTHER family collected outside the enabled filter, for the
+    // same reason and with the same honesty requirement; see
+    // [`collect_plugin_settings_tabs`]. Installed-gated, and each tab carries the
+    // app's `app_enabled` bit so the shell can say "saved, applies once enabled"
+    // instead of implying the plugin is running.
+    settings_tabs.extend(collect_plugin_settings_tabs(
+        &manifests,
+        &installed_ids,
+        &enabled_ids,
+        surface,
+    ));
     for manifest in manifests.iter() {
         if !enabled_ids.contains(&manifest.id) {
             continue;
@@ -11242,7 +11326,6 @@ async fn plugin_contributions(
             v
         };
         composer_controls.extend(c.composer_controls.iter().cloned().map(tag));
-        settings_tabs.extend(c.settings_tabs.iter().cloned().map(tag));
         // Per-message toolbar actions and context-menu rows — the in-conversation
         // seams. Stored raw + tagged with the owning plugin id, exactly like the
         // sibling client-rendered families; the renderer owns the `kind`/`anchor`
@@ -13941,6 +14024,149 @@ async fn set_pi_model_enabled(
     }
 }
 
+// ── Subscription OAuth login (ChatGPT / Claude / Copilot) ────────────────────
+//
+// The provider cards' "Login" used to run the agent-advertised ACP method, which
+// for pi-acp is a hint that logs nobody in — and the app had no channel to carry
+// an authorization URL, device code, or prompt back to the user, so no
+// interactive login could be completed at all. These four routes are that
+// channel: start a flow, stream its events, answer its prompts, cancel it.
+
+/// `POST /api/pi-config/providers/:id/login` — begin a subscription OAuth login
+/// for a provider ("claude-pro-max" / "openai-codex" / "github-copilot").
+/// Returns the session id to stream from. The credential lands in the managed
+/// Pi's `auth.json`, which is what flips the card to Connected.
+#[utoipa::path(
+    post,
+    path = "/api/pi-config/providers/{id}/login",
+    tag = "Agents",
+    summary = "Start a subscription OAuth login",
+    params(("id" = String, Path, description = "Provider id")),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn start_pi_provider_login(Path(provider_id): Path<String>) -> axum::response::Response {
+    match crate::pi_config::oauth_login::start(&provider_id).await {
+        Ok(session_id) => Json(json!({ "sessionId": session_id })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/pi-config/login/:session/events` — SSE for one login flow:
+/// `auth_url`, `device_code`, `prompt`, `progress`, and finally `success` or
+/// `error`. Events already emitted are replayed first, because the client
+/// subscribes after `start` returns — by which point the flow has usually
+/// already produced the URL or its first prompt.
+#[utoipa::path(
+    get,
+    path = "/api/pi-config/login/{session}/events",
+    tag = "Agents",
+    summary = "Stream a subscription login's events",
+    params(("session" = String, Path, description = "Login session id")),
+    responses((status = 200, description = "Server-Sent Events stream"))
+)]
+async fn pi_provider_login_events(
+    Path(session_id): Path<String>,
+) -> axum::response::sse::Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use tokio::sync::broadcast::error::RecvError;
+
+    let session = crate::pi_config::oauth_login::get(&session_id);
+    let replay = session
+        .as_ref()
+        .map(|s| s.replay())
+        .unwrap_or_else(|| {
+            vec![json!({ "type": "error", "message": "this login is no longer active" })]
+        });
+    let live = session.as_ref().map(|s| s.subscribe());
+
+    let stream = futures_util::stream::unfold(
+        (replay.into_iter(), live),
+        |(mut replay, mut live)| async move {
+            if let Some(event) = replay.next() {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                return Some((Ok(Event::default().data(data)), (replay, live)));
+            }
+            let rx = live.as_mut()?;
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let data = serde_json::to_string(&event).unwrap_or_default();
+                        return Some((Ok(Event::default().data(data)), (replay, live)));
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Body for `POST /api/pi-config/login/:session/answer`.
+#[derive(serde::Deserialize)]
+struct PiLoginAnswer {
+    /// The `id` from the `prompt` event being answered.
+    prompt_id: String,
+    /// For a `select` prompt this must be the chosen option's **id** — the flow
+    /// matches on the id, not on a label or an index.
+    value: String,
+}
+
+/// `POST /api/pi-config/login/:session/answer` — answer a prompt the flow is
+/// waiting on (a pasted authorization code, an enterprise domain, a choice).
+#[utoipa::path(
+    post,
+    path = "/api/pi-config/login/{session}/answer",
+    tag = "Agents",
+    summary = "Answer a subscription login prompt",
+    params(("session" = String, Path, description = "Login session id")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn answer_pi_provider_login(
+    Path(session_id): Path<String>,
+    Json(body): Json<PiLoginAnswer>,
+) -> axum::response::Response {
+    let Some(session) = crate::pi_config::oauth_login::get(&session_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "this login is no longer active" })),
+        )
+            .into_response();
+    };
+    match session.answer(&body.prompt_id, &body.value).await {
+        Ok(()) => Json(json!({ "accepted": true })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "accepted": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/pi-config/login/:session/cancel` — abandon a login and kill its
+/// flow. Not optional politeness: `openai-codex` listens on a fixed
+/// `localhost:1455` that its registered redirect URI depends on, so a flow left
+/// running would make every later ChatGPT login fail to bind.
+#[utoipa::path(
+    post,
+    path = "/api/pi-config/login/{session}/cancel",
+    tag = "Agents",
+    summary = "Cancel a subscription login",
+    params(("session" = String, Path, description = "Login session id")),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn cancel_pi_provider_login(Path(session_id): Path<String>) -> axum::response::Response {
+    let cancelled = crate::pi_config::oauth_login::cancel(&session_id);
+    Json(json!({ "cancelled": cancelled })).into_response()
+}
+
 /// The stable well-known id for the lean Ryu agent (Pi + Gateway). Using a
 /// constant rather than a hard-coded string literal ensures the id is consistent
 /// across create, find, and update paths in this module.
@@ -14403,7 +14629,7 @@ struct ForkConversationBody {
 
 /// `POST /api/conversations/:id/fork`
 ///
-/// ChatGPT-style "Branch in new chat": copy this conversation's history up to a
+/// "Branch in new chat": copy this conversation's history up to a
 /// chosen message into a fresh, independent conversation and return its summary.
 /// The caller opens the returned conversation to continue the branch.
 #[utoipa::path(
@@ -29671,6 +29897,100 @@ mod pure_helper_tests {
         assert_eq!(
             out[0]["spec"]["install"]["http"]["path"], "/api/workflows/catalog/install"
         );
+    }
+
+    // ── Settings tabs (contributes.settings_tabs) ────────────────────────────
+
+    fn settings_tab_manifest(id: &str) -> crate::plugin_manifest::PluginManifest {
+        manifest(json!({
+            "id": id, "name": id, "version": "1.0.0", "runnables": [],
+            "contributes": { "settings_tabs": [
+                { "id": "exa.settings", "title": "Exa Search", "scope": "node",
+                  "fields": [{ "type": "secret", "pref_key": "RYU_EXA_API_KEY",
+                               "label": "Exa API key" }] }
+            ]}
+        }))
+    }
+
+    /// THE invariant of this family: installing a plugin does NOT enable it, so an
+    /// enabled-gated settings tab is missing exactly when the user goes looking for
+    /// it — right after installing, to paste the API key the plugin needs before it
+    /// is worth enabling at all.
+    #[test]
+    fn settings_tabs_are_served_for_an_installed_but_disabled_plugin() {
+        let manifests = vec![settings_tab_manifest("@ryu/exa")];
+        let installed = enabled_set(&["@ryu/exa"]);
+        let none = enabled_set(&[]);
+
+        let disabled = collect_plugin_settings_tabs(&manifests, &installed, &none, None);
+        assert_eq!(disabled.len(), 1, "a disabled plugin still offers its settings");
+        assert_eq!(disabled[0]["plugin"], "@ryu/exa");
+        assert_eq!(
+            disabled[0]["app_enabled"], false,
+            "the shell must be able to say the plugin is not running yet"
+        );
+        // The declared body is passed through untouched — Core never validates it.
+        assert_eq!(disabled[0]["fields"][0]["pref_key"], "RYU_EXA_API_KEY");
+
+        let on = collect_plugin_settings_tabs(&manifests, &installed, &installed, None);
+        assert_eq!(on[0]["app_enabled"], true);
+    }
+
+    /// Installed IS still required. Unlike a store tab (which is how you install an
+    /// app in the first place), settings for an app this node does not have are
+    /// preferences nothing reads.
+    #[test]
+    fn settings_tabs_are_not_served_for_an_uninstalled_plugin() {
+        let manifests = vec![settings_tab_manifest("@ryu/exa")];
+        let none = enabled_set(&[]);
+        assert!(collect_plugin_settings_tabs(&manifests, &none, &none, None).is_empty());
+    }
+
+    /// Dropping the ENABLED filter must not drop the SURFACE filter with it.
+    #[test]
+    fn settings_tabs_still_respect_the_surface_filter() {
+        use crate::plugin_manifest::Surface;
+        let manifests = vec![manifest(json!({
+            "id": "@ryu/exa", "name": "Exa", "version": "1.0.0", "runnables": [],
+            "targets": ["desktop"],
+            "contributes": { "settings_tabs": [
+                { "id": "exa.settings", "title": "Exa", "fields": [
+                    { "type": "secret", "pref_key": "RYU_EXA_API_KEY", "label": "Key" }
+                ]}
+            ]}
+        }))];
+        let installed = enabled_set(&["@ryu/exa"]);
+        assert_eq!(
+            collect_plugin_settings_tabs(&manifests, &installed, &installed, Some(Surface::Desktop))
+                .len(),
+            1
+        );
+        assert_eq!(
+            collect_plugin_settings_tabs(&manifests, &installed, &installed, Some(Surface::Island))
+                .len(),
+            0
+        );
+        assert_eq!(
+            collect_plugin_settings_tabs(&manifests, &installed, &installed, None).len(),
+            1
+        );
+    }
+
+    /// Assert against the SHIPPED manifest: Exa is the case this exists for — its
+    /// only configuration is an API key, and it is useless until that key is set.
+    #[test]
+    fn the_exa_plugin_registers_its_api_key_settings_tab() {
+        let manifests: Vec<_> = crate::plugin_manifest::PluginManifestLoader::load()
+            .into_iter()
+            .filter(|m| m.id == "@ryu/exa")
+            .collect();
+        assert_eq!(manifests.len(), 1, "the Exa manifest is compiled in");
+        let installed = enabled_set(&["@ryu/exa"]);
+        let none = enabled_set(&[]);
+        let out = collect_plugin_settings_tabs(&manifests, &installed, &none, None);
+        assert_eq!(out.len(), 1, "Exa registers exactly one settings tab");
+        assert_eq!(out[0]["fields"][0]["pref_key"], "RYU_EXA_API_KEY");
+        assert_eq!(out[0]["app_enabled"], false);
     }
 
     #[test]

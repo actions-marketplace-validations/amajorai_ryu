@@ -52,17 +52,18 @@ import {
 	useState,
 } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	deleteMemory,
 	listMemories,
 	MEMORY_CATEGORIES,
-	MEMORY_CATEGORY_LABELS,
-	MEMORY_SCOPE_LABELS,
 	MEMORY_SCOPES,
 	type Memory,
 	type MemoryCategory,
 	type MemoryScope,
+	memoryCategoryLabels,
+	memoryScopeLabels,
 } from "@/src/lib/api/memory.ts";
 import { MemoryEditor } from "./MemoryEditor.tsx";
 
@@ -70,16 +71,18 @@ const ALL = "all";
 
 // A Select's closed trigger takes its text from `items`, so the sentinel row has
 // to be in here too — otherwise the filter reads "all"/"preference" once picked.
-const SCOPE_FILTER_ITEMS = [
+//
+// Built per render rather than once at module scope: the labels now depend on the
+// app-wide "Friendly names" toggle, and a module-level constant would freeze
+// whichever vocabulary was active when this file was first imported — leaving the
+// closed trigger reading "Node" under a list that says "This device".
+const scopeFilterItems = (labels: Record<MemoryScope, string>) => [
 	{ label: "All scopes", value: ALL },
-	...MEMORY_SCOPES.map((s) => ({ label: MEMORY_SCOPE_LABELS[s], value: s })),
+	...MEMORY_SCOPES.map((s) => ({ label: labels[s], value: s })),
 ];
-const CATEGORY_FILTER_ITEMS = [
+const categoryFilterItems = (labels: Record<MemoryCategory, string>) => [
 	{ label: "All categories", value: ALL },
-	...MEMORY_CATEGORIES.map((c) => ({
-		label: MEMORY_CATEGORY_LABELS[c],
-		value: c,
-	})),
+	...MEMORY_CATEGORIES.map((c) => ({ label: labels[c], value: c })),
 ];
 
 /** A single memory row: content, metadata badges, tags, and hover actions. */
@@ -92,6 +95,11 @@ function MemoryRow({
 	onDelete: (memory: Memory) => void;
 	onEdit: (memory: Memory) => void;
 }) {
+	// Both vocabularies come from the one shared table; which one shows is the
+	// app-wide "Friendly names" toggle.
+	const [friendly] = useFriendlyMode();
+	const scopeLabels = memoryScopeLabels(friendly);
+	const categoryLabels = memoryCategoryLabels(friendly);
 	return (
 		<li className="group/mem rounded-lg border border-border/60 bg-muted/30 p-4">
 			<div className="flex items-start justify-between gap-3">
@@ -127,10 +135,8 @@ function MemoryRow({
 			) : null}
 
 			<div className="mt-3 flex flex-wrap items-center gap-1.5">
-				<Badge variant="secondary">{MEMORY_SCOPE_LABELS[memory.scope]}</Badge>
-				<Badge variant="outline">
-					{MEMORY_CATEGORY_LABELS[memory.category]}
-				</Badge>
+				<Badge variant="secondary">{scopeLabels[memory.scope]}</Badge>
+				<Badge variant="outline">{categoryLabels[memory.category]}</Badge>
 				<Badge variant="outline">Importance {memory.importance}</Badge>
 				{memory.tags.map((tag) => (
 					<Badge key={tag} variant="secondary">
@@ -144,6 +150,12 @@ function MemoryRow({
 
 export function MemoryLibrary() {
 	const activeNode = useActiveNode();
+	// Both vocabularies come from the one shared table; which one shows is the
+	// app-wide "Friendly names" toggle.
+	const [friendly] = useFriendlyMode();
+	const scopeLabels = memoryScopeLabels(friendly);
+	const categoryLabels = memoryCategoryLabels(friendly);
+
 	const target: ApiTarget = useMemo(
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
@@ -312,7 +324,7 @@ export function MemoryLibrary() {
 							/>
 						</div>
 						<Select
-							items={SCOPE_FILTER_ITEMS}
+							items={scopeFilterItems(scopeLabels)}
 							onValueChange={(v) =>
 								setScopeFilter(v as MemoryScope | typeof ALL)
 							}
@@ -325,13 +337,13 @@ export function MemoryLibrary() {
 								<SelectItem value={ALL}>All scopes</SelectItem>
 								{MEMORY_SCOPES.map((s) => (
 									<SelectItem key={s} value={s}>
-										{MEMORY_SCOPE_LABELS[s]}
+										{scopeLabels[s]}
 									</SelectItem>
 								))}
 							</SelectContent>
 						</Select>
 						<Select
-							items={CATEGORY_FILTER_ITEMS}
+							items={categoryFilterItems(categoryLabels)}
 							onValueChange={(v) =>
 								setCategoryFilter(v as MemoryCategory | typeof ALL)
 							}
@@ -344,7 +356,7 @@ export function MemoryLibrary() {
 								<SelectItem value={ALL}>All categories</SelectItem>
 								{MEMORY_CATEGORIES.map((c) => (
 									<SelectItem key={c} value={c}>
-										{MEMORY_CATEGORY_LABELS[c]}
+										{categoryLabels[c]}
 									</SelectItem>
 								))}
 							</SelectContent>

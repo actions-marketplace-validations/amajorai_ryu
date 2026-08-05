@@ -1,11 +1,13 @@
 // apps/desktop/src/components/shell/TrayPopover.tsx
 //
 // Shared chrome for the sidebar-footer tray panels (Inbox, Downloads). Both hang
-// a TrayMorph off a 28px icon button: the trigger IS the panel, a circle that
-// morphs open into the tray box (`.t-morph` / `.t-morph-plus` / `.t-morph-menu`
-// in globals.css) rather than spawning a popover beside itself — the same motion
-// the sidebar "+" CreateMenu uses. The two trays share one set of headers, rows,
-// empty states, and the "open the full page" footer here.
+// a TrayMorph off a 28px icon button: a circle that morphs open into the tray
+// box (`.t-morph` / `.t-morph-menu` in globals.css) over the button rather than
+// spawning a popover beside it — the same motion the sidebar "+" CreateMenu
+// uses. Unlike CreateMenu the box is portaled out of the sidebar (see
+// TrayMorph): the tray is wider than the sidebar, and two of the sidebar's
+// hosts clip it flat at the sidebar's width. The two trays share one set of
+// headers, rows, empty states, and the "open the full page" footer here.
 //
 // Design rules the two trays obey, so they read as one component:
 //   * One row grid, always: 28px glyph · title + one meta line · action slot.
@@ -35,9 +37,11 @@ import {
 	useCallback,
 	useEffect,
 	useId,
+	useLayoutEffect,
 	useRef,
 	useState,
 } from "react";
+import { createPortal } from "react-dom";
 
 export type TrayTone = "default" | "danger" | "success" | "primary";
 
@@ -59,6 +63,13 @@ const TRAY_MORPH_OPEN_W = "23rem";
  * it and writing the container's height is one-way and settles.
  */
 const TRAY_MORPH_INITIAL_H = 240;
+/**
+ * How far the 40px box hangs past the 28px trigger slot on each pinned edge —
+ * the `-bottom-1.5 -left-1.5` the box carried while it was an absolutely
+ * positioned child of the slot, now applied to the portaled box's fixed
+ * coordinates so it lands in exactly the same place.
+ */
+const MORPH_SLOT_OFFSET = 6;
 
 /**
  * The count bubble both triggers overlay. Stays mounted so the
@@ -98,13 +109,27 @@ export function TrayBadge({
 }
 
 /**
- * The sidebar-footer tray morph (Inbox, Downloads): a 28px icon button whose
- * trigger IS the panel — the closed circle grows into the tray box
- * (`.t-morph` / `.t-morph-plus` / `.t-morph-menu`) instead of spawning a
- * popover beside itself, exactly like the "+" CreateMenu in the same footer.
- * The panel is always mounted (inert when closed) so its height can be measured
- * while hidden; the box grows to the measured height, so a short list hugs its
- * rows and a long one caps at the scroller's max.
+ * The sidebar-footer tray morph (Inbox, Downloads): a 28px icon button that
+ * grows into the tray box (`.t-morph` / `.t-morph-menu`) instead of spawning a
+ * popover beside itself, like the "+" CreateMenu in the same footer. The panel
+ * is always mounted (inert when closed) so its height can be measured while
+ * hidden; the box grows to the measured height, so a short list hugs its rows
+ * and a long one caps at the scroller's max.
+ *
+ * The box is PORTALED out and positioned `fixed` over the trigger's slot,
+ * because the tray is 23rem — wider than the sidebar it lives in — and two of
+ * the sidebar's hosts clip it flat at that width: Layout's hover-peek panel
+ * (`overflow-hidden` + a transform) and, once a background is customized,
+ * `html[data-ryu-bg-active] [data-slot="sidebar-inner"]` (`overflow: clip`).
+ * `position: fixed` alone is not enough — the hover-peek panel also carries a
+ * transform, which makes it the containing block for fixed descendants, so the
+ * box has to leave the subtree entirely. (The docked sidebar clips nothing,
+ * which is why this only ever looked broken on some setups.)
+ *
+ * The BUTTON stays in the sidebar DOM (it keeps its tab order, its tooltip, and
+ * NavUser's context-menu wrapper for "Hide downloads"); only the box travels.
+ * It fades out on open the way `.t-morph-plus` used to, so the panel — which
+ * now sits over it rather than around it — hands off cleanly.
  */
 export function TrayMorph({
 	badge,
@@ -124,18 +149,28 @@ export function TrayMorph({
 }) {
 	const panelId = useId();
 	const rootRef = useRef<HTMLDivElement | null>(null);
+	const boxRef = useRef<HTMLDivElement | null>(null);
 	const triggerRef = useRef<HTMLButtonElement | null>(null);
 	const panelRef = useRef<HTMLDivElement | null>(null);
 	const [openH, setOpenH] = useState(TRAY_MORPH_INITIAL_H);
+	const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(
+		null
+	);
+	const [portalTarget, setPortalTarget] = useState<Element | null>(null);
 
 	// Close on outside pointerdown or Escape — the morph has no backdrop, and
-	// there is no Base UI popover here that would own this for us.
+	// there is no Base UI popover here that would own this for us. The box is
+	// portaled, so "inside" is the trigger slot OR the box; testing the slot
+	// alone would read every click on a row as an outside click.
 	useEffect(() => {
 		if (!open) {
 			return;
 		}
 		const onPointerDown = (e: PointerEvent) => {
-			if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+			const target = e.target as Node;
+			const inside =
+				rootRef.current?.contains(target) || boxRef.current?.contains(target);
+			if (!inside) {
 				onOpenChange(false);
 			}
 		};
@@ -153,7 +188,11 @@ export function TrayMorph({
 	}, [onOpenChange, open]);
 
 	// Measure the panel one-way: the box's open height tracks the panel's
-	// content height, which nothing animates, so the observer settles.
+	// content height, which nothing animates, so the observer settles. Keyed on
+	// `portalTarget` because the panel does not exist until the portal has one —
+	// on an empty dep list this runs against a null ref on the first commit and
+	// never again, which silently pins every tray to the fallback height and
+	// guillotines any list taller than it.
 	useEffect(() => {
 		const el = panelRef.current;
 		if (!el || typeof ResizeObserver === "undefined") {
@@ -164,7 +203,45 @@ export function TrayMorph({
 		const observer = new ResizeObserver(measure);
 		observer.observe(el);
 		return () => observer.disconnect();
-	}, []);
+	}, [portalTarget]);
+
+	// Track where the portaled box sits: bottom-left pinned to the trigger's
+	// slot, offset by the 6px the box used to hang past it (`-bottom-1.5
+	// -left-1.5`). Measured on mount, on every open, and on window resize —
+	// enough for a control that only moves when the window or the sidebar's own
+	// layout changes, and cheaper than tracking it every frame. Layout effect, so
+	// the corrected anchor lands in the same commit as the open: the hover-peek
+	// sidebar mounts this while translated off-screen, so the anchor measured at
+	// mount is stale by the time the panel has slid in, and a passive effect would
+	// paint the first frames of the morph off the window's left edge.
+	useLayoutEffect(() => {
+		const el = rootRef.current;
+		if (!el) {
+			return;
+		}
+		const measure = () => {
+			const r = el.getBoundingClientRect();
+			setAnchor({
+				bottom: window.innerHeight - r.bottom - MORPH_SLOT_OFFSET,
+				left: r.left - MORPH_SLOT_OFFSET,
+			});
+		};
+		measure();
+		// On a phone the sidebar is a modal Sheet, which does NOT clip (nothing in
+		// that chain sets overflow) but does mark the rest of the body
+		// `aria-hidden` while it is open. Portaling to the body there would leave
+		// the tray visible and clickable but invisible to a screen reader, so the
+		// Sheet's own popup is the portal target when there is one.
+		setPortalTarget(el.closest('[data-slot="sheet-content"]') ?? document.body);
+		window.addEventListener("resize", measure);
+		// Capture: the sidebar's own scroller, not the window, is what moves the
+		// footer on the surfaces where the footer scrolls.
+		window.addEventListener("scroll", measure, true);
+		return () => {
+			window.removeEventListener("resize", measure);
+			window.removeEventListener("scroll", measure, true);
+		};
+	}, [open]);
 
 	// Keep the popover's focus behaviour: the panel takes focus when it opens,
 	// and returns it to the trigger when it closes.
@@ -185,62 +262,87 @@ export function TrayMorph({
 
 	return (
 		<div className="relative size-7 shrink-0" ref={rootRef}>
-			{/* The tray panel is 23rem — wider than the whole sidebar — so unlike the
-			    create menu it grows UP and to the RIGHT (bottom-left pinned), out over
-			    the content pane, instead of off the window's left edge. */}
-			<div className="absolute -bottom-1.5 -left-1.5 z-50">
-				{/* The lift rides the container, not the panel: `.t-morph` clips its
-				    children, so a shadow on the panel inside would never be painted. */}
-				<div
-					className="t-morph data-[open=true]:shadow-lg"
-					data-open={open}
-					style={morphVars}
-				>
-					{/* `.t-morph-plus` fills the 40px closed box (that is what carries
-					    the fade on open), so the BUTTON is the 28px child centred inside
-					    it. Hanging the click on the 40px box instead would push the hit
-					    area 6px past the slot and onto the neighbours. */}
-					<div className="t-morph-plus">
-						<Tooltip>
-							<TooltipTrigger
-								render={
-									<button
-										aria-controls={panelId}
-										aria-expanded={open}
-										aria-haspopup="true"
-										aria-label={label}
-										className={cn(
-											trayTriggerClass,
-											open && "bg-muted text-foreground"
-										)}
-										onClick={() => onOpenChange(!open)}
-										ref={triggerRef}
-										type="button"
-									>
-										<HugeiconsIcon icon={icon} size={15} />
-										{badge}
-									</button>
-								}
-							/>
-							<TooltipContent>{label}</TooltipContent>
-						</Tooltip>
-					</div>
-					{/* Pinned to the container's bottom-left at its open width, so the
-					    rows sit still while the box grows past them instead of travelling
-					    with its top-left corner. The height is content-sized and always
-					    mounted so the closed tray is measurable. */}
-					<div
-						className="t-morph-menu absolute bottom-0 left-0 flex flex-col rounded-[20px] border border-border/50 bg-popover/70 p-0 backdrop-blur-2xl backdrop-saturate-150"
-						id={panelId}
-						inert={!open}
-						ref={panelRef}
-						style={{ width: "var(--morph-open-w)" }}
-						tabIndex={-1}
-					>
-						{children}
-					</div>
-				</div>
+			{/* The trigger stays here; the box below is portaled over it. It fades
+			    and lifts on open (what `.t-morph-plus` did while it still wrapped the
+			    button) so the icon hands off to the panel instead of showing through
+			    the panel's translucent corner. */}
+			<div
+				className="transition-[opacity,transform] duration-200 ease-out data-[open=true]:pointer-events-none data-[open=true]:-translate-y-1 data-[open=true]:opacity-0"
+				data-open={open}
+			>
+				<Tooltip>
+					<TooltipTrigger
+						render={
+							<button
+								aria-controls={panelId}
+								aria-expanded={open}
+								aria-haspopup="true"
+								aria-label={label}
+								className={cn(
+									trayTriggerClass,
+									open && "bg-muted text-foreground"
+								)}
+								onClick={() => onOpenChange(!open)}
+								ref={triggerRef}
+								type="button"
+							>
+								<HugeiconsIcon icon={icon} size={15} />
+								{badge}
+							</button>
+						}
+					/>
+					<TooltipContent>{label}</TooltipContent>
+				</Tooltip>
 			</div>
+			{portalTarget &&
+				createPortal(
+					// Bottom-left pinned at the trigger's slot, so the box grows UP and to
+					// the RIGHT — over the content pane, not off the window's left edge —
+					// and the rows sit still while it grows past them. `pointer-events` is
+					// off while closed: the 40px closed box covers the trigger it no longer
+					// contains, and would otherwise swallow the click that opens it.
+					<div
+						className={cn(
+							"fixed z-[60]",
+							open ? "pointer-events-auto" : "pointer-events-none"
+						)}
+						// Marks "a panel the sidebar owns is open, outside the sidebar's own
+						// DOM". Layout's hover-peek sidebar reads it so moving the pointer
+						// onto this tray — which now counts as leaving the peek panel —
+						// doesn't slide the sidebar away underneath it.
+						data-sidebar-overlay={open ? "open" : undefined}
+						ref={boxRef}
+						style={{
+							bottom: anchor?.bottom ?? 0,
+							// Parked off-screen for the frame before the first measurement,
+							// so an unpositioned box never flashes in the corner.
+							left: anchor?.left ?? -9999,
+						}}
+					>
+						{/* The lift rides the container, not the panel: `.t-morph` clips its
+					    children, so a shadow on the panel inside would never be painted. */}
+						<div
+							className="t-morph data-[open=true]:shadow-lg"
+							data-open={open}
+							style={morphVars}
+						>
+							{/* Pinned to the container's bottom-left at its open width. The
+						    height is content-sized and always mounted so the closed tray is
+						    measurable. */}
+							<div
+								className="t-morph-menu absolute bottom-0 left-0 flex flex-col rounded-[20px] border border-border/50 bg-popover/70 p-0 backdrop-blur-2xl backdrop-saturate-150"
+								id={panelId}
+								inert={!open}
+								ref={panelRef}
+								style={{ width: "var(--morph-open-w)" }}
+								tabIndex={-1}
+							>
+								{children}
+							</div>
+						</div>
+					</div>,
+					portalTarget
+				)}
 		</div>
 	);
 }

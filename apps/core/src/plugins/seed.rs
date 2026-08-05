@@ -173,7 +173,13 @@ fn seed_overrides() -> [SeedSpec; 17] {
             // accept/dismiss + judge) via the `quests:crud` bridge capability (host-direct,
             // monitors pattern). Ships a prebuilt companion UI. Core-tier, so it must NOT
             // declare `sidecar:process` (the Gateway denies that grant at enable).
-            grants: &["quests:crud"],
+            //
+            // It ALSO holds `quests:capture` — the separate, narrower grant behind the
+            // `quests.capture` verb. Split from `quests:crud` because keeping text the
+            // user selected in ANOTHER app is a different reach than editing the board;
+            // `@ryu/approvals` holds `quests:crud` for the inbox's task check-off and
+            // deliberately does NOT hold this one.
+            grants: &["quests:crud", "quests:capture"],
             ui_code: Some(QUESTS_UI_HTML),
         },
         SeedSpec {
@@ -473,6 +479,62 @@ pub async fn seed_default_on(store: &PluginStore, manifests: &[PluginManifest]) 
     }
 
     seed_companion_ui(store, manifests).await;
+    backfill_declared_grants(store).await;
+}
+
+/// Union any newly-declared seed grant into an EXISTING record.
+///
+/// # The upgrade gap this closes
+///
+/// Seeding is one-time: a user who already enabled a built-in keeps the record they
+/// have, grants and all. That is the right rule for *user* state — but a grant the
+/// BUILD declares is not user state. When a release splits a verb out behind a new,
+/// narrower grant (`quests.capture` leaving `quests:crud`), every existing install
+/// would keep only the old grant and the new verb would be denied for them and only
+/// them: working on a fresh install, broken on an upgrade, which is the worst shape
+/// a permission bug can take.
+///
+/// Strictly additive, and deliberately so:
+///
+/// - it only ever ADDS grants the built-in's own `SeedSpec` declares (which the
+///   Gateway's reviewed allowlist already blesses), so it cannot widen anything the
+///   build did not already ship;
+/// - it never removes a grant, so a user's own additions survive;
+/// - it never touches the `enabled` bit, so it cannot resurrect a disabled app;
+/// - it skips DISABLED records entirely. `set_disabled` wipes `approved_grants` to
+///   `[]` — disabling is a consent revocation, not a pause — so re-granting a
+///   disabled app here would quietly undo that. Its grants come back when the user
+///   enables it again, from the seed spec, which is where they belong.
+///
+/// A record that does not exist is skipped — installing is the seed's job, not this.
+async fn backfill_declared_grants(store: &PluginStore) {
+    for spec in seed_overrides() {
+        if spec.grants.is_empty() {
+            continue;
+        }
+        let Ok(Some(record)) = store.get(spec.id).await else {
+            continue;
+        };
+        if !record.enabled {
+            continue;
+        }
+        let missing: Vec<String> = spec
+            .grants
+            .iter()
+            .filter(|g| !record.approved_grants.iter().any(|have| have == *g))
+            .map(|g| (*g).to_owned())
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        match store.add_approved_grants(spec.id, &missing).await {
+            Ok(_) => tracing::info!(
+                "grant backfill: added {missing:?} to '{}' (the build declares them; the                  record predates the declaration)",
+                spec.id
+            ),
+            Err(e) => tracing::warn!("grant backfill: '{}' failed: {e}", spec.id),
+        }
+    }
 }
 
 /// Every built-in companion that ships a compiled-in `ui_code` bundle, derived from
@@ -1911,6 +1973,85 @@ mod tests {
         assert!(engines.grants.is_empty());
     }
 
+    /// The upgrade path for a grant SPLIT: a record enabled before `quests:capture`
+    /// existed must gain it, without losing what it had or changing whether it is on.
+    #[tokio::test]
+    async fn backfill_adds_a_newly_declared_grant_to_an_existing_record() {
+        let store = PluginStore::open_in_memory().unwrap();
+        let id = crate::plugins::builtins::QUESTS_PLUGIN_ID;
+        store.insert(id, "1.0.0").await.unwrap();
+        store
+            .set_enabled(id, &["quests:crud".to_owned()])
+            .await
+            .unwrap();
+
+        super::backfill_declared_grants(&store).await;
+
+        let record = store.get(id).await.unwrap().unwrap();
+        assert!(record.approved_grants.iter().any(|g| g == "quests:crud"));
+        assert!(record.approved_grants.iter().any(|g| g == "quests:capture"));
+        assert!(record.enabled, "backfill must not change the enabled bit");
+    }
+
+    /// Additive only: a grant the user's record carries that the build does not
+    /// declare survives the backfill.
+    #[tokio::test]
+    async fn backfill_never_removes_a_grant() {
+        let store = PluginStore::open_in_memory().unwrap();
+        let id = crate::plugins::builtins::QUESTS_PLUGIN_ID;
+        store.insert(id, "1.0.0").await.unwrap();
+        store
+            .set_enabled(
+                id,
+                &["quests:crud".to_owned(), "something:extra".to_owned()],
+            )
+            .await
+            .unwrap();
+
+        super::backfill_declared_grants(&store).await;
+
+        let record = store.get(id).await.unwrap().unwrap();
+        assert!(record.approved_grants.iter().any(|g| g == "something:extra"));
+        assert!(record.approved_grants.iter().any(|g| g == "quests:capture"));
+    }
+
+    /// A DISABLED app is not re-granted. `set_disabled` wipes `approved_grants` —
+    /// disabling revokes consent — so a backfill that re-added them would silently
+    /// undo the user's decision.
+    #[tokio::test]
+    async fn backfill_leaves_a_disabled_app_revoked() {
+        let store = PluginStore::open_in_memory().unwrap();
+        let id = crate::plugins::builtins::QUESTS_PLUGIN_ID;
+        store.insert(id, "1.0.0").await.unwrap();
+        store
+            .set_enabled(id, &["quests:crud".to_owned()])
+            .await
+            .unwrap();
+        store.set_disabled(id).await.unwrap();
+
+        super::backfill_declared_grants(&store).await;
+
+        let record = store.get(id).await.unwrap().unwrap();
+        assert!(!record.enabled, "a disabled app must stay disabled");
+        assert!(
+            record.approved_grants.is_empty(),
+            "disabling revoked its grants; the backfill must not hand them back"
+        );
+    }
+
+    /// No record = nothing installed. Installing is the seed's job, not the
+    /// backfill's, so it must not conjure one.
+    #[tokio::test]
+    async fn backfill_does_not_create_a_record() {
+        let store = PluginStore::open_in_memory().unwrap();
+        super::backfill_declared_grants(&store).await;
+        assert!(store
+            .get(crate::plugins::builtins::QUESTS_PLUGIN_ID)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
     /// End-to-end over the real store: a fresh install seeds every default-on
     /// plugin enabled, and a second run never re-seeds (a user's disable sticks).
     #[tokio::test]
@@ -2242,10 +2383,22 @@ mod tests {
         assert!(ui.len() > 10_000 && ui.contains('<'));
         let record = store.get(id).await.unwrap().unwrap();
         assert!(record.enabled, "the fill must not disturb enabled state");
-        assert_eq!(
-            record.approved_grants,
-            vec!["quests:crud".to_owned()],
-            "the fill must not rewrite approved grants"
+        // The bundle fill itself rewrites NO grants. The pass as a whole is allowed
+        // to ADD one the build declares (`backfill_declared_grants`) — that is not
+        // user state — but the grant the record already had must survive verbatim,
+        // and nothing may be dropped.
+        assert!(
+            record.approved_grants.iter().any(|g| g == "quests:crud"),
+            "the fill must not drop a grant the record already had"
+        );
+        assert!(
+            record
+                .approved_grants
+                .iter()
+                .all(|g| seed_overrides()
+                    .iter()
+                    .any(|spec| spec.id == id && spec.grants.contains(&g.as_str()))),
+            "the pass must only ever add grants the build itself declares"
         );
         assert_eq!(
             record.version, "1.0.0",

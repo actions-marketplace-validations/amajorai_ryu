@@ -689,10 +689,14 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // Capture is split out of `quests.crud` on purpose: writing a todo is not the
+    // same reach as keeping text the user selected in ANOTHER app, which is what a
+    // capture carries. An app that only needs the board holds `quests:crud` and
+    // cannot capture.
     m(
         "quests.capture",
-        "quests.crud",
-        Some("quests:crud"),
+        "quests.capture",
+        Some("quests:capture"),
         false,
         true,
     ),

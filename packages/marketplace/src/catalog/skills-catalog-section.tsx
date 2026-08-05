@@ -69,7 +69,9 @@ import {
 	type CatalogHost,
 	type CatalogInstall,
 	type CatalogMarkdownProps,
+	type PluginSettingsOpener,
 	useCatalogHost,
+	useNoSettingsOpener,
 } from "./host.tsx";
 import { REALM_ICONS } from "./realm-icons.ts";
 import type {
@@ -187,6 +189,11 @@ export default function SkillsCatalogSection({
 	initialQuery?: string;
 } = {}) {
 	const host = useCatalogHost();
+	// One resolver for the section (a host implementation reads live node state to
+	// answer it), threaded to the cards. Null for a plain SKILL.md, which is most.
+	const usePluginSettingsOpener =
+		host.usePluginSettingsOpener ?? useNoSettingsOpener;
+	const settingsOpener = usePluginSettingsOpener();
 	const {
 		skills,
 		loading,
@@ -338,6 +345,7 @@ export default function SkillsCatalogSection({
 						onSelect={select}
 						selectedId={selectedId}
 						setSkillEnabled={setSkillEnabled}
+						settingsOpener={settingsOpener}
 						skills={skills}
 						togglingSkill={togglingSkill}
 					/>
@@ -602,6 +610,7 @@ function SkillList({
 	togglingSkill,
 	fetchNextPage,
 	hasNextPage,
+	settingsOpener,
 }: {
 	skills: SkillCard[];
 	loading: boolean;
@@ -615,6 +624,8 @@ function SkillList({
 	togglingSkill: string | null;
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
+	/** Resolves a card to the settings of the plugin that ships it, when one does. */
+	settingsOpener: PluginSettingsOpener;
 }) {
 	// The IntersectionObserver root is the layout's scroll column, not the viewport.
 	const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
@@ -664,6 +675,7 @@ function SkillList({
 									setSkillEnabled(s.id, true).catch(() => undefined);
 								}}
 								onInstall={() => cardInstall(s.id)}
+								onOpenSettings={settingsOpener(s.id)}
 								toggleBusy={togglingSkill === s.id}
 							/>
 						}
@@ -676,10 +688,14 @@ function SkillList({
 								/>
 							)
 						}
+						// The SKILL.md one-liner when the source could give us one
+						// without a per-card round trip (installed skills always can),
+						// else the provenance line every card showed before.
 						description={
-							s.installs > 0
+							s.description?.trim() ||
+							(s.installs > 0
 								? `${s.source} · ${formatCount(s.installs)} installs`
-								: s.source
+								: s.source)
 						}
 						icon={
 							<HugeiconsIcon className="size-5" icon={REALM_ICONS.skills} />
@@ -713,6 +729,7 @@ function SkillCardAction({
 	onInstall,
 	onEnable,
 	onDisable,
+	onOpenSettings,
 }: {
 	card: SkillCard;
 	enabled: boolean | undefined;
@@ -721,6 +738,9 @@ function SkillCardAction({
 	onInstall: () => void;
 	onEnable: () => void;
 	onDisable: () => void;
+	/** Set for a skill shipped by an installed plugin that declares settings; a
+	 *  plain SKILL.md has none and gets no Settings row. */
+	onOpenSettings?: (() => void) | null;
 }) {
 	return (
 		<StoreItemAction
@@ -730,6 +750,7 @@ function SkillCardAction({
 			onDisable={onDisable}
 			onEnable={onEnable}
 			onInstall={onInstall}
+			onOpenSettings={onOpenSettings ?? undefined}
 		/>
 	);
 }

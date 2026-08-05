@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Developer Tools",
   "description": "Author a user-owned Agent Skill (SKILL.md): front-matter fields (name / description / allowed tools / always-on), a markdown body editor, debounced autosave, and server-backed undoable version history.",
+  "tagline": "Write and version your own agent skills",
+  "keywords": ["skills", "authoring", "editor", "developer"],
   "icon": "sparkles",
   "iconDither": { "from": 308, "to": 342, "direction": "down" },
   "surfaces": {

@@ -10,6 +10,11 @@ import { type ApiTarget, buyerTokenHeader, request } from "./client.ts";
 
 /** A Skill row in the left-hand selector. */
 export interface SkillCard {
+	/** One-line "what this does". Core fills it for INSTALLED cards from the
+	 *  on-disk SKILL.md front matter and for the detail card; it is absent for a
+	 *  browse result, because skills.sh's search payload carries no description
+	 *  and fetching one per card would be a request per row. */
+	description?: string | null;
 	downloads?: number;
 	id: string;
 	installed: boolean;
@@ -56,6 +61,7 @@ export interface SkillDetail {
 }
 
 interface CardWire {
+	description?: string | null;
 	downloads?: number;
 	id: string;
 	installed?: boolean;
@@ -74,6 +80,11 @@ function toCard(w: CardWire): SkillCard {
 		installs: w.installs ?? 0,
 		downloads: w.downloads ?? w.installs ?? 0,
 		installed: w.installed ?? false,
+		// Core omits the key entirely when it has nothing (`skip_serializing_if`),
+		// so normalize the absent case to null rather than leaving it undefined —
+		// the card renderer treats both as "fall back to the provenance line", but
+		// a single shape keeps the type honest.
+		description: w.description ?? null,
 	};
 }
 

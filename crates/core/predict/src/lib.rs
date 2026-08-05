@@ -146,7 +146,7 @@ impl PredictConfig {
 /// control type (e.g. "edit", "password"); some apps expose "password" directly,
 /// and browsers surface secure inputs whose name/type carries these markers. We
 /// match loosely (substring, case-insensitive) and fail *closed* — if in doubt,
-/// refuse. This is the privacy floor the Gateway moat exists to enforce: never
+/// refuse. This is the privacy floor the Gateway exists to enforce: never
 /// exfiltrate a secret to a model just because the user was typing one.
 const SECURE_CONTROL_MARKERS: &[&str] = &[
     "password", "passwd", "secure", "pin", "otp", "cvv", "secret",

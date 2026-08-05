@@ -1,6 +1,10 @@
 import { decideUpdateEligibility } from "@ryu/auth/lib/plans";
 import { useEffect, useRef } from "react";
 import { sileo } from "sileo";
+import {
+	updateToastBody,
+	updateToastId,
+} from "@/src/components/updater/ReleaseNotes.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -9,6 +13,7 @@ import {
 	getAutoUpdateEnabled,
 	type UpdateCheck,
 } from "@/src/lib/api/update.ts";
+import { getAppVersion, verdictAppliesToApp } from "@/src/lib/app-version.ts";
 import {
 	getReleaseChannel,
 	type ReleaseChannel,
@@ -71,7 +76,17 @@ export function AutoUpdater() {
 			const verdict = await checkForUpdate(target, { clamp: true });
 			if (!verdict.update_available) {
 				// Already at the ceiling their window covers, but a newer Ryu exists.
-				notifyUpdatesWindowLapsed(verdict);
+				await notifyUpdatesWindowLapsed(verdict);
+				return;
+			}
+			// Core answered about ITSELF — `verdict.current` is the answering Core
+			// binary's version, and Core is a SEPARATE install from this app bundle
+			// (on macOS the desktop downloads `ryu-core` into `~/.ryu/bin`). A Core
+			// left behind at an older version therefore reported a perfectly true
+			// "0.0.14 → 0.1.3" that this app, already on 0.1.3, presented as
+			// "Update available — v0.1.3". Everything below drives THIS APP'S bundle,
+			// so the app's own version is what the release has to beat.
+			if (!(await verdictAppliesToApp(verdict))) {
 				return;
 			}
 
@@ -85,13 +100,17 @@ export function AutoUpdater() {
 			}
 
 			// Notify-only: persistent toast with an explicit install action.
-			const notes =
-				verdict.notes ?? "A new version of Ryu is ready to install.";
 			sileo.info({
 				title: `Update available — v${verdict.latest}`,
-				description: verdict.cutoff_waived_for_security
-					? `${notes} This is a security update, included regardless of your updates window.`
-					: notes,
+				description: updateToastBody({
+					notes: verdict.notes,
+					htmlUrl: verdict.html_url,
+					fallback: "A new version of Ryu is ready to install.",
+					footnote: verdict.cutoff_waived_for_security
+						? "This is a security update, included regardless of your updates window."
+						: undefined,
+				}),
+				id: updateToastId(verdict.latest),
 				duration: null,
 				button: {
 					title: "Update now",
@@ -120,7 +139,9 @@ export function AutoUpdater() {
  * budget the moment the launch check already spent it. See
  * {@link notifyUpdateOutsideWindow}.
  */
-export function notifyUpdatesWindowLapsed(verdict: UpdateCheck): void {
+export async function notifyUpdatesWindowLapsed(
+	verdict: UpdateCheck
+): Promise<void> {
 	if (!verdict.restricted_by_cutoff) {
 		return;
 	}
@@ -139,9 +160,13 @@ export function notifyUpdatesWindowLapsed(verdict: UpdateCheck): void {
 	// UNCLAMPED verdict never had a ceiling computed at all — there `latest` is
 	// the absolute newest release, which is the opposite of what this sentence
 	// would be asserting.
+	// The build named here is the one the user sees in the About/Updates row — the
+	// APP's, from Tauri. `verdict.current` is the answering Core's, and the two are
+	// separate installs that routinely differ.
+	const current = (await getAppVersion()) ?? verdict.current;
 	const ceiling =
 		verdict.restricted_by_cutoff && !verdict.cutoff_unresolved
-			? ` You're on v${verdict.current}, and Ryu stays on the newest build they cover.`
+			? ` You're on v${current}, and Ryu stays on the newest build they cover.`
 			: "";
 
 	sileo.info({

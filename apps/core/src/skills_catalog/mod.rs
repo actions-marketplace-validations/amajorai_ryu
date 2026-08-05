@@ -60,6 +60,17 @@ pub struct SkillCard {
     pub slug: String,
     /// Human-friendly name (frontmatter name on detail; slug-derived in lists).
     pub name: String,
+    /// One-line "what this does", when the source can supply it without a
+    /// per-card round trip.
+    ///
+    /// Populated for INSTALLED cards (read straight out of the on-disk SKILL.md
+    /// front matter, which is already being parsed here for `name`) and for the
+    /// detail card. `None` for a browse result, because `skills.sh`'s
+    /// `/api/search` returns only `id`/`name`/`installs`/`source` — filling it
+    /// there would mean one extra HTTP request per card. Clients fall back to the
+    /// source + install count, which is what they showed for every card before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Lifetime install count from the directory.
     pub installs: u64,
     /// Download count when exposed by the upstream catalog. skills.sh currently
@@ -135,6 +146,11 @@ struct SearchItem {
     installs: u64,
     #[serde(default)]
     source: String,
+    /// Not returned by skills.sh `/api/search` today — accepted so a source that
+    /// does supply it (or a future skills.sh) flows straight through to the card
+    /// without a Core change.
+    #[serde(default)]
+    description: Option<String>,
 }
 
 /// Derive the slug (last segment) from a full `owner/repo/slug` id.
@@ -158,6 +174,10 @@ fn to_card(item: SearchItem, installed_slugs: &std::collections::HashSet<String>
         downloads: item.installs,
         slug,
         id: item.id,
+        // `#[serde(default)]` on SearchItem, so this is `None` against today's
+        // skills.sh (its search payload carries no description) and starts
+        // populating browse cards for free the day any source adds the field.
+        description: item.description.filter(|d| !d.trim().is_empty()),
     }
 }
 
@@ -208,6 +228,10 @@ fn installed_cards() -> Vec<SkillCard> {
         let contents = std::fs::read_to_string(&found.skill_md).unwrap_or_default();
         let (fm, _) = split_front_matter(&contents);
         let name = front_matter_field(&fm, "name").unwrap_or_else(|| slug.clone());
+        // The front matter is already open and already being read for `name`, so
+        // the one-line description is free here — and it is the only place a
+        // description exists without a network round trip.
+        let description = front_matter_field(&fm, "description");
         // Provenance gives the full id (clickable detail); else fall back to the
         // bare slug so user-authored local skills still appear.
         let id = provenance
@@ -223,6 +247,7 @@ fn installed_cards() -> Vec<SkillCard> {
             installs: 0,
             downloads: 0,
             installed: true,
+            description,
         });
     }
     cards.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -853,6 +878,7 @@ pub async fn skill_detail(client: &reqwest::Client, id: &str) -> Result<SkillDet
         downloads: installs,
         name,
         slug: slug.clone(),
+        description: description.clone(),
     };
 
     Ok(SkillDetail {

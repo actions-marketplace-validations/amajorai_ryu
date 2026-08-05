@@ -28,6 +28,7 @@ import {
 	Download01Icon,
 	GridIcon,
 	Link01Icon,
+	Settings01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -65,6 +66,7 @@ import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
+import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginStoreTab } from "@/src/lib/api/plugins.ts";
 
@@ -95,6 +97,10 @@ function AppOffState({
 }) {
 	const { install, toggle } = useApps();
 	const [busy, setBusy] = useState(false);
+	// An installed-but-disabled app can be configured before it is turned on — that
+	// is often the point (paste the key, then enable). Absent for an app that isn't
+	// installed yet: there is nothing on this node to configure.
+	const openSettings = usePluginSettingsOpener()(tab.plugin);
 
 	const handleEnable = async () => {
 		setBusy(true);
@@ -126,10 +132,18 @@ function AppOffState({
 						"This catalog is provided by an app that isn't running yet."}
 				</EmptyDescription>
 			</EmptyHeader>
-			<InstallProgressButton installing={busy} onClick={handleEnable}>
-				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-				{tab.app_installed ? "Enable" : "Install"}
-			</InstallProgressButton>
+			<div className="flex items-center gap-2">
+				<InstallProgressButton installing={busy} onClick={handleEnable}>
+					<HugeiconsIcon className="size-4" icon={Download01Icon} />
+					{tab.app_installed ? "Enable" : "Install"}
+				</InstallProgressButton>
+				{openSettings ? (
+					<Button onClick={openSettings} size="sm" variant="outline">
+						<HugeiconsIcon className="size-4" icon={Settings01Icon} />
+						Settings
+					</Button>
+				) : null}
+			</div>
 		</Empty>
 	);
 }

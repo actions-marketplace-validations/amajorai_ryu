@@ -212,6 +212,93 @@ describe("source-fetched items", () => {
 			])
 		).toHaveLength(1);
 	});
+
+	// One endpoint, several sections: `/api/runs` takes no query parameters, so a
+	// status slice has to happen client-side or Working and Done show the same rows.
+	const runs = {
+		runs: [
+			{ id: "r-1", title: "A", run_status: "running", folder_path: "/w/alpha" },
+			{
+				id: "r-2",
+				title: "B",
+				run_status: "completed",
+				folder_path: "/w/beta",
+			},
+			{ id: "r-3", title: "C", run_status: "failed", folder_path: "/w/beta/" },
+			{ id: "r-4", title: "D" },
+		],
+	};
+
+	it("filters rows by equals / in / notIn, ANDing every predicate", () => {
+		const slice = (filter: ViewSource["filter"]) =>
+			sourceItemsFromResponse(
+				{ http: { path: "/api/runs" }, items: "runs", filter },
+				runs
+			).map((entry) => entry.item.id);
+
+		expect(slice([{ key: "run_status", equals: "running" }])).toEqual(["r-1"]);
+		expect(slice([{ key: "run_status", in: ["completed", "failed"] }])).toEqual(
+			["r-2", "r-3"]
+		);
+		expect(slice([{ key: "run_status", notIn: ["running"] }])).toEqual([
+			"r-2",
+			"r-3",
+		]);
+		expect(
+			slice([
+				{ key: "run_status", notIn: ["running"] },
+				{ key: "folder_path", equals: "/w/beta" },
+			])
+		).toEqual(["r-2"]);
+		// A key the row lacks never matches — r-4 has no run_status.
+		expect(slice([{ key: "run_status" }])).toEqual(["r-1", "r-2", "r-3"]);
+	});
+
+	it("caps rows at `limit`, counting only rows that survived the filter", () => {
+		expect(
+			sourceItemsFromResponse(
+				{
+					http: { path: "/api/runs" },
+					items: "runs",
+					filter: [{ key: "run_status", notIn: ["running"] }],
+					limit: 1,
+				},
+				runs
+			).map((entry) => entry.item.id)
+		).toEqual(["r-2"]);
+	});
+
+	it("transforms a subtitle to its basename and falls back for a missing title", () => {
+		const items = sourceItemsFromResponse(
+			{
+				http: { path: "/api/runs" },
+				items: "runs",
+				map: {
+					subtitle: "folder_path",
+					subtitleTransform: "basename",
+					titleFallback: "Untitled run",
+				},
+			},
+			{
+				runs: [
+					{ id: "r-1", title: "A", folder_path: "/w/alpha" },
+					// A trailing separator must not yield an empty second line.
+					{ id: "r-2", title: "B", folder_path: "C:\\work\\beta\\" },
+					// A run Core has not titled yet stays listed, under the fallback.
+					{ id: "r-3", folder_path: "/w/gamma" },
+					// No folder at all = no second line (the row stays single-line).
+					{ id: "r-4", title: "D" },
+				],
+			}
+		);
+		expect(items.map((entry) => entry.item.subtitle)).toEqual([
+			"alpha",
+			"beta",
+			"gamma",
+			undefined,
+		]);
+		expect(items[2]?.item.title).toBe("Untitled run");
+	});
 });
 
 // ── Store-tab catalog primitives (contributes.store_tabs) ────────────────────

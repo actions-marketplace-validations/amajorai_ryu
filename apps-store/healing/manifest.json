@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Developer Tools",
   "description": "Self-healing: failed runs are diagnosed by a Gateway side-model and proposed fixes are delivered to the approvals inbox for human review before they apply.",
+  "tagline": "Failed runs diagnose and fix themselves — with your approval",
+  "keywords": ["healing", "reliability", "automation", "approvals"],
   "icon": "health",
   "iconDither": {
     "from": 270,

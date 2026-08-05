@@ -50,7 +50,6 @@ import {
 	isCoreApiPath,
 	renderActionHttp,
 	renderTemplate,
-	type SourceItem,
 	sourceItemsFromResponse,
 	type ViewActionHttp,
 } from "@ryu/app-host/views";
@@ -118,7 +117,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
 	type DragEvent as ReactDragEvent,
@@ -159,6 +158,7 @@ import {
 	useTabsContext,
 } from "@/src/contexts/TabsContext.tsx";
 import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
+import { parseContributedTarget } from "@/src/contributions/contributed-target.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
@@ -4592,10 +4592,22 @@ function AppsSection({
  * Core `/api/` path the shell fetches through the authenticated node seam, mapped via
  * {@link sourceItemsFromResponse} — so nothing is hardcoded per app. Clicking a row
  * opens `spec.itemTarget` (a `{{item.<key>}}` route template) via `openTab`. Returns
- * null when empty, mirroring {@link AppsSection}, so a disabled/empty app never leaves
- * a phantom header. (Per-row actions + create-and-open land with the Canvas migration.)
+ * null when empty *unless* the spec declares an `emptyState`, mirroring
+ * {@link AppsSection}, so a disabled/empty app never leaves a phantom header while a
+ * section whose emptiness is meaningful ("nothing is running") can still say so.
+ *
+ * The fetch is a react-query read keyed by (node, path, method): several sections
+ * sourcing the SAME endpoint — the common case once one app slices one feed with
+ * `source.filter` — share a single request and a single `source.refreshMs` poll,
+ * which a per-section `fetch` loop could not. The poll is suspended while the
+ * section is collapsed; a create/delete invalidates the key rather than re-fetching
+ * one section's copy of shared data.
+ *
+ * Exported so the e2e harness can mount it in isolation (see
+ * `e2e/harness/contributed-section-story.tsx`) — the two-line row is a visual
+ * contract a type-check cannot verify.
  */
-function DynamicSidebarSection({
+export function DynamicSidebarSection({
 	contribution,
 	collapsed,
 	dnd,
@@ -4606,36 +4618,58 @@ function DynamicSidebarSection({
 }: SectionProps & { contribution: PluginSidebarSection }) {
 	const { openTab } = useTabsContext();
 	const node = useActiveNode();
-	const [rows, setRows] = useState<SourceItem[]>([]);
+	const queryClient = useQueryClient();
 	const spec = contribution.spec;
 	const source = spec?.source;
 	const sourcePath = source?.http.path;
 	const sourceMethod = source?.http.method ?? "GET";
+	const fetchable = Boolean(source && sourcePath && isCoreApiPath(sourcePath));
+	const target = toTarget(node);
+	// Shared across every section reading the same endpoint on the same node. The
+	// PAYLOAD is cached, not the mapped rows, because two sections map/filter the
+	// same payload differently.
+	const queryKey = useMemo(
+		() => [
+			"contributed-section-source",
+			target.url,
+			target.token,
+			sourcePath ?? "",
+			sourceMethod,
+		],
+		[target.url, target.token, sourcePath, sourceMethod]
+	);
 
-	// Re-fetch the section's live rows through the authenticated node seam. Reused by
-	// the initial load and after a create/delete so the list reflects the new state.
-	const reload = useCallback(async () => {
-		if (!(source && sourcePath && isCoreApiPath(sourcePath))) {
-			setRows([]);
-			return;
-		}
-		try {
-			const target = toTarget(node);
-			const resp = await fetch(apiUrl(target, sourcePath), {
+	const { data: payload } = useQuery({
+		queryKey,
+		enabled: fetchable,
+		// A dead node or a route gated behind a disabled app answers non-2xx; that
+		// is an empty section, not an error state to retry into.
+		retry: false,
+		queryFn: async () => {
+			const resp = await fetch(apiUrl(target, sourcePath as string), {
 				method: sourceMethod,
 				headers: makeHeaders(target.token),
 			});
-			setRows(
-				resp.ok ? sourceItemsFromResponse(source, await resp.json()) : []
-			);
-		} catch {
-			setRows([]);
-		}
-	}, [node, source, sourcePath, sourceMethod]);
+			return resp.ok ? ((await resp.json()) as unknown) : null;
+		},
+		// Live sections declare their own cadence; the floor keeps a typo like
+		// `refreshMs: 10` from turning the sidebar into a request loop. Collapsed =
+		// nothing visible to keep fresh, so the poll stops.
+		refetchInterval:
+			source?.refreshMs && !collapsed
+				? Math.max(source.refreshMs, 1000)
+				: false,
+	});
 
-	useEffect(() => {
-		void reload();
-	}, [reload]);
+	const rows = useMemo(
+		() => (source && payload ? sourceItemsFromResponse(source, payload) : []),
+		[source, payload]
+	);
+
+	const reload = useCallback(
+		() => queryClient.invalidateQueries({ queryKey }),
+		[queryClient, queryKey]
+	);
 
 	const openTarget = (
 		item: Record<string, unknown>,
@@ -4643,7 +4677,13 @@ function DynamicSidebarSection({
 		forceNew = false
 	) => {
 		if (spec?.itemTarget) {
-			openTab(renderTemplate(spec.itemTarget, { item }, { uriEncode: true }), {
+			// A contributed target may carry allowlisted query parameters that belong
+			// in openTab's OPTIONS (a conversation id has no route of its own).
+			const { path, options } = parseContributedTarget(
+				renderTemplate(spec.itemTarget, { item }, { uriEncode: true })
+			);
+			openTab(path, {
+				...options,
 				title,
 				forceNew,
 				icon: asGlyphValue(item.icon),
@@ -4712,9 +4752,11 @@ function DynamicSidebarSection({
 		}
 	};
 
-	// A section with nothing to list AND no way to create renders nothing (mirrors
-	// AppsSection) — no phantom header for a disabled/empty app.
-	if (rows.length === 0 && !spec?.create) {
+	// A section with nothing to list, no way to create AND nothing to say when empty
+	// renders nothing (mirrors AppsSection) — no phantom header for a disabled/empty
+	// app. An `emptyState` is the opt-in that keeps the header, for a section whose
+	// emptiness is itself the answer.
+	if (rows.length === 0 && !(spec?.create || spec?.emptyState)) {
 		return null;
 	}
 
@@ -4741,8 +4783,30 @@ function DynamicSidebarSection({
 			sort={sort}
 		>
 			<SidebarMenu className="gap-0.5">
+				{rows.length === 0 && spec?.emptyState ? (
+					<div className="px-2 py-2">
+						<p className="text-muted-foreground text-xs">
+							{/* `null` is the queryFn's marker for a non-2xx answer (a route
+							    gated behind a disabled app, a node that is down) — reporting
+							    that as "nothing here" states something the shell never
+							    learned. `undefined` is merely the in-flight first load. */}
+							{payload === null && spec.emptyState.unavailable
+								? spec.emptyState.unavailable
+								: spec.emptyState.title}
+						</p>
+						{spec.emptyState.description && payload !== null ? (
+							<p className="mt-0.5 text-muted-foreground/70 text-xs">
+								{spec.emptyState.description}
+							</p>
+						) : null}
+					</div>
+				) : null}
 				{rows.map((row) => {
 					const title = row.item.title;
+					// A row with supporting text (its project, say) is a TALLER two-line
+					// row; one without keeps the single-line height, so a section that
+					// mixes both still scans as one list.
+					const subtitle = row.item.subtitle;
 					const open = (forceNew = false) =>
 						openTarget(row.raw, title, forceNew);
 					return (
@@ -4751,7 +4815,9 @@ function DynamicSidebarSection({
 								<ContextMenuTrigger>
 									{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
 									<div
-										className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+										className={`group/row flex cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted ${
+											subtitle ? "h-11" : "h-8"
+										}`}
 										onAuxClick={(e) => {
 											if (e.button === 1) {
 												e.preventDefault();
@@ -4822,8 +4888,15 @@ function DynamicSidebarSection({
 												</SidebarPreviewTitle>
 											}
 										>
-											<span className="min-w-0 flex-1 truncate text-sm">
-												{title}
+											<span className="flex min-w-0 flex-1 flex-col justify-center overflow-hidden">
+												<span className="truncate text-sm leading-tight">
+													{title}
+												</span>
+												{subtitle ? (
+													<span className="truncate text-muted-foreground text-xs leading-tight">
+														{subtitle}
+													</span>
+												) : null}
 											</span>
 										</SidebarItemPreview>
 									</div>

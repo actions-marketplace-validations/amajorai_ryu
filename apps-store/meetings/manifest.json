@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Communication",
   "description": "Meeting notes: record → live transcript → AI notes, auto-saved into the Meetings Space so they stay editable and RAG-searchable.",
+  "tagline": "Record, transcribe, and write up your meetings",
+  "keywords": ["meetings", "transcription", "notes", "recording"],
   "icon": "mic-01",
   "iconDither": { "from": 318, "to": 352, "direction": "down" },
   "surfaces": {

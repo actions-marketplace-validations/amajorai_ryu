@@ -742,9 +742,18 @@ export function modelHaystack(card: ModelCard): string {
 		.toLowerCase();
 }
 
-/** Lowercased haystack for a skill card: name, source/org, slug, id. */
+/** Lowercased haystack for a skill card: name, source/org, slug, id, and the
+ *  one-line description when the card carries one (installed skills do), so
+ *  searching for what a skill DOES finds it, not only what it is called. */
 export function skillHaystack(card: SkillCard): string {
-	return [card.name, titleCase(card.name), card.source, card.slug, card.id]
+	return [
+		card.name,
+		titleCase(card.name),
+		card.source,
+		card.slug,
+		card.id,
+		card.description ?? "",
+	]
 		.join(" ")
 		.toLowerCase();
 }

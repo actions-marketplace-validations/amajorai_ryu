@@ -560,7 +560,7 @@ function MotionNavigationMenuContent({
 	return (
 		<AnimatePresence custom={context.direction} initial={false}>
 			{isOpen && (
-				<div className="absolute top-full left-0 z-50 mt-1.5 overflow-hidden rounded-2xl border border-border/60 bg-muted/60 shadow-lg backdrop-blur-xl">
+				<div className="absolute top-full left-0 z-50 mt-1.5 overflow-hidden rounded-2xl border border-border/50 bg-muted/90 shadow-lg backdrop-blur-2xl backdrop-saturate-150">
 					<motion.div
 						animate="active"
 						className={cn("p-2 pr-2.5 text-popover-foreground", className)}
@@ -692,7 +692,12 @@ function MotionNavigationMenuViewport({
 			>
 				<div
 					className={cn(
-						"rounded-2xl border border-border/60 bg-muted/60 text-popover-foreground shadow-lg backdrop-blur-xl",
+						// Same overlay-surface tokens as dropdown-menu / select / popover.
+						// `bg-muted/90` (not /60) is load-bearing: `backdrop-filter` is a
+						// no-op in some engines/GPU configs, and at 60% the panel then
+						// reads as transparent with page content showing through sharply.
+						// At 90% the surface stands on its own and the blur is enhancement.
+						"rounded-2xl border border-border/50 bg-muted/90 text-popover-foreground shadow-lg backdrop-blur-2xl backdrop-saturate-150",
 						className
 					)}
 					data-slot="navigation-menu-viewport"

@@ -3,8 +3,9 @@
 //
 // `@ryu/ui` stays agnostic of where the model lives: the host app (desktop)
 // registers the Gateway's OpenAI-compatible base URL + the chosen model. Every
-// editor model call then routes through Ryu's Gateway (the moat: routing /
-// firewall / budgets / audit), honoring "nothing hardcoded". When unconfigured,
+// editor model call then routes through Ryu's Gateway (the governance layer:
+// routing / firewall / budgets / audit), honoring "nothing hardcoded". When
+// unconfigured,
 // the editor falls back to its built-in mock stream so it still works offline.
 
 export interface EditorAiConfig {

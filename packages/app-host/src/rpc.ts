@@ -191,6 +191,10 @@ export type Capability =
 	// including the `quests.openDetectionSettings` shell-navigation verb that opens the
 	// Settings dialog at the Quests (detection) tab.
 	| "quests.crud"
+	// Keeping a selection from another app (grant `quests:capture`). Split from
+	// `quests.crud` because it is a wider reach than editing the board: an app
+	// that only renders quests holds `quests:crud` and cannot capture.
+	| "quests.capture"
 	// Activity feed (grant `activity:read`) — the `@ryu/activity` app renders Core's
 	// read-only unified feed (`GET /api/activity`) from its sandboxed companion frame.
 	// Host-direct (the monitors pattern): the host holds the node token and calls the
@@ -1364,6 +1368,9 @@ const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 	"ghost.record",
 	"webhooks.crud",
 	"quests.crud",
+	// Capture is a SEPARATE capability from board CRUD: it carries text the user
+	// selected in another app, which is a wider reach than editing a todo.
+	"quests.capture",
 	"activity.read",
 	"mail.crud",
 	"calendar.crud",

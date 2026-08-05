@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Core",
   "description": "Agent catalog and management: browse, install, create, edit, and delete agents that back Ryu chat sessions.",
+  "tagline": "Browse, create, and edit your agents",
+  "keywords": ["agents", "catalog", "management"],
   "engines": {
     "ryu": ">=0.0.1"
   },

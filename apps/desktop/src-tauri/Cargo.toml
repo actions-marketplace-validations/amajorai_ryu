@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.77.2"
 
@@ -66,3 +66,9 @@ nix = { version = "0.29", features = ["signal"] }
 # Pinned to 0.25 to share the same build decorum already links.
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"
+# Quick Capture's double-Shift event tap + the AX/pasteboard readers. Pinned to
+# the versions `cocoa 0.25` already links: two copies of the same framework types
+# in one binary produce mismatch errors that read like a bug in our own code.
+core-graphics = "0.23"
+core-foundation = "0.9"
+objc = "0.2"

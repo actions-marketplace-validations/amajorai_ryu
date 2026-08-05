@@ -36,8 +36,12 @@ import { Switch } from "@ryu/ui/components/switch";
 import { useEffect, useState } from "react";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
+import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
-import type { RouteStrategy } from "@/src/lib/api/gateway.ts";
+import {
+	type RouteStrategy,
+	routeStrategyCopy,
+} from "@/src/lib/api/gateway.ts";
 import {
 	type AgentAutoRoutingConfig,
 	DEFAULT_AGENT_AUTO_ROUTING,
@@ -53,23 +57,16 @@ interface AutoRuleRow {
 	id: string;
 }
 
-const STRATEGY_LABELS: Record<RouteStrategy, string> = {
-	llm: "LLM classifier",
-	embedding: "Embedding",
-	keyword: "Keyword",
-};
-
-const STRATEGY_DESCRIPTIONS: Record<RouteStrategy, string> = {
-	llm: "a cheap model reads the message and picks a rule",
-	embedding: "cosine-match rule text against the message",
-	keyword: "case-insensitive word match, zero cost",
-};
-
 export function AgentAutoRoutingEditor() {
 	const open = useAgentAutoDialog((s) => s.open);
 	const setOpen = useAgentAutoDialog((s) => s.setOpen);
 	const getNode = useActiveNodeGetter();
 	const { agents } = useAgents();
+	// The app-wide "Friendly names" toggle picks which of the two vocabularies this
+	// picker speaks. Read per-surface rather than threaded through props: all three
+	// places that render this control now share one copy table, so each just asks.
+	const [friendly] = useFriendlyMode();
+	const strategyCopy = routeStrategyCopy(friendly);
 
 	const [draft, setDraft] = useState<AgentAutoRoutingConfig>(
 		DEFAULT_AGENT_AUTO_ROUTING
@@ -203,9 +200,11 @@ export function AgentAutoRoutingEditor() {
 						</div>
 
 						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="auto-strategy">Strategy</Label>
+							<Label htmlFor="auto-strategy">
+								{friendly ? "How to choose a rule" : "Strategy"}
+							</Label>
 							<Select
-								items={STRATEGY_LABELS}
+								items={strategyCopy.labels}
 								onValueChange={(v) =>
 									v && patch({ strategy: v as RouteStrategy })
 								}
@@ -216,12 +215,15 @@ export function AgentAutoRoutingEditor() {
 								</SelectTrigger>
 								<SelectContent>
 									{(
-										Object.entries(STRATEGY_LABELS) as [RouteStrategy, string][]
+										Object.entries(strategyCopy.labels) as [
+											RouteStrategy,
+											string,
+										][]
 									).map(([val, label]) => (
 										<SelectItem key={val} value={val}>
 											<span className="font-medium">{label}</span>
 											<span className="ml-1 text-muted-foreground text-xs">
-												— {STRATEGY_DESCRIPTIONS[val]}
+												— {strategyCopy.descriptions[val]}
 											</span>
 										</SelectItem>
 									))}

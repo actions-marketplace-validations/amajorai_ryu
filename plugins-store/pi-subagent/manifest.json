@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "category": "Automation",
   "description": "Adds the Task tool to the managed Pi agent, so it can delegate a bounded, context-isolated job to a child agent.",
+  "tagline": "Let the agent delegate work to child agents",
+  "keywords": ["subagent", "delegation", "automation", "agent"],
   "icon": "user-multiple-02",
   "iconDither": { "from": 12, "to": 46, "direction": "down" },
   "surfaces": {

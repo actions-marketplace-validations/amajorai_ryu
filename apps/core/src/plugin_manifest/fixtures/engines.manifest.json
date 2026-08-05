@@ -2,6 +2,9 @@
   "id": "@ryu/engines",
   "name": "Local Engines",
   "version": "1.0.0",
+  "description": "The local inference engines that run models on your own machine: llama.cpp for chat and completion, and its embedding counterpart that backs RAG. Provides the `engines` capability, so a different runtime can be bound in its place.",
+  "tagline": "Run models on your own machine",
+  "keywords": ["engines", "llamacpp", "local", "inference", "embeddings"],
   "category": "Core",
   "engines": {
     "ryu": ">=0.0.1"

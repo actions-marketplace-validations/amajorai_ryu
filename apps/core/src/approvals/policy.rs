@@ -15,7 +15,7 @@
 //!         irreversible tools (send/delete/pay/deploy) get HITL on a default
 //!         install. `off` must be an explicit operator choice.
 //!
-//! A "Layer C — Gateway consult" (org-policy moat) has been designed but is NOT
+//! A "Layer C — Gateway consult" (org-policy layer) has been designed but is NOT
 //! implemented; nothing in this module calls the Gateway. Do not describe it as
 //! an active control until it exists.
 //!

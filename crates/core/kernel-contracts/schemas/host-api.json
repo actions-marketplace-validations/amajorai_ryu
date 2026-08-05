@@ -659,8 +659,8 @@
       "tsHost": true
     },
     {
-      "capability": "quests.crud",
-      "grant": "quests:crud",
+      "capability": "quests.capture",
+      "grant": "quests:capture",
       "method": "quests.capture",
       "streaming": false,
       "tsHost": true

@@ -272,10 +272,10 @@ export const products: Product[] = [
 		navLabel: "Gateway",
 		category: "Platform",
 		tagline:
-			"The moat: firewall, model routing, budgets, evals, and audit on every call.",
+			"Governance on every call: firewall, model routing, budgets, evals, and audit.",
 		Icon: Shield,
 		hero: {
-			eyebrow: "Ryu Gateway · the moat",
+			eyebrow: "Ryu Gateway · the control plane",
 			title: "A firewall in front of any agent.",
 			subtitle:
 				"One base-URL swap puts routing, PII and DLP, prompt-injection defense, budgets, evals, and audit in front of agents you already run. This is how you make agents reliable in production.",

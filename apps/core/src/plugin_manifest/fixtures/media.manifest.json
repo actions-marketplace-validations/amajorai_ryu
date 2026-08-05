@@ -5,6 +5,8 @@
   "category": "Core",
   "mandatory": true,
   "description": "Generative-media producers: image generation (sd.cpp / cloud), video generation, and GIF search. Governance shell over the in-crate media module. The shared no-cloud blob store (/api/media/:file serve, /api/media/upload) stays kernel storage — it also serves TTS audio + chat uploads.",
+  "tagline": "Generate images, video, and GIFs",
+  "keywords": ["media", "images", "video", "generation"],
   "engines": {
     "ryu": ">=0.0.1"
   },

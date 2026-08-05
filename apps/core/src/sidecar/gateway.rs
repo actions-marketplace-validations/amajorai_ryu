@@ -1939,7 +1939,7 @@ pub enum IdentityGrantOutcome {
 ///
 /// Fail-closed: a denied grant, an unparseable response, or an unreachable
 /// gateway all return `Deny` unless `RYU_ALLOW_GATEWAY_FALLBACK=1` is set. This
-/// keeps the moat (scope enforcement) in the Gateway: Core never approves a read
+/// keeps scope enforcement in the Gateway: Core never approves a read
 /// on its own.
 ///
 /// `scope` is the grant scope to check (e.g. `"identity.read"`); `context` is an

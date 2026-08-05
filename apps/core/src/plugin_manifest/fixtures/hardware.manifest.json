@@ -5,6 +5,8 @@
   "category": "Core",
   "mandatory": true,
   "description": "Physical Ryu hardware: pair, manage, and control ESP32-based devices from the node, with device CRUD backed by the local device store.",
+  "tagline": "Pair and control your Ryu devices",
+  "keywords": ["hardware", "devices", "esp32", "iot"],
   "engines": {
     "ryu": ">=0.0.1"
   },

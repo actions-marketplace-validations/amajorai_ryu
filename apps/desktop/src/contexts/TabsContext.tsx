@@ -292,7 +292,10 @@ interface TabsContextValue {
 	updateTabTitle: (id: string, title: string) => void;
 }
 
-const TabsContext = createContext<TabsContextValue | null>(null);
+/** Exported ONLY so the e2e harness can supply a stub value for a component under
+ *  test; app code must go through {@link useTabsContext}, which fails loudly
+ *  outside a real {@link TabsProvider}. */
+export const TabsContext = createContext<TabsContextValue | null>(null);
 const IsActiveTabContext = createContext<boolean>(true);
 
 // The id of the tab a subtree is rendered under. Undefined when rendered

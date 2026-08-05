@@ -27,7 +27,9 @@ import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
-import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreItemAction, {
+	StoreItemOverflowMenu,
+} from "@ryu/marketplace/catalog/chrome/store-item-action";
 import { Badge } from "@ryu/ui/components/badge";
 import {
 	Empty,
@@ -41,6 +43,10 @@ import { Switch } from "@ryu/ui/components/switch";
 import { type ComponentProps, useMemo, useState } from "react";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useEngines } from "@/src/hooks/useEngines.ts";
+import {
+	type PluginSettingsOpener,
+	usePluginSettingsOpener,
+} from "@/src/hooks/usePluginSettingsOpener.ts";
 import {
 	type SandboxBackendEntry,
 	useSandboxBackends,
@@ -224,12 +230,16 @@ function EngineCardAction({
 	onInstall,
 	onUninstall,
 	onToggle,
+	onOpenSettings,
 }: {
 	busy: boolean;
 	item: EngineListItem;
 	onInstall: (item: EngineListItem) => void;
 	onToggle: (item: EngineListItem, next: boolean) => void;
 	onUninstall: (item: EngineListItem) => void;
+	/** Set for an engine that is ALSO an installed plugin with settings (a voice
+	 *  or sandbox backend shipped as an app); null for the rest. */
+	onOpenSettings?: (() => void) | null;
 }) {
 	const { percent } = useInstallProgress(
 		["engine", "voice", "media", "embedding"],
@@ -253,6 +263,7 @@ function EngineCardAction({
 				busy={busy || item.installState === "installing"}
 				installed={false}
 				onInstall={() => onInstall(item)}
+				onOpenSettings={onOpenSettings ?? undefined}
 				percent={percent}
 			/>
 		);
@@ -265,7 +276,10 @@ function EngineCardAction({
 	// than a 3-dot menu that opens empty. The row's status badge, which such a row
 	// always carries ("Active" / "Default"), already says where it stands.
 	if (!(canToggleOn || canToggleOff || item.canUninstall)) {
-		return null;
+		// …unless it is configurable, in which case the menu is not empty after all.
+		return onOpenSettings ? (
+			<StoreItemOverflowMenu onOpenSettings={onOpenSettings} />
+		) : null;
 	}
 
 	return (
@@ -277,6 +291,7 @@ function EngineCardAction({
 			installed
 			onDisable={canToggleOff ? () => onToggle(item, false) : undefined}
 			onEnable={canToggleOn ? () => onToggle(item, true) : undefined}
+			onOpenSettings={onOpenSettings ?? undefined}
 			onUninstall={item.canUninstall ? () => onUninstall(item) : undefined}
 			percent={percent}
 		/>
@@ -293,7 +308,11 @@ function EngineList({
 	onInstall,
 	onUninstall,
 	onToggle,
+	settingsOpener,
 }: {
+	/** Resolves a row to its settings tab; null for an engine that is not an
+	 *  installed plugin, which is most of them. */
+	settingsOpener: PluginSettingsOpener;
 	groups: { kind: EngineListKind; items: EngineListItem[] }[];
 	loading: boolean;
 	error: string | null;
@@ -353,6 +372,7 @@ function EngineList({
 											busy={rowState(item.name).pending !== null}
 											item={item}
 											onInstall={onInstall}
+											onOpenSettings={settingsOpener(item.id)}
 											onToggle={onToggle}
 											onUninstall={onUninstall}
 										/>
@@ -711,6 +731,9 @@ function EngineDetailPanel({
 }
 
 export default function EnginesCatalogSection() {
+	// Some engines ship as installed plugins with their own settings (a voice
+	// backend, a sandbox provider); the resolver returns null for the rest.
+	const settingsOpener = usePluginSettingsOpener();
 	const [query, setQuery] = useState("");
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -907,6 +930,7 @@ export default function EnginesCatalogSection() {
 					onUninstall={handleUninstall}
 					rowState={rowState}
 					selectedId={selectedId}
+					settingsOpener={settingsOpener}
 				/>
 			}
 			onCloseDetail={() => setSelectedId(null)}

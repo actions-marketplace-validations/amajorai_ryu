@@ -5,6 +5,8 @@
   "category": "Core",
   "mandatory": true,
   "description": "Agent Skills: discover, install, and manage SKILL.md skills across ~/.claude/skills and ~/.agents/skills, injected into agents and searchable via the skills catalog.",
+  "tagline": "Install and manage agent skills",
+  "keywords": ["skills", "catalog", "agents"],
   "engines": {
     "ryu": ">=0.0.1"
   },

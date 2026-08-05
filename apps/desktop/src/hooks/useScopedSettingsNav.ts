@@ -31,6 +31,9 @@ export {
 
 /** One entity's nav entry: a stable id, a display label, and its settings tabs. */
 export interface ScopedNavEntity {
+	/** False when the owning app is installed but not enabled — its settings are
+	 *  still editable (they are preferences), they just aren't in effect yet. */
+	enabled: boolean;
 	id: string;
 	label: string;
 	tabs: PluginSettingsTab[];
@@ -113,6 +116,9 @@ export function useScopedSettingsNav(scope: SettingsScope): ScopedSettingsNav {
 				id,
 				label: nameFor(id),
 				tabs: entityTabs,
+				// The bit is app-level, stamped identically on each of that app's
+				// tabs, so any one of them answers for the entity.
+				enabled: entityTabs.every((t) => t.enabled),
 			}));
 		return {
 			apps: toEntities(split.apps),

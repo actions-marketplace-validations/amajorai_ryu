@@ -5,6 +5,8 @@
   "hidden": true,
   "category": "Developer Tools",
   "description": "Reference third-party MCP widget plugin. A tiny local Node MCP server (server.mjs) exposes one render tool (sample_widget__render) that returns structured data AND serves a self-contained skybridge HTML resource (ui://widget/sample.html). contributes.widgets binds the tool to that resource; the widget:render grant + this manifest are the consent gate that lets Core promote the tool's result into an inline chat widget. Copy this directory as the starting point for your own widget plugin.",
+  "tagline": "Reference plugin: an inline chat widget",
+  "keywords": ["example", "reference", "developer", "widget", "mcp"],
   "icon": "puzzle",
   "iconDither": { "from": 282, "to": 316, "direction": "down" },
   "surfaces": {

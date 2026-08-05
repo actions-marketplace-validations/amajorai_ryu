@@ -2,6 +2,9 @@
   "id": "@ryu/routing",
   "name": "Smart Model Routing",
   "version": "1.0.0",
+  "description": "Picks the model for each turn instead of sending everything to one: cheap work goes to a cheap model and hard work goes to a strong one, so quality holds without paying top-tier rates for every message.",
+  "tagline": "Send each turn to the model that fits it",
+  "keywords": ["routing", "models", "cost", "policy"],
   "category": "Core",
   "engines": {
     "ryu": ">=0.0.1"

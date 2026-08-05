@@ -5,6 +5,7 @@ mod mcp_bridge;
 mod nodes;
 mod permissions;
 mod profile;
+mod quick_capture;
 mod secrets;
 mod shadow_auth;
 mod startup;
@@ -1412,6 +1413,12 @@ pub fn run() {
                 );
             }
 
+            // Quick Capture (double-tap Shift → keep the selection on the Quests
+            // board). A no-op unless the user has already switched it on: starting
+            // the tap is what triggers the Input Monitoring prompt, and prompting
+            // at launch would mostly get denied.
+            quick_capture::init(app.handle());
+
             // Watch <ryu-home>/nodes.json and emit "nodes-changed" when it changes.
             // Profile-aware so the dev variant watches ~/.ryu-dev/nodes.json.
             let watcher_handle = app.handle().clone();
@@ -1585,6 +1592,10 @@ pub fn run() {
             permissions::check_input_monitoring_permission,
             permissions::request_input_monitoring_permission,
             permissions::automation_permissions_required,
+            // Quick Capture: the double-Shift keep gesture (macOS; no-ops elsewhere).
+            quick_capture::quick_capture_status,
+            quick_capture::quick_capture_set_enabled,
+            quick_capture::quick_capture_set_binding,
             // M7 companion spike commands (return Err when feature is off)
             companion_spike::companion_get_proactive,
             companion_spike::companion_get_context,
