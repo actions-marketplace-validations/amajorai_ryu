@@ -74,11 +74,15 @@ impl KokoroDownloader {
             std::env::var("RYU_KOKORO_MODEL_URL").unwrap_or_else(|_| MODEL_URL.to_string());
         let voices_url =
             std::env::var("RYU_KOKORO_VOICES_URL").unwrap_or_else(|_| VOICES_URL.to_string());
+        // Distinct labels per artifact. Both used to be sent as a bare
+        // "Kokoro 82M", so the overlay showed two identical rows — one ~310 MB,
+        // one ~27 MB — with nothing to say which was which or why there were two.
         self.ensure_file(
             &model_url,
             &model_path(),
             MODEL_STORE_KEY,
             MODEL_FILE,
+            "Kokoro 82M (weights)",
             downloads,
         )
         .await?;
@@ -87,6 +91,7 @@ impl KokoroDownloader {
             &voices_path(),
             VOICES_STORE_KEY,
             VOICES_FILE,
+            "Kokoro 82M (voice pack)",
             downloads,
         )
         .await?;
@@ -102,6 +107,7 @@ impl KokoroDownloader {
         dest: &PathBuf,
         store_key: &str,
         file_name: &str,
+        label: &str,
         downloads: &crate::downloads::DownloadCenter,
     ) -> Result<()> {
         if dest.exists() && VersionStore::load().checksums.contains_key(store_key) {
@@ -118,7 +124,8 @@ impl KokoroDownloader {
         let downloaded = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Voice,
-                label: "Kokoro 82M".to_string(),
+                role: crate::downloads::DownloadRole::VoiceModel,
+                label: label.to_string(),
                 url: url.to_string(),
                 dest: dest.clone(),
                 sha256: None,

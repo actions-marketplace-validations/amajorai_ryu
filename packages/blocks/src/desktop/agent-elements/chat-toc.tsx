@@ -10,8 +10,8 @@ import {
 	useMessageScrollerVisibility,
 } from "@ryu/ui/components/message-scroller";
 import { cn } from "@ryu/ui/lib/utils";
-import { motion } from "motion/react";
-import { memo, type ReactNode, useEffect } from "react";
+import { motion, useReducedMotion } from "motion/react";
+import { memo, type ReactNode, useEffect, useState } from "react";
 
 export interface ChatTocFileChange {
 	/** Basename or relative path shown in the popover. */
@@ -33,11 +33,25 @@ export interface ChatTocItem {
 	title: string;
 }
 
-const lineVariants = {
-	normal: { width: 16 },
-	active: { width: 28 },
-	hover: { width: 28 },
-};
+/** No tick is hovered — every line rests at its resting width. */
+const NO_HOVER = -1;
+
+const RESTING_WIDTH = 16;
+const PEAK_WIDTH = 28;
+
+/**
+ * Line widths by distance from the hovered tick. The pointer lifts its own
+ * marker to the peak and its neighbours partway there, so the rail ripples into
+ * a pyramid instead of a single tick popping out on its own.
+ */
+const WIDTH_BY_DISTANCE = [PEAK_WIDTH, 24, 20] as const;
+
+function getLineWidth(distance: number, isActive: boolean) {
+	if (distance !== NO_HOVER) {
+		return WIDTH_BY_DISTANCE[distance] ?? RESTING_WIDTH;
+	}
+	return isActive ? PEAK_WIDTH : RESTING_WIDTH;
+}
 
 const MAX_PREVIEW_FILES = 4;
 
@@ -56,6 +70,8 @@ export const ChatToc = memo(function ChatToc({
 }) {
 	const { scrollToMessage } = useMessageScroller();
 	const { currentAnchorId } = useMessageScrollerVisibility();
+	const [hoveredIndex, setHoveredIndex] = useState(NO_HOVER);
+	const reduceMotion = useReducedMotion();
 
 	// Sidebar / deep-link jump: ChatPage dispatches this once messages hydrate.
 	useEffect(() => {
@@ -82,10 +98,13 @@ export const ChatToc = memo(function ChatToc({
 				"group/toc no-scrollbar pointer-events-auto absolute inset-s-2 top-1/2 z-20 hidden max-h-[70%] -translate-y-1/2 flex-col gap-2 overflow-y-auto py-2 lg:flex",
 				className
 			)}
+			onMouseLeave={() => setHoveredIndex(NO_HOVER)}
 		>
-			{items.map((item) => {
+			{items.map((item, index) => {
 				const isActive = item.id === currentAnchorId;
 				const extraFiles = (item.files?.length ?? 0) - MAX_PREVIEW_FILES;
+				const distance =
+					hoveredIndex === NO_HOVER ? NO_HOVER : Math.abs(index - hoveredIndex);
 
 				return (
 					<HoverCard key={item.id}>
@@ -94,15 +113,20 @@ export const ChatToc = memo(function ChatToc({
 							className="group/toc-item relative flex h-6 cursor-pointer items-center gap-2 py-1 text-left"
 							closeDelay={0}
 							delay={0}
+							onBlur={() => setHoveredIndex(NO_HOVER)}
 							onClick={() => scrollToMessage(item.id, { align: "start" })}
+							onFocus={() => setHoveredIndex(index)}
+							onMouseEnter={() => setHoveredIndex(index)}
 						>
 							<motion.span
-								animate={isActive ? "active" : "normal"}
-								className="block h-px shrink-0 rounded-full bg-foreground/25 transition-colors group-hover/toc-item:bg-foreground group-hover/toc:bg-foreground/40 group-aria-[current=true]/toc-item:bg-foreground"
+								animate={{ width: getLineWidth(distance, isActive) }}
+								className="block h-px shrink-0 origin-left rounded-full bg-foreground/25 transition-colors group-hover/toc-item:bg-foreground group-hover/toc:bg-foreground/40 group-aria-[current=true]/toc-item:bg-foreground"
 								initial={false}
-								transition={{ type: "spring", stiffness: 200, damping: 20 }}
-								variants={lineVariants}
-								whileHover="hover"
+								transition={
+									reduceMotion
+										? { duration: 0 }
+										: { type: "spring", stiffness: 200, damping: 20 }
+								}
 							/>
 							<span className="max-w-[220px] truncate whitespace-nowrap text-muted-foreground text-xs opacity-0 transition-opacity duration-200 group-hover/toc-item:text-foreground group-hover/toc:opacity-100 group-aria-[current=true]/toc-item:text-foreground">
 								{item.title}

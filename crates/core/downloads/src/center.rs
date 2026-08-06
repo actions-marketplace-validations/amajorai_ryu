@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,8 +22,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 use super::{
-    default_http_client, host, DownloadEvent, DownloadKind, DownloadSpec, DownloadState,
-    DownloadTask,
+    default_http_client, host, AutoTuner, ConcurrencyMode, DownloadEvent, DownloadKind,
+    DownloadRole, DownloadSettings, DownloadSettingsView, DownloadSpec, DownloadState, DownloadTask,
+    ThroughputSample, DEFAULT_SLOTS, MAX_SLOTS, MIN_SLOTS,
 };
 
 /// Max HTTP attempts per active streaming pass before a task is marked
@@ -51,11 +53,77 @@ struct TaskCtl {
     done: watch::Sender<Term>,
 }
 
+/// A resizable concurrency gate.
+///
+/// `tokio::sync::Semaphore` can grow freely (`add_permits`) but can only shrink by
+/// *reclaiming permits that are currently free* (`forget_permits`), so a request to
+/// drop from 6 slots to 2 while 6 transfers are running can only take back what is
+/// idle right now. Rather than block, the limiter records the target and reconciles
+/// on every acquire and every tuner tick — permits are handed back as running
+/// transfers finish, and the gate converges without ever stalling one.
+struct Limiter {
+    sem: Arc<tokio::sync::Semaphore>,
+    /// Permits the semaphore is currently sized to.
+    sized: AtomicUsize,
+    /// Permits we want it sized to.
+    desired: AtomicUsize,
+}
+
+impl Limiter {
+    fn new(slots: usize) -> Self {
+        let slots = slots.clamp(MIN_SLOTS, MAX_SLOTS);
+        Self {
+            sem: Arc::new(tokio::sync::Semaphore::new(slots)),
+            sized: AtomicUsize::new(slots),
+            desired: AtomicUsize::new(slots),
+        }
+    }
+
+    fn set(&self, slots: usize) {
+        self.desired
+            .store(slots.clamp(MIN_SLOTS, MAX_SLOTS), Ordering::Relaxed);
+        self.reconcile();
+    }
+
+    /// Slots in force right now (what the gate has actually reached).
+    fn effective(&self) -> usize {
+        self.sized.load(Ordering::Relaxed)
+    }
+
+    /// Move `sized` toward `desired` as far as the semaphore allows right now.
+    fn reconcile(&self) {
+        let want = self.desired.load(Ordering::Relaxed);
+        let have = self.sized.load(Ordering::Relaxed);
+        if want > have {
+            self.sem.add_permits(want - have);
+            self.sized.store(want, Ordering::Relaxed);
+        } else if want < have {
+            // Only the permits that are free right now come back; the rest are
+            // reclaimed by a later reconcile once their transfer releases them.
+            let reclaimed = self.sem.forget_permits(have - want);
+            self.sized.fetch_sub(reclaimed, Ordering::Relaxed);
+        }
+    }
+
+    async fn acquire(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.reconcile();
+        self.sem
+            .acquire()
+            .await
+            .expect("download semaphore is never closed")
+    }
+}
+
 struct Inner {
     tasks: RwLock<HashMap<String, DownloadTask>>,
     handles: Mutex<HashMap<String, TaskCtl>>,
     events: broadcast::Sender<DownloadEvent>,
-    sem: Arc<tokio::sync::Semaphore>,
+    limiter: Limiter,
+    /// The persisted preference plus the live tuner behind [`ConcurrencyMode::Auto`].
+    settings: Mutex<SettingsState>,
+    /// Whether the sampling loop has been started (lazily, on the first download,
+    /// so constructing a center outside a Tokio runtime never panics).
+    tuner_started: AtomicBool,
     client: reqwest::Client,
     /// Durable log of finished downloads (newest first), so "previous downloads"
     /// survives a restart even though live terminal tasks are dropped from the
@@ -85,12 +153,55 @@ fn history_path() -> PathBuf {
 /// Cap on retained history entries (newest kept). Bounds the file + response.
 const HISTORY_CAP: usize = 200;
 
-fn max_concurrency() -> usize {
+/// Where the concurrency preference lives.
+fn settings_path() -> PathBuf {
+    std::env::var("RYU_DOWNLOADS_SETTINGS_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| host().ryu_dir().join("downloads-settings.json"))
+}
+
+/// How often the auto-tuner samples throughput. Long enough that a sample spans
+/// several per-task speed updates (which refresh every 250 ms), short enough that
+/// a slot change still lands inside a multi-minute model download.
+const TUNE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The operator pin, if `RYU_MAX_CONCURRENT_DOWNLOADS` is set. When present it
+/// wins over the stored preference and the API refuses to overwrite it — an
+/// operator who pinned the value in the environment should not have it silently
+/// changed from a settings screen.
+fn env_pinned_slots() -> Option<usize> {
     std::env::var("RYU_MAX_CONCURRENT_DOWNLOADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(3)
+        .map(|n| n.clamp(MIN_SLOTS, MAX_SLOTS))
+}
+
+/// The preference plus the tuner state that serves [`ConcurrencyMode::Auto`].
+struct SettingsState {
+    settings: DownloadSettings,
+    tuner: AutoTuner,
+    /// Whether the on-disk preference has been folded in yet (see `new`).
+    loaded: bool,
+}
+
+/// Read the stored preference, falling back to the default. An env pin overrides
+/// it entirely (and presents as Manual).
+fn load_settings() -> DownloadSettings {
+    if let Some(pinned) = env_pinned_slots() {
+        return DownloadSettings {
+            mode: ConcurrencyMode::Manual,
+            manual_slots: pinned,
+        };
+    }
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<DownloadSettings>(&raw).ok())
+        .map(|s| DownloadSettings {
+            mode: s.mode,
+            manual_slots: s.manual_slots.clamp(MIN_SLOTS, MAX_SLOTS),
+        })
+        .unwrap_or_default()
 }
 
 fn now_ms() -> i64 {
@@ -114,12 +225,30 @@ fn part_path(dest: &Path) -> PathBuf {
 impl DownloadCenter {
     pub fn new(client: reqwest::Client) -> Self {
         let (events, _rx) = broadcast::channel(256);
+        // Start from the env pin (which needs nothing) or the plain default. The
+        // stored preference is read lazily on first use — `settings_path()` goes
+        // through the host, and a center can legitimately be constructed before
+        // one is installed.
+        let initial = env_pinned_slots().unwrap_or(DEFAULT_SLOTS);
+        let settings = DownloadSettings {
+            mode: match env_pinned_slots() {
+                Some(_) => ConcurrencyMode::Manual,
+                None => ConcurrencyMode::Auto,
+            },
+            manual_slots: initial,
+        };
         Self {
             inner: Arc::new(Inner {
                 tasks: RwLock::new(HashMap::new()),
                 handles: Mutex::new(HashMap::new()),
                 events,
-                sem: Arc::new(tokio::sync::Semaphore::new(max_concurrency())),
+                limiter: Limiter::new(initial),
+                settings: Mutex::new(SettingsState {
+                    settings,
+                    tuner: AutoTuner::new(initial),
+                    loaded: false,
+                }),
+                tuner_started: AtomicBool::new(false),
                 client,
                 history: Mutex::new(Vec::new()),
             }),
@@ -134,6 +263,134 @@ impl DownloadCenter {
     /// Subscribe to live download deltas (used by the SSE endpoint).
     pub fn subscribe(&self) -> broadcast::Receiver<DownloadEvent> {
         self.inner.events.subscribe()
+    }
+
+    // ── Concurrency settings ──────────────────────────────────────────────────
+
+    /// Fold the on-disk preference in the first time it is needed, and apply it.
+    async fn ensure_settings_loaded(&self) {
+        let mut state = self.inner.settings.lock().await;
+        if state.loaded {
+            return;
+        }
+        state.loaded = true;
+        state.settings = load_settings();
+        if state.settings.mode == ConcurrencyMode::Manual {
+            self.inner.limiter.set(state.settings.manual_slots);
+            state.tuner = AutoTuner::new(state.settings.manual_slots);
+        }
+    }
+
+    /// The current preference plus what it resolves to right now.
+    pub async fn settings(&self) -> DownloadSettingsView {
+        self.ensure_settings_loaded().await;
+        let state = self.inner.settings.lock().await;
+        DownloadSettingsView {
+            mode: state.settings.mode,
+            manual_slots: state.settings.manual_slots,
+            effective_slots: self.inner.limiter.effective(),
+            min_slots: MIN_SLOTS,
+            max_slots: MAX_SLOTS,
+            measured_bps: state.tuner.measured_bps(),
+            env_locked: env_pinned_slots().is_some(),
+        }
+    }
+
+    /// Change how many downloads run at once. `slots` is ignored (and retained
+    /// unchanged) in [`ConcurrencyMode::Auto`]. Returns the resulting view, or an
+    /// error when the value is pinned by the environment.
+    pub async fn set_settings(
+        &self,
+        mode: ConcurrencyMode,
+        slots: Option<usize>,
+    ) -> Result<DownloadSettingsView> {
+        if env_pinned_slots().is_some() {
+            anyhow::bail!(
+                "download concurrency is pinned by RYU_MAX_CONCURRENT_DOWNLOADS; \
+                 unset it to change this from the app"
+            );
+        }
+        self.ensure_settings_loaded().await;
+        let to_persist = {
+            let mut state = self.inner.settings.lock().await;
+            state.settings.mode = mode;
+            if let Some(n) = slots {
+                state.settings.manual_slots = n.clamp(MIN_SLOTS, MAX_SLOTS);
+            }
+            match mode {
+                ConcurrencyMode::Manual => {
+                    self.inner.limiter.set(state.settings.manual_slots);
+                    // Re-seed the tuner from the user's pick, so switching back to
+                    // Auto starts from a sane number rather than a stale one.
+                    state.tuner = AutoTuner::new(state.settings.manual_slots);
+                }
+                ConcurrencyMode::Auto => {
+                    self.inner.limiter.set(state.tuner.slots());
+                }
+            }
+            state.settings
+        };
+        let path = settings_path();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&to_persist) {
+                let _ = std::fs::write(&path, json);
+            }
+        })
+        .await;
+        Ok(self.settings().await)
+    }
+
+    /// Start the throughput sampling loop once, on the first download. Deferred
+    /// (rather than done in `new`) so building a center outside a Tokio runtime —
+    /// which several callers do — never panics on `tokio::spawn`.
+    fn ensure_tuner_running(&self) {
+        if self.inner.tuner_started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(TUNE_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                // Arc::strong_count == 1 ⇒ only this loop holds the center; the
+                // owner is gone, so stop rather than tick forever.
+                if Arc::strong_count(&inner) == 1 {
+                    return;
+                }
+                let sample = {
+                    let tasks = inner.tasks.read().await;
+                    let mut aggregate_bps = 0u64;
+                    let mut active = 0usize;
+                    let mut queued = 0usize;
+                    for t in tasks.values() {
+                        match t.state {
+                            DownloadState::Active => {
+                                active += 1;
+                                aggregate_bps += t.speed_bps.unwrap_or(0);
+                            }
+                            DownloadState::Queued => queued += 1,
+                            _ => {}
+                        }
+                    }
+                    ThroughputSample {
+                        aggregate_bps,
+                        active,
+                        queued,
+                    }
+                };
+                let mut state = inner.settings.lock().await;
+                if state.settings.mode == ConcurrencyMode::Auto {
+                    let slots = state.tuner.observe(sample);
+                    inner.limiter.set(slots);
+                } else {
+                    inner.limiter.reconcile();
+                }
+            }
+        });
     }
 
     /// Snapshot of all tasks, ordered by creation (stable for the UI).
@@ -217,6 +474,9 @@ impl DownloadCenter {
     /// cancel leaves no false-installed state.
     ///
     /// Runs `fut` on the caller's task (no spawn), so `fut` need not be `Send`.
+    ///
+    /// The role defaults from `kind`; use [`Self::register_indeterminate_as`] when
+    /// the call site knows something more specific (an unpack step, an image model).
     pub async fn register_indeterminate<F, T>(
         &self,
         id: String,
@@ -227,10 +487,27 @@ impl DownloadCenter {
     where
         F: std::future::Future<Output = Result<T>>,
     {
+        self.register_indeterminate_as(id, kind, DownloadRole::from_kind(kind), label, fut)
+            .await
+    }
+
+    /// [`Self::register_indeterminate`] with an explicit [`DownloadRole`].
+    pub async fn register_indeterminate_as<F, T>(
+        &self,
+        id: String,
+        kind: DownloadKind,
+        role: DownloadRole,
+        label: String,
+        fut: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
         let now = now_ms();
         let task = DownloadTask {
             id: id.clone(),
             kind,
+            role,
             label,
             url: None,
             dest_path: None,
@@ -326,6 +603,8 @@ impl DownloadCenter {
         start_paused: bool,
     ) -> (String, watch::Receiver<Term>) {
         let id = derive_id(&spec.dest);
+        self.ensure_settings_loaded().await;
+        self.ensure_tuner_running();
 
         {
             let mut handles = self.inner.handles.lock().await;
@@ -365,6 +644,7 @@ impl DownloadCenter {
             let task = DownloadTask {
                 id: id.clone(),
                 kind: spec.kind,
+                role: spec.role,
                 label: spec.label.clone(),
                 url: Some(spec.url.clone()),
                 dest_path: Some(spec.dest.to_string_lossy().to_string()),
@@ -451,6 +731,7 @@ impl DownloadCenter {
             }
             let spec = DownloadSpec {
                 kind: task.kind,
+                role: task.role,
                 label: task.label.clone(),
                 url,
                 dest,
@@ -593,13 +874,19 @@ async fn drive(
             return;
         }
 
-        // Acquire a concurrency slot only while actively streaming.
+        // Take a concurrency slot BEFORE flipping to Active. The order matters: a
+        // task that is waiting on the gate is `Queued`, and only one that is
+        // actually streaming is `Active`. Marking it Active first (as this did)
+        // meant every queued download rendered as "Downloading" the instant it was
+        // registered — so the queue existed in Core but was invisible everywhere,
+        // and a sequential-looking onboarding was indistinguishable from a
+        // parallel one that happened to be waiting.
+        let _permit = inner.limiter.acquire().await;
         patch(&inner, &id, true, |t| {
             t.state = DownloadState::Active;
             t.error = None;
         })
         .await;
-        let _permit = inner.sem.acquire().await;
 
         match attempt(&inner, &id, &spec, &mut control_rx).await {
             AttemptOutcome::Done(path) => {
@@ -980,6 +1267,7 @@ mod tests {
     fn spec(dest: PathBuf) -> DownloadSpec {
         DownloadSpec {
             kind: DownloadKind::Model,
+            role: DownloadRole::ChatModel,
             label: "test".to_string(),
             url: "http://127.0.0.1:0/never".to_string(),
             dest,
@@ -1137,6 +1425,84 @@ mod tests {
             .unwrap();
         assert_eq!(t.state, DownloadState::Failed);
         assert!(t.retryable);
+    }
+
+    /// A download waiting on the concurrency gate must report `Queued`, not
+    /// `Active`. This is what makes the queue visible at all: the driver used to
+    /// flip the state to Active before acquiring a permit, so every waiting task
+    /// claimed to be downloading and the tray had nothing to group.
+    #[tokio::test]
+    async fn waiting_downloads_report_queued_not_active() {
+        ensure_host();
+        let center = DownloadCenter::with_default_client();
+        // One slot, so everything after the first must wait on the gate.
+        center
+            .set_settings(ConcurrencyMode::Manual, Some(1))
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("ryu-dl-queue-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        // Unroutable URLs: the first task holds the single permit while it retries,
+        // which is exactly the "slot is busy" condition the others must queue behind.
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let mut s = spec(dir.join(format!("queued-{n}.bin")));
+            s.url = "http://127.0.0.1:1/never".to_string();
+            ids.push(center.enqueue(s).await);
+        }
+
+        // Let the drivers reach their first await point.
+        let mut queued = 0;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let snap = center.snapshot().await;
+            queued = snap
+                .iter()
+                .filter(|t| ids.contains(&t.id) && t.state == DownloadState::Queued)
+                .count();
+            if queued >= 2 {
+                break;
+            }
+        }
+        assert!(
+            queued >= 2,
+            "with 1 slot and 3 downloads, at least 2 must sit in Queued (saw {queued})"
+        );
+
+        for id in &ids {
+            center.cancel(id).await;
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Manual mode resizes the live gate and the view reports what is in force.
+    #[tokio::test]
+    async fn manual_settings_resize_the_gate() {
+        ensure_host();
+        let center = DownloadCenter::with_default_client();
+        let view = center
+            .set_settings(ConcurrencyMode::Manual, Some(6))
+            .await
+            .unwrap();
+        assert_eq!(view.mode, ConcurrencyMode::Manual);
+        assert_eq!(view.manual_slots, 6);
+        assert_eq!(view.effective_slots, 6);
+
+        // Growing is immediate; shrinking with nothing running is too.
+        let view = center
+            .set_settings(ConcurrencyMode::Manual, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(view.effective_slots, 2);
+
+        // Out-of-range values clamp rather than being rejected.
+        let view = center
+            .set_settings(ConcurrencyMode::Manual, Some(999))
+            .await
+            .unwrap();
+        assert_eq!(view.manual_slots, MAX_SLOTS);
     }
 
     #[tokio::test]

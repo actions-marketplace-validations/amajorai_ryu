@@ -1,9 +1,16 @@
 // Unified Library page — the single browsing surface for everything the app
 // holds (agents, workflows, chats, spaces, teams, meetings, channels,
-// identities), modelled on the Store shell (`StorePage`). One section-nav of
-// pill tabs switches collections in-place; every tab shares the SAME toolbar +
-// card/row (from `@ryu/blocks/desktop/library`) so the views are standardised
-// rather than each collection having its own bespoke page.
+// identities) PLUS every collection an app registers, modelled on the Store
+// shell (`StorePage`). One inline row of section tabs switches collections
+// in-place; every tab shares the SAME toolbar + card/row (from
+// `@ryu/blocks/desktop/library`) so the views are standardised rather than each
+// collection having its own bespoke page.
+//
+// App-registered collections arrive from the same `contributes.sidebar_sections`
+// declaration the sidebar reads (see `ContributedLibrarySection`), so an app
+// ships ONE declaration and gets both surfaces. That is what keeps the sidebar
+// from growing without bound as apps pile up: the Library is where a long list of
+// collections belongs, and the sidebar can stay the short one.
 //
 // Two synthetic tabs sit in front: Recents (recently-opened, across all types,
 // from the `library` store's stamp-on-open recents) and Favorites (items the
@@ -37,7 +44,11 @@ import {
 	type LibrarySortOption,
 	LibraryToolbar,
 } from "@ryu/blocks/desktop/library";
-import { StoreSectionNav } from "@ryu/blocks/desktop/store";
+import {
+	StoreSearchButton,
+	type StoreSectionTab,
+	StoreSectionTabs,
+} from "@ryu/blocks/desktop/store";
 import type { ViewMode } from "@ryu/blocks/desktop/view-toggle";
 import {
 	type ReactNode,
@@ -46,6 +57,8 @@ import {
 	useMemo,
 	useState,
 } from "react";
+import { SURFACE_PLUGIN_OWNER } from "@/src/components/layout/sidebar-sections.ts";
+import ContributedLibrarySection from "@/src/components/library/ContributedLibrarySection.tsx";
 import { SpacePreview } from "@/src/components/library/SpacePreview.tsx";
 import { MemoryLibrary } from "@/src/components/memory/MemoryLibrary.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
@@ -62,9 +75,11 @@ import { useApps } from "@/src/hooks/useApps.ts";
 import { useChannels } from "@/src/hooks/useChannels.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
 import { useMeetings } from "@/src/hooks/useMeetings.ts";
+import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
 import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
+import type { PluginSidebarSection } from "@/src/lib/api/plugins.ts";
 import {
 	type LibraryItemType,
 	normalizeTimestamp,
@@ -109,16 +124,20 @@ const SECTIONS: {
 	{ value: "tools", label: "Tools", icon: Wrench01Icon },
 ];
 
-/** The app that owns each collection. A tab shows only when its owning app is
- *  enabled — so an uninstalled Workflows/Teams/Meetings app leaves no empty tab.
- *  Sections absent here (recents/favorites/chat/channel/identity) are host
- *  surfaces, always shown. */
+/** The app that owns each built-in collection. A tab shows only when its owning
+ *  app is enabled — so an uninstalled Workflows/Teams/Meetings app leaves no empty
+ *  tab. Sections absent here (recents/favorites/chat/channel/identity) are host
+ *  surfaces, always shown.
+ *
+ *  The plugin ids come from `SURFACE_PLUGIN_OWNER` — the ONE table naming which
+ *  app owns each compiled-in surface, shared with the sidebar. This map only says
+ *  which library TYPE maps onto which surface. */
 const SECTION_PLUGIN: Partial<Record<LibrarySection, string>> = {
-	agent: "@ryu/agents",
-	workflow: "@ryu/workflows",
-	space: "@ryu/spaces",
-	team: "@ryu/teams",
-	meeting: "@ryu/meetings",
+	agent: SURFACE_PLUGIN_OWNER.agents,
+	workflow: SURFACE_PLUGIN_OWNER.workflows,
+	space: SURFACE_PLUGIN_OWNER.spaces,
+	team: SURFACE_PLUGIN_OWNER.teams,
+	meeting: SURFACE_PLUGIN_OWNER.meetings,
 };
 
 /** Per-type display metadata for the synthetic (mixed) tabs and filter chips. */
@@ -163,6 +182,21 @@ function isLibrarySection(value: string): value is LibrarySection {
 	return SECTIONS.some((s) => s.value === value);
 }
 
+/** The tab key of an app-registered collection, namespaced exactly like the
+ *  sidebar's dynamic section keys so the two can never collide with a built-in. */
+function contributedSectionValue(section: PluginSidebarSection): string {
+	return `plugin:${section.plugin}:${section.id}`;
+}
+
+/** Apps that own a compiled-in Library tab already — their contributed sidebar
+ *  sections must not appear a second time as an app collection. */
+const SURFACE_OWNER_IDS = new Set<string>(Object.values(SURFACE_PLUGIN_OWNER));
+
+/** The active tab: one of the shell's own collections, or an app-registered one
+ *  (`plugin:<pluginId>:<sectionId>`). Deliberately open — the Library's tab list
+ *  is no longer a closed union the shell can enumerate at compile time. */
+type ActiveSection = LibrarySection | string;
+
 /** True for the sections that ARE a `LibraryItemType` — i.e. the ones backed by the
  *  shared collection pipeline. Excludes the synthetic mixed tabs and any
  *  custom-surface section (which has no `LibraryItem` representation at all, so it
@@ -193,9 +227,15 @@ function LibraryCollections({
 }: {
 	initialSection?: string;
 }) {
-	const [section, setSection] = useState<LibrarySection>(
+	const [active, setActive] = useState<ActiveSection>(
 		isLibrarySection(initialSection) ? initialSection : "recents"
 	);
+	// Everything below the tab strip is written against the built-in collections;
+	// an app-registered tab renders its own surface instead, so the built-in
+	// pipeline runs on a harmless stand-in rather than being made nullable
+	// throughout.
+	const section: LibrarySection = isLibrarySection(active) ? active : "recents";
+	const setSection = setActive;
 
 	// View mode persists across tabs and sessions; query/sort reset per tab.
 	const [view, setView] = useState<ViewMode>(() => {
@@ -267,13 +307,61 @@ function LibraryCollections({
 		[enabledPlugins, appsLoading]
 	);
 
-	// If the active tab's app was just disabled, fall back to Recents so the page
-	// never sits on a now-hidden collection.
+	// App-registered collections, from the same `sidebar_sections` declaration the
+	// sidebar renders. Core serves these only for ENABLED apps, so no gate is
+	// needed here. A section owned by an app that also owns a built-in tab is
+	// skipped: @ryu/meetings ships both, and two tabs called "Meetings" listing the
+	// same rows is worse than either alone.
+	const { sidebar_sections } = usePluginContributions();
+	const contributedSections = useMemo(
+		() =>
+			sidebar_sections
+				.filter((c) => !SURFACE_OWNER_IDS.has(c.plugin))
+				.filter((c) => Boolean(c.spec?.source))
+				.sort(
+					(a, b) =>
+						(a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title)
+				),
+		[sidebar_sections]
+	);
+
+	const contributedFor = useCallback(
+		(value: string) =>
+			contributedSections.find((c) => contributedSectionValue(c) === value) ??
+			null,
+		[contributedSections]
+	);
+	const activeContributed = contributedFor(active);
+
+	// The tab strip: the shell's own collections, then every app-registered one.
+	const navSections = useMemo((): StoreSectionTab[] => {
+		const own = visibleSections.map((s) => ({
+			icon: s.icon,
+			label: s.label,
+			value: s.value as string,
+			group: "own",
+		}));
+		return [
+			...own,
+			...contributedSections.map((c) => ({
+				icon: c.icon ?? "grid",
+				label: c.title,
+				value: contributedSectionValue(c),
+				group: "apps",
+			})),
+		];
+	}, [visibleSections, contributedSections]);
+
+	// If the active tab's app was just disabled (or its contribution withdrawn),
+	// fall back to Recents so the page never sits on a now-hidden collection.
 	useEffect(() => {
-		if (!visibleSections.some((s) => s.value === section)) {
+		const stillThere =
+			visibleSections.some((s) => s.value === active) ||
+			contributedSections.some((c) => contributedSectionValue(c) === active);
+		if (!stillThere) {
 			setSection("recents");
 		}
-	}, [visibleSections, section]);
+	}, [visibleSections, contributedSections, active]);
 
 	// Create-dialog state for the collections that need a name before they exist.
 	const [spaceDialogOpen, setSpaceDialogOpen] = useState(false);
@@ -711,88 +799,100 @@ function LibraryCollections({
 	// kind of duplication that made this area feel bolted together.
 	const customSurface = CUSTOM_SURFACE_SECTIONS.has(section);
 
+	// Neither a built-in collection's controls nor the shell's search apply to a
+	// surface that owns its own (Tools) or to an app-registered collection, which
+	// declares its rows and gets the shared search only.
+	const showCollectionToolbar = !(customSurface || activeContributed);
+
 	return (
-		<div className="relative flex h-full flex-col overflow-hidden">
-			<StoreSectionNav
-				active={section}
-				onSelect={(value: string) => {
-					if (isLibrarySection(value)) {
-						setSection(value);
-					}
-				}}
-				panel={
-					customSurface ? undefined : (
-						<LibraryToolbar
-							ctaIcon={cta ? Add01Icon : undefined}
-							ctaLabel={cta?.label}
-							filterSlot={
-								isMixed ? (
-									<div className="flex items-center gap-0.5">
-										<LibraryFilterChip
-											active={typeFilter === null}
-											label="All"
-											onClick={() => setTypeFilter(null)}
-										/>
-										{SECTIONS.filter(
-											(
-												s
-											): s is {
-												value: LibraryItemType;
-												label: string;
-												icon: IconSvgElement;
-											} => isItemType(s.value) && presentTypes.has(s.value)
-										).map((s) => (
-											<LibraryFilterChip
-												active={typeFilter === s.value}
-												icon={TYPE_META[s.value].icon}
-												key={s.value}
-												label={s.label}
-												onClick={() => setTypeFilter(s.value)}
-											/>
-										))}
-									</div>
-								) : undefined
-							}
-							onCta={cta?.onCta}
-							onSortChange={setSort}
-							onViewChange={onViewChange}
-							showSearch={false}
-							sort={section === "recents" ? undefined : sort}
-							sortOptions={section === "recents" ? [] : SORT_OPTIONS}
-							view={view}
+		<div className="flex h-full flex-col overflow-hidden pt-12">
+			{/* Page chrome, inline: title, tabs, then the collection's own controls.
+			    No floating bar — the tab list is open-ended (every app may register a
+			    collection), so it scrolls in the page flow instead of wrapping into a
+			    bar pinned over the content. */}
+			<div className="mx-auto w-full max-w-4xl shrink-0 px-4 pt-4">
+				<div className="flex items-center justify-between gap-3">
+					<p className="font-semibold text-lg">
+						{activeContributed?.title ?? sectionMeta?.label ?? "Library"}
+					</p>
+					{customSurface ? null : (
+						<StoreSearchButton
+							onChange={setQuery}
+							placeholder={`Search ${(activeContributed?.title ?? sectionMeta?.label ?? "items").toLowerCase()}…`}
+							value={query}
 						/>
-					)
-				}
-				search={
-					customSurface
-						? undefined
-						: {
-								value: query,
-								onChange: setQuery,
-								placeholder: `Search ${sectionMeta?.label.toLowerCase() ?? "items"}…`,
-							}
-				}
-				sections={visibleSections}
-			/>
+					)}
+				</div>
+				<StoreSectionTabs
+					active={active}
+					className="pt-2"
+					onSelect={setActive}
+					sections={navSections}
+				/>
+				{showCollectionToolbar ? (
+					<LibraryToolbar
+						className="px-0 py-2"
+						ctaIcon={cta ? Add01Icon : undefined}
+						ctaLabel={cta?.label}
+						filterSlot={
+							isMixed ? (
+								<div className="flex items-center gap-0.5">
+									<LibraryFilterChip
+										active={typeFilter === null}
+										label="All"
+										onClick={() => setTypeFilter(null)}
+									/>
+									{SECTIONS.filter(
+										(
+											s
+										): s is {
+											value: LibraryItemType;
+											label: string;
+											icon: IconSvgElement;
+										} => isItemType(s.value) && presentTypes.has(s.value)
+									).map((s) => (
+										<LibraryFilterChip
+											active={typeFilter === s.value}
+											icon={TYPE_META[s.value].icon}
+											key={s.value}
+											label={s.label}
+											onClick={() => setTypeFilter(s.value)}
+										/>
+									))}
+								</div>
+							) : undefined
+						}
+						onCta={cta?.onCta}
+						onSortChange={setSort}
+						onViewChange={onViewChange}
+						showSearch={false}
+						sort={section === "recents" ? undefined : sort}
+						sortOptions={section === "recents" ? [] : SORT_OPTIONS}
+						view={view}
+					/>
+				) : null}
+			</div>
 
 			{/* A custom-surface section fills the shell itself: it is a full-height
 			    master/detail layout with its own scroll containers, so it must NOT be
-			    nested inside the centered, scrolling card column below. `pt-12` still
-			    clears the transparent titlebar. */}
+			    nested inside the centered, scrolling card column below. */}
 			{customSurface ? (
-				<div className="min-h-0 flex-1 overflow-hidden pt-12">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					{section === "tools" ? <ToolsLibrary /> : null}
 				</div>
 			) : (
-				/* Single scroll viewport → content scrolls UNDER the frosted, transparent
-			    titlebar (Layout no longer reserves its height for /library — see
-			    pathScrollsUnderTitlebar). `pt-12` clears the bar. */
-				/* Centered, capped-width column mirroring the Store/Customize catalog
-			    layout — the cards read as the same 2-column grid rather than a
-			    full-bleed wall. */
-				<div className="min-h-0 flex-1 overflow-y-auto px-4 pt-12 pb-24">
+				/* Centered, capped-width column mirroring the Store catalog layout —
+			    the cards read as the same 2-column grid rather than a full-bleed
+			    wall. */
+				<div className="min-h-0 flex-1 overflow-y-auto px-4 pt-2 pb-24">
 					<div className="mx-auto w-full max-w-4xl">
-						{loading ? (
+						{activeContributed ? (
+							<ContributedLibrarySection
+								query={query}
+								section={activeContributed}
+								view={view}
+							/>
+						) : loading ? (
 							<LibraryLoading />
 						) : visibleItems.length === 0 ? (
 							<LibraryEmpty

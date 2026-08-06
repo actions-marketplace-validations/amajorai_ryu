@@ -18,16 +18,22 @@ import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
 
 export interface WaitlistMe {
 	applicationStatus: "submitted" | "approved" | "rejected" | null;
+	// Casing the user typed when reserving; falls back to `username`.
+	displayUsername: string | null;
 	// Rough wait estimate derived from position ("~3 weeks"), null when approved.
 	eta: string | null;
 	hasApplied: boolean;
 	isAdmin: boolean;
+	// Sign-up time (ISO). The "member since" date on the membership pass.
+	joinedAt: string | null;
 	position: number | null;
 	referralCode: string | null;
 	referralCount: number;
 	referralUrl: string | null;
 	status: "pending" | "approved";
 	totalWaiting: number;
+	// Reserved handle (normalized, no leading "@"), or null if unclaimed.
+	username: string | null;
 }
 
 /** The signed-in user's own waitlist state, or null when it can't be resolved. */

@@ -67,6 +67,11 @@ const GRANT_META: Record<string, GrantMeta> = {
 		label: "Send follow-up messages",
 		description: "Post a follow-up turn into the current chat.",
 	},
+	"assistant:context": {
+		label: "Talk to your assistant about its page",
+		description:
+			"Tell the Ask Ryu assistant what this app is showing, guide how it answers while the app is open, and ask it a question on your behalf.",
+	},
 	calendar: {
 		label: "Access your calendar",
 		description: "Read and edit your calendar.",

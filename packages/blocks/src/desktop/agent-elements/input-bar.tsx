@@ -14,14 +14,12 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 const RECORDING_WAVE_BARS = 48;
 
 interface InputConfig {
-	attachmentButtonPosition: "left" | "right";
 	attachmentPreviewStyle: "thumbnail" | "chip" | "hidden";
 	inputBarPlaceholder: string;
 }
 
 const DEFAULT_INPUT_CONFIG: InputConfig = {
 	inputBarPlaceholder: "What do you want to do?",
-	attachmentButtonPosition: "left",
 	attachmentPreviewStyle: "thumbnail",
 };
 
@@ -461,7 +459,6 @@ export const InputBar = memo(function InputBar({
 			: (placeholder ?? config.inputBarPlaceholder);
 
 	const showAttach = Boolean(onAttach);
-	const attachRight = config.attachmentButtonPosition === "right";
 
 	// Auto-resize textarea
 	useEffect(() => {
@@ -874,7 +871,6 @@ export const InputBar = memo(function InputBar({
 	// mode it also hosts the textarea as its flexing centre.
 	const composerToolbar = (
 		<ComposerToolbar
-			attachRight={attachRight}
 			canQueue={canQueueNow && hasInput}
 			center={
 				compact ? (

@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Ryu Dev",
+  "productName": "Ryu (Dev)",
   "mainBinaryName": "Ryu Dev",
   "identifier": "ai.amajor.ryu.desktop.dev",
   "app": {
     "windows": [
       {
-        "title": "Ryu Dev",
+        "title": "Ryu (Dev)",
         "zoomHotkeysEnabled": true
       }
     ]

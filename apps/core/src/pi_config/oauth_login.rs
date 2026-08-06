@@ -173,27 +173,93 @@ fn ensure_bridge() -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-/// Resolve a JavaScript runtime for the bridge. Node first, deliberately: the
-/// flow modules reach `node:http` / `node:crypto` through an indirection that
-/// exists to defeat bundlers, and Node is what pi-ai targets.
-fn js_runtime() -> Option<String> {
-    for candidate in ["node", "bun"] {
-        if which_on_path(candidate).is_some() {
-            return Some(candidate.to_owned());
+/// The runtimes that can host the bridge, in priority order. Node first,
+/// deliberately: the flow modules reach `node:http` / `node:crypto` through an
+/// indirection that exists to defeat bundlers, and Node is what pi-ai targets.
+const JS_RUNTIMES: [&str; 2] = ["node", "bun"];
+
+/// Resolve a JavaScript runtime for the bridge, as an **absolute path**.
+///
+/// A bare `PATH` scan for the literal name is not enough, and got this wrong in
+/// both directions:
+/// - on Windows the interpreter is `node.exe` / `bun.exe`, so probing
+///   `<dir>/node` matched nothing on every Windows host — a user with Node
+///   installed was told to install Node, and the login 400'd before it started.
+///   [`crate::sidecar::manifest_sidecar::which_on_path`] already knows the
+///   extension rule (and why `Command::new` cannot spawn a bare `.cmd`), so this
+///   reuses it rather than keeping a third, subtly-different copy;
+/// - a macOS app launched from Finder inherits a minimal
+///   `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) that contains no Node install, so
+///   the GUI case fails where a terminal launch works. The common install
+///   prefixes are probed explicitly, mirroring
+///   `skills_catalog::default_skills::resolve_npx`.
+///
+/// PATH still wins over the well-known prefixes — a user who put a specific
+/// runtime on their PATH meant it.
+fn js_runtime() -> Option<std::path::PathBuf> {
+    for candidate in JS_RUNTIMES {
+        if let Some(found) = crate::sidecar::manifest_sidecar::which_on_path(candidate) {
+            return Some(found);
+        }
+    }
+    for candidate in JS_RUNTIMES {
+        if let Some(found) = well_known_runtime(candidate) {
+            return Some(found);
         }
     }
     None
 }
 
-fn which_on_path(binary: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            return Some(candidate);
+/// Install prefixes a process that did not inherit a login shell's `PATH` still
+/// has to look in.
+#[cfg(windows)]
+fn well_known_runtime(binary: &str) -> Option<std::path::PathBuf> {
+    let exe = format!("{binary}.exe");
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        roots.push(
+            std::path::PathBuf::from(program_files)
+                .join("nodejs")
+                .join(&exe),
+        );
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let local = std::path::PathBuf::from(local);
+        roots.push(local.join("Programs").join("nodejs").join(&exe));
+        // winget shims every package it installs into this one directory.
+        roots.push(
+            local
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Links")
+                .join(&exe),
+        );
+    }
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".bun").join("bin").join(&exe));
+    }
+    roots.into_iter().find(|p| p.is_file())
+}
+
+#[cfg(not(windows))]
+fn well_known_runtime(binary: &str) -> Option<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("/opt/homebrew/bin").join(binary),
+        std::path::PathBuf::from("/usr/local/bin").join(binary),
+        std::path::PathBuf::from("/usr/bin").join(binary),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".bun").join("bin").join(binary));
+        roots.push(home.join(".volta").join("bin").join(binary));
+        roots.push(home.join(".local").join("bin").join(binary));
+        // nvm keeps one bin dir per installed Node version.
+        if let Ok(entries) = std::fs::read_dir(home.join(".nvm").join("versions").join("node")) {
+            for entry in entries.flatten() {
+                roots.push(entry.path().join("bin").join(binary));
+            }
         }
     }
-    None
+    roots.into_iter().find(|p| p.is_file())
 }
 
 /// The pi-ai OAuth provider id backing a Ryu provider id. These coincide by
@@ -226,8 +292,12 @@ pub async fn start(ryu_provider_id: &str) -> Result<String> {
     let provider = oauth_provider_id(ryu_provider_id)
         .ok_or_else(|| anyhow!("\"{ryu_provider_id}\" is not a subscription login provider"))?;
     let bridge = ensure_bridge()?;
-    let runtime = js_runtime()
-        .ok_or_else(|| anyhow!("no JavaScript runtime found on PATH — install Node to sign in"))?;
+    let runtime = js_runtime().ok_or_else(|| {
+        anyhow!(
+            "no JavaScript runtime found — Ryu looked on PATH and in the usual Node/Bun install \
+             locations. Install Node, then try signing in again"
+        )
+    })?;
 
     // Retire any earlier attempt for this provider before binding its port again.
     let stale: Vec<String> = sessions()
@@ -377,6 +447,27 @@ mod tests {
         // Not a login provider: an api-key provider has nothing to log into.
         assert_eq!(oauth_provider_id("openai"), None);
         assert_eq!(oauth_provider_id("nope"), None);
+    }
+
+    /// The runtime probe must find an interpreter by its PLATFORM file name, not
+    /// by the bare literal. Probing `<dir>/node` is what made every Windows host
+    /// (where it is `node.exe`) answer "no JavaScript runtime found" and fail the
+    /// login with a 400 before the flow ever started. `sh`/`cmd` stand in for the
+    /// interpreters here because they are the only executables guaranteed to be
+    /// present on a CI box — the lookup is the same one.
+    #[test]
+    fn the_runtime_probe_resolves_by_platform_file_name() {
+        #[cfg(unix)]
+        let known = "sh";
+        #[cfg(windows)]
+        let known = "cmd";
+        assert!(
+            crate::sidecar::manifest_sidecar::which_on_path(known).is_some(),
+            "the probe backing js_runtime cannot find {known}"
+        );
+        let missing =
+            crate::sidecar::manifest_sidecar::which_on_path("definitely-not-a-real-runtime-xyz");
+        assert!(missing.is_none());
     }
 
     /// A completed login must land in `auth.json` WITHOUT disturbing any other

@@ -1567,6 +1567,9 @@ pub fn capability_label(grant: &str) -> String {
         // plugin host bridge). The declarative `http` tier needs NO grant — it runs
         // shell-side; this grant is only for app-consumed intents.
         "views:actions" => "View actions".to_string(),
+        // Assistant bridge — the app publishes page context to the global Ask Ryu
+        // panel and may take it over while its own surface is open.
+        "assistant:context" => "Assistant context".to_string(),
         "core:list_agents" => "Lists agents & models".to_string(),
         "media:generate" => "Generates images, video & speech".to_string(),
         "media:transcribe" => "Transcribes audio".to_string(),

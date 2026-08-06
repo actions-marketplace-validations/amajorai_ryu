@@ -45,15 +45,29 @@ export function storeTabSectionValue(tab: PluginStoreTab): string {
 	return `plugin:${tab.plugin}:${tab.id}`;
 }
 
-/** Contributed store tabs, sorted into a stable render order within each group. */
+/**
+ * Contributed store tabs the Store shows, sorted into a stable render order
+ * within each group.
+ *
+ * **Only tabs whose owning app is installed AND enabled.** Core serves every
+ * declaration regardless (see `Contributes::store_tabs`) so a surface *may* use
+ * the tab as an acquisition funnel; the desktop deliberately does not. A pill
+ * that exists whether or not you own the app is indistinguishable from a section
+ * the shell hardcoded — it made "Workflows" and "Meeting Notes" look welded into
+ * the Store, and clicking either got you a "Turn on X" prompt where a catalog
+ * should be. Apps are installed from the Apps tab; a tab appears when its app
+ * does, and disappears when the app is turned off.
+ */
 export function useContributedStoreTabs(): PluginStoreTab[] {
 	const { store_tabs } = usePluginContributions();
 	return useMemo(
 		() =>
-			[...store_tabs].sort(
-				(a, b) =>
-					(a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title)
-			),
+			store_tabs
+				.filter((t) => t.app_installed && t.app_enabled)
+				.sort(
+					(a, b) =>
+						(a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title)
+				),
 		[store_tabs]
 	);
 }

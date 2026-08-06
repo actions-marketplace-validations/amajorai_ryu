@@ -884,6 +884,7 @@ export function CoworkContextPanel({
 				classNames={{
 					item: "border border-border/60",
 					description: "text-sm",
+					title: "truncate",
 				}}
 				defaultValue={items[0]?.id ?? null}
 				items={items}

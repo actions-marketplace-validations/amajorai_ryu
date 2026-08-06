@@ -1,5 +1,9 @@
 import { Share08Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import {
+	DESKTOP_TRIAL_INCLUDES,
+	DESKTOP_TRIAL_LABEL,
+} from "@ryu/auth/lib/plans";
 import { settingsApi, useSubscription } from "@ryu/settings";
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
@@ -251,11 +255,13 @@ function DesktopAccessSection() {
 		subscription: "Active subscription",
 		license: "Licensed",
 		beta: "Free during beta",
-		trial: `Free trial — ${verdict.daysLeftInTrial} day${
+		// Not a "Pro trial": the trial grants Band 2 only — see
+		// `DESKTOP_TRIAL_LABEL` in `@ryu/auth/lib/plans`.
+		trial: `${DESKTOP_TRIAL_LABEL} — ${verdict.daysLeftInTrial} day${
 			verdict.daysLeftInTrial === 1 ? "" : "s"
 		} left`,
 		"offline-grace": "Active (offline)",
-		"trial-expired": "Trial ended",
+		"trial-expired": `${DESKTOP_TRIAL_LABEL} ended`,
 		locked: "Free (local only)",
 	};
 
@@ -274,7 +280,7 @@ function DesktopAccessSection() {
 						verdict.paywalled
 							? "Basic local chat stays free. Unlock Pro features and cloud models that run for you."
 							: verdict.reason === "trial"
-								? "You have full access during the trial."
+								? DESKTOP_TRIAL_INCLUDES
 								: verdict.reason === "beta"
 									? "Ryu is free for everyone during the beta. Enjoy full Pro features."
 									: "Pro features are unlocked."

@@ -19,7 +19,7 @@
 //     sidestep the `targetOrigin: "*"` ambiguity a null-origin frame would force.
 
 import type { MutableRefObject } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import {
 	asAgentRunArg,
 	asFinetuneIdArg,
@@ -44,6 +44,19 @@ import {
  *  component. Do NOT add `allow-same-origin`; it converts the sandbox into full
  *  parent access (invariant #2). */
 export const IFRAME_SANDBOX = "allow-scripts";
+
+/**
+ * Attach the handshake listener during the COMMIT, not from a passive effect.
+ *
+ * React flushes `useEffect` in a scheduler task, which the iframe's own load task
+ * can beat — and a `ryu-plugin-ready` posted before the listener exists is dropped
+ * with nothing to re-deliver it. The frame now re-announces until the port lands
+ * (`handshakeAnnounceScript`), so this is no longer load-bearing; it just closes
+ * the window instead of paying a retry tick for it. `useLayoutEffect` warns under
+ * SSR, so fall back to `useEffect` where there is no DOM.
+ */
+const useHandshakeEffect =
+	typeof document === "undefined" ? useEffect : useLayoutEffect;
 
 /** Inputs to the handshake decision, pulled out of the DOM event so the decision
  *  is a pure function. */
@@ -148,7 +161,7 @@ export function ExtensionHost({
 	const pushRefRef = useRef(pushRef);
 	pushRefRef.current = pushRef;
 
-	useEffect(() => {
+	useHandshakeEffect(() => {
 		const iframe = iframeRef.current;
 		if (!iframe) {
 			return;

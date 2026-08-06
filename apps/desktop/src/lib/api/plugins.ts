@@ -456,6 +456,11 @@ export interface PluginContributions {
 	/** Per-message toolbar actions enabled plugins contribute
 	 *  (`contributes.message_actions`), tagged with `plugin`. */
 	message_actions: PluginMessageAction[];
+	/** Output styles contributed by enabled plugins (`contributes.output_styles`),
+	 *  tagged with `plugin`. See {@link PluginOutputStyle} — the desktop reads styles
+	 *  from `GET /api/output-styles`, so this family is provenance, not the picker's
+	 *  data source. */
+	output_styles: PluginOutputStyle[];
 	settings_tabs: Record<string, unknown>[];
 	/** App-registered sidebar buttons (single nav rows), tagged with `plugin`. */
 	sidebar_buttons: PluginSidebarButton[];
@@ -466,6 +471,11 @@ export interface PluginContributions {
 	 *  install/enable state. The ONE family Core serves for disabled and
 	 *  not-installed apps too — see {@link PluginStoreTab}. */
 	store_tabs: PluginStoreTab[];
+	/** Colour themes contributed by enabled plugins (`contributes.themes`), tagged
+	 *  with `plugin`. Shape-identical to the shell's own `ThemeVariant`, so an
+	 *  installed theme and a built-in one are the same object by the time the
+	 *  Appearance picker renders them. */
+	themes: PluginTheme[];
 	turn_hooks: Record<string, unknown>[];
 	/** Declarative views (the Raycast tier) contributed by enabled plugins. Each is a
 	 *  {@link ViewContribution} the desktop/island renderer maps to native components,
@@ -486,6 +496,62 @@ export interface PluginSidebarSection {
 	plugin: string;
 	spec?: SidebarSectionSpec;
 	title: string;
+}
+
+/** A colour theme served by Core from an enabled plugin's `contributes.themes[]`,
+ *  tagged with its owning `plugin`.
+ *
+ *  This is the marketplace half of the theme story: rather than a `CatalogKind`, a
+ *  theme rides in on an ordinary plugin, so it inherits install/uninstall/enable,
+ *  versioning, signing and the Store detail page unchanged — the same trade VS Code
+ *  and Zed make. `tokens` is left open (CSS custom property → value) because the
+ *  design system grows independently of this contract, and the shell only ever
+ *  assigns these to CSS variables, never evaluates them. */
+export interface PluginTheme {
+	id: string;
+	label: string;
+	mode: "light" | "dark";
+	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
+	plugin: string;
+	preview: { bg: string; surface: string; primary: string; text: string };
+	tokens: Record<string, string>;
+}
+
+/** An output style served by Core from an enabled plugin's `contributes.output_styles[]`,
+ *  tagged with its owning `plugin`.
+ *
+ *  A style reshapes HOW an agent answers by editing the system prompt for the turn
+ *  (`docs/output-styles.md`). Like {@link PluginTheme} it rides in on an ordinary
+ *  plugin rather than being its own catalog kind, so it inherits install/enable,
+ *  versioning, signing and the Store detail page unchanged.
+ *
+ *  This family is **metadata + provenance, never the style body**. Core parses the
+ *  contributed Markdown once (`parse_output_style_md`, design §4's one-parser rule)
+ *  and serves only the frontmatter it read; neither the pre-hydration `file` path nor
+ *  the inlined `source` reaches a client. That is deliberate rather than incidental —
+ *  a body is up to 64 KB and this endpoint is polled by every shell on boot, and the
+ *  body's only consumer is Core's own registry, which already got it at the enable
+ *  seam. A surface that wants the text asks `GET /api/output-styles/{id}/source`.
+ *
+ *  So this is what a surface uses to answer "which plugin shipped this style" and to
+ *  explain a style it cannot offer (a `force_for_plugin` row is pinned while its
+ *  plugin is enabled). The picker's actual data source is `GET /api/output-styles`,
+ *  which merges these with the user's, the project's and managed styles. */
+export interface PluginOutputStyle {
+	/** Frontmatter `description`; `null` when the style file omits it. */
+	description: string | null;
+	/** Frontmatter `force-for-plugin` — this style overrides all three selection
+	 *  tiers while its plugin is enabled (design §5). */
+	force_for_plugin: boolean;
+	id: string;
+	/** Frontmatter `keep-coding-instructions` — whether the body is appended after the
+	 *  agent's base instructions (`true`) or replaces them (`false`, the default).
+	 *  See `docs/output-styles.md` §2. */
+	keep_coding_instructions: boolean;
+	/** Frontmatter `name`, falling back to the file stem. */
+	name: string;
+	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
+	plugin: string;
 }
 
 /** An app-registered marketplace TAB as served by Core (`contributes.store_tabs[]`),
@@ -767,6 +833,7 @@ export async function getPluginContributions(
 		composer_controls: json.composer_controls ?? [],
 		settings_tabs: json.settings_tabs ?? [],
 		message_actions: json.message_actions ?? [],
+		output_styles: json.output_styles ?? [],
 		context_menu_items: json.context_menu_items ?? [],
 		slash_commands: json.slash_commands ?? [],
 		turn_hooks: json.turn_hooks ?? [],
@@ -774,6 +841,7 @@ export async function getPluginContributions(
 		views: json.views ?? [],
 		sidebar_sections: json.sidebar_sections ?? [],
 		sidebar_buttons: json.sidebar_buttons ?? [],
+		themes: json.themes ?? [],
 		dock_panels: json.dock_panels ?? [],
 		store_tabs: json.store_tabs ?? [],
 		channels: json.channels ?? [],

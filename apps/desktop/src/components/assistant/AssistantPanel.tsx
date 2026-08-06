@@ -81,23 +81,60 @@ function tabContextTitle(title: string, path: string): string {
 }
 
 /**
- * Build the user-message text for a fresh thread, embedding the active page
- * context inline (the established "ask about what you're looking at" convention
- * — Core has no structured context field, so context rides in the message).
+ * Resolve the published context to plain text at SEND time.
+ *
+ * An item's `getText` wins over its `text` snapshot — that is the whole point of
+ * the lazy form: a dashboard's widgets refresh on their own, so the snapshot the
+ * page pushed when it mounted describes a board that no longer exists. A
+ * resolver that throws degrades to its snapshot rather than failing the send.
  */
-function composeWithContext(
-	content: string,
+async function resolveContext(
 	context: PageContextItem[]
+): Promise<{ source?: string; text: string; title: string }[]> {
+	return await Promise.all(
+		context.map(async (c) => {
+			const head = { title: c.title, source: c.source };
+			if (!c.getText) {
+				return { ...head, text: c.text };
+			}
+			try {
+				return { ...head, text: (await c.getText()) || c.text };
+			} catch {
+				return { ...head, text: c.text };
+			}
+		})
+	);
+}
+
+/** The `<page-context>` block for a resolved context set, or "" when empty. */
+function contextBlock(
+	resolved: { source?: string; text: string; title: string }[]
 ): string {
-	if (context.length === 0) {
-		return content;
+	if (resolved.length === 0) {
+		return "";
 	}
-	const block = context
+	return resolved
 		.map((c) => {
+			// Attribution rides into the prompt too: the model should know a claim
+			// came from an app, not from the user or from Ryu itself.
+			const head = c.source
+				? `### ${c.title} (from ${c.source})`
+				: `### ${c.title}`;
 			const body = c.text.trim();
-			return body ? `### ${c.title}\n${body}` : `### ${c.title}`;
+			return body ? `${head}\n${body}` : head;
 		})
 		.join("\n\n");
+}
+
+/**
+ * Build the user-message text, embedding the active page context inline (the
+ * established "ask about what you're looking at" convention — Core has no
+ * structured context field, so context rides in the message).
+ */
+function composeWithContext(content: string, block: string): string {
+	if (!block) {
+		return content;
+	}
 	return `The user is working in Ryu and currently has this open. Use it as context for their request.\n\n<page-context>\n${block}\n</page-context>\n\n${content}`;
 }
 
@@ -121,7 +158,7 @@ function buildChatRequestBody(params: {
 		const messages = id
 			? injectPreamble(
 					outgoing,
-					buildBuilderPreamble(session.kind, id, session.snapshot)
+					buildBuilderPreamble(session, id, session.snapshot)
 				)
 			: outgoing;
 		return {
@@ -147,22 +184,54 @@ function buildChatRequestBody(params: {
 	};
 }
 
-/** Empty-state header for the builder chat, worded per builder kind. */
+/** Copy under the empty-state title. An app-defined surface supplies its own;
+ *  the two built-in builders keep their curated wording. */
+function surfaceDescription(session: AssistantBuilderSession): string {
+	if (session.description) {
+		return session.description;
+	}
+	if (session.kind === "agent") {
+		return "Ask what this agent should be. When it tries to change itself, I'll ask you to allow or deny the tool call.";
+	}
+	if (session.kind === "workflow") {
+		return "Describe what the workflow should do in plain language. I'll assemble the nodes and wiring on the canvas.";
+	}
+	return "Ask about what you have open here, or say what you want changed.";
+}
+
+/** Empty-state header for a takeover, worded per surface, with the surface's own
+ *  one-tap starter prompts underneath (an app declares them; the built-in
+ *  builders declare none and simply render nothing extra). */
 function BuilderEmptyState({
+	onPrompt,
 	session,
 	title,
 }: {
+	onPrompt: (prompt: string) => void;
 	session: AssistantBuilderSession;
 	title: string | null;
 }) {
+	const prompts = session.prompts?.filter((p) => p.trim().length > 0) ?? [];
 	return (
 		<div className="flex flex-col gap-1 px-1 pb-3 text-center">
 			<span className="font-semibold text-base">{title}</span>
 			<span className="text-muted-foreground text-sm">
-				{session.kind === "agent"
-					? "Ask what this agent should be. When it tries to change itself, I'll ask you to allow or deny the tool call."
-					: "Describe what the workflow should do in plain language. I'll assemble the nodes and wiring on the canvas."}
+				{surfaceDescription(session)}
 			</span>
+			{prompts.length > 0 ? (
+				<div className="mt-2 flex flex-wrap justify-center gap-1.5">
+					{prompts.map((prompt) => (
+						<button
+							className="rounded-full border border-border px-2.5 py-1 text-muted-foreground text-xs hover:bg-muted hover:text-foreground"
+							key={prompt}
+							onClick={() => onPrompt(prompt)}
+							type="button"
+						>
+							{prompt}
+						</button>
+					))}
+				</div>
+			) : null}
 		</div>
 	);
 }
@@ -193,6 +262,10 @@ function GenericAssistantExtras(props: {
 					key={c.id}
 				>
 					<span className="truncate">{c.title}</span>
+					{/* Shell-set attribution — an app feeding the assistant says so. */}
+					{c.source ? (
+						<span className="shrink-0 opacity-60">· {c.source}</span>
+					) : null}
 					<button
 						aria-label={`Remove ${c.title} from context`}
 						className="shrink-0 rounded-full p-0.5 hover:bg-background"
@@ -652,6 +725,19 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	const effectiveContextRef = useRef(effectiveContext);
 	effectiveContextRef.current = effectiveContext;
 
+	// The context block last sent on this thread. Context is re-injected whenever
+	// it CHANGES, not only on the first turn: a live surface (dashboard, canvas)
+	// looks different by turn three, and the old first-turn-only rule meant every
+	// later question was answered against a stale board — or against nothing at
+	// all if the user opened the panel after typing. Unchanged context is not
+	// re-sent, so a static document still ships exactly once.
+	const lastSentContextRef = useRef<string>("");
+	// A new thread has been told nothing yet — re-arm so the next send carries the
+	// full context again (New chat, or reopening on a different conversation).
+	useEffect(() => {
+		lastSentContextRef.current = "";
+	}, [activeConvId]);
+
 	const handleSend = useCallback(
 		(msg: { role: "user"; content: string }) => {
 			const session = builderRef.current;
@@ -682,14 +768,26 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 				setConversationId(convId);
 				setActiveConversationId(convId);
 			}
-			const baseText =
-				messages.length === 0
-					? composeWithContext(msg.content, effectiveContextRef.current)
-					: msg.content;
+			// Drain the composer's staged attachments SYNCHRONOUSLY, before the async
+			// context resolve. A page's `getText` may genuinely await, and anything the
+			// composer re-renders in that window would take the staged images/clip with
+			// it — the turn would then send without the files the user attached.
 			const clipText = takeClipTextRef.current();
-			const text = clipText ? `${clipText}\n\n${baseText}` : baseText;
 			const files = takeImagesRef.current();
-			sendMessage(files ? { text, files } : { text });
+			// Resolving `getText` is async, so the send is too. The composer has
+			// already cleared its input by now, so nothing user-visible waits on it.
+			void resolveContext(effectiveContextRef.current).then((resolved) => {
+				const block = contextBlock(resolved);
+				const changed = block !== lastSentContextRef.current;
+				const baseText = changed
+					? composeWithContext(msg.content, block)
+					: msg.content;
+				if (changed) {
+					lastSentContextRef.current = block;
+				}
+				const text = clipText ? `${clipText}\n\n${baseText}` : baseText;
+				sendMessage(files ? { text, files } : { text });
+			});
 		},
 		[
 			convId,
@@ -701,6 +799,20 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 			sendMessage,
 		]
 	);
+
+	// An app asked a question on the user's behalf (`assistant.open({ prompt })`)
+	// while the panel was closed — the panel unmounts when closed, so the store
+	// held it. Send it once and clear the queue immediately, before the async send
+	// resolves, so a re-render can never send it twice.
+	const pendingPrompt = useAssistantStore((s) => s.pendingPrompt);
+	const setPendingPrompt = useAssistantStore((s) => s.setPendingPrompt);
+	useEffect(() => {
+		if (!pendingPrompt) {
+			return;
+		}
+		setPendingPrompt(null);
+		handleSend({ role: "user", content: pendingPrompt });
+	}, [pendingPrompt, setPendingPrompt, handleSend]);
 
 	const handleOpenFullScreen = useCallback(() => {
 		// Carry THIS conversation into a full `/chat` tab, then close the panel so
@@ -726,15 +838,22 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	// Dividers read fine on the opaque sidebar, but the floating window is
 	// deliberately borderless/backgroundless — drop them there.
 	const divider = bare ? "" : "border-border/60 border-b";
+	// An app-defined surface names itself (`label`); the built-in builders keep
+	// the "Build <target>" wording.
 	const builderTitle = builder
-		? `Build ${builder.targetName.trim() || (builder.kind === "agent" ? "this agent" : "this workflow")}`
+		? builder.label?.trim() ||
+			`Build ${builder.targetName.trim() || (builder.kind === "agent" ? "this agent" : builder.kind === "workflow" ? "this workflow" : "this")}`
 		: null;
 
 	// Builder threads get a worded prompt; the generic assistant reuses the main
 	// chat's `EmptyStateHeader` so the driving agent's logo sits behind the
 	// composer and opens the same Agent · Model · Thinking dropdown.
 	const emptyHeader = builder ? (
-		<BuilderEmptyState session={builder} title={builderTitle} />
+		<BuilderEmptyState
+			onPrompt={(prompt) => handleSend({ role: "user", content: prompt })}
+			session={builder}
+			title={builderTitle}
+		/>
 	) : (
 		<EmptyStateHeader
 			logo={genericLogo}

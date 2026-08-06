@@ -19,6 +19,9 @@ import {
 	asActivitySessionArg,
 	asApprovalDecideArg,
 	asAssetQueryArg,
+	asAssistantContextArg,
+	asAssistantOpenArg,
+	asAssistantSurfaceArg,
 	asCalendarCreateAutomationArg,
 	asFinetuneIdArg,
 	asMailCreateArg,
@@ -649,5 +652,91 @@ describe("string-shape validators that permit an empty value", () => {
 		expect(asRecordStartArg({ task: "do X" })).toEqual({ task: "do X" });
 		expect(asRecordStartArg({ task: 5 })).toBeNull();
 		expect(asRecordStartArg(null)).toBeNull();
+	});
+});
+
+describe("assistant bridge validators", () => {
+	it("asAssistantContextArg drops malformed items and keeps the well-formed ones", () => {
+		expect(
+			asAssistantContextArg({
+				items: [
+					{ id: "a", title: "Board", text: "one widget" },
+					{ id: "", title: "no id" },
+					{ id: "b", title: "" },
+					{ title: "no id at all" },
+					"not an object",
+					{ id: "c", title: "No text" },
+				],
+			})
+		).toEqual({
+			items: [
+				{ id: "a", title: "Board", text: "one widget" },
+				// A missing `text` is legitimate (a title-only chip), so it defaults
+				// to "" rather than dropping the item.
+				{ id: "c", title: "No text", text: "" },
+			],
+		});
+	});
+
+	it("asAssistantContextArg rejects a wrong ENVELOPE but never a wrong item", () => {
+		expect(asAssistantContextArg(null)).toBeNull();
+		expect(asAssistantContextArg({ items: "nope" })).toBeNull();
+		expect(asAssistantContextArg({})).toBeNull();
+		expect(asAssistantContextArg({ items: [] })).toEqual({ items: [] });
+	});
+
+	it("asAssistantContextArg caps item count and body length instead of failing", () => {
+		const many = Array.from({ length: 40 }, (_, i) => ({
+			id: `i${i}`,
+			title: "t",
+			text: "x".repeat(20_000),
+		}));
+		const out = asAssistantContextArg({ items: many });
+		expect(out?.items.length).toBe(8);
+		expect(out?.items[0].text.length).toBe(8000);
+	});
+
+	it("asAssistantSurfaceArg requires a label — an unattributed takeover is refused", () => {
+		expect(asAssistantSurfaceArg({ preamble: "do things" })).toBeNull();
+		expect(asAssistantSurfaceArg({ label: "   " })).toBeNull();
+		expect(asAssistantSurfaceArg(null)).toBeNull();
+		expect(asAssistantSurfaceArg({ label: "Build board" })).toEqual({
+			label: "Build board",
+		});
+	});
+
+	it("asAssistantSurfaceArg keeps only well-typed optional fields", () => {
+		expect(
+			asAssistantSurfaceArg({
+				label: "Board",
+				description: "d",
+				preamble: "p",
+				tools: ["a", "", 5, "b"],
+				prompts: [],
+				extra: "ignored",
+			})
+		).toEqual({
+			label: "Board",
+			description: "d",
+			preamble: "p",
+			tools: ["a", "b"],
+		});
+	});
+
+	it("asAssistantOpenArg treats no argument as a bare open", () => {
+		expect(asAssistantOpenArg(undefined)).toEqual({});
+		expect(asAssistantOpenArg(null)).toEqual({});
+		expect(asAssistantOpenArg({})).toEqual({});
+		expect(asAssistantOpenArg("floating")).toBeNull();
+	});
+
+	it("asAssistantOpenArg keeps a known mode + non-blank prompt only", () => {
+		expect(asAssistantOpenArg({ mode: "sidebar", prompt: "why?" })).toEqual({
+			mode: "sidebar",
+			prompt: "why?",
+		});
+		expect(asAssistantOpenArg({ mode: "fullscreen", prompt: "  " })).toEqual(
+			{}
+		);
 	});
 });

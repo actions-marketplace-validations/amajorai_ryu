@@ -24,6 +24,25 @@ pub use ryu_gw_firewall::{DetectionKind, FirewallMatch};
 pub mod inspector;
 pub mod resolve;
 
+/// Compiled-size ceiling for a caller-supplied custom pattern, in bytes of DFA
+/// program. The `regex` crate is backtracking-free, so a custom pattern cannot
+/// cause catastrophic *matching* blow-up — but bounded repetition still expands
+/// at COMPILE time, and `a{1000}{1000}` compiles to a program measured in
+/// gigabytes. That was harmless while patterns only ever came from node/org
+/// config; it stops being harmless now that the request scope
+/// (`x-ryu-node-routing`) lets a bearer supply them. 1 MiB is roughly two orders
+/// of magnitude above what the curated pattern set needs, so no legitimate
+/// pattern notices the bound; one over it is skipped with a warning like any
+/// other invalid regex, which never disables the rest of the firewall.
+const CUSTOM_PATTERN_SIZE_LIMIT: usize = 1 << 20;
+
+/// Compile one caller-supplied pattern under [`CUSTOM_PATTERN_SIZE_LIMIT`].
+fn compile_custom_pattern(pattern: &str) -> Result<Regex, regex::Error> {
+    regex::RegexBuilder::new(pattern)
+        .size_limit(CUSTOM_PATTERN_SIZE_LIMIT)
+        .build()
+}
+
 pub struct FirewallScanner {
     config: FirewallConfig,
     pii_patterns: Vec<(String, Regex)>,
@@ -87,7 +106,7 @@ impl FirewallScanner {
                 warn!("Firewall: skipping custom pattern with empty name or regex");
                 continue;
             }
-            match Regex::new(&pat.regex) {
+            match compile_custom_pattern(&pat.regex) {
                 Ok(re) => {
                     let target = match pat.kind {
                         CustomPatternKind::Pii => &mut pii_patterns,

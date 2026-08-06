@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::sidecar::download_manager::{
-    build_http_client, compute_sha256, extract_from_tar_gz, extract_from_zip, ryu_dir,
-    ProgressCallback, VersionStore,
+    build_http_client, compute_sha256, extract_from_tar_gz, extract_from_zip, fetch_sibling_sha256,
+    ryu_dir, sha256_sibling_url, ProgressCallback, VersionStore,
 };
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
@@ -134,43 +134,20 @@ fn archive_url() -> String {
 // ── Archive integrity: the sibling `.sha256` ───────────────────────────────────
 //
 // Byte-for-byte the same reasoning as Ghost's — see the long form in
-// `sidecar/tools/ghost/downloader.rs`, which also carries the "hoist into
-// `download_manager` when that file is next opened" note. In short: the release
-// workflow emits a `<asset>.sha256` next to every staged asset, `ensure_installed`
-// used to pass `sha256: None` and execute whatever bytes came back, and a
-// published digest nothing verifies against is a shipped artifact that cannot
-// take effect. Precedent is `manifest_sidecar::fetch_release_sha256` (duplicated,
-// not called: that one is `#[cfg(not(debug_assertions))]` and its `screen_https`
-// is module-private). NOT a precedent: the llama.cpp downloader, which passes
-// `sha256: None` at both call sites.
+// `sidecar/tools/ghost/downloader.rs`. In short: the release workflow emits a
+// `<asset>.sha256` next to every staged asset, `ensure_installed` used to pass
+// `sha256: None` and execute whatever bytes came back, and a published digest
+// nothing verifies against is a shipped artifact that cannot take effect.
+//
+// HOISTED: the parser + fetcher that used to be duplicated here now live in
+// `download_manager::{parse_sha256_digest, fetch_sibling_sha256, sha256_sibling_url}`,
+// which is the hoist ghost's section comment asked for. The parser's unit tests
+// moved with it. `manifest_sidecar::fetch_release_sha256` stays separate (it is
+// `#[cfg(not(debug_assertions))]` and its `screen_https` is module-private).
 //
 // Best-effort rather than fail-closed, unlike `mirror/overlay/install.sh`:
 // `RYU_SHADOW_RELEASE_URL` exists to point at self-built archives that have no
 // sibling digest, and failing closed would make the documented override unusable.
-
-/// The sibling checksum URL for a release archive.
-fn sha256_url(archive_url: &str) -> String {
-    format!("{archive_url}.sha256")
-}
-
-/// Parse a published `.sha256` body into a lowercase 64-char hex digest.
-///
-/// Accepts the two-column `<hex>  <filename>` form both `sha256sum` and
-/// `shasum -a 256` write, and a bare hex line. Anything that is not exactly 64 hex
-/// characters is rejected rather than passed on, because `DownloadCenter` compares
-/// the value verbatim: a truncated or HTML-error-page "digest" would fail the
-/// transfer as a checksum mismatch and misdiagnose a missing file as a corrupt one.
-///
-/// Pure so it is testable against the real published format without a network
-/// call; the fetch wrapper is [`ShadowDownloader::fetch_release_sha256`].
-fn parse_sha256_digest(body: &str) -> Option<String> {
-    let hex = body.split_whitespace().next()?;
-    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(hex.to_ascii_lowercase())
-    } else {
-        None
-    }
-}
 
 // ── ShadowDownloader ───────────────────────────────────────────────────────────
 
@@ -201,21 +178,7 @@ impl ShadowDownloader {
     /// by whoever rewrote the archive, so following it would be verification
     /// theatre. A non-https override downloads unverified (warned) instead.
     async fn fetch_release_sha256(&self, archive_url: &str) -> Option<String> {
-        if !archive_url.starts_with("https://") {
-            return None;
-        }
-        let body = self
-            .client
-            .get(sha256_url(archive_url))
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .text()
-            .await
-            .ok()?;
-        parse_sha256_digest(&body)
+        fetch_sibling_sha256(&self.client, archive_url).await
     }
 
     /// Ensure the Shadow binary is installed at `~/.ryu/bin/shadow`.
@@ -266,13 +229,14 @@ impl ShadowDownloader {
         if sha256.is_none() {
             tracing::warn!(
                 "shadow: no usable .sha256 published at {} — downloading unverified",
-                sha256_url(&url)
+                sha256_sibling_url(&url)
             );
         }
 
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Tool,
+                role: crate::downloads::DownloadRole::Tool,
                 label: "Shadow".to_string(),
                 url: url.to_string(),
                 dest: archive_dest,
@@ -484,6 +448,10 @@ mod tests {
     // green whenever GitHub is up and says nothing about whether we can parse what
     // the release actually publishes.
 
+    // The PARSER's tests moved to `download_manager::sha256_sibling_tests` with the
+    // parser itself. What stays here is shadow-specific: that the URL we actually
+    // request is the sibling of shadow's own archive URL, and that shadow's wrapper
+    // keeps the https-only rule.
     #[test]
     fn sha256_url_is_the_published_asset_plus_the_suffix() {
         // The workflow emits `<asset>.sha256` — an exact sibling, not a separate
@@ -492,50 +460,10 @@ mod tests {
         let _lock = lock_env();
         let _g = EnvGuard::clear();
         let url = archive_url();
-        assert_eq!(sha256_url(&url), format!("{url}.sha256"));
-        assert!(sha256_url(&url).ends_with(".tar.gz.sha256") || cfg!(target_os = "windows"));
-    }
-
-    #[test]
-    fn parse_sha256_digest_reads_the_two_column_shasum_form() {
-        // The exact bytes `sha256sum` / `shasum -a 256` write, which is what
-        // `.github/workflows/release.yml` and `scripts/release/release-local.sh`
-        // redirect into the `.sha256` file.
-        let hex = "b".repeat(64);
-        assert_eq!(
-            parse_sha256_digest(&format!("{hex}  shadow-macos-aarch64.tar.gz\n")),
-            Some(hex.clone())
+        assert_eq!(sha256_sibling_url(&url), format!("{url}.sha256"));
+        assert!(
+            sha256_sibling_url(&url).ends_with(".tar.gz.sha256") || cfg!(target_os = "windows")
         );
-        assert_eq!(
-            parse_sha256_digest(&format!("{hex} shadow.tar.gz")),
-            Some(hex.clone())
-        );
-        assert_eq!(parse_sha256_digest(&hex), Some(hex.clone()));
-        assert_eq!(parse_sha256_digest(&format!("  \n {hex}\n")), Some(hex));
-    }
-
-    #[test]
-    fn parse_sha256_digest_lowercases() {
-        // `DownloadCenter` compares against `hex::encode`'s lowercase output, so an
-        // uppercase digest would fail every transfer as a "checksum mismatch" — a
-        // corrupt-download diagnosis for a perfectly good file.
-        let upper = "A1B2C3D4".repeat(8);
-        assert_eq!(upper.len(), 64);
-        assert_eq!(parse_sha256_digest(&upper), Some("a1b2c3d4".repeat(8)));
-    }
-
-    #[test]
-    fn parse_sha256_digest_rejects_anything_that_is_not_a_digest() {
-        // Rejection matters more than acceptance: `None` downloads unverified with
-        // a warning, whereas a bogus non-digest aborts the transfer and blames the
-        // archive. GitHub answers a missing asset with an HTML page.
-        assert_eq!(parse_sha256_digest(""), None);
-        assert_eq!(parse_sha256_digest("   \n\t "), None);
-        assert_eq!(parse_sha256_digest("<!DOCTYPE html><html>Not Found"), None);
-        assert_eq!(parse_sha256_digest(&"b".repeat(63)), None, "too short");
-        assert_eq!(parse_sha256_digest(&"b".repeat(65)), None, "too long");
-        assert_eq!(parse_sha256_digest(&"g".repeat(64)), None, "not hex");
-        assert_eq!(parse_sha256_digest("sha256 shadow.tar.gz"), None);
     }
 
     #[tokio::test]

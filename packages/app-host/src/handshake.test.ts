@@ -10,6 +10,12 @@ import {
 	IFRAME_SANDBOX,
 	shouldTransferPort,
 } from "./ExtensionHost.tsx";
+import { examplePluginSrcdoc } from "./example-plugin.ts";
+import { handshakeAnnounceScript } from "./rpc.ts";
+import {
+	htmlCompanionSrcdoc,
+	thirdPartyPluginSrcdoc,
+} from "./third-party-plugin.ts";
 
 const NONCE = "host-nonce-123";
 const validReady = { kind: "ryu-plugin-ready", nonce: NONCE };
@@ -99,6 +105,52 @@ describe("handshakeHostApiVersion (versioned envelope, legacy-tolerant)", () => 
 			handshakeHostApiVersion({ ...validReady, hostApiVersion: 1 })
 		).toBeNull();
 		expect(handshakeHostApiVersion(null)).toBeNull();
+	});
+});
+
+// The frame side of the handshake. A frame that announces ONCE loses the race
+// whenever its load task beats the host's (passive-effect-scheduled) listener, and
+// nothing re-delivers a dropped `ryu-plugin-ready`: the panel then sits on
+// "starting…" forever and a Path-A bundle never even evaluates, because it is only
+// run once the port lands. Every builder must therefore re-announce until
+// connected, and must stop as soon as it holds a port (the host also refuses every
+// announce after the first — `alreadyConnected` above — so a duplicate can never
+// mint a second channel).
+describe("every sandboxed frame re-announces until the port arrives", () => {
+	const builders: [string, string][] = [
+		["example plugin", examplePluginSrcdoc("nonce-a")],
+		[
+			"third-party (Path A, ESM bundle)",
+			thirdPartyPluginSrcdoc("nonce-b", "", "com.test.a"),
+		],
+		[
+			"html companion (Path B)",
+			htmlCompanionSrcdoc("nonce-c", "<p>hi</p>", "com.test.b"),
+		],
+	];
+
+	for (const [name, doc] of builders) {
+		it(`${name} announces, then repeats on a timer`, () => {
+			expect(doc).toContain('{ kind: "ryu-plugin-ready", nonce: NONCE');
+			expect(doc).toContain("setInterval");
+			expect(doc).toContain("ryuAnnounceReady");
+		});
+
+		it(`${name} stops announcing once it holds a port`, () => {
+			expect(doc).toContain(
+				"if (port) { clearInterval(ryuReadyTimer); return; }"
+			);
+		});
+
+		it(`${name} bounds the retry window`, () => {
+			expect(doc).toContain(
+				"setTimeout(function () { clearInterval(ryuReadyTimer); }"
+			);
+		});
+	}
+
+	it("emits the versioned envelope from the shared snippet", () => {
+		expect(handshakeAnnounceScript()).toContain("hostApiVersion:");
 	});
 });
 

@@ -13,6 +13,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
+import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
 import {
 	Select,
 	SelectContent,
@@ -20,7 +21,6 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select";
-import { Slider } from "@ryu/ui/components/slider";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { useEffect, useState } from "react";
@@ -232,25 +232,16 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 								/>
 							</div>
 							<div className="flex flex-col gap-1.5">
-								<div className="flex items-center justify-between">
-									<Label htmlFor="agent-smart-route-threshold">
-										Similarity threshold
-									</Label>
-									<span className="text-muted-foreground text-xs tabular-nums">
-										{(draft.similarity_threshold ?? 0.35).toFixed(2)}
-									</span>
-								</div>
-								<Slider
-									aria-label="Similarity threshold"
+								<FluidSlider
+									format={(v) => v.toFixed(2)}
+									label="Similarity threshold"
 									max={1}
 									min={0}
-									onValueChange={(v: number | number[]) =>
-										patch({
-											similarity_threshold: Array.isArray(v) ? v[0] : v,
-										})
+									onValueChange={(similarity_threshold) =>
+										patch({ similarity_threshold })
 									}
 									step={0.05}
-									value={[draft.similarity_threshold ?? 0.35]}
+									value={draft.similarity_threshold ?? 0.35}
 								/>
 							</div>
 						</>

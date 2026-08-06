@@ -64,6 +64,12 @@ export interface LifetimeUpdatesWindow {
 /** The subscription-status payload's entitlement-bearing fields (Unit B1). */
 export interface SubscriptionStatus {
 	entitlement?: Entitlement | null;
+	/**
+	 * Server-driven rollout flags. Optional like every field here — this is a
+	 * structural view of the JSON, not a checked mirror of the server's
+	 * `SubscriptionStatusPayload`, so an older control plane simply omits it.
+	 */
+	features?: Record<string, boolean> | null;
 	lifetime?: LifetimeUpdatesWindow | null;
 	plan?: PlanId | null;
 	scope?: "org" | "user";
@@ -82,6 +88,15 @@ export interface SubscriptionStatus {
  */
 export interface EntitlementSnapshot {
 	entitlement: Entitlement | null;
+	/**
+	 * The rollout flags this caller is served, or null when the control plane
+	 * carried none (an older server, or a client whose build predates the
+	 * field). Kept NULLABLE rather than defaulted to `{}` for this file's whole
+	 * reason to exist: `{}` would read as "checked, and every flag is off",
+	 * which is exactly the outage-becomes-a-lockout mistake the header rejects.
+	 * The flag cache turns null into the compiled-in default per key instead.
+	 */
+	features: Record<string, boolean> | null;
 	lifetime: LifetimeUpdatesWindow | null;
 }
 
@@ -104,6 +119,7 @@ export async function fetchEntitlementSnapshot(): Promise<EntitlementSnapshot | 
 		const json = (await resp.json()) as SubscriptionStatus;
 		return {
 			entitlement: json.entitlement ?? null,
+			features: json.features ?? null,
 			lifetime: json.lifetime ?? null,
 		};
 	} catch {

@@ -33,6 +33,7 @@ import {
 	updateCheckFailed,
 } from "@/src/lib/api/update.ts";
 import { verdictAppliesToApp } from "@/src/lib/app-version.ts";
+import { appDisplayName } from "@/src/lib/channel-brand.ts";
 import {
 	formatUpdatesCutoff,
 	getUpdatesWindowEnd,
@@ -191,6 +192,7 @@ export function AppUpdatesSettings() {
 				onToggle={(next) => {
 					onToggle(next).catch(() => undefined);
 				}}
+				productName={appDisplayName(version)}
 				updatesWindowNotice={updatesWindowNotice}
 				version={version}
 			/>

@@ -48,6 +48,7 @@ import { CitationSources } from "./inline-citation.tsx";
 import { Markdown } from "./markdown.tsx";
 import { AcpUsageStats, MessageStats } from "./message-stats.tsx";
 import { PinnedUserMessageBar } from "./pinned-user-message-bar.tsx";
+import { shouldShowPlanning } from "./planning-visibility.ts";
 import { messageSelectableProps, SelectionQuoteToolbar } from "./quote.tsx";
 import { SpiralLoader } from "./spiral-loader.tsx";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer.tsx";
@@ -1031,15 +1032,16 @@ export const MessageList = memo(function MessageList({
 	}, [turns, assistantAvatar, assistantName]);
 	const showPlanning = useMemo(() => {
 		const lastMessage = normalizedMessages.at(-1);
-		if (!lastMessage) {
-			return false;
-		}
 		const lastTurn = turns.at(-1);
-		const hasAssistant = Boolean(lastTurn && lastTurn.assistantMsgs.length > 0);
-		if (lastMessage.role === "user" && !hasAssistant) {
-			return true;
-		}
-		return isStreaming && !getLastAssistantHasContent(normalizedMessages);
+		return shouldShowPlanning({
+			hasMessages: Boolean(lastMessage),
+			lastMessageIsUser: lastMessage?.role === "user",
+			lastTurnHasAssistant: Boolean(
+				lastTurn && lastTurn.assistantMsgs.length > 0
+			),
+			isStreaming,
+			lastAssistantHasContent: getLastAssistantHasContent(normalizedMessages),
+		});
 	}, [isStreaming, normalizedMessages, turns]);
 
 	return (

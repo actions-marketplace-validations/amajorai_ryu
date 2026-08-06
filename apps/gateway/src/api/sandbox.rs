@@ -246,7 +246,10 @@ async fn debit_sandbox_sync(
     }
     let secret = credits.internal_secret.as_deref()?;
 
-    let url = format!("{}/credits/debit", credits.base_url.trim_end_matches('/'));
+    // `/api` is part of the route — see the long note on the same join in
+    // `pipeline/mod.rs`. Without it every sandbox debit 404s and fails open, so
+    // sandbox compute bills nothing.
+    let url = format!("{}/api/credits/debit", credits.base_url.trim_end_matches('/'));
     let ref_id = format!("{run_id}:sandbox:{tick_index}");
     // No `pool` field, and that is deliberate: sandbox compute is Ryu's own
     // container time, not inference drawn from a donated provider allowance.

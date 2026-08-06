@@ -1,4 +1,4 @@
-import { ElasticSlider } from "@ryu/ui/components/elastic-slider";
+import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
 import {
 	Select,
 	SelectContent,
@@ -792,8 +792,8 @@ export function IslandSettings() {
 				caption={`One value, applied to each edge: a corner is inset on both axes at once. ${DEFAULT_ISLAND_EDGE_OFFSET}px is the default.`}
 			>
 				<SettingsCard>
-					<ElasticSlider
-						formatValue={(v) => `${v}px`}
+					<FluidSlider
+						format={(v) => `${v}px`}
 						label="Offset from edge"
 						max={MAX_ISLAND_EDGE_OFFSET}
 						min={MIN_ISLAND_EDGE_OFFSET}

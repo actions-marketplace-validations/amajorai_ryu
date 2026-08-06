@@ -4,23 +4,24 @@ import {
 	GridIcon,
 	Home01Icon,
 	Link01Icon,
+	SlidersHorizontalIcon,
 	Wallet01Icon,
 } from "@hugeicons/core-free-icons";
-import type { IconSvgElement } from "@hugeicons/react";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
 	StoreComingSoon,
-	StoreSectionNav,
+	StoreSearchButton,
 	type StoreSectionTab,
+	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store";
-import { StoreCatalogHeaderProvider } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
+import { Button } from "@ryu/ui/components/button";
 import {
-	type ReactElement,
-	useCallback,
-	useEffect,
-	useMemo,
-	useState,
-} from "react";
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@ryu/ui/components/popover";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { DesktopMarketplaceHost } from "@/src/components/marketplace/host.tsx";
 import AccountSection from "@/src/components/store/AccountSection.tsx";
 import AgentsCatalogSection from "@/src/components/store/AgentsCatalogSection.tsx";
@@ -39,7 +40,6 @@ import {
 	type StoreToolbarConfig,
 	StoreToolbarProvider,
 } from "@/src/components/store/storeToolbar.tsx";
-import WorkflowTemplatesSection from "@/src/components/store/WorkflowTemplatesSection.tsx";
 import {
 	contributedTabForSection,
 	resolveStoreSection,
@@ -238,69 +238,22 @@ function sectionHeader(
 	};
 }
 
-function StoreSectionHeader({
-	section,
-	contributed,
-	compact = false,
-}: {
-	compact?: boolean;
-	contributed: PluginStoreTab | null;
-	section: StoreSection;
-}) {
-	const header = sectionHeader(section, contributed);
-	return (
-		<div className={`shrink-0 px-4 pt-4 ${compact ? "pb-1" : "pb-3"}`}>
-			<p className="font-semibold text-lg">{header.title}</p>
-		</div>
-	);
-}
-
-/** Sections that render inside {@link StoreCatalogLayout} — a centered, max-width
- *  card grid with a preview aside. For these the header lives INSIDE the layout
- *  column (via {@link StoreCatalogHeaderProvider}) so title, search and cards
- *  stay aligned even when the aside opens; the rest keep a full-width header. */
-const CATALOG_SECTIONS = new Set<BuiltinStoreSection>([
-	"integrations",
-	"apps",
-	"plugins",
-	"skills",
-	"mcp",
-	"agents",
-	// Manage sections converted to the same App Store card/preview shape — their
-	// header lives inside the centered layout column too, so it must NOT also get
-	// the outer full-width StoreSectionHeader (that would render the title twice).
-	"engines",
-	"installed",
-]);
-
-/** Contributed tabs render through {@link ContributedStoreSection}, which is built
- *  on the same `StoreCatalogLayout`, so they belong to the centered-column header
- *  treatment too.
- *
- *  The exception is a contributed tab whose app is OFF: that path renders a bare
- *  enable prompt with no `StoreCatalogLayout`, so nothing consumes the header
- *  provider and the pane would come out titleless. It takes the full-width header
- *  instead — the same treatment the non-carded built-in sections get. */
-function usesCatalogLayout(
-	section: StoreSection,
-	contributed: PluginStoreTab | null
-): boolean {
-	if (isBuiltinSection(section)) {
-		return CATALOG_SECTIONS.has(section);
-	}
-	return section !== "home" && (contributed?.app_enabled ?? false);
-}
-
 /**
- * Unified Store shell, App Store-shaped: a full-width content pane above a
- * floating bottom toolbar (StoreSectionNav — the same pattern as the Library
- * page). The bar carries the section pills (grouped by purpose), the store-wide
- * search folded in, and — for the Models tab only — the rich filter panel. The
- * section is decided once on mount from `initialSection` (driven by the tab path
- * in Layout) and switched in-place from the bar. Typing in the folded search
- * shows aggregated cross-realm results in place of the section; picking a result
- * opens that realm with the query carried over. The Models tab publishes its own
- * filters up into the bar through {@link StoreToolbarProvider}.
+ * Unified Store shell, App Store-shaped: one inline page chrome — the section
+ * title, the section tabs, and the store-wide search — over the active section's
+ * content.
+ *
+ * The chrome used to be a floating, translucent bar pinned to the bottom of the
+ * pane with the tabs, the search and the filter panel all folded inside it. It is
+ * ordinary page furniture now: the tabs scroll in the flow (the list is
+ * open-ended — every app may register one), search is a button beside them, and a
+ * section's own filters live with that section's content
+ * ({@link StoreToolbarProvider} → the toolbar row here).
+ *
+ * The section is decided once on mount from `initialSection` (driven by the tab
+ * path in Layout) and switched in-place from the tabs. Typing in the store-wide
+ * search shows aggregated cross-realm results in place of the section; picking a
+ * result opens that realm with the query carried over.
  */
 export default function StorePage({
 	initialSection = "home",
@@ -379,8 +332,8 @@ export default function StorePage({
 		string | undefined
 	>(initialQuery);
 
-	// The active section publishes its toolbar here; the floating bottom nav
-	// (StoreSectionNav) renders it as its expandable filter panel.
+	// The active section publishes its filter panel here; the chrome's toolbar row
+	// renders it as a popover button beside the search.
 	const [toolbar, setToolbar] = useState<StoreToolbarConfig | null>(null);
 
 	const openRealm = (realm: StoreSearchRealm, query: string) => {
@@ -411,17 +364,64 @@ export default function StorePage({
 	// spinner instead of a premature "Nothing found".
 	const searchPending = searchQuery.trim().length > 0 && !search.hasQuery;
 
-	// The Models tab keeps its original full-width master-detail layout and
-	// publishes its rich filters into the floating bottom bar's expandable panel;
-	// every other (carded) section folds its filters into its own top toolbar, so
-	// only Models lights up the bottom bar's filter toggle.
-	const usesBottomFilterBar = section === "models";
+	// The Models tab keeps its full-width master-detail layout and publishes its
+	// rich filters up here; every other (carded) section renders its own filter
+	// button beside its list, so only Models fills this slot.
+	const sectionFilters = section === "models" ? toolbar : null;
 
 	return (
 		<DesktopMarketplaceHost>
 			<DesktopCatalogHost>
 				<StoreToolbarProvider value={setToolbar}>
-					<div className="relative flex h-full flex-col overflow-hidden pt-12">
+					<div className="flex h-full flex-col overflow-hidden pt-12">
+						{/* Page chrome, inline: the section title, the section tabs, and
+						    the store-wide search + the active section's filters. Aligned
+						    to the same centered column the card grids use, so the title,
+						    the tabs and the first card share a left edge. */}
+						<div className="mx-auto w-full max-w-4xl shrink-0 px-4 pt-4">
+							<div className="flex items-center justify-between gap-3">
+								<p className="font-semibold text-lg">
+									{sectionHeader(section, activeContributedTab).title}
+								</p>
+								<div className="flex items-center gap-1">
+									<StoreSearchButton
+										onChange={setSearchQuery}
+										placeholder="Search the whole marketplace…"
+										value={searchQuery}
+									/>
+									{sectionFilters?.panel ? (
+										<Popover>
+											<PopoverTrigger
+												render={
+													<Button className="gap-1.5" size="sm" variant="ghost">
+														<HugeiconsIcon
+															className="size-3.5"
+															icon={
+																sectionFilters.panelIcon ??
+																SlidersHorizontalIcon
+															}
+														/>
+														{sectionFilters.panelLabel ?? "Filters"}
+													</Button>
+												}
+											/>
+											<PopoverContent
+												align="end"
+												className="w-[min(30rem,90vw)] p-0"
+											>
+												{sectionFilters.panel}
+											</PopoverContent>
+										</Popover>
+									) : null}
+								</div>
+							</div>
+							<StoreSectionTabs
+								active={section}
+								className="pt-2 pb-1"
+								onSelect={selectSection}
+								sections={navSections}
+							/>
+						</div>
 						<div className="min-h-0 min-w-0 flex-1 overflow-hidden">
 							{searching ? (
 								<StoreSearchResults
@@ -431,77 +431,20 @@ export default function StorePage({
 									onOpenRealm={(realm) => openRealm(realm, searchQuery)}
 								/>
 							) : (
-								<div className="flex h-full flex-col">
-									{/* Catalog sections render their header INSIDE the centered
-									    layout column (via the provider); Home renders its own
-									    centered header. Only full-width master-detail sections
-									    (Models, Tools, …) get the inline full-width header here. */}
-									{usesCatalogLayout(section, activeContributedTab) ||
-									section === "home" ? null : (
-										<StoreSectionHeader
-											contributed={activeContributedTab}
-											section={section}
-										/>
-									)}
-									<div className="min-h-0 flex-1 overflow-hidden">
-										<StoreCatalogHeaderProvider
-											header={
-												<StoreSectionHeader
-													compact
-													contributed={activeContributedTab}
-													section={section}
-												/>
-											}
-										>
-											<StoreContent
-												contributedTab={activeContributedTab}
-												initialQuery={sectionInitialQuery}
-												onOpenRealm={openRealm}
-												section={section}
-											/>
-										</StoreCatalogHeaderProvider>
-									</div>
-								</div>
+								<StoreContent
+									contributedTab={activeContributedTab}
+									initialQuery={sectionInitialQuery}
+									onOpenRealm={openRealm}
+									section={section}
+								/>
 							)}
 						</div>
-						{/* Floating bottom toolbar — same pattern as the Library page
-						    (StoreSectionNav): the section pills, the store-wide search
-						    folded in, and (Models only) the rich filter panel. */}
-						<StoreSectionNav
-							active={section}
-							onSelect={selectSection}
-							panel={usesBottomFilterBar ? toolbar?.panel : undefined}
-							panelIcon={usesBottomFilterBar ? toolbar?.panelIcon : undefined}
-							panelLabel={usesBottomFilterBar ? toolbar?.panelLabel : undefined}
-							search={{
-								value: searchQuery,
-								onChange: setSearchQuery,
-								placeholder: "Search the whole marketplace…",
-							}}
-							sections={navSections}
-						/>
 					</div>
 				</StoreToolbarProvider>
 			</DesktopCatalogHost>
 		</DesktopMarketplaceHost>
 	);
 }
-
-/**
- * Named first-party renderers a `store_tabs` entry may claim through its `view`
- * field, keyed by the OWNING PLUGIN ID — never by the `view` string itself.
- *
- * Same trust gate `EntitySettings.SETTINGS_VIEWS` uses, for the same reason: a
- * third-party manifest can declare `"view": "workflow-templates"` all it likes, but
- * its plugin id is not a key here, so it falls back to the declarative `spec` and
- * can never borrow a first-party component (or the data that component reads).
- */
-const STORE_TAB_VIEWS: Record<
-	string,
-	(props: { initialQuery?: string }) => ReactElement
-> = {
-	"@ryu/workflows": WorkflowTemplatesSection,
-};
 
 function StoreContent({
 	section,
@@ -554,21 +497,13 @@ function StoreContent({
 	if (section === "account") {
 		return <AccountSection />;
 	}
-	// App-registered tab. A `view` the shell recognises FOR THAT PLUGIN renders its
-	// first-party component (the workflow-template graph preview needs more than the
-	// declarative vocabulary can express); everything else — including a `view` from a
-	// plugin that is not on the allowlist — renders from the declarative spec.
+	// App-registered tab. EVERY one renders from its declarative spec — there is no
+	// per-plugin component table any more. The Workflows tab was the last holder of
+	// one, purely so its preview could draw the template graph; that is now the
+	// `spec.detail.graph` primitive, which any app can declare (see
+	// `ContributedStoreSection`). A first-party escape hatch here is exactly what
+	// makes a "you can own a Store section" promise untrue for everyone else.
 	if (contributedTab) {
-		// The enablement gate comes FIRST, before the view allowlist: a first-party
-		// component fetches the app's own gated catalog and would render an error when
-		// the app is off. The generic renderer is what knows how to offer the install.
-		const FirstPartyView =
-			contributedTab.view && contributedTab.app_enabled
-				? STORE_TAB_VIEWS[contributedTab.plugin]
-				: undefined;
-		if (FirstPartyView) {
-			return <FirstPartyView initialQuery={initialQuery} />;
-		}
 		return (
 			<ContributedStoreSection
 				initialQuery={initialQuery}

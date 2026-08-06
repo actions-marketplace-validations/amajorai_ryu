@@ -106,6 +106,41 @@
       "tsHost": true
     },
     {
+      "capability": "assistant.context",
+      "grant": "assistant:context",
+      "method": "assistant.publishContext",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "assistant.context",
+      "grant": "assistant:context",
+      "method": "assistant.clearContext",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "assistant.context",
+      "grant": "assistant:context",
+      "method": "assistant.registerSurface",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "assistant.context",
+      "grant": "assistant:context",
+      "method": "assistant.clearSurface",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "assistant.context",
+      "grant": "assistant:context",
+      "method": "assistant.open",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "model.complete",
       "grant": "hook:side-model",
       "method": "model.complete",

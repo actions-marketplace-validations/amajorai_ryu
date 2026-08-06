@@ -35,6 +35,26 @@ fn budget_action_label(action: BudgetAction) -> &'static str {
     }
 }
 
+/// Echo whether the node's routing preferences were looked at, on the same
+/// header name the request carried them on — mirroring `x-ryu-prompt-cache`'s
+/// existing two-way use.
+///
+/// Deliberately reports RECEIPT, not the per-entry drop reasons. The fallback
+/// clamp runs inside the chain-expansion helper (it needs the routed primary,
+/// which only exists after the Route stage) and threading its `DropReason`s back
+/// out to this handler would mean widening `run` / `run_stream` / `pre_process`
+/// return types across three call sites for a diagnostic. The drops are logged at
+/// `debug` where they happen; this header answers the question a caller actually
+/// has, which is "did the header reach a reader that understood it".
+fn apply_node_routing_header(
+    hdrs: &mut HeaderMap,
+    prefs: Option<&pipeline::node_routing::NodeRoutingPrefs>,
+) {
+    if prefs.is_some() {
+        hdrs.insert("x-ryu-node-routing", HeaderValue::from_static("accepted"));
+    }
+}
+
 /// Attach `x-budget-*` headers so the client can observe budget state and the
 /// action that was taken (U21 acceptance criterion: observable to the client).
 fn apply_budget_headers(hdrs: &mut HeaderMap, budget: &BudgetDecision) {
@@ -147,6 +167,15 @@ pub async fn chat_completions(
         .and_then(|v| ryu_gw_providers::PromptCacheMode::parse(&v));
     let prompt_cache_ttl = header_string(&headers, "x-ryu-prompt-cache-ttl");
 
+    // The node's own routing preferences (`v1.<base64url-nopad(JSON)>`). Same
+    // discipline as the prompt-cache block above: an unparseable value is ignored
+    // rather than guessed at, for the same reason — a typo must not change
+    // routing, and must not fail the turn either. What survives here is still
+    // RAW; every knob is clamped against the fleet's own decision before it can
+    // touch anything (see `pipeline::node_routing`).
+    let node_routing = header_string(&headers, "x-ryu-node-routing")
+        .and_then(|v| pipeline::node_routing::parse(&v, &state.config.node_routing));
+
     let ctx = authenticate(
         &state,
         AuthInputs {
@@ -167,6 +196,7 @@ pub async fn chat_completions(
             raw_tools,
             prompt_cache_mode,
             prompt_cache_ttl,
+            node_routing,
         },
     )
     .await?;
@@ -205,6 +235,7 @@ pub async fn chat_completions(
             "x-ryu-prompt-cache",
             HeaderValue::from_static(output.prompt_cache.as_str()),
         );
+        apply_node_routing_header(response.headers_mut(), output.context.node_routing.as_ref());
         // Ok-path policy-alert stamp: stash on the RESPONSE extensions so the
         // router's `map_response` layer writes `x-ryu-policy-alert`. Inserting on
         // the response (not the request) is the F1 correctness fix.
@@ -222,6 +253,7 @@ pub async fn chat_completions(
         let prompt_cache = output.prompt_cache;
         let cache_read_tokens = output.cache_read_tokens;
         let cache_write_tokens = output.cache_write_tokens;
+        let node_routing_seen = output.context.node_routing.clone();
         let mut response = Json(output.response).into_response();
         let hdrs = response.headers_mut();
         if let Ok(v) = HeaderValue::from_str(&output.context.request_id) {
@@ -266,6 +298,7 @@ pub async fn chat_completions(
         if let Ok(v) = HeaderValue::from_str(&cache_write_tokens.to_string()) {
             hdrs.insert("x-ryu-cache-write", v);
         }
+        apply_node_routing_header(hdrs, node_routing_seen.as_ref());
         // Ok-path policy-alert stamp (see the streaming branch): stash on the
         // response extensions for the router's `map_response` layer.
         if let Some(alert) = policy_alert {

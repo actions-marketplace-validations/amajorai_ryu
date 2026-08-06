@@ -45,21 +45,33 @@ use schema::validate_runnable;
 // `PluginManifestLoader`, `core_version`, the built-in fixtures, and UI consts.
 pub use ryu_kernel_contracts::manifest::*;
 
-/// Resolve every `code_file` a manifest declares into its inline `code`, from the
-/// one source that can actually hold the file for this manifest's provenance.
+/// Resolve every path a manifest references into its inline wire form — `code_file`
+/// → `code` and `output_styles[].file` → `source` — from the one source that can
+/// actually hold the file for this manifest's provenance.
 ///
 /// Two provenances, two sources, and the fork is not cosmetic:
 ///
 /// - **`code_base: None` — a compiled-in built-in.** Its package directory does not
 ///   exist on the user's machine (Core embeds only the `manifest.json`), so the
-///   bodies come from the [`builtin_code`] table, which embeds them with the same
-///   `include_str!` mechanism. A path missing from the table is a hard error: the
-///   alternative is a hook that loads with an empty body and silently never acts.
+///   bodies come from the [`builtin_code`] tables, which embed them with the same
+///   `include_str!` mechanism. A path missing from a table is a hard error: the
+///   alternative is a hook that loads with an empty body and silently never acts, or
+///   a style that silently degrades to "no style".
 /// - **`code_base: Some(dir)` — a manifest read off disk** (`~/.ryu/plugins/<id>/`,
 ///   a satellite checkout, a dev tree). Its files are right there next to it, so
-///   they are read directly. [`validate_code_file_path`] has already constrained the
-///   path to `<hooks|adapters>/<name>.js` with no traversal, so the join stays inside
-///   the plugin directory.
+///   they are read directly. [`validate_code_file_path`] /
+///   [`validate_output_style_path`] have already constrained the path to
+///   `<hooks|adapters>/<name>.js` / `output-styles/<name>.md` with no traversal, so
+///   the join stays inside the plugin directory.
+///
+/// # Why both carriage paths run from ONE function
+///
+/// Not for brevity — for coverage. This is the single seam every manifest reaches
+/// Core through (the loader below, `plugin_host`'s disk read, and `self_build`'s two
+/// call sites), so a second sibling function would have to be threaded through all
+/// four, and the one that got missed would leave a third-party plugin's styles
+/// un-hydrated: `source` empty, `file` still set, and no error anywhere — the plugin
+/// installs, enables, and contributes nothing.
 pub fn hydrate_manifest_code_files(
     manifest: &mut PluginManifest,
     code_base: Option<&Path>,
@@ -75,6 +87,19 @@ pub fn hydrate_manifest_code_files(
                 "built-in plugin '{plugin_id}' references '{rel}', which is not embedded — add \
                  an include_str! row for it to plugin_manifest::builtin_code::BUILTIN_CODE_FILES"
             )
+            }),
+    })?;
+    manifest.hydrate_output_style_files(|rel| match code_base {
+        Some(dir) => std::fs::read_to_string(dir.join(rel))
+            .map_err(|e| format!("{}: {e}", dir.join(rel).display())),
+        None => builtin_code::lookup_output_style(&plugin_id, rel)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                format!(
+                    "built-in plugin '{plugin_id}' contributes output style file '{rel}', which \
+                     is not embedded — add an include_str! row for it to \
+                     plugin_manifest::builtin_code::BUILTIN_OUTPUT_STYLES"
+                )
             }),
     })
 }
@@ -690,6 +715,23 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // its `node` server is never spawned unless a developer installs it. The
     // canonical copy under `plugins-store/` and this fixture are byte-identical.
     include_str!("../../../../plugins-store/sample-widget/manifest.json"),
+    // The six built-in output styles (ELI5, I have ADHD, Explanatory, Learning,
+    // Proactive, Plain text). Zero runnables and zero `permission_grants`: a style
+    // body is inert prose appended to (or replacing) the agent's base instructions
+    // for a turn, so nothing evaluates it — the same argument `ThemeContribution`
+    // makes for themes, and the reason a style is a plugin CONTRIBUTION rather than
+    // its own `CatalogKind` (it inherits install/enable, versioning, signing, the
+    // Store detail page and the trust scorecard for free). See
+    // `docs/output-styles.md` §4.
+    //
+    // Each entry's `file` is hydrated into an inline `source` at load time from
+    // `builtin_code::BUILTIN_OUTPUT_STYLES` — a built-in ships only this manifest,
+    // so an un-embedded style file would resolve to nothing.
+    //
+    // Pre-installed but INERT: the node default is "no style" and none of the six
+    // sets `force-for-plugin`, so registering it changes no prompt until a user
+    // picks one in the composer or the Store's Output Styles tab.
+    include_str!("../../../../plugins-store/output-styles/manifest.json"),
     include_str!("../../../../plugins-store/firecrawl/manifest.json"),
     include_str!("../../../../plugins-store/mem0/manifest.json"),
     // `spidercloud` is the SECOND `web.crawl` provider, which is what finally makes
@@ -1228,6 +1270,19 @@ impl PluginManifestLoader {
             contributes
                 .validate_settings_contributions()
                 .map_err(|e| format!("app '{}': {e} (source: {source})", manifest.id))?;
+
+            // Output styles need their own line here for the reason this loader
+            // re-runs individual gates rather than `PluginManifest::validate`:
+            // hydration above already enforced exactly-one-of `source`/`file`, the
+            // path allowlist and the size cap, but NOT the id alphabet or id
+            // uniqueness. A duplicate id is the one that has to be caught at load —
+            // two rows sharing one id collapse to a single entry in the merged
+            // registry, so a persisted selection silently resolves to whichever
+            // happened to load last. Runs AFTER hydration on purpose: by now every
+            // row is in the `source`-only wire form the check's second arm accepts.
+            contributes
+                .validate_output_styles()
+                .map_err(|e| format!("app '{}': {e} (source: {source})", manifest.id))?;
         }
 
         // User-facing permission vocabulary gate. Repeated here rather than inherited
@@ -1566,6 +1621,232 @@ mod tests {
                 "plugin_manifest::builtin_code embeds pi extension ('{id}', '{rel}'), which no \
                  package manifest declares any more. Remove the row (and the file, if it is dead)."
             );
+        }
+    }
+
+    /// Walk `plugins-store` and `apps-store`, returning `(plugin id, package dir,
+    /// output style file)` for every `contributes.output_styles[].file` a package
+    /// manifest references. Same runtime-read, empty-in-the-OSS-mirror posture as
+    /// [`packaged_code_file_refs`].
+    fn packaged_output_style_refs() -> Vec<(String, String, String)> {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let mut refs = Vec::new();
+        for root in ["apps-store", "plugins-store"] {
+            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
+                continue; // OSS mirror: this root is not shipped.
+            };
+            let mut dirs: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.join("manifest.json").is_file())
+                .collect();
+            dirs.sort();
+            for dir in dirs {
+                let path = dir.join("manifest.json");
+                let raw = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+                let manifest: PluginManifest = serde_json::from_str(&raw)
+                    .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
+                let name = dir
+                    .file_name()
+                    .expect("package dir has a name")
+                    .to_string_lossy()
+                    .into_owned();
+                for rel in manifest.output_style_refs() {
+                    refs.push((manifest.id.clone(), name.clone(), rel));
+                }
+            }
+        }
+        refs
+    }
+
+    /// [`builtin_code::BUILTIN_OUTPUT_STYLES`] and the `contributes.output_styles`
+    /// references in the package manifests must be a BIJECTION.
+    ///
+    /// The inert-prose twin of [`builtin_code_table_matches_package_manifests`], and
+    /// it exists for the same reason both siblings do: a built-in plugin's package
+    /// directory is not on the user's machine, so a declared style with no embedded
+    /// row cannot be resolved. That one at least fails loudly — hydration treats a
+    /// missing row as a hard error rather than an empty body, precisely because an
+    /// empty style is indistinguishable at every read site from the user having
+    /// picked none — but the failure takes the WHOLE manifest down at load, so the
+    /// plugin's other contributions vanish with it. An orphan row is the milder half
+    /// (dead embedded prose, and the signal that a style was renamed or deleted
+    /// without cleaning up).
+    #[test]
+    fn builtin_output_style_table_matches_package_manifests() {
+        let refs = packaged_output_style_refs();
+        if refs.is_empty() {
+            assert!(
+                builtin_code::BUILTIN_OUTPUT_STYLES.is_empty()
+                    || !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../plugins-store")
+                        .is_dir(),
+                "no package manifest contributes an output style, but BUILTIN_OUTPUT_STYLES has \
+                 {} row(s) — they embed prose nothing can reach",
+                builtin_code::BUILTIN_OUTPUT_STYLES.len()
+            );
+            return;
+        }
+
+        let declared: HashSet<(&str, &str)> = builtin_code::BUILTIN_OUTPUT_STYLES
+            .iter()
+            .map(|(id, rel, _)| (*id, *rel))
+            .collect();
+
+        for (id, dir, rel) in &refs {
+            assert!(
+                declared.contains(&(id.as_str(), rel.as_str())),
+                "{dir}/manifest.json contributes output style file '{rel}' but \
+                 plugin_manifest::builtin_code has no row for ('{id}', '{rel}'). A built-in ships \
+                 only its manifest — its package directory is NOT on the user's machine — so \
+                 without an include_str! row the style cannot be hydrated and the whole manifest \
+                 fails to load. Add:\n    (\n        \"{id}\",\n        \"{rel}\",\n        \
+                 include_str!(\"../../../../plugins-store/{dir}/{rel}\"),\n    ),"
+            );
+        }
+
+        let referenced: HashSet<(&str, &str)> = refs
+            .iter()
+            .map(|(id, _, rel)| (id.as_str(), rel.as_str()))
+            .collect();
+        for (id, rel, _) in builtin_code::BUILTIN_OUTPUT_STYLES {
+            assert!(
+                referenced.contains(&(*id, *rel)),
+                "plugin_manifest::builtin_code embeds output style ('{id}', '{rel}'), which no \
+                 package manifest contributes any more. Remove the row (and the file, if it is \
+                 dead)."
+            );
+        }
+    }
+
+    /// No package manifest may carry an output style's body INLINE.
+    ///
+    /// The prose half of [`packaged_plugin_manifests_declare_no_inline_sandbox_code`],
+    /// and separate from it because the argument is different. Inline sandboxed JS is
+    /// banned because a `\n`-escaped blob is unauditable and that is where malicious
+    /// code hides; a style body is inert, so the reason here is authorship: the file
+    /// form is the SAME format a user's own `<claude-dir>/output-styles/*.md` uses, so
+    /// a style moves between a plugin package and a user root by plain copy. Inlined,
+    /// it stops being diffable, stops being copyable, and the frontmatter — which is
+    /// the single source of truth for the style's `name`, `description` and
+    /// `keep-coding-instructions` — becomes a JSON string nobody reads.
+    ///
+    /// Checked against the raw JSON, not a parsed [`PluginManifest`]: hydration moves
+    /// the body INTO `source` and clears `file`, so a typed parse would inspect the
+    /// wire form and pass unconditionally. This is about the on-disk form.
+    #[test]
+    fn packaged_plugin_manifests_declare_no_inline_output_style_source() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let mut checked = 0;
+        let mut offenders: Vec<String> = Vec::new();
+
+        for root in ["apps-store", "plugins-store"] {
+            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
+                continue; // OSS mirror: this root is not shipped.
+            };
+            let mut dirs: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.join("manifest.json").is_file())
+                .collect();
+            dirs.sort();
+            for dir in dirs {
+                let path = dir.join("manifest.json");
+                let raw = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+                let json: serde_json::Value = serde_json::from_str(&raw)
+                    .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
+                let name = dir
+                    .file_name()
+                    .expect("dir name")
+                    .to_string_lossy()
+                    .into_owned();
+
+                let styles = json
+                    .get("contributes")
+                    .and_then(|c| c.get("output_styles"))
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                for style in styles {
+                    if style.get("source").is_some() {
+                        let id = style
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("?");
+                        offenders.push(format!("{root}/{name}: output style '{id}'"));
+                    }
+                }
+                checked += 1;
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these package manifests inline an output style body instead of pointing at a file \
+             with `file`:\n  {}\nMove each body to {OUTPUT_STYLE_DIR}/<name>.md, replace `source` \
+             with `file`, and add an include_str! row to \
+             plugin_manifest::builtin_code::BUILTIN_OUTPUT_STYLES.",
+            offenders.join("\n  ")
+        );
+
+        if repo_root.join("apps-store").is_dir() || repo_root.join("plugins-store").is_dir() {
+            assert!(
+                checked > 0,
+                "a package root is present but nothing was checked"
+            );
+        }
+    }
+
+    /// Every `.md` sitting in a package's `output-styles/` folder must be DECLARED
+    /// by that package's own manifest.
+    ///
+    /// The reference-keyed bijection above cannot see a file nobody references, so
+    /// this is the same guard [`packaged_pi_extension_files_are_all_declared`] gives
+    /// the extension road: an undeclared `output-styles/foo.md` is committed,
+    /// reviewed, mirrored into the published tree — and never reaches a prompt.
+    #[test]
+    fn packaged_output_style_files_are_all_declared() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let declared: HashSet<(String, String)> = packaged_output_style_refs()
+            .into_iter()
+            .map(|(_, dir, rel)| (dir, rel))
+            .collect();
+
+        for root in ["apps-store", "plugins-store"] {
+            let Ok(entries) = std::fs::read_dir(repo_root.join(root)) else {
+                continue; // OSS mirror: this root is not shipped.
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let pkg = entry.path();
+                let Ok(files) = std::fs::read_dir(pkg.join(OUTPUT_STYLE_DIR)) else {
+                    continue;
+                };
+                let dir_name = pkg
+                    .file_name()
+                    .expect("package dir has a name")
+                    .to_string_lossy()
+                    .into_owned();
+                for file in files.filter_map(Result::ok) {
+                    let name = file.file_name().to_string_lossy().into_owned();
+                    if !name.ends_with(".md") {
+                        continue;
+                    }
+                    let rel = format!("{OUTPUT_STYLE_DIR}/{name}");
+                    assert!(
+                        declared.contains(&(dir_name.clone(), rel.clone())),
+                        "{root}/{dir_name}/{rel} exists but {dir_name}/manifest.json declares no \
+                         contributes.output_styles entry for it — it would never reach a prompt"
+                    );
+                }
+            }
         }
     }
 

@@ -1,11 +1,15 @@
 import { OnboardingView } from "@ryu/blocks/desktop/onboarding";
 import { Button } from "@ryu/ui/components/button";
-import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { sileo } from "sileo";
 import { WEB_URL } from "@/lib/app-urls.ts";
-import { openExternal } from "@/lib/tauri-bridge.ts";
+import {
+	ensureCoreInstalled,
+	getRyuStatus,
+	openExternal,
+	startRyuCore,
+} from "@/lib/tauri-bridge.ts";
 import { ColorStep } from "@/src/components/onboarding/ColorStep.tsx";
 import { PreferencesStep } from "@/src/components/onboarding/PreferencesStep.tsx";
 import { PrivacyStep } from "@/src/components/onboarding/PrivacyStep.tsx";
@@ -62,6 +66,7 @@ const withAgentLogo = (entry: AgentCatalogEntry) => ({
 type Phase =
 	| "starting"
 	| "choose"
+	| "connect"
 	| "installing"
 	| "agents"
 	| "features"
@@ -74,6 +79,7 @@ type Phase =
 
 const PHASE_TITLES: Partial<Record<Phase, string>> = {
 	choose: "How do you want to run Ryu?",
+	connect: "Connect to a node",
 	agents: "Add your agents",
 	features: "Choose your features",
 	mic: "Allow Ryu to access microphone",
@@ -86,7 +92,8 @@ const PHASE_TITLES: Partial<Record<Phase, string>> = {
 };
 
 const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
-	choose: "Run AI on this device, or let us host it for you",
+	choose: "Run AI on this device, in the cloud, or on a node you already have",
+	connect: "Point this app at a Ryu node that's already running",
 	agents: "Pick which ones to add, and install more later",
 	features: "Turn features on or off, and change this anytime",
 	mic: "So you can talk to your agents. Skip anytime, change later in Settings",
@@ -223,6 +230,97 @@ async function waitForLocalStack(
 	// let it finish in the background rather than stranding the user here.
 }
 
+// How long the "run locally" pick waits for a Core it just installed/started to
+// answer its health check. Generous because the first run may be downloading the
+// binary; past this we surface the failure on the choose step rather than
+// dropping the user into an app with no backend.
+const CORE_BOOT_MAX_MS = 5 * 60 * 1000;
+const CORE_BOOT_POLL_MS = 1500;
+// A typed node address gets one short probe — long enough for a LAN round trip,
+// short enough that a wrong address fails fast.
+const CONNECT_PROBE_TIMEOUT_MS = 6000;
+
+/**
+ * Bring a local Core up for the "run locally" pick: install the binary if it is
+ * missing (a no-op in dev and when it is already there), start it, then poll
+ * health until it answers. Resolves true once Core is running.
+ *
+ * This is the moment the desktop earns the right to install anything. The app
+ * itself opens with no Core at all — a user who connects to their team's node
+ * never downloads one — so the install is deferred to the explicit local pick
+ * rather than run at boot.
+ */
+async function startLocalCore(isCancelled: () => boolean): Promise<boolean> {
+	if ((await getRyuStatus().catch(() => "stopped")) === "running") {
+		return true;
+	}
+	// Best-effort: a download failure still leaves an older binary usable, and the
+	// start below reports the real outcome.
+	await ensureCoreInstalled().catch(() => undefined);
+	if (isCancelled()) {
+		return false;
+	}
+	await startRyuCore().catch(() => undefined);
+
+	const deadline = Date.now() + CORE_BOOT_MAX_MS;
+	while (Date.now() < deadline && !isCancelled()) {
+		if ((await getRyuStatus().catch(() => "stopped")) === "running") {
+			return true;
+		}
+		await sleep(CORE_BOOT_POLL_MS);
+	}
+	return false;
+}
+
+/** Normalize a typed node address: trim, add a scheme if omitted, drop the
+ *  trailing slash. `192.168.1.20:7980` and `http://192.168.1.20:7980/` both
+ *  resolve to the same URL the node store stores. */
+function normalizeNodeUrl(raw: string): string {
+	const trimmed = raw.trim().replace(/\/+$/, "");
+	if (trimmed === "") {
+		return "";
+	}
+	return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
+
+/** Probe a node the user just typed. Unlike `test_node` this takes a URL rather
+ *  than the name of an already-persisted node — nothing is written to nodes.json
+ *  until this passes. */
+async function probeNodeUrl(url: string, token: string): Promise<boolean> {
+	const headers: Record<string, string> = {};
+	if (token !== "") {
+		headers.Authorization = `Bearer ${token}`;
+	}
+	try {
+		const res = await fetch(`${url}/api/health`, {
+			headers,
+			signal: AbortSignal.timeout(CONNECT_PROBE_TIMEOUT_MS),
+		});
+		return res.ok;
+	} catch {
+		return false;
+	}
+}
+
+/** A stable, human-readable name for a connected node, derived from its host and
+ *  de-duplicated against the names already in the store. */
+function nodeNameForUrl(url: string, taken: readonly string[]): string {
+	let base: string;
+	try {
+		base = new URL(url).hostname || "node";
+	} catch {
+		base = "node";
+	}
+	if (!taken.includes(base)) {
+		return base;
+	}
+	let n = 2;
+	while (taken.includes(`${base}-${n}`)) {
+		n++;
+	}
+	return `${base}-${n}`;
+}
+
 // The curated set of third-party agents worth surfacing on first run. Anything
 // detectable but not on this list is too niche for onboarding and is hidden.
 // Ids are matched against the live catalog, so entries that don't exist yet
@@ -287,6 +385,15 @@ export default function OnboardingPage() {
 	// waitForLocalStack budget and then drop the user into a broken app.
 	const [localChecking, setLocalChecking] = useState(false);
 	const [localUnreachable, setLocalUnreachable] = useState(false);
+	// Which path the user picked on `choose`, or null while they are still on the
+	// fork. Only the local path cares whether this device's Core came up, so this
+	// is what gates the "Couldn't start Ryu" screen — a user on a remote or cloud
+	// node must never be blocked by a Core they deliberately did not install.
+	const [mode, setMode] = useState<"local" | "managed" | "remote" | null>(null);
+	// The connect-to-an-existing-node form: probe in flight, and why the last
+	// attempt failed.
+	const [remoteChecking, setRemoteChecking] = useState(false);
+	const [remoteError, setRemoteError] = useState<string | null>(null);
 	// Guards the async local/managed setup against a late state update after the
 	// page unmounts (it unmounts on the final navigate to /chat).
 	const cancelledRef = useRef(false);
@@ -405,47 +512,49 @@ export default function OnboardingPage() {
 		[goToFeatures]
 	);
 
-	// Once Core is up, present the managed-vs-local choice (WS8) instead of
-	// auto-running local setup. Downstream setup runs from the user's pick. Only
-	// advances out of the initial 'starting' screen so a later phase is never
+	// Present the local / cloud / existing-node fork immediately. This used to
+	// wait for `coreStatus === "running"`, which made a local Core a hard
+	// prerequisite for even *seeing* the choice — so the one screen offering "you
+	// don't need a local Core" was unreachable without one. Nothing on this step
+	// talks to Core; each path brings up (or connects to) its own backend from the
+	// user's pick. Only advances out of 'starting' so a later phase is never
 	// yanked back to the fork.
 	useEffect(() => {
-		if (coreStatus !== "running") {
-			return;
-		}
 		setPhase((p) => (p === "starting" ? "choose" : p));
-	}, [coreStatus]);
+	}, []);
 
-	// Local pick. Two fixes over the old straight-to-setup call:
+	// Local pick. Three things it owns:
 	//
-	// 1. Resolve the LOCAL node explicitly instead of `getActiveNode()`. On the
-	//    webapp `preferLocalOrCloud()` may already have flipped the default to
-	//    cloud, so the button labelled "local" was able to run local setup against
-	//    the CLOUD node.
-	// 2. Probe it before committing. `waitForLocalStack` swallows every error and
-	//    proceeds anyway after 45s, so an unreachable node used to end with the
-	//    user inside a fully broken app and onboarding marked complete. Instead
-	//    stay on `choose` and offer the desktop download, which is the only way to
-	//    actually get a local node.
-	//
-	// Desktop is unaffected: `choose` only renders once its own Core is running,
-	// so the probe is a fast confirmation of something already true.
+	// 1. Bring Core up. The app no longer requires (or auto-installs) a local Core
+	//    to open, so this pick is where one is installed and started —
+	//    `startLocalCore` is a no-op when it is already running, which is the
+	//    common case in dev and for a returning user.
+	// 2. Resolve the LOCAL node explicitly instead of `getActiveNode()`, whose
+	//    default may already be a cloud node — the button labelled "local" was
+	//    otherwise able to run local setup against the CLOUD node.
+	// 3. Confirm it answers before committing. `waitForLocalStack` swallows every
+	//    error and proceeds anyway after 45s, so an unreachable node used to end
+	//    with the user inside a fully broken app and onboarding marked complete.
+	//    Instead stay on `choose`, where the other two paths are still offered.
 	const handleChooseLocal = useCallback(() => {
 		if (localChecking) {
 			return;
 		}
+		setMode("local");
 		setLocalChecking(true);
 		(async () => {
 			const nodes = useNodeStore.getState().nodes;
 			const node = nodes.find(isLocalNode) ?? LOCAL_FALLBACK;
-			const { online } = await invoke<{ online: boolean }>("test_node", {
-				name: node.name,
-			}).catch(() => ({ online: false }));
+			// `startLocalCore` resolves only once `/api/health` on the local Core
+			// answered, so this IS the reachability proof — no second probe, and no
+			// dependency on `nodes.json` existing yet (on a fresh install the file is
+			// written a few lines below, by `setDefault`).
+			const up = await startLocalCore(() => cancelledRef.current);
 			if (cancelledRef.current) {
 				return;
 			}
 			setLocalChecking(false);
-			if (!online) {
+			if (!up) {
 				setLocalUnreachable(true);
 				return;
 			}
@@ -467,6 +576,121 @@ export default function OnboardingPage() {
 		openExternal(`${WEB_URL}/download`).catch(() => undefined);
 	}, []);
 
+	// Open the connect form. Nothing is committed here — the address is probed on
+	// submit, and only a node that answers is written to nodes.json.
+	const handleChooseRemote = useCallback(() => {
+		setRemoteError(null);
+		setMode("remote");
+		setPhase("connect");
+	}, []);
+
+	const handleBackFromConnect = useCallback(() => {
+		if (remoteChecking) {
+			return;
+		}
+		setRemoteError(null);
+		setMode(null);
+		setPhase("choose");
+	}, [remoteChecking]);
+
+	// Adopt a node the user already runs (their team's server, another machine on
+	// the LAN or mesh). Probe first, persist second: a node that never answered
+	// would otherwise sit in the picker forever. Once adopted we run the SAME
+	// agent detection the local path does — a company node is a full Core with a
+	// real catalog, unlike a managed node, which runs its own inference — but skip
+	// `waitForLocalStack`, which polls a local install this device does not have.
+	const handleConnectRemote = useCallback(
+		(rawUrl: string, token: string) => {
+			if (remoteChecking) {
+				return;
+			}
+			const url = normalizeNodeUrl(rawUrl);
+			if (url === "") {
+				setRemoteError("Enter the node's address.");
+				return;
+			}
+			setRemoteChecking(true);
+			setRemoteError(null);
+			(async () => {
+				const online = await probeNodeUrl(url, token);
+				if (cancelledRef.current) {
+					return;
+				}
+				if (!online) {
+					setRemoteChecking(false);
+					setRemoteError(
+						"Couldn't reach a Ryu node there. Check the address, the port, and that the node is running — and the token if it needs one."
+					);
+					return;
+				}
+
+				const state = useNodeStore.getState();
+				const existing = state.nodes.find(
+					(n) => n.url.replace(/\/+$/, "") === url
+				);
+				let name = existing?.name;
+				if (!name) {
+					name = nodeNameForUrl(
+						url,
+						state.nodes.map((n) => n.name)
+					);
+					try {
+						await state.addNode(name, url, token === "" ? undefined : token);
+					} catch (err) {
+						if (cancelledRef.current) {
+							return;
+						}
+						setRemoteChecking(false);
+						setRemoteError(
+							err instanceof Error
+								? err.message
+								: "Couldn't save this node. Try again."
+						);
+						return;
+					}
+				}
+				if (cancelledRef.current) {
+					return;
+				}
+				// Route the rest of onboarding — and the app — at the node we just
+				// verified. A cloud-shaped node isn't in nodes.json, so fall back to an
+				// in-memory default exactly as the managed path does.
+				try {
+					await setDefault(name);
+				} catch {
+					useNodeStore.setState({ defaultNode: name });
+				}
+				setRemoteChecking(false);
+
+				const node = useNodeStore
+					.getState()
+					.nodes.find((n) => n.name === name) ?? {
+					name,
+					token: token === "" ? null : token,
+					url,
+				};
+				const { found, suggested } = await loadOnboardingAgents(toTarget(node));
+				if (cancelledRef.current) {
+					return;
+				}
+				if (found.length > 0 || suggested.length > 0) {
+					setFoundAgents(found);
+					setSuggestedAgents(suggested);
+					setSelected(new Set(found.map((a) => a.id)));
+					setPhase("agents");
+					return;
+				}
+				goToFeatures([]);
+			})().catch(() => {
+				if (!cancelledRef.current) {
+					setRemoteChecking(false);
+					setRemoteError("Couldn't connect to that node. Try again.");
+				}
+			});
+		},
+		[goToFeatures, remoteChecking, setDefault]
+	);
+
 	// Managed (Ryu Cloud) pick. Gated on the plan entitlement: if not entitled
 	// (or the plan is still resolving to not-entitled) this is an upsell that
 	// deep-links to web pricing and stays on the choice screen. When entitled it
@@ -482,6 +706,7 @@ export default function OnboardingPage() {
 		if (managedBusy) {
 			return;
 		}
+		setMode("managed");
 		setManagedBusy(true);
 		const adopted = await adoptManagedNode(
 			hydrateCloudNodes,
@@ -517,12 +742,23 @@ export default function OnboardingPage() {
 				"Buy or start a Ryu Cloud server in your browser. It appears here once it registers.",
 		});
 		openExternal(`${WEB_URL}/organizations`).catch(() => undefined);
-		// Continue on local so onboarding still completes. Same explicit local-node
-		// resolution as the local pick — `getActiveNode()` here could be the cloud
-		// node we just failed to adopt.
-		beginLocalSetup(
-			useNodeStore.getState().nodes.find(isLocalNode) ?? LOCAL_FALLBACK
-		).catch(() => undefined);
+		// Fall back to the local path so onboarding still completes — which now
+		// means actually bringing a local Core up, since the app no longer starts
+		// one at boot. Same explicit local-node resolution as the local pick;
+		// `getActiveNode()` here could be the cloud node we just failed to adopt.
+		setMode("local");
+		startLocalCore(() => cancelledRef.current)
+			.then((up) => {
+				if (!up || cancelledRef.current) {
+					setLocalUnreachable(true);
+					setPhase("choose");
+					return undefined;
+				}
+				return beginLocalSetup(
+					useNodeStore.getState().nodes.find(isLocalNode) ?? LOCAL_FALLBACK
+				);
+			})
+			.catch(() => undefined);
 	}, [
 		entitlement,
 		managedBusy,
@@ -549,10 +785,19 @@ export default function OnboardingPage() {
 	}, [phase]);
 
 	// When Ryu never comes up (App.tsx flips it to "stopped" after its startup
-	// timeout) the onboarding effect above never fires, so the screen would
-	// otherwise sit forever on "starting" with a shimmering progress bar and no
-	// way out. We render a dedicated error state with a restart button instead.
-	const coreFailed = coreStatus === "stopped";
+	// timeout) a local-path user would otherwise sit on a shimmering progress bar
+	// with no way out, so we render a dedicated error state with a restart button.
+	// Scoped to the LOCAL path: a user who picked the cloud or their own node has
+	// no local Core by design, and "stopped" is the correct, expected state for
+	// them — blocking them on it is what made the desktop unusable without an
+	// install in the first place.
+	// Not while the local pick is still working: `startLocalCore` may be several
+	// minutes into downloading the binary, which is longer than App.tsx's startup
+	// grace — reporting that as "Couldn't start Ryu" would replace a working
+	// install with an error screen. A genuine failure there ends on `choose` with
+	// the unreachable card instead.
+	const coreFailed =
+		coreStatus === "stopped" && mode === "local" && !localChecking;
 	// On the auto-advancing phases the rotating copy IS the headline; everywhere
 	// else the static title/subtitle pair carries the step. Every non-rotating
 	// phase has a PHASE_TITLES entry, so the fallthrough is always defined.
@@ -713,14 +958,18 @@ export default function OnboardingPage() {
 				currentFeature={TOGGLEABLE_FEATURES[featureIndex]}
 				featureStepIndex={featureIndex + 1}
 				featureStepTotal={TOGGLEABLE_FEATURES.length}
+				isDesktop
 				localChecking={localChecking}
 				localUnreachable={localUnreachable}
 				managedBusy={managedBusy}
 				managedEntitled={Boolean(entitlement?.managedInference)}
 				managedLoading={entitlementLoading}
 				micSubmitting={submitting}
+				onBackFromConnect={handleBackFromConnect}
 				onChooseLocal={handleChooseLocal}
 				onChooseManaged={handleChooseManaged}
+				onChooseRemote={handleChooseRemote}
+				onConnectRemote={handleConnectRemote}
 				onContinueAgents={handleContinue}
 				onContinueMic={handleAllowMic}
 				onDownloadDesktop={handleDownloadDesktop}
@@ -730,6 +979,8 @@ export default function OnboardingPage() {
 				onSkipMic={handleSkipMic}
 				onToggleAgent={toggle}
 				progress={PHASE_PROGRESS[phase]}
+				remoteChecking={remoteChecking}
+				remoteError={remoteError}
 				selected={selected}
 				step={phase}
 				subtitle={subtitle}

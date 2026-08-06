@@ -7,7 +7,6 @@ import {
 	InformationCircleIcon,
 	LayoutGridIcon,
 	Link01Icon,
-	Menu01Icon,
 	PackageIcon,
 	Robot01Icon,
 	ServerStack01Icon,
@@ -30,10 +29,6 @@ import {
 } from "@ryu/ui/components/alert-dialog.tsx";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
-import {
-	DitherGradient,
-	type GradientDirection,
-} from "@ryu/ui/components/dither-kit/gradient.tsx";
 import {
 	Empty,
 	EmptyDescription,
@@ -64,8 +59,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
-import { cn } from "@ryu/ui/lib/utils.ts";
-import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMarketplaceHostOptional } from "../host.tsx";
 import { useOptionalReport } from "../report/report-provider.tsx";
 import { StarRating } from "../star-rating.tsx";
@@ -73,7 +67,6 @@ import { formatPrice } from "../types.ts";
 import { groupByCategory } from "./categories.ts";
 import BrandOrCoverImage from "./chrome/brand-image.tsx";
 import CommunityTrustNotice from "./chrome/community-trust-notice.tsx";
-import { normalizeDither } from "./chrome/dither.ts";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
@@ -83,28 +76,37 @@ import StoreItemAction, {
 	StoreItemContextMenuContent,
 	StoreItemOverflowMenu,
 } from "./chrome/store-item-action.tsx";
-import { DetailMetaStrip } from "./detail/detail-panels.tsx";
+import { formatCount, formatDate } from "./detail/detail-panels.tsx";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingGalleryRail,
+	ListingHero,
+	ListingInfoGrid,
+	ListingSection,
+	type ListingStat,
+	ListingStatStrip,
+} from "./detail/listing-detail-shell.tsx";
 import { ListingDetailTabs } from "./detail/listing-detail-tabs.tsx";
 import { ScorecardBadge } from "./detail/scorecard-panel.tsx";
 import { grantDescription, grantLabel } from "./grant-labels.ts";
 import {
 	type CatalogHost,
 	type CatalogInstall,
-	type CatalogNode,
 	type PluginSettingsOpener,
 	useCatalogHost,
 	useNoSettingsOpener,
 } from "./host.tsx";
 import { resolveCardIcon } from "./icon-url.ts";
+import ImportToolsAction from "./import-tools-action.tsx";
 import { REALM_ICONS } from "./realm-icons.ts";
 import { safeHttpUrl } from "./safe-url.ts";
-import { runScorecard } from "./scorecard.ts";
+import { runScorecard, type Scorecard } from "./scorecard.ts";
 import { stabilityLabel } from "./stability.ts";
+import { surfaceLabel } from "./surface-labels.ts";
 import type {
 	AddMarketplaceParams,
 	AppCatalogItem,
-	CardDither,
-	CatalogBanner,
 	CatalogEntry,
 	PluginCatalogDetail,
 	PluginCatalogSource,
@@ -1029,78 +1031,6 @@ function reportTargetForApp(item: AppCatalogItem) {
 	};
 }
 
-/** Import an integrations.sh API entry (REST `openapi` or `graphql`) as
- *  gateway-governed `http` tools via the Core import endpoints. Core resolves +
- *  parses server-side and installs a disabled plugin (one tool per operation for
- *  REST, one query tool for GraphQL); the user enables it from Tools to activate. */
-function ImportToolsAction({
-	node,
-	endpoint,
-	body,
-}: {
-	node: CatalogNode;
-	endpoint: string;
-	body: Record<string, unknown>;
-}) {
-	const [state, setState] = useState<"idle" | "busy" | "done" | "error">(
-		"idle"
-	);
-	const [message, setMessage] = useState<string | null>(null);
-
-	const run = () => {
-		setState("busy");
-		setMessage(null);
-		const base = node.url.replace(/\/$/, "");
-		fetch(`${base}${endpoint}`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				...(node.token ? { Authorization: `Bearer ${node.token}` } : {}),
-			},
-			body: JSON.stringify(body),
-		})
-			.then(async (res) => {
-				const json = (await res.json().catch(() => ({}))) as {
-					dropped?: number;
-					error?: string;
-					success?: boolean;
-					tools?: number;
-				};
-				if (res.ok && json.success) {
-					const dropped = json.dropped
-						? ` (${json.dropped} more not imported)`
-						: "";
-					setMessage(
-						`Installed ${json.tools ?? 0} tool${json.tools === 1 ? "" : "s"}${dropped}. Enable it from Tools to use them.`
-					);
-					setState("done");
-				} else {
-					setMessage(json.error ?? `HTTP ${res.status}`);
-					setState("error");
-				}
-			})
-			.catch((err: unknown) => {
-				setMessage(err instanceof Error ? err.message : String(err));
-				setState("error");
-			});
-	};
-
-	if (state === "done") {
-		return <p className="text-muted-foreground text-sm">{message}</p>;
-	}
-	return (
-		<div className="flex flex-col gap-1">
-			<Button disabled={state === "busy"} onClick={run} size="sm">
-				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-				{state === "busy" ? "Installing…" : "Install as tools"}
-			</Button>
-			{state === "error" && message ? (
-				<p className="text-destructive text-xs">{message}</p>
-			) : null}
-		</div>
-	);
-}
-
 /** The Install / Enable / Disable button cluster plus inline action error.
  *  Enable is gated behind a grant-confirmation dialog because enable is where
  *  the Gateway validates (and may deny) the app's declared grants. On a
@@ -1116,6 +1046,7 @@ function AppActions({
 	installLayer,
 	renderAffordance,
 	onOpenSettings,
+	status,
 }: {
 	item: AppCatalogItem;
 	install: () => Promise<void>;
@@ -1127,6 +1058,10 @@ function AppActions({
 	renderAffordance: CatalogHost["renderAffordance"];
 	/** Reveal this listing's settings tab; absent when it declares none. */
 	onOpenSettings?: (() => void) | null;
+	/** Price / installed-state pills, pushed to the far end of the action bar.
+	 *  They belong beside the verb they qualify ("Enable" — because it is already
+	 *  Installed), not up in the hero where they competed with the app's name. */
+	status?: ReactNode;
 }) {
 	const host = useCatalogHost();
 	const node = host.useActiveNode();
@@ -1263,8 +1198,8 @@ function AppActions({
 	}
 
 	return (
-		<div className="flex flex-col gap-2">
-			<div className="flex flex-wrap items-center gap-2">
+		<div className="flex w-full flex-col gap-2">
+			<div className="flex w-full flex-wrap items-center gap-2">
 				{action}
 				{/* Beside the lifecycle verb, not inside it: configuring an app is not
 				    part of installing or disabling it, and this is where a user who
@@ -1274,6 +1209,11 @@ function AppActions({
 						<HugeiconsIcon className="size-4" icon={Settings01Icon} />
 						Settings
 					</Button>
+				) : null}
+				{status ? (
+					<span className="ml-auto flex shrink-0 items-center gap-2">
+						{status}
+					</span>
 				) : null}
 			</div>
 			{error && <p className="text-destructive text-sm">{error}</p>}
@@ -1422,9 +1362,14 @@ function AppDetailPanel({
 	const versionRepo = detail?.repositoryUrl ?? entry.repo_url ?? null;
 	const integrationUrl =
 		entry.integration_url ?? detail?.url ?? detail?.descriptor?.url ?? null;
-	const showHero =
-		!entry.descriptor_only &&
-		Boolean(entry.banner || entry.icon_url || entry.icon_background);
+	// The hero band always renders — it is the listing's header. This gates only
+	// whether it paints the listing's ART: a descriptor-only entry's `banner` /
+	// `icon_dither` describe the UPSTREAM service, so using them would present a
+	// third-party brand as this listing's own. Those fall back to the muted band.
+	//
+	// It used to gate the whole hero, which is why a listing with no presentation
+	// metadata opened on a bare heading in mid-air with no header at all.
+	const showHero = !entry.descriptor_only;
 	// An integrations.sh reference entry is descriptor-only AND carries an
 	// integration kind. A community GitHub listing is also descriptor-only but has
 	// no integration kind — it is a real plugin with a real manifest, so it gets
@@ -1433,21 +1378,18 @@ function AppDetailPanel({
 		entry.descriptor_only && entry.integration_kind
 	);
 
+	// The Overview tab is now PROSE + what-you-get. Everything reference-shaped
+	// (Information, external links) moved to the shell's right rail, and the meta
+	// facts moved to the stat strip — the two things that make a wide dialog read
+	// as an app-store listing rather than one tall column with air beside it.
 	const overview = (
 		<div className="flex flex-col gap-6">
 			{entry.description ? (
-				<section className="flex flex-col gap-2">
-					<h3 className="flex items-center gap-1.5 font-medium text-sm">
-						<HugeiconsIcon
-							className="size-4 text-muted-foreground"
-							icon={InformationCircleIcon}
-						/>
-						About
-					</h3>
+				<ListingSection icon={InformationCircleIcon} title="About">
 					<p className="text-muted-foreground text-sm leading-relaxed">
 						{entry.description}
 					</p>
-				</section>
+				</ListingSection>
 			) : null}
 
 			{isIntegrationDescriptor ? (
@@ -1463,14 +1405,7 @@ function AppDetailPanel({
 						runnables={detail?.runnables ?? entry.runnables}
 					/>
 
-					<section className="flex flex-col gap-2">
-						<h3 className="flex items-center gap-1.5 font-medium text-sm">
-							<HugeiconsIcon
-								className="size-4 text-muted-foreground"
-								icon={SquareLock01Icon}
-							/>
-							Permissions
-						</h3>
+					<ListingSection icon={SquareLock01Icon} title="Permissions">
 						{grants.length === 0 ? (
 							<p className="text-muted-foreground text-sm">
 								This plugin requests no special permissions.
@@ -1478,130 +1413,88 @@ function AppDetailPanel({
 						) : (
 							<GrantList grants={grants} />
 						)}
-					</section>
-
-					<AppInformationSection detail={detail} entry={entry} />
+					</ListingSection>
 				</>
 			)}
 		</div>
 	);
 
+	// Hero chips: the identity facts (Built-in / Community / Required / kinds).
+	// Free-form `tags` stay OUT of the hero — a listing with nine of them turned
+	// the header into a tag cloud — and live in the rail instead.
+	const heroBadges = [
+		entry.built_in ? "Built-in" : null,
+		isCommunityEntry(item) ? "Community" : null,
+		stabilityLabel(entry.stability),
+		isMandatoryListing(entry) ? "Required" : null,
+		...entry.kinds.map((k) => k.toUpperCase()),
+	].filter((b): b is string => Boolean(b));
+
 	return (
-		<div className="flex flex-col gap-6 p-4">
-			{showHero ? <AppHero entry={entry} /> : null}
-			<header className="flex flex-col gap-3">
-				<div className="flex items-start justify-between gap-3">
-					<div className="min-w-0">
-						<h2 className="truncate font-semibold text-xl">{entry.name}</h2>
-						{entry.tagline || detail?.tagline ? (
-							<p className="truncate text-muted-foreground text-sm">
-								{entry.tagline ?? detail?.tagline}
-							</p>
-						) : null}
-					</div>
-					<div className="flex shrink-0 items-center gap-2">
-						{/* Rating summary from the card's denormalized aggregate — no review
-						    fetch needed to show it, and clicking through opens the tab that
-						    does load them. */}
-						{reviewsService &&
-						typeof entry.rating_count === "number" &&
-						entry.rating_count > 0 ? (
-							<button
-								className="rounded transition-opacity hover:opacity-80"
-								onClick={() => setTab("reviews")}
-								type="button"
-							>
-								<StarRating
-									count={entry.rating_count}
-									showValue
-									size="size-3.5"
-									value={entry.rating_average ?? 0}
-								/>
-							</button>
-						) : null}
-						{scorecard ? (
-							<ScorecardBadge
-								onClick={() => setTab("health")}
-								scorecard={scorecard}
-							/>
-						) : null}
-						<PriceBadge entry={entry} />
-						{entry.descriptor_only ? (
-							<Badge variant="outline">
-								{entry.integration_kind?.toUpperCase() ?? "Descriptor"}
-							</Badge>
-						) : (
-							<AppStatusBadge enabled={enabled} installed={installed} />
-						)}
-					</div>
-				</div>
-
-				<DetailMetaStrip detail={detail} entry={entry} />
-
-				<div className="flex flex-wrap items-center gap-1">
-					{entry.built_in && (
-						<Badge className="text-xs" variant="outline">
-							Built-in
-						</Badge>
-					)}
-					{isCommunityEntry(item) ? (
-						<Badge
-							className="border-amber-500/40 text-amber-600 text-xs"
-							variant="outline"
-						>
-							Community
-						</Badge>
-					) : null}
-					{stabilityLabel(entry.stability) ? (
-						<Badge
-							className="border-amber-500/40 text-amber-600 text-xs"
-							variant="outline"
-						>
-							{stabilityLabel(entry.stability)}
-						</Badge>
-					) : null}
-					{/* Sits ahead of the kind/tag badges: "you cannot remove this" is the
-					    single most consequential thing about the listing, and it explains
-					    the missing Disable button a few rows below. */}
-					{isMandatoryListing(entry) ? (
-						<Badge className="text-xs" variant="secondary">
-							Required
-						</Badge>
-					) : null}
-					{entry.kinds.map((k) => (
-						<Badge className="text-xs" key={k} variant="secondary">
-							{k.toUpperCase()}
-						</Badge>
-					))}
-					{entry.tags.map((t) => (
-						<Badge className="font-normal text-xs" key={t} variant="outline">
-							{t}
-						</Badge>
-					))}
-				</div>
-			</header>
-
-			{/* Load-bearing placement: unavoidable in the reading path before any
-			    install action, in both the side-pane and the dialog preview. */}
-			{isCommunityEntry(item) ? (
-				<CommunityTrustNotice
-					tone="inline"
-					topic={detail?.discoveredFrom?.topic}
+		<ListingDetailShell
+			actions={
+				<AppActions
+					error={error}
+					install={install}
+					installing={installing}
+					installLayer={installLayer}
+					item={item}
+					lifecyclePending={lifecyclePending}
+					onOpenSettings={settingsOpener(entry.id)}
+					renderAffordance={renderAffordance}
+					setEnabled={setEnabled}
+					status={
+						<>
+							<PriceBadge entry={entry} />
+							{entry.descriptor_only ? (
+								<Badge variant="outline">
+									{entry.integration_kind?.toUpperCase() ?? "Descriptor"}
+								</Badge>
+							) : (
+								<AppStatusBadge enabled={enabled} installed={installed} />
+							)}
+						</>
+					}
 				/>
-			) : null}
-
-			<AppActions
-				error={error}
-				install={install}
-				installing={installing}
-				installLayer={installLayer}
-				item={item}
-				lifecyclePending={lifecyclePending}
-				onOpenSettings={settingsOpener(entry.id)}
-				renderAffordance={renderAffordance}
-				setEnabled={setEnabled}
-			/>
-
+			}
+			aside={
+				<AppDetailAside
+					detail={detail}
+					entry={entry}
+					onOpenHealth={() => setTab("health")}
+					scorecard={scorecard}
+				/>
+			}
+			gallery={
+				<ListingGalleryRail
+					name={entry.name}
+					screenshots={detail?.screenshots}
+				/>
+			}
+			hero={<AppHero badges={heroBadges} entry={entry} showArt={showHero} />}
+			notice={
+				/* Load-bearing placement: unavoidable in the reading path BEFORE the
+				   action bar, so it cannot be scrolled past on the way to Install. */
+				isCommunityEntry(item) ? (
+					<CommunityTrustNotice
+						tone="inline"
+						topic={detail?.discoveredFrom?.topic}
+					/>
+				) : null
+			}
+			stats={
+				<ListingStatStrip
+					items={appStatItems({
+						detail,
+						entry,
+						onOpenHealth: () => setTab("health"),
+						onOpenReviews: () => setTab("reviews"),
+						scorecard,
+						showRating: Boolean(reviewsService),
+					})}
+				/>
+			}
+		>
 			{detailLoading && !isIntegrationDescriptor ? (
 				<Spinner className="size-4" />
 			) : null}
@@ -1626,7 +1519,128 @@ function AppDetailPanel({
 				reviewsService={reviewsService}
 				scorecard={scorecard}
 			/>
-		</div>
+		</ListingDetailShell>
+	);
+}
+
+/** The stat strip's cells for an app/plugin listing. Built as data rather than
+ *  markup so the same facts can be reordered per realm without each realm
+ *  re-deriving them — and so an absent fact drops its whole cell rather than
+ *  rendering an empty one, which is what makes the strip read as evenly divided
+ *  at any listing's level of completeness. */
+function appStatItems({
+	detail,
+	entry,
+	onOpenHealth,
+	onOpenReviews,
+	scorecard,
+	showRating,
+}: {
+	detail: PluginCatalogDetail | null;
+	entry: CatalogEntry;
+	onOpenHealth: () => void;
+	onOpenReviews: () => void;
+	scorecard: Scorecard | null;
+	showRating: boolean;
+}): ListingStat[] {
+	// Annotated as `(ListingStat | null)[]` so an absent fact contributes `null`
+	// rather than widening the array's inferred element union per branch.
+	const ratingCount = entry.rating_count ?? 0;
+	const version = detail?.version ?? entry.version ?? null;
+	const updated = formatDate(detail?.updatedAt);
+	const downloads = detail?.downloads ?? null;
+	const surfaces = detail?.surfaces ?? entry.surfaces ?? [];
+	const developer = detail?.developer ?? entry.developer ?? null;
+	const category = detail?.category ?? entry.category ?? null;
+
+	const cells: (ListingStat | null)[] = [
+		showRating && ratingCount > 0
+			? {
+					label: `${formatCount(ratingCount)} Ratings`,
+					// Apple's shape exactly: the number is the headline, the stars are
+					// the caption. Clicking the cell opens the tab that loads them.
+					onClick: onOpenReviews,
+					sub: (
+						<StarRating
+							className="justify-center"
+							size="size-3"
+							value={entry.rating_average ?? 0}
+						/>
+					),
+					value: (entry.rating_average ?? 0).toFixed(1),
+				}
+			: null,
+		scorecard?.grade && scorecard.score !== null
+			? {
+					label: "Health",
+					onClick: onOpenHealth,
+					sub: `${scorecard.score}/100`,
+					value: scorecard.grade,
+				}
+			: null,
+		version && !entry.descriptor_only
+			? { label: "Version", value: `v${version.replace(/^v/, "")}` }
+			: null,
+		category ? { label: "Category", sub: "Category", value: category } : null,
+		developer ? { label: "Developer", value: developer } : null,
+		updated ? { label: "Updated", value: updated } : null,
+		typeof downloads === "number"
+			? { label: "Downloads", value: formatCount(downloads) }
+			: null,
+		surfaces.length > 0
+			? {
+					label: "Runs on",
+					value: surfaces.map((s) => surfaceLabel(s)).join(", "),
+				}
+			: null,
+	];
+	return cells.filter((item): item is ListingStat => item !== null);
+}
+
+/** The detail shell's right rail for an app/plugin: Information, then the
+ *  listing's free-form tags. This is the material that used to sit at the BOTTOM
+ *  of the Overview tab, below permissions — i.e. below the fold on every listing —
+ *  where "who made this, what licence, where's the privacy policy" is exactly what
+ *  a store visitor is scanning for before they install. */
+function AppDetailAside({
+	detail,
+	entry,
+	onOpenHealth,
+	scorecard,
+}: {
+	detail: PluginCatalogDetail | null;
+	entry: CatalogEntry;
+	onOpenHealth: () => void;
+	scorecard: Scorecard | null;
+}) {
+	const hasTags = entry.tags.length > 0;
+	// Guarded on the DATA, not on whether the child rendered: the shell reserves a
+	// whole 18rem column for a truthy `aside`, and a fragment of three nulls is
+	// truthy — that is a wide empty gutter on every listing with no metadata.
+	const hasInfo = appInfoRows({ detail, entry }).length > 0;
+	if (!(hasInfo || hasTags || scorecard)) {
+		return null;
+	}
+	return (
+		<>
+			<AppInformationSection detail={detail} entry={entry} />
+			{scorecard ? (
+				<ListingAsideCard title="Trust">
+					<ScorecardBadge onClick={onOpenHealth} scorecard={scorecard} />
+				</ListingAsideCard>
+			) : null}
+			{hasTags ? (
+				<ListingAsideCard title="Tags">
+					<div className="flex flex-wrap gap-1">
+						{entry.tags.map((t) => (
+							<Badge className="font-normal text-xs" key={t} variant="outline">
+								{t}
+							</Badge>
+						))}
+					</div>
+				</ListingAsideCard>
+			) : null}
+		</>
 	);
 }
 
@@ -1714,43 +1728,70 @@ export { prettyPluginId } from "./plugin-id.ts";
  *  surface — see the note on {@link isCompanionApp}. */
 export { safeHttpUrl } from "./safe-url.ts";
 
-/** One label/value row in the Information table. Renders the value as a safe
- *  external link only when `href` is a valid http(s) URL; otherwise plain text. */
-function InfoRow({
-	href,
-	label,
-	value,
-}: {
-	href?: string | null;
-	label: string;
-	value: string;
-}) {
+/** One value cell in the Information table. Renders as a safe external link only
+ *  when `href` is a valid http(s) URL; otherwise plain text. The label half is the
+ *  shell's ({@link ListingInfoGrid}) — this is only the value, so every realm's
+ *  rail lays its rows out identically. */
+function InfoValue({ href, value }: { href?: string | null; value: string }) {
 	const safeHref = safeHttpUrl(href);
+	if (!safeHref) {
+		return <span className="truncate">{value}</span>;
+	}
 	return (
-		<div className="flex items-start justify-between gap-3 py-2 text-sm">
-			<span className="shrink-0 text-muted-foreground">{label}</span>
-			{safeHref ? (
-				<a
-					className="min-w-0 truncate text-right text-foreground hover:underline"
-					href={safeHref}
-					rel="noopener noreferrer"
-					target="_blank"
-				>
-					{value}
-				</a>
-			) : (
-				<span className="min-w-0 truncate text-right text-foreground">
-					{value}
-				</span>
-			)}
-		</div>
+		<a
+			className="truncate hover:underline"
+			href={safeHref}
+			rel="noopener noreferrer"
+			target="_blank"
+		>
+			{value}
+		</a>
 	);
 }
 
-/** "Information": a compact key/value table. Rows come from `detail` (desktop)
+/** The Information rows for a listing, as data. Rows come from `detail` (desktop)
  *  falling back to `entry` (present on every surface), so on the web host — where
  *  `detail` is null — it still shows Developer/Category/Version from the entry and
  *  simply omits the detail-only rows (homepage/license/privacy/terms). */
+function appInfoRows({
+	detail,
+	entry,
+}: {
+	detail: PluginCatalogDetail | null;
+	entry: CatalogEntry;
+}): { href?: string | null; label: string; value: string }[] {
+	const version = entry.descriptor_only ? null : (entry.version ?? null);
+	return [
+		{ label: "Developer", value: detail?.developer ?? entry.developer ?? null },
+		{ label: "Category", value: detail?.category ?? entry.category ?? null },
+		{ label: "Version", value: version },
+		{ label: "License", value: detail?.license ?? null },
+		{
+			href: detail?.website ?? null,
+			label: "Website",
+			value: detail?.website ?? null,
+		},
+		{
+			href: detail?.privacyPolicyUrl ?? null,
+			label: "Privacy Policy",
+			value: detail?.privacyPolicyUrl ?? null,
+		},
+		{
+			href: detail?.termsOfServiceUrl ?? null,
+			label: "Terms of Service",
+			value: detail?.termsOfServiceUrl ?? null,
+		},
+	].filter(
+		(row): row is { href?: string | null; label: string; value: string } =>
+			Boolean(row.value)
+	);
+}
+
+/** "Information": the key/value table. Lives in the detail shell's RIGHT RAIL
+ *  now rather than at the bottom of the Overview tab — "who made this, what
+ *  licence, where is the privacy policy" is what a store visitor scans for before
+ *  installing, and below permissions on a tall single column it was below the fold
+ *  on every listing. */
 function AppInformationSection({
 	detail,
 	entry,
@@ -1758,151 +1799,47 @@ function AppInformationSection({
 	detail: PluginCatalogDetail | null;
 	entry: CatalogEntry;
 }) {
-	const developer = detail?.developer ?? entry.developer ?? null;
-	const category = detail?.category ?? entry.category ?? null;
-	const version = entry.descriptor_only ? null : (entry.version ?? null);
-	const license = detail?.license ?? null;
-	const website = detail?.website ?? null;
-	const privacy = detail?.privacyPolicyUrl ?? null;
-	const terms = detail?.termsOfServiceUrl ?? null;
-
-	const hasRows = Boolean(
-		developer || category || version || license || website || privacy || terms
-	);
-	if (!hasRows) {
+	const rows = appInfoRows({ detail, entry });
+	if (rows.length === 0) {
 		return null;
 	}
-
 	return (
-		<section className="flex flex-col gap-2">
-			<h3 className="flex items-center gap-1.5 font-medium text-sm">
-				<HugeiconsIcon
-					className="size-4 text-muted-foreground"
-					icon={Menu01Icon}
-				/>
-				Information
-			</h3>
-			<div className="flex flex-col divide-y rounded-lg border px-3">
-				{developer ? <InfoRow label="Developer" value={developer} /> : null}
-				{category ? <InfoRow label="Category" value={category} /> : null}
-				{version ? <InfoRow label="Version" value={version} /> : null}
-				{license ? <InfoRow label="License" value={license} /> : null}
-				{website ? (
-					<InfoRow href={website} label="Website" value={website} />
-				) : null}
-				{privacy ? (
-					<InfoRow href={privacy} label="Privacy Policy" value={privacy} />
-				) : null}
-				{terms ? (
-					<InfoRow href={terms} label="Terms of Service" value={terms} />
-				) : null}
-			</div>
-		</section>
+		<ListingAsideCard title="Information">
+			<ListingInfoGrid
+				rows={rows.map((row) => ({
+					label: row.label,
+					value: <InfoValue href={row.href} value={row.value} />,
+				}))}
+			/>
+		</ListingAsideCard>
 	);
 }
 
-/** Flip a dither direction. Used so the hero's icon tile washes the opposite way
- *  from the hero behind it, which is what keeps the two readable as separate
- *  surfaces when they share a colour. */
-const OPPOSITE_DIRECTION: Record<GradientDirection, GradientDirection> = {
-	up: "down",
-	down: "up",
-	left: "right",
-	right: "left",
-};
-
-/** Self-contained hero background.
+/** The app detail hero. Thin wrapper over the shared {@link ListingHero}: this
+ *  resolves the listing's ART (which is realm-specific — `icon`/`icon_url`/svgl
+ *  brand marks) and the shell owns the LAYOUT (band height, scrim, icon tile,
+ *  title stack, badge chips), so an app hero and an MCP hero cannot drift.
  *
- *  Three tiers, most-specific first:
- *
- *  1. **`icon_dither`** — the real ordered-dither wash from dither-kit, the same
- *     `DitherGradient` the listing's card icon already paints. Every first-party
- *     manifest declares one, so this is the path a Ryu app actually takes.
- *  2. **`banner`** — an explicit hero spec (`colors`, optional `feTurbulence`
- *     noise overlay). Kept for third-party listings that publish one.
- *  3. **A flat fallback** — `icon_background`/`accent_color`, else the muted
- *     surface.
- *
- *  Tier 1 is new and is the reason the store stopped looking generic: with no
- *  `banner` (which no first-party manifest has ever declared) every hero painted
- *  the SAME hardcoded indigo `linear-gradient`, so all 62 detail pages opened with
- *  an identical purple slab that had nothing to do with the app. The dither each
- *  manifest already carried — and which its card was already showing — was sitting
- *  right there unused, so the hero and the card now disagree about nothing. */
-function DitherBanner({
-	banner,
-	dither,
-	fallback,
+ *  Always rendered, even for a listing with no presentation metadata: the band
+ *  falls back to the muted surface, which is a header. It used to be omitted, and
+ *  a listing without art opened with no header at all — the dialog started at a
+ *  bare `<h2>` mid-air. */
+function AppHero({
+	badges,
+	entry,
+	showArt,
+	tagline,
 }: {
-	banner?: CatalogBanner | null;
-	/** The listing's `icon_dither`, untrusted; validated before paint. */
-	dither?: CardDither | null;
-	fallback?: string | null;
+	badges: string[];
+	entry: CatalogEntry;
+	/** Resolved by the caller so the detail payload's tagline can win when the
+	 *  card carries none. */
+	tagline?: string | null;
+	/** False for descriptor-only listings, whose `icon_*` fields describe the
+	 *  UPSTREAM service rather than a Ryu package — painting them as a hero would
+	 *  present a third-party brand as the listing's own art. */
+	showArt: boolean;
 }) {
-	const filterId = useId();
-	const safeDither = normalizeDither(dither);
-	const colors = banner?.colors?.length ? banner.colors : null;
-	// An explicit `banner` outranks the icon dither: it is the author saying "the
-	// hero is not just my icon, bigger". Absent one, the dither wins over the flat
-	// fallback.
-	const explicitBanner = colors || banner?.style === "dither";
-
-	if (safeDither && !explicitBanner) {
-		return (
-			<div
-				aria-hidden="true"
-				className="absolute inset-0 bg-muted"
-				// `relative`-free: DitherGradient absolutely fills its nearest
-				// positioned ancestor, which is the hero's own `relative` wrapper.
-			>
-				<DitherGradient
-					cell={4}
-					direction={safeDither.direction}
-					from={safeDither.from}
-					to={safeDither.to}
-				/>
-			</div>
-		);
-	}
-
-	const gradient = colors
-		? `linear-gradient(135deg, ${colors.join(", ")})`
-		: (fallback ?? undefined);
-	const isDither = banner?.style === "dither";
-
-	return (
-		<div
-			aria-hidden="true"
-			className={cn("absolute inset-0", gradient ? undefined : "bg-muted")}
-			style={gradient ? { background: gradient } : undefined}
-		>
-			{isDither ? (
-				<svg
-					className="absolute inset-0 size-full opacity-30 mix-blend-overlay"
-					preserveAspectRatio="none"
-				>
-					<title>Dither texture</title>
-					<filter id={filterId}>
-						<feTurbulence
-							baseFrequency="0.9"
-							numOctaves={2}
-							seed={banner?.seed ?? 0}
-							type="fractalNoise"
-						/>
-						<feColorMatrix type="saturate" values="0" />
-					</filter>
-					<rect filter={`url(#${filterId})`} height="100%" width="100%" />
-				</svg>
-			) : null}
-		</div>
-	);
-}
-
-/** The app detail hero: a banner background overlaid with the icon square, the
- *  name, and the tagline. Rendered only for full (non-descriptor) apps that
- *  carry banner/icon/accent presentation metadata. */
-function AppHero({ entry }: { entry: CatalogEntry }) {
-	const fallback = entry.icon_background ?? entry.accent_color ?? null;
 	const svglIndex = useSvglIndex();
 	// Raster logo for the hero: `icon_url` (any https host), an `svgl:` brand mark,
 	// or a GitHub-image URL pasted into the `icon` field (the card's
@@ -1917,63 +1854,29 @@ function AppHero({ entry }: { entry: CatalogEntry }) {
 		iconUrl: entry.icon_url,
 		svglIndex,
 	});
-	// The tile gets its own dither wash, painted OPPOSITE the banner's direction so
-	// the two do not blend into one flat field — the tile has to read as a tile
-	// sitting on the hero, not as a hole in it. Without this it was a translucent
-	// grey square holding a generic grid glyph, on every app.
-	const tileDither = normalizeDither(entry.icon_dither);
 	return (
-		<div className="relative h-32 overflow-hidden rounded-t-xl rounded-b-lg">
-			<DitherBanner
-				banner={entry.banner}
-				dither={entry.icon_dither}
-				fallback={fallback}
-			/>
-			<div className="absolute inset-0 flex items-end gap-3 p-3">
-				<span
-					className={cn(
-						"relative flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl text-white shadow-sm ring-1 ring-white/20",
-						tileDither ? undefined : "bg-background/20"
-					)}
-					style={
-						entry.icon_background
-							? { background: entry.icon_background }
-							: undefined
-					}
-				>
-					{tileDither && !entry.icon_background ? (
-						<DitherGradient
-							direction={OPPOSITE_DIRECTION[tileDither.direction ?? "up"]}
-							from={tileDither.from}
-							to={tileDither.to}
-						/>
-					) : null}
-					<span className="relative flex items-center justify-center">
-						{previewIconUrl ? (
-							<BrandOrCoverImage
-								brand={isBrandMark === true}
-								dark={previewIconUrlDark ?? null}
-								light={previewIconUrl}
-							/>
-						) : previewIconId ? (
-							<Icon icon={previewIconId} size={26} />
-						) : (
-							<HugeiconsIcon className="size-6" icon={GridIcon} />
-						)}
-					</span>
-				</span>
-				<div className="min-w-0 pb-1">
-					<div className="truncate font-semibold text-base text-white drop-shadow">
-						{entry.name}
-					</div>
-					{entry.tagline ? (
-						<div className="truncate text-white/80 text-xs drop-shadow">
-							{entry.tagline}
-						</div>
-					) : null}
-				</div>
-			</div>
-		</div>
+		<ListingHero
+			badges={badges}
+			banner={showArt ? entry.banner : null}
+			dither={showArt ? entry.icon_dither : null}
+			fallback={entry.accent_color ?? null}
+			icon={
+				previewIconUrl ? (
+					<BrandOrCoverImage
+						brand={isBrandMark === true}
+						dark={previewIconUrlDark ?? null}
+						light={previewIconUrl}
+					/>
+				) : previewIconId ? (
+					<Icon icon={previewIconId} size={34} />
+				) : (
+					<HugeiconsIcon className="size-8" icon={GridIcon} />
+				)
+			}
+			iconBackground={entry.icon_background ?? null}
+			name={entry.name}
+			tagline={tagline}
+		/>
 	);
 }
 

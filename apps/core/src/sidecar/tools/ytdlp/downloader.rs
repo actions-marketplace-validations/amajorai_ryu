@@ -112,6 +112,7 @@ impl YtDlpDownloader {
         downloads
             .download_blocking(DownloadSpec {
                 kind: DownloadKind::Tool,
+                role: crate::downloads::DownloadRole::Tool,
                 label: "yt-dlp".to_string(),
                 url,
                 dest: dest.clone(),

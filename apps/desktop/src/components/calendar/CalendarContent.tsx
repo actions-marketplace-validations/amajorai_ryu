@@ -390,11 +390,13 @@ export function CalendarContent({
 				</div>
 			)}
 
-			{/* Floating bottom toolbar — beUI-style pill, matching the Store's
-			    StoreSectionNav (packages/blocks/src/desktop/store.tsx): a centered,
-			    rounded, frosted pill that floats above the calendar. Holds the date
-			    navigation, the view switcher, and the section actions, so nothing
-			    sits above the grid anymore. */}
+			{/* Floating bottom toolbar — beUI-style pill: a centered, rounded,
+			    frosted pill that floats above the calendar, holding the date
+			    navigation, the view switcher and the section actions so nothing sits
+			    above the grid. The Store and the Library used to share this shape and
+			    no longer do (their tabs are inline page furniture now, see
+			    StoreSectionTabs) — this is a per-day toolbar over a fixed grid, not an
+			    open-ended list of sections, so it stays. */}
 			<div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-4 py-3">
 				<div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1 rounded-full bg-muted/70 p-1.5 shadow-lg backdrop-blur-md">
 					<Button

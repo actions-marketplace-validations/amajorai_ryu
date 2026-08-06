@@ -342,6 +342,7 @@ pub fn silero_download_spec() -> ryu_downloads::DownloadSpec {
         .unwrap_or_else(|| SILERO_MODEL_SHA256.to_string());
     ryu_downloads::DownloadSpec {
         kind: ryu_downloads::DownloadKind::Voice,
+        role: ryu_downloads::DownloadRole::SpeechModel,
         label: "Silero VAD model".to_string(),
         url,
         dest: silero_model_path(),

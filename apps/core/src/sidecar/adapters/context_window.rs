@@ -40,7 +40,7 @@ use std::sync::OnceLock;
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use super::{message_image_parts, UiMessage};
+use super::{document_context_block, message_image_parts, UiMessage};
 use crate::plugin_host::{self, HookContext, HookDirective, HookMessage};
 use crate::server::conversations::ConversationStore;
 
@@ -102,10 +102,19 @@ pub fn estimate_tokens(text: &str) -> usize {
 
 /// Estimate a UI message's tokens: its text parts plus a flat per-image cost
 /// and the per-message overhead. Base64 image data is intentionally ignored.
+///
+/// Attached-document text IS counted, because unlike an image's base64 it lands in
+/// the prompt verbatim (see [`document_context_block`]). Leaving it out would make a
+/// window carrying a 40-page PDF estimate as an empty message, and the trimmer would
+/// keep history it has no room for.
 fn estimate_ui_message_tokens(msg: &UiMessage) -> usize {
     let text = ui_message_text(msg);
+    let documents = document_context_block(msg).unwrap_or_default();
     let images = message_image_parts(msg).len();
-    estimate_tokens(&text) + images * IMAGE_TOKEN_COST + PER_MESSAGE_OVERHEAD
+    estimate_tokens(&text)
+        + estimate_tokens(&documents)
+        + images * IMAGE_TOKEN_COST
+        + PER_MESSAGE_OVERHEAD
 }
 
 /// The plain text of a UI message (content string or joined `text` parts).

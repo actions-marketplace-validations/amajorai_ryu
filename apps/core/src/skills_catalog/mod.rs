@@ -23,6 +23,7 @@ use serde::Serialize;
 
 const GITHUB_CACHE_TTL_SECONDS: u64 = 60 * 60 * 24;
 
+pub mod default_skills;
 pub mod from_source;
 pub mod plugin_skills;
 
@@ -78,6 +79,17 @@ pub struct SkillCard {
     pub downloads: u64,
     /// True when this Skill is already installed in the universal skills dir.
     pub installed: bool,
+    /// How much the *source* vouches for this entry: `"builtin"`, `"trusted"`
+    /// (a first-party/vendor repo the source curates) or `"community"` (anyone
+    /// can publish). `None` when the source makes no claim.
+    ///
+    /// This is a property of the REGISTRY, not an audit of the skill: a
+    /// community registry is open-publish, so everything it serves is
+    /// `"community"` regardless of how popular the entry is. Clients render it
+    /// as a badge so an open-publish registry can never be mistaken for a
+    /// curated one — see the ClawHub note in `catalog_source::skill_registries`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_level: Option<String>,
 }
 
 /// One file inside a Skill package.
@@ -127,7 +139,7 @@ pub struct SkillDetail {
 
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 
-fn get(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
+pub(crate) fn get(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
     client.get(url).header("User-Agent", USER_AGENT)
 }
 
@@ -154,7 +166,7 @@ struct SearchItem {
 }
 
 /// Derive the slug (last segment) from a full `owner/repo/slug` id.
-fn slug_of(id: &str) -> String {
+pub(crate) fn slug_of(id: &str) -> String {
     id.rsplit('/').next().unwrap_or(id).to_string()
 }
 
@@ -178,6 +190,9 @@ fn to_card(item: SearchItem, installed_slugs: &std::collections::HashSet<String>
         // skills.sh (its search payload carries no description) and starts
         // populating browse cards for free the day any source adds the field.
         description: item.description.filter(|d| !d.trim().is_empty()),
+        // skills.sh is open-publish (anyone can index a public repo), so every
+        // browse card it serves is community-trust.
+        trust_level: Some("community".to_string()),
     }
 }
 
@@ -248,6 +263,9 @@ fn installed_cards() -> Vec<SkillCard> {
             downloads: 0,
             installed: true,
             description,
+            // Already on disk: the user accepted it, so the registry's claim is
+            // no longer the relevant signal.
+            trust_level: None,
         });
     }
     cards.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -640,7 +658,7 @@ async fn fetch_github_raw_file(
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn github_cache_path(name: &str) -> std::path::PathBuf {
+pub(crate) fn github_cache_path(name: &str) -> std::path::PathBuf {
     crate::paths::ryu_dir()
         .join("cache")
         .join("skills-github")
@@ -667,7 +685,7 @@ fn now_unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-fn read_fresh_cache<T>(path: &std::path::Path) -> Option<T>
+pub(crate) fn read_fresh_cache<T>(path: &std::path::Path) -> Option<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -680,7 +698,7 @@ where
     }
 }
 
-fn write_cache<T>(path: &std::path::Path, value: &T)
+pub(crate) fn write_cache<T>(path: &std::path::Path, value: &T)
 where
     T: Serialize,
 {
@@ -879,6 +897,7 @@ pub async fn skill_detail(client: &reqwest::Client, id: &str) -> Result<SkillDet
         name,
         slug: slug.clone(),
         description: description.clone(),
+        trust_level: Some("community".to_string()),
     };
 
     Ok(SkillDetail {
@@ -1098,7 +1117,7 @@ fn record_provenance(slug: &str, id: &str) {
 /// Slugs of Skills currently present in any standard skills root — `~/.claude/skills`
 /// or the vendor-neutral `~/.agents/skills` (standard `<slug>/SKILL.md` layout, or
 /// a legacy flat `<slug>.md` in the primary root).
-fn installed_slugs() -> std::collections::HashSet<String> {
+pub(crate) fn installed_slugs() -> std::collections::HashSet<String> {
     ryu_skills::scan_all_skill_dirs()
         .into_iter()
         .map(|s| s.id)

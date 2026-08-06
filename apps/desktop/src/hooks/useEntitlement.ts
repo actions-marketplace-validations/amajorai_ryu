@@ -50,6 +50,7 @@ import {
 } from "@/src/lib/api/billing.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { setEntitlementActive } from "@/src/lib/api/preferences.ts";
+import { publishFeatureFlags } from "@/src/lib/feature-flags.ts";
 import { setUpdatesWindow } from "@/src/lib/updates-window.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
@@ -180,6 +181,19 @@ export function useEntitlement(): UseEntitlement {
 			const { lifetime } = snapshot;
 			const applies = updatesWindowApplies(liveEntitlement?.plan ?? null);
 			setUpdatesWindow(applies && lifetime ? lifetime.updatesExpiresAt : null);
+			// 2c) Same free ride, same firewall: publish the server-driven ROLLOUT
+			//     flags for surfaces that gate on them. A different axis from
+			//     entitlement — what has been switched ON for this account, not what
+			//     they paid for — so like the updates window it must never reach
+			//     `decideDesktopAccess`, the verdict, or the cached entitlement.
+			//
+			//     Inside `if (snapshot)` on purpose: a FAILED check must leave the
+			//     stored map alone so last-good keeps riding, exactly as the window
+			//     above does. This is an OPTIMIZATION, not the mechanism — this
+			//     effect runs on mount and is not on a timer, so `useFeatureFlag`'s
+			//     own TTL refresh is what makes a central flip land without a
+			//     restart.
+			publishFeatureFlags(snapshot.features);
 		}
 
 		if (liveEntitlement) {

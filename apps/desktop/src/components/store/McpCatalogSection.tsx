@@ -13,8 +13,18 @@ import StoreItemAction, {
 	StoreItemContextMenuContent,
 	StoreItemOverflowMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingInfoGrid,
+	ListingSection,
+	type ListingStat,
+	ListingStatStrip,
+} from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
+import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar";
 import {
 	Empty,
 	EmptyDescription,
@@ -410,18 +420,35 @@ function McpDetailPanel({
 	const isInstalling = installing === card.id;
 	const { percent } = useInstallProgress(["tool", "other"], card.name);
 
+	const transports = Array.from(
+		new Set(
+			[
+				...packages.map((p) => p.transport),
+				...remotes.map((r) => r.transportType),
+			].filter((t): t is string => Boolean(t))
+		)
+	);
+
+	const statItems: (ListingStat | null)[] = [
+		card.version ? { label: "Version", value: `v${card.version}` } : null,
+		packages.length > 0
+			? { label: "Packages", value: `${packages.length}` }
+			: null,
+		remotes.length > 0
+			? { label: "Remotes", value: `${remotes.length}` }
+			: null,
+		transports.length > 0
+			? { label: "Transport", value: transports.join(", ") }
+			: null,
+		{ label: "Registry", value: "MCP Registry" },
+	];
+
 	return (
-		<div className="scroll-fade-effect-y flex h-full flex-col gap-6 overflow-auto p-4">
-			<header className="flex flex-col gap-3">
-				<div className="flex items-start justify-between gap-3">
-					<div className="min-w-0">
-						<h2 className="truncate font-semibold text-xl">{card.name}</h2>
-						{card.version && (
-							<p className="text-muted-foreground text-sm">v{card.version}</p>
-						)}
-					</div>
+		<ListingDetailShell
+			actions={
+				<>
 					{card.installed ? (
-						<Badge className="shrink-0 gap-1" variant="secondary">
+						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon
 								className="size-3.5 text-success"
 								icon={CheckmarkCircle02Icon}
@@ -430,7 +457,6 @@ function McpDetailPanel({
 						</Badge>
 					) : (
 						<InstallProgressButton
-							idleVariant="ghost"
 							installing={isInstalling}
 							onClick={() => {
 								install().catch(() => undefined);
@@ -441,25 +467,62 @@ function McpDetailPanel({
 							Install server
 						</InstallProgressButton>
 					)}
-				</div>
-				{card.description && (
-					<p className="text-muted-foreground text-sm">{card.description}</p>
-				)}
-				{card.installed && (
-					<p className="text-muted-foreground text-xs">
-						Added to your MCP servers (disabled). Enable and start it from the
-						Tools page — Ryu never auto-launches a registry command.
-					</p>
-				)}
-			</header>
-
+					{card.installed ? (
+						<span className="ml-auto text-muted-foreground text-xs">
+							Added to your MCP servers (disabled). Enable and start it from the
+							Tools page — Ryu never auto-launches a registry command.
+						</span>
+					) : null}
+				</>
+			}
+			aside={
+				<ListingAsideCard title="Information">
+					<ListingInfoGrid
+						rows={[
+							{ label: "Server ID", value: card.id },
+							{ label: "Version", value: card.version ?? "Unversioned" },
+							{
+								label: "Launchable",
+								value:
+									packages.length + remotes.length > 0 ? "Yes" : "No target",
+							},
+						]}
+					/>
+				</ListingAsideCard>
+			}
+			hero={
+				<ListingHero
+					badges={[card.installed ? "Installed" : null, ...transports].filter(
+						(b): b is string => Boolean(b)
+					)}
+					icon={
+						// Registry servers ship no art, so the tile is the generative one
+						// keyed on the server id — the same rule the Apps hero uses for an
+						// artless listing.
+						<DitherAvatar
+							animate={false}
+							className="size-full"
+							name={card.id}
+						/>
+					}
+					name={card.name}
+					tagline={card.description}
+				/>
+			}
+			stats={
+				<ListingStatStrip
+					items={statItems.filter((s): s is ListingStat => s !== null)}
+				/>
+			}
+		>
 			{packages.length > 0 && (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">Packages ({packages.length})</h3>
-					<div className="flex flex-col gap-2">
+				<ListingSection title={`Packages (${packages.length})`}>
+					{/* Two-up on a wide dialog: a launch target is a short line, and one
+					    per full-width row was a column of mostly-empty cards. */}
+					<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
 						{packages.map((p) => (
 							<div
-								className="rounded-md border px-3 py-2"
+								className="rounded-lg border border-border/60 px-3 py-2"
 								key={`${p.registryType}:${p.identifier}:${p.version}`}
 							>
 								<div className="flex items-center gap-2">
@@ -481,16 +544,15 @@ function McpDetailPanel({
 							</div>
 						))}
 					</div>
-				</section>
+				</ListingSection>
 			)}
 
 			{remotes.length > 0 && (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">Remotes ({remotes.length})</h3>
-					<div className="flex flex-col gap-2">
+				<ListingSection title={`Remotes (${remotes.length})`}>
+					<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
 						{remotes.map((r) => (
 							<div
-								className="rounded-md border px-3 py-2"
+								className="rounded-lg border border-border/60 px-3 py-2"
 								key={`${r.transportType}:${r.url}`}
 							>
 								{r.transportType && (
@@ -504,7 +566,7 @@ function McpDetailPanel({
 							</div>
 						))}
 					</div>
-				</section>
+				</ListingSection>
 			)}
 
 			{packages.length === 0 && remotes.length === 0 && (
@@ -512,6 +574,6 @@ function McpDetailPanel({
 					This server advertises no launchable package or remote endpoint.
 				</p>
 			)}
-		</div>
+		</ListingDetailShell>
 	);
 }

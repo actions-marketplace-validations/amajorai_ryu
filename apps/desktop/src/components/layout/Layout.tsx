@@ -49,9 +49,15 @@ import {
 	TitleBarProvider,
 	useTitleBarContext,
 } from "@/src/contexts/TitleBarContext.tsx";
+import {
+	useAppShellPath,
+	useAppShellRoutes,
+} from "@/src/contributions/app-shell-routes.ts";
 import { seedBuiltinRoutes } from "@/src/contributions/builtins.ts";
 import { RouteOutlet } from "@/src/contributions/RouteOutlet.tsx";
+import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useApprovalEvents } from "@/src/hooks/useApprovalEvents.ts";
+import { usePluginThemeSync } from "@/src/hooks/useContributedThemes.ts";
 import { useDesktopNotificationsStream } from "@/src/hooks/useDesktopNotificationsStream.ts";
 import { useDownloadsStream } from "@/src/hooks/useDownloadsStream.ts";
 import { useEditorUploader } from "@/src/hooks/useEditorUploader.ts";
@@ -75,6 +81,10 @@ import {
 } from "@/src/hooks/useThemePreset.ts";
 import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
 import { setCrashRoute } from "@/src/lib/crash-context.ts";
+import {
+	DASHBOARDS_HOME_BUTTON_ID,
+	DASHBOARDS_PLUGIN_ID,
+} from "@/src/lib/dashboards/app.ts";
 import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { DESKTOP_HOTKEYS } from "@/src/lib/hotkeys/actions.ts";
 import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
@@ -167,10 +177,14 @@ function PaneBadge({
 	}
 
 	return (
-		<div className="pointer-events-none absolute bottom-2 left-2 z-10 flex items-center gap-1.5">
+		// Fixed row height (h-8, the action buttons' size) so the pill sits at the
+		// same spot whether or not the focused pane's actions are beside it —
+		// otherwise the row collapses to the pill's own height on unfocused panes
+		// and the badge visibly jumps/resizes every time focus moves.
+		<div className="pointer-events-none absolute bottom-2 left-2 z-10 flex h-8 items-center gap-1.5">
 			<div
 				className={cn(
-					"flex items-center gap-1.5 rounded-full px-2.5 py-1 backdrop-blur-sm transition-opacity duration-300",
+					"flex h-6 items-center gap-1.5 rounded-full px-2.5 backdrop-blur-sm transition-opacity duration-300",
 					focused
 						? "bg-primary text-primary-foreground"
 						: "bg-muted/70 text-muted-foreground ring-1 ring-border/20"
@@ -200,7 +214,7 @@ function PaneBadge({
 			</div>
 			{focused && actions ? (
 				<div
-					className="pointer-events-auto flex shrink-0 flex-row items-center gap-1 rounded-2xl bg-background/80 px-1 shadow-lg ring-1 ring-border/40 backdrop-blur-sm"
+					className="pointer-events-auto flex h-8 shrink-0 flex-row items-center gap-1 rounded-2xl bg-background/80 px-1 shadow-lg ring-1 ring-border/40 backdrop-blur-sm"
 					data-tauri-drag-region={false}
 				>
 					{actions}
@@ -268,6 +282,9 @@ function LayoutContent({
 	// because LayoutContent is always mounted; a disabled plugin's route then
 	// resolves to null (blank) — the "route disappears" behavior of #446.
 	usePluginContributionRoutes();
+	// Same seam for the shell pages an APP owns (the Home dashboard): the route is
+	// minted at the path the app's manifest declares, and disappears with the app.
+	useAppShellRoutes();
 	usePluginContributionTabIcons();
 
 	// Live refresh for the contributions cache: Core broadcasts on the
@@ -275,6 +292,12 @@ function LayoutContent({
 	// change; this invalidates the shared react-query read immediately. Remote
 	// nodes fail-soft to the stale-window poll above.
 	usePluginContributionsLiveRefresh();
+
+	// Mirror marketplace-installed themes (`contributes.themes`) into the local
+	// resolution cache the theme picker and `initTheme()` read. Mounted here, not in
+	// Appearance settings: a theme must resolve at boot and survive the user never
+	// opening settings at all.
+	usePluginThemeSync();
 
 	const { open, openMobile, setOpen, toggleSidebar } = useSidebar();
 	// The desktop app is also served as a web app, so it has to survive phone
@@ -487,8 +510,28 @@ function LayoutContent({
 	useHotkey("sidebar.toggle", toggleSidebar);
 	useHotkey("settings.open", () => openSettings());
 	useHotkey("chat.new", handleNewConversation);
-	useHotkey("nav.home", () => openTab("/home"));
-	useHotkey("nav.timeline", () => openTab("/timeline"));
+	// "Go home" opens whatever path the Dashboards app declares — and does nothing
+	// when no enabled app claims it, so the shortcut can't land the user on an
+	// "App not enabled" card for a feature they never turned on.
+	const dashboardPath = useAppShellPath(
+		DASHBOARDS_PLUGIN_ID,
+		DASHBOARDS_HOME_BUTTON_ID
+	);
+	useHotkey("nav.home", () => {
+		if (dashboardPath) {
+			openTab(dashboardPath);
+		}
+	});
+	// Same rule for the Timeline shortcut, which reaches an app-owned path
+	// (`/timeline` resolves through the companion-alias catch-all): no enabled app
+	// claims it → the shortcut does nothing, rather than opening a dead tab. This is
+	// the AFFORDANCE tier `use-companion-alias.ts` describes.
+	const timelineCompanion = useCompanionAlias("/timeline");
+	useHotkey("nav.timeline", () => {
+		if (timelineCompanion) {
+			openTab("/timeline");
+		}
+	});
 	useHotkey("nav.library", () => openTab("/library"));
 	// allowInInput: the default binding (F11) is a bare key, which the dispatcher
 	// otherwise suppresses while a field has focus — i.e. most of the time, since

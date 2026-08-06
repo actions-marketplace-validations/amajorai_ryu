@@ -44,6 +44,11 @@ mod image_host;
 mod inference;
 mod learning;
 mod lsp;
+/// Telegram "managed bots" (Bot API 9.6) pairing: how a per-user child bot's token
+/// reaches this node without the user ever visiting @BotFather. Client for the
+/// hosted manager (`apps/cloud-bot`) plus the pending-pairing store; the HTTP
+/// surface lives in [`server::managed_bot_api`].
+mod managed_bot;
 mod memory_host;
 mod memory_policy;
 mod memory_provider;
@@ -637,11 +642,18 @@ async fn main() {
         "ironclaw".into(),
         "hermes".into(),
         // Mesh daemon (Tailscale/Headscale, #478). Listed in startup_order so a
-        // mesh-enabled node auto-starts the daemon on boot. It is PATH-adopted
-        // (never downloaded, so never in `versions.json`) — `start_all` skips it
+        // mesh-enabled node auto-starts the daemon on boot. `start_all` skips it
         // unless it was explicitly marked installed, which `main()` does just
         // below only when `ryu_mesh::is_enabled()`. A mesh-off install is never
         // marked and so never runs (nor logs) anything.
+        //
+        // It USED to be PATH-adopted only, and therefore never in `versions.json`.
+        // It can be there now — `sidecar/tailscale/downloader.rs` installs a
+        // managed pair when no client is on PATH — which would otherwise make
+        // `seed_installed_from_disk` mark it installed on every boot and produce a
+        // failed-start log for users who never enabled the mesh. That function
+        // skips this one name for exactly that reason; the mesh pref stays the
+        // single source of installed-ness here.
         "tailscale".into(),
     ];
 
@@ -831,6 +843,26 @@ async fn main() {
     // or mesh-relevant reads it. Same pattern as entitlement/claude-config/etc.
     if let Ok(Some(value)) = preferences.get(crate::mesh_host::MESH_ENABLED_PREF_KEY).await {
         ryu_mesh::set_pref_enabled(ryu_mesh::parse_enabled(Some(&value)));
+    }
+    // Managed-inference fleet coordinates. Same shape and the same reason as the
+    // mesh seed above: `pi_config::apply` is synchronous and cannot await the
+    // prefs store, so the pref half is read once here into a process-global that
+    // the sync path consults (`RYU_MANAGED_GATEWAY_*` env still wins). This is
+    // what lets a SELF-HOSTED node spend its plan's credits — the managed
+    // provider routes at the hosted fleet while BYOK providers keep using the
+    // local gateway.
+    {
+        let url = preferences
+            .get(crate::sidecar::gateway::MANAGED_FLEET_URL_PREF_KEY)
+            .await
+            .ok()
+            .flatten();
+        let token = preferences
+            .get(crate::sidecar::gateway::MANAGED_FLEET_TOKEN_PREF_KEY)
+            .await
+            .ok()
+            .flatten();
+        crate::sidecar::gateway::set_managed_fleet_pref(url, token);
     }
     // Local support-access diagnostic channel (#546, P5): the append-only audit
     // log, plus the startup auto-disable sweep. Re-checking the hard expiry HERE
@@ -1933,9 +1965,11 @@ async fn main() {
     setup.seed_installed_from_disk(&seed_names).await;
 
     // Mesh daemon: make `start_all` actually start it when the mesh is enabled.
-    // `seed_installed_from_disk` can't cover tailscale (PATH-adopted, never in
-    // `versions.json`), so mark it installed from the SAME signal the rest of
-    // the mesh reads. A mesh-off install stays unmarked → `start_all` skips it
+    // `seed_installed_from_disk` deliberately skips tailscale (a `versions.json`
+    // row now exists once the managed client is installed, and seeding from it
+    // would start the daemon for people who never enabled the mesh), so mark it
+    // installed from the SAME signal the rest of the mesh reads. A mesh-off
+    // install stays unmarked → `start_all` skips it
     // entirely (no daemon, no warning). The desktop's runtime toggle marks it
     // too via `POST /api/mesh/config`.
     if ryu_mesh::is_enabled() {

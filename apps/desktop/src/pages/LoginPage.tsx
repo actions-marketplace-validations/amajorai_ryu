@@ -22,7 +22,14 @@ export default function LoginPage() {
 	const [polling, setPolling] = useState(false);
 	const cancelPoll = useRef<(() => void) | null>(null);
 	const coreStatus = useAppStore((s) => s.coreStatus);
-	const coreReady = coreStatus === "running";
+	// Signing in is device auth against the web backend — it never touches Core.
+	// On the webapp `coreStatus` tracks the HOSTED core, so not reaching it is a
+	// genuine blocker and the gate stays. On the desktop it tracks a LOCAL Core,
+	// which is optional now: onboarding's first step offers Ryu Cloud and
+	// "connect to an existing node" as well as running locally, so blocking
+	// sign-in on a local Core locked coreless users out of the very screen that
+	// tells them they don't need one.
+	const coreReady = IS_WEBAPP ? coreStatus === "running" : true;
 
 	useEffect(() => {
 		return () => {
@@ -133,7 +140,7 @@ export default function LoginPage() {
 		<div className="size-full" data-tauri-drag-region="true">
 			<LoginView
 				coreReady={coreReady}
-				coreStarting={coreStatus === "starting"}
+				coreStarting={IS_WEBAPP && coreStatus === "starting"}
 				coreStatusLabel={coreStatusLabel}
 				hasVerificationUri={verificationUri !== null}
 				onCancel={handleCancel}

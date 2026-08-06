@@ -787,7 +787,7 @@ describe("the upload ceiling this client reports", () => {
 	it("is the one every upload from this app actually hits", () => {
 		// `/api/uploads` is where chat attachments, editor pastes and
 		// `ui.uploadFile` all land, and 32 MiB is where they stop. This is the only
-		// ceiling `DocumentParsingSettings` may print.
+		// ceiling `StorageSettings` may print.
 		expect(rustSource("apps/core/src/server/uploads.rs")).toContain(
 			"pub const MAX_UPLOAD_BYTES: usize = super::media::MAX_MEDIA_BYTES;"
 		);
@@ -814,8 +814,12 @@ describe("the upload ceiling this client reports", () => {
 				"if bytes.len() > MAX_FILE_BYTES"
 			)
 		).toBe(ANCHOR_PRESENT);
+		// The row lives on the Storage tab. It used to be a card on a separate
+		// "Document parsing" section, which also carried a duplicate of the
+		// `document.parse` provider picker that the node dropdown's Toolkits row
+		// already owns; that section is gone and this row moved with the ceiling.
 		const panel = rustSource(
-			"apps/desktop/src/components/settings/DocumentParsingSettings.tsx"
+			"apps/desktop/src/components/settings/StorageSettings.tsx"
 		);
 		// It may still be NAMED in the panel's prose (that is where the discrepancy is
 		// explained); what it must not be is rendered.
@@ -823,16 +827,14 @@ describe("the upload ceiling this client reports", () => {
 		expect(panel).not.toContain(
 			"import { formatBytes, SPACE_UPLOAD_MAX_BYTES }"
 		);
-		// The panel now prefers the ceiling the NODE reports over any client mirror,
+		// The panel prefers the ceiling the NODE reports over any client mirror,
 		// falling back to the constant only when the node did not answer. That is the
 		// stronger shape: a hardcoded figure is what produced the 200 MiB bug, so this
 		// pins "fetched, with a labelled fallback" rather than a specific literal.
 		expect(panel).toContain("capability?.maxInputBytes");
 		expect(panel).toContain("formatBytes(limit)");
 		expect(panel).toContain("NODE_UPLOAD_MAX_BYTES");
-		expect(panel).toContain(
-			"<ItemTitle>Maximum file you can upload</ItemTitle>"
-		);
+		expect(panel).toContain('title="Maximum file you can upload"');
 	});
 
 	it("pins the axum default that made the old 200 MiB figure unreachable", () => {

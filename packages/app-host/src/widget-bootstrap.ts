@@ -225,7 +225,18 @@ function bridgeSource(
     uploadFile: function(a){ return call("ui.uploadFile", [a]); },
     selectFiles: function(a){ return call("ui.selectFiles", [a]); },
     getFileDownloadUrl: function(a){ return call("ui.getFileDownloadUrl", [a]); },
-    setOpenInAppUrl: function(a){ return call("ui.setOpenInAppUrl", [a]); }
+    setOpenInAppUrl: function(a){ return call("ui.setOpenInAppUrl", [a]); },
+    // Assistant bridge: tell the global Ask Ryu panel what this surface is showing
+    // (publishContext), optionally lend it this surface's own instructions while
+    // the page is open (registerSurface), and open it (open). Gated on the
+    // assistant:context grant — ungranted calls reject like any other.
+    assistant: {
+      publishContext: function(items){ return call("assistant.publishContext", [{ items: items }]); },
+      clearContext: function(){ return call("assistant.clearContext", []); },
+      registerSurface: function(s){ return call("assistant.registerSurface", [s]); },
+      clearSurface: function(){ return call("assistant.clearSurface", []); },
+      open: function(a){ return call("assistant.open", [a || {}]); }
+    }
   };
   window.ryu = api; window.openai = api;
   // Detection contract (shared with installRyuBridge): mark THIS bootstrap as the

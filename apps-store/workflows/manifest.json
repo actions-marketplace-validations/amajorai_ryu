@@ -97,7 +97,6 @@
         "icon": "workflow-square-01",
         "group": "catalog",
         "order": 60,
-        "view": "workflow-templates",
         "spec": {
           "source": {
             "http": { "method": "GET", "path": "/api/workflows/catalog" },
@@ -108,8 +107,27 @@
             "title": "name",
             "description": "description",
             "badge": "pattern",
+            "badgeTransform": "humanize",
             "tags": "tags",
             "sourceUrl": "source_url"
+          },
+          "detail": {
+            "item": "template",
+            "source": {
+              "http": {
+                "method": "GET",
+                "path": "/api/workflows/catalog/{{item.id}}"
+              }
+            },
+            "graph": {
+              "title": "Workflow",
+              "nodes": "nodes",
+              "edges": "edges",
+              "nodeId": "id",
+              "edgeSource": "from",
+              "edgeTarget": "to",
+              "edgeLabel": "branch"
+            }
           },
           "groupBy": "category",
           "groups": [

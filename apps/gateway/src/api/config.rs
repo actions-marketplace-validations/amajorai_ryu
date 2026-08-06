@@ -1073,6 +1073,7 @@ mod tests {
             resolved_policy: None,
             prompt_cache_mode: None,
             prompt_cache_ttl: None,
+            node_routing: None,
         }
     }
 

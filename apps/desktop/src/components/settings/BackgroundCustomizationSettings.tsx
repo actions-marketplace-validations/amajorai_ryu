@@ -16,7 +16,7 @@ import {
 	ColorPickerInput,
 	ColorPickerTrigger,
 } from "@ryu/ui/components/color-picker";
-import { ElasticSlider } from "@ryu/ui/components/elastic-slider";
+import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
 import {
 	Select,
 	SelectContent,
@@ -180,9 +180,9 @@ function GradientStopsEditor({
 						onChange={(color) => setColor(i, color)}
 						value={stop.color}
 					/>
-					<ElasticSlider
+					<FluidSlider
 						aria-label={`Gradient stop ${i + 1} position`}
-						formatValue={(v) => `${Math.round(v)}%`}
+						format={(v) => `${Math.round(v)}%`}
 						label=""
 						max={100}
 						min={0}
@@ -292,8 +292,8 @@ function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 							onChange={(stops) => update({ gradientStops: stops })}
 							stops={bg.gradientStops}
 						/>
-						<ElasticSlider
-							formatValue={(v) => `${Math.round(v)}°`}
+						<FluidSlider
+							format={(v) => `${Math.round(v)}°`}
 							label="Angle"
 							max={360}
 							min={0}
@@ -392,8 +392,8 @@ function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 								</FieldRow>
 
 								{scaleApplies && (
-									<ElasticSlider
-										formatValue={(v) => `${Math.round(v)}%`}
+									<FluidSlider
+										format={(v) => `${Math.round(v)}%`}
 										label="Scale"
 										max={300}
 										min={25}
@@ -411,8 +411,8 @@ function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 											value={bg.overlayColor}
 										/>
 									</FieldRow>
-									<ElasticSlider
-										formatValue={(v) => `${Math.round(v)}%`}
+									<FluidSlider
+										format={(v) => `${Math.round(v)}%`}
 										label="Overlay opacity"
 										max={100}
 										min={0}
@@ -445,8 +445,8 @@ function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 					</p>
 				</div>
 				<div className="space-y-2.5 rounded-lg border border-border/60 p-3">
-					<ElasticSlider
-						formatValue={(v) => `${Math.round(v)}%`}
+					<FluidSlider
+						format={(v) => `${Math.round(v)}%`}
 						label="Transparency"
 						max={100}
 						min={0}
@@ -458,8 +458,8 @@ function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 						Fades the gradient and image so the theme colors (and whatever is
 						behind the surface) show through.
 					</p>
-					<ElasticSlider
-						formatValue={(v) => `${Math.round(v)}px`}
+					<FluidSlider
+						format={(v) => `${Math.round(v)}px`}
 						label="Backdrop blur"
 						max={MAX_BACKDROP_BLUR}
 						min={0}

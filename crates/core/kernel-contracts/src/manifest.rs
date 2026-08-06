@@ -134,6 +134,77 @@ pub fn validate_pi_extension_path(rel: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The ONE directory a manifest `output_styles[].file` may name, one segment deep.
+///
+/// A third sibling of [`CODE_FILE_DIRS`] and [`PI_EXTENSION_DIR`] rather than a
+/// member of either, for the same reason those two are separate: the three carry
+/// things of wildly different privilege — sandboxed JS, unsandboxed TypeScript, and
+/// inert prose — and a single parameterised gate is one edit away from letting any
+/// of them wear another's clothes.
+///
+/// The name is deliberately the same as the directory a *user's* own styles live in
+/// (`<claude-dir>/output-styles/`), so a style moves between a plugin package and a
+/// user root by plain copy, with no path rewriting and no second layout to learn.
+pub const OUTPUT_STYLE_DIR: &str = "output-styles";
+
+/// Largest output-style file a manifest may reference, in bytes.
+///
+/// Separate from [`MAX_CODE_FILE_BYTES`] because the two bound different risks. A
+/// code file is bounded so a resolver cannot be aimed at something enormous; a style
+/// is bounded because its `source` is hydrated INLINE and then travels on every
+/// `GET /api/plugins/contributions` response and into every manifest clone — and,
+/// downstream of that, into the system prompt of every turn. 64 KB is already an
+/// order of magnitude more prose than any sane style (the built-ins are 1–3 KB).
+pub const MAX_OUTPUT_STYLE_BYTES: usize = 64 * 1024;
+
+/// Validate an `output_styles[].file` path: exactly `output-styles/<name>.md`.
+///
+/// A near-copy of [`validate_pi_extension_path`] for the reason that function's own
+/// comment gives — the allowlists ARE the gate, and merging them would let a style
+/// name a `hooks/*.js` or a `code_file` name a `.md`. Same traversal-sink posture as
+/// both siblings: the path is joined onto a plugin directory, and `\` is a separator
+/// on Windows where a drive-qualified component silently replaces the base in
+/// `PathBuf::join`.
+///
+/// Flatness is load-bearing beyond safety: `tools/mirror-public.sh` step 1c vendors
+/// these into the published tree with a literal `plugins-store/*/output-styles/*.md`
+/// glob, and a nested layout would make that glob accidentally rather than provably
+/// sufficient — a miss that first surfaces as a public-tree build failure *after*
+/// publication.
+pub fn validate_output_style_path(rel: &str) -> Result<(), String> {
+    if rel.is_empty() {
+        return Err("output style file must not be empty".to_string());
+    }
+    let mut segments = rel.split('/');
+    let (Some(dir), Some(file), None) = (segments.next(), segments.next(), segments.next()) else {
+        return Err(format!(
+            "output style file '{rel}' must be exactly '{OUTPUT_STYLE_DIR}/<name>.md'"
+        ));
+    };
+    if dir != OUTPUT_STYLE_DIR {
+        return Err(format!(
+            "output style file '{rel}' must live under '{OUTPUT_STYLE_DIR}/'"
+        ));
+    }
+    if !file.ends_with(".md") {
+        return Err(format!("output style file '{rel}' must name a .md file"));
+    }
+    let stem_ok = file
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+    if !stem_ok {
+        return Err(format!(
+            "output style file '{rel}' contains illegal characters (allowed: a-z A-Z 0-9 . - _)"
+        ));
+    }
+    if file.contains("..") || file.starts_with('.') {
+        return Err(format!(
+            "output style file '{rel}' must not traverse or start with '.'"
+        ));
+    }
+    Ok(())
+}
+
 /// Hydrate one code-bearing node: enforce exactly-one-of `code`/`code_file`,
 /// resolve the path, move the contents into `code`, and clear `code_file` so the
 /// hydrated manifest is byte-indistinguishable from an inline one.
@@ -168,6 +239,48 @@ fn hydrate_one(
     }
     *code = body;
     *code_file = None;
+    Ok(())
+}
+
+/// The [`hydrate_one`] twin for an output style: exactly-one-of `source`/`file`,
+/// resolve the path, move the contents into `source`, clear `file`.
+///
+/// A parallel helper rather than a call into [`hydrate_one`] because the two nodes
+/// spell "not provided" differently — a hook's body is a `String` that is absent by
+/// being empty, a style's is an `Option<String>` — and because the size cap and the
+/// path allowlist differ. Sharing them would mean threading three parameters through
+/// to reach one shared `if`.
+fn hydrate_one_output_style(
+    label: &str,
+    source: &mut Option<String>,
+    file: &mut Option<String>,
+    resolve: &mut impl FnMut(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    let has_inline = source.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let Some(rel) = file.clone() else {
+        if has_inline {
+            return Ok(());
+        }
+        return Err(format!("{label} declares neither 'source' nor 'file'"));
+    };
+    if has_inline {
+        return Err(format!(
+            "{label} declares both 'source' and 'file' ('{rel}') — exactly one is allowed"
+        ));
+    }
+    validate_output_style_path(&rel).map_err(|e| format!("{label}: {e}"))?;
+    let body = resolve(&rel).map_err(|e| format!("{label}: cannot resolve file: {e}"))?;
+    if body.len() > MAX_OUTPUT_STYLE_BYTES {
+        return Err(format!(
+            "{label}: file '{rel}' is {} bytes (max {MAX_OUTPUT_STYLE_BYTES})",
+            body.len()
+        ));
+    }
+    if body.trim().is_empty() {
+        return Err(format!("{label}: file '{rel}' is empty"));
+    }
+    *source = Some(body);
+    *file = None;
     Ok(())
 }
 
@@ -310,7 +423,6 @@ pub fn canonical_plugin_id(id: &str) -> &str {
 pub const LEGACY_PLUGIN_ID_ALIASES: &[(&str, &str)] = &[
     ("agentbrowser", "@ryu/agentbrowser"),
     ("brave", "@ryu/brave"),
-    ("bytebot", "@ryu/bytebot"),
     ("chat-title", "@ryu/chat-title"),
     (
         "com.example.research-assistant",
@@ -1023,6 +1135,22 @@ impl PluginManifest {
             .collect()
     }
 
+    /// Every plugin-root-relative `output_styles[].file` path this manifest declares,
+    /// in walk order. Empty once the manifest has been hydrated.
+    ///
+    /// The [`Self::code_file_refs`] analogue for the style carriage path, and a third
+    /// separate list for the same reason `pi_extension_refs` is a second one: each
+    /// feeds a different embed table's bijection assertion
+    /// (`BUILTIN_CODE_FILES` / `BUILTIN_PI_EXTENSIONS` / the output-style table), and
+    /// folding them together would break all three at once.
+    pub fn output_style_refs(&self) -> Vec<String> {
+        self.contributes
+            .iter()
+            .flat_map(|c| c.output_styles.iter())
+            .filter_map(|style| style.file.clone())
+            .collect()
+    }
+
     /// Replace every `code_file` reference with the file's contents, in place.
     ///
     /// # The invariant this encodes
@@ -1069,6 +1197,48 @@ impl PluginManifest {
                     &mut resolve,
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    /// Replace every `output_styles[].file` reference with the file's contents, in
+    /// place — the prose twin of [`Self::hydrate_code_files`], and the function
+    /// `docs/output-styles.md` §4 names.
+    ///
+    /// Same source/wire invariant, for the same reason: a style body is authored as a
+    /// real `.md` file (diffable, copyable straight into a user's own
+    /// `output-styles/` directory) and every consumer downstream of parsing — the
+    /// registry, `GET /api/plugins/contributions`, the Gateway-signed bundle `ryu
+    /// pack` emits — sees only the inline `source` string. Inlining at pack time is
+    /// what keeps the whole body INSIDE the signed surface, so authoring in files
+    /// adds no unsigned carriage channel.
+    ///
+    /// # `source` carries the WHOLE file, frontmatter included
+    ///
+    /// Not a pre-split body plus mirrored `name`/`description` manifest keys. Two
+    /// things fall out of that. There stays exactly ONE parser
+    /// (`parse_output_style_md`) for a style off disk and a style out of a manifest,
+    /// so the two can never drift in how they read frontmatter; and the frontmatter
+    /// remains the single source of truth for a style's metadata, so a manifest key
+    /// cannot disagree with the file it points at.
+    ///
+    /// # Fail-closed
+    ///
+    /// Exactly one of `source` / `file`, and an unresolvable `file` is a hard error —
+    /// never an empty body. An empty style would silently degrade to "no style", the
+    /// one outcome indistinguishable at every read site from the user's own choice
+    /// not to use one.
+    pub fn hydrate_output_style_files(
+        &mut self,
+        mut resolve: impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<(), String> {
+        let plugin = self.id.clone();
+        let Some(contributes) = &mut self.contributes else {
+            return Ok(());
+        };
+        for style in &mut contributes.output_styles {
+            let label = format!("plugin '{plugin}' output style '{}'", style.id);
+            hydrate_one_output_style(&label, &mut style.source, &mut style.file, &mut resolve)?;
         }
         Ok(())
     }
@@ -1151,6 +1321,9 @@ impl PluginManifest {
                 .map_err(|e| format!("plugin '{}': {e}", self.id))?;
             contributes
                 .validate_pi_extensions()
+                .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+            contributes
+                .validate_output_styles()
                 .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         }
         if let Some(permissions) = &self.permissions {
@@ -1555,6 +1728,69 @@ pub struct Contributes {
     #[serde(default)]
     pub sidebar_buttons: Vec<SidebarButtonContribution>,
 
+    /// **Colour themes** the plugin ships — the seam that makes a theme an ordinary
+    /// marketplace item instead of a hardcoded entry in the shell's preset table.
+    ///
+    /// This is deliberately the VS Code / Zed shape: a theme is not its own catalog
+    /// kind, it is a plugin that contributes one. That choice is load-bearing rather
+    /// than cosmetic — it means a theme inherits install/uninstall/enable, versioning,
+    /// signing, the Store detail page, reviews and the trust scorecard for free, and
+    /// it means a plugin that ships a theme ALONGSIDE other contributions (an app with
+    /// a matching skin) is expressible. A new `CatalogKind::Theme` would have bought a
+    /// second, weaker copy of all of that.
+    ///
+    /// Each entry is a [`ThemeContribution`]: pure design tokens, no code. Themes are
+    /// therefore the one contribution family that is safe with **zero** grants — the
+    /// worst a hostile theme can do is look bad, because the shell only ever reads
+    /// `tokens` into CSS custom properties and never evaluates them.
+    ///
+    /// Self-contained (it names no runnable), so it stays out of
+    /// [`Contributes::referenced_ids`]. Typed rather than opaque JSON because Core
+    /// does interpret it: the mode/token split is what lets a client ask for "the dark
+    /// themes" without parsing every payload.
+    #[serde(default)]
+    pub themes: Vec<ThemeContribution>,
+
+    /// **Output styles** the plugin ships — Markdown files that change *how* an agent
+    /// answers (role, tone, default response shape) by editing the system prompt for
+    /// the turn. See `docs/output-styles.md`.
+    ///
+    /// A style is NOT its own catalog kind, for exactly the argument
+    /// [`Contributes::themes`] makes one field up: as a contribution it inherits
+    /// install/uninstall/enable, versioning, signing, the Store detail page, reviews
+    /// and the trust scorecard for free, and a plugin that ships a style ALONGSIDE
+    /// other contributions (an app with a matching voice) stays expressible. A
+    /// `CatalogKind::OutputStyle` would have been a second, weaker copy of all of
+    /// that — and `CatalogKind::ALL` is a closed five-member enum that must stay
+    /// that way, because every surface that switches on it exhaustively is a place a
+    /// sixth member would have to be threaded by hand.
+    ///
+    /// # Safe with zero grants, unlike the other file-bearing family here
+    ///
+    /// The body is prose: nothing in the pipeline evaluates it, it only ever lands in
+    /// a system prompt as text. So a style sits with themes on the safe side of the
+    /// line — the worst a hostile one can do is make the agent tiresome — and
+    /// pointedly NOT with [`Contributes::pi_extensions`], which is unsandboxed code
+    /// and therefore tier-gated at the materializer.
+    ///
+    /// # Served on the contributions endpoint
+    ///
+    /// Unlike [`Contributes::pi_extensions`] and [`Contributes::lsp_servers`], which
+    /// Core consumes at their own sites, this one IS served from
+    /// `GET /api/plugins/contributions` — the desktop composer's style picker is a
+    /// client-rendered surface and needs the declaration, not just its effect.
+    ///
+    /// Self-contained (it names no runnable), so it stays out of
+    /// [`Contributes::referenced_ids`].
+    ///
+    /// ```json
+    /// "output_styles": [
+    ///   { "id": "eli5", "file": "output-styles/eli5.md" }
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_styles: Vec<OutputStyleContribution>,
+
     /// App-registered **marketplace tabs** — one section in the Store's nav bar,
     /// carrying the app's own installable catalog (workflow templates, meeting-notes
     /// templates, monitor presets, …). The Store-shaped sibling of
@@ -1562,13 +1798,17 @@ pub struct Contributes {
     /// surface instead of the shell welding the section into a closed `StoreSection`
     /// union. Self-contained + opaque `spec` (see [`StoreTabContribution`]).
     ///
-    /// **Served OUTSIDE the enabled filter**, unlike every sibling family here. The
-    /// Store is where an app gets installed, so gating its tab on the app's own
-    /// enabled bit would hide the tab you install the app FROM — and every built-in
-    /// feature app is `NOT_PRE_INSTALLED` on a fresh machine. Each entry is tagged
-    /// with `plugin` plus `app_installed` / `app_enabled` so the renderer can show an
-    /// enable-CTA instead of an empty list. The DATA the tab fetches stays gated by
-    /// the app's own route gate; only the declaration is unconditional.
+    /// **Served OUTSIDE the enabled filter**, unlike every sibling family here: each
+    /// entry is tagged with `plugin` plus `app_installed` / `app_enabled` and the
+    /// renderer decides. Serving the declaration unconditionally keeps the door open
+    /// for a surface that wants the tab as an acquisition funnel; the DATA behind it
+    /// stays gated by the app's own route gate either way.
+    ///
+    /// The desktop Store deliberately renders only the tabs whose app is installed
+    /// AND enabled. A pill present whether or not you own the app reads exactly like
+    /// a section the shell hardcoded, and clicking it produced a "Turn on X" prompt
+    /// where a catalog belongs. Apps are acquired from the Apps tab; the app's own
+    /// sections appear with it.
     #[serde(default)]
     pub store_tabs: Vec<StoreTabContribution>,
 
@@ -1752,6 +1992,45 @@ pub struct PiExtensionContribution {
     /// Optional human-facing one-liner (what the extension adds to the agent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// One **output style** a plugin ships (a [`Contributes::output_styles`] row).
+///
+/// Carries the style's *body* in one of two forms and NOTHING else — no `name`, no
+/// `description`, no `keep-coding-instructions`. Every one of those lives in the
+/// file's own YAML frontmatter, which [`PluginManifest::hydrate_output_style_files`]
+/// explains: mirroring them up here would create a second place a style's metadata
+/// can be stated, and therefore a place it can disagree with itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OutputStyleContribution {
+    /// Stable id for this style within the plugin (`[a-z0-9][a-z0-9._-]*`).
+    ///
+    /// Validated with the same alphabet as a [`PiExtensionContribution::id`], and for
+    /// a related reason: the registry merges plugin, user, project and managed styles
+    /// into one id-keyed table where later entries win, and the persisted per-turn /
+    /// per-conversation / node-default selection is this id. A free-form id would
+    /// make a selection unresolvable the moment it contained something a settings key
+    /// or a URL path could not carry.
+    pub id: String,
+
+    /// SOURCE form: path to the Markdown file, relative to the plugin root — exactly
+    /// `output-styles/<name>.md`. See [`validate_output_style_path`].
+    ///
+    /// Exactly one of `file` / `source` is set. Authors write `file`;
+    /// [`PluginManifest::hydrate_output_style_files`] turns it into `source` at parse
+    /// time and clears this, so a hydrated manifest is byte-indistinguishable from
+    /// one that was authored inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+
+    /// WIRE form: the file's contents **verbatim, frontmatter included**.
+    ///
+    /// Deliberately the whole file rather than a pre-split body, so that a style
+    /// contributed by a plugin and a style sitting in a user's `output-styles/`
+    /// directory are the same bytes and go through the same single parser. See
+    /// [`PluginManifest::hydrate_output_style_files`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// One **declarative view** contribution (the Raycast tier — see [`Contributes::views`]).
@@ -2231,11 +2510,13 @@ pub struct SidebarSectionContribution {
 /// `spec` stays opaque so a new catalog capability is a renderer change, not a Core
 /// change.
 ///
-/// `view` is the escape hatch, mirroring `SettingsTabContribution::view`: a named
-/// first-party renderer for a tab whose detail pane needs more than the declarative
-/// vocabulary (the workflow-template graph preview). Like settings views, the shell
-/// keys its view table on the owning **plugin id**, not on this string, so a
-/// third-party manifest cannot borrow a first-party component by naming it.
+/// **There is no first-party escape hatch.** This contribution used to carry a
+/// `view` naming a hand-written renderer the shell kept in a plugin-id allowlist,
+/// for the one tab whose detail pane the vocabulary could not express (the
+/// workflow-template graph). That made the flagship example of "an app can own a
+/// Store section" the single section no other app could reproduce. The graph is a
+/// declarative primitive now (`spec.detail.graph`), the field is gone, and every
+/// contributed tab — first-party or not — renders from the same spec.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StoreTabContribution {
     /// Stable id for this tab within the plugin. The shell namespaces it into the
@@ -2263,12 +2544,6 @@ pub struct StoreTabContribution {
     /// Placement hint within the group (lower = further left).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i64>,
-
-    /// Named first-party renderer for this tab. When set, the shell renders that
-    /// component instead of the declarative `spec` — subject to its own plugin-id
-    /// allowlist. Absent = purely declarative.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<String>,
 
     /// The opaque tab spec (source/map/groups/search/install/itemActions). Interpreted
     /// by the desktop renderer, never by Core. Absent alongside an absent `view` = an
@@ -2299,6 +2574,53 @@ pub struct SidebarButtonContribution {
     /// Optional placement hint among the sidebar buttons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i64>,
+}
+
+/// One colour theme a plugin contributes (`contributes.themes`).
+///
+/// Shape-identical to the shell's own `ThemeVariant` (`@ryu/ui/theme/presets`), so a
+/// theme installed from the marketplace and a theme that ships in the binary are the
+/// same object by the time the picker renders them — there is no second rendering
+/// path to keep in sync, and a plugin can never express a theme the built-ins could
+/// not.
+///
+/// # Why `tokens` is an untyped map
+///
+/// The keys are CSS custom properties (`--background`, `--sidebar-ring`, …). Typing
+/// them as a fixed struct would mean every new token added to the design system
+/// silently DROPS out of third-party themes until Core is rebuilt and redeployed —
+/// exactly the drift `settings_tabs` documents for its own `serde_json::Value`. The
+/// values are never evaluated, only assigned to CSS variables, so an unknown key is
+/// inert rather than dangerous.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ThemeContribution {
+    /// Stable id used as the persisted preset selection. Namespace it with the
+    /// plugin id (e.g. `"@acme/themes:midnight"`) so two plugins cannot collide, and
+    /// so a selection survives the theme being renamed.
+    pub id: String,
+
+    /// Human name shown in the theme picker.
+    pub label: String,
+
+    /// Which mode slot this theme fills: `"light"` or `"dark"`. A plugin shipping a
+    /// pair contributes two entries, mirroring how the shell keeps an independent
+    /// preset per mode rather than one theme with two halves.
+    pub mode: String,
+
+    /// The four swatch colours the picker paints before the theme is applied.
+    pub preview: ThemePreview,
+
+    /// CSS custom property name → value (e.g. `"--background"` → `"oklch(1 0 0)"`).
+    pub tokens: std::collections::BTreeMap<String, String>,
+}
+
+/// The swatch a theme shows in the picker, without applying the theme.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ThemePreview {
+    pub bg: String,
+    pub surface: String,
+    pub primary: String,
+    pub text: String,
 }
 
 /// One app-widget contribution (Ryu Apps). Binds the tool that renders the widget
@@ -3084,9 +3406,16 @@ pub struct ContextMenuContribution {
 
     /// WHICH menu. Closed-ish enum by convention, open by encoding (same call as
     /// [`DockPanelPlacement`]): `"conversation"` | `"message"` | `"space"` |
-    /// `"agent"` | `"project"` | `"workflow"` | `"skill"`. The shell owns the anchor
-    /// set; an app cannot conjure a new menu, but an unknown value must not fail the
-    /// load.
+    /// `"agent"` | `"project"` | `"workflow"` | `"skill"` | `"channel"`. The shell
+    /// owns the anchor set; an app cannot conjure a new menu, but an unknown value
+    /// must not fail the load.
+    ///
+    /// An anchor names an ENTITY, not a place, so one declaration reaches every
+    /// surface that shows it. The desktop renders these in the sidebar row's menu
+    /// AND — for whatever entity a tab is showing — in that tab's right-click menu,
+    /// on both the horizontal strip and the vertical tab list. `"channel"` is in the
+    /// list because a channel is one of those tab-visible entities; it is not a
+    /// desktop-only extension.
     pub anchor: String,
 
     /// The granted capability the shell invokes when the row is clicked, plus
@@ -3579,6 +3908,66 @@ impl Contributes {
             }
             validate_pi_extension_path(&ext.file)
                 .map_err(|e| format!("pi_extensions[{}]: {e}", ext.id))?;
+        }
+        Ok(())
+    }
+
+    /// Cross-validate [`Contributes::output_styles`]: unique ids in the id alphabet,
+    /// exactly one of `file` / `source`, and a legal [`OUTPUT_STYLE_DIR`] path.
+    ///
+    /// Checks the *shape*, deliberately not the *hydration state*. A residual `file`
+    /// is legal here — unlike a residual `code_file`, which
+    /// [`PluginManifest::validate_code_sources`] rejects outright. That asymmetry is
+    /// intentional: the code rule is safe only because every loader path provably
+    /// hydrates before validating, and an `Err` from here skips the WHOLE manifest.
+    /// Failing an entire app to load because one prose file had not been inlined yet
+    /// is a wildly disproportionate blast radius for a contribution that cannot
+    /// execute anything.
+    ///
+    /// The duplicate-id half matters for the reason [`OutputStyleContribution::id`]
+    /// gives: two rows sharing an id collapse to one entry in the merged registry, so
+    /// the persisted selection silently resolves to whichever loaded last.
+    pub fn validate_output_styles(&self) -> Result<(), String> {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for style in &self.output_styles {
+            let valid_id = style
+                .id
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && style.id.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                });
+            if !valid_id {
+                return Err(format!(
+                    "output_styles[{}]: id must match [a-z0-9][a-z0-9._-]*",
+                    style.id
+                ));
+            }
+            if !seen.insert(style.id.as_str()) {
+                return Err(format!("duplicate output style id '{}'", style.id));
+            }
+            match (&style.file, &style.source) {
+                (Some(rel), None) => validate_output_style_path(rel)
+                    .map_err(|e| format!("output_styles[{}]: {e}", style.id))?,
+                (None, Some(source)) if !source.trim().is_empty() => {}
+                (Some(rel), Some(_)) => {
+                    return Err(format!(
+                        "output_styles[{}] declares both 'source' and 'file' ('{rel}') — exactly \
+                         one is allowed",
+                        style.id
+                    ));
+                }
+                // Covers both "neither key" and an inline `source` that is blank. A
+                // style with no body would load as a style that changes nothing,
+                // which no read site can tell apart from the user having picked none.
+                _ => {
+                    return Err(format!(
+                        "output_styles[{}] declares neither 'source' nor 'file'",
+                        style.id
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -5185,6 +5574,212 @@ mod tests {
             parsed.pi_extension_refs(),
             vec!["pi-extensions/ryu-shell.ts".to_owned()],
             "the file is enumerated, never hydrated into the manifest"
+        );
+    }
+
+    // ── output styles ────────────────────────────────────────────────────────
+
+    /// Same traversal-sink argument as the two allowlists above, plus the cross-check
+    /// that all three stay disjoint: prose must never be loadable as sandboxed JS or
+    /// as an unsandboxed Pi extension, and neither of those may be smuggled in as a
+    /// style.
+    #[test]
+    fn output_style_path_allowlist_rejects_traversal_and_stray_dirs() {
+        assert!(validate_output_style_path("output-styles/eli5.md").is_ok());
+        assert!(validate_output_style_path("output-styles/i-have-adhd.md").is_ok());
+        for bad in [
+            "",
+            "eli5.md",                     // no dir segment
+            "output-styles/nested/x.md",   // not flat: breaks the mirror's glob
+            "styles/eli5.md",              // wrong dir
+            "output-styles/../../etc/passwd",
+            "../output-styles/eli5.md",
+            "/etc/passwd",
+            "output-styles\\eli5.md", // Windows separator
+            "C:/output-styles/eli5.md",
+            "output-styles/eli5.markdown", // near-miss extension
+            "output-styles/eli5.js",       // sandboxed-JS extension, not prose
+            "output-styles/.hidden.md",
+        ] {
+            assert!(
+                validate_output_style_path(bad).is_err(),
+                "'{bad}' must be rejected"
+            );
+        }
+        // All three allowlists are disjoint in every direction.
+        assert!(validate_code_file_path("output-styles/eli5.md").is_err());
+        assert!(validate_pi_extension_path("output-styles/eli5.md").is_err());
+        assert!(validate_output_style_path("hooks/loop.js").is_err());
+        assert!(validate_output_style_path("pi-extensions/ryu-shell.ts").is_err());
+    }
+
+    /// A style body is authored as a file and travels as an inline string. The whole
+    /// file — frontmatter included — is what lands in `source`, because one parser
+    /// has to read a plugin style and a disk style identically.
+    #[test]
+    fn output_style_hydration_inlines_the_whole_file_and_clears_the_path() {
+        let raw = r#"{
+            "id": "@ryu/output-styles",
+            "name": "Output styles",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "output_styles": [{ "id": "eli5", "file": "output-styles/eli5.md" }]
+            }
+        }"#;
+        let body = "---\nname: ELI5\nkeep-coding-instructions: true\n---\n\nTalk to me like I'm 5.\n";
+
+        let mut m: PluginManifest = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.output_style_refs(), vec!["output-styles/eli5.md".to_owned()]);
+        m.hydrate_output_style_files(|rel| {
+            assert_eq!(rel, "output-styles/eli5.md");
+            Ok(body.to_owned())
+        })
+        .expect("hydrates");
+
+        let style = &m.contributes.as_ref().unwrap().output_styles[0];
+        assert_eq!(
+            style.source.as_deref(),
+            Some(body),
+            "the frontmatter travels with the body — it is the style's metadata"
+        );
+        assert!(
+            style.file.is_none(),
+            "file must be cleared so a hydrated manifest is indistinguishable from an inline one"
+        );
+        assert!(m.output_style_refs().is_empty());
+        m.validate().expect("the hydrated form still validates");
+    }
+
+    #[test]
+    fn an_unresolvable_or_oversized_output_style_is_an_error_not_an_empty_style() {
+        let manifest = |styles: serde_json::Value| {
+            serde_json::json!({
+                "id": "@example/styles",
+                "name": "Styles",
+                "version": "1.0.0",
+                "runnables": [],
+                "contributes": { "output_styles": styles },
+            })
+            .to_string()
+        };
+        let one = manifest(serde_json::json!([
+            { "id": "eli5", "file": "output-styles/eli5.md" }
+        ]));
+
+        let mut m: PluginManifest = serde_json::from_str(&one).unwrap();
+        let err = m
+            .hydrate_output_style_files(|rel| Err(format!("no such file: {rel}")))
+            .unwrap_err();
+        assert!(err.contains("cannot resolve file"), "got: {err}");
+
+        let mut m: PluginManifest = serde_json::from_str(&one).unwrap();
+        let err = m
+            .hydrate_output_style_files(|_| Ok("   \n".to_owned()))
+            .unwrap_err();
+        assert!(err.contains("is empty"), "got: {err}");
+
+        let big = "x".repeat(MAX_OUTPUT_STYLE_BYTES + 1);
+        let mut m: PluginManifest = serde_json::from_str(&one).unwrap();
+        let err = m
+            .hydrate_output_style_files(|_| Ok(big.clone()))
+            .unwrap_err();
+        assert!(err.contains("max"), "got: {err}");
+    }
+
+    /// A malformed declaration must fail at LOAD. Note what is deliberately NOT an
+    /// error: a residual `file`. See [`Contributes::validate_output_styles`].
+    #[test]
+    fn a_malformed_output_style_declaration_fails_validation() {
+        let manifest = |styles: serde_json::Value| {
+            serde_json::json!({
+                "id": "@example/styles",
+                "name": "Styles",
+                "version": "1.0.0",
+                "runnables": [],
+                "contributes": { "output_styles": styles },
+            })
+            .to_string()
+        };
+
+        let bad_path = manifest(serde_json::json!([
+            { "id": "eli5", "file": "../../etc/passwd" }
+        ]));
+        let err = PluginManifest::parse_and_validate(&bad_path).unwrap_err();
+        assert!(err.contains("output style file"), "got: {err}");
+
+        let bad_id = manifest(serde_json::json!([
+            { "id": "ELI5!", "file": "output-styles/eli5.md" }
+        ]));
+        let err = PluginManifest::parse_and_validate(&bad_id).unwrap_err();
+        assert!(err.contains("[a-z0-9]"), "got: {err}");
+
+        let dup = manifest(serde_json::json!([
+            { "id": "eli5", "file": "output-styles/a.md" },
+            { "id": "eli5", "file": "output-styles/b.md" }
+        ]));
+        let err = PluginManifest::parse_and_validate(&dup).unwrap_err();
+        assert!(err.contains("duplicate output style id"), "got: {err}");
+
+        let both = manifest(serde_json::json!([
+            { "id": "eli5", "file": "output-styles/a.md", "source": "---\nname: x\n---\nhi" }
+        ]));
+        let err = PluginManifest::parse_and_validate(&both).unwrap_err();
+        assert!(err.contains("exactly one is allowed"), "got: {err}");
+
+        let neither = manifest(serde_json::json!([{ "id": "eli5" }]));
+        let err = PluginManifest::parse_and_validate(&neither).unwrap_err();
+        assert!(err.contains("declares neither"), "got: {err}");
+
+        // The un-hydrated source form is valid on its own: validation checks shape,
+        // not whether a resolver has run yet.
+        let unhydrated = manifest(serde_json::json!([
+            { "id": "eli5", "file": "output-styles/eli5.md" }
+        ]));
+        PluginManifest::parse_and_validate(&unhydrated)
+            .expect("a well-formed, un-hydrated declaration loads");
+    }
+
+    /// The wire form must survive a JSON round trip unchanged — it is what
+    /// `GET /api/plugins/contributions` serves and what `ryu pack` signs.
+    #[test]
+    fn a_manifest_carrying_output_styles_round_trips_through_json() {
+        let raw = r#"{
+            "id": "@ryu/output-styles",
+            "name": "Output styles",
+            "version": "1.2.3",
+            "runnables": [],
+            "contributes": {
+                "output_styles": [
+                    { "id": "eli5", "source": "---\nname: ELI5\n---\n\nSmall words.\n" },
+                    { "id": "plain-text", "file": "output-styles/plain-text.md" }
+                ],
+                "themes": []
+            }
+        }"#;
+        let m = PluginManifest::parse_and_validate(raw).expect("validates");
+        let styles = &m.contributes.as_ref().unwrap().output_styles;
+        assert_eq!(styles.len(), 2);
+        assert_eq!(styles[0].source.as_deref(), Some("---\nname: ELI5\n---\n\nSmall words.\n"));
+        assert!(styles[0].file.is_none());
+        assert_eq!(styles[1].file.as_deref(), Some("output-styles/plain-text.md"));
+        assert!(styles[1].source.is_none());
+
+        let round_tripped: PluginManifest =
+            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(round_tripped, m);
+
+        // Absent by default, and absent from the serialized form when empty — an
+        // existing manifest gains no key by this field existing.
+        let bare = PluginManifest::parse_and_validate(
+            r#"{ "id": "@example/bare", "name": "Bare", "version": "1.0.0", "runnables": [],
+                 "contributes": {} }"#,
+        )
+        .expect("validates");
+        assert!(bare.contributes.as_ref().unwrap().output_styles.is_empty());
+        assert!(
+            !serde_json::to_string(&bare).unwrap().contains("output_styles"),
+            "an empty list must not appear on the wire"
         );
     }
 

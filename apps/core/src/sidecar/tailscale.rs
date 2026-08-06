@@ -10,11 +10,21 @@
 //! Opt-in only: `TailscaleManager` is registered in `all_sidecars` and listed in
 //! `startup_order`, but `start_all` skips it unless `main()` marked it installed —
 //! which happens only when `ryu_mesh::is_enabled()` (the `RYU_MESH_ENABLED` env OR
-//! the `mesh-enabled` pref the desktop's Gateway → Integrations toggle writes). The
-//! daemon is **PATH-adopted** on every platform — an official `tailscale` +
-//! `tailscaled` client install is expected on PATH; the `required_platforms("tailscale") => ["linux"]`
-//! label reserves a future Linux-only downloader and gates the generic install
-//! route there.
+//! the `mesh-enabled` pref the desktop's Gateway → Integrations toggle writes).
+//!
+//! **PATH adoption first, managed install second.** An official `tailscale` +
+//! `tailscaled` pair already on PATH always wins — Ryu never shadows a client the
+//! user installed. Only when there is no such pair does [`downloader`] install a
+//! Ryu-managed one under the profile's `bin/` (pinned upstream archive on Linux,
+//! Homebrew on macOS; Windows has no automatic leg — see that module's doc).
+//! `required_platforms("tailscale")` is unconstrained and stays that way: adoption
+//! works everywhere, and the per-platform difference lives in the downloader.
+//!
+//! Resolution is **same-origin** and returns ABSOLUTE paths
+//! ([`resolve_mesh_pair`]): a PATH `tailscale` is never paired with a managed
+//! `tailscaled`. On macOS `/usr/local/bin/tailscale` is a shim into `Tailscale.app`
+//! with no sibling daemon, so a per-binary search would silently pair a GUI-app CLI
+//! with Ryu's daemon.
 //!
 //! Security (folded review fixes, all HIGH/MED):
 //! - **Userspace mode exposes a local SOCKS5 + HTTP proxy** (`--socks5-server`,
@@ -34,13 +44,16 @@
 //!   immediately after a successful one-shot `tailscale up` (enrollment is
 //!   one-shot, so there is no reason to retain a long-lived secret on disk).
 
-use std::path::PathBuf;
+pub mod downloader;
+
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Context;
 
 use crate::sidecar::process::ProcessHandle;
+use crate::sidecar::tailscale::downloader::{exe_name, CLI_BIN, DAEMON_BIN};
 use crate::sidecar::{BoxFuture, HealthStatus, Sidecar};
 use crate::win_process::NoWindow;
 
@@ -60,6 +73,9 @@ const ENV_AUTHKEY: &str = "RYU_MESH_AUTHKEY";
 /// `tailscale up --login-server`. Unset = Tailscale SaaS.
 const ENV_LOGIN_SERVER: &str = "RYU_MESH_LOGIN_SERVER";
 /// Env overriding the `tailscaled` binary (otherwise resolved on PATH).
+/// Overrides the name this node registers on the tailnet with (see
+/// [`mesh_hostname`]). Unset = derived from the OS hostname.
+const ENV_HOSTNAME: &str = "RYU_MESH_HOSTNAME";
 const ENV_TAILSCALED_BIN: &str = "RYU_TAILSCALED_BIN";
 /// Env overriding the `tailscale` CLI binary (otherwise resolved on PATH).
 const ENV_TAILSCALE_BIN: &str = "RYU_TAILSCALE_BIN";
@@ -102,18 +118,286 @@ fn authkey_path() -> PathBuf {
     mesh_dir().join("authkey")
 }
 
-fn tailscaled_bin() -> String {
-    std::env::var(ENV_TAILSCALED_BIN)
+/// The explicit override for one of the two binaries, trimmed; `None` when unset
+/// or blank (a blank value in an env file must read as "unset", not as an empty
+/// program name).
+fn env_bin(key: &str) -> Option<String> {
+    std::env::var(key)
         .ok()
+        .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "tailscaled".to_owned())
 }
 
-fn tailscale_bin() -> String {
-    std::env::var(ENV_TAILSCALE_BIN)
+/// The name this node registers on the tailnet with.
+///
+/// Tailscale derives a node name from the OS hostname by taking its FIRST DNS
+/// label, which is actively wrong on a large class of machines: a DHCP box whose
+/// hostname is `192.168.1.175` registers as **`192`** — meaningless in the node
+/// picker, and COLLIDING with every other such machine on the tailnet (Headscale
+/// then disambiguates with a suffix, so they are all indistinguishable). Sanitize
+/// the WHOLE hostname into one DNS-safe label instead, so `192.168.1.175`
+/// becomes `192-168-1-175` — still ugly, but unique and traceable to a machine.
+///
+/// Returns `None` when nothing usable can be derived, in which case the caller
+/// omits `--hostname` and leaves Tailscale's own default in place.
+fn mesh_hostname() -> Option<String> {
+    let raw = std::env::var(ENV_HOSTNAME)
         .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "tailscale".to_owned())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(sysinfo::System::host_name)?;
+    let sanitized: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Collapse runs of separators and trim them from the ends — Tailscale rejects
+    // a label that starts or ends with `-`.
+    let cleaned = sanitized
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    // Tailscale caps a label at 63 characters.
+    let capped: String = cleaned.chars().take(63).collect();
+    let capped = capped.trim_end_matches('-').to_owned();
+    (!capped.is_empty()).then_some(capped)
+}
+
+/// Whether a command name resolves to something executable — an absolute/relative
+/// path that exists, or a bare name found on `PATH`.
+pub(crate) fn binary_resolves(bin: &str) -> bool {
+    if bin.contains(std::path::MAIN_SEPARATOR) || bin.contains('/') {
+        return Path::new(bin).is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(bin).is_file())
+}
+
+// ── Mesh binary resolution ────────────────────────────────────────────────────
+//
+// PATH ADOPTION MUST WIN. Ryu can now install its own `tailscaled`/`tailscale`
+// pair (see [`downloader`]), and the whole point of the precedence below is that
+// doing so never shadows a client the user installed themselves.
+//
+// The resolution is SAME-ORIGIN, not per-binary, and that is the load-bearing
+// part. On macOS `/usr/local/bin/tailscale` is a shim into `Tailscale.app` with no
+// sibling `tailscaled` at all; a per-binary search would happily pair that GUI-app
+// CLI with Ryu's managed daemon, and the two do not agree about anything. So an
+// origin supplies BOTH binaries or neither.
+//
+// "Origin" is deliberately coarse for PATH — anywhere on PATH counts, not one
+// directory — because Linux packages legitimately split the pair (`/usr/bin/
+// tailscale` + `/usr/sbin/tailscaled`). The mixing this guards against is
+// PATH-vs-managed, which is where the semantics actually differ.
+//
+// Ordering is not left to PATH order: `PathManager::add_to_path` APPENDS on both
+// platforms (`format!("{current};{bin}")` on Windows, `export PATH="$PATH:…"` on
+// unix), so the user's own install already sorts first — but the managed dir is
+// EXCLUDED from the PATH scan explicitly rather than relying on that.
+
+/// A complete, absolute `tailscaled` + `tailscale` pair from ONE origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MeshPair {
+    pub daemon: PathBuf,
+    pub cli: PathBuf,
+    /// Which origin supplied the pair, for the start-up log line. This is the only
+    /// way the precedence is observable rather than inferred, and it is the first
+    /// thing to look at when someone reports "it ran the wrong tailscale".
+    pub origin: &'static str,
+}
+
+/// The verdict when no complete pair could be resolved.
+///
+/// Structured rather than a bare string because the desktop needs to branch on it:
+/// `can_install` true means "offer to install it", false means "tell them how to
+/// install it themselves". A dead-end toast was the previous behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MissingMesh {
+    pub missing: Vec<String>,
+    pub can_install: bool,
+}
+
+impl std::fmt::Display for MissingMesh {
+    /// Keeps the one actionable sentence the raw spawn failure never gave. Without
+    /// it the only symptom of a missing client was "No such file or directory
+    /// (os error 2)", which the desktop faithfully showed in a toast that told the
+    /// user nothing about what to do.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the Tailscale client is not installed: {} not found. ",
+            self.missing.join(" and ")
+        )?;
+        if self.can_install {
+            write!(
+                f,
+                "Ryu can install a managed copy for this node — retry with the install \
+                 action, or install the official client yourself \
+                 (https://tailscale.com/download)."
+            )
+        } else {
+            write!(
+                f,
+                "Install the official client (macOS: `brew install tailscale`; \
+                 https://tailscale.com/download) or point \
+                 {ENV_TAILSCALED_BIN}/{ENV_TAILSCALE_BIN} at an existing install."
+            )
+        }
+    }
+}
+
+impl From<MissingMesh> for anyhow::Error {
+    fn from(m: MissingMesh) -> Self {
+        anyhow::anyhow!("{m}")
+    }
+}
+
+/// Two paths refer to the same directory. Canonicalized where possible so a
+/// symlinked or `..`-laden PATH entry cannot sneak the managed dir past the
+/// exclusion; compared case-insensitively on Windows, where paths are.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (a, b) = (canon(a), canon(b));
+    if cfg!(windows) {
+        a.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+    } else {
+        a == b
+    }
+}
+
+/// Split a raw `PATH` value into origin dirs, minus the Ryu-managed bin dir.
+///
+/// Takes the raw value rather than reading the env so the exclusion is testable
+/// against a constructed `PATH` — mutating the process's real `PATH` from a test
+/// would race every other test in the crate that spawns a subprocess.
+fn split_path_origins(raw: &std::ffi::OsStr, managed_dir: &Path) -> Vec<PathBuf> {
+    std::env::split_paths(raw)
+        .filter(|dir| !same_dir(dir, managed_dir))
+        .collect()
+}
+
+/// The directories on this process's `PATH`, minus the Ryu-managed bin dir.
+fn path_origin_dirs(managed_dir: &Path) -> Vec<PathBuf> {
+    let Some(path) = std::env::var_os("PATH") else {
+        return Vec::new();
+    };
+    split_path_origins(&path, managed_dir)
+}
+
+/// First `dirs` entry containing an executable named `bin`, as an absolute path.
+fn lookup_in(dirs: &[PathBuf], bin: &str) -> Option<PathBuf> {
+    let file = exe_name(bin);
+    dirs.iter()
+        .map(|dir| dir.join(&file))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| std::fs::canonicalize(&candidate).unwrap_or(candidate))
+}
+
+/// The pure resolver behind [`resolve_mesh_pair`], parameterized so the precedence
+/// can be tested against temp dirs standing in for the two origins.
+fn resolve_pair_in(
+    path_dirs: &[PathBuf],
+    managed_dir: &Path,
+    env_daemon: Option<&str>,
+    env_cli: Option<&str>,
+) -> Result<MeshPair, MissingMesh> {
+    // An explicit env override is per-binary and outranks everything: the operator
+    // pointed at a specific file, so the same-origin rule (which exists to stop
+    // *discovery* from mixing) does not apply to it.
+    let explicit = |raw: Option<&str>| -> Option<PathBuf> {
+        let raw = raw?;
+        let p = PathBuf::from(raw);
+        if p.is_file() {
+            return Some(std::fs::canonicalize(&p).unwrap_or(p));
+        }
+        // A bare name in the override still resolves on PATH, as it did before.
+        binary_resolves(raw).then(|| lookup_in(path_dirs, raw)).flatten()
+    };
+    let env_daemon_path = explicit(env_daemon);
+    let env_cli_path = explicit(env_cli);
+    if let (Some(daemon), Some(cli)) = (&env_daemon_path, &env_cli_path) {
+        return Ok(MeshPair {
+            daemon: daemon.clone(),
+            cli: cli.clone(),
+            origin: "env",
+        });
+    }
+
+    let managed_dirs = [managed_dir.to_path_buf()];
+    let from = |dirs: &[PathBuf], origin: &'static str| -> Option<MeshPair> {
+        // A half-override fills only its own slot; the other still comes from a
+        // discovered origin.
+        let daemon = env_daemon_path
+            .clone()
+            .or_else(|| lookup_in(dirs, DAEMON_BIN))?;
+        let cli = env_cli_path.clone().or_else(|| lookup_in(dirs, CLI_BIN))?;
+        Some(MeshPair {
+            daemon,
+            cli,
+            origin,
+        })
+    };
+    if let Some(pair) = from(path_dirs, "PATH") {
+        return Ok(pair);
+    }
+    if let Some(pair) = from(&managed_dirs, "managed") {
+        return Ok(pair);
+    }
+
+    // Report what is genuinely absent EVERYWHERE, which is what a user can act on.
+    let mut missing: Vec<String> = [DAEMON_BIN, CLI_BIN]
+        .into_iter()
+        .filter(|bin| lookup_in(path_dirs, bin).is_none() && lookup_in(&managed_dirs, bin).is_none())
+        .map(exe_name)
+        .collect();
+    if missing.is_empty() {
+        // Both exist but only in DIFFERENT origins — the mixed pair the same-origin
+        // rule refuses. Rare (a Ryu install always lands both), but naming neither
+        // binary would produce a message that reads like a bug. Report both, and let
+        // the install path lay down a complete managed pair.
+        missing = [DAEMON_BIN, CLI_BIN].into_iter().map(exe_name).collect();
+    }
+    Err(MissingMesh {
+        missing,
+        can_install: downloader::can_install(),
+    })
+}
+
+/// Resolve the absolute `tailscaled` + `tailscale` pair this node will run.
+///
+/// Precedence: explicit `RYU_TAILSCALED_BIN`/`RYU_TAILSCALE_BIN` → a complete pair
+/// on `PATH` (excluding Ryu's own bin dir) → the Ryu-managed pair. See the section
+/// comment above for why this is same-origin.
+pub(crate) fn resolve_mesh_pair() -> Result<MeshPair, MissingMesh> {
+    let managed_dir = crate::paths::ryu_dir().join("bin");
+    let path_dirs = path_origin_dirs(&managed_dir);
+    resolve_pair_in(
+        &path_dirs,
+        &managed_dir,
+        env_bin(ENV_TAILSCALED_BIN).as_deref(),
+        env_bin(ENV_TAILSCALE_BIN).as_deref(),
+    )
+}
+
+/// Fail EARLY and ACTIONABLY when no complete Tailscale client pair is available.
+///
+/// PURE: it resolves and reports, it never downloads. `start()` runs from
+/// `start_all()` at boot, and a 38 MB fetch during boot is the wrong behaviour —
+/// installing is a user-initiated action, driven from
+/// `POST /api/setup/tailscale/install` after `POST /api/mesh/config` reports
+/// `can_install`.
+pub(crate) fn ensure_mesh_binaries() -> Result<(), MissingMesh> {
+    resolve_mesh_pair().map(|_| ())
 }
 
 /// Restrict the authkey file so only the current owner can read it.
@@ -211,7 +495,8 @@ pub async fn scrub_authkey_to_keyfile() {
 /// parsed JSON. Errors when the daemon is absent or returns non-JSON (the caller
 /// maps that to an enabled-but-unreachable status).
 pub async fn status_json() -> anyhow::Result<serde_json::Value> {
-    let output = tokio::process::Command::new(tailscale_bin())
+    let cli = resolve_mesh_pair()?.cli;
+    let output = tokio::process::Command::new(&cli)
         .arg(format!("--socket={}", socket_path().display()))
         .arg("status")
         .arg("--json")
@@ -233,7 +518,8 @@ pub async fn status_json() -> anyhow::Result<serde_json::Value> {
 /// the daemon Running with HTTPS provisioned; surfaces a clear error otherwise so
 /// P6's ingress seam can fall back.
 pub async fn ensure_funnel(port: u16) -> anyhow::Result<String> {
-    let status = tokio::process::Command::new(tailscale_bin())
+    let cli = resolve_mesh_pair()?.cli;
+    let status = tokio::process::Command::new(&cli)
         .arg(format!("--socket={}", socket_path().display()))
         .arg("funnel")
         .arg("--bg")
@@ -318,6 +604,24 @@ impl Sidecar for TailscaleManager {
                 );
             }
 
+            // Resolved BEFORE anything else so a machine without a complete client
+            // pair gets one clear sentence instead of an OS errno from deep in the
+            // spawn path. Pure — `start()` runs at boot from `start_all()`, so it
+            // must never download; the install is user-initiated (see
+            // `resolve_mesh_pair`'s doc and `POST /api/mesh/config`).
+            let pair = resolve_mesh_pair()?;
+            // Log the RESOLVED ABSOLUTE PATHS and which origin won. Precedence is
+            // otherwise unobservable, and "Ryu ran the wrong tailscale" is exactly
+            // the report this line answers in one look — including the case where a
+            // user with only half a pair on PATH now gets the managed pair for BOTH
+            // binaries rather than a mixed one.
+            tracing::info!(
+                origin = pair.origin,
+                daemon = %pair.daemon.display(),
+                cli = %pair.cli.display(),
+                "tailscale: resolved mesh binaries"
+            );
+
             // Ensure the per-node state dir exists.
             tokio::fs::create_dir_all(mesh_dir())
                 .await
@@ -333,7 +637,7 @@ impl Sidecar for TailscaleManager {
             } else {
                 let socks = socks5_addr();
                 let http_proxy = http_proxy_addr();
-                let bin = tailscaled_bin();
+                let bin = pair.daemon.display().to_string();
                 tracing::info!(
                     bin = %bin,
                     socks = %socks,
@@ -405,9 +709,14 @@ impl Sidecar for TailscaleManager {
                 if let Some(login) = login_server {
                     up_args.push(format!("--login-server={login}"));
                 }
-                let bin = tailscale_bin();
+                // Register under a sanitized whole-hostname label rather than
+                // letting Tailscale take the first one (see `mesh_hostname`).
+                if let Some(host) = mesh_hostname() {
+                    up_args.push(format!("--hostname={host}"));
+                }
+                let bin = pair.cli.display().to_string();
                 tracing::info!(bin = %bin, "tailscale: enrolling node (`tailscale up`)");
-                let out = tokio::process::Command::new(&bin)
+                let out = tokio::process::Command::new(&pair.cli)
                     .args(&up_args)
                     .no_window()
                     .output()
@@ -437,12 +746,16 @@ impl Sidecar for TailscaleManager {
         let running = Arc::clone(&self.running);
         Box::pin(async move {
             // Best-effort `tailscale down` so the node leaves the tailnet cleanly.
-            let _ = tokio::process::Command::new(tailscale_bin())
-                .arg(format!("--socket={}", socket_path().display()))
-                .arg("down")
-                .no_window()
-                .output()
-                .await;
+            // An unresolvable pair here is not an error for a stop request — there
+            // is nothing enrolled to take down.
+            if let Ok(pair) = resolve_mesh_pair() {
+                let _ = tokio::process::Command::new(&pair.cli)
+                    .arg(format!("--socket={}", socket_path().display()))
+                    .arg("down")
+                    .no_window()
+                    .output()
+                    .await;
+            }
             daemon.stop().await?;
             running.store(false, Ordering::Relaxed);
             Ok(())
@@ -494,6 +807,32 @@ impl Sidecar for TailscaleManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hostname sanitization. Kept as ONE test because `EnvGuard` mutates a
+    /// process-global env var and `cargo test` runs test fns in parallel — three
+    /// separate tests raced each other's `ENV_HOSTNAME` and failed at random.
+    ///
+    /// The regression this guards: a DHCP machine whose hostname is an IP
+    /// registered on the tailnet as `192`, because Tailscale keeps only the first
+    /// DNS label — so every such machine collided under one name.
+    #[test]
+    fn mesh_hostname_sanitizes_into_one_dns_label() {
+        {
+            let _g = EnvGuard::set(ENV_HOSTNAME, "192.168.1.175");
+            assert_eq!(mesh_hostname().as_deref(), Some("192-168-1-175"));
+        }
+        {
+            let _g = EnvGuard::set(ENV_HOSTNAME, "  My__Laptop.local  ");
+            assert_eq!(mesh_hostname().as_deref(), Some("my-laptop-local"));
+        }
+        {
+            // Tailscale rejects a label longer than 63 chars or ending in `-`.
+            let _g = EnvGuard::set(ENV_HOSTNAME, &format!("{}.suffix", "a".repeat(63)));
+            let name = mesh_hostname().expect("a name");
+            assert!(name.len() <= 63, "label too long: {name}");
+            assert!(!name.ends_with('-'), "label ends with a separator: {name}");
+        }
+    }
 
     #[test]
     fn socks5_addr_defaults() {
@@ -587,29 +926,163 @@ mod tests {
     }
 
     #[test]
-    fn tailscale_bins_default_to_bare_names() {
+    fn env_bin_is_unset_for_blank_values() {
+        // A blank value in an env file must read as "unset", not as an empty program
+        // name — otherwise `RYU_TAILSCALED_BIN=` would make the mesh unresolvable.
         let _lock = lock_env();
-        let _a = EnvGuard::clear(ENV_TAILSCALED_BIN);
-        let _b = EnvGuard::clear(ENV_TAILSCALE_BIN);
-        assert_eq!(tailscaled_bin(), "tailscaled");
-        assert_eq!(tailscale_bin(), "tailscale");
-    }
-
-    #[test]
-    fn tailscale_bins_honour_env_override() {
-        let _lock = lock_env();
-        let _a = EnvGuard::set(ENV_TAILSCALED_BIN, "/opt/ts/tailscaled");
+        let _a = EnvGuard::set(ENV_TAILSCALED_BIN, "   ");
+        assert_eq!(env_bin(ENV_TAILSCALED_BIN), None);
         let _b = EnvGuard::set(ENV_TAILSCALE_BIN, "/opt/ts/tailscale");
-        assert_eq!(tailscaled_bin(), "/opt/ts/tailscaled");
-        assert_eq!(tailscale_bin(), "/opt/ts/tailscale");
+        assert_eq!(
+            env_bin(ENV_TAILSCALE_BIN).as_deref(),
+            Some("/opt/ts/tailscale")
+        );
+    }
+
+    // ── Same-origin pair resolution ───────────────────────────────────────────
+    //
+    // Exercised through the pure `resolve_pair_in` with temp dirs standing in for
+    // the two origins: `crate::paths::ryu_dir()` is a cached `OnceLock`, so the
+    // managed dir cannot be moved per-test, and a test that depended on the real
+    // PATH would assert whatever happens to be installed on the runner.
+
+    /// Create an executable-looking file for each name in `dir`.
+    fn fake_bins(dir: &std::path::Path, names: &[&str]) {
+        std::fs::create_dir_all(dir).expect("create origin dir");
+        for name in names {
+            std::fs::write(dir.join(exe_name(name)), b"#!/bin/true\n").expect("write fake bin");
+        }
     }
 
     #[test]
-    fn tailscale_bin_empty_env_falls_back() {
-        // An empty (unset-equivalent) value is filtered out → the bare default.
-        let _lock = lock_env();
-        let _a = EnvGuard::set(ENV_TAILSCALED_BIN, "");
-        assert_eq!(tailscaled_bin(), "tailscaled");
+    fn a_complete_path_pair_beats_the_managed_pair() {
+        // PATH ADOPTION MUST WIN. Ryu installing its own copy must never shadow the
+        // client the user installed themselves.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path_dir = tmp.path().join("usr-bin");
+        let managed = tmp.path().join("ryu-bin");
+        fake_bins(&path_dir, &[DAEMON_BIN, CLI_BIN]);
+        fake_bins(&managed, &[DAEMON_BIN, CLI_BIN]);
+
+        let pair = resolve_pair_in(&[path_dir.clone()], &managed, None, None).expect("a pair");
+        assert_eq!(pair.origin, "PATH");
+        assert!(pair.daemon.starts_with(
+            std::fs::canonicalize(&path_dir).unwrap_or_else(|_| path_dir.clone())
+        ));
+        assert!(pair.cli.starts_with(
+            std::fs::canonicalize(&path_dir).unwrap_or_else(|_| path_dir.clone())
+        ));
+    }
+
+    #[test]
+    fn a_half_pair_on_path_falls_through_to_the_managed_pair() {
+        // The realistic macOS case: `/usr/local/bin/tailscale` is a shim into
+        // Tailscale.app with no sibling daemon. Pairing that CLI with Ryu's managed
+        // `tailscaled` is exactly the mix this refuses — BOTH must come from the
+        // managed origin instead.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path_dir = tmp.path().join("usr-local-bin");
+        let managed = tmp.path().join("ryu-bin");
+        fake_bins(&path_dir, &[CLI_BIN]); // CLI only — the app-bundle shim.
+        fake_bins(&managed, &[DAEMON_BIN, CLI_BIN]);
+
+        let pair = resolve_pair_in(&[path_dir], &managed, None, None).expect("a pair");
+        assert_eq!(pair.origin, "managed");
+        let managed_canon = std::fs::canonicalize(&managed).unwrap_or(managed);
+        assert_eq!(pair.daemon.parent().unwrap(), managed_canon);
+        assert_eq!(
+            pair.cli.parent().unwrap(),
+            managed_canon,
+            "the CLI must come from the SAME origin as the daemon"
+        );
+    }
+
+    #[test]
+    fn spanning_path_dirs_is_still_one_origin() {
+        // Debian-style packaging splits the pair across `/usr/bin` and `/usr/sbin`.
+        // "Origin" is PATH-as-a-whole, not one directory, or every Linux adoption
+        // would fall through to a managed install nobody asked for.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin = tmp.path().join("usr-bin");
+        let sbin = tmp.path().join("usr-sbin");
+        let managed = tmp.path().join("ryu-bin");
+        fake_bins(&bin, &[CLI_BIN]);
+        fake_bins(&sbin, &[DAEMON_BIN]);
+        fake_bins(&managed, &[DAEMON_BIN, CLI_BIN]);
+
+        let pair = resolve_pair_in(&[bin, sbin], &managed, None, None).expect("a pair");
+        assert_eq!(pair.origin, "PATH");
+    }
+
+    #[test]
+    fn the_env_override_beats_both_origins() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path_dir = tmp.path().join("usr-bin");
+        let managed = tmp.path().join("ryu-bin");
+        let explicit = tmp.path().join("opt-ts");
+        fake_bins(&path_dir, &[DAEMON_BIN, CLI_BIN]);
+        fake_bins(&managed, &[DAEMON_BIN, CLI_BIN]);
+        fake_bins(&explicit, &[DAEMON_BIN, CLI_BIN]);
+
+        let pair = resolve_pair_in(
+            &[path_dir],
+            &managed,
+            Some(explicit.join(exe_name(DAEMON_BIN)).to_str().unwrap()),
+            Some(explicit.join(exe_name(CLI_BIN)).to_str().unwrap()),
+        )
+        .expect("a pair");
+        assert_eq!(pair.origin, "env");
+        let explicit_canon = std::fs::canonicalize(&explicit).unwrap_or(explicit);
+        assert_eq!(pair.daemon.parent().unwrap(), explicit_canon);
+        assert_eq!(pair.cli.parent().unwrap(), explicit_canon);
+    }
+
+    #[test]
+    fn nothing_anywhere_reports_both_binaries_as_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let empty = tmp.path().join("empty");
+        let managed = tmp.path().join("ryu-bin");
+        std::fs::create_dir_all(&empty).expect("mkdir");
+        std::fs::create_dir_all(&managed).expect("mkdir");
+
+        let missing = resolve_pair_in(&[empty], &managed, None, None).expect_err("no pair");
+        assert_eq!(
+            missing.missing,
+            vec![exe_name(DAEMON_BIN), exe_name(CLI_BIN)]
+        );
+        // The message must stay one actionable sentence — the raw spawn failure
+        // ("No such file or directory") is what this replaced.
+        let text = missing.to_string();
+        assert!(text.contains(&exe_name(DAEMON_BIN)), "got: {text}");
+        assert!(text.contains("tailscale.com/download"), "got: {text}");
+    }
+
+    #[test]
+    fn the_managed_bin_dir_is_excluded_from_the_path_scan() {
+        // Ryu's own bin dir may legitimately be ON PATH — other downloaders call
+        // `PathManager::add_to_path`, and a user may have added it themselves. If it
+        // counted as a PATH origin, a managed install would masquerade as an adopted
+        // one and the precedence would be decided by PATH ordering instead of by
+        // rule. So the managed dir is put on the constructed PATH here on purpose:
+        // an exclusion tested against a dir that was never on PATH tests nothing.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let managed = tmp.path().join("ryu-bin");
+        let other = tmp.path().join("usr-bin");
+        fake_bins(&managed, &[DAEMON_BIN, CLI_BIN]);
+        fake_bins(&other, &[]); // on PATH, but carries neither binary.
+        let raw = std::env::join_paths([&managed, &other]).expect("join PATH");
+
+        let dirs = split_path_origins(&raw, &managed);
+        assert!(
+            !dirs.iter().any(|d| same_dir(d, &managed)),
+            "the managed dir must never appear as a PATH origin: {dirs:?}"
+        );
+        assert!(dirs.iter().any(|d| same_dir(d, &other)), "{dirs:?}");
+
+        // And the pair still resolves as `managed`, never as an adopted PATH
+        // install — which is the claim the exclusion exists to make true.
+        let pair = resolve_pair_in(&dirs, &managed, None, None).expect("a pair");
+        assert_eq!(pair.origin, "managed");
     }
 
     #[test]

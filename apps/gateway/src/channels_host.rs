@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -26,9 +27,10 @@ use uuid::Uuid;
 use ryu_gw_channels::{
     bluebubbles::BlueBubblesChannel,
     discord::DiscordChannel,
+    is_token_rejected,
     media::VoiceReplyMode as ChannelVoiceReplyMode,
     pairing::{AccessPolicy, PairingStore},
-    policy_from_env,
+    policy_from_env, run_channel,
     slack::SlackChannel,
     spawn_channel,
     status::StatusReporter,
@@ -288,6 +290,7 @@ fn channel_context(channel_name: &str) -> RequestContext {
         // policy applies unmodified.
         prompt_cache_mode: None,
         prompt_cache_ttl: None,
+        node_routing: None,
         // Bots use the managed tool loops, not SDK raw passthrough.
         raw_tools: false,
         // Channel/bot traffic is not a dynamically-resolved managed tenant.
@@ -578,6 +581,343 @@ fn store_reporter(state: &SharedState, bot_id: &str) -> Option<StatusReporter> {
     )
 }
 
+// ─── Managed-bot token rotation ──────────────────────────────────────────────
+//
+// A Telegram bot that Ryu created for the user (Bot API 9.6 "managed bots") can
+// have its token replaced at any moment: the owner rotates it inside Telegram, or
+// the manager calls `replaceManagedBotToken`. The old token dies immediately and
+// the running adapter's `getUpdates` starts answering 401 — the bot goes deaf with
+// nothing in the UI to explain why.
+//
+// Recovery cannot be a mutation. The token is baked into the adapter's API base
+// at construction (`crates/gateway/channels/src/telegram.rs`), so a new token
+// means a NEW adapter. Hence a supervisor *around* the adapter: it awaits the
+// loop, and when it ends in `TokenRejected` it re-reads the token from the
+// manager and builds a replacement. Every other exit is left alone — those are
+// already logged by `run_channel`, and restart-looping them would just hide them.
+//
+// A hand-pasted @BotFather token has no pairing secret and therefore nothing to
+// refresh. That is a legitimate configuration, not an error, so the supervisor
+// says so once in a line an operator can act on and stops.
+
+/// Base URL of the managed-bot manager (Ryu's hosted `cloud-bot`). Deliberately
+/// the same variable name the node uses, so one deployment override moves both
+/// ends of the pairing — note this breaks the gateway's local habit of bare
+/// `CONTROL_PLANE_*` names, which is the lesser evil.
+const ENV_MANAGED_BOT_URL: &str = "RYU_MANAGED_BOT_URL";
+
+/// The hosted manager, used when nothing overrides it.
+const DEFAULT_MANAGED_BOT_URL: &str = "https://bot.ryuhq.com";
+
+/// Secrets key holding the pairing's `claim_secret` — the bearer that authorizes
+/// re-reading this bot's token. Its presence is what distinguishes a Ryu-created
+/// bot from a hand-pasted one, so it doubles as the "can this be refreshed?" flag.
+const SECRET_MANAGED_BOT_SECRET: &str = "managed_bot_secret";
+
+/// Secrets key holding the pairing's public `nonce`, which names the record.
+const SECRET_MANAGED_BOT_NONCE: &str = "managed_bot_nonce";
+
+/// Hard ceiling on refresh attempts before the supervisor gives up.
+///
+/// A revoked bot (the owner ran `/deletebot`) and a rotate storm both present as
+/// an endless 401, so an unbounded retry is a hot loop against both Telegram and
+/// the manager. Five attempts at the backoff below spans ~2.5 minutes: long
+/// enough to ride out a rotation, short enough that the give-up line shows up
+/// while the operator is still looking.
+const MAX_TOKEN_REFRESHES: u32 = 5;
+
+/// Delay before the first refresh, doubling per attempt up to
+/// [`REFRESH_BACKOFF_MAX`]. Non-zero on purpose — a rotation the user just
+/// triggered may still be in flight on the manager side.
+const REFRESH_BACKOFF_BASE: Duration = Duration::from_secs(5);
+
+/// Cap on the per-attempt delay, so the bounded budget still spans minutes
+/// rather than hours.
+const REFRESH_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// Timeout for one refresh call. Short: the supervisor is holding a dead bot open
+/// while it waits.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// An adapter that stayed up this long was working, so its next 401 is a NEW
+/// rotation rather than the same one failing again — and the attempt budget
+/// resets. Without this, a bot rotated five times over its life would refuse to
+/// recover from the sixth.
+const HEALTHY_RUN: Duration = Duration::from_secs(600);
+
+/// The credentials that let the gateway re-read one managed bot's token.
+#[derive(Debug, Clone)]
+struct ManagedBotCreds {
+    /// Public pairing id — names the record on the manager.
+    nonce: String,
+    /// The pairing's `claim_secret`. Never logged: it is the bearer that yields a
+    /// live bot token.
+    secret: String,
+}
+
+/// Pull the managed-bot pairing credentials out of a bot's secrets map.
+///
+/// `None` means "hand-pasted token": there is nothing to refresh. Blank values
+/// count as absent — the control plane drops blank secrets on write, but an empty
+/// string that did land would otherwise produce an unauthenticated refresh whose
+/// 401 is indistinguishable from a wrong secret.
+fn managed_bot_creds(secrets: &HashMap<String, String>) -> Option<ManagedBotCreds> {
+    let nonce = secrets.get(SECRET_MANAGED_BOT_NONCE)?.trim();
+    let secret = secrets.get(SECRET_MANAGED_BOT_SECRET)?.trim();
+    if nonce.is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some(ManagedBotCreds {
+        nonce: nonce.to_string(),
+        secret: secret.to_string(),
+    })
+}
+
+/// Base URL of the managed-bot manager, env-overridable, trailing slash trimmed.
+fn managed_bot_base_url() -> String {
+    std::env::var(ENV_MANAGED_BOT_URL)
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or_else(|| DEFAULT_MANAGED_BOT_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Delay before refresh attempt `attempt` (1-based): exponential, capped.
+///
+/// Pure so the "cannot become a hot loop" property is a test rather than a
+/// reading of the loop — the whole budget's worth of delay is bounded and
+/// monotonic by construction.
+fn refresh_backoff(attempt: u32) -> Duration {
+    // Clamp the shift before it is applied: `1u32 << 32` is UB-adjacent (a debug
+    // panic), and every attempt past a handful is capped anyway.
+    let shift = attempt.saturating_sub(1).min(16);
+    REFRESH_BACKOFF_BASE
+        .saturating_mul(1u32 << shift)
+        .min(REFRESH_BACKOFF_MAX)
+}
+
+/// The manager's answer to `POST /managed-bot/refresh`.
+#[derive(Debug, Deserialize)]
+struct ManagedBotRefreshResponse {
+    /// `"ready"` or `"pending"`.
+    status: String,
+    /// Present only when `status == "ready"`. Optional and never unwrapped, so a
+    /// manager that answers `pending` cannot take the gateway down with it.
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// Why a refresh did not produce a usable token.
+///
+/// Distinguished from a plain `Option` because half of the failures must NOT be
+/// retried: a deleted pairing record and a rejected `claim_secret` will answer
+/// the same way forever, and spending the attempt budget on them only delays the
+/// log line that tells the operator what to fix.
+enum RefreshOutcome {
+    /// A live token for this bot.
+    Token(String),
+    /// Retrying may work — the manager was unreachable, returned 5xx, or is still
+    /// `pending`.
+    Retry,
+    /// It never will. Carries the operator-facing reason.
+    Terminal(&'static str),
+}
+
+/// Ask the manager for this bot's CURRENT token.
+///
+/// `refresh`, never `rotate`: when the owner rotated the token inside Telegram,
+/// the current token *is* the new one, and `replaceManagedBotToken` would throw
+/// away the token the user just minted.
+///
+/// Nothing here logs the token, the secret or the nonce — a bot token is a full
+/// credential, and the log sink is not a secret store.
+async fn refresh_managed_bot_token(
+    state: &SharedState,
+    creds: &ManagedBotCreds,
+    name: &str,
+) -> RefreshOutcome {
+    let url = format!("{}/managed-bot/refresh", managed_bot_base_url());
+    let sent = state
+        .http
+        .post(&url)
+        .bearer_auth(&creds.secret)
+        .json(&serde_json::json!({ "nonce": creds.nonce }))
+        .timeout(REFRESH_TIMEOUT)
+        .send()
+        .await;
+
+    let resp = match sent {
+        Ok(resp) => resp,
+        Err(err) => {
+            // `without_url` for symmetry with the adapter: the bearer is not in
+            // the URL, but neither is anything useful, and this keeps the habit.
+            warn!(channel = %name, err = %err.without_url(), "managed-bot token refresh unreachable");
+            return RefreshOutcome::Retry;
+        }
+    };
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return RefreshOutcome::Terminal(
+            "the managed-bot pairing no longer exists on the manager (deleted or expired)",
+        );
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return RefreshOutcome::Terminal("the manager rejected this bot's stored pairing secret");
+    }
+    if !status.is_success() {
+        warn!(channel = %name, %status, "managed-bot token refresh returned non-2xx");
+        return RefreshOutcome::Retry;
+    }
+
+    match resp.json::<ManagedBotRefreshResponse>().await {
+        Ok(body) if body.status == "ready" => match body.token {
+            Some(token) if !token.trim().is_empty() => RefreshOutcome::Token(token),
+            // A ready record with no token is a manager bug, not a wait state —
+            // polling it forever would never resolve.
+            _ => RefreshOutcome::Terminal("the manager reported a ready bot with no token"),
+        },
+        Ok(body) => {
+            info!(channel = %name, status = %body.status, "managed-bot token not ready yet");
+            RefreshOutcome::Retry
+        }
+        Err(err) => {
+            warn!(channel = %name, %err, "could not parse the managed-bot refresh response");
+            RefreshOutcome::Retry
+        }
+    }
+}
+
+/// Run one Telegram adapter, and when its token is rejected, refresh the token
+/// and run a replacement adapter built from it.
+///
+/// Returns when the bot is done: a clean exit, a non-auth failure, a bot with no
+/// pairing to refresh, or an exhausted attempt budget. It never returns to a
+/// caller that would restart it, so "done" here means "offline until the gateway
+/// restarts" — which is the honest state, and is reported as such.
+async fn supervise_telegram(
+    host: Arc<dyn ChannelHost>,
+    state: SharedState,
+    pairing: PairingStore,
+    mut cfg: ryu_gw_channels::TelegramChannelConfig,
+    reporter: Option<StatusReporter>,
+    managed: Option<ManagedBotCreds>,
+    name: String,
+) {
+    let mut attempts: u32 = 0;
+    loop {
+        let started = Instant::now();
+        let result = run_channel(
+            &host,
+            TelegramChannel::new_with_status(
+                cfg.clone(),
+                state.http.clone(),
+                pairing.clone(),
+                reporter.clone(),
+            ),
+        )
+        .await;
+
+        // `run` only returns on failure today; an `Ok` is an adapter that was
+        // told to stop, and there is nothing to respawn.
+        let Err(err) = result else {
+            return;
+        };
+        // Anything but a rejected token is already logged by `run_channel` and is
+        // not a rotation. Leave the bot down rather than turn every transport
+        // failure into a restart loop.
+        if !is_token_rejected(&err) {
+            return;
+        }
+
+        let Some(creds) = managed.as_ref() else {
+            warn!(
+                channel = %name,
+                "telegram rejected this bot's token (401) and the bot has no Ryu-managed pairing, so the gateway cannot fetch a new one — create a fresh token with @BotFather and save it on the channel; not retrying"
+            );
+            if let Some(reporter) = &reporter {
+                reporter
+                    .error("bot token rejected by Telegram (401) — save a new token")
+                    .await;
+            }
+            return;
+        };
+
+        // A long healthy run means this is a fresh rotation, not the same one
+        // failing again, so it earns a fresh budget.
+        if started.elapsed() >= HEALTHY_RUN {
+            attempts = 0;
+        }
+
+        let mut fresh_token = None;
+        while attempts < MAX_TOKEN_REFRESHES {
+            attempts += 1;
+            tokio::time::sleep(refresh_backoff(attempts)).await;
+            match refresh_managed_bot_token(&state, creds, &name).await {
+                RefreshOutcome::Token(token) => {
+                    fresh_token = Some(token);
+                    break;
+                }
+                RefreshOutcome::Retry => continue,
+                RefreshOutcome::Terminal(reason) => {
+                    warn!(channel = %name, reason, "managed-bot token refresh cannot succeed; leaving this bot offline");
+                    if let Some(reporter) = &reporter {
+                        reporter.error(reason).await;
+                    }
+                    return;
+                }
+            }
+        }
+
+        let Some(token) = fresh_token else {
+            warn!(
+                channel = %name,
+                attempts = MAX_TOKEN_REFRESHES,
+                "gave up refreshing this managed bot's token; it stays offline until the gateway restarts"
+            );
+            if let Some(reporter) = &reporter {
+                reporter
+                    .error("managed-bot token refresh exhausted — bot offline")
+                    .await;
+            }
+            return;
+        };
+
+        info!(channel = %name, "managed-bot token refreshed; respawning the telegram adapter");
+        cfg.token = token;
+    }
+}
+
+/// Register a Telegram bot under the rotation supervisor instead of a bare
+/// [`spawn_channel`].
+///
+/// Both Telegram spawn sites go through this — the env-configured bot too, whose
+/// hand-pasted token takes the `managed: None` path and so gets the actionable
+/// "save a new token" line rather than a bare `channel loop exited with error`.
+/// The other four transports stay on `spawn_channel`: none of them has a token
+/// Ryu can re-mint, so there is nothing for a supervisor to do.
+fn spawn_telegram_supervised(
+    host: &Arc<dyn ChannelHost>,
+    state: &SharedState,
+    pairing: &PairingStore,
+    cfg: TelegramChannelConfig,
+    reporter: Option<StatusReporter>,
+    managed: Option<ManagedBotCreds>,
+    name: String,
+) {
+    tokio::spawn(supervise_telegram(
+        Arc::clone(host),
+        Arc::clone(state),
+        pairing.clone(),
+        to_channel_telegram(cfg),
+        reporter,
+        managed,
+        name,
+    ));
+}
+
 /// Spawn every channel configured in [`GatewayConfig`](crate::config::GatewayConfig)
 /// **or** stored as an enabled bot config in the control-plane store.
 ///
@@ -618,14 +958,16 @@ pub async fn spawn_registered(state: SharedState) {
             "telegram" => {
                 if let Some(cfg) = telegram_cfg_from_store(bot) {
                     info!(name = %bot.name, "registering telegram bot from store");
-                    spawn_channel(
+                    // Under the supervisor, not `spawn_channel`: a Ryu-created bot's
+                    // token can be replaced while this adapter is running.
+                    spawn_telegram_supervised(
                         &host,
-                        TelegramChannel::new_with_status(
-                            to_channel_telegram(cfg),
-                            state.http.clone(),
-                            pairing.clone(),
-                            reporter,
-                        ),
+                        &state,
+                        &pairing,
+                        cfg,
+                        reporter,
+                        managed_bot_creds(&bot.secrets),
+                        bot.name.clone(),
                     );
                     store_telegram = true;
                 } else {
@@ -714,14 +1056,17 @@ pub async fn spawn_registered(state: SharedState) {
     // against), so the node's pairing store reaches every adapter either way.
     if !store_telegram {
         if let Some(cfg) = state.config.channels.telegram.clone() {
-            spawn_channel(
+            // An env bot's token is by definition hand-pasted, so it takes the
+            // supervisor's `managed: None` path — the point is not rotation but
+            // the actionable 401 line, which the bare spawn cannot produce.
+            spawn_telegram_supervised(
                 &host,
-                TelegramChannel::new_with_status(
-                    to_channel_telegram(cfg),
-                    state.http.clone(),
-                    pairing.clone(),
-                    None,
-                ),
+                &state,
+                &pairing,
+                cfg,
+                None,
+                None,
+                "telegram (env)".to_string(),
             );
         }
     }
@@ -1023,5 +1368,129 @@ mod tests {
             Some(PathBuf::from("/tmp/ryu-pairing-test.json"))
         );
         std::env::remove_var(ENV_PAIRING_PATH);
+    }
+
+    // ─── Managed-bot token rotation ─────────────────────────────────────────
+    //
+    // The supervisor itself needs a live Telegram and a live manager, so what is
+    // tested is every decision it makes: whether a bot CAN be refreshed, how long
+    // it waits between tries, and how the manager's answer is classified. A wrong
+    // answer to any of those is either a bot that never comes back or a hot loop
+    // against Telegram, and a typecheck catches neither.
+
+    #[test]
+    fn managed_bot_creds_require_both_keys() {
+        let mut secrets = HashMap::new();
+        secrets.insert("bot_token".to_string(), "123:ABC".to_string());
+        // A hand-pasted token: nothing to refresh, and that is not an error.
+        assert!(managed_bot_creds(&secrets).is_none());
+
+        secrets.insert(SECRET_MANAGED_BOT_NONCE.to_string(), "n0nce".to_string());
+        assert!(
+            managed_bot_creds(&secrets).is_none(),
+            "a nonce without the claim secret cannot authorize a refresh"
+        );
+
+        secrets.insert(SECRET_MANAGED_BOT_SECRET.to_string(), "s3cret".to_string());
+        let creds = managed_bot_creds(&secrets).expect("both keys present");
+        assert_eq!(creds.nonce, "n0nce");
+        assert_eq!(creds.secret, "s3cret");
+    }
+
+    #[test]
+    fn managed_bot_creds_treat_blanks_as_absent() {
+        // An empty secret would otherwise send an unauthenticated refresh, whose
+        // 401 is indistinguishable from a genuinely wrong secret.
+        let mut secrets = HashMap::new();
+        secrets.insert(SECRET_MANAGED_BOT_NONCE.to_string(), "n0nce".to_string());
+        secrets.insert(SECRET_MANAGED_BOT_SECRET.to_string(), "   ".to_string());
+        assert!(managed_bot_creds(&secrets).is_none());
+    }
+
+    /// The "cannot become a hot loop" guarantee, as an assertion rather than a
+    /// reading of the loop: every delay is non-trivial, the sequence never
+    /// shrinks, it is capped, and the whole budget still costs the operator only
+    /// minutes of downtime.
+    #[test]
+    fn refresh_backoff_is_monotonic_capped_and_bounded() {
+        let mut previous = Duration::ZERO;
+        let mut total = Duration::ZERO;
+        for attempt in 1..=MAX_TOKEN_REFRESHES {
+            let delay = refresh_backoff(attempt);
+            assert!(
+                delay >= REFRESH_BACKOFF_BASE,
+                "attempt {attempt} never busy-waits"
+            );
+            assert!(delay >= previous, "attempt {attempt} must not go backwards");
+            assert!(
+                delay <= REFRESH_BACKOFF_MAX,
+                "attempt {attempt} respects the cap"
+            );
+            previous = delay;
+            total += delay;
+        }
+        assert_eq!(refresh_backoff(1), REFRESH_BACKOFF_BASE);
+        // A wildly out-of-range attempt must saturate, not overflow the shift.
+        assert_eq!(refresh_backoff(u32::MAX), REFRESH_BACKOFF_MAX);
+        assert!(
+            total >= Duration::from_secs(30) && total <= Duration::from_secs(600),
+            "the whole budget spans minutes, not milliseconds or hours: {total:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_response_parses_ready_and_pending() {
+        let ready: ManagedBotRefreshResponse =
+            serde_json::from_value(json!({ "status": "ready", "token": "123:ABC" })).unwrap();
+        assert_eq!(ready.status, "ready");
+        assert_eq!(ready.token.as_deref(), Some("123:ABC"));
+
+        // `pending` carries no token — the field must be optional, never unwrapped.
+        let pending: ManagedBotRefreshResponse =
+            serde_json::from_value(json!({ "status": "pending" })).unwrap();
+        assert_eq!(pending.status, "pending");
+        assert!(pending.token.is_none());
+    }
+
+    #[test]
+    fn managed_bot_base_url_defaults_and_trims() {
+        std::env::remove_var(ENV_MANAGED_BOT_URL);
+        assert_eq!(managed_bot_base_url(), DEFAULT_MANAGED_BOT_URL);
+
+        // A trailing slash would produce `//managed-bot/refresh`.
+        std::env::set_var(ENV_MANAGED_BOT_URL, "http://localhost:4000/");
+        assert_eq!(managed_bot_base_url(), "http://localhost:4000");
+
+        // A blank override is an operator mistake, not a request for an empty base.
+        std::env::set_var(ENV_MANAGED_BOT_URL, "  ");
+        assert_eq!(managed_bot_base_url(), DEFAULT_MANAGED_BOT_URL);
+        std::env::remove_var(ENV_MANAGED_BOT_URL);
+    }
+
+    /// A managed bot's pairing keys ride in the same opaque `secrets` map as the
+    /// token, so they must survive the store parse and reach the supervisor.
+    #[test]
+    fn stored_bot_config_carries_the_managed_bot_pairing() {
+        let raw = json!({
+            "channels": [{
+                "id": "chan-mb",
+                "channelType": "telegram",
+                "name": "My Helper",
+                "secrets": {
+                    "bot_token": "123:ABC",
+                    "managed_bot_nonce": "n0nce",
+                    "managed_bot_secret": "s3cret"
+                },
+                "agentId": null,
+                "model": null,
+                "systemPrompt": null
+            }]
+        });
+        let parsed: StoredChannelsResponse = serde_json::from_value(raw).unwrap();
+        let bot = &parsed.channels[0];
+        // The token still resolves — the extra keys are not mistaken for it.
+        let cfg = telegram_cfg_from_store(bot).expect("bot_token present");
+        assert_eq!(cfg.token, "123:ABC");
+        assert!(managed_bot_creds(&bot.secrets).is_some());
     }
 }

@@ -164,6 +164,19 @@ impl SetupManager {
         let store = crate::sidecar::download_manager::VersionStore::load();
         let mut status = self.status.write().await;
         for name in names {
+            // The mesh daemon is the ONE entry whose installed-ness is not decided
+            // by `versions.json`. It is in `startup_order`, so seeding it from a
+            // version row would make `start_all` try to start it on EVERY boot for
+            // anyone who ever installed the binaries — and `TailscaleManager::start`
+            // bails immediately when the mesh is off, so the only product of that
+            // is a failed-start error in the log of a user who never enabled the
+            // mesh. Before the downloader existed the row could not exist and the
+            // question never arose. `main()` marks it from the authoritative signal
+            // (`ryu_mesh::is_enabled()`) right after this call; keep that the single
+            // source, and see also `POST /api/mesh/config`.
+            if name == "tailscale" {
+                continue;
+            }
             // Use the raw `versions` map, not `installed_version()`: engine
             // version strings like llama.cpp's `b9670` are not semver and would
             // fail to parse, but their presence as a key still means "installed".
@@ -474,6 +487,26 @@ impl SetupManager {
             }
         };
 
+        // ── Steps 2–8 register together ───────────────────────────────────────
+        //
+        // Everything below depends only on step 1 (the llama.cpp binary, for the
+        // GGUF steps) and on nothing else here, so the steps are *registered*
+        // concurrently rather than awaited one after another.
+        //
+        // This is not "download everything at once": the DownloadCenter's
+        // concurrency gate still decides how many actually stream, and the rest sit
+        // in `Queued`. Registering them together is what gives the gate something
+        // to schedule — and what makes the queue visible. Awaiting each step in
+        // turn (as this did) meant the gate never saw more than one candidate, so
+        // a first run downloaded the chat model, then the embedder, then the
+        // reranker, then the classifier, strictly in file order, with no way for
+        // the user to see what was still coming.
+        //
+        // `tokio::join!` polls in argument order, and the gate hands out permits
+        // first-come-first-served, so the chat model — the one thing that unblocks
+        // actually using the app — still claims the first slot.
+        let chat_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 2 — GGUF weight file. Only attempted if binary installed.
         // If the binary failed, downloading the model is pointless — skip and warn.
         let gguf_installed = if llamacpp_installed {
@@ -484,6 +517,7 @@ impl SetupManager {
                     &registry.local_chat_model.weight_url,
                     &registry.local_chat_model.sha256,
                     &format!("{model_id} (chat model)"),
+                    crate::downloads::DownloadRole::ChatModel,
                 ))
                 .await
             {
@@ -555,7 +589,11 @@ impl SetupManager {
             );
             false
         };
+        (gguf_installed, warnings)
+        };
 
+        let embed_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 3 — nomic embedding GGUF (downloaded here, like the chat model).
         //
         // Onboarding is the *single owner* of every default model download — the
@@ -571,6 +609,7 @@ impl SetupManager {
                     &registry.local_embed_model.weight_url,
                     &registry.local_embed_model.sha256,
                     &format!("{id} (embedding model)"),
+                    crate::downloads::DownloadRole::EmbeddingModel,
                 ))
                 .await
             {
@@ -609,7 +648,11 @@ impl SetupManager {
             );
             false
         };
+        (embed_gguf_installed, warnings)
+        };
 
+        let reranker_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 3.5 — bge reranker GGUF (downloaded here, like the embedding model).
         //
         // Auto-downloaded so Spaces RAG can neural-rerank with zero setup. The
@@ -625,6 +668,7 @@ impl SetupManager {
                     &registry.local_reranker_model.weight_url,
                     &registry.local_reranker_model.sha256,
                     &format!("{id} (reranker model)"),
+                    crate::downloads::DownloadRole::RerankerModel,
                 ))
                 .await
             {
@@ -661,7 +705,11 @@ impl SetupManager {
             );
             false
         };
+        (reranker_gguf_installed, warnings)
+        };
 
+        let classifier_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 3.6 — 270M classifier GGUF (downloaded here, like the reranker).
         //
         // Same posture as every other bundled default: unconditional, sequential,
@@ -691,6 +739,7 @@ impl SetupManager {
                     &registry.local_classifier_model.weight_url,
                     &registry.local_classifier_model.sha256,
                     &format!("{id} (classifier model)"),
+                    crate::downloads::DownloadRole::ClassifierModel,
                 ))
                 .await
             {
@@ -735,7 +784,11 @@ impl SetupManager {
             );
             false
         };
+        (classifier_gguf_installed, warnings)
+        };
 
+        let whisper_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 4 — whisper.cpp voice (STT) engine + default GGML model.
         //
         // Bundled-by-default extra: a fresh install can transcribe audio with no
@@ -761,7 +814,11 @@ impl SetupManager {
                 false
             }
         };
+        (whisper_installed, warnings)
+        };
 
+        let parakeet_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 5 — parakeet v3 ONNX speech model (downloaded here by default).
         //
         // Like whisper, the model is bundled up front so the parakeet speech
@@ -805,7 +862,11 @@ impl SetupManager {
                     false
                 }
             };
+        (parakeet_installed, warnings)
+        };
 
+        let vad_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 5.5 — Silero VAD ONNX model (downloaded here by default).
         //
         // Bundled up front so voice mode's noise-robust neural endpointing works
@@ -833,7 +894,11 @@ impl SetupManager {
                 false
             }
         };
+        (vad_installed, warnings)
+        };
 
+        let outetts_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 6 — OuteTTS (text-to-speech) binary + GGUF models.
         //
         // Bundled-by-default extra so a fresh install can *speak* with no setup
@@ -856,7 +921,11 @@ impl SetupManager {
                 false
             }
         };
+        (outetts_installed, warnings)
+        };
 
+        let kokoro_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 7 — Kokoro 82M (the cross-surface default TTS engine): runtime, then
         // model artifacts.
         //
@@ -924,7 +993,11 @@ impl SetupManager {
             );
             false
         };
+        (kokoro_installed, warnings)
+        };
 
+        let sdcpp_step = async {
+        let mut warnings = Vec::<String>::new();
         // Step 8 — stable-diffusion.cpp image engine (server binary + default model).
         //
         // Bundled-by-default so text-to-image works zero-setup, mirroring the STT/
@@ -951,6 +1024,48 @@ impl SetupManager {
                     false
                 }
             };
+        (sdcpp_installed, warnings)
+        };
+
+        let (
+            (gguf_installed, w_chat),
+            (embed_gguf_installed, w_embed),
+            (reranker_gguf_installed, w_rerank),
+            (classifier_gguf_installed, w_classify),
+            (whisper_installed, w_whisper),
+            (parakeet_installed, w_parakeet),
+            (vad_installed, w_vad),
+            (outetts_installed, w_outetts),
+            (kokoro_installed, w_kokoro),
+            (sdcpp_installed, w_sdcpp),
+        ) = tokio::join!(
+            chat_step,
+            embed_step,
+            reranker_step,
+            classifier_step,
+            whisper_step,
+            parakeet_step,
+            vad_step,
+            outetts_step,
+            kokoro_step,
+            sdcpp_step,
+        );
+        // Merged in step order, so the warning list a user reads stays stable even
+        // though the steps themselves no longer finish in that order.
+        for w in [
+            w_chat,
+            w_embed,
+            w_rerank,
+            w_classify,
+            w_whisper,
+            w_parakeet,
+            w_vad,
+            w_outetts,
+            w_kokoro,
+            w_sdcpp,
+        ] {
+            warnings.extend(w);
+        }
 
         let status = LocalStackStatus {
             llamacpp_installed,

@@ -37,6 +37,14 @@ import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingInfoGrid,
+	ListingSection,
+	ListingStatStrip,
+} from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -573,45 +581,78 @@ function ServerDetail({
 	tools: McpTool[];
 }) {
 	return (
-		<div className="flex flex-col gap-6 p-4">
-			<header className="flex flex-col gap-3">
-				<div className="pr-8">
-					<h2 className="truncate font-semibold text-xl">{server.name}</h2>
-					<p className="text-muted-foreground text-sm">MCP server</p>
-				</div>
-				<div className="flex flex-wrap items-center gap-1">
-					<Badge variant={server.enabled ? "default" : "secondary"}>
-						{server.enabled ? "Enabled" : "Disabled"}
-					</Badge>
-					{server.available === false ? (
-						<Badge variant="secondary">Not installed</Badge>
-					) : null}
-					<Badge variant="outline">
-						{tools.length} {tools.length === 1 ? "tool" : "tools"}
-					</Badge>
-				</div>
-			</header>
-
-			<section className="flex flex-col gap-2">
-				<h3 className="font-medium text-sm">About</h3>
+		<ListingDetailShell
+			aside={
+				<ListingAsideCard title="Information">
+					<ListingInfoGrid
+						rows={[
+							{ label: "Command", value: server.command },
+							{
+								label: "State",
+								value: server.enabled ? "Enabled" : "Disabled",
+							},
+							{
+								label: "Installed",
+								value: server.available === false ? "No" : "Yes",
+							},
+							{ label: "Tools", value: `${tools.length}` },
+						]}
+					/>
+				</ListingAsideCard>
+			}
+			hero={
+				<ListingHero
+					badges={[
+						server.enabled ? "Enabled" : "Disabled",
+						server.available === false ? "Not installed" : null,
+					].filter((b): b is string => Boolean(b))}
+					icon={<HugeiconsIcon className="size-8" icon={ServerStack01Icon} />}
+					name={server.name}
+					tagline={server.description ?? "MCP server"}
+				/>
+			}
+			stats={
+				<ListingStatStrip
+					items={[
+						{
+							label: "Tools",
+							sub: tools.length === 1 ? "tool" : "tools",
+							value: `${tools.length}`,
+						},
+						{
+							label: "State",
+							value: server.enabled ? "Enabled" : "Disabled",
+						},
+						{
+							label: "Installed",
+							value: server.available === false ? "No" : "Yes",
+						},
+					]}
+				/>
+			}
+		>
+			<ListingSection title="About">
 				<p className="text-muted-foreground text-sm leading-relaxed">
 					{server.description ?? "No description provided."}
 				</p>
-			</section>
+			</ListingSection>
 
-			<section className="flex flex-col gap-2">
-				<h3 className="font-medium text-sm">Command</h3>
-				<code className="block truncate rounded bg-muted px-2 py-1 text-muted-foreground text-xs">
+			<ListingSection title="Command">
+				<code className="block overflow-x-auto whitespace-pre rounded bg-muted px-2 py-1 text-muted-foreground text-xs">
 					{[server.command, ...server.args].join(" ")}
 				</code>
-			</section>
+			</ListingSection>
 
 			{tools.length > 0 ? (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">Tools</h3>
-					<ul className="flex flex-col divide-y rounded-lg border px-3">
+				<ListingSection title={`Tools (${tools.length})`}>
+					{/* Two-up on a wide dialog: a tool row is a name plus one line, and
+					    a single full-width column of them wasted most of the space. */}
+					<ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
 						{tools.map((tool) => (
-							<li className="py-2 text-sm" key={tool.id}>
+							<li
+								className="rounded-lg border border-border/60 px-3 py-2 text-sm"
+								key={tool.id}
+							>
 								<div className="truncate font-medium">{tool.name}</div>
 								{tool.description ? (
 									<div className="truncate text-muted-foreground text-xs">
@@ -621,9 +662,9 @@ function ServerDetail({
 							</li>
 						))}
 					</ul>
-				</section>
+				</ListingSection>
 			) : null}
-		</div>
+		</ListingDetailShell>
 	);
 }
 
@@ -687,21 +728,35 @@ function ToolDetail({
 	};
 
 	return (
-		<div className="flex flex-col gap-6 p-4">
-			<header className="flex flex-col gap-3">
-				<div className="pr-8">
-					<h2 className="truncate font-semibold text-xl">{tool.name}</h2>
-					<p className="text-muted-foreground text-sm">{tool.server}</p>
-				</div>
-				{tool.description ? (
-					<p className="text-muted-foreground text-sm leading-relaxed">
-						{tool.description}
-					</p>
-				) : null}
-			</header>
-
-			<section className="flex flex-col gap-3">
-				<h3 className="font-medium text-sm">Test call</h3>
+		<ListingDetailShell
+			aside={
+				<ListingAsideCard title="Information">
+					<ListingInfoGrid
+						rows={[
+							{ label: "Tool ID", value: tool.id },
+							{ label: "Server", value: tool.server },
+						]}
+					/>
+				</ListingAsideCard>
+			}
+			hero={
+				<ListingHero
+					badges={[tool.server]}
+					icon={<HugeiconsIcon className="size-8" icon={Wrench01Icon} />}
+					name={tool.name}
+					tagline={tool.description}
+				/>
+			}
+			stats={
+				<ListingStatStrip
+					items={[
+						{ label: "Server", value: tool.server },
+						{ label: "Runs as", value: agents.length > 0 ? "Agent" : "—" },
+					]}
+				/>
+			}
+		>
+			<ListingSection title="Test call">
 				{agents.length === 0 ? (
 					<p className="rounded bg-muted px-3 py-2 text-muted-foreground text-xs">
 						Create an agent first, then come back here to try this tool. Tools
@@ -776,8 +831,8 @@ function ToolDetail({
 						{resultText}
 					</pre>
 				)}
-			</section>
-		</div>
+			</ListingSection>
+		</ListingDetailShell>
 	);
 }
 

@@ -129,7 +129,12 @@ export interface PluginManifest {
 	 */
 	capabilities?: string[];
 	/**
-	 * Free-text category (Claude `category`).
+	 * Free-text category (Claude `category`). The Store groups its Apps and
+	 * Plugins tabs by this string, so two listings that mean the same shelf must
+	 * spell it the same way — see the canonical set in `docs/`-adjacent
+	 * `STORE_CATEGORY_ORDER` (`packages/marketplace/src/catalog/categories.ts`),
+	 * which also decides shelf ORDER. An unrecognised value still renders; it just
+	 * sorts after the known shelves, so a new category needs no client release.
 	 */
 	category?: string | null;
 	/**
@@ -162,6 +167,20 @@ export interface PluginManifest {
 	 */
 	examplePrompts?: string[];
 	/**
+	 * Hide this listing from the Store without uninstalling or disabling it.
+	 *
+	 * The listing keeps working for anyone who already has it — this is a
+	 * *catalog* control, not a lifecycle one. It exists so an app that is built
+	 * but not ready to be discovered can ship dark: the manifest stays compiled
+	 * in, the routes stay registered, and the card simply is not offered.
+	 *
+	 * Absent ⇒ visible, matching the identically-named field the published
+	 * `marketplace.json` already carries for third-party indexes
+	 * (`catalog_source::sources`), so both tiers spell "don't list this" the same
+	 * way and a client that predates the field just shows everything.
+	 */
+	hidden?: boolean;
+	/**
 	 * Homepage/website URL (Claude `homepage`; emitted as `website`).
 	 */
 	homepage?: string | null;
@@ -171,6 +190,13 @@ export interface PluginManifest {
 	 * the shared `Icon` primitive. Distinct from `icon_url`: this is a GLYPH id the
 	 * card masks with `currentColor`, `icon_url` is a raster logo. When absent the
 	 * card falls back to `icon_url`, then a default glyph.
+	 *
+	 * One id shape is NOT a glyph: `svgl:<slug>` (or `svgl:<light>|<dark>`) names a
+	 * brand mark on svgl.app, which the card renders as a full-colour image instead
+	 * — masking a brand's logo to `currentColor` would flatten it to a silhouette.
+	 * Prefer it over `icon_url` for a listing that fronts a known product (Brave,
+	 * Firecrawl, Notion, …): it is a stable, versionless id rather than a URL that
+	 * can rot, and svgl's own API supplies the dark-theme variant when one exists.
 	 */
 	icon?: string | null;
 	/**
@@ -204,6 +230,22 @@ export interface PluginManifest {
 	 * SPDX license identifier (Claude `license`).
 	 */
 	license?: string | null;
+	/**
+	 * This plugin is REQUIRED FOR CORE: the UI must never offer to disable or
+	 * uninstall it, and the lifecycle refuses both — with no `force` escape, which
+	 * is what separates it from the softer
+	 * [`crate::manifest`]-external load-bearing guard.
+	 *
+	 * **Declaring this does not grant it.** A manifest is untrusted input, and an
+	 * undisableable plugin is exactly what a hostile one would ask to be, so the
+	 * enforcement set is a Core-owned constant (`plugins::builtins::
+	 * MANDATORY_PLUGINS`) and this field is only the manifest-side declaration of
+	 * it. A bijection test keeps the two in lockstep, and a third-party manifest
+	 * that sets it is ignored by the lifecycle — it only ever affects how the
+	 * listing renders. Same posture as `CORE_PLUGINS`: privilege is never
+	 * self-asserted.
+	 */
+	mandatory?: boolean;
 	/**
 	 * Declarative **stdio MCP servers** this plugin registers into Core's MCP
 	 * registry on enable and deregisters on disable/uninstall. Each entry is a
@@ -369,6 +411,15 @@ export interface PluginManifest {
 	 */
 	source?: string | null;
 	/**
+	 * How finished this listing is: `alpha`, `beta`, `rc`, … Absent or `stable`
+	 * means finished and renders no badge.
+	 *
+	 * Free-form, NOT an enum, for the same reason the marketplace-index copy of
+	 * this field is: an unrecognised tier renders verbatim rather than being
+	 * dropped, so publishing a `canary` needs no client release.
+	 */
+	stability?: string | null;
+	/**
 	 * Per-surface support + UI declaration — the richer successor to [`targets`].
 	 *
 	 * When **present**, this map is authoritative and [`targets`] is ignored: a
@@ -450,7 +501,8 @@ export interface CompanionSurface {
  * Most surfaces added since are **self-contained**: they carry their own payload
  * and reference no runnable at all (`widgets`, `views`, `dock_panels`,
  * `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
- * `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`).
+ * `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
+ * `message_actions`, `context_menu_items`).
  *
  * # Extending
  *
@@ -531,6 +583,18 @@ export interface Contributes {
 	 * older shells" instead of breaking the composer.
 	 */
 	composer_controls?: unknown[];
+	/**
+	 * Context-menu rows the plugin contributes to a shell entity menu (the
+	 * conversation-row dropdown, a message right-click, a space row). Lets an app
+	 * own a menu row instead of the shell hardcoding it (e.g. "Make a skill from
+	 * this chat" is a Learning contribution, not an `AppSidebar` if). See
+	 * [`ContextMenuContribution`]; served + tagged with the owning `plugin` id at
+	 * `GET /api/plugins/contributions`.
+	 *
+	 * **Stored raw, validated at the chokepoint** — same rule as
+	 * [`Contributes::message_actions`].
+	 */
+	context_menu_items?: ContextMenuContribution[];
 	/**
 	 * **Deletable data categories** the app owns — one "Delete all X" row in
 	 * Settings → Danger Zone (see [`DataCategoryContribution`]).
@@ -661,6 +725,62 @@ export interface Contributes {
 		[k: string]: LspServerContribution;
 	};
 	/**
+	 * Per-message actions the plugin contributes to the desktop message toolbar
+	 * (thumbs, rate, transform, …). Lets an app own a control in the per-message
+	 * toolbar instead of the shell welding the action into the closed set of
+	 * built-in toolbar buttons. Self-contained + opaque `spec` (see
+	 * [`MessageActionContribution`]), so a new action kind needs no Core change;
+	 * served + tagged with the owning `plugin` id at
+	 * `GET /api/plugins/contributions`. A renderer that does not know a `kind`
+	 * ignores it, so an older shell degrades to "not shown" rather than breaking.
+	 *
+	 * **Stored raw, validated at the chokepoint** — same rule as
+	 * [`Contributes::settings_tabs`]: the desktop forwards the original bytes, so
+	 * a shell newer than this Core build still gets every field it was shipped to
+	 * render.
+	 */
+	message_actions?: MessageActionContribution[];
+	/**
+	 * **Output styles** the plugin ships — Markdown files that change *how* an agent
+	 * answers (role, tone, default response shape) by editing the system prompt for
+	 * the turn. See `docs/output-styles.md`.
+	 *
+	 * A style is NOT its own catalog kind, for exactly the argument
+	 * [`Contributes::themes`] makes one field up: as a contribution it inherits
+	 * install/uninstall/enable, versioning, signing, the Store detail page, reviews
+	 * and the trust scorecard for free, and a plugin that ships a style ALONGSIDE
+	 * other contributions (an app with a matching voice) stays expressible. A
+	 * `CatalogKind::OutputStyle` would have been a second, weaker copy of all of
+	 * that — and `CatalogKind::ALL` is a closed five-member enum that must stay
+	 * that way, because every surface that switches on it exhaustively is a place a
+	 * sixth member would have to be threaded by hand.
+	 *
+	 * # Safe with zero grants, unlike the other file-bearing family here
+	 *
+	 * The body is prose: nothing in the pipeline evaluates it, it only ever lands in
+	 * a system prompt as text. So a style sits with themes on the safe side of the
+	 * line — the worst a hostile one can do is make the agent tiresome — and
+	 * pointedly NOT with [`Contributes::pi_extensions`], which is unsandboxed code
+	 * and therefore tier-gated at the materializer.
+	 *
+	 * # Served on the contributions endpoint
+	 *
+	 * Unlike [`Contributes::pi_extensions`] and [`Contributes::lsp_servers`], which
+	 * Core consumes at their own sites, this one IS served from
+	 * `GET /api/plugins/contributions` — the desktop composer's style picker is a
+	 * client-rendered surface and needs the declaration, not just its effect.
+	 *
+	 * Self-contained (it names no runnable), so it stays out of
+	 * [`Contributes::referenced_ids`].
+	 *
+	 * ```json
+	 * "output_styles": [
+	 *   { "id": "eli5", "file": "output-styles/eli5.md" }
+	 * ]
+	 * ```
+	 */
+	output_styles?: OutputStyleContribution[];
+	/**
 	 * **Pi extensions** the plugin ships — TypeScript files the managed `ryu` (Pi)
 	 * agent loads at process start:
 	 *
@@ -743,6 +863,50 @@ export interface Contributes {
 	 */
 	slash_commands?: unknown[];
 	/**
+	 * App-registered **marketplace tabs** — one section in the Store's nav bar,
+	 * carrying the app's own installable catalog (workflow templates, meeting-notes
+	 * templates, monitor presets, …). The Store-shaped sibling of
+	 * [`Contributes::dock_panels`]: it lets an app own its browse-and-install
+	 * surface instead of the shell welding the section into a closed `StoreSection`
+	 * union. Self-contained + opaque `spec` (see [`StoreTabContribution`]).
+	 *
+	 * **Served OUTSIDE the enabled filter**, unlike every sibling family here: each
+	 * entry is tagged with `plugin` plus `app_installed` / `app_enabled` and the
+	 * renderer decides. Serving the declaration unconditionally keeps the door open
+	 * for a surface that wants the tab as an acquisition funnel; the DATA behind it
+	 * stays gated by the app's own route gate either way.
+	 *
+	 * The desktop Store deliberately renders only the tabs whose app is installed
+	 * AND enabled. A pill present whether or not you own the app reads exactly like
+	 * a section the shell hardcoded, and clicking it produced a "Turn on X" prompt
+	 * where a catalog belongs. Apps are acquired from the Apps tab; the app's own
+	 * sections appear with it.
+	 */
+	store_tabs?: StoreTabContribution[];
+	/**
+	 * **Colour themes** the plugin ships — the seam that makes a theme an ordinary
+	 * marketplace item instead of a hardcoded entry in the shell's preset table.
+	 *
+	 * This is deliberately the VS Code / Zed shape: a theme is not its own catalog
+	 * kind, it is a plugin that contributes one. That choice is load-bearing rather
+	 * than cosmetic — it means a theme inherits install/uninstall/enable, versioning,
+	 * signing, the Store detail page, reviews and the trust scorecard for free, and
+	 * it means a plugin that ships a theme ALONGSIDE other contributions (an app with
+	 * a matching skin) is expressible. A new `CatalogKind::Theme` would have bought a
+	 * second, weaker copy of all of that.
+	 *
+	 * Each entry is a [`ThemeContribution`]: pure design tokens, no code. Themes are
+	 * therefore the one contribution family that is safe with **zero** grants — the
+	 * worst a hostile theme can do is look bad, because the shell only ever reads
+	 * `tokens` into CSS custom properties and never evaluates them.
+	 *
+	 * Self-contained (it names no runnable), so it stays out of
+	 * [`Contributes::referenced_ids`]. Typed rather than opaque JSON because Core
+	 * does interpret it: the mode/token split is what lets a client ask for "the dark
+	 * themes" without parsing every payload.
+	 */
+	themes?: ThemeContribution[];
+	/**
 	 * Tools this plugin wants **hidden** from the model's offered tool list —
 	 * the declarative half of a tool firewall (see [`ToolFilterContribution`]).
 	 *
@@ -815,6 +979,57 @@ export interface ContributionId {
 	 * Optional display title (e.g. the palette label for a command).
 	 */
 	title?: string | null;
+}
+/**
+ * One context-menu row a plugin contributes (see
+ * [`Contributes::context_menu_items`]).
+ */
+export interface ContextMenuContribution {
+	/**
+	 * WHICH menu. Closed-ish enum by convention, open by encoding (same call as
+	 * [`DockPanelPlacement`]): `"conversation"` | `"message"` | `"space"` |
+	 * `"agent"` | `"project"` | `"workflow"` | `"skill"` | `"channel"`. The shell
+	 * owns the anchor set; an app cannot conjure a new menu, but an unknown value
+	 * must not fail the load.
+	 *
+	 * An anchor names an ENTITY, not a place, so one declaration reaches every
+	 * surface that shows it. The desktop renders these in the sidebar row's menu
+	 * AND — for whatever entity a tab is showing — in that tab's right-click menu,
+	 * on both the horizontal strip and the vertical tab list. `"channel"` is in the
+	 * list because a channel is one of those tab-visible entities; it is not a
+	 * desktop-only extension.
+	 */
+	anchor: string;
+	args?: unknown;
+	/**
+	 * The granted capability the shell invokes when the row is clicked, plus
+	 * static `args`. Never inline code, never a capability the owning plugin was
+	 * not granted.
+	 */
+	capability: string;
+	/**
+	 * Optional feedback text for the shell's toast: `{ loading, success, error }`.
+	 * Lets the app own its copy without owning the toast component.
+	 */
+	feedback?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Optional glyph id resolved by the shell's Icon primitive.
+	 */
+	icon?: string | null;
+	/**
+	 * Stable id for this row within the plugin.
+	 */
+	id: string;
+	/**
+	 * Row label.
+	 */
+	label: string;
+	/**
+	 * Sort position among contributed rows (ascending).
+	 */
+	order?: number | null;
 }
 /**
  * One **deletable data category** an app owns (see [`Contributes::data_categories`]).
@@ -1109,6 +1324,107 @@ export interface LspServerContribution {
 	workspaceFolder?: string | null;
 }
 /**
+ * One per-message toolbar action a plugin contributes (see
+ * [`Contributes::message_actions`]).
+ *
+ * The `kind` discriminant is deliberately NOT an enum (same reasoning as
+ * [`ViewContribution::view`]): a member an older shell has never heard of must
+ * reach a newer shell intact rather than being rejected at load. Renderers ignore
+ * a `kind` they do not know, so a new kind degrades to "not shown" instead of
+ * breaking the message toolbar.
+ */
+export interface MessageActionContribution {
+	args?: unknown;
+	/**
+	 * The granted capability the shell invokes when the action fires, plus static
+	 * `args`. Never inline code, never a capability the owning plugin was not
+	 * granted — identical to the `action` composer control's dispatch rule.
+	 */
+	capability: string;
+	/**
+	 * Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+	 */
+	icon?: string | null;
+	/**
+	 * Stable id for this action within the plugin (the shell's element key and
+	 * dispatch tag, namespaced as `plugin:<pluginId>:<id>`).
+	 */
+	id: string;
+	/**
+	 * Render mode: `"button"` (fire-and-forget) | `"toggle-group"` (mutually
+	 * exclusive states, what thumbs is) | `"menu"`. Open string.
+	 */
+	kind: string;
+	/**
+	 * Accessible label (tooltip / aria-label) for the action button.
+	 */
+	label: string;
+	/**
+	 * Sort position among contributed actions (ascending).
+	 */
+	order?: number | null;
+	/**
+	 * Optional `ViewSource` the shell polls to hydrate current state (what lights
+	 * the thumb on reload). Same `/api/`-path guard as views.
+	 */
+	state_source?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * For `kind: "toggle-group"`: the states, each `{ value, label, icon?,
+	 * active_icon? }`. Opaque to Core; the renderer owns the shape.
+	 */
+	states?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Which messages the action attaches to: `"assistant"` | `"user"` | `"any"`.
+	 * Open string — an unknown role is ignored, not rejected.
+	 */
+	target: string;
+}
+/**
+ * One **output style** a plugin ships (a [`Contributes::output_styles`] row).
+ *
+ * Carries the style's *body* in one of two forms and NOTHING else — no `name`, no
+ * `description`, no `keep-coding-instructions`. Every one of those lives in the
+ * file's own YAML frontmatter, which [`PluginManifest::hydrate_output_style_files`]
+ * explains: mirroring them up here would create a second place a style's metadata
+ * can be stated, and therefore a place it can disagree with itself.
+ */
+export interface OutputStyleContribution {
+	/**
+	 * SOURCE form: path to the Markdown file, relative to the plugin root — exactly
+	 * `output-styles/<name>.md`. See [`validate_output_style_path`].
+	 *
+	 * Exactly one of `file` / `source` is set. Authors write `file`;
+	 * [`PluginManifest::hydrate_output_style_files`] turns it into `source` at parse
+	 * time and clears this, so a hydrated manifest is byte-indistinguishable from
+	 * one that was authored inline.
+	 */
+	file?: string | null;
+	/**
+	 * Stable id for this style within the plugin (`[a-z0-9][a-z0-9._-]*`).
+	 *
+	 * Validated with the same alphabet as a [`PiExtensionContribution::id`], and for
+	 * a related reason: the registry merges plugin, user, project and managed styles
+	 * into one id-keyed table where later entries win, and the persisted per-turn /
+	 * per-conversation / node-default selection is this id. A free-form id would
+	 * make a selection unresolvable the moment it contained something a settings key
+	 * or a URL path could not carry.
+	 */
+	id: string;
+	/**
+	 * WIRE form: the file's contents **verbatim, frontmatter included**.
+	 *
+	 * Deliberately the whole file rather than a pre-split body, so that a style
+	 * contributed by a plugin and a style sitting in a user's `output-styles/`
+	 * directory are the same bytes and go through the same single parser. See
+	 * [`PluginManifest::hydrate_output_style_files`].
+	 */
+	source?: string | null;
+}
+/**
  * One **Pi extension** a plugin ships (a [`Contributes::pi_extensions`] row).
  *
  * Carries a path, never a body: unlike [`TurnHookContribution`] there is no inline
@@ -1317,6 +1633,113 @@ export interface SidebarSectionContribution {
 	 * Header label shown in the sidebar and the Customize dialog.
 	 */
 	title: string;
+}
+/**
+ * One app-registered **marketplace tab** — a section in the Store's nav bar whose
+ * content is the app's own installable catalog. A typed envelope around an opaque
+ * `spec` (the `StoreTabSpec` in `@ryu/app-host/views`: a `ViewSource` for the rows,
+ * a `groupBy`/`groups` split into card sections, an `install` action, and per-item
+ * actions). Core stores it verbatim and tags it with the owning `plugin` id; the
+ * `spec` stays opaque so a new catalog capability is a renderer change, not a Core
+ * change.
+ *
+ * **There is no first-party escape hatch.** This contribution used to carry a
+ * `view` naming a hand-written renderer the shell kept in a plugin-id allowlist,
+ * for the one tab whose detail pane the vocabulary could not express (the
+ * workflow-template graph). That made the flagship example of "an app can own a
+ * Store section" the single section no other app could reproduce. The graph is a
+ * declarative primitive now (`spec.detail.graph`), the field is gone, and every
+ * contributed tab — first-party or not — renders from the same spec.
+ */
+export interface StoreTabContribution {
+	/**
+	 * Which nav cluster the pill joins — the shell draws a divider wherever the
+	 * group changes. Built-in groups: `discover`, `catalog`, `community`, `manage`,
+	 * `account`. An unknown value gets its own cluster rather than being dropped.
+	 */
+	group?: string | null;
+	/**
+	 * Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+	 */
+	icon?: string | null;
+	/**
+	 * Stable id for this tab within the plugin. The shell namespaces it into the
+	 * section key as `plugin:<pluginId>:<id>` so two apps can both ship a
+	 * `templates` tab.
+	 */
+	id: string;
+	/**
+	 * Placement hint within the group (lower = further left).
+	 */
+	order?: number | null;
+	/**
+	 * The opaque tab spec (source/map/groups/search/install/itemActions). Interpreted
+	 * by the desktop renderer, never by Core. Absent alongside an absent `view` = an
+	 * empty tab.
+	 */
+	spec?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * One-line description shown under the title in the section header.
+	 */
+	subtitle?: string | null;
+	/**
+	 * Nav-pill label.
+	 */
+	title: string;
+}
+/**
+ * One colour theme a plugin contributes (`contributes.themes`).
+ *
+ * Shape-identical to the shell's own `ThemeVariant` (`@ryu/ui/theme/presets`), so a
+ * theme installed from the marketplace and a theme that ships in the binary are the
+ * same object by the time the picker renders them — there is no second rendering
+ * path to keep in sync, and a plugin can never express a theme the built-ins could
+ * not.
+ *
+ * # Why `tokens` is an untyped map
+ *
+ * The keys are CSS custom properties (`--background`, `--sidebar-ring`, …). Typing
+ * them as a fixed struct would mean every new token added to the design system
+ * silently DROPS out of third-party themes until Core is rebuilt and redeployed —
+ * exactly the drift `settings_tabs` documents for its own `serde_json::Value`. The
+ * values are never evaluated, only assigned to CSS variables, so an unknown key is
+ * inert rather than dangerous.
+ */
+export interface ThemeContribution {
+	/**
+	 * Stable id used as the persisted preset selection. Namespace it with the
+	 * plugin id (e.g. `"@acme/themes:midnight"`) so two plugins cannot collide, and
+	 * so a selection survives the theme being renamed.
+	 */
+	id: string;
+	/**
+	 * Human name shown in the theme picker.
+	 */
+	label: string;
+	/**
+	 * Which mode slot this theme fills: `"light"` or `"dark"`. A plugin shipping a
+	 * pair contributes two entries, mirroring how the shell keeps an independent
+	 * preset per mode rather than one theme with two halves.
+	 */
+	mode: string;
+	preview: ThemePreview;
+	/**
+	 * CSS custom property name → value (e.g. `"--background"` → `"oklch(1 0 0)"`).
+	 */
+	tokens: {
+		[k: string]: string;
+	};
+}
+/**
+ * The four swatch colours the picker paints before the theme is applied.
+ */
+export interface ThemePreview {
+	bg: string;
+	primary: string;
+	surface: string;
+	text: string;
 }
 /**
  * One **tool filter**: a fully-qualified tool id a plugin wants withheld from the

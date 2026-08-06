@@ -20,7 +20,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { LibraryToolbar } from "@ryu/blocks/desktop/library.tsx";
+import { StoreSearchButton } from "@ryu/blocks/desktop/store.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Dialog,
@@ -32,14 +32,7 @@ import {
 	PopoverContent,
 	PopoverTrigger,
 } from "@ryu/ui/components/popover.tsx";
-import {
-	createContext,
-	type ReactNode,
-	useContext,
-	useEffect,
-	useRef,
-	useState,
-} from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 /** Below this content width the preview opens as a dialog, not a side pane. */
 const NARROW_PX = 880;
@@ -63,25 +56,6 @@ function useContainerWidth(): [React.RefObject<HTMLDivElement | null>, number] {
 		return () => ro.disconnect();
 	}, []);
 	return [ref, width];
-}
-
-/** Section header (title/subtitle) rendered inside the catalog's centered left
- *  column so it tracks the card grid — including when the preview aside opens and
- *  the grid recenters. The Store shell supplies it per section. */
-const StoreCatalogHeaderContext = createContext<ReactNode>(null);
-
-export function StoreCatalogHeaderProvider({
-	header,
-	children,
-}: {
-	header: ReactNode;
-	children: ReactNode;
-}) {
-	return (
-		<StoreCatalogHeaderContext.Provider value={header}>
-			{children}
-		</StoreCatalogHeaderContext.Provider>
-	);
 }
 
 export default function StoreCatalogLayout({
@@ -124,7 +98,6 @@ export default function StoreCatalogLayout({
 	 *  earns its space (Models, whose preview is a long per-file list). */
 	previewMode?: "auto" | "dialog";
 }) {
-	const header = useContext(StoreCatalogHeaderContext);
 	const [ref, width] = useContainerWidth();
 	// Before the first measure width is 0 — treat that as wide so the side pane is
 	// the default and we never flash a dialog on mount.
@@ -137,59 +110,55 @@ export default function StoreCatalogLayout({
 	return (
 		<div className="flex h-full flex-col overflow-hidden" ref={ref}>
 			<div className="flex min-h-0 flex-1 overflow-hidden">
-				{/* Left region — header, toolbar and the centered card grid share one
-				    column at the same max-width, so they stay aligned in both states;
-				    when the preview aside opens, the whole column narrows and every
-				    row recenters together. */}
+				{/* Left region — the section's controls and its centered card grid share
+				    one column at the same max-width, so they stay aligned in both
+				    states; when the preview aside opens, the whole column narrows and
+				    every row recenters together. The section TITLE is not here: the
+				    Store's page chrome renders one title for every tab, carded or not. */}
 				<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-					{header ? (
-						<div className="mx-auto w-full max-w-4xl shrink-0">{header}</div>
-					) : null}
-
 					{/* Card grid — the same centered max-width so selecting an item
 					    never reflows it; the preview is a FIXED-width pane beside.
-					    The search toolbar is sticky inside the scroll area so it
-					    pins to the top and the scroll-fade appears below it. */}
+					    The section's own controls sit in one compact row above it:
+					    a search BUTTON that expands in place plus whatever the
+					    section declares (source, filters), so the row reads as
+					    buttons rather than a full-width field that pushed them onto
+					    a second line. Sticky, so it stays reachable while scrolling. */}
 					<div className="scroll-fade-effect-y min-h-0 flex-1 overflow-auto">
-						{search ? (
-							<div className="sticky top-0 z-10 mx-auto w-full max-w-4xl bg-background pb-1">
-								<LibraryToolbar
-									filterSlot={
-										filter ? (
-											<Popover>
-												<PopoverTrigger
-													render={
-														<Button
-															className="gap-1.5"
-															size="sm"
-															variant="secondary"
-														>
-															<HugeiconsIcon
-																className="size-3.5"
-																icon={filter.icon ?? SlidersHorizontalIcon}
-															/>
-															{filter.label ?? "Filters"}
-															{filter.activeCount ? (
-																<span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-foreground px-1 text-[10px] text-background">
-																	{filter.activeCount}
-																</span>
-															) : null}
-														</Button>
-													}
-												/>
-												<PopoverContent
-													align="end"
-													className="w-[min(30rem,90vw)] p-0"
-												>
-													{filter.panel}
-												</PopoverContent>
-											</Popover>
-										) : null
-									}
-									onQueryChange={search.onChange}
-									query={search.value}
-									searchPlaceholder={search.placeholder ?? "Search…"}
-								/>
+						{search || filter ? (
+							<div className="sticky top-0 z-10 mx-auto flex w-full max-w-4xl items-center justify-end gap-1 bg-background px-4 pb-2">
+								{search ? (
+									<StoreSearchButton
+										onChange={search.onChange}
+										placeholder={search.placeholder ?? "Search…"}
+										value={search.value}
+									/>
+								) : null}
+								{filter ? (
+									<Popover>
+										<PopoverTrigger
+											render={
+												<Button className="gap-1.5" size="sm" variant="ghost">
+													<HugeiconsIcon
+														className="size-3.5"
+														icon={filter.icon ?? SlidersHorizontalIcon}
+													/>
+													{filter.label ?? "Filters"}
+													{filter.activeCount ? (
+														<span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-foreground px-1 text-[10px] text-background">
+															{filter.activeCount}
+														</span>
+													) : null}
+												</Button>
+											}
+										/>
+										<PopoverContent
+											align="end"
+											className="w-[min(30rem,90vw)] p-0"
+										>
+											{filter.panel}
+										</PopoverContent>
+									</Popover>
+								) : null}
 							</div>
 						) : null}
 						<div className="mx-auto w-full max-w-4xl px-4 pb-24">{list}</div>

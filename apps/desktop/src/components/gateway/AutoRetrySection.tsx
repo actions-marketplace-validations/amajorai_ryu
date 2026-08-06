@@ -23,7 +23,7 @@
 // setting to try first.
 
 import { Label } from "@ryu/ui/components/label";
-import { Slider } from "@ryu/ui/components/slider";
+import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -214,30 +214,23 @@ export function AutoRetrySection({
 
 							<SettingsCard>
 								<div className="space-y-2">
-									<div className="flex items-center justify-between gap-3">
-										<Label htmlFor="auto-retry-threshold">
-											Count a window as spent below
-										</Label>
-										<span className="text-muted-foreground text-xs tabular-nums">
-											{policy.spent_below_percent}% left
-										</span>
-									</div>
 									<p className="text-muted-foreground text-xs">
 										Also the bar a plan has to clear to receive a retry, so
 										raising it both catches a cap sooner and refuses plans that
 										are nearly out themselves.
 									</p>
-									<Slider
+									<FluidSlider
 										aria-label="Percent left below which a window counts as spent"
 										disabled={disabled}
-										id="auto-retry-threshold"
+										format={(v) => `${v}% left`}
+										label="Count a window as spent below"
 										max={25}
 										min={0}
-										onValueChange={([value]) =>
-											commit({ spent_below_percent: value })
+										onValueChange={(spent_below_percent) =>
+											commit({ spent_below_percent })
 										}
 										step={1}
-										value={[policy.spent_below_percent]}
+										value={policy.spent_below_percent}
 									/>
 								</div>
 							</SettingsCard>

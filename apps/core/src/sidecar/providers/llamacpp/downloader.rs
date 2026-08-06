@@ -150,6 +150,7 @@ impl LlamaCppDownloader {
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Engine,
+                role: crate::downloads::DownloadRole::Engine,
                 label: "llama.cpp".to_string(),
                 url,
                 dest: archive_dest,
@@ -234,6 +235,7 @@ impl LlamaCppDownloader {
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Voice,
+                role: crate::downloads::DownloadRole::Engine,
                 label: "llama-tts".to_string(),
                 url,
                 dest: archive_dest,

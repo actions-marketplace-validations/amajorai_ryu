@@ -274,6 +274,46 @@ export type PiExtensionContribution = z.infer<
 	typeof PiExtensionContributionSchema
 >;
 
+// ── OutputStyleContribution ──────────────────────────────────────────────────
+
+/**
+ * One output style the plugin ships — a Markdown file (YAML frontmatter + prose)
+ * that rewrites the system prompt's voice for a turn. Mirrors the Rust-side
+ * `OutputStyleContribution`.
+ *
+ * Unlike `pi_extensions` above, this one is INLINED by `ryu pack`: `file` is the
+ * source form and `source` is the wire form, exactly as `code_file` → `code`. That
+ * is why both fields exist here and only `file` exists there — a style body is
+ * prose nothing evaluates, so inlining it costs no auditability (the whole point of
+ * keeping `pi-extensions/*.ts` out of the manifest), and it is what keeps the body
+ * inside the Gateway-signed surface instead of relying on a directory the installed
+ * plugin does not carry.
+ *
+ * Typed rather than a loose record for the same reason `pi_extensions` is: three
+ * fields, all of them Ryu's own vocabulary. Deliberately NOT refined to
+ * "exactly one of `file` / `source`" — Core's `Contributes::validate_output_styles`
+ * is the single gate for that rule, and a second copy here is a place the two can
+ * disagree about a manifest that has already been hydrated once.
+ */
+export const OutputStyleContributionSchema = z.object({
+	/** Stable id for this style within the plugin (`[a-z0-9][a-z0-9._-]*`). It is
+	 *  also the persisted selection key, so it must survive a settings key and a URL
+	 *  path. */
+	id: z.string().min(1),
+	/** SOURCE form: path to the Markdown file, relative to the plugin root —
+	 *  exactly `output-styles/<name>.md`. `ryu pack` replaces this with `source`. */
+	file: z.string().min(1).optional(),
+	/** WIRE form: the file's contents verbatim, frontmatter INCLUDED. The whole file
+	 *  rather than a pre-split body plus mirrored `name`/`description` keys, so a
+	 *  plugin style and a user's own `output-styles/*.md` go through one parser and
+	 *  the frontmatter stays the single source of truth for a style's metadata. */
+	source: z.string().optional(),
+});
+
+export type OutputStyleContribution = z.infer<
+	typeof OutputStyleContributionSchema
+>;
+
 // ── WidgetContribution (Ryu Apps) ─────────────────────────────────────────────
 
 /** Default widget MIME dialect. Mirrors Core `default_widget_mime`. */
@@ -402,6 +442,14 @@ export const ContributesSchema = z.object({
 	 *  all of them Core-interpreted — unlike `lsp_servers`, whose entry shape is
 	 *  Claude Code's to extend. */
 	pi_extensions: z.array(PiExtensionContributionSchema).default([]),
+	/** Output styles the plugin ships — Markdown files that rewrite the system
+	 *  prompt's voice. Mirrors the Rust-side `Contributes.output_styles`; without it
+	 *  the CLI's zod parse would strip the declaration, and `ryu pack` would sign a
+	 *  bundle whose styles simply do not exist. Worse than the usual case of that
+	 *  bug: the styles' `.md` files are not carried by the bundle either, so there
+	 *  would be no residue to notice — the plugin would install clean and contribute
+	 *  nothing. */
+	output_styles: z.array(OutputStyleContributionSchema).default([]),
 });
 
 export type Contributes = z.infer<typeof ContributesSchema>;

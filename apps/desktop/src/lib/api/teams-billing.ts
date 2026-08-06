@@ -147,6 +147,20 @@ export interface Entitlement {
 
 export interface SubscriptionStatus {
 	entitlement: Entitlement;
+	/**
+	 * Server-driven rollout flags. Declared here so the SSE path carries them:
+	 * `BillingStatusEvent.subscription` IS this payload, so a frame lands them
+	 * at `frame.subscription.features`. Without the field the push path would
+	 * silently type-drop it while the TTL path kept working — the hardest
+	 * version of this bug to notice.
+	 *
+	 * Required, matching this file's all-required style. Note the compiler
+	 * cannot enforce it either way: both desktop mirrors are independent
+	 * structural declarations cast off `resp.json()`, NOT imports of the
+	 * server's `SubscriptionStatusPayload`, so nothing links them. They are kept
+	 * in step by hand.
+	 */
+	features: Record<string, boolean>;
 	organizationId: string | null;
 	plan: string | null;
 	scope: "org" | "user";

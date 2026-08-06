@@ -14,8 +14,8 @@
 import { Tick01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
-import { ElasticSlider } from "@ryu/ui/components/elastic-slider";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
+import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
 import { PageHeader } from "@ryu/ui/components/page-header";
 import {
 	Select,
@@ -284,8 +284,8 @@ export function ColorStep({ busy = false, onContinue }: ColorStepProps) {
 							variants={darkVariants}
 						/>
 
-						<ElasticSlider
-							formatValue={(v) => `${v.toFixed(3)}rem`}
+						<FluidSlider
+							format={(v) => `${v.toFixed(3)}rem`}
 							label="Roundness"
 							max={RADIUS_MAX}
 							min={RADIUS_MIN}

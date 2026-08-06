@@ -13,6 +13,7 @@ import {
 	SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { DESKTOP_TRIAL_LABEL } from "@ryu/auth/lib/plans";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Dialog,
@@ -101,7 +102,7 @@ export function PaywallModal({
 							icon={SparklesIcon}
 							strokeWidth={2}
 						/>
-						<DialogTitle>Your free trial has ended</DialogTitle>
+						<DialogTitle>Your {DESKTOP_TRIAL_LABEL} has ended</DialogTitle>
 					</div>
 					<DialogDescription>
 						Basic local chat stays free. Unlock Pro features and Ryu-managed

@@ -1,10 +1,11 @@
 //! Files a built-in plugin's manifest references by path, embedded at compile time.
 //!
-//! Two tables, because a built-in plugin carries two kinds of code with very
-//! different privilege: [`BUILTIN_CODE_FILES`] holds the **sandboxed** JS a
-//! `code_file` names, and [`BUILTIN_PI_EXTENSIONS`] holds the **unsandboxed**
-//! TypeScript a `contributes.pi_extensions[].file` names. They must not be merged;
-//! see the second table's own doc.
+//! Three tables, one per kind of file a manifest can name, ordered here by how much
+//! privilege the contents carry: [`BUILTIN_CODE_FILES`] holds the **sandboxed** JS a
+//! `code_file` names, [`BUILTIN_PI_EXTENSIONS`] holds the **unsandboxed** TypeScript
+//! a `contributes.pi_extensions[].file` names, and [`BUILTIN_OUTPUT_STYLES`] holds
+//! the **inert prose** a `contributes.output_styles[].file` names. They must not be
+//! merged; see each later table's own doc for why.
 //!
 //! # Why a table and not a directory read
 //!
@@ -31,6 +32,11 @@
 //! plugins are included too: they are loaded from disk today, but the total invariant
 //! is what makes promoting one to a built-in a one-line change instead of a silent
 //! no-op.
+//!
+//! Each table has its OWN bijection test, for the reason each table is its own
+//! table: the three reference lists ([`super::PluginManifest::code_file_refs`],
+//! `pi_extension_refs`, `output_style_refs`) are disjoint by construction, so one
+//! merged assertion would be satisfiable by a row of the wrong kind.
 
 /// `(plugin id, plugin-root-relative path, file contents)` for every `code_file` a
 /// `plugins-store` manifest references. Sorted by plugin dir then path.
@@ -232,6 +238,79 @@ pub(crate) const BUILTIN_PI_EXTENSIONS: &[(&str, &str, &str)] = &[
 /// dir is not on the user's machine).
 pub(crate) fn lookup_pi_extension(plugin_id: &str, rel: &str) -> Option<&'static str> {
     BUILTIN_PI_EXTENSIONS
+        .iter()
+        .find(|(id, path, _)| *id == plugin_id && *path == rel)
+        .map(|(_, _, source)| *source)
+}
+
+/// `(plugin id, plugin-root-relative path, file contents)` for every
+/// `contributes.output_styles[].file` a `plugins-store` manifest references.
+///
+/// # Why a THIRD table
+///
+/// Same embedding problem again — a built-in ships only its `manifest.json`, so a
+/// style whose body is not compiled in resolves to nothing — but the contents sit at
+/// the OPPOSITE end of the privilege scale from the other two tables, and that is
+/// exactly why they stay apart:
+///
+/// - A `code_file` is **sandboxed** JS, spliced into a deny-by-default Deno IIFE.
+/// - A `pi_extensions[].file` is **unsandboxed** TypeScript with the managed Pi
+///   process's full privilege.
+/// - An `output_styles[].file` is **inert prose**. Nothing in the pipeline evaluates
+///   it; it is appended to (or replaces) the agent's base instructions for a turn and
+///   is otherwise plain text, which is why a style contribution needs no capability
+///   grant at all — the argument `ThemeContribution` already makes for themes, and
+///   the reason `@ryu/output-styles` ships with an empty `permission_grants`.
+///
+/// Merging any two of these is one edit away from letting a file wear another's
+/// clothes: a single parameterised table would have one path allowlist, and
+/// `validate_output_style_path` exists precisely so a style cannot name a
+/// `hooks/*.js` and a `code_file` cannot name a `.md`. The bijection tests would
+/// fall over too — see the module doc.
+///
+/// Rows are sorted by path within the plugin, matching [`BUILTIN_CODE_FILES`].
+pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
+    // output-styles
+    (
+        "@ryu/output-styles",
+        "output-styles/eli5.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/eli5.md"),
+    ),
+    (
+        "@ryu/output-styles",
+        "output-styles/explanatory.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/explanatory.md"),
+    ),
+    (
+        "@ryu/output-styles",
+        "output-styles/i-have-adhd.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/i-have-adhd.md"),
+    ),
+    (
+        "@ryu/output-styles",
+        "output-styles/learning.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/learning.md"),
+    ),
+    (
+        "@ryu/output-styles",
+        "output-styles/plain-text.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/plain-text.md"),
+    ),
+    (
+        "@ryu/output-styles",
+        "output-styles/proactive.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/proactive.md"),
+    ),
+];
+
+/// The embedded contents of `rel` for built-in plugin `plugin_id`, or `None` when
+/// nothing in [`BUILTIN_OUTPUT_STYLES`] matches.
+///
+/// `None` is a hard load error at the call site, never an empty style. An empty
+/// body is the one degradation no read site can distinguish from the user's own
+/// choice not to use a style, so the plugin must fail to load instead.
+pub(crate) fn lookup_output_style(plugin_id: &str, rel: &str) -> Option<&'static str> {
+    BUILTIN_OUTPUT_STYLES
         .iter()
         .find(|(id, path, _)| *id == plugin_id && *path == rel)
         .map(|(_, _, source)| *source)

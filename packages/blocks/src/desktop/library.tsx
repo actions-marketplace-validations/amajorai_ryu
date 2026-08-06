@@ -76,6 +76,7 @@ const noop = () => {
  * tab's create CTA. The container owns all state; this is purely controlled.
  */
 export function LibraryToolbar({
+	className,
 	query = "",
 	onQueryChange = noop,
 	searchPlaceholder = "Search…",
@@ -90,6 +91,9 @@ export function LibraryToolbar({
 	ctaIcon,
 	onCta,
 }: {
+	/** Overrides the row's own padding — the Library page renders this inside its
+	 *  centered chrome column, which already owns the horizontal inset. */
+	className?: string;
 	query?: string;
 	onQueryChange?: (value: string) => void;
 	searchPlaceholder?: string;
@@ -109,7 +113,12 @@ export function LibraryToolbar({
 }) {
 	const activeSort = sortOptions.find((o) => o.value === sort);
 	return (
-		<div className="flex shrink-0 flex-wrap items-center gap-2 px-4 py-3">
+		<div
+			className={cn(
+				"flex shrink-0 flex-wrap items-center gap-2 px-4 py-3",
+				className
+			)}
+		>
 			{showSearch ? (
 				<div className="relative min-w-48 flex-1">
 					<HugeiconsIcon

@@ -10,7 +10,6 @@ import {
 	IconPlayerStopFilled,
 } from "@tabler/icons-react";
 import type { ContextUsage } from "../context-usage.tsx";
-import { AttachmentButton } from "./attachment-button.tsx";
 import { ContextMeter } from "./context-meter.tsx";
 import {
 	type DoubleCheckControls,
@@ -23,9 +22,6 @@ import {
 import { SendButton } from "./send-button.tsx";
 
 export interface ComposerToolbarProps {
-	/** Render the attachment button on the right of the toolbar instead of the left. */
-	attachRight: boolean;
-
 	/**
 	 * When true, an "Add to queue" button appears next to the Stop button so the
 	 * user can stash the typed message while a run is in flight. Driven by the
@@ -221,6 +217,7 @@ function resolvePlusMenu(
 		| "hasVideoGen"
 		| "onGenerateVideo"
 		| "isGeneratingVideo"
+		| "showAttach"
 	>
 ): {
 	imageGen: MediaGenControls | undefined;
@@ -245,8 +242,14 @@ function resolvePlusMenu(
 	return {
 		imageGen,
 		videoGen,
+		// Attach alone is enough to open the menu. Gating the dropdown on the
+		// *optional* rows made the "+" mean two different things depending on the
+		// surface: a dropdown on the chat page (goal/ghost/plugins/gen wired) but a
+		// bare file dialog on the launchpad and the builder panes, which wire none
+		// of them. The affordance is shared, so it must not degrade per host.
 		showPlusMenu: Boolean(
-			p.goalControls ||
+			p.showAttach ||
+				p.goalControls ||
 				p.ghostControls ||
 				p.pluginControls?.length ||
 				imageGen ||
@@ -264,7 +267,6 @@ function resolvePlusMenu(
  */
 export function ComposerToolbar({
 	showAttach,
-	attachRight,
 	onAttach,
 	goalControls,
 	ghostControls,
@@ -318,6 +320,7 @@ export function ComposerToolbar({
 		hasVideoGen,
 		onGenerateVideo,
 		isGeneratingVideo,
+		showAttach,
 	});
 
 	const leftCluster = (
@@ -327,7 +330,7 @@ export function ComposerToolbar({
 				compact ? "shrink-0" : "min-w-0"
 			)}
 		>
-			{showPlusMenu ? (
+			{showPlusMenu && (
 				<GoalPlusButton
 					disabled={disabled}
 					doubleCheck={doubleCheckControls}
@@ -338,10 +341,6 @@ export function ComposerToolbar({
 					pluginControls={pluginControls}
 					videoGen={videoGen}
 				/>
-			) : (
-				!attachRight &&
-				showAttach &&
-				onAttach && <AttachmentButton onClick={onAttach} />
 			)}
 			{leftActions}
 		</div>
@@ -360,9 +359,11 @@ export function ComposerToolbar({
 			{hasVoice && isTranscribing && (
 				<Wave aria-label="Transcribing" className="h-4 w-7 text-primary" />
 			)}
-			{!goalControls && attachRight && showAttach && onAttach && (
-				<AttachmentButton onClick={onAttach} />
-			)}
+			{/* A right-side attach button used to live here, guarded on `!goalControls`
+			    — one of several menu triggers, so it could render alongside the "+"
+			    popover. It is unreachable now that attach alone opens the menu
+			    (`showAttach` implies `showPlusMenu`), so the "+" dropdown is now the
+			    attach affordance on every surface. */}
 			{/* While a run is streaming and the user has typed, offer an explicit
 				    "queue" affordance alongside the Stop button so the behaviour is
 				    discoverable (Enter also queues). */}

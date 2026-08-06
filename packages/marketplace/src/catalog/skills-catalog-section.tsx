@@ -9,6 +9,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
+import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import {
 	Empty,
 	EmptyContent,
@@ -64,6 +65,16 @@ import StoreCatalogLayout, {
 import StoreItemAction, {
 	StoreItemContextMenuContent,
 } from "./chrome/store-item-action.tsx";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingInfoGrid,
+	type ListingInfoRow,
+	ListingSection,
+	type ListingStat,
+	ListingStatStrip,
+} from "./detail/listing-detail-shell.tsx";
 import { skillOrg, titleCase } from "./friendly.ts";
 import {
 	type CatalogHost,
@@ -74,6 +85,7 @@ import {
 	useNoSettingsOpener,
 } from "./host.tsx";
 import { REALM_ICONS } from "./realm-icons.ts";
+import { safeHttpUrl } from "./safe-url.ts";
 import type {
 	AddMarketplaceParams,
 	SkillCard,
@@ -851,35 +863,13 @@ function SkillDetailPanel({
 	const downloads =
 		(card.downloads ?? 0) > 0 ? formatCount(card.downloads ?? 0) : null;
 
+	const title = friendly ? titleCase(card.name) : card.name;
+	const sourceLabel = card.source || "skills.sh";
+
 	return (
-		<div className="flex flex-col gap-6 p-4">
-			<header className="flex flex-col gap-3">
-				<div className="flex items-start justify-between gap-3">
-					<div className="min-w-0">
-						<h2 className="truncate font-semibold text-xl">
-							{friendly ? titleCase(card.name) : card.name}
-						</h2>
-						<p className="text-muted-foreground text-sm">
-							{owner ? (
-								<Tooltip>
-									<TooltipTrigger
-										render={
-											<button
-												className="underline decoration-dotted underline-offset-2 hover:text-foreground"
-												onClick={() => onSelectOrg(owner)}
-												type="button"
-											>
-												{card.source || "skills.sh"}
-											</button>
-										}
-									/>
-									<TooltipContent>Browse all skills by {owner}</TooltipContent>
-								</Tooltip>
-							) : (
-								card.source || "skills.sh"
-							)}
-						</p>
-					</div>
+		<ListingDetailShell
+			actions={
+				<>
 					<SkillDetailAction
 						canAuthor={canAuthor}
 						card={card}
@@ -893,33 +883,181 @@ function SkillDetailPanel({
 						skillEnabled={skillEnabled}
 						skillKey={skillKey}
 					/>
-				</div>
-				{description && (
-					<p className="text-muted-foreground text-sm">{description}</p>
-				)}
-				<SkillMetadataGrid
-					downloads={downloads}
-					firstSeen={metadata.firstSeen}
-					githubCreatedAt={metadata.githubCreatedAt}
-					githubPushedAt={metadata.githubPushedAt}
-					githubStars={metadata.githubStars}
-					githubUpdatedAt={metadata.githubUpdatedAt}
-					installs={installs}
-					repositoryUrl={metadata.repositoryUrl}
-					securityAudits={metadata.securityAudits}
+					<span className="ml-auto flex shrink-0 items-center gap-2">
+						{owner ? (
+							<Tooltip>
+								<TooltipTrigger
+									render={
+										<button
+											className="text-muted-foreground text-xs underline decoration-dotted underline-offset-2 hover:text-foreground"
+											onClick={() => onSelectOrg(owner)}
+											type="button"
+										>
+											More by {owner}
+										</button>
+									}
+								/>
+								<TooltipContent>Browse all skills by {owner}</TooltipContent>
+							</Tooltip>
+						) : null}
+					</span>
+				</>
+			}
+			aside={
+				<SkillDetailAside
+					metadata={metadata}
+					sourceLabel={sourceLabel}
 					url={url}
 				/>
-			</header>
-
-			{readme && (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">README</h3>
+			}
+			hero={
+				<ListingHero
+					badges={[
+						card.installed ? (skillEnabled ? "Enabled" : "Installed") : null,
+						sourceLabel,
+					].filter((b): b is string => Boolean(b))}
+					icon={
+						// Skills carry no art of their own — no manifest, no icon field. The
+						// generative tile keyed on the skill id is the same rule
+						// `AppIcon` uses for an artless app, so a skill still reads as
+						// *that* skill rather than as one repeated grey glyph.
+						<DitherAvatar
+							animate={false}
+							className="size-full"
+							name={card.id}
+						/>
+					}
+					name={title}
+					tagline={description}
+				/>
+			}
+			stats={
+				<ListingStatStrip
+					items={skillStatItems({ downloads, installs, metadata })}
+				/>
+			}
+		>
+			{readme ? (
+				<ListingSection title="README">
 					<div className="prose prose-sm dark:prose-invert max-w-none text-sm">
 						<Markdown className="[&_ol]:pl-10 [&_ul]:pl-9" content={readme} />
 					</div>
-				</section>
+				</ListingSection>
+			) : (
+				<p className="text-muted-foreground text-sm">
+					This skill ships no README.
+				</p>
 			)}
-		</div>
+		</ListingDetailShell>
+	);
+}
+
+/** The skill stat strip. Only facts the source ACTUALLY reported get a cell —
+ *  the old metadata grid rendered "Not reported" in seven boxes for a skill with
+ *  no GitHub link, which is a wall of nothing where the headline numbers go. The
+ *  unreported ones still appear, as rows, in the rail. */
+function skillStatItems({
+	downloads,
+	installs,
+	metadata,
+}: {
+	downloads: string | null;
+	installs: string | null;
+	metadata: SkillDetail["metadata"];
+}): ListingStat[] {
+	const audits = metadata.securityAudits;
+	const passed = audits.filter((a) => a.status.toLowerCase() === "pass").length;
+	const cells: (ListingStat | null)[] = [
+		installs ? { label: "Installs", value: installs } : null,
+		downloads ? { label: "Downloads", value: downloads } : null,
+		metadata.githubStars
+			? { label: "Stars", value: metadata.githubStars }
+			: null,
+		formatDateLabel(metadata.githubPushedAt)
+			? {
+					label: "Last push",
+					value: formatDateLabel(metadata.githubPushedAt) as string,
+				}
+			: null,
+		metadata.firstSeen
+			? { label: "First seen", value: metadata.firstSeen }
+			: null,
+		audits.length > 0
+			? {
+					label: "Audits",
+					sub: `${passed}/${audits.length} pass`,
+					value: `${audits.length}`,
+				}
+			: null,
+	];
+	return cells.filter((cell): cell is ListingStat => cell !== null);
+}
+
+/** The skill detail rail: provenance rows, then the security-audit list. The
+ *  audits were previously buried under a seven-box grid at the bottom of the
+ *  header — for a listing whose whole trust story IS the audit, that is the one
+ *  thing that should not need scrolling to. */
+function SkillDetailAside({
+	metadata,
+	sourceLabel,
+	url,
+}: {
+	metadata: SkillDetail["metadata"];
+	sourceLabel: string;
+	url: string;
+}) {
+	const rows: (ListingInfoRow | null)[] = [
+		{ label: "Source", value: sourceLabel },
+		metadata.repositoryUrl
+			? {
+					label: "Repository",
+					value: <SkillLink href={metadata.repositoryUrl} label="GitHub" />,
+				}
+			: null,
+		{ label: "Listing", value: <SkillLink href={url} label="Open" /> },
+		formatDateLabel(metadata.githubCreatedAt)
+			? {
+					label: "Created",
+					value: formatDateLabel(metadata.githubCreatedAt) as string,
+				}
+			: null,
+		formatDateLabel(metadata.githubUpdatedAt)
+			? {
+					label: "Updated",
+					value: formatDateLabel(metadata.githubUpdatedAt) as string,
+				}
+			: null,
+	];
+
+	return (
+		<>
+			<ListingAsideCard title="Information">
+				<ListingInfoGrid
+					rows={rows.filter((row): row is ListingInfoRow => row !== null)}
+				/>
+			</ListingAsideCard>
+			<ListingAsideCard title="Security audits">
+				<SkillAuditList audits={metadata.securityAudits} />
+			</ListingAsideCard>
+		</>
+	);
+}
+
+/** External link in the skill rail, scheme-guarded like every other catalog href. */
+function SkillLink({ href, label }: { href: string; label: string }) {
+	const safe = safeHttpUrl(href);
+	if (!safe) {
+		return <span className="text-muted-foreground">Unavailable</span>;
+	}
+	return (
+		<a
+			className="hover:underline"
+			href={safe}
+			rel="noopener noreferrer"
+			target="_blank"
+		>
+			{label}
+		</a>
 	);
 }
 
@@ -1018,123 +1156,71 @@ function SkillDetailAction({
 	);
 }
 
-function SkillMetadataGrid({
-	installs,
-	downloads,
-	githubStars,
-	firstSeen,
-	githubCreatedAt,
-	githubUpdatedAt,
-	githubPushedAt,
-	repositoryUrl,
-	securityAudits,
-	url,
+/** The security-audit list, as a rail card. Extracted from the old
+ *  `SkillMetadataGrid`, whose other half (a 2-column "Not reported" x7 box grid)
+ *  is now the stat strip + the Information rows: a fact the source did report is
+ *  a headline cell, a fact it did not is a rail row, and neither is a box of the
+ *  word "Not reported". */
+function SkillAuditList({
+	audits,
 }: {
-	installs: string | null;
-	downloads: string | null;
-	githubStars: string | null;
-	firstSeen: string | null;
-	githubCreatedAt: string | null;
-	githubUpdatedAt: string | null;
-	githubPushedAt: string | null;
-	repositoryUrl: string | null;
-	securityAudits: SkillDetail["metadata"]["securityAudits"];
-	url: string;
+	audits: SkillDetail["metadata"]["securityAudits"];
 }) {
-	const rows = [
-		{ label: "Installs", value: installs ?? "Not reported" },
-		{ label: "Downloads", value: downloads ?? "Not reported" },
-		{ label: "GitHub Stars", value: githubStars ?? "Not reported" },
-		{ label: "Skills First Seen", value: firstSeen ?? "Not reported" },
-		{
-			label: "GitHub Created",
-			value: formatDateLabel(githubCreatedAt) ?? "Not reported",
-		},
-		{
-			label: "GitHub Updated",
-			value: formatDateLabel(githubUpdatedAt) ?? "Not reported",
-		},
-		{
-			label: "Last Push",
-			value: formatDateLabel(githubPushedAt) ?? "Not reported",
-		},
-	];
-
+	if (audits.length === 0) {
+		return (
+			<p className="text-muted-foreground text-xs">
+				Nobody has published an audit of this skill.
+			</p>
+		);
+	}
 	return (
-		<div className="flex flex-col gap-3">
-			{rows.length > 0 && (
-				<div className="grid grid-cols-2 gap-2">
-					{rows.map((row) => (
-						<div className="rounded-md border px-3 py-2" key={row.label}>
-							<div className="text-muted-foreground text-xs">{row.label}</div>
-							<div className="font-medium text-sm">{row.value}</div>
-						</div>
-					))}
-				</div>
-			)}
-			<div className="flex flex-col gap-1">
-				<div className="text-muted-foreground text-xs">Security Audits</div>
-				<div className="flex flex-wrap gap-1.5">
-					{securityAudits.length > 0 ? (
-						securityAudits.map((audit) => (
-							<a
-								className="block w-full rounded-md px-3 py-2 text-xs transition-colors hover:bg-accent/50"
-								href={audit.url ?? undefined}
-								key={audit.name}
-								rel="noopener noreferrer"
-								target={audit.url ? "_blank" : undefined}
+		<div className="flex flex-col gap-1.5">
+			{audits.map((audit) => {
+				const href = safeHttpUrl(audit.url);
+				const body = (
+					<>
+						<div className="flex items-center justify-between gap-2">
+							<span className="font-medium">{audit.name}</span>
+							<span
+								className={
+									audit.status.toLowerCase() === "pass"
+										? "font-mono text-success uppercase"
+										: "font-mono text-warning uppercase"
+								}
 							>
-								<div className="flex items-center justify-between gap-2">
-									<span className="font-medium">{audit.name}</span>
-									<span
-										className={
-											audit.status.toLowerCase() === "pass"
-												? "font-mono text-success uppercase"
-												: "font-mono text-warning uppercase"
-										}
-									>
-										{audit.status}
-									</span>
-								</div>
-								{audit.risk_level && (
-									<div className="mt-1 text-muted-foreground">
-										Risk: {audit.risk_level}
-									</div>
-								)}
-								{audit.summary && (
-									<div className="mt-1 line-clamp-2 text-muted-foreground">
-										{audit.summary}
-									</div>
-								)}
-							</a>
-						))
-					) : (
-						<Badge variant="secondary">Not reported</Badge>
-					)}
-				</div>
-			</div>
-			<div className="flex flex-wrap gap-3 text-muted-foreground text-xs">
-				{repositoryUrl && (
+								{audit.status}
+							</span>
+						</div>
+						{audit.risk_level ? (
+							<div className="mt-1 text-muted-foreground">
+								Risk: {audit.risk_level}
+							</div>
+						) : null}
+						{audit.summary ? (
+							<div className="mt-1 line-clamp-2 text-muted-foreground">
+								{audit.summary}
+							</div>
+						) : null}
+					</>
+				);
+				const className =
+					"block w-full rounded-md border border-border/60 px-3 py-2 text-xs";
+				return href ? (
 					<a
-						className="underline hover:text-foreground"
-						href={repositoryUrl}
+						className={`${className} transition-colors hover:bg-accent/50`}
+						href={href}
+						key={audit.name}
 						rel="noopener noreferrer"
 						target="_blank"
 					>
-						Repository
+						{body}
 					</a>
-				)}
-				{url && (
-					<a
-						className="underline hover:text-foreground"
-						href={url}
-						rel="noopener noreferrer"
-						target="_blank"
-					>
-						skills.sh
-					</a>
-				)}
-			</div>
+				) : (
+					<div className={className} key={audit.name}>
+						{body}
+					</div>
+				);
+			})}
 		</div>
 	);
 }

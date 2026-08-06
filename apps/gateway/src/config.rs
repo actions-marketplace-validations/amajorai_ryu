@@ -212,6 +212,14 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub prompt_cache: PromptCacheConfig,
 
+    /// Per-request NODE ROUTING PREFERENCES (`x-ryu-node-routing`). A managed
+    /// node states what it would *prefer*; this section is the operator's lever
+    /// over whether that preference is honoured at all, and how big a document
+    /// the parser will look at. See [`crate::pipeline::node_routing`] for why
+    /// every knob can only narrow the org's envelope.
+    #[serde(default)]
+    pub node_routing: NodeRoutingConfig,
+
     /// Fleet mode (managed-cloud WS2). When true, this gateway is a publicly
     /// reachable multi-tenant replica sitting behind a co-located load balancer /
     /// reverse proxy, so external callers arrive over the loopback interface and
@@ -269,6 +277,73 @@ impl Default for PromptCacheConfig {
             breakpoints: prompt_cache_breakpoints(),
             session_affinity: false,
             allow_request_override: true,
+        }
+    }
+}
+
+/// Node-level policy for the per-request `x-ryu-node-routing` preference channel.
+///
+/// The defaults reproduce today's behaviour on an untouched install: nothing
+/// changes until a caller actually sends the header, and a caller that never
+/// sends it never notices this section exists. The size caps exist because the
+/// document is parsed BEFORE it is trusted — they bound the work an unauthorized
+/// (or merely buggy) sender can make the parser do, and they are byte counts on
+/// the wire rather than semantic limits so they can be enforced without decoding.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct NodeRoutingConfig {
+    /// Honour the per-request `x-ryu-node-routing` header at all. On by default,
+    /// mirroring [`PromptCacheConfig::allow_request_override`]: an operator
+    /// running a fixed routing profile (fixed cost envelope, compliance) turns it
+    /// off so node config is the only lever and the header is dropped whole.
+    #[serde(default = "default_true")]
+    pub allow_request_override: bool,
+    /// Reject (ignore) an encoded header longer than this many bytes, measured
+    /// before base64 decoding. 4096 sits well inside the usual terminating-proxy
+    /// per-header limits (nginx 8k, Cloudflare 16k total).
+    #[serde(default = "node_routing_max_header_bytes")]
+    pub max_header_bytes: usize,
+    /// Ignore a document whose DECODED JSON exceeds this many bytes. Bounds the
+    /// serde work, which the wire bound alone cannot (base64 expands 4:3).
+    #[serde(default = "node_routing_max_doc_bytes")]
+    pub max_doc_bytes: usize,
+    /// Maximum `fallback` entries considered. Each surviving entry costs a pool
+    /// lookup plus a credit-gate evaluation, so this is a work bound, not a
+    /// policy one — the clamp already refuses ids outside the fleet chain.
+    #[serde(default = "node_routing_max_fallback")]
+    pub max_fallback: usize,
+    /// Maximum `firewall.custom_patterns` a request may append.
+    #[serde(default = "node_routing_max_patterns")]
+    pub max_patterns: usize,
+    /// Maximum total bytes of regex source across `firewall.custom_patterns`.
+    #[serde(default = "node_routing_max_pattern_bytes")]
+    pub max_pattern_bytes: usize,
+}
+
+fn node_routing_max_header_bytes() -> usize {
+    4096
+}
+fn node_routing_max_doc_bytes() -> usize {
+    3072
+}
+fn node_routing_max_fallback() -> usize {
+    16
+}
+fn node_routing_max_patterns() -> usize {
+    16
+}
+fn node_routing_max_pattern_bytes() -> usize {
+    1024
+}
+
+impl Default for NodeRoutingConfig {
+    fn default() -> Self {
+        Self {
+            allow_request_override: true,
+            max_header_bytes: node_routing_max_header_bytes(),
+            max_doc_bytes: node_routing_max_doc_bytes(),
+            max_fallback: node_routing_max_fallback(),
+            max_patterns: node_routing_max_patterns(),
+            max_pattern_bytes: node_routing_max_pattern_bytes(),
         }
     }
 }
@@ -2835,6 +2910,15 @@ impl GatewayConfig {
                 env_bool("GATEWAY_PROMPT_CACHE_ALLOW_OVERRIDE", true);
         }
 
+        // Node routing preferences (`x-ryu-node-routing`). Only the on/off lever
+        // is env-settable: the size caps are a work bound an operator has no
+        // reason to tune per replica, and making them env-settable would invite
+        // raising them past what the terminating proxy will even forward.
+        if std::env::var("GATEWAY_NODE_ROUTING_ALLOW_OVERRIDE").is_ok() {
+            config.node_routing.allow_request_override =
+                env_bool("GATEWAY_NODE_ROUTING_ALLOW_OVERRIDE", true);
+        }
+
         // Composio
         if let Ok(key) = std::env::var("COMPOSIO_API_KEY") {
             config.composio.api_key = Some(key);
@@ -4030,6 +4114,7 @@ impl Default for GatewayConfig {
             file_classify_provider: None,
             firewall: FirewallConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            node_routing: NodeRoutingConfig::default(),
             custom_evaluators: Vec::new(),
             firewall_org_overlays: HashMap::new(),
             firewall_agent_overlays: HashMap::new(),

@@ -318,9 +318,37 @@ fn active_provider_id_from(settings: &PiSettings) -> Option<String> {
 /// replacing) means switching models in the composer never removes an earlier
 /// model from Pi's available list, so the user can always switch back.
 fn gateway_openai_patch(model: Option<&str>) -> Map<String, Value> {
-    let base = crate::sidecar::gateway::gateway_url();
+    gateway_openai_patch_for(model, false)
+}
+
+/// As [`gateway_openai_patch`], but routes the MANAGED provider at the hosted
+/// gateway fleet when this node has managed coordinates.
+///
+/// This is what lets ONE node run both planes at once, which is the whole point:
+///  - `managed-openrouter` → the REMOTE fleet, whose env holds the provider keys
+///    and whose per-org resolve enforces the plan's credit budget;
+///  - every BYOK provider → the node's OWN local gateway, using the user's keys.
+///
+/// Before this, both pointed at the local gateway, so a self-hosted user who
+/// selected "Ryu (managed · included with your plan)" was silently routed into
+/// their own keyless gateway — the subscription they paid for could not be spent
+/// from anywhere except a Ryu-provisioned cloud node. Falls back to the local
+/// gateway when no managed coordinates are configured, so nothing regresses on a
+/// node that never opted in.
+fn gateway_openai_patch_for(model: Option<&str>, managed: bool) -> Map<String, Value> {
+    let fleet = if managed {
+        crate::sidecar::gateway::managed_fleet()
+    } else {
+        None
+    };
+    let (base, token) = match fleet {
+        Some((url, token)) => (url, token),
+        None => (
+            crate::sidecar::gateway::gateway_url(),
+            crate::sidecar::gateway::gateway_token().unwrap_or_else(|| "ryu-local".to_owned()),
+        ),
+    };
     let v1 = format!("{}/v1", base.trim_end_matches('/'));
-    let token = crate::sidecar::gateway::gateway_token().unwrap_or_else(|| "ryu-local".to_owned());
     let mut patch = Map::new();
     patch.insert("baseUrl".to_owned(), Value::String(v1));
     patch.insert(
@@ -328,6 +356,28 @@ fn gateway_openai_patch(model: Option<&str>) -> Map<String, Value> {
         Value::String("openai-completions".to_owned()),
     );
     patch.insert("apiKey".to_owned(), Value::String(token));
+
+    // This node's own routing preferences, on the Pi-managed path.
+    //
+    // Pi drives the gateway itself here — Core's `connect_openai` is not in the
+    // loop — so the header Core sends on the chat path never travels for a
+    // Pi-routed turn. VERIFIED against the installed Pi rather than assumed:
+    // `@earendil-works/pi-coding-agent`'s `ProviderConfigSchema`
+    // (`dist/core/model-config.d.ts`) declares a provider-level
+    // `headers: Record<string, string>` right beside `baseUrl` / `apiKey` / `api`,
+    // and `pi-ai`'s `Provider` carries it through to dispatch (its own docs draw
+    // the line as "if it can be expressed as apiKey/headers/baseUrl it is provider
+    // config"). That is the seam; there was no need to invent one.
+    //
+    // Both legs of the `fleet` match above target a GATEWAY (hosted fleet or the
+    // local one), never a raw provider endpoint, so this is safe on either. Absent
+    // when the node has stated no preferences, which keeps `models.json`
+    // byte-identical on an untouched install.
+    if let Some(prefs) = crate::sidecar::gateway::node_routing_header() {
+        let mut headers = Map::new();
+        headers.insert("x-ryu-node-routing".to_owned(), Value::String(prefs));
+        patch.insert("headers".to_owned(), Value::Object(headers));
+    }
 
     // Union of declared model entries (order-preserving, deduped). Ryu's bundled
     // local model gets full metadata because Pi treats unknown custom ids with
@@ -2265,7 +2315,14 @@ pub fn apply(input: PiConfigInput) -> Result<PiConfigView> {
         // `OPENAI_BASE_URL` env injection alone is ignored by Pi (see
         // `gateway_openai_patch`). Declare the chosen model so Pi sends it (not its
         // built-in `gpt-5.4` default) over chat-completions.
-        upsert_provider("openai", gateway_openai_patch(effective_model.as_deref()))?;
+        //
+        // `managed` picks the HOSTED fleet when this node has managed coordinates,
+        // so the plan's credits are spendable from a self-hosted node; the
+        // synthetic gateway provider and every BYOK provider stay local.
+        upsert_provider(
+            "openai",
+            gateway_openai_patch_for(effective_model.as_deref(), managed),
+        )?;
         return Ok(current());
     }
 
@@ -3451,6 +3508,76 @@ mod tests {
     }
 
     #[test]
+    /// Managed reaches the HOSTED fleet while the synthetic gateway provider
+    /// stays LOCAL — both on the same node — and managed falls back to local when
+    /// no fleet coordinates are configured.
+    ///
+    /// Regression: both used to resolve to the local gateway, so a self-hosted
+    /// user who picked "Ryu (managed · included with your plan)" was routed into
+    /// their own keyless gateway and could never spend the plan they paid for.
+    ///
+    /// One test, not three: these mutate PROCESS-GLOBAL env and `cargo test` runs
+    /// test fns in parallel, so separate cases race each other's vars.
+    #[test]
+    fn managed_routes_at_the_fleet_while_byok_stays_local() {
+        struct EnvGuard(&'static str, Option<String>);
+        impl EnvGuard {
+            fn set(k: &'static str, v: &str) -> Self {
+                let prev = std::env::var(k).ok();
+                std::env::set_var(k, v);
+                Self(k, prev)
+            }
+            fn clear(k: &'static str) -> Self {
+                let prev = std::env::var(k).ok();
+                std::env::remove_var(k);
+                Self(k, prev)
+            }
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+
+        with_temp_dir(|| {
+            {
+                let _u = EnvGuard::set("RYU_MANAGED_GATEWAY_URL", "https://gw.example.test");
+                let _t = EnvGuard::set("RYU_MANAGED_GATEWAY_TOKEN", "rgw_unit_test");
+
+                let managed = gateway_openai_patch_for(Some("openrouter/auto"), true);
+                assert_eq!(
+                    managed.get("baseUrl").and_then(Value::as_str),
+                    Some("https://gw.example.test/v1")
+                );
+                assert_eq!(
+                    managed.get("apiKey").and_then(Value::as_str),
+                    Some("rgw_unit_test")
+                );
+
+                // BYOK keeps the local gateway even while managed is configured.
+                let local = gateway_openai_patch_for(Some("gpt-4o"), false);
+                let base = local.get("baseUrl").and_then(Value::as_str).unwrap();
+                assert!(
+                    base.contains("127.0.0.1"),
+                    "BYOK must stay on the local gateway, got {base}"
+                );
+            }
+            {
+                // No coordinates ⇒ managed falls back to local (opt-in must not
+                // regress a node that never opted in).
+                let _u = EnvGuard::clear("RYU_MANAGED_GATEWAY_URL");
+                let _t = EnvGuard::clear("RYU_MANAGED_GATEWAY_TOKEN");
+                crate::sidecar::gateway::set_managed_fleet_pref(None, None);
+                let patch = gateway_openai_patch_for(Some("openrouter/auto"), true);
+                let base = patch.get("baseUrl").and_then(Value::as_str).unwrap();
+                assert!(base.contains("127.0.0.1"), "expected local fallback, got {base}");
+            }
+        });
+    }
+
     fn apply_gateway_writes_openai_provider_and_marker() {
         with_temp_dir(|| {
             let view = apply(PiConfigInput {

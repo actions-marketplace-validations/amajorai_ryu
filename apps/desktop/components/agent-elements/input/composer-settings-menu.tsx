@@ -63,6 +63,15 @@ export interface ComposerSettingsSection {
 	 */
 	renderContent?: (onSelect: (id: string) => void) => ReactNode;
 	value: string | undefined;
+	/**
+	 * How the section's options are picked. `"list"` (the default) is the checked
+	 * submenu; `"slider"` renders them inline as a stepped slider — one detent per
+	 * item, in the order the source advertised them. Reserved for ORDERED scales
+	 * (reasoning effort: off → low → … → max), never for unordered sets, and the
+	 * detent count is always the live list's length rather than a fixed ladder, so
+	 * a 3-level agent and a 5-level one each get their own.
+	 */
+	variant?: "list" | "slider";
 }
 
 export interface ComposerSettingsMenuProps {

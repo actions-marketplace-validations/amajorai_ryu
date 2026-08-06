@@ -40,6 +40,11 @@ export function AgentUpdateControl({ agentId }: { agentId: string }) {
 						? `Now on v${res.installedVersion}.`
 						: "The runtime was refreshed.",
 				});
+			} else if (res.hint) {
+				// Not a failure — the runtime is real, it just isn't Ryu's to move.
+				toast.info("Update it where it was installed", {
+					description: res.hint,
+				});
 			} else {
 				toast.error("Update failed", {
 					description: res.error ?? "The runtime could not be updated.",

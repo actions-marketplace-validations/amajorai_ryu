@@ -19,6 +19,7 @@ import type { ReactNode } from "react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useComposerAgentControls } from "@/components/agent-elements/input/composer-agent-controls.tsx";
 import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
+import type { GhostControls } from "@/components/agent-elements/input/goal-plus-button.tsx";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import {
 	type AttachedImage,
@@ -26,12 +27,13 @@ import {
 	type InputBarInfoBar,
 	type InputBarProps,
 } from "@/components/agent-elements/input-bar.tsx";
+import type { ModelOption } from "@/components/agent-elements/types.ts";
 import { VoiceModeSurface } from "@/src/components/voice/VoiceModeSurface.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
-import type { BuilderRuntime } from "@/src/hooks/useBuilderRuntime.ts";
 import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
+import type { Team } from "@/src/lib/api/teams.ts";
 import { stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { transcribeAudio } from "@/src/lib/api/voice.ts";
 
@@ -54,6 +56,13 @@ export interface ComposerSlot {
 	attachClip: (text: string, frames: ComposerSendFile[]) => void;
 	/** Pass to `<AgentChat attachments={...}>` so the composer "+" stages images. */
 	attachments: {
+		/**
+		 * Stage dropped files. `AgentChat` handles its own drop zone, so only a
+		 * surface that renders the `inputBar` directly (the launchpad) needs this.
+		 */
+		addFiles: (files: File[]) => void;
+		/** Drop the staged images (after a surface has carried them elsewhere). */
+		clear: () => void;
 		images: AttachedImage[];
 		onAttach: () => void;
 		onPaste: (e: React.ClipboardEvent) => void;
@@ -93,6 +102,21 @@ export interface ComposerSlot {
 	voiceModeOverlay: ReactNode;
 }
 
+/**
+ * The agent/model selection a composer drives. `BuilderRuntime` satisfies it, and
+ * so does any surface that owns those five bindings itself (the launchpad keeps
+ * its pick in localStorage, not in a builder runtime) — the slot never needed the
+ * rest of a runtime, and demanding one is what pushed the launchpad into
+ * hand-rolling its own bar.
+ */
+export interface ComposerRuntime {
+	agentId: string | null;
+	effectiveModel: string | null;
+	modelOptions: ModelOption[];
+	setAgentId: (id: string) => void;
+	setModel: (id: string) => void;
+}
+
 export interface ComposerSlotOptions {
 	/** Single-row compact layout (used once the thread has history). */
 	compact?: boolean;
@@ -104,6 +128,17 @@ export interface ComposerSlotOptions {
 	/** Bind voice-mode turns to this conversation so history persists. */
 	conversationId?: string;
 	/**
+	 * Temporary-chat ("ghost") toggle for the "+" dropdown. Only a new-chat surface
+	 * can offer it — an existing thread can't retroactively become unsaved — so it's
+	 * opt-in per surface, not derived here.
+	 */
+	ghost?: GhostControls;
+	/**
+	 * Offer "New agent…" in the agent picker. The surface routes it (a tab, a
+	 * dialog), so it's a callback rather than a slot-owned navigation.
+	 */
+	onCreateAgent?: () => void;
+	/**
 	 * Text-to-image generation. When provided, the composer's toolbar gains an
 	 * image button (the SAME one ChatPage wires) that takes the composer text as
 	 * the prompt, generates via Core's `/api/images/generate`, and clears the
@@ -112,10 +147,16 @@ export interface ComposerSlotOptions {
 	 * the draft text is owned by the InputBar, so the host receives only the prompt.
 	 */
 	onGenerateImage?: (prompt: string) => void | Promise<void>;
+	/** Handle a team pick. Omit to hide the picker's Teams section entirely. */
+	onSelectTeam?: (teamId: string) => void;
 	/** Composer placeholder override (builders use "Describe what to build…"). */
 	placeholder?: string;
 	/** Node target for voice STT + realtime voice mode. */
 	target: ApiTarget;
+	/** The picked team, when the surface can target one instead of an agent. */
+	teamId?: string | null;
+	/** Live teams for the picker's Teams section. */
+	teams?: Team[];
 }
 
 /**
@@ -126,7 +167,7 @@ export interface ComposerSlotOptions {
  * and the `voiceModeOverlay` to render.
  */
 export function useComposerSlot(
-	runtime: BuilderRuntime,
+	runtime: ComposerRuntime,
 	options: ComposerSlotOptions
 ): ComposerSlot {
 	const {
@@ -135,7 +176,12 @@ export function useComposerSlot(
 		compactTrigger = false,
 		placeholder,
 		conversationId,
+		ghost,
+		onCreateAgent,
 		onGenerateImage,
+		onSelectTeam,
+		teamId,
+		teams,
 	} = options;
 	const { agents } = useAgents();
 
@@ -161,6 +207,10 @@ export function useComposerSlot(
 			atConversationStart: !conversationId,
 			agentId: runtime.agentId,
 			onSelectAgent: runtime.setAgentId,
+			teams,
+			teamId,
+			onSelectTeam,
+			onCreateAgent,
 			modelOptions: runtime.modelOptions,
 			model: runtime.effectiveModel,
 			onModelChange: runtime.setModel,
@@ -213,6 +263,7 @@ export function useComposerSlot(
 		(id: string) => setImages((prev) => prev.filter((img) => img.id !== id)),
 		[]
 	);
+	const clearImages = useCallback(() => setImages([]), []);
 	const imagesRef = useRef(images);
 	imagesRef.current = images;
 	const takeImages = useCallback((): ComposerSendFile[] | undefined => {
@@ -272,7 +323,9 @@ export function useComposerSlot(
 	// ChatGPT-style continuous voice mode — its own entry point, separate from the
 	// push-to-talk dictation above. The surface renders `voiceModeOverlay`.
 	const voiceMode = useVoiceMode(target, {
-		agentId: runtime.agentId,
+		// A surface can sit on no agent at all (the launchpad before a pick), which
+		// voice mode reads as "use the node default".
+		agentId: runtime.agentId ?? undefined,
 		conversationId,
 	});
 	const composerShortcuts = useComposerShortcutBindings();
@@ -280,6 +333,7 @@ export function useComposerSlot(
 	// Every injected prop rides one ref so the memoized slot identity stays stable.
 	const liveRef = useRef<{
 		compact: boolean;
+		ghost?: GhostControls;
 		left: ReactNode;
 		onGenerateImage?: (prompt: string) => void | Promise<void>;
 		onStartVoiceMode: () => void;
@@ -290,6 +344,7 @@ export function useComposerSlot(
 		shortcuts: typeof composerShortcuts;
 	}>({
 		compact,
+		ghost,
 		// The threshold-fallback notice, so a dock/builder composer says the same
 		// thing the chat page does when a rule reroutes a turn.
 		infoBar,
@@ -303,6 +358,7 @@ export function useComposerSlot(
 	});
 	liveRef.current = {
 		compact,
+		ghost,
 		infoBar,
 		left: leftActions,
 		onGenerateImage,
@@ -321,6 +377,7 @@ export function useComposerSlot(
 					<InputBar
 						{...props}
 						compact={live.compact}
+						ghostControls={live.ghost}
 						infoBar={live.infoBar}
 						leftActions={live.left}
 						onGenerateImage={live.onGenerateImage}
@@ -352,7 +409,14 @@ export function useComposerSlot(
 
 	return {
 		attachClip,
-		attachments: { images, onAttach, onPaste, onRemoveImage },
+		attachments: {
+			addFiles: addImages,
+			clear: clearImages,
+			images,
+			onAttach,
+			onPaste,
+			onRemoveImage,
+		},
 		inputBar,
 		renderBody,
 		sections,

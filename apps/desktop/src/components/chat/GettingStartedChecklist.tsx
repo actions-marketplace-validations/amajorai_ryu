@@ -95,7 +95,7 @@ export const GettingStartedChecklist = memo(function GettingStartedChecklist({
 
 	return (
 		<BouncyAccordion
-			classNames={{ item: "border border-border/60" }}
+			classNames={{ item: "border border-border/60", title: "truncate" }}
 			defaultValue={nextId}
 			items={items}
 		/>

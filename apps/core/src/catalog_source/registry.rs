@@ -16,6 +16,9 @@ use std::sync::RwLock;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::skill_registries::{
+    self, BrowseShSource, ClawHubSource, LobeHubSource, WellKnownSource,
+};
 use super::sources::{
     HfSource, IntegrationsShSource, MarketplaceSource, ModelIndexSource, OfficialMcpSource,
     OkfBundleSource, RyuHostedMcpSource, RyuMarketplaceSource, SkillsShSource, SmitherySource,
@@ -103,6 +106,17 @@ fn source_from_spec(spec: CustomSourceSpec) -> Source {
             // marketplace.json`. With no base_url there is nothing to point at, so
             // it degrades to a labelled stub.
             match spec.base_url.filter(|u| !u.trim().is_empty()) {
+                // A URL naming `/.well-known/skills` is the discovery protocol,
+                // not a Claude plugin marketplace. Both forms are just "a URL" in
+                // a custom source spec, so this is where they are told apart —
+                // mirroring the `.json` model-index rule in the Model arm above.
+                Some(url) if WellKnownSource::is_well_known_url(&url) => Source::WellKnown(
+                    WellKnownSource::new(
+                        spec.id,
+                        spec.display_name,
+                        WellKnownSource::base_from_url(&url),
+                    ),
+                ),
                 Some(repo_url) => Source::Marketplace(
                     MarketplaceSource::new(
                         spec.id,
@@ -444,13 +458,23 @@ fn builtin_sources() -> HashMap<CatalogKind, Vec<Source>> {
             Source::RyuMarketplace(RyuMarketplaceSource::builtin(CatalogKind::Model)),
         ],
     );
-    map.insert(
+    // The Skill tab lists every public registry, not just skills.sh. Order is
+    // the picker's order, and the FIRST entry is the default active source, so
+    // skills.sh stays primary and the rest are opt-in.
+    //
+    // Vendor GitHub taps come next (that is where `anthropics/skills`' pdf /
+    // xlsx / pptx / docx / frontend-design live), then the bulk community
+    // registries. ClawHub is last on purpose: it is the largest and the least
+    // vouched-for, so it should never be what a user lands on by default.
+    let mut skill_sources = vec![Source::SkillsSh(SkillsShSource::builtin())];
+    skill_sources.extend(skill_registries::github_taps().into_iter().map(Source::GithubTap));
+    skill_sources.push(Source::BrowseSh(BrowseShSource::builtin()));
+    skill_sources.push(Source::LobeHub(LobeHubSource::builtin()));
+    skill_sources.push(Source::ClawHub(ClawHubSource::builtin()));
+    skill_sources.push(Source::RyuMarketplace(RyuMarketplaceSource::builtin(
         CatalogKind::Skill,
-        vec![
-            Source::SkillsSh(SkillsShSource::builtin()),
-            Source::RyuMarketplace(RyuMarketplaceSource::builtin(CatalogKind::Skill)),
-        ],
-    );
+    )));
+    map.insert(CatalogKind::Skill, skill_sources);
     map.insert(
         CatalogKind::Mcp,
         vec![
@@ -526,6 +550,62 @@ fn builtin_sources() -> HashMap<CatalogKind, Vec<Source>> {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    /// Source ids are the key the active-source preference persists and the key
+    /// `get_active` looks up, so a duplicate would silently shadow a whole
+    /// registry — the picker would show two rows and one of them would never
+    /// resolve. The Skill kind carries a dozen sources now, so this is checked
+    /// for every kind rather than eyeballed.
+    #[test]
+    fn builtin_source_ids_are_unique_within_each_kind() {
+        for (kind, sources) in builtin_sources() {
+            let mut ids: Vec<&str> = sources.iter().map(|s| s.id()).collect();
+            let total = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(ids.len(), total, "duplicate builtin source id for {kind}");
+            for source in &sources {
+                assert_eq!(
+                    source.kind(),
+                    kind,
+                    "source `{}` registered under {kind} but reports {}",
+                    source.id(),
+                    source.kind()
+                );
+            }
+        }
+    }
+
+    /// skills.sh must stay the default active Skill source. `builtin_primary` is
+    /// the first entry, so adding a registry above it would silently move every
+    /// user onto a different catalog — and ClawHub, the largest of them, is
+    /// open-publish. Same guard, same reason, as the plugin test below.
+    #[test]
+    fn skills_sh_stays_primary_and_clawhub_is_never_default() {
+        let builtins = builtin_sources();
+        let skills = builtins.get(&CatalogKind::Skill).expect("skill sources");
+        assert_eq!(
+            skills.first().map(|s| s.id()),
+            Some("skills-sh"),
+            "skills.sh must remain the default active Skill source"
+        );
+        assert!(
+            skills.iter().any(|s| s.id() == "clawhub"),
+            "ClawHub should be registered"
+        );
+        assert_ne!(
+            skills.first().map(|s| s.id()),
+            Some("clawhub"),
+            "an open-publish registry must never be the default"
+        );
+        // The vendor taps that carry the document skills are registered.
+        for want in ["gh-anthropic", "gh-openai"] {
+            assert!(
+                skills.iter().any(|s| s.id() == want),
+                "missing builtin tap `{want}`"
+            );
+        }
+    }
 
     /// Community discovery is registered and addressable, but must NOT be the
     /// default: `builtin_primary` is the first entry, and if a reorder ever made

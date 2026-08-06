@@ -119,3 +119,68 @@ describe("asRpcRequest envelope validation", () => {
 		expect(asRpcRequest("nope")).toBeNull();
 	});
 });
+
+describe("assistant bridge dispatch", () => {
+	const ASSISTANT = new Set<Capability>(["assistant.context"]);
+
+	it("routes each assistant method to its service when granted", async () => {
+		const calls: string[] = [];
+		const svc: HostServices = {
+			assistantPublishContext: async ({ items }) => {
+				calls.push(`publish:${items.length}`);
+			},
+			assistantClearContext: async () => {
+				calls.push("clear");
+			},
+			assistantRegisterSurface: async ({ label }) => {
+				calls.push(`surface:${label}`);
+			},
+			assistantClearSurface: async () => {
+				calls.push("clearSurface");
+			},
+			assistantOpen: async ({ prompt }) => {
+				calls.push(`open:${prompt ?? ""}`);
+			},
+		};
+		await dispatchRpc(
+			"assistant.publishContext",
+			[{ items: [{ id: "a", title: "T", text: "x" }] }],
+			ASSISTANT,
+			svc
+		);
+		await dispatchRpc("assistant.clearContext", [], ASSISTANT, svc);
+		await dispatchRpc(
+			"assistant.registerSurface",
+			[{ label: "Board" }],
+			ASSISTANT,
+			svc
+		);
+		await dispatchRpc("assistant.clearSurface", [], ASSISTANT, svc);
+		await dispatchRpc("assistant.open", [{ prompt: "why?" }], ASSISTANT, svc);
+		expect(calls).toEqual([
+			"publish:1",
+			"clear",
+			"surface:Board",
+			"clearSurface",
+			"open:why?",
+		]);
+	});
+
+	it("REFUSES every assistant method without the grant, service untouched", async () => {
+		let touched = false;
+		const svc: HostServices = {
+			assistantPublishContext: async () => {
+				touched = true;
+			},
+			assistantOpen: async () => {
+				touched = true;
+			},
+		};
+		for (const method of ["assistant.publishContext", "assistant.open"]) {
+			await expect(
+				dispatchRpc(method, [{ items: [] }], new Set<Capability>(), svc)
+			).rejects.toBeInstanceOf(CapabilityError);
+		}
+		expect(touched).toBe(false);
+	});
+});

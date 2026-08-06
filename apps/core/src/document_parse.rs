@@ -49,13 +49,15 @@
 //! - [`parse_capability`] **is mounted** (`GET /api/documents/parse/capability`, in
 //!   the main route table of `apps/core/src/server/mod.rs`, deliberately *outside*
 //!   the Spaces `AppGate` — the bound provider serves chat attachments too, so a
-//!   node with Spaces turned off must still be able to read this). Its consumer is
-//!   the desktop's **Document parsing** settings panel
-//!   (`components/settings/DocumentParsingSettings.tsx`, mounted in the Gateway
-//!   dialog), which reads the bound provider's identity, its format list, its
-//!   missing native tools and `max_input_bytes` off this one response. Before it
-//!   was registered the panel's fetch 404'd, `capability` was `null`, and the two
-//!   rows that depend on it rendered nothing at all.
+//!   node with Spaces turned off must still be able to read this). Its consumers
+//!   are the desktop's **Storage** settings panel
+//!   (`components/settings/StorageSettings.tsx`, mounted in the Gateway dialog),
+//!   which prints `max_input_bytes` as the node's upload ceiling, and the composer
+//!   attachment seam (`lib/composer/attachments.ts`). Before it was registered the
+//!   fetch 404'd, `capability` was `null`, and the row fell back to the client's
+//!   compiled-in default. There is no longer a **Document parsing** settings
+//!   section: the provider is bound from the node dropdown's Toolkits row, the
+//!   generic surface every swappable capability uses.
 //! - [`parse_document`] and [`parse_job`] are **still unmounted**. Their consumer is
 //!   the *composer* attachment flow, which now EXISTS as a seam
 //!   (`apps/desktop/src/lib/composer/attachments.ts`, whose `stageComposerFiles`

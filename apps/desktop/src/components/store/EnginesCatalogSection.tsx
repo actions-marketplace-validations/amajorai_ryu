@@ -21,7 +21,6 @@ import {
 	EngineInstallButton,
 	type EngineInstallState,
 	EnginesErrorState,
-	installStateBadge,
 } from "@ryu/blocks/desktop/store-engines";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
 import StoreCatalogLayout, {
@@ -30,6 +29,14 @@ import StoreCatalogLayout, {
 import StoreItemAction, {
 	StoreItemOverflowMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingInfoGrid,
+	ListingSection,
+	ListingStatStrip,
+} from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { Badge } from "@ryu/ui/components/badge";
 import {
 	Empty,
@@ -477,39 +484,32 @@ function EngineDetailPanel({
 		const unsupported = !engine.supported;
 
 		return (
-			<div className="scroll-fade-effect-y flex h-full flex-col gap-6 overflow-auto p-4">
-				<header className="flex flex-col gap-3">
-					<div className="flex items-start justify-between gap-3 pr-8">
-						<div className="min-w-0">
-							<h2 className="truncate font-semibold text-xl">
-								{engine.displayName}
-							</h2>
-							<p className="text-muted-foreground text-sm">
-								{GROUP_LABELS.text}
-							</p>
-						</div>
-						<div className="flex shrink-0 items-center gap-3">
-							<LiveEngineInstallButton
-								busy={busy || unsupported}
-								disabledUninstall={engine.active}
-								engineName={engine.name}
-								hasUpdate={hasEngineUpdate(engine)}
-								installState={engine.installState}
-								// Same button installs or updates: force only when the node
-								// says a newer build is actually reachable, so a first
-								// install keeps its cheap idempotent path.
-								onInstall={() =>
-									runAction(engine.name, "install", () =>
-										installText(engine.name, hasEngineUpdate(engine))
-									)
-								}
-								onUninstall={() =>
-									runAction(engine.name, "uninstall", () =>
-										uninstallText(engine.name)
-									)
-								}
-								pending={state.pending}
-							/>
+			<ListingDetailShell
+				actions={
+					<>
+						<LiveEngineInstallButton
+							busy={busy || unsupported}
+							disabledUninstall={engine.active}
+							engineName={engine.name}
+							hasUpdate={hasEngineUpdate(engine)}
+							installState={engine.installState}
+							// Same button installs or updates: force only when the node
+							// says a newer build is actually reachable, so a first
+							// install keeps its cheap idempotent path.
+							onInstall={() =>
+								runAction(engine.name, "install", () =>
+									installText(engine.name, hasEngineUpdate(engine))
+								)
+							}
+							onUninstall={() =>
+								runAction(engine.name, "uninstall", () =>
+									uninstallText(engine.name)
+								)
+							}
+							pending={state.pending}
+						/>
+						<label className="ml-auto flex shrink-0 items-center gap-2 text-sm">
+							Active engine
 							<Switch
 								aria-label={`Set ${engine.displayName} as active engine`}
 								checked={engine.active}
@@ -526,38 +526,73 @@ function EngineDetailPanel({
 									})
 								}
 							/>
-						</div>
-					</div>
-					<div className="flex flex-wrap items-center gap-2">
-						{installStateBadge(engine.installState)}
-						{engine.active && <Badge>Active</Badge>}
-					</div>
-					<p className="text-muted-foreground text-sm">{engine.description}</p>
-					{unsupported && (
-						<EngineFootnote>
-							{unsupportedReason(engine.platforms)}
-						</EngineFootnote>
-					)}
-					{state.gatewayStale && (
-						<EngineFootnote tone="amber">
-							Engine active, but gateway routing was not refreshed.
-						</EngineFootnote>
-					)}
-					{state.error && (
-						<EngineFootnote tone="destructive">{state.error}</EngineFootnote>
-					)}
-					{textError && (
-						<EngineFootnote tone="destructive">{textError}</EngineFootnote>
-					)}
-				</header>
-				<section className="text-muted-foreground text-sm">
-					<p>
+						</label>
+					</>
+				}
+				aside={
+					<ListingAsideCard title="Information">
+						<ListingInfoGrid
+							rows={[
+								{ label: "Kind", value: GROUP_LABELS.text },
+								{ label: "Engine ID", value: engine.name },
+								{
+									label: "Platforms",
+									value: engine.platforms?.join(", ") || "All",
+								},
+							]}
+						/>
+					</ListingAsideCard>
+				}
+				hero={
+					<ListingHero
+						badges={[
+							engine.active ? "Active" : null,
+							unsupported ? "Unsupported here" : null,
+						].filter((b): b is string => Boolean(b))}
+						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
+						name={engine.displayName}
+						tagline={engine.description}
+					/>
+				}
+				stats={
+					<ListingStatStrip
+						items={[
+							{ label: "Type", value: GROUP_LABELS.text },
+							{
+								label: "Install",
+								value: isInstalled ? "Installed" : "Not installed",
+							},
+							{ label: "Binding", value: engine.active ? "Active" : "Idle" },
+							{
+								label: "Supported",
+								value: engine.supported ? "Yes" : "No",
+							},
+						]}
+					/>
+				}
+			>
+				<ListingSection title="How this engine behaves">
+					<p className="text-muted-foreground text-sm leading-relaxed">
 						Text engines are mutually exclusive — only one can be the resident
 						engine at a time. Toggling on swaps which engine Core binds local
 						agents to.
 					</p>
-				</section>
-			</div>
+				</ListingSection>
+				{unsupported && (
+					<EngineFootnote>{unsupportedReason(engine.platforms)}</EngineFootnote>
+				)}
+				{state.gatewayStale && (
+					<EngineFootnote tone="amber">
+						Engine active, but gateway routing was not refreshed.
+					</EngineFootnote>
+				)}
+				{state.error && (
+					<EngineFootnote tone="destructive">{state.error}</EngineFootnote>
+				)}
+				{textError && (
+					<EngineFootnote tone="destructive">{textError}</EngineFootnote>
+				)}
+			</ListingDetailShell>
 		);
 	}
 
@@ -578,36 +613,29 @@ function EngineDetailPanel({
 		const busy = state.pending !== null;
 
 		return (
-			<div className="scroll-fade-effect-y flex h-full flex-col gap-6 overflow-auto p-4">
-				<header className="flex flex-col gap-3">
-					<div className="flex items-start justify-between gap-3 pr-8">
-						<div className="min-w-0">
-							<h2 className="truncate font-semibold text-xl">
-								{engine.displayName}
-							</h2>
-							<p className="text-muted-foreground text-sm">
-								{GROUP_LABELS[kind]}
-							</p>
-						</div>
-						<div className="flex shrink-0 items-center gap-3">
-							<LiveEngineInstallButton
-								busy={busy}
-								disabledUninstall={engine.running}
-								engineName={engine.name}
-								hasUpdate={hasEngineUpdate(engine)}
-								installState={engine.installState}
-								onInstall={() =>
-									runAction(engine.name, "install", () =>
-										installVoice(engine.name, hasEngineUpdate(engine))
-									)
-								}
-								onUninstall={() =>
-									runAction(engine.name, "uninstall", () =>
-										uninstallVoice(engine.name)
-									)
-								}
-								pending={state.pending}
-							/>
+			<ListingDetailShell
+				actions={
+					<>
+						<LiveEngineInstallButton
+							busy={busy}
+							disabledUninstall={engine.running}
+							engineName={engine.name}
+							hasUpdate={hasEngineUpdate(engine)}
+							installState={engine.installState}
+							onInstall={() =>
+								runAction(engine.name, "install", () =>
+									installVoice(engine.name, hasEngineUpdate(engine))
+								)
+							}
+							onUninstall={() =>
+								runAction(engine.name, "uninstall", () =>
+									uninstallVoice(engine.name)
+								)
+							}
+							pending={state.pending}
+						/>
+						<label className="ml-auto flex shrink-0 items-center gap-2 text-sm">
+							Running
 							<Switch
 								aria-label={`Start or stop ${engine.displayName}`}
 								checked={engine.running}
@@ -618,27 +646,62 @@ function EngineDetailPanel({
 									)
 								}
 							/>
-						</div>
-					</div>
-					<div className="flex flex-wrap items-center gap-2">
-						{installStateBadge(engine.installState)}
-						{engine.running && <Badge>Running</Badge>}
-					</div>
-					<p className="text-muted-foreground text-sm">{engine.description}</p>
-					{state.error && (
-						<EngineFootnote tone="destructive">{state.error}</EngineFootnote>
-					)}
-					{voiceError && (
-						<EngineFootnote tone="destructive">{voiceError}</EngineFootnote>
-					)}
-				</header>
-				<section className="text-muted-foreground text-sm">
-					<p>
+						</label>
+					</>
+				}
+				aside={
+					<ListingAsideCard title="Information">
+						<ListingInfoGrid
+							rows={[
+								{ label: "Kind", value: GROUP_LABELS[kind] },
+								{ label: "Engine ID", value: engine.name },
+								{
+									label: "Process",
+									value: engine.running ? "Running" : "Stopped",
+								},
+							]}
+						/>
+					</ListingAsideCard>
+				}
+				hero={
+					<ListingHero
+						badges={[engine.running ? "Running" : null].filter(
+							(b): b is string => Boolean(b)
+						)}
+						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
+						name={engine.displayName}
+						tagline={engine.description}
+					/>
+				}
+				stats={
+					<ListingStatStrip
+						items={[
+							{ label: "Type", value: GROUP_LABELS[kind] },
+							{
+								label: "Install",
+								value: isInstalled ? "Installed" : "Not installed",
+							},
+							{
+								label: "Process",
+								value: engine.running ? "Running" : "Stopped",
+							},
+						]}
+					/>
+				}
+			>
+				<ListingSection title="How this engine behaves">
+					<p className="text-muted-foreground text-sm leading-relaxed">
 						Image and speech engines run alongside the active text engine. Use
 						the toggle to start or stop this engine's sidecar process.
 					</p>
-				</section>
-			</div>
+				</ListingSection>
+				{state.error && (
+					<EngineFootnote tone="destructive">{state.error}</EngineFootnote>
+				)}
+				{voiceError && (
+					<EngineFootnote tone="destructive">{voiceError}</EngineFootnote>
+				)}
+			</ListingDetailShell>
 		);
 	}
 
@@ -659,17 +722,10 @@ function EngineDetailPanel({
 		const selectable = backend.supported;
 
 		return (
-			<div className="scroll-fade-effect-y flex h-full flex-col gap-6 overflow-auto p-4">
-				<header className="flex flex-col gap-3">
-					<div className="flex items-start justify-between gap-3 pr-8">
-						<div className="min-w-0">
-							<h2 className="truncate font-semibold text-xl">
-								{backend.displayName}
-							</h2>
-							<p className="text-muted-foreground text-sm">
-								{GROUP_LABELS.sandbox}
-							</p>
-						</div>
+			<ListingDetailShell
+				actions={
+					<label className="flex items-center gap-2 text-sm">
+						Default backend
 						<Switch
 							aria-label={`Set ${backend.displayName} as the default sandbox backend`}
 							checked={backend.isDefault}
@@ -683,47 +739,82 @@ function EngineDetailPanel({
 								})
 							}
 						/>
-					</div>
-					<div className="flex flex-wrap items-center gap-2">
-						{installStateBadge(
-							backend.detected ? "installed" : "not_installed"
-						)}
-						{backend.isDefault && <Badge>Default</Badge>}
-					</div>
-					<p className="text-muted-foreground text-sm">
-						{sandboxDescription(backend)}
-					</p>
-					{backend.supported && !backend.detected && (
-						<EngineFootnote tone="amber">
-							Not detected on the node — calls fall back to unavailable until
-							its runtime is installed.
-						</EngineFootnote>
-					)}
-					{!backend.supported && (
-						<EngineFootnote>
-							{unsupportedReason(
-								backend.name === "microsandbox" ||
-									backend.name === "opensandbox"
-									? ["linux", "macos"]
-									: []
-							)}
-						</EngineFootnote>
-					)}
-					{state.error && (
-						<EngineFootnote tone="destructive">{state.error}</EngineFootnote>
-					)}
-					{sandboxError && (
-						<EngineFootnote tone="destructive">{sandboxError}</EngineFootnote>
-					)}
-				</header>
-				<section className="text-muted-foreground text-sm">
-					<p>
+					</label>
+				}
+				aside={
+					<ListingAsideCard title="Information">
+						<ListingInfoGrid
+							rows={[
+								{ label: "Kind", value: GROUP_LABELS.sandbox },
+								{ label: "Backend ID", value: backend.name },
+								{
+									label: "Detected",
+									value: backend.detected ? "Yes" : "No",
+								},
+							]}
+						/>
+					</ListingAsideCard>
+				}
+				hero={
+					<ListingHero
+						badges={[
+							backend.isDefault ? "Default" : null,
+							backend.supported ? null : "Unsupported here",
+						].filter((b): b is string => Boolean(b))}
+						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
+						name={backend.displayName}
+						tagline={sandboxDescription(backend)}
+					/>
+				}
+				stats={
+					<ListingStatStrip
+						items={[
+							{ label: "Type", value: GROUP_LABELS.sandbox },
+							{
+								label: "Runtime",
+								value: backend.detected ? "Detected" : "Missing",
+							},
+							{
+								label: "Default",
+								value: backend.isDefault ? "Yes" : "No",
+							},
+							{
+								label: "Supported",
+								value: backend.supported ? "Yes" : "No",
+							},
+						]}
+					/>
+				}
+			>
+				<ListingSection title="How this backend behaves">
+					<p className="text-muted-foreground text-sm leading-relaxed">
 						Sandbox backends pick the default runtime the sandbox_exec tool uses
 						when a call omits an explicit backend. Only one can be the default
 						at a time.
 					</p>
-				</section>
-			</div>
+				</ListingSection>
+				{backend.supported && !backend.detected && (
+					<EngineFootnote tone="amber">
+						Not detected on the node — calls fall back to unavailable until its
+						runtime is installed.
+					</EngineFootnote>
+				)}
+				{!backend.supported && (
+					<EngineFootnote>
+						{unsupportedReason(
+							backend.name === "microsandbox" || backend.name === "opensandbox"
+								? ["linux", "macos"]
+								: []
+						)}
+					</EngineFootnote>
+				)}
+				{state.error && (
+					<EngineFootnote tone="destructive">{state.error}</EngineFootnote>
+				)}
+				{sandboxError && (
+					<EngineFootnote tone="destructive">{sandboxError}</EngineFootnote>
+				)}
+			</ListingDetailShell>
 		);
 	}
 

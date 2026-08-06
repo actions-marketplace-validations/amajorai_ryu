@@ -109,6 +109,7 @@ impl WhisperCppDownloader {
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Voice,
+                role: crate::downloads::DownloadRole::Engine,
                 label: "whisper.cpp".to_string(),
                 url,
                 dest: archive_dest,
@@ -198,6 +199,7 @@ impl WhisperCppDownloader {
         downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Voice,
+                role: crate::downloads::DownloadRole::SpeechModel,
                 label: "whisper.cpp model".to_string(),
                 url: DEFAULT_MODEL_URL.to_string(),
                 dest: dest.clone(),

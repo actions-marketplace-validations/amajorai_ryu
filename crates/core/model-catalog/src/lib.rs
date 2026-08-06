@@ -1527,9 +1527,11 @@ pub fn gguf_download_spec(
     weight_url: &str,
     sha256: &str,
     label: &str,
+    role: ryu_downloads::DownloadRole,
 ) -> ryu_downloads::DownloadSpec {
     ryu_downloads::DownloadSpec {
         kind: ryu_downloads::DownloadKind::Model,
+        role,
         label: label.to_string(),
         url: weight_url.to_string(),
         // `~/.ryu/models/<id>.gguf` — matches the local model registry's
@@ -1623,6 +1625,7 @@ async fn download_mmproj(
 ) -> Result<std::path::PathBuf> {
     let spec = ryu_downloads::DownloadSpec {
         kind: ryu_downloads::DownloadKind::Model,
+        role: ryu_downloads::DownloadRole::VisionAdapter,
         label: format!("{repo_id} (vision adapter)"),
         url: format!("{}/{repo_id}/resolve/main/{filename}", endpoint.host),
         dest: installed::mmproj_file_path(model_stem),
@@ -1691,6 +1694,10 @@ pub async fn install_file(
             &url,
             &sha.unwrap_or_default(),
             &format!("{repo_id} ({filename})"),
+            // A user-installed GGUF from the catalog. `ggufFileRole` on the client
+            // still refines a draft/MTP head out of the filename; the role here is
+            // what the row badges by default.
+            ryu_downloads::DownloadRole::ChatModel,
         ))
         .await
         .with_context(|| format!("downloading {filename} from {repo_id}"))?;
@@ -1769,6 +1776,7 @@ pub async fn install_from_descriptor(
             url,
             sha256.unwrap_or(""),
             &format!("{repo_id} ({dest_filename})"),
+            ryu_downloads::DownloadRole::ChatModel,
         ))
         .await
         .with_context(|| format!("downloading {dest_filename} from {url}"))?;
@@ -1887,6 +1895,7 @@ pub async fn install_snapshot(
         }
         let spec = ryu_downloads::DownloadSpec {
             kind: ryu_downloads::DownloadKind::Model,
+            role: ryu_downloads::DownloadRole::ChatModel,
             label: format!("{repo_id} ({rel})"),
             url: format!("{}/{repo_id}/resolve/main/{rel}", endpoint.host),
             dest,
@@ -2268,7 +2277,13 @@ mod tests {
     #[test]
     fn gguf_download_spec_shape() {
         ensure_test_host();
-        let spec = gguf_download_spec("my-stem", "https://hf/x.gguf", "deadbeef", "a label");
+        let spec = gguf_download_spec(
+            "my-stem",
+            "https://hf/x.gguf",
+            "deadbeef",
+            "a label",
+            ryu_downloads::DownloadRole::ChatModel,
+        );
         assert_eq!(spec.url, "https://hf/x.gguf");
         assert_eq!(spec.sha256.as_deref(), Some("deadbeef"));
         assert!(spec
@@ -2279,7 +2294,7 @@ mod tests {
             "gguf:my-stem"
         );
         // Empty sha → no checksum on the spec.
-        let spec2 = gguf_download_spec("s2", "u", "", "l");
+        let spec2 = gguf_download_spec("s2", "u", "", "l", ryu_downloads::DownloadRole::ChatModel);
         assert!(spec2.sha256.is_none());
     }
 

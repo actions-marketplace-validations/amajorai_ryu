@@ -41,6 +41,10 @@ import {
 } from "@/components/agent-elements/input/mode-selector.tsx";
 import { AUTO_AGENT_ID } from "@/components/agent-elements/input/universal-picker-body.tsx";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
+import {
+	NO_OUTPUT_STYLE_ID,
+	useComposerOutputStyleSection,
+} from "@/components/agent-elements/input/use-composer-output-style-section.ts";
 import { useUniversalPicker } from "@/components/agent-elements/input/use-universal-picker.ts";
 import type { InputBarInfoBar } from "@/components/agent-elements/input-bar.tsx";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
@@ -236,6 +240,9 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	 * The composed Agent · Model · Approval/Thinking sections, exposed so the
 	 * trigger summary (`Ryu · Sonnet · Plan`) stays glanceable on a surface with
 	 * its own trigger. The body itself now comes from `renderBody`.
+	 *
+	 * The Output style section joins this list only while a style is actually in
+	 * force — see the note at its construction. It is always in the picker body.
 	 */
 	sections: ComposerSettingsSection[];
 } {
@@ -390,7 +397,32 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 				onChange: onModelChange,
 			};
 
-	const sections = [agentSection, modelSectionResolved, ...extraSections];
+	// Output style (`docs/output-styles.md` §6) — the ONE place it is wired, so every
+	// composer surface offers it and no surface hand-rolls its own. It comes after the
+	// caller's own extra sections because those (approval, thinking, agent-advertised
+	// config) tune the active TARGET, while a style is a node-wide prompt preset that
+	// outlives whichever agent is selected. Empty when the node has no styles, and
+	// every consumer auto-hides an empty section.
+	const outputStyleSection = useComposerOutputStyleSection();
+	const bodySections = useMemo(
+		() => [...extraSections, outputStyleSection],
+		[extraSections, outputStyleSection]
+	);
+
+	// The trigger summary reads `Ryu · Sonnet · Plan`; a style earns a segment there
+	// only once one is actually in force. "None" is the shipped default (design §8),
+	// so summarising it would add a permanent, meaningless fourth segment to every
+	// composer — while an ACTIVE style genuinely belongs there, since it is the only
+	// signal that the agent's answers are being reshaped.
+	const styleInForce =
+		outputStyleSection.items.length > 0 &&
+		outputStyleSection.value !== NO_OUTPUT_STYLE_ID;
+	const sections = [
+		agentSection,
+		modelSectionResolved,
+		...extraSections,
+		...(styleInForce ? [outputStyleSection] : []),
+	];
 
 	// The universal picker body (Ryu (providers nested) · External Agents) that
 	// replaces the sibling-submenu list. The trigger summary still derives from
@@ -406,7 +438,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		onSelectTeam,
 		onCreateAgent,
 		activeModelSection: modelSectionResolved,
-		activeExtraSections: extraSections,
+		activeExtraSections: bodySections,
 	});
 
 	// Leading mark: a custom-agent avatar image wins, else the active mode's engine

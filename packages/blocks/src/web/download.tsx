@@ -1,9 +1,7 @@
 import {
-	Accordion,
-	AccordionContent,
-	AccordionItem,
-	AccordionTrigger,
-} from "@ryu/ui/components/accordion";
+	BouncyAccordion,
+	type BouncyAccordionItem,
+} from "@ryu/ui/components/bouncy-accordion";
 import { Button, buttonVariants } from "@ryu/ui/components/button";
 import {
 	Card,
@@ -508,24 +506,27 @@ export default function DownloadBlock({
 								<h2 className="mb-6 text-center font-medium text-foreground text-xl">
 									Previous releases
 								</h2>
-								<Accordion multiple={false}>
-									{previousReleases.map((release) => (
-										<AccordionItem
-											key={release.id}
-											value={release.id.toString()}
-										>
-											<AccordionTrigger className="hover:no-underline">
-												<div className="flex flex-col items-start text-left">
+								<BouncyAccordion
+									classNames={{
+										item: "border border-border bg-muted/30",
+										trigger: "px-4 py-3",
+										description: "text-foreground",
+									}}
+									items={previousReleases.map(
+										(release): BouncyAccordionItem => ({
+											id: release.id.toString(),
+											title: (
+												<span className="flex flex-col items-start text-left">
 													<span className="font-semibold">
 														{release.tag_name}
 													</span>
 													<span className="text-muted-foreground text-xs">
 														{formatDate(release.published_at)}
 													</span>
-												</div>
-											</AccordionTrigger>
-											<AccordionContent>
-												<div className="grid grid-cols-1 gap-4 pt-4 md:grid-cols-3">
+												</span>
+											),
+											description: (
+												<div className="grid grid-cols-1 gap-4 pt-1 md:grid-cols-3">
 													{/* Scoped to this one release — an archived version
 													    must not silently serve a different version's
 													    binary just because its own build lacked one. */}
@@ -537,10 +538,10 @@ export default function DownloadBlock({
 														/>
 													))}
 												</div>
-											</AccordionContent>
-										</AccordionItem>
-									))}
-								</Accordion>
+											),
+										})
+									)}
+								/>
 							</div>
 						)}
 					</div>

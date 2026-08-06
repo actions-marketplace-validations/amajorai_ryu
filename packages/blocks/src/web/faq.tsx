@@ -1,9 +1,7 @@
 import {
-	Accordion,
-	AccordionContent,
-	AccordionItem,
-	AccordionTrigger,
-} from "@ryu/ui/components/accordion";
+	BouncyAccordion,
+	type BouncyAccordionItem,
+} from "@ryu/ui/components/bouncy-accordion";
 
 import { SectionTitle } from "./section-title.tsx";
 
@@ -91,7 +89,26 @@ interface FAQProps {
 	items?: FAQItem[];
 }
 
+function faqAnswer(content: FAQItem["content"]) {
+	const paragraphs = Array.isArray(content) ? content : [content];
+
+	return (
+		<div className="space-y-3">
+			{paragraphs.map((paragraph, index) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: static content
+				<p key={index}>{paragraph}</p>
+			))}
+		</div>
+	);
+}
+
 export default function FAQ({ items = GENERAL_FAQ_ITEMS }: FAQProps) {
+	const accordionItems: BouncyAccordionItem[] = items.map((item) => ({
+		id: item.id,
+		title: item.title,
+		description: faqAnswer(item.content),
+	}));
+
 	return (
 		<div className="container mx-auto px-4 py-16">
 			<div className="mx-auto flex max-w-2xl flex-col gap-4">
@@ -99,29 +116,17 @@ export default function FAQ({ items = GENERAL_FAQ_ITEMS }: FAQProps) {
 					<SectionTitle size="compact" title="Frequently Asked Questions" />
 				</div>
 
-				<Accordion className="w-full space-y-3 overflow-visible rounded-none border-0">
-					{items.map((item) => (
-						<AccordionItem
-							className="rounded-2xl border-none bg-muted/50 dark:bg-white/5"
-							key={item.id}
-							value={item.id}
-						>
-							<AccordionTrigger className="px-4 py-3 font-semibold text-[15px]">
-								{item.title}
-							</AccordionTrigger>
-							<AccordionContent className="space-y-3 pb-3 text-muted-foreground">
-								{Array.isArray(item.content) ? (
-									item.content.map((paragraph, index) => (
-										// biome-ignore lint/suspicious/noArrayIndexKey: static content
-										<p key={index}>{paragraph}</p>
-									))
-								) : (
-									<p>{item.content}</p>
-								)}
-							</AccordionContent>
-						</AccordionItem>
-					))}
-				</Accordion>
+				<BouncyAccordion
+					classNames={{
+						// Keep the card look the Base UI version had; the bouncy rows
+						// animate their own radii, so no rounding class here.
+						item: "border-none bg-muted/50 dark:bg-white/5",
+						trigger: "px-4 py-3",
+						title: "font-semibold text-[15px] leading-6",
+						description: "px-1 text-[15px] text-muted-foreground",
+					}}
+					items={accordionItems}
+				/>
 			</div>
 		</div>
 	);

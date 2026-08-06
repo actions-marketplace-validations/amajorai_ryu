@@ -287,9 +287,10 @@ pub async fn tts_models_install(
 
     let result = state
         .downloads
-        .register_indeterminate(
+        .register_indeterminate_as(
             format!("tts-model:{engine}:{model_name}"),
             crate::downloads::DownloadKind::Model,
+            crate::downloads::DownloadRole::VoiceModel,
             label,
             async move {
                 crate::sidecar::providers::ryutts::install_model(&client, &engine, &model_name)

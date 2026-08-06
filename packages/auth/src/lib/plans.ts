@@ -893,9 +893,38 @@ export interface DesktopGateConfig {
 	readonly trialDays: number;
 }
 
+/**
+ * What the free trial is a trial OF — and it is NOT Pro.
+ *
+ * The trial branch of {@link decideDesktopAccess} returns
+ * `proUnlocked: true, managedInference: false`. That is Band 2 and only Band 2:
+ * the local power features a one-time **Lifetime Desktop license** unlocks
+ * forever. It grants no managed inference, no credits and no cloud node — every
+ * one of which is Band 3 and belongs to a Pro/Max SUBSCRIPTION.
+ *
+ * Calling it a "Pro trial" therefore oversold it in both directions: it promised
+ * credits and a server the trial never grants, and it hid that what the user is
+ * actually sampling is the Lifetime Desktop product. A trialist who then bought
+ * Pro expecting the same thing plus a bill is a support ticket; one who assumed
+ * the trial included managed inference is a refund.
+ *
+ * Single source of truth so the name cannot drift across the desktop, the web
+ * pricing page and the docs the way "Pro trial" did.
+ */
+export const DESKTOP_TRIAL_LABEL = "Lifetime Desktop trial";
+
+/**
+ * One line for "what does the trial actually include", for any surface that
+ * needs to say so. Names the exclusions explicitly, because the exclusions are
+ * the part that was previously misrepresented.
+ */
+export const DESKTOP_TRIAL_INCLUDES =
+	"Full desktop app access. Managed inference, credits and cloud nodes are not included.";
+
 /** The single default gate config (swappable; never inlined per-component). */
 export const DESKTOP_GATE: DesktopGateConfig = {
-	// Open-core + 7-day trial → upsell is the shipped model. `betaFree` is a
+	// Open-core + a 7-day LIFETIME DESKTOP trial → upsell is the shipped model
+	// (see `DESKTOP_TRIAL_LABEL` for why it is not a "Pro" trial). `betaFree` is a
 	// break-glass escape hatch only (see the field doc); the default is OFF so a
 	// fresh install gets the trial, then the paywall — not free Pro forever.
 	betaFree: false,

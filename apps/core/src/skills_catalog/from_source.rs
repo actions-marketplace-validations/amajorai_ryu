@@ -586,6 +586,27 @@ fn copy_dir_guarded(src: &Path, dest: &Path) -> Result<()> {
 /// note is logged; this keeps the single-id return contract simple. Callers can
 /// invoke per-skill if they need finer control.
 pub async fn install_from_source(client: &reqwest::Client, source: &str) -> Result<InstallResult> {
+    // Form 7: a direct `SKILL.md` over HTTP(S). There is no repo to clone — the
+    // URL *is* the skill — so this is handled before `parse_source`, which would
+    // otherwise treat it as a generic git remote and fail. Goes through the same
+    // `guard_remote_url` SSRF screen as every other remote form; skipping it here
+    // would make this the one fetch that could be pointed at the loopback
+    // interface.
+    if is_direct_skill_md_url(source) {
+        let url = source.trim();
+        guard_remote_url(url).await?;
+        tracing::info!(source = %url, "installing skill from a direct SKILL.md URL");
+        let resp = super::get(client, url)
+            .send()
+            .await
+            .with_context(|| format!("requesting SKILL.md ({url})"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("SKILL.md URL returned HTTP {}", resp.status());
+        }
+        let markdown = resp.text().await.context("reading SKILL.md body")?;
+        return install_skill_md_text(&skill_name_from_md_url(url), &markdown).await;
+    }
+
     let parsed = parse_source(source)?;
     tracing::info!(source = %source, strategy = ?parsed.strategy, "installing skill from source");
 
@@ -773,6 +794,90 @@ fn install_from_dir(dir: &Path, root_name_hint: Option<String>) -> Result<Instal
     })
 }
 
+/// True when a source string is a direct `SKILL.md` document rather than a repo.
+///
+/// Matched on the path only, so a `?token=…` query or `#fragment` does not defeat
+/// it. Deliberately narrow — it must be the `SKILL.md` filename itself, not any
+/// `.md`, so a README URL still falls through to the repo forms.
+fn is_direct_skill_md_url(raw: &str) -> bool {
+    let source = raw.trim();
+    if !(source.starts_with("http://") || source.starts_with("https://")) {
+        return false;
+    }
+    source
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(source)
+        .rsplit('/')
+        .next()
+        .is_some_and(|file| file.eq_ignore_ascii_case("SKILL.md"))
+}
+
+/// Name a skill fetched as a bare `SKILL.md` after its parent path segment
+/// (`…/skills/pdf/SKILL.md` -> `pdf`), falling back to `skill`.
+fn skill_name_from_md_url(raw: &str) -> String {
+    let url = raw.split(['?', '#']).next().unwrap_or(raw);
+    // Drop scheme + authority first. Walking segments right-to-left over the
+    // whole URL would run past the path and pick up the HOST for a root-level
+    // `https://example.com/SKILL.md`, naming the skill after the domain.
+    let path = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split_once('/')
+        .map(|(_, path)| path)
+        .unwrap_or_default();
+    let parent = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .nth(1)
+        .unwrap_or_default();
+    let name = sanitize_name(parent);
+    if name.is_empty() {
+        "skill".to_string()
+    } else {
+        name
+    }
+}
+
+/// Install a skill whose entire body is a `SKILL.md` document we already hold in
+/// memory, rather than a git repo to clone.
+///
+/// Three of the registries in [`crate::catalog_source::skill_registries`] serve
+/// the markdown itself and never expose a fetchable source repo — ClawHub returns
+/// it as `skill.description`, browse.sh as `skillMd`, and a LobeHub agent is
+/// synthesized into one. Without this they would be browse-only.
+///
+/// The write goes through [`install_from_dir`] rather than straight to the skills
+/// dir so a content-served skill lands in exactly the same shape, and under the
+/// same replace-existing and `set_active` rules, as a cloned one.
+pub async fn install_skill_md_text(name: &str, markdown: &str) -> Result<InstallResult> {
+    let safe = sanitize_name(name);
+    if safe.is_empty() {
+        anyhow::bail!("skill name `{name}` has no path-safe characters");
+    }
+    if markdown.trim().is_empty() {
+        anyhow::bail!("skill `{name}` has an empty SKILL.md");
+    }
+
+    let workdir = temp_workdir()?;
+    let result = (|| {
+        let dir = workdir.join(&safe);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating staging dir {}", dir.display()))?;
+        std::fs::write(dir.join("SKILL.md"), markdown).context("writing staged SKILL.md")?;
+        // No name hint on purpose: the hint path exists to turn a `repo-<ref>`
+        // checkout dir into `repo` and so strips everything after the last `-`,
+        // which would truncate a legitimately hyphenated skill
+        // (`contract-opportunity-search` -> `contract-opportunity`). The staging
+        // dir is already named `safe`, so `skill_name_for` derives the right name.
+        install_from_dir(&dir, None)
+    })();
+    // Best-effort cleanup of the staging tree regardless of outcome.
+    let _ = std::fs::remove_dir_all(&workdir);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,6 +981,31 @@ mod tests {
         assert!(parse_source("   ").is_err());
         // A path that doesn't exist and isn't owner/repo or a URL.
         assert!(parse_source("not a real thing with spaces").is_err());
+    }
+
+    #[test]
+    fn direct_skill_md_urls_are_detected_and_named_from_their_parent() {
+        assert!(is_direct_skill_md_url(
+            "https://example.com/skills/pdf/SKILL.md"
+        ));
+        // Query/fragment must not defeat the match.
+        assert!(is_direct_skill_md_url(
+            "https://example.com/skills/pdf/SKILL.md?token=abc"
+        ));
+        // Narrow on purpose: any other markdown file is still a repo form.
+        assert!(!is_direct_skill_md_url("https://example.com/README.md"));
+        assert!(!is_direct_skill_md_url("https://github.com/owner/repo"));
+        assert!(!is_direct_skill_md_url("owner/repo"));
+
+        assert_eq!(
+            skill_name_from_md_url("https://example.com/skills/pdf/SKILL.md"),
+            "pdf"
+        );
+        assert_eq!(
+            skill_name_from_md_url("https://example.com/a/b/my-skill/SKILL.md?x=1"),
+            "my-skill"
+        );
+        assert_eq!(skill_name_from_md_url("https://example.com/SKILL.md"), "skill");
     }
 
     #[test]

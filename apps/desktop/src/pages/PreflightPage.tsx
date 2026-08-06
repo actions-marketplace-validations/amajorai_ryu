@@ -468,7 +468,12 @@ export function PreflightPage({
 
 	const body = (
 		<>
-			<BouncyAccordion items={items} onValueChange={setOpen} value={open} />
+			<BouncyAccordion
+				classNames={{ title: "truncate" }}
+				items={items}
+				onValueChange={setOpen}
+				value={open}
+			/>
 
 			<div className="flex items-center justify-between gap-2">
 				<div className="flex gap-2">

@@ -3,6 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 export const startRyuCore = () => invoke<string>("start_ryu_core");
 export const stopRyuCore = () => invoke<void>("stop_ryu_core");
 export const getRyuStatus = () => invoke<string>("get_ryu_status");
+/**
+ * Download the `ryu-core` binary into `~/.ryu{profile}/bin` if it is missing,
+ * resolving to its path. A no-op (`"dev"`) in dev builds, where turbo owns the
+ * binary. Called by the onboarding "run locally" pick, which is the first moment
+ * we know the user actually wants a local Core — the app itself no longer
+ * requires one to open.
+ */
+export const ensureCoreInstalled = () =>
+	invoke<string>("ensure_core_installed");
 
 const sleep = (ms: number) =>
 	new Promise<void>((resolve) => setTimeout(resolve, ms));

@@ -253,13 +253,25 @@ pub fn parse_status_json(enabled: bool, raw: &serde_json::Value) -> MeshStatus {
         .to_owned();
     let reachable = backend_state == "Running";
 
-    // Control plane: CurrentTailnet is absent on Headscale; ControlURL (under
-    // Self / the top-level) carries the login server when configured.
+    // Control plane. The precedence here was originally written the other way
+    // round — it read `ControlURL` and dismissed `CurrentTailnet` as "absent on
+    // Headscale". Verified against a real Headscale v0.29 tailnet, it is the
+    // exact opposite: `ControlURL` is absent (null under both `Self` and the top
+    // level) while `CurrentTailnet.Name` carries the control host. The result was
+    // that `control_server` — and therefore `backend`, which is classified from
+    // it — came back null on every Headscale node, so the desktop could never
+    // tell a self-hosted tailnet from Tailscale SaaS. Try both, ControlURL first
+    // (it is the more specific value when a client does report it).
     let control_server = raw
         .get("Self")
         .and_then(|s| s.get("ControlURL"))
         .and_then(|v| v.as_str())
         .or_else(|| raw.get("ControlURL").and_then(|v| v.as_str()))
+        .or_else(|| {
+            raw.get("CurrentTailnet")
+                .and_then(|t| t.get("Name"))
+                .and_then(|v| v.as_str())
+        })
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 

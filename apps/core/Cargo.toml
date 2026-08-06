@@ -1,6 +1,6 @@
 [package]
 name = "ryu-core"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -139,6 +139,14 @@ ryu-kernel-contracts = { path = "../../crates/core/kernel-contracts" }
 # publishes the ryu data dir + implements `Runnable for SkillRecord` host-side
 # (`skills_host.rs`), so the crate has ZERO dependency on apps/core.
 ryu-skills = { path = "../../crates/core/skills" }
+# Output styles (`docs/output-styles.md`): the `<name>.md` registry, the four-source
+# merge, the node-default selection, the system-prompt style block, user-root
+# authoring, and the `/api/output-styles` surface. NON-optional for the same reason
+# `ryu-skills` is: the registry is consulted at turn assembly (the style is resolved
+# per turn, which is what makes the composer picker live), so it must always compile —
+# only the HTTP surface is gated. Core publishes the ryu data dir and mounts the
+# router, so the crate has ZERO dependency on apps/core.
+ryu-output-styles = { path = "../../crates/core/output-styles" }
 # Home dashboards are now OUT-OF-PROCESS: the `ryu-dashboards` sidecar
 # (`apps-store/dashboards/backend`) owns `dashboards.db`, the refresh loop, the
 # device-image renderer, and the `/api/dashboards/*` surface (served through the

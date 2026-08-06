@@ -11,6 +11,7 @@ import { ArrowRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
 import { StoreCardGrid } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
+import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import {
 	Carousel,
 	type CarouselApi,
@@ -80,9 +81,9 @@ export default function StoreHome({
 
 	return (
 		<div className="scroll-fade-effect-y h-full overflow-auto">
-			<div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 pt-4 pb-12">
-				<p className="font-semibold text-lg">Home</p>
-
+			{/* No title here — the Store's page chrome (StorePage) renders the
+			    section title for every tab, including this one. */}
+			<div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 pt-2 pb-12">
 				{featured.length > 0 ? (
 					<FeaturedCarousel items={featured} onOpenRealm={onOpenRealm} />
 				) : null}
@@ -288,19 +289,18 @@ function FeaturedLogo({
 function HomeSection({ row, onOpen }: { row: HomeRow; onOpen: () => void }) {
 	return (
 		<section>
-			<button
-				className="group mb-2 flex items-center gap-2 text-foreground"
-				onClick={onOpen}
-				type="button"
+			<StoreShelfHeading
+				action={
+					<span className="flex items-center gap-0.5 text-muted-foreground text-xs transition-colors group-hover:text-foreground">
+						See all
+						<HugeiconsIcon className="size-3.5" icon={ArrowRight01Icon} />
+					</span>
+				}
+				className="px-0"
+				onOpen={onOpen}
 			>
-				<span className="font-semibold text-base tracking-tight">
-					{row.label}
-				</span>
-				<span className="flex items-center gap-0.5 text-muted-foreground text-xs transition-colors group-hover:text-foreground">
-					See all
-					<HugeiconsIcon className="size-3.5" icon={ArrowRight01Icon} />
-				</span>
-			</button>
+				{row.label}
+			</StoreShelfHeading>
 			<StoreCardGrid>
 				{row.items.slice(0, 6).map((item: HomeCard) => (
 					<StoreCatalogCard

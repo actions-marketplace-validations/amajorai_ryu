@@ -1455,8 +1455,21 @@ pub fn run() {
                 // app moved to 0.0.8. In dev the binary is owned by turbo
                 // (`bun run dev:core`), so we never download — resolve_core_binary's
                 // dev fallback finds the debug build.
+                //
+                // The missing-binary half is now gated on the user having chosen
+                // to run locally (`nodes.json` exists and its default node is this
+                // machine's Core). The desktop no longer requires a local Core to
+                // open — onboarding offers cloud and "connect to an existing node"
+                // — so downloading one at boot would install a backend on behalf
+                // of a user who may never want it. A fresh install therefore
+                // downloads nothing until the local path is picked, which does it
+                // through `ensure_core_installed`. The STALE half stays ungated: a
+                // binary already on disk means this is a local user, and letting
+                // an old core linger is the bug that check exists to prevent.
                 #[cfg(not(debug_assertions))]
-                if binary.is_none() || crate::core::install::is_managed_core_stale(&handle) {
+                if (binary.is_none() && crate::nodes::default_node_is_local())
+                    || (binary.is_some() && crate::core::install::is_managed_core_stale(&handle))
+                {
                     match crate::core::install::download_core_binary(&handle).await {
                         Ok(p) => binary = Some(p),
                         // Keep whatever resolve_core_binary found on failure: a download
@@ -1468,12 +1481,18 @@ pub fn run() {
                 // spawns it as a managed sidecar at boot and hands it every model
                 // call, so a missing gateway degrades chat with no auto-retry. A
                 // failure here is loud but non-fatal — the app still opens.
+                //
+                // Only when there IS a local Core to serve, though: the gateway is
+                // that Core's sidecar, so downloading it for a user whose node is
+                // in the cloud or on their company's server buys nothing.
                 #[cfg(not(debug_assertions))]
-                if let Err(e) = crate::core::install::ensure_gateway_installed(&handle).await {
-                    tracing::error!(
-                        "Failed to auto-install ryu-gateway (chat will be degraded until it is installed to ~/.ryu/bin/ or RYU_GATEWAY_BIN is set): {}",
-                        e
-                    );
+                if binary.is_some() {
+                    if let Err(e) = crate::core::install::ensure_gateway_installed(&handle).await {
+                        tracing::error!(
+                            "Failed to auto-install ryu-gateway (chat will be degraded until it is installed to ~/.ryu/bin/ or RYU_GATEWAY_BIN is set): {}",
+                            e
+                        );
+                    }
                 }
                 if let Some(binary) = binary {
                     let mut process = RyuCoreProcess::new(binary);

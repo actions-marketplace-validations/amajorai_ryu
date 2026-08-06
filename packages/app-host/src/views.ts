@@ -236,8 +236,11 @@ export interface ViewSourceFilter {
  *
  * - `basename` — the last `/` or `\` segment. What turns a run's absolute
  *   `folder_path` into the project name a row can actually show.
+ * - `humanize` — a `-`/`_` separated wire token title-cased into display copy
+ *   (`evaluator-optimizer` → `Evaluator Optimizer`). What lets a catalog badge
+ *   read as a label without the app shipping a second, display-only field.
  */
-export type ViewTextTransform = "basename";
+export type ViewTextTransform = "basename" | "humanize";
 
 /** Maps each {@link ViewItem} field to the response-row key it reads. Defaults:
  *  `id` → `"id"`, `title` → `"title"`; the rest are omitted unless mapped. */
@@ -340,6 +343,10 @@ export interface SidebarSectionSpec {
 export interface StoreItemMap {
 	/** Row key holding a short badge string (a pattern, a duration, a kind). */
 	badge?: string;
+	/** Transform applied to the mapped `badge` value — `"humanize"` turns a wire
+	 *  token (`evaluator-optimizer`) into display copy (`Evaluator Optimizer`).
+	 *  Opt-in per tab: a badge that is already prose must not be re-cased. */
+	badgeTransform?: ViewTextTransform;
 	/** Row key holding the card's supporting text. */
 	description?: string;
 	/** Row key holding a per-item glyph id, overriding the tab's icon. */
@@ -371,6 +378,54 @@ export interface StoreInstallSpec {
 }
 
 /**
+ * A **read-only node/edge graph** drawn in the detail pane from the per-item
+ * detail payload. The one thing a marketplace card could not say declaratively:
+ * a workflow template is its shape, and a list of node names is not a picture of
+ * it. Every key is a response-key name, so an app whose graph calls its endpoints
+ * `source`/`target` declares that instead of renaming its API.
+ */
+export interface StoreDetailGraphSpec {
+	/** Edge-row key holding the branch/condition label drawn on the edge. */
+	edgeLabel?: string;
+	/** Edge-row key holding the source node id (default `"from"`). */
+	edgeSource?: string;
+	/** Response key holding the edge array (default `"edges"`). */
+	edges?: string;
+	/** Edge-row key holding the target node id (default `"to"`). */
+	edgeTarget?: string;
+	/** Node-row key holding the node id (default `"id"`). */
+	nodeId?: string;
+	/** Node-row key holding the node's label (default: the id). */
+	nodeLabel?: string;
+	/** Response key holding the node array (default `"nodes"`). */
+	nodes?: string;
+	/** Heading above the graph (default `"Graph"`). */
+	title?: string;
+}
+
+/**
+ * What the detail pane shows BEYOND the card's own fields, fetched per selection.
+ *
+ * This is the seam that retired the shell's `view` allowlist: the Workflows tab
+ * used to claim a first-party component purely so its preview could draw the
+ * template graph, which meant the one tab that proved apps can own a Store
+ * section was also the one tab hardcoded into the closed desktop source. A
+ * declared `source` + `graph` gives every app the same preview, so no future app
+ * needs an entry in a table it cannot edit.
+ */
+export interface StoreDetailSpec {
+	/** Drawn from the fetched payload (or, with no `source`, from the row). */
+	graph?: StoreDetailGraphSpec;
+	/** Key of the detail object inside the response envelope — Core's template
+	 *  route answers `{"template": {...}}`. Absent = the response IS the object.
+	 *  The list side's {@link ViewSource.items} for a single object. */
+	item?: string;
+	/** Fetched when a row is selected. `{{item.<key>}}` resolves against the RAW
+	 *  catalog row, so a per-item path like `/api/x/{{item.id}}` works. */
+	source?: { http: ViewActionHttp };
+}
+
+/**
  * The opaque `spec` of a manifest `store_tabs` contribution (the Rust
  * `StoreTabContribution`). The desktop Store renders it so an app owns its
  * marketplace section instead of the shell hardcoding one — the same relationship
@@ -388,6 +443,8 @@ export interface StoreInstallSpec {
  * contributed tabs.
  */
 export interface StoreTabSpec {
+	/** Per-item detail fetched on selection, and how to draw it. */
+	detail?: StoreDetailSpec;
 	/** Copy for the empty state. */
 	empty?: { description?: string; title?: string };
 	/** Row key whose value splits the cards into labelled sections. */
@@ -632,12 +689,25 @@ function rowText(
 /** Split on either separator so a Windows path yields its basename too. */
 const PATH_SEPARATOR_RE = /[\\/]/;
 
+/** Word boundaries in a wire token, for the `humanize` transform. */
+const TOKEN_SEPARATOR_RE = /[-_\s]+/;
+
 /** Apply a {@link ViewTextTransform} to an already-stringified field value. */
 function transformText(
 	value: string | undefined,
 	transform: ViewTextTransform | undefined
 ): string | undefined {
-	if (value === undefined || transform !== "basename") {
+	if (value === undefined) {
+		return value;
+	}
+	if (transform === "humanize") {
+		const words = value
+			.split(TOKEN_SEPARATOR_RE)
+			.filter(Boolean)
+			.map((word) => word.charAt(0).toUpperCase() + word.slice(1));
+		return words.length === 0 ? undefined : words.join(" ");
+	}
+	if (transform !== "basename") {
 		return value;
 	}
 	// Trailing separators would otherwise yield an empty basename.
@@ -797,7 +867,7 @@ export function storeItemsFromResponse(
 			continue;
 		}
 		out.push({
-			badge: rowText(row, map.badge),
+			badge: transformText(rowText(row, map.badge), map.badgeTransform),
 			description: rowText(row, map.description ?? "description"),
 			group: spec.groupBy ? (rowText(row, spec.groupBy) ?? "") : "",
 			icon: rowText(row, map.icon),
@@ -810,6 +880,79 @@ export function storeItemsFromResponse(
 		});
 	}
 	return out;
+}
+
+/** One node of a {@link StoreDetailGraphSpec} graph, already mapped. */
+export interface StoreGraphNode {
+	id: string;
+	label: string;
+}
+
+/** One edge of a {@link StoreDetailGraphSpec} graph, already mapped. */
+export interface StoreGraphEdge {
+	/** Branch/condition drawn on the edge; absent when unmapped or empty. */
+	label?: string;
+	source: string;
+	target: string;
+}
+
+/** Unwrap a detail response to the object the {@link StoreDetailSpec} describes:
+ *  `spec.item` names the envelope key, absent means the payload itself. */
+export function storeDetailObject(
+	spec: StoreDetailSpec,
+	payload: unknown
+): unknown {
+	if (!spec.item) {
+		return payload;
+	}
+	return isRecord(payload) ? payload[spec.item] : undefined;
+}
+
+function graphRows(payload: unknown, key: string): Record<string, unknown>[] {
+	const rows = isRecord(payload) ? payload[key] : undefined;
+	if (!Array.isArray(rows)) {
+		return [];
+	}
+	return rows.filter(isRecord);
+}
+
+/**
+ * Map a detail payload to the graph a renderer draws. Forgiving like every other
+ * mapper here: a payload whose arrays are missing or whose rows carry no usable
+ * ids yields an empty graph, so the detail pane simply omits the picture rather
+ * than throwing on a backend the shell cannot parse. Edges pointing at nodes that
+ * are not in the payload are dropped — a dangling edge would otherwise render as
+ * an arrow from nowhere.
+ */
+export function storeGraphFromResponse(
+	spec: StoreDetailGraphSpec,
+	payload: unknown
+): { edges: StoreGraphEdge[]; nodes: StoreGraphNode[] } {
+	const idKey = spec.nodeId ?? "id";
+	const nodes: StoreGraphNode[] = [];
+	const seen = new Set<string>();
+	for (const row of graphRows(payload, spec.nodes ?? "nodes")) {
+		const id = rowText(row, idKey);
+		if (!id || seen.has(id)) {
+			continue;
+		}
+		seen.add(id);
+		nodes.push({ id, label: rowText(row, spec.nodeLabel ?? idKey) ?? id });
+	}
+
+	const sourceKey = spec.edgeSource ?? "from";
+	const targetKey = spec.edgeTarget ?? "to";
+	const edges: StoreGraphEdge[] = [];
+	for (const row of graphRows(payload, spec.edges ?? "edges")) {
+		const source = rowText(row, sourceKey);
+		const target = rowText(row, targetKey);
+		if (!(source && target && seen.has(source) && seen.has(target))) {
+			continue;
+		}
+		const label = spec.edgeLabel ? rowText(row, spec.edgeLabel) : undefined;
+		edges.push({ label: label || undefined, source, target });
+	}
+	return { edges, nodes };
 }
 
 /** The searchable haystack for one catalog item: its title, description, badge,

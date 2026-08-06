@@ -15,7 +15,7 @@
 /** Build the example plugin's sandboxed document, with the host nonce baked in.
  *  `nonce` MUST be host-generated (e.g. crypto.randomUUID()), never plugin- or
  *  user-controlled. It is JSON-encoded into a string literal in the script. */
-import { HOST_API_VERSION } from "./rpc.ts";
+import { handshakeAnnounceScript } from "./rpc.ts";
 
 export function examplePluginSrcdoc(nonce: string): string {
 	const nonceLiteral = JSON.stringify(nonce);
@@ -116,8 +116,9 @@ export function examplePluginSrcdoc(nonce: string): string {
       });
     });
 
-    // Announce readiness to the host (it verifies event.source + this nonce).
-    window.parent.postMessage({ kind: "ryu-plugin-ready", nonce: NONCE, hostApiVersion: ${JSON.stringify(HOST_API_VERSION)} }, "*");
+    // Announce readiness to the host (it verifies event.source + this nonce), and
+    // keep announcing until the port lands — see handshakeAnnounceScript.
+${handshakeAnnounceScript()}
   })();
 </script>
 </body>

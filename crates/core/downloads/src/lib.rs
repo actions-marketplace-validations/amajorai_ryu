@@ -35,8 +35,10 @@
 //! installed rather than silently defaulting to a wrong data dir / dropping HF
 //! auth. The crate's own tests install a temp-dir [`DownloadsHost`] first.
 
+mod autotune;
 mod center;
 
+pub use autotune::{AutoTuner, ThroughputSample, MAX_SLOTS, MIN_SLOTS};
 pub use center::DownloadCenter;
 
 use std::path::PathBuf;
@@ -120,6 +122,76 @@ pub enum DownloadKind {
     Other,
 }
 
+/// What the artifact *is*, at the granularity a person reads it — the thing a
+/// download row wears as a badge ("Chat model", "Speech model", "Engine").
+///
+/// [`DownloadKind`] is deliberately coarse (it groups every weight file under
+/// `Model`/`Voice`), which is why every row used to be disambiguated by stuffing a
+/// parenthetical into `label` — `"nomic-embed-text-v1.5 (embedding model)"` — while
+/// binaries and archives got nothing at all. That left the overlay showing two
+/// identically-named "Kokoro 82M" rows and a bare "Parakeet v3 (extract)". The role
+/// is the structured version of that suffix: set once at the call site that knows
+/// what it is fetching, so clients can badge consistently instead of guessing from
+/// a display string.
+///
+/// `#[serde(default)]` on the task field means a `downloads.json` written by an
+/// older Core still loads (its tasks come back as [`DownloadRole::Other`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadRole {
+    /// An inference runtime binary (llama.cpp, whisper.cpp, sd.cpp, Ollama).
+    Engine,
+    /// Weights the assistant chats with.
+    ChatModel,
+    /// Weights that turn text into vectors for retrieval.
+    EmbeddingModel,
+    /// Weights that re-order retrieved passages by relevance.
+    RerankerModel,
+    /// The small classifier the firewall/router/judge tiers run on.
+    ClassifierModel,
+    /// An image-understanding adapter (`mmproj`) paired with a chat model.
+    VisionAdapter,
+    /// A companion draft/multi-token head used for speculative decoding.
+    DraftModel,
+    /// Speech-to-text weights (whisper GGML, Parakeet ONNX).
+    SpeechModel,
+    /// Text-to-speech weights (Kokoro, OuteTTS).
+    VoiceModel,
+    /// Image-generation weights.
+    ImageModel,
+    /// Video-generation weights.
+    VideoModel,
+    /// A coding-agent runtime.
+    Agent,
+    /// A standalone tool binary (yt-dlp, Ghost, Shadow).
+    Tool,
+    /// A skill bundle.
+    Skill,
+    /// A plugin/app bundle or its sidecar payload.
+    Plugin,
+    /// A post-download processing step (unpacking an archive). Byte-less by
+    /// nature, so a client must not render it as a 0 B transfer.
+    Extract,
+    #[default]
+    Other,
+}
+
+impl DownloadRole {
+    /// The role to assume when a call site says nothing — derived from the coarse
+    /// [`DownloadKind`] so an un-migrated caller still badges better than "Other".
+    pub fn from_kind(kind: DownloadKind) -> Self {
+        match kind {
+            DownloadKind::Engine => Self::Engine,
+            DownloadKind::Agent => Self::Agent,
+            DownloadKind::Tool => Self::Tool,
+            DownloadKind::Skill => Self::Skill,
+            DownloadKind::Embedding => Self::EmbeddingModel,
+            DownloadKind::Voice => Self::VoiceModel,
+            DownloadKind::Model | DownloadKind::Media | DownloadKind::Other => Self::Other,
+        }
+    }
+}
+
 /// The lifecycle state of a single download. Unit variants only — the human
 /// error string and retryability live on [`DownloadTask`] so the SSE/JSON shape
 /// stays flat for the desktop store.
@@ -167,6 +239,10 @@ pub struct DownloadTask {
     /// artifact dedups onto the in-flight task instead of starting a second.
     pub id: String,
     pub kind: DownloadKind,
+    /// What this artifact is, for badging. Defaulted on deserialize so a
+    /// `downloads.json` from an older Core still loads.
+    #[serde(default)]
+    pub role: DownloadRole,
     /// Human-facing label, e.g. "Gemma 4 E2B (Q4_K_M)".
     pub label: String,
     pub url: Option<String>,
@@ -207,6 +283,9 @@ impl DownloadTask {
 #[derive(Debug, Clone)]
 pub struct DownloadSpec {
     pub kind: DownloadKind,
+    /// What this artifact is, for badging. Use [`DownloadRole::from_kind`] when a
+    /// call site genuinely has nothing more specific to say.
+    pub role: DownloadRole,
     pub label: String,
     pub url: String,
     /// Final on-disk path. The in-flight file is `<dest>.part`.
@@ -221,6 +300,60 @@ pub struct DownloadSpec {
 pub struct VersionRecord {
     pub store_key: String,
     pub version: String,
+}
+
+// ── Concurrency settings ────────────────────────────────────────────────────
+
+/// How the parallel-download slot count is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrencyMode {
+    /// Ryu picks the slot count from measured throughput (see [`AutoTuner`]).
+    #[default]
+    Auto,
+    /// The user pinned an explicit slot count.
+    Manual,
+}
+
+/// The persisted download-concurrency preference (`~/.ryu/downloads-settings.json`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DownloadSettings {
+    pub mode: ConcurrencyMode,
+    /// The user's pinned slot count. Only consulted in [`ConcurrencyMode::Manual`],
+    /// but retained across a switch to Auto so toggling back restores the choice.
+    pub manual_slots: usize,
+}
+
+impl Default for DownloadSettings {
+    fn default() -> Self {
+        Self {
+            mode: ConcurrencyMode::Auto,
+            manual_slots: DEFAULT_SLOTS,
+        }
+    }
+}
+
+/// Slot count used before any throughput has been measured, and the manual
+/// default. Three parallel transfers is the same figure the fixed semaphore used
+/// before it became adjustable, so an untouched install behaves as it always did.
+pub const DEFAULT_SLOTS: usize = 3;
+
+/// The live view a client renders: the preference plus what it currently resolves
+/// to and the evidence behind it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadSettingsView {
+    pub mode: ConcurrencyMode,
+    pub manual_slots: usize,
+    /// Slots actually in force right now (in Auto this is the tuner's pick).
+    pub effective_slots: usize,
+    pub min_slots: usize,
+    pub max_slots: usize,
+    /// Best aggregate throughput observed so far, bytes/sec — what Auto reasons
+    /// from. `0` until something has downloaded.
+    pub measured_bps: u64,
+    /// True when `RYU_MAX_CONCURRENT_DOWNLOADS` pins the value, in which case the
+    /// mode is forced to Manual and a write is rejected.
+    pub env_locked: bool,
 }
 
 /// A delta pushed to SSE subscribers. The stream sends one [`DownloadEvent::Snapshot`]

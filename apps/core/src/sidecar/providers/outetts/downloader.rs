@@ -74,7 +74,10 @@ impl OuteTtsDownloader {
             &model_path(),
             MODEL_STORE_KEY,
             MODEL_FILE,
-            "OuteTTS",
+            // Distinct per artifact: both files used to be labelled a bare
+            // "OuteTTS", so the overlay showed two identical rows of different
+            // sizes with no way to tell them apart.
+            "OuteTTS (weights)",
             downloads,
         )
         .await?;
@@ -83,7 +86,7 @@ impl OuteTtsDownloader {
             &vocoder_path(),
             VOCODER_STORE_KEY,
             VOCODER_FILE,
-            "OuteTTS",
+            "OuteTTS (vocoder)",
             downloads,
         )
         .await?;
@@ -118,6 +121,7 @@ impl OuteTtsDownloader {
         let downloaded = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Voice,
+                role: crate::downloads::DownloadRole::VoiceModel,
                 label: label.to_string(),
                 url: url.to_string(),
                 dest: dest.clone(),

@@ -183,6 +183,15 @@ fn reserved_namespaces() -> Vec<String> {
         // for MCP widget bridges. Reserved so a manifest cannot declare its way in.
         "ui",
         "views",
+        // `assistant:context` lets an app steer the ONE global Ask Ryu surface:
+        // publish what its page is showing (text that lands inside the user's
+        // prompt), lend the assistant its own instructions while that page is
+        // open, and — with `assistant.open({ prompt })` — post a turn on the
+        // user's behalf. That last power is precisely what `chat.sendFollowUp`
+        // and `ui:send_message` gate, so the sigil is fenced alike: reserved, so
+        // Rule 2's owner-scoped self-grant cannot hand it to `com.evil.assistant`
+        // on a name match.
+        "assistant",
         // The browser namespace covers the identity-vault connect flow
         // (`browser.connect`) as well as the Browser app's sidecar control.
         "browser",
@@ -400,6 +409,16 @@ fn default_grant_allowlist() -> Vec<String> {
         // disable→re-enable of a widget companion is approved, not denied with
         // GrantsDenied. Swappable via the env override.
         "chat.sendFollowUp",
+        // The assistant-bridge scope: an app describes its own page to the global
+        // Ask Ryu panel (context, its own instructions while that page is open,
+        // opening/asking). Allowlisted rather than owner-scoped because
+        // `assistant` is a RESERVED namespace — without an entry here NO app could
+        // ever hold it without a Gateway Rust edit, which is the per-app-string
+        // anti-pattern this list's doc warns about. The power is bounded: an app
+        // only ever writes into its OWN context slice, the write is capped and
+        // cleared when its surface unmounts, and nothing reads the conversation
+        // back. Swappable via the env override.
+        "assistant:context",
         // The Browser app (`@ryu/browser`) exposes a real-Chromium Electron
         // sidecar as the grant-gated `browser.control` capability (list/open/
         // navigate tabs, screenshot, read titles, evaluate JS), which the desktop

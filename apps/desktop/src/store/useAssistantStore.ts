@@ -15,16 +15,60 @@ export type AssistantMode = "closed" | "floating" | "sidebar";
 
 /** A single piece of "what the user is looking at" handed to the assistant. */
 export interface PageContextItem {
+	/**
+	 * Lazy resolver called at SEND time, winning over {@link PageContextItem.text}
+	 * when present. This is what makes a live surface (a dashboard whose widgets
+	 * refresh on their own, a canvas the user is still editing) answerable: a
+	 * pushed snapshot describes the page as it was when the effect ran, which for
+	 * anything self-refreshing is wrong by the time the user asks about it.
+	 *
+	 * Only reachable from in-process publishers (the hooks below). A sandboxed
+	 * plugin cannot be called back synchronously across the bridge, so it
+	 * re-publishes instead — see `assistant.publishContext` in the app host.
+	 */
+	getText?: () => string | Promise<string>;
 	/** Stable id so a chip can be removed and de-duped. */
 	id: string;
-	/** The actual content embedded into the first message sent to the agent. */
+	/**
+	 * Who published this, when that is not the page itself — set by the SHELL for
+	 * bridge publishers (never by the app, which would just lie). Rendered on the
+	 * chip and carried into the prompt block, so "an app is putting words in my
+	 * assistant's mouth" is visible rather than something the user has to infer.
+	 */
+	source?: string;
+	/**
+	 * The content embedded into the message sent to the agent. A **snapshot** —
+	 * correct for static surfaces (a doc's text at publish time), stale for live
+	 * ones. Live surfaces set {@link PageContextItem.getText} instead and leave
+	 * this as the last-known value (or `""`).
+	 */
 	text: string;
 	/** Short human label shown on the context chip (e.g. the page/doc title). */
 	title: string;
 }
 
-/** Which kind of thing the assistant is currently building. */
-export type AssistantBuilderKind = "agent" | "workflow";
+/** Owner-key PREFIX for in-process page publishers (`page:<hook instance>`).
+ *  Bridge publishers use `plugin:<id>`, so an app and the page under it can never
+ *  clobber each other — last-writer-wins across unrelated publishers was the old
+ *  behaviour, and it is what made "one publisher at a time" a hidden constraint. */
+export const PAGE_CONTEXT_OWNER = "page";
+
+/** One publisher's slice of the context set, kept separate so a plugin and the
+ *  page it is layered over both contribute instead of racing. */
+interface ContextSlice {
+	items: PageContextItem[];
+	owner: string;
+}
+
+/**
+ * Which kind of thing the assistant is currently driving. `agent` and `workflow`
+ * are the two built-in builders (their preambles ship in `builderPreamble.ts`);
+ * any other string is an **app-defined** surface, which must carry its own
+ * `preamble`. Deliberately an open union — a closed enum here is exactly what
+ * forced `DashboardBuilderChat` to grow a second chat pane rather than drive the
+ * one global assistant.
+ */
+export type AssistantBuilderKind = "agent" | "workflow" | (string & {});
 
 /**
  * A "builder takeover" registered by a builder page (agent edit, workflows) so
@@ -42,10 +86,37 @@ export type AssistantBuilderKind = "agent" | "workflow";
 export interface AssistantBuilderSession {
 	/** Stable per-page conversation id (also the owner token). persist:false. */
 	conversationId: string;
-	/** Agent vs workflow — selects the preamble + empty-state copy. */
+	/**
+	 * Sentence describing what this surface is, shown under the empty-state title.
+	 * Optional: the two built-in kinds have their own worded copy.
+	 */
+	description?: string;
+	/**
+	 * Whether registering DOCKS the panel open — the builder pages' behaviour
+	 * (opening the agent editor is an explicit "I came here to build this").
+	 * Bridge-registered surfaces pass `false`: an app that merely rendered its page
+	 * has not asked for the assistant to appear, and popping a sidebar open on
+	 * mount is how a helpful surface becomes an obnoxious one. Defaults to `true`,
+	 * so existing callers are unchanged.
+	 */
+	dock?: boolean;
+	/** Agent, workflow, or an app-defined surface id. Selects the built-in
+	 *  preamble + empty-state copy; app-defined kinds bring their own. */
 	kind: AssistantBuilderKind;
+	/** Empty-state / header title. Defaults to `Build <targetName>`. */
+	label?: string;
 	/** Called after each settled turn with the edited id so the page re-hydrates. */
 	onChanged: (id: string) => void;
+	/**
+	 * The instructions injected ahead of the first outgoing user message,
+	 * REQUIRED for an app-defined `kind` (the built-in `agent`/`workflow` kinds
+	 * fall back to `buildBuilderPreamble`). `{{targetId}}` and `{{snapshot}}` are
+	 * substituted at send time so a surface registered before its record exists
+	 * still names the right id.
+	 */
+	preamble?: string;
+	/** One-tap starter prompts offered while the thread is empty. */
+	prompts?: string[];
 	/** Lazily resolve (creating a draft) the id to build. Returns null on failure. */
 	resolveId: () => Promise<string | null>;
 	/** Compact snapshot of the current definition, injected into the preamble. */
@@ -54,7 +125,18 @@ export interface AssistantBuilderSession {
 	targetId: string | null;
 	/** Human name of the target, for the header + empty-state copy. */
 	targetName: string;
+	/**
+	 * Tool ids this surface wants the assistant to reach for. **Advisory**: Core's
+	 * chat stream takes no per-request tool allowlist, so these are named in the
+	 * preamble ("use these tools"), not enforced. Real enforcement stays where it
+	 * already is — the agent's own tool set and the in-chat permission prompt.
+	 */
+	tools?: string[];
 }
+
+/** The generalized name for a takeover — an app-defined surface is not a
+ *  "builder". Same shape; the old name is kept so existing imports still resolve. */
+export type AssistantSurfaceSession = AssistantBuilderSession;
 
 const MODE_KEY = "ryu:assistant-mode";
 
@@ -85,6 +167,8 @@ interface AssistantState {
 	builder: AssistantBuilderSession | null;
 	/** Tear down the builder takeover — no-op unless `owner` owns it. */
 	clearBuilder: (owner: string) => void;
+	/** Drop one publisher's whole context slice (unmount / blur / plugin close). */
+	clearContextOwner: (owner: string) => void;
 	/** Hide the panel without discarding the conversation. */
 	close: () => void;
 	/**
@@ -92,6 +176,8 @@ interface AssistantState {
 	 * Reset whenever the active page changes (a new page offers fresh context).
 	 */
 	contextDismissed: boolean;
+	/** Every publisher's slice, in publish order. `pageContext` is its flattening. */
+	contextOwners: ContextSlice[];
 	/**
 	 * The assistant's dedicated Core conversation id. Stable across open/close so
 	 * the thread survives toggling the panel, and identical to the id handed to
@@ -108,8 +194,22 @@ interface AssistantState {
 
 	/** Open the panel, restoring the last layout unless one is given. */
 	open: (mode?: "floating" | "sidebar") => void;
-	/** Richer context published by the active page (doc/file editors, etc.). */
+	/** Richer context published by the active page (doc/file editors, etc.) and by
+	 *  any app that reached the bridge — the flattening of `contextOwners`. */
 	pageContext: PageContextItem[];
+	/**
+	 * A question an app asked the assistant on the user's behalf
+	 * (`assistant.open({ prompt })`), waiting for the panel to mount and send it.
+	 * A *queue of one*: the panel is unmounted while closed, so there is nobody to
+	 * send it yet, and an app spamming opens should cost one turn, not N.
+	 */
+	pendingPrompt: string | null;
+	/**
+	 * Replace ONE publisher's slice, leaving every other publisher's alone. This
+	 * is the bridge's entry point: an app publishes under `plugin:<id>` while the
+	 * page it sits on keeps publishing under {@link PAGE_CONTEXT_OWNER}.
+	 */
+	publishContext: (owner: string, items: PageContextItem[]) => void;
 	/**
 	 * Register (or replace) the builder takeover and auto-dock the panel as a
 	 * sidebar, so opening a builder page shows the builder docked by default.
@@ -123,17 +223,44 @@ interface AssistantState {
 	setConversationId: (id: string | null) => void;
 	/** Switch between floating and sidebar without closing. */
 	setLayout: (mode: "floating" | "sidebar") => void;
-	/** Replace the page-published context (latest page wins). */
-	setPageContext: (items: PageContextItem[]) => void;
+	/** Queue (or clear, with `null`) the app-asked prompt the panel sends on mount. */
+	setPendingPrompt: (prompt: string | null) => void;
 	/** Patch the live builder fields (id/name/snapshot) without re-docking. */
 	updateBuilder: (patch: Partial<AssistantBuilderSession>) => void;
+}
+
+/** Flatten the per-owner slices into the single list every reader consumes.
+ *  Publish order is preserved so the page's own context leads and later
+ *  publishers append — stable across re-publishes of an existing owner. */
+function flatten(slices: ContextSlice[]): PageContextItem[] {
+	return slices.flatMap((s) => s.items);
+}
+
+/** Replace one owner's slice (dropping it entirely when empty). */
+function withOwner(
+	slices: ContextSlice[],
+	owner: string,
+	items: PageContextItem[]
+): ContextSlice[] {
+	const without = slices.filter((s) => s.owner !== owner);
+	if (items.length === 0) {
+		return without;
+	}
+	const index = slices.findIndex((s) => s.owner === owner);
+	if (index === -1) {
+		return [...slices, { owner, items }];
+	}
+	// Re-publishing keeps the owner's position so chips don't jump around.
+	return slices.map((s) => (s.owner === owner ? { owner, items } : s));
 }
 
 export const useAssistantStore = create<AssistantState>((set) => ({
 	mode: "closed",
 	conversationId: null,
 	pageContext: [],
+	contextOwners: [],
 	contextDismissed: false,
+	pendingPrompt: null,
 	builder: null,
 
 	open: (mode) =>
@@ -149,10 +276,27 @@ export const useAssistantStore = create<AssistantState>((set) => ({
 			return { mode };
 		}),
 	setConversationId: (id) => set({ conversationId: id }),
+	setPendingPrompt: (prompt) => set({ pendingPrompt: prompt }),
 	newConversation: () => set({ conversationId: null, contextDismissed: false }),
-	setPageContext: (items) => set({ pageContext: items }),
+	publishContext: (owner, items) =>
+		set((s) => {
+			const contextOwners = withOwner(s.contextOwners, owner, items);
+			return { contextOwners, pageContext: flatten(contextOwners) };
+		}),
+	clearContextOwner: (owner) =>
+		set((s) => {
+			const contextOwners = s.contextOwners.filter((o) => o.owner !== owner);
+			return { contextOwners, pageContext: flatten(contextOwners) };
+		}),
 	removePageContext: (id) =>
-		set((s) => ({ pageContext: s.pageContext.filter((c) => c.id !== id) })),
+		set((s) => {
+			// Removing a chip removes it from whichever publisher contributed it —
+			// the user's "not this" is about the item, not about who published it.
+			const contextOwners = s.contextOwners
+				.map((o) => ({ ...o, items: o.items.filter((c) => c.id !== id) }))
+				.filter((o) => o.items.length > 0);
+			return { contextOwners, pageContext: flatten(contextOwners) };
+		}),
 	dismissContext: () => set({ contextDismissed: true }),
 	restoreContext: () => set({ contextDismissed: false }),
 
@@ -162,6 +306,11 @@ export const useAssistantStore = create<AssistantState>((set) => ({
 			// after a re-focus while already open); otherwise auto-dock as a sidebar.
 			// `nextMode` is always an open layout, so it is safe to persist directly.
 			const sameOwner = s.builder?.conversationId === session.conversationId;
+			if (session.dock === false) {
+				// A silent takeover: the surface is live for whenever the user opens the
+				// panel, but registering it does not open anything.
+				return { builder: session };
+			}
 			const nextMode: "floating" | "sidebar" =
 				sameOwner && s.mode !== "closed" ? s.mode : "sidebar";
 			persistMode(nextMode);
@@ -170,11 +319,18 @@ export const useAssistantStore = create<AssistantState>((set) => ({
 	updateBuilder: (patch) =>
 		set((s) => (s.builder ? { builder: { ...s.builder, ...patch } } : {})),
 	clearBuilder: (owner) =>
-		set((s) =>
+		set((s) => {
 			// Owner-guarded so a background builder tab losing focus can't clear the
 			// builder the newly-focused page just registered.
-			s.builder?.conversationId === owner
-				? { builder: null, mode: "closed" }
-				: {}
-		),
+			if (s.builder?.conversationId !== owner) {
+				return {};
+			}
+			// A takeover that opened the panel closes it again on the way out. One
+			// that never opened it leaves it exactly as the user left it — closing a
+			// panel the user opened themselves, because some app's page unmounted,
+			// is the same intrusion as force-opening it.
+			return s.builder.dock === false
+				? { builder: null }
+				: { builder: null, mode: "closed" };
+		}),
 }));

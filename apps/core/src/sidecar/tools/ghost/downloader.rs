@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::sidecar::download_manager::{
-    build_http_client, compute_sha256, extract_from_tar_gz, extract_from_zip, ryu_dir,
-    ProgressCallback, VersionStore,
+    build_http_client, compute_sha256, extract_from_tar_gz, extract_from_zip, fetch_sibling_sha256,
+    ryu_dir, sha256_sibling_url, ProgressCallback, VersionStore,
 };
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
@@ -153,18 +153,20 @@ fn archive_url() -> String {
 // is a shipped artifact that cannot take effect — the same defect class as an
 // unreachable setting — and this is a binary Ryu then *runs*.
 //
-// PRECEDENT: `sidecar/manifest_sidecar.rs::fetch_release_sha256`, which does
-// exactly this for the apps-store sidecar bins off the same release. This is a
-// deliberate duplicate of that helper rather than a call to it, for two reasons
-// that are both about the seam, not about taste:
-//   - that one is `#[cfg(not(debug_assertions))]` (the download it guards is
-//     release-only; ghost's is not, so a dev build must still verify), and
-//   - its `screen_https` SSRF screen is private to that module.
+// HOISTED. The parser + fetcher that used to live here (and byte-identically in
+// `sidecar/tools/shadow/downloader.rs`) now live in
+// `download_manager::{parse_sha256_digest, fetch_sibling_sha256, sha256_sibling_url}`,
+// which is what this comment used to ask for ("when download_manager.rs is next
+// opened, hoist this pair into it") and what the mesh downloader
+// (`sidecar/tailscale/downloader.rs`) reuses rather than writing a third copy.
+// The parser's unit tests moved with it.
+//
+// `manifest_sidecar::fetch_release_sha256` deliberately did NOT fold in: it is
+// `#[cfg(not(debug_assertions))]` (the download it guards is release-only; ghost's
+// is not, so a dev build must still verify) and its `screen_https` SSRF screen is
+// private to that module.
 // NOT a precedent: `sidecar/providers/llamacpp/downloader.rs`, which passes
 // `sha256: None` at both of its call sites — it verifies nothing either.
-// When `sidecar/download_manager.rs` is next opened, hoist this pair (here and
-// the byte-identical copy in `sidecar/tools/shadow/downloader.rs`) into it and
-// make `manifest_sidecar` call the same function.
 //
 // BEST-EFFORT, NOT FAIL-CLOSED, and the asymmetry with `mirror/overlay/install.sh`
 // (which aborts on a missing checksum) is deliberate rather than an oversight.
@@ -175,32 +177,6 @@ fn archive_url() -> String {
 // Matching `manifest_sidecar`'s warn-and-continue keeps the knob working. The
 // warning says "downloading unverified" in as many words — it must never read as
 // though verification happened.
-
-/// The sibling checksum URL for a release archive.
-fn sha256_url(archive_url: &str) -> String {
-    format!("{archive_url}.sha256")
-}
-
-/// Parse a published `.sha256` body into a lowercase 64-char hex digest.
-///
-/// Both `sha256sum` and `shasum -a 256` write the two-column `<hex>  <filename>`
-/// form, which is what the release workflow and `scripts/release/release-local.sh`
-/// produce; a bare hex line is accepted too because hand-made mirrors emit it.
-/// Anything that is not exactly 64 hex characters is rejected rather than passed
-/// on, because `DownloadCenter` compares the value verbatim — a truncated or
-/// HTML-error-page "digest" would fail every transfer with a checksum mismatch
-/// and misdiagnose a missing file as a corrupt download.
-///
-/// Pure so it can be tested against the real published format without a network
-/// call; the fetch wrapper around it is [`GhostDownloader::fetch_release_sha256`].
-fn parse_sha256_digest(body: &str) -> Option<String> {
-    let hex = body.split_whitespace().next()?;
-    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(hex.to_ascii_lowercase())
-    } else {
-        None
-    }
-}
 
 // ── GhostDownloader ────────────────────────────────────────────────────────────
 
@@ -234,21 +210,7 @@ impl GhostDownloader {
     /// theatre rather than verification. A non-https override therefore downloads
     /// unverified (warned) instead of pretending.
     async fn fetch_release_sha256(&self, archive_url: &str) -> Option<String> {
-        if !archive_url.starts_with("https://") {
-            return None;
-        }
-        let body = self
-            .client
-            .get(sha256_url(archive_url))
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .text()
-            .await
-            .ok()?;
-        parse_sha256_digest(&body)
+        fetch_sibling_sha256(&self.client, archive_url).await
     }
 
     /// Ensure the Ghost binary is installed at `~/.ryu/bin/ghost`.
@@ -303,13 +265,14 @@ impl GhostDownloader {
         if sha256.is_none() {
             tracing::warn!(
                 "ghost: no usable .sha256 published at {} — downloading unverified",
-                sha256_url(&url)
+                sha256_sibling_url(&url)
             );
         }
 
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Tool,
+                role: crate::downloads::DownloadRole::Tool,
                 label: "Ghost".to_string(),
                 url: url.to_string(),
                 dest: archive_dest,
@@ -511,9 +474,10 @@ mod tests {
 
     // ── sibling `.sha256` ─────────────────────────────────────────────────────
     //
-    // These exercise the pure half only, deliberately. A test that performed a
-    // live GET against the hub would be green whenever GitHub is up and says
-    // nothing about whether we parse what the release actually publishes.
+    // The PARSER's tests moved to `download_manager::sha256_sibling_tests` with the
+    // parser itself. What stays here is what is still ghost-specific: that the URL
+    // we actually request is the sibling of the archive URL ghost synthesizes, and
+    // that ghost's own wrapper keeps the https-only rule.
 
     #[test]
     fn sha256_url_is_the_published_asset_plus_the_suffix() {
@@ -523,59 +487,10 @@ mod tests {
         let _lock = lock_env();
         let _g = EnvGuard::clear();
         let url = archive_url();
-        assert_eq!(sha256_url(&url), format!("{url}.sha256"));
-        assert!(sha256_url(&url).ends_with(".tar.gz.sha256") || cfg!(target_os = "windows"));
-    }
-
-    #[test]
-    fn parse_sha256_digest_reads_the_two_column_shasum_form() {
-        // The exact bytes `sha256sum` / `shasum -a 256` write, which is what
-        // `.github/workflows/release.yml` and `scripts/release/release-local.sh`
-        // both redirect into the `.sha256` file.
-        let hex = "a".repeat(64);
-        assert_eq!(
-            parse_sha256_digest(&format!("{hex}  ghost-macos-aarch64.tar.gz\n")),
-            Some(hex.clone())
+        assert_eq!(sha256_sibling_url(&url), format!("{url}.sha256"));
+        assert!(
+            sha256_sibling_url(&url).ends_with(".tar.gz.sha256") || cfg!(target_os = "windows")
         );
-        // BSD `shasum` on some hosts emits a single space; and a bare digest is
-        // what hand-rolled mirrors tend to produce.
-        assert_eq!(
-            parse_sha256_digest(&format!("{hex} ghost.tar.gz")),
-            Some(hex.clone())
-        );
-        assert_eq!(parse_sha256_digest(&hex), Some(hex.clone()));
-        assert_eq!(parse_sha256_digest(&format!("  \n {hex}\n")), Some(hex));
-    }
-
-    #[test]
-    fn parse_sha256_digest_lowercases() {
-        // `DownloadCenter` compares against `hex::encode`'s lowercase output, so an
-        // uppercase digest would fail every transfer as a "checksum mismatch" —
-        // a corrupt-download diagnosis for a perfectly good file.
-        let upper = "A1B2C3D4".repeat(8);
-        assert_eq!(upper.len(), 64);
-        assert_eq!(
-            parse_sha256_digest(&upper),
-            Some("a1b2c3d4".repeat(8)),
-            "digest must be normalised to lowercase"
-        );
-    }
-
-    #[test]
-    fn parse_sha256_digest_rejects_anything_that_is_not_a_digest() {
-        // Rejection matters more than acceptance: a `None` downloads unverified
-        // with a warning, whereas a bogus non-digest would abort the transfer and
-        // blame the archive. GitHub answers a missing asset with an HTML page.
-        assert_eq!(parse_sha256_digest(""), None);
-        assert_eq!(parse_sha256_digest("   \n\t "), None);
-        assert_eq!(parse_sha256_digest("<!DOCTYPE html><html>Not Found"), None);
-        assert_eq!(parse_sha256_digest(&"a".repeat(63)), None, "too short");
-        assert_eq!(parse_sha256_digest(&"a".repeat(65)), None, "too long");
-        // 64 chars but not hex — `g` is the classic off-by-one past `f`.
-        assert_eq!(parse_sha256_digest(&"g".repeat(64)), None);
-        // A trailing filename must not be mistaken for the digest when the digest
-        // column itself is malformed.
-        assert_eq!(parse_sha256_digest("sha256 ghost.tar.gz"), None);
     }
 
     #[tokio::test]

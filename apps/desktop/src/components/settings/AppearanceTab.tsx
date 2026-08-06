@@ -1,7 +1,9 @@
 import {
 	ArrowDown01Icon,
 	Cancel01Icon,
+	Delete02Icon,
 	FloppyDiskIcon,
+	Share08Icon,
 	Tick01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -23,21 +25,25 @@ import {
 	ColorPickerInput,
 	ColorPickerTrigger,
 } from "@ryu/ui/components/color-picker";
-import { ElasticSlider } from "@ryu/ui/components/elastic-slider";
 import { Input } from "@ryu/ui/components/input";
+import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
 import {
 	Select,
 	SelectContent,
+	SelectGroup,
 	SelectItem,
+	SelectLabel,
+	SelectSeparator,
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select";
+import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Switch } from "@ryu/ui/components/switch";
 import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
 import { cn } from "@ryu/ui/lib/utils";
 import { useTheme } from "next-themes";
 import type { CSSProperties } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { useChatDateGrouping } from "@/src/hooks/useChatDateGrouping.ts";
 import {
 	setChromeShadows,
@@ -122,13 +128,16 @@ import {
 	customTokensToVariant,
 	DEFAULT_DARK_ID,
 	DEFAULT_LIGHT_ID,
+	deleteCustomTheme,
 	findVariant,
-	getAllVariants,
+	type GroupedVariants,
+	getGroupedVariants,
 	STORAGE_KEYS,
 	saveCustomTheme,
 	type ThemeVariant,
 	variantToCustomTokens,
 } from "@/src/lib/themes/presets.ts";
+import { themeManifestJson } from "@/src/lib/themes/publish.ts";
 import { BackgroundCustomizationSettings } from "./BackgroundCustomizationSettings.tsx";
 import {
 	SettingsCard,
@@ -327,6 +336,77 @@ function PresetSelectItem({ variant }: { variant: ThemeVariant }) {
 	);
 }
 
+// Section headers for the preset picker, in render order. "My themes" leads because
+// a user's own saved theme is the one they came here to re-select; "Installed" holds
+// themes that arrived with a marketplace plugin (`contributes.themes`); "Built-in"
+// is the shipped set — named for provenance, matching how VS Code and Zed label the
+// bundled half of their theme lists.
+const PRESET_GROUP_LABELS: Record<keyof GroupedVariants, string> = {
+	custom: "My themes",
+	plugin: "Installed",
+	builtin: "Built-in",
+};
+
+const PRESET_GROUP_ORDER = ["custom", "plugin", "builtin"] as const;
+
+/**
+ * Hand the user a publishable plugin manifest for one of their own themes.
+ *
+ * Sharing a theme is publishing a plugin here — there is no theme-shaped upload
+ * endpoint, because a theme IS a plugin that contributes one. The clipboard is the
+ * whole handoff: what comes back is a complete `manifest.json`, so the next step is
+ * the same `ryu publish` any other plugin author runs.
+ */
+async function shareTheme(variant: ThemeVariant) {
+	try {
+		await navigator.clipboard.writeText(themeManifestJson(variant));
+		toast.success("Theme manifest copied", {
+			description:
+				"Save it as manifest.json in a new folder and run `ryu publish` to list it on the marketplace.",
+		});
+	} catch {
+		toast.error("Couldn't copy the theme manifest");
+	}
+}
+
+/**
+ * The preset dropdown, split into provenance groups with shadcn `SelectGroup` /
+ * `SelectLabel` headers. Empty groups are dropped entirely rather than rendered as a
+ * bare header (a fresh install has no custom or installed themes, and a lone
+ * "Built-in" header above the only group would be noise).
+ */
+function PresetSelectGroups({ groups }: { groups: GroupedVariants }) {
+	const populated = PRESET_GROUP_ORDER.filter((key) => groups[key].length > 0);
+	// A single group needs no header at all — the trigger already says what it is.
+	if (populated.length < 2) {
+		return (
+			<>
+				{populated.flatMap((key) =>
+					groups[key].map((v) => <PresetSelectItem key={v.id} variant={v} />)
+				)}
+			</>
+		);
+	}
+	return (
+		<>
+			{populated.map((key, index) => (
+				// The separator sits BETWEEN groups, not inside one: a `SelectGroup`
+				// is a labelled region, and a rule nested under its label reads as
+				// part of that group rather than as the boundary before it.
+				<Fragment key={key}>
+					{index > 0 && <SelectSeparator />}
+					<SelectGroup>
+						<SelectLabel>{PRESET_GROUP_LABELS[key]}</SelectLabel>
+						{groups[key].map((v) => (
+							<PresetSelectItem key={v.id} variant={v} />
+						))}
+					</SelectGroup>
+				</Fragment>
+			))}
+		</>
+	);
+}
+
 function ColorField({
 	mode,
 	fieldKey,
@@ -456,8 +536,10 @@ function PrimaryColorField({
 interface ThemePanelProps {
 	baseTokens: CustomTokens;
 	dirty: boolean;
+	groups: GroupedVariants;
 	label: string;
 	mode: "light" | "dark";
+	onDeletePreset: (id: string) => void;
 	onDiscardClick: () => void;
 	onSaveCancel: () => void;
 	onSaveClick: () => void;
@@ -469,13 +551,12 @@ interface ThemePanelProps {
 	saveName: string;
 	selectedId: string;
 	tokens: CustomTokens;
-	variants: ThemeVariant[];
 }
 
 function ThemePanel({
 	mode,
 	label,
-	variants,
+	groups,
 	selectedId,
 	tokens,
 	dirty,
@@ -484,12 +565,24 @@ function ThemePanel({
 	onSelectPreset,
 	onTokenChange,
 	onSaveClick,
+	onDeletePreset,
 	onDiscardClick,
 	onSaveNameChange,
 	onSaveConfirm,
 	onSaveCancel,
 }: ThemePanelProps) {
 	const selected = findVariant(selectedId);
+	// Hold the id being confirmed, not a bare boolean: picking a different preset
+	// mid-confirm then re-selects the state away instead of leaving an armed
+	// "Delete" pointed at whatever is now selected.
+	const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+	// Only a locally-saved theme can be deleted here. A built-in has no storage to
+	// remove, and an installed one belongs to its plugin — that is an uninstall in
+	// the Store, not a delete in Appearance. Answered from `groups.custom` rather
+	// than `variantSource()` so this stays free: the panel re-renders on every
+	// colour-picker drag, and that helper re-reads and re-parses localStorage.
+	const canDelete = !dirty && groups.custom.some((v) => v.id === selectedId);
+	const confirming = canDelete && confirmDeleteId === selectedId;
 
 	return (
 		<div className="space-y-3">
@@ -498,38 +591,91 @@ function ThemePanel({
 				<p className="mb-2 text-muted-foreground text-xs">
 					Used when {mode} mode is active.
 				</p>
-				<Select onValueChange={onSelectPreset} value={dirty ? "" : selectedId}>
-					<SelectTrigger className="h-9 w-full text-sm">
-						{dirty ? (
-							<span className="flex items-center gap-2">
-								<PresetSwatch
-									bg={tokens.background}
-									primary={tokens.primary}
-									surface={tokens.sidebar}
-								/>
-								<span className="text-muted-foreground italic">
-									Unsaved theme
+				<div className="flex items-center gap-2">
+					<Select
+						onValueChange={onSelectPreset}
+						value={dirty ? "" : selectedId}
+					>
+						<SelectTrigger className="h-9 w-full text-sm">
+							{dirty ? (
+								<span className="flex items-center gap-2">
+									<PresetSwatch
+										bg={tokens.background}
+										primary={tokens.primary}
+										surface={tokens.sidebar}
+									/>
+									<span className="text-muted-foreground italic">
+										Unsaved theme
+									</span>
 								</span>
-							</span>
-						) : selected ? (
-							<span className="flex items-center gap-2">
-								<PresetSwatch
-									bg={selected.preview.bg}
-									primary={selected.preview.primary}
-									surface={selected.preview.surface}
-								/>
-								<span>{selected.label}</span>
-							</span>
-						) : (
-							<SelectValue />
-						)}
-					</SelectTrigger>
-					<SelectContent>
-						{variants.map((v) => (
-							<PresetSelectItem key={v.id} variant={v} />
-						))}
-					</SelectContent>
-				</Select>
+							) : selected ? (
+								<span className="flex items-center gap-2">
+									<PresetSwatch
+										bg={selected.preview.bg}
+										primary={selected.preview.primary}
+										surface={selected.preview.surface}
+									/>
+									<span>{selected.label}</span>
+								</span>
+							) : (
+								<SelectValue />
+							)}
+						</SelectTrigger>
+						<SelectContent>
+							<PresetSelectGroups groups={groups} />
+						</SelectContent>
+					</Select>
+					{canDelete && !confirming && (
+						<>
+							<Button
+								aria-label={`Share ${selected?.label ?? "theme"}`}
+								className="h-9 w-9 flex-shrink-0"
+								onClick={() => selected && shareTheme(selected)}
+								size="icon"
+								title="Copy a publishable plugin manifest for this theme"
+								variant="ghost"
+							>
+								<HugeiconsIcon icon={Share08Icon} size={14} />
+							</Button>
+							<Button
+								aria-label={`Delete ${selected?.label ?? "theme"}`}
+								className="h-9 w-9 flex-shrink-0"
+								onClick={() => setConfirmDeleteId(selectedId)}
+								size="icon"
+								title={`Delete ${selected?.label ?? "theme"}`}
+								variant="ghost"
+							>
+								<HugeiconsIcon icon={Delete02Icon} size={14} />
+							</Button>
+						</>
+					)}
+				</div>
+				{confirming && (
+					<div className="mt-2 flex items-center gap-2">
+						<span className="flex-1 text-muted-foreground text-xs">
+							Delete “{selected?.label}”?
+						</span>
+						<Button
+							className="h-7 px-2 text-xs"
+							onClick={() => {
+								setConfirmDeleteId(null);
+								onDeletePreset(selectedId);
+							}}
+							size="sm"
+							variant="destructive"
+						>
+							Delete
+						</Button>
+						<Button
+							className="h-7 px-2 text-xs"
+							onClick={() => setConfirmDeleteId(null)}
+							size="sm"
+							variant="ghost"
+						>
+							Cancel
+						</Button>
+					</div>
+				)}
 			</div>
 
 			<div className="space-y-1.5">
@@ -838,11 +984,11 @@ export function AppearanceTab() {
 	const lightDirty = !tokensAreEqual(lightTokens, lightBaseTokens);
 	const darkDirty = !tokensAreEqual(darkTokens, darkBaseTokens);
 
-	const [lightVariants, setLightVariants] = useState<ThemeVariant[]>(() =>
-		getAllVariants("light")
+	const [lightGroups, setLightGroups] = useState<GroupedVariants>(() =>
+		getGroupedVariants("light")
 	);
-	const [darkVariants, setDarkVariants] = useState<ThemeVariant[]>(() =>
-		getAllVariants("dark")
+	const [darkGroups, setDarkGroups] = useState<GroupedVariants>(() =>
+		getGroupedVariants("dark")
 	);
 
 	const [uiFont, setUiFontState] = useState<string>(
@@ -947,7 +1093,7 @@ export function AppearanceTab() {
 		const id = `custom-light-${name.toLowerCase().replace(/\s+/g, "-")}-${Date.now()}`;
 		const variant = customTokensToVariant(id, name, "light", lightTokens);
 		saveCustomTheme(variant);
-		setLightVariants(getAllVariants("light"));
+		setLightGroups(getGroupedVariants("light"));
 		setLightPresetId(id);
 		setLightBaseTokens(lightTokens);
 		setLightSaveDialog(false);
@@ -963,13 +1109,40 @@ export function AppearanceTab() {
 		const id = `custom-dark-${name.toLowerCase().replace(/\s+/g, "-")}-${Date.now()}`;
 		const variant = customTokensToVariant(id, name, "dark", darkTokens);
 		saveCustomTheme(variant);
-		setDarkVariants(getAllVariants("dark"));
+		setDarkGroups(getGroupedVariants("dark"));
 		setDarkPresetId(id);
 		setDarkBaseTokens(darkTokens);
 		setDarkSaveDialog(false);
 		setDarkSaveName("");
 		setDarkPreset(id);
 	}, [darkSaveName, darkTokens]);
+
+	// Deleting the ACTIVE preset would otherwise leave a dangling id in
+	// localStorage: `findVariant` returns undefined, `initTheme` applies nothing,
+	// and the next cold start boots with whatever tokens the stylesheet ships. So
+	// deletion always re-selects the shipped default for that mode, which also
+	// repaints immediately through the normal preset-change path.
+	const handleLightDelete = useCallback(
+		(id: string) => {
+			deleteCustomTheme(id);
+			setLightGroups(getGroupedVariants("light"));
+			if (lightPresetId === id) {
+				handleLightPreset(DEFAULT_LIGHT_ID);
+			}
+		},
+		[handleLightPreset, lightPresetId]
+	);
+
+	const handleDarkDelete = useCallback(
+		(id: string) => {
+			deleteCustomTheme(id);
+			setDarkGroups(getGroupedVariants("dark"));
+			if (darkPresetId === id) {
+				handleDarkPreset(DEFAULT_DARK_ID);
+			}
+		},
+		[handleDarkPreset, darkPresetId]
+	);
 
 	const handleLightDiscard = useCallback(() => {
 		// Re-apply the saved preset variant (not customTokensToVariant on the
@@ -1155,8 +1328,10 @@ export function AppearanceTab() {
 					<ThemePanel
 						baseTokens={lightBaseTokens}
 						dirty={lightDirty}
+						groups={lightGroups}
 						label="Light"
 						mode="light"
+						onDeletePreset={handleLightDelete}
 						onDiscardClick={handleLightDiscard}
 						onSaveCancel={() => setLightSaveDialog(false)}
 						onSaveClick={() => setLightSaveDialog(true)}
@@ -1168,13 +1343,14 @@ export function AppearanceTab() {
 						saveName={lightSaveName}
 						selectedId={lightPresetId}
 						tokens={lightTokens}
-						variants={lightVariants}
 					/>
 					<ThemePanel
 						baseTokens={darkBaseTokens}
 						dirty={darkDirty}
+						groups={darkGroups}
 						label="Dark"
 						mode="dark"
+						onDeletePreset={handleDarkDelete}
 						onDiscardClick={handleDarkDiscard}
 						onSaveCancel={() => setDarkSaveDialog(false)}
 						onSaveClick={() => setDarkSaveDialog(true)}
@@ -1186,7 +1362,6 @@ export function AppearanceTab() {
 						saveName={darkSaveName}
 						selectedId={darkPresetId}
 						tokens={darkTokens}
-						variants={darkVariants}
 					/>
 				</SettingsCard>
 			</SettingsSection>
@@ -1194,7 +1369,7 @@ export function AppearanceTab() {
 			<SettingsSection title="Layout & sizing">
 				<SettingsCard className="space-y-3">
 					<div className="space-y-1.5">
-						<ElasticSlider
+						<FluidSlider
 							label="Muted contrast"
 							max={100}
 							min={0}
@@ -1208,8 +1383,8 @@ export function AppearanceTab() {
 						</p>
 					</div>
 
-					<ElasticSlider
-						formatValue={(v) => `${v.toFixed(3)}rem`}
+					<FluidSlider
+						format={(v) => `${v.toFixed(3)}rem`}
 						label="Roundness"
 						max={1.5}
 						min={0}
@@ -1219,8 +1394,8 @@ export function AppearanceTab() {
 					/>
 
 					<div className="space-y-1.5">
-						<ElasticSlider
-							formatValue={(v) => `${(v * 100).toFixed(0)}%`}
+						<FluidSlider
+							format={(v) => `${(v * 100).toFixed(0)}%`}
 							label="Scale (UI zoom)"
 							max={SCALE_MAX}
 							min={SCALE_MIN}
@@ -1235,8 +1410,8 @@ export function AppearanceTab() {
 					</div>
 
 					<div className="space-y-1.5">
-						<ElasticSlider
-							formatValue={(v) => `${v.toFixed(3)}rem`}
+						<FluidSlider
+							format={(v) => `${v.toFixed(3)}rem`}
 							label="Zoom (spacing)"
 							max={0.36}
 							min={0.16}
@@ -1252,8 +1427,8 @@ export function AppearanceTab() {
 					</div>
 
 					<div className="space-y-1.5">
-						<ElasticSlider
-							formatValue={(v) => `${v.toFixed(2)}rem`}
+						<FluidSlider
+							format={(v) => `${v.toFixed(2)}rem`}
 							label="Card padding"
 							max={1.6}
 							min={0.48}
@@ -1268,8 +1443,8 @@ export function AppearanceTab() {
 						</p>
 					</div>
 
-					<ElasticSlider
-						formatValue={(v) => `${v}px`}
+					<FluidSlider
+						format={(v) => `${v}px`}
 						label="Chat width"
 						max={960}
 						min={480}
@@ -1278,8 +1453,8 @@ export function AppearanceTab() {
 						value={chatWidthValue}
 					/>
 
-					<ElasticSlider
-						formatValue={(v) => `${v}px`}
+					<FluidSlider
+						format={(v) => `${v}px`}
 						label="Sidebar width"
 						max={MAX_SIDEBAR_WIDTH}
 						min={MIN_SIDEBAR_WIDTH}

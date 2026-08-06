@@ -816,6 +816,7 @@ async fn ensure_binary(
                 downloads
                     .download_blocking(crate::downloads::DownloadSpec {
                         kind: crate::downloads::DownloadKind::Other,
+                        role: crate::downloads::DownloadRole::Plugin,
                         label: format!("plugin sidecar binary: {}", bin.url),
                         url: bin.url.clone(),
                         dest: dest.clone(),
@@ -846,6 +847,7 @@ async fn ensure_binary(
                     downloads
                         .download_blocking(crate::downloads::DownloadSpec {
                             kind: crate::downloads::DownloadKind::Other,
+                            role: crate::downloads::DownloadRole::Plugin,
                             label: format!("plugin sidecar archive: {}", bin.url),
                             url: bin.url.clone(),
                             dest: archive_path.clone(),
@@ -1064,6 +1066,7 @@ async fn ensure_local_sidecar_present(
             match downloads
                 .download_blocking(crate::downloads::DownloadSpec {
                     kind: crate::downloads::DownloadKind::Other,
+                    role: crate::downloads::DownloadRole::Plugin,
                     label: format!("app sidecar: {command}"),
                     url: url.clone(),
                     dest: dest.clone(),

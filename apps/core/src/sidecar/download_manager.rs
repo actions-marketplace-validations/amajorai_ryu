@@ -80,6 +80,87 @@ where
     Err(last_err)
 }
 
+// ── Sibling `.sha256` verification ────────────────────────────────────────────
+//
+// Publishers of release archives — this repo's own `.github/workflows/release.yml`
+// staging loop, and third parties like `pkgs.tailscale.com` — emit a `<asset>.sha256`
+// next to every asset. Verifying against it is what stops `DownloadCenter` from
+// executing bytes nobody checked, and this is the shared implementation every
+// downloader must use.
+//
+// This pair was duplicated byte-for-byte in `tools/ghost/downloader.rs` and
+// `tools/shadow/downloader.rs`, whose section comment asked for exactly this hoist
+// ("When `sidecar/download_manager.rs` is next opened, hoist this pair … into it").
+// `manifest_sidecar::fetch_release_sha256` deliberately stays separate: it is
+// `#[cfg(not(debug_assertions))]` (its download is release-only) and screens URLs
+// through that module's private `screen_https`, so folding it in here would either
+// drop a guard or drag a module-private SSRF screen into shared code.
+//
+// FAIL-CLOSED vs BEST-EFFORT is the CALLER's decision, not this helper's: it
+// returns `None` for "no usable digest" and says nothing about whether that is
+// tolerable. A caller fetching from a publisher that ALWAYS emits a digest (the
+// hub release, pkgs.tailscale.com) should abort on `None`; a caller whose URL may
+// come from an operator env knob pointing at a self-built archive should warn and
+// continue, because failing closed there makes the documented override unusable.
+
+/// The sibling checksum URL for a release archive — an exact `<asset>.sha256`
+/// sibling, not a separate SHASUMS manifest.
+pub(crate) fn sha256_sibling_url(archive_url: &str) -> String {
+    format!("{archive_url}.sha256")
+}
+
+/// Parse a published `.sha256` body into a lowercase 64-char hex digest.
+///
+/// Both `sha256sum` and `shasum -a 256` write the two-column `<hex>  <filename>`
+/// form, which is what the release workflow and `scripts/release/release-local.sh`
+/// produce; a bare hex line is accepted too because hand-made mirrors (and
+/// `pkgs.tailscale.com`) emit that single-column form.
+///
+/// Anything that is not exactly 64 hex characters is rejected rather than passed
+/// on, because `DownloadCenter` compares the value verbatim — a truncated or
+/// HTML-error-page "digest" would fail every transfer with a checksum mismatch
+/// and misdiagnose a missing file as a corrupt download.
+///
+/// Pure so it can be tested against the real published format without a network
+/// call; the fetch wrapper around it is [`fetch_sibling_sha256`].
+pub(crate) fn parse_sha256_digest(body: &str) -> Option<String> {
+    let hex = body.split_whitespace().next()?;
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(hex.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// Fetch the archive's sibling `<url>.sha256`, for
+/// [`crate::downloads::DownloadSpec::sha256`] to verify the downloaded bytes
+/// against. `None` when the checksum is absent, unreachable or malformed.
+///
+/// Only `https` URLs are followed. Several callers build the archive URL from an
+/// operator env knob, and a plaintext checksum fetched over `http` could be
+/// rewritten by whoever rewrote the archive — verification theatre rather than
+/// verification. A non-https URL therefore yields `None` (and the caller decides
+/// whether to refuse or to download unverified, loudly) instead of pretending.
+pub(crate) async fn fetch_sibling_sha256(
+    client: &reqwest::Client,
+    archive_url: &str,
+) -> Option<String> {
+    if !archive_url.starts_with("https://") {
+        return None;
+    }
+    let body = client
+        .get(sha256_sibling_url(archive_url))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    parse_sha256_digest(&body)
+}
+
 /// Issue a GET, attaching the Hugging Face access token for Hub hosts and
 /// turning a gated `401`/`403` into an actionable error (token + license terms),
 /// rather than a bare HTTP status. Non-HF hosts pass through unchanged.
@@ -1037,6 +1118,97 @@ impl VersionStore {
         self.versions.insert(name.to_string(), version.to_string());
         self.checksums
             .insert(name.to_string(), checksum.to_string());
+    }
+}
+
+/// The hoisted sibling-`.sha256` pair. Moved here verbatim (tests included) from
+/// `tools/ghost/downloader.rs`, whose section comment asked for the hoist.
+///
+/// These exercise the PURE half only, deliberately. A test that performed a live
+/// GET against a publisher would be green whenever that publisher is up and says
+/// nothing about whether we parse what it really emits.
+#[cfg(test)]
+mod sha256_sibling_tests {
+    use super::*;
+
+    #[test]
+    fn sha256_sibling_url_is_the_asset_plus_the_suffix() {
+        // An exact sibling, not a separate SHASUMS manifest. If this ever drifts,
+        // every download silently falls back to unverified.
+        assert_eq!(
+            sha256_sibling_url("https://example.test/ghost-macos-aarch64.tar.gz"),
+            "https://example.test/ghost-macos-aarch64.tar.gz.sha256"
+        );
+    }
+
+    #[test]
+    fn parse_sha256_digest_reads_the_two_column_shasum_form() {
+        // The exact bytes `sha256sum` / `shasum -a 256` write, which is what
+        // `.github/workflows/release.yml` and `scripts/release/release-local.sh`
+        // both redirect into the `.sha256` file.
+        let hex = "a".repeat(64);
+        assert_eq!(
+            parse_sha256_digest(&format!("{hex}  ghost-macos-aarch64.tar.gz\n")),
+            Some(hex.clone())
+        );
+        // BSD `shasum` on some hosts emits a single space; and a bare digest is
+        // what hand-rolled mirrors — and pkgs.tailscale.com — produce.
+        assert_eq!(
+            parse_sha256_digest(&format!("{hex} ghost.tar.gz")),
+            Some(hex.clone())
+        );
+        assert_eq!(parse_sha256_digest(&hex), Some(hex.clone()));
+        assert_eq!(parse_sha256_digest(&format!("  \n {hex}\n")), Some(hex));
+    }
+
+    #[test]
+    fn parse_sha256_digest_lowercases() {
+        // `DownloadCenter` compares against `hex::encode`'s lowercase output, so an
+        // uppercase digest would fail every transfer as a "checksum mismatch" —
+        // a corrupt-download diagnosis for a perfectly good file.
+        let upper = "A1B2C3D4".repeat(8);
+        assert_eq!(upper.len(), 64);
+        assert_eq!(
+            parse_sha256_digest(&upper),
+            Some("a1b2c3d4".repeat(8)),
+            "digest must be normalised to lowercase"
+        );
+    }
+
+    #[test]
+    fn parse_sha256_digest_rejects_anything_that_is_not_a_digest() {
+        // Rejection matters more than acceptance: a `None` lets the caller decide
+        // (refuse, or warn + download unverified), whereas a bogus non-digest would
+        // abort the transfer and blame the archive. GitHub answers a missing asset
+        // with an HTML page.
+        assert_eq!(parse_sha256_digest(""), None);
+        assert_eq!(parse_sha256_digest("   \n\t "), None);
+        assert_eq!(parse_sha256_digest("<!DOCTYPE html><html>Not Found"), None);
+        assert_eq!(parse_sha256_digest(&"a".repeat(63)), None, "too short");
+        assert_eq!(parse_sha256_digest(&"a".repeat(65)), None, "too long");
+        // 64 chars but not hex — `g` is the classic off-by-one past `f`.
+        assert_eq!(parse_sha256_digest(&"g".repeat(64)), None);
+        // A trailing filename must not be mistaken for the digest when the digest
+        // column itself is malformed.
+        assert_eq!(parse_sha256_digest("sha256 ghost.tar.gz"), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_sibling_sha256_refuses_non_https_urls() {
+        // Several callers build the archive URL from operator input. Over plaintext
+        // the checksum is rewritable by whoever rewrote the archive, so we decline
+        // rather than perform verification theatre. No network is touched here: the
+        // scheme check returns before any request is built.
+        let c = build_http_client();
+        assert_eq!(
+            fetch_sibling_sha256(&c, "http://mirror.test/g.tar.gz").await,
+            None
+        );
+        assert_eq!(
+            fetch_sibling_sha256(&c, "file:///tmp/ghost.tar.gz").await,
+            None
+        );
+        assert_eq!(fetch_sibling_sha256(&c, "/tmp/ghost.tar.gz").await, None);
     }
 }
 

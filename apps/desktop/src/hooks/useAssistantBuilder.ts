@@ -6,7 +6,7 @@
 // a background builder tab can't steal the panel (every tab stays mounted — see
 // Layout), and the takeover is cleared when the page unmounts or loses focus.
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useIsActiveTab } from "@/src/contexts/TabsContext.tsx";
 import {
 	type AssistantBuilderKind,
@@ -14,9 +14,26 @@ import {
 } from "@/src/store/useAssistantStore.ts";
 
 export interface AssistantBuilderInput {
+	/** Sentence under the empty-state title. Required for an app-defined kind. */
+	description?: string;
+	/** Whether registering docks the panel open. Defaults to `true` (the builder
+	 *  pages' behaviour); pass `false` for a surface the user did not ask to chat
+	 *  with. See the store's `dock` doc. */
+	dock?: boolean;
+	/** `agent` / `workflow` (built-in preambles) or an app-defined surface id. */
 	kind: AssistantBuilderKind;
+	/** Empty-state + header title. Defaults to `Build <targetName>`. */
+	label?: string;
 	/** Called after each settled turn with the edited id so the page re-hydrates. */
 	onChanged: (id: string) => void;
+	/**
+	 * Instructions injected ahead of the first outgoing user message. REQUIRED for
+	 * an app-defined `kind`; ignored for `agent`/`workflow`, which ship their own.
+	 * `{{targetId}}` / `{{snapshot}}` are substituted at send time.
+	 */
+	preamble?: string;
+	/** One-tap starter prompts offered while the thread is empty. */
+	prompts?: string[];
 	/** Lazily resolve (creating a draft) the id to build. Returns null on failure. */
 	resolveId: () => Promise<string | null>;
 	/** Compact snapshot of the current definition, injected into the preamble. */
@@ -25,6 +42,8 @@ export interface AssistantBuilderInput {
 	targetId: string | null;
 	/** Human name of the target, for the header + empty-state copy. */
 	targetName: string;
+	/** Tool ids to name in the preamble. Advisory — see the store's doc comment. */
+	tools?: string[];
 }
 
 /**
@@ -66,8 +85,28 @@ export function useAssistantBuilder(input: AssistantBuilderInput | null): void {
 	const targetId = input?.targetId ?? null;
 	const targetName = input?.targetName ?? "";
 	const snapshot = input?.snapshot ?? "";
-	const fieldsRef = useRef({ targetId, targetName, snapshot });
-	fieldsRef.current = { targetId, targetName, snapshot };
+	// The descriptive half (label/description/preamble/tools/prompts). Arrays get
+	// a serialized dep key so an inline `tools={[...]}` literal can't re-fire the
+	// update effect every render.
+	const label = input?.label;
+	const description = input?.description;
+	const dock = input?.dock;
+	const preamble = input?.preamble;
+	const toolsKey = JSON.stringify(input?.tools ?? []);
+	const promptsKey = JSON.stringify(input?.prompts ?? []);
+	const descriptor = useMemo(
+		() => ({
+			label,
+			description,
+			dock,
+			preamble,
+			tools: JSON.parse(toolsKey) as string[],
+			prompts: JSON.parse(promptsKey) as string[],
+		}),
+		[label, description, dock, preamble, toolsKey, promptsKey]
+	);
+	const fieldsRef = useRef({ targetId, targetName, snapshot, descriptor });
+	fieldsRef.current = { targetId, targetName, snapshot, descriptor };
 
 	// Register (auto-docks) on focus; clear on blur/unmount. Owner-guarded clear.
 	useEffect(() => {
@@ -82,6 +121,7 @@ export function useAssistantBuilder(input: AssistantBuilderInput | null): void {
 			snapshot: fieldsRef.current.snapshot,
 			targetId: fieldsRef.current.targetId,
 			targetName: fieldsRef.current.targetName,
+			...fieldsRef.current.descriptor,
 		});
 		return () => clearBuilder(owner);
 	}, [
@@ -99,6 +139,21 @@ export function useAssistantBuilder(input: AssistantBuilderInput | null): void {
 		if (!(isActive && kind)) {
 			return;
 		}
-		updateBuilder({ snapshot, targetId, targetName });
-	}, [isActive, kind, snapshot, targetId, targetName, updateBuilder]);
+		updateBuilder({ snapshot, targetId, targetName, ...descriptor });
+	}, [
+		isActive,
+		kind,
+		snapshot,
+		targetId,
+		targetName,
+		descriptor,
+		updateBuilder,
+	]);
 }
+
+/**
+ * The generalized name for {@link useAssistantBuilder}: an app-defined takeover
+ * is a *surface*, not a builder. Same hook — `kind` is an open string and an
+ * app-defined kind must bring its own `preamble`.
+ */
+export const useAssistantSurface = useAssistantBuilder;

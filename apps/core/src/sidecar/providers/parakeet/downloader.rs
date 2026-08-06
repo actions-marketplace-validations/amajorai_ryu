@@ -105,7 +105,8 @@ impl ParakeetDownloader {
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Voice,
-                label: "Parakeet v3".to_string(),
+                role: crate::downloads::DownloadRole::SpeechModel,
+                label: "Parakeet v3 (archive)".to_string(),
                 url,
                 dest: archive_dest,
                 sha256: None,
@@ -119,10 +120,14 @@ impl ParakeetDownloader {
         // error, the same way other post-download install steps report.
         let archive_to_extract = archive_path.clone();
         let written = downloads
-            .register_indeterminate(
+            .register_indeterminate_as(
                 "parakeet-extract:v3-int8".to_string(),
                 crate::downloads::DownloadKind::Voice,
-                "Parakeet v3 (extract)".to_string(),
+                // Tagged as an unpack step, not a transfer: it moves no bytes over
+                // the network, so a client must render it as "Unpacking" rather
+                // than a download stuck at 0 B.
+                crate::downloads::DownloadRole::Extract,
+                "Parakeet v3 (unpack)".to_string(),
                 async move {
                     let archive = tokio::fs::read(&archive_to_extract)
                         .await

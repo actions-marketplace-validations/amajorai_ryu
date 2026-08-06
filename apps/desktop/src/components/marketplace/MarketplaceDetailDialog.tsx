@@ -34,6 +34,15 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ImageLightbox } from "@ryu/blocks/desktop/agent-elements/image-lightbox";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingInfoGrid,
+	ListingSection,
+	type ListingStat,
+	ListingStatStrip,
+} from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
@@ -105,18 +114,25 @@ export default function MarketplaceDetailDialog({
 			onOpenChange={(next: boolean) => (next ? undefined : onClose())}
 			open={open}
 		>
-			<DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
+			{/* Same width and the same `p-0` full-bleed contract as the Store's
+			    catalog preview (`StoreCatalogLayout`), because it is the same THING —
+			    a listing page. It was `max-w-3xl` (48rem) while the catalog preview was
+			    already 64rem, so the paid listings opened in a noticeably narrower box
+			    than the free ones and every section inside wrapped early. */}
+			<DialogContent className="max-h-[88vh] w-[min(80rem,94vw)] max-w-[min(80rem,94vw)] overflow-hidden p-0">
 				<DialogHeader className="sr-only">
 					<DialogTitle>{initialName ?? "Listing"}</DialogTitle>
 				</DialogHeader>
-				{open ? (
-					<DetailBody
-						id={id}
-						initialIconUrl={initialIconUrl}
-						initialName={initialName}
-						kind={kind}
-					/>
-				) : null}
+				<div className="max-h-[88vh] overflow-y-auto overflow-x-hidden">
+					{open ? (
+						<DetailBody
+							id={id}
+							initialIconUrl={initialIconUrl}
+							initialName={initialName}
+							kind={kind}
+						/>
+					) : null}
+				</div>
 			</DialogContent>
 		</Dialog>
 	);
@@ -173,56 +189,78 @@ function DetailBody({
 	// The header's primary CTA opens the first setup step that carries a link.
 	const primaryAction = detail?.setup.find((s) => s.actionUrl) ?? null;
 
+	// `(ListingStat | null)[]`, not `ListingStat[]`: an absent fact contributes
+	// `null` and drops its whole cell, rather than widening the array's inferred
+	// element union per branch.
+	const cells: (ListingStat | null)[] = [
+		rating.count > 0
+			? {
+					label: `${rating.count} Ratings`,
+					sub: (
+						<StarRating
+							className="justify-center"
+							size="size-3"
+							value={rating.average}
+						/>
+					),
+					value: rating.average.toFixed(1),
+				}
+			: { label: "Ratings", value: "—", sub: "No reviews yet" },
+		detail?.version ? { label: "Version", value: `v${detail.version}` } : null,
+		detail?.category ? { label: "Category", value: detail.category } : null,
+		detail?.developer ? { label: "Developer", value: detail.developer } : null,
+		detail && detail.runnables.length > 0
+			? { label: "Includes", value: `${detail.runnables.length}` }
+			: null,
+	];
+	const statItems = cells.filter((cell): cell is ListingStat => cell !== null);
+
 	return (
-		<div className="flex flex-col gap-6">
-			<header className="flex items-start gap-4">
-				<DetailLogo iconUrl={iconUrl} name={name} />
-				<div className="min-w-0 flex-1">
-					<h2 className="truncate font-semibold text-lg">{name}</h2>
-					{detail?.tagline ? (
-						<p className="mt-0.5 truncate text-muted-foreground text-sm">
-							{detail.tagline}
-						</p>
-					) : null}
-					<div className="mt-1.5 flex flex-wrap items-center gap-2">
-						{detail?.category ? (
-							<Badge variant="outline">{detail.category}</Badge>
-						) : null}
-						{detail?.version ? (
-							<Badge className="text-[10px]" variant="outline">
-								v{detail.version}
-							</Badge>
-						) : null}
-						{rating.count > 0 ? (
-							<StarRating
-								count={rating.count}
-								showValue
-								value={rating.average}
-							/>
-						) : (
-							<span className="text-muted-foreground text-xs">
-								No reviews yet
-							</span>
-						)}
-					</div>
-				</div>
-				<div className="flex shrink-0 items-center gap-2">
-					{detail ? <OverflowMenu detail={detail} /> : null}
+		<ListingDetailShell
+			actions={
+				<>
 					{primaryAction?.actionUrl ? (
-						<Button asChild size="sm">
-							<a
-								href={primaryAction.actionUrl}
-								rel="noopener noreferrer"
-								target="_blank"
-							>
-								{primaryAction.actionLabel || "Open"}
-								<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
-							</a>
+						// Base UI: `render=`, not an `asChild` child — nesting an <a>
+						// inside <Button> renders a link inside a button element.
+						<Button
+							render={
+								<a
+									href={primaryAction.actionUrl}
+									rel="noopener noreferrer"
+									target="_blank"
+								/>
+							}
+							size="sm"
+						>
+							{primaryAction.actionLabel || "Open"}
+							<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
 						</Button>
 					) : null}
-				</div>
-			</header>
-
+					{detail ? (
+						<span className="ml-auto shrink-0">
+							<OverflowMenu detail={detail} />
+						</span>
+					) : null}
+				</>
+			}
+			aside={detail ? <InformationBlock detail={detail} /> : null}
+			gallery={
+				detail && detail.screenshots.length > 0 ? (
+					<ScreenshotGallery name={name} screenshots={detail.screenshots} />
+				) : null
+			}
+			hero={
+				<ListingHero
+					badges={[detail?.category ?? null].filter((b): b is string =>
+						Boolean(b)
+					)}
+					icon={<DetailLogo iconUrl={iconUrl} name={name} />}
+					name={name}
+					tagline={detail?.tagline}
+				/>
+			}
+			stats={<ListingStatStrip items={statItems} />}
+		>
 			{loading && !detail ? (
 				<div className="flex justify-center py-8">
 					<Spinner className="size-5" />
@@ -234,17 +272,12 @@ function DetailBody({
 				<ExamplePrompts name={name} prompts={detail.examplePrompts} />
 			) : null}
 
-			{detail && detail.screenshots.length > 0 ? (
-				<ScreenshotGallery name={name} screenshots={detail.screenshots} />
-			) : null}
-
 			{detail?.description ? (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">About</h3>
+				<ListingSection title="About">
 					<p className="whitespace-pre-wrap text-muted-foreground text-sm leading-relaxed">
 						{detail.description}
 					</p>
-				</section>
+				</ListingSection>
 			) : null}
 
 			{detail && detail.setup.length > 0 ? (
@@ -255,10 +288,8 @@ function DetailBody({
 				<RunnablesSection runnables={detail.runnables} />
 			) : null}
 
-			{detail ? <InformationBlock detail={detail} /> : null}
-
 			<ReviewsSection id={id} kind={kind} onRatingChange={setRating} />
-		</div>
+		</ListingDetailShell>
 	);
 }
 
@@ -336,11 +367,13 @@ function DetailLogo({
 	iconUrl: string | null;
 	name: string;
 }) {
+	// Fills the hero's icon tile rather than sizing itself: the tile owns the box,
+	// the radius and the ring, so every realm's hero art is the same square.
 	if (iconUrl) {
 		return (
 			<img
 				alt={`${name} logo`}
-				className="size-16 shrink-0 rounded-xl border object-cover"
+				className="size-full object-cover"
 				src={iconUrl}
 			/>
 		);
@@ -348,7 +381,7 @@ function DetailLogo({
 	return (
 		<span
 			aria-hidden="true"
-			className="flex size-16 shrink-0 items-center justify-center rounded-xl bg-muted font-semibold text-2xl text-muted-foreground uppercase"
+			className="font-semibold text-2xl text-white uppercase"
 		>
 			{name.trim().charAt(0) || "?"}
 		</span>
@@ -478,15 +511,21 @@ function SetupSection({ steps }: { steps: DetailSetupStep[] }) {
 							) : null}
 						</div>
 						{step.actionUrl ? (
-							<Button asChild size="sm" variant="outline">
-								<a
-									href={step.actionUrl}
-									rel="noopener noreferrer"
-									target="_blank"
-								>
-									{step.actionLabel || "Open"}
-									<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
-								</a>
+							// Base UI: `render=`, not an `asChild` child (same rule as the
+							// header CTA above) — otherwise this is an <a> inside a <button>.
+							<Button
+								render={
+									<a
+										href={step.actionUrl}
+										rel="noopener noreferrer"
+										target="_blank"
+									/>
+								}
+								size="sm"
+								variant="outline"
+							>
+								{step.actionLabel || "Open"}
+								<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
 							</Button>
 						) : null}
 					</li>
@@ -602,47 +641,41 @@ function InformationBlock({ detail }: { detail: MarketplaceDetail }) {
 		return null;
 	}
 
+	// Rendered as the shell's RIGHT-RAIL card. It used to be a full-width block
+	// stacked between Runnables and Reviews, which put "who made this / what
+	// version / where are its links" below every other section on the page.
 	return (
-		<section className="flex flex-col gap-2">
-			<h3 className="font-medium text-sm">Information</h3>
-			<dl className="flex flex-col divide-y divide-border rounded-lg border">
-				{rows.map((row) => (
-					<div
-						className="flex items-start justify-between gap-3 px-3 py-2.5"
-						key={row.label}
-					>
-						<dt className="flex items-center gap-1.5 text-muted-foreground text-sm">
-							<HugeiconsIcon className="size-4" icon={row.icon} />
-							{row.label}
-						</dt>
-						<dd className="min-w-0 text-right text-sm">{row.value}</dd>
-					</div>
-				))}
-				{links.length > 0 ? (
-					<div className="flex items-center justify-between gap-3 px-3 py-2.5">
-						<dt className="flex items-center gap-1.5 text-muted-foreground text-sm">
-							<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
-							Links
-						</dt>
-						<dd className="flex items-center gap-1">
-							{links.map((link) => (
-								<a
-									aria-label={link.label}
-									className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-									href={link.href}
-									key={link.href}
-									rel="noopener noreferrer"
-									target="_blank"
-									title={link.label}
-								>
-									<HugeiconsIcon className="size-4" icon={link.icon} />
-								</a>
-							))}
-						</dd>
-					</div>
-				) : null}
-			</dl>
-		</section>
+		<ListingAsideCard title="Information">
+			<ListingInfoGrid
+				rows={[
+					...rows.map((row) => ({ label: row.label, value: row.value })),
+					...(links.length > 0
+						? [
+								{
+									label: "Links",
+									value: (
+										<span className="flex items-center justify-end gap-1">
+											{links.map((link) => (
+												<a
+													aria-label={link.label}
+													className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+													href={link.href}
+													key={link.href}
+													rel="noopener noreferrer"
+													target="_blank"
+													title={link.label}
+												>
+													<HugeiconsIcon className="size-4" icon={link.icon} />
+												</a>
+											))}
+										</span>
+									),
+								},
+							]
+						: []),
+				]}
+			/>
+		</ListingAsideCard>
 	);
 }
 

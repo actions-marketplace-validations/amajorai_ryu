@@ -3179,6 +3179,34 @@ impl ConversationStore {
         Ok(n.max(0) as u64)
     }
 
+    /// `(sealed, total)` chat-content rows, for the encryption-status surface.
+    ///
+    /// Measured, not assumed: sealed rows carry the `enc:v1:` envelope prefix, so
+    /// a row written before encryption landed counts toward `total` but not
+    /// `sealed`. Reporting a flat "encrypted ✓" would hide exactly that legacy
+    /// plaintext.
+    ///
+    /// Counts ROWS, not fields, keyed on the field that every row has: a message is
+    /// sealed when its `content` envelope is present, a conversation when its
+    /// `title` is. `parts` needs no term of its own — it is sealed through the same
+    /// [`FieldCipher`] in [`Self::update_message_parts`], and it only ever exists on
+    /// a row already counted here, so adding it would double-count the same message.
+    /// If a future field is sealed on a path of its own, it needs a term on BOTH
+    /// sides — one added to `total` alone would peg every node at partial coverage.
+    pub async fn count_sealed_content(&self) -> Result<(u64, u64)> {
+        let conn = self.conn.lock().await;
+        let (sealed, total): (i64, i64) = conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM messages WHERE content LIKE 'enc:v1:%')
+                 + (SELECT COUNT(*) FROM conversations WHERE title LIKE 'enc:v1:%'),
+                 (SELECT COUNT(*) FROM messages)
+                 + (SELECT COUNT(*) FROM conversations WHERE title IS NOT NULL AND title <> '')",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((sealed.max(0) as u64, total.max(0) as u64))
+    }
+
     /// Delete **every** conversation and all chat-scoped state: messages and
     /// sessions (both keyed by `conversation_id`) plus the conversation rows
     /// themselves (which carry the goal columns). Returns the number of
@@ -4114,6 +4142,35 @@ mod tests {
         assert!(store.delete_conversation("conv-x").await.unwrap());
         assert!(store.get_messages("conv-x").await.unwrap().is_empty());
         assert!(!store.delete_conversation("conv-x").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn sealed_content_count_separates_sealed_rows_from_legacy_plaintext() {
+        // The Encryption settings tab reports this as MEASURED coverage, so a
+        // legacy plaintext row must drag the count down, not be assumed sealed.
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .append_message("conv-a", "user", "sealed on write", None, None, None)
+            .await
+            .unwrap();
+        let (sealed, total) = store.count_sealed_content().await.unwrap();
+        assert!(total > 0, "the written row must be counted");
+        assert_eq!(sealed, total, "everything written now is sealed");
+        let before = total;
+
+        // A row from before encryption landed: plaintext, no `enc:v1:` prefix.
+        {
+            let conn = store.conn.lock().await;
+            conn.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, created_at)
+                 VALUES ('legacy', 'conv-a', 'user', 'written before encryption', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let (sealed, total) = store.count_sealed_content().await.unwrap();
+        assert_eq!(total, before + 1, "the legacy row is counted in the total");
+        assert_eq!(sealed, before, "legacy plaintext must count as open");
     }
 
     #[tokio::test]

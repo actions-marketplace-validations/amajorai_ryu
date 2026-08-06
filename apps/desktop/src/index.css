@@ -15,6 +15,14 @@
 @source "./";
 @source "../../../packages/blocks/src/desktop";
 @source "../../../packages/blocks/src/web";
+/* `@ryu/marketplace` renders whole SCREENS here — the Store's card grids and every
+   tab's listing-detail preview — so its classes have to be scanned like any other
+   source. Without this line only the classes that happen to ALSO appear somewhere
+   under apps/ get generated, and one used solely in the package silently resolves
+   to nothing: `lg:w-72` on the detail rail was absent, so the preview's two-column
+   body collapsed its main column to a few characters wide. A missing utility has
+   no error and no warning — it just doesn't lay out. */
+@source "../../../packages/marketplace/src";
 
 @theme inline {
 	--font-sans: "Inter Variable", sans-serif;

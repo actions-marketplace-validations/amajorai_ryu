@@ -27,12 +27,33 @@ export interface UpdatesViewProps {
 	 * once something is actually being withheld — how to get another year. Absent
 	 * for everyone else, which leaves this tab exactly as it renders today.
 	 */
+	/**
+	 * The bundle's OS-registered name including its release channel — "Ryu
+	 * (Nightly)", "Ryu (Research Preview)". Set by the App tab, which knows the
+	 * running bundle's version; the Gateway tab governs Core, which has no bundle
+	 * name, and leaves it off.
+	 */
+	productName?: string | null;
 	updatesWindowNotice?: string;
 	version?: string | null;
 }
 
+/** "Ryu (Nightly) — current version: v0.1.4-nightly.20260806.12." */
+function versionCaption(
+	version: string | null | undefined,
+	productName: string | null | undefined
+): string | undefined {
+	if (!version) {
+		return productName ?? undefined;
+	}
+	return productName
+		? `${productName} — current version: v${version}.`
+		: `Current version: v${version}.`;
+}
+
 export function UpdatesView({
 	version,
+	productName,
 	autoUpdate = true,
 	checking,
 	onToggle,
@@ -43,7 +64,7 @@ export function UpdatesView({
 	return (
 		<div className="space-y-6">
 			<SettingsSection
-				caption={version ? `Current version: v${version}.` : undefined}
+				caption={versionCaption(version, productName)}
 				title="Software updates"
 			>
 				<SettingsGroup>

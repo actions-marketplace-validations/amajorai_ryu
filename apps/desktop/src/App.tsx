@@ -44,7 +44,11 @@ import OnboardingPage from "./pages/OnboardingPage.tsx";
 import { PreflightPage } from "./pages/PreflightPage.tsx";
 import WaitlistPage from "./pages/WaitlistPage.tsx";
 import { useAppStore } from "./store/useAppStore.ts";
-import { useNodeStore } from "./store/useNodeStore.ts";
+import {
+	isLocalNode,
+	LOCAL_FALLBACK,
+	useNodeStore,
+} from "./store/useNodeStore.ts";
 
 // Detect the Tauri window label synchronously via the internals object that
 // Tauri injects before any JS runs. Falls back to "main" in a plain browser.
@@ -175,27 +179,40 @@ function MainApp() {
 			// Attempt to spawn Core — ignore errors (may already be running).
 			await startRyuCore().catch(() => undefined);
 
-			// Poll until HTTP health check passes (covers already-running instances).
-			// Timeout is long to accommodate first-time Rust compilation in dev.
+			// Poll the health check for as long as the app is open, rather than
+			// giving up at the first verdict. `coreStatus` used to latch: the loop
+			// returned on its first "running" or on the timeout, so a Core that came
+			// up LATER — which is now the normal case, since onboarding's "run
+			// locally" pick is what installs and starts it — left the store stuck on
+			// "stopped" and stranded the user on Preflight next render.
+			//
+			// The grace window only decides when a still-absent Core is reported as
+			// "stopped" rather than "starting"; it's long to accommodate first-time
+			// Rust compilation in dev.
 			const POLL_INTERVAL_MS = 1500;
-			const TIMEOUT_MS = 180_000;
+			const IDLE_POLL_INTERVAL_MS = 5000;
+			const GRACE_MS = 180_000;
 			const start = Date.now();
 
 			while (!cancelled) {
 				const status = await getRyuStatus().catch(() => "stopped");
+				if (cancelled) {
+					return;
+				}
+				const settled = Date.now() - start > GRACE_MS;
 				if (status === "running") {
-					if (!cancelled) {
-						setCoreStatus("running");
-					}
-					return;
+					setCoreStatus("running");
+				} else if (settled) {
+					setCoreStatus("stopped");
 				}
-				if (Date.now() - start > TIMEOUT_MS) {
-					if (!cancelled) {
-						setCoreStatus("stopped");
-					}
-					return;
-				}
-				await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+				await new Promise((r) =>
+					setTimeout(
+						r,
+						status === "running" || settled
+							? IDLE_POLL_INTERVAL_MS
+							: POLL_INTERVAL_MS
+					)
+				);
 			}
 		}
 
@@ -514,6 +531,27 @@ function MainApp() {
 		};
 	}, []);
 
+	// Preflight ("Ryu Core isn't running") used to gate the ENTIRE tree, ahead of
+	// even the login screen — so a machine with no local Core could never reach
+	// sign-in, let alone the screen that offers running in the cloud or on an
+	// existing node. Core is optional now, so this is scoped to the only users for
+	// whom a dead local Core is actually a fault:
+	//
+	//   * onboarding must already be finished — before that, the choose step is
+	//     exactly where a user without Core is supposed to land; and
+	//   * the active node must be the local one. A user pointed at their team's
+	//     server or a cloud node has no local Core by design, and the node
+	//     selector's unreachable banner is the right (non-blocking) signal there.
+	const defaultNodeName = useNodeStore((s) => s.defaultNode);
+	const nodes = useNodeStore((s) => s.nodes);
+	const activeNodeIsLocal = isLocalNode(
+		nodes.find((n) => n.name === defaultNodeName) ?? LOCAL_FALLBACK
+	);
+	const showPreflight =
+		coreStatus === "stopped" &&
+		activeNodeIsLocal &&
+		localStorage.getItem("ryu_onboarding_complete") === "true";
+
 	const showApp = authed;
 	// Hold the app behind the waitlist check while it resolves, so we never flash
 	// the app and then bounce a pending user to the queue screen.
@@ -532,7 +570,7 @@ function MainApp() {
 			<Toaster position="bottom-right" theme="system" />
 			<AgentationToolbar />
 			<GlobalContextMenu>
-				{coreStatus === "stopped" ? (
+				{showPreflight ? (
 					<PageWrapper>
 						<PreflightPage />
 					</PageWrapper>
@@ -547,7 +585,10 @@ function MainApp() {
 					</PageWrapper>
 				) : waitlisted ? (
 					<PageWrapper>
-						<WaitlistPage userName={session?.user?.name ?? null} />
+						<WaitlistPage
+							avatarUrl={session?.user?.image ?? null}
+							userName={session?.user?.name ?? null}
+						/>
 					</PageWrapper>
 				) : showApp ? (
 					<AuthProvider>

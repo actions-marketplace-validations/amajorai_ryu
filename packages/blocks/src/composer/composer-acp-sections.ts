@@ -279,6 +279,11 @@ export function buildConfigOptionSection(
 		})),
 		value: acpOptionValues[opt.id] ?? opt.currentValue,
 		onChange: (valueId: string) => onChange(opt.id, valueId),
+		// Reasoning effort is the one ordered scale an agent advertises (off →
+		// low → … → max), so it reads as a slider rather than a checked list. The
+		// detents ARE the agent's own values: Pi ships an `off` level, Codex does
+		// not, and a hardcoded low→xhigh ladder would desync from both.
+		variant: isReasoningOption(opt) ? "slider" : undefined,
 	};
 }
 

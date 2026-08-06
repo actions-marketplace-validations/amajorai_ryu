@@ -2301,7 +2301,7 @@ mod tests {
 
     /// Uninstalling a built-in is REFUSED so it can never be resurrected by the
     /// startup seed. `goal` isolates the `is_default_on` branch: default-on, NOT a
-    /// SYSTEM plugin, NOT load-bearing — a weak `is_builtin`-only guard would wrongly
+    /// SYSTEM plugin, NOT load-bearing — a weak `is_system_plugin`-only guard would wrongly
     /// allow it and the seed would re-add it on the next boot.
     #[tokio::test]
     async fn uninstall_of_a_builtin_is_refused_so_it_never_resurrects() {

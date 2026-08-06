@@ -429,6 +429,22 @@ pub struct ChatStreamRequest {
     /// default (no hook acts on a flag it cannot see).
     #[serde(default)]
     pub plugin_flags: std::collections::HashMap<String, bool>,
+    /// Output style to apply to THIS turn — tier 1 of the three-tier resolution in
+    /// `docs/output-styles.md` §5 (per-turn → per-conversation → node default), set
+    /// by the composer's style picker.
+    ///
+    /// Per-turn rather than per-session is the whole point of the picker: upstream
+    /// Claude Code reads the style once at session start and needs `/clear` to change
+    /// it, whereas Ryu resolves it at turn assembly (design §7.1), so switching styles
+    /// takes effect on the next message with no reload and no new conversation. An
+    /// unknown id falls through to the next tier rather than erroring — a style can be
+    /// deleted or its plugin disabled between the picker's last fetch and this turn,
+    /// and losing the styling is a better failure than losing the turn.
+    ///
+    /// A plugin style with `force-for-plugin: true` overrides this (design §5); the
+    /// field is a *preference*, not a guarantee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_style: Option<String>,
     /// Verified human author of this turn's user message — the Better Auth user
     /// id resolved from the request's user JWT (`crate::identity_verify`). This is
     /// SERVER-SET ONLY: `chat_stream` stamps it from the verified caller, and
@@ -1815,6 +1831,12 @@ pub(crate) fn append_last_user_text(messages: &mut [UiMessage], extra: &str) -> 
 
 /// Image `file` parts of a single message (AI SDK v6 `file` parts with an image
 /// mediaType/mimeType carrying a data-URL `data:<mime>;base64,<data>`).
+///
+/// The `mime.starts_with("image/")` skip below is NOT a drop: non-image `file` parts
+/// are handled by [`message_document_parts`], which both call sites invoke alongside
+/// this one. Adding a third kind of part means extending that pair — a part type
+/// neither function claims reaches the model as nothing, which is exactly the bug
+/// this seam was split to fix.
 fn message_image_parts(msg: &UiMessage) -> Vec<ImagePart> {
     let mut images = Vec::new();
     for part in &msg.parts {
@@ -1839,6 +1861,172 @@ fn message_image_parts(msg: &UiMessage) -> Vec<ImagePart> {
         }
     }
     images
+}
+
+/// Cap on the extracted text a single attached document may contribute to a turn.
+///
+/// Mirrors `crate::document_parse::MAX_MARKDOWN_BYTES`, which already clamped it on
+/// the way in. Repeated here because this side must hold regardless of who wrote the
+/// part: a `file` part arrives from a client and is not trusted to have been
+/// through Core's own parse facade.
+const MAX_DOCUMENT_PART_CHARS: usize = 400_000;
+
+/// Cap on how many attached documents one message may contribute, so a drag-and-drop
+/// of forty files cannot crowd the conversation out of its own context window.
+const MAX_DOCUMENT_PARTS: usize = 12;
+
+/// The **document half** of the multimodal seam, and the reason a dropped PDF is no
+/// longer discarded.
+///
+/// [`message_image_parts`] deliberately skips every `file` part whose mediaType is
+/// not `image/*`. Until this function existed, that `continue` was the end of the
+/// road: a PDF, a DOCX, a spreadsheet — anything not an image — reached the model as
+/// nothing at all, with no error anywhere in the stack. This is its sibling, so the
+/// two together account for every `file` part instead of one of them quietly eating
+/// the rest.
+///
+/// ## Why the extracted text arrives as a part rather than as the user's prose
+///
+/// The desktop extracts through `POST /api/documents/parse` (the one
+/// `document.parse` facade) and attaches the resulting markdown as a
+/// `text/markdown` `file` part carrying the ORIGINAL filename. It is not folded into
+/// the user's message text on the client, because the user did not type it: a 60k
+/// character extraction rendered inside their own chat bubble is not a chat message.
+/// Keeping it a part lets the transcript render a document chip while the model
+/// receives the contents, and — because message parts are persisted (the sealed
+/// `parts` column) — a reloaded thread still carries the document without re-parsing
+/// a file the user may have since deleted.
+///
+/// ## Why it is resolved HERE and not further out
+///
+/// Both chat planes converge on this module, and both build their prompt text from
+/// the same `UiMessage`s. Resolving at this seam means one implementation serves the
+/// openai-compat plane (per message, so document context survives across the whole
+/// history) and the ACP plane (last turn only) with the same rules, instead of two
+/// prompt builders growing their own idea of what an attachment is.
+///
+/// Only `data:` URLs are read. A part pointing at an `http(s)` URL is skipped rather
+/// than fetched: this runs inside the chat request path, and turning a
+/// client-supplied URL into a server-side fetch would be an SSRF primitive on the
+/// hottest path in the product.
+fn message_document_parts(msg: &UiMessage) -> Vec<(String, String)> {
+    let mut docs = Vec::new();
+    for part in &msg.parts {
+        if docs.len() >= MAX_DOCUMENT_PARTS {
+            break;
+        }
+        if part.get("type").and_then(|v| v.as_str()) != Some("file") {
+            continue;
+        }
+        let mime = part
+            .get("mediaType")
+            .or_else(|| part.get("mimeType"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // Images are the other half of the seam.
+        if mime.starts_with("image/") {
+            continue;
+        }
+        let filename = part
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("attachment")
+            .to_owned();
+
+        // A `file` part that is neither an image nor readable text is the case the
+        // desktop no longer produces (it extracts before sending) but that any other
+        // client still can — native, TUI, the extension, a channel adapter. It gets a
+        // NOTE, not a skip. Dropping it is the original bug, and "the model was never
+        // told there was a file" is precisely the failure mode that made it invisible
+        // for so long: this way the assistant can say "I can see notes.pdf is attached
+        // but I can't read it", which is a debuggable answer.
+        let text = mime
+            .starts_with("text/")
+            .then(|| part.get("url").and_then(|v| v.as_str()).unwrap_or(""))
+            .and_then(decode_text_data_url)
+            .filter(|t| !t.trim().is_empty());
+        let Some(text) = text else {
+            docs.push((
+                filename,
+                format!(
+                    "[This file is attached but no text could be extracted from it \
+                     (type: {}). Tell the user you cannot read it rather than \
+                     guessing at its contents.]",
+                    if mime.is_empty() { "unknown" } else { mime }
+                ),
+            ));
+            continue;
+        };
+
+        let mut body = text;
+        if body.chars().count() > MAX_DOCUMENT_PART_CHARS {
+            body = body
+                .chars()
+                .take(MAX_DOCUMENT_PART_CHARS)
+                .collect::<String>()
+                + "\n\n[truncated]";
+        }
+        docs.push((filename, body));
+    }
+    docs
+}
+
+/// The attached documents of `msg` rendered as one context block, or `None`.
+///
+/// Fenced and labelled with the source filename so the model can tell the user's own
+/// words from a file's contents — the same reason retrieved memory is delimited.
+fn document_context_block(msg: &UiMessage) -> Option<String> {
+    let docs = message_document_parts(msg);
+    if docs.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for (filename, body) in docs {
+        out.push_str(&format!(
+            "\n\n<attached-document filename=\"{}\">\n{}\n</attached-document>",
+            filename.replace('"', "'"),
+            body
+        ));
+    }
+    Some(out)
+}
+
+/// Decode a `data:` URL whose payload is text, base64 or percent/plain encoded.
+/// `None` for a non-data URL or bytes that are not valid UTF-8.
+fn decode_text_data_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    if meta.ends_with(";base64") {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .ok()?;
+        return String::from_utf8(bytes).ok();
+    }
+    // Non-base64 data URLs are percent-encoded text.
+    Some(percent_decode(data))
+}
+
+/// Minimal percent-decode for a plain `data:` URL payload. Invalid escapes are kept
+/// verbatim rather than dropped — losing characters from a document silently is the
+/// class of bug this whole change exists to remove.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Extract image parts from the last user message (for the ACP plane, which
@@ -2177,6 +2365,153 @@ fn merge_system_prompt(existing: Option<String>, tone_prefix: Option<String>) ->
         (Some(e), Some(p)) => Some(if p.is_empty() { e } else { p }),
         (None, Some(p)) if !p.is_empty() => Some(p),
         (existing, _) => existing,
+    }
+}
+
+// ── Output styles (docs/output-styles.md §5) ──────────────────────────────────
+//
+// A style changes HOW the agent answers by editing the system prompt for the turn.
+// Selection is resolved here, at turn assembly, which is what makes the composer
+// picker live (design §7.1); injection happens at the two seams the skills block
+// already uses, one per plane.
+
+/// The style in force for this turn, resolved against `registry`.
+///
+/// The tiers, most specific first, exactly as design §5 lists them: per-turn
+/// ([`ChatStreamRequest::output_style`]) → per-conversation → node default. A plugin
+/// style with `force-for-plugin: true` beats all three while its plugin is enabled.
+///
+/// Takes the registry and the node default as **arguments** rather than reading the
+/// process globals itself so the ladder is unit-testable against a locally built
+/// registry; [`output_style_for_turn`] is the thin wrapper that supplies the globals.
+///
+/// A tier that names an id which no longer resolves (style deleted, plugin disabled,
+/// stale picker state) **falls through to the next tier** instead of resolving to "no
+/// style". The tiers are a specificity ladder, not a chain of overrides that can be
+/// set to "off": there is no way to express "explicitly no style" in tier 1 or 2 — the
+/// picker clears its selection instead of sending one — so a dangling id carries no
+/// intent to suppress the tier below it.
+fn resolve_output_style(
+    registry: &ryu_output_styles::OutputStyleRegistry,
+    per_turn: Option<&str>,
+    per_conversation: Option<&str>,
+    node_default: Option<&str>,
+) -> Option<ryu_output_styles::OutputStyleRecord> {
+    if let Some(forced) = registry.forced_style() {
+        return Some(forced);
+    }
+    [per_turn, per_conversation, node_default]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .find_map(|id| match registry.get(id) {
+            Some(record) => Some(record),
+            None => {
+                tracing::debug!("output style '{id}' is selected but not installed; ignoring");
+                None
+            }
+        })
+}
+
+/// [`resolve_output_style`] against the process-global registry and the persisted
+/// node default. `None` before Core has mounted the registry (a headless/embedded
+/// caller that never built the router), which keeps the feature inert rather than
+/// panicking on a handle that was never published.
+fn output_style_for_turn(
+    per_turn: Option<&str>,
+    per_conversation: Option<&str>,
+) -> Option<ryu_output_styles::OutputStyleRecord> {
+    let registry = ryu_output_styles::global_registry()?;
+    resolve_output_style(
+        registry,
+        per_turn,
+        per_conversation,
+        ryu_output_styles::load_selection().as_deref(),
+    )
+}
+
+/// The system-prompt prefix a resolved style contributes to this turn, or `None`
+/// when it contributes nothing.
+///
+/// This is the ONE place `keep-coding-instructions` is interpreted (design §2 — the
+/// crate carries the flag and deliberately does not act on it):
+///
+/// - `true` — the style body is **appended after** the agent's base instructions, so
+///   both apply. This is what "change how it talks while it keeps doing the same
+///   work" needs, and it is what all but one of the built-ins want.
+/// - `false` (the default) — the style body **replaces** them, for a style that turns
+///   the agent into something else entirely (a writing editor, a data analyst).
+///
+/// `base_instructions` is the agent record's `system_prompt`. Note what "replaces"
+/// means in practice here: Ryu does not otherwise inject that field into a chat turn
+/// (an ACP agent owns its own prompt, and the openai-compat path carries only the
+/// persona tone prefix), so `false` leaves the assembled prompt exactly as it is today
+/// plus the style body, and `true` is what actually surfaces the agent's instructions
+/// alongside the style. Everything else — skills, memory, persona, tool descriptions —
+/// is untouched by either value.
+///
+/// Returns `None` for a body-less (frontmatter-only) style, because
+/// [`ryu_output_styles::style_block`] yields an empty string for one and injecting a
+/// bare adherence reminder would point the model at instructions that do not exist.
+fn output_style_prefix(
+    record: &ryu_output_styles::OutputStyleRecord,
+    base_instructions: Option<&str>,
+) -> Option<String> {
+    let block = ryu_output_styles::style_block(record);
+    if block.is_empty() {
+        return None;
+    }
+    match base_instructions.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(base) if record.keep_coding_instructions => Some(format!("{base}\n\n{block}")),
+        _ => Some(block),
+    }
+}
+
+/// The agent record's `system_prompt` — the "base instructions"
+/// [`output_style_prefix`] composes against.
+///
+/// A second store read rather than an eighth element on [`resolve_binding`]'s tuple:
+/// this is needed only on a turn that both resolved a style AND that style keeps the
+/// base instructions, which is a small fraction of turns, whereas widening the tuple
+/// would push the cost (and the churn) onto the routing-policy path every turn.
+async fn agent_base_instructions(agent_id: &str, store: &AgentStore) -> Option<String> {
+    match store.get(agent_id).await {
+        Ok(record) => record.and_then(|r| r.system_prompt),
+        Err(e) => {
+            tracing::warn!(
+                "output style: agent '{agent_id}' lookup failed for base instructions: {e:#}"
+            );
+            None
+        }
+    }
+}
+
+/// Prepend `prefix` to the leading `system` message of an OpenAI-compat message
+/// array, inserting one at the front when there is none.
+///
+/// Deliberately targets the SAME message
+/// [`ryu_skills::SkillRegistry::inject_into_messages_filtered`] writes into, and is
+/// called after it, so the style lands in front of the skills block (design §5).
+/// Messages whose `content` is not a string are skipped as injection targets: a
+/// client may send a multimodal `system` message whose content is a parts array, and
+/// flattening that to a string would silently drop its parts.
+fn prepend_system_prefix(messages: &mut Vec<Value>, prefix: &str) {
+    match messages
+        .iter_mut()
+        .find(|m| m["role"] == "system" && m["content"].is_string())
+    {
+        Some(sys) => {
+            let existing = sys["content"].as_str().unwrap_or_default().to_owned();
+            // NB argument order: `merge_system_prompt` PREPENDS its second argument.
+            if let Some(merged) = merge_system_prompt(Some(existing), Some(prefix.to_owned())) {
+                sys["content"] = Value::String(merged);
+            }
+        }
+        None => messages.insert(
+            0,
+            serde_json::json!({ "role": "system", "content": prefix }),
+        ),
     }
 }
 
@@ -3185,6 +3520,12 @@ pub(crate) async fn run_text_turn_in(
         // member) — yield to a directly-typing user on the shared local engine.
         background: true,
         plugin_flags: std::collections::HashMap::new(),
+        // Never styled: docs/output-styles.md §5 scopes output styles to the main
+        // conversation, because a delegate's reply is structured text the PARENT
+        // parses back and a style would reshape it. `route_chat_stream` enforces that
+        // from `background` (which is what actually suppresses the node-default tier);
+        // spelling it out here too keeps the intent visible at the construction site.
+        output_style: None,
         // Programmatic turn, no verified human author to attribute.
         author_user_id: None,
         // Connector-supplied sender display name (group/channel chats); None for
@@ -3280,6 +3621,8 @@ pub(crate) async fn run_text_turn_stream(
         acp_model: None,
         background: true,
         plugin_flags: std::collections::HashMap::new(),
+        // Unstyled, same scope rule as [`run_text_turn_in`].
+        output_style: None,
         author_user_id: None,
         author_name: None,
     };
@@ -3497,6 +3840,8 @@ async fn run_member_text(
         // member) — yield to a directly-typing user on the shared local engine.
         background: true,
         plugin_flags: std::collections::HashMap::new(),
+        // Unstyled, same scope rule as [`run_text_turn_in`].
+        output_style: None,
         // Programmatic per-member turn, no human author to attribute.
         author_user_id: None,
         author_name: None,
@@ -4066,6 +4411,59 @@ pub async fn route_chat_stream(
     // dispatching — prepended to long_term_system for both adapters.
     let persona_prefix = persona_tone_prefix(persona.as_ref());
 
+    // The output style for this turn (docs/output-styles.md §5), resolved ONCE here
+    // for both planes. Only the *text* is computed at this point — the injection
+    // happens further down, per plane, because the style has to land in front of the
+    // skills block and the skills block is folded in later.
+    //
+    // Resolved per turn, after routing policy has settled the agent: a rule that
+    // swapped agents mid-turn changes whose base instructions
+    // `keep-coding-instructions` composes against.
+    //
+    // Scope (design §5): the style applies to the MAIN conversation only, so every
+    // programmatic sub-turn is skipped — a delegated subagent's or team member's
+    // reply is structured text the parent parses back, and reshaping it would corrupt
+    // that. `background` is the existing discriminant for exactly this class
+    // (sub-agent fan-out, worker, scheduled run), and skipping here rather than at the
+    // construction sites is what also keeps the node-DEFAULT tier off those turns —
+    // a `None` per-turn field would still fall through to it.
+    let resolved_style = if req.background {
+        None
+    } else {
+        output_style_for_turn(
+            req.output_style.as_deref(),
+            // Tier 2 (the per-conversation sticky selection) has no server-side store
+            // yet — nothing persists a style id on the conversation row. Until it does,
+            // the composer re-sends its sticky choice as tier 1 on every turn, which is
+            // behaviourally identical for a single client; this argument is the seam the
+            // store lands on.
+            None,
+        )
+    };
+    let style_prefix = match resolved_style {
+        Some(record) => {
+            // Read the agent's base instructions only when the style actually keeps
+            // them — see `agent_base_instructions` on why this is a separate read.
+            let base = match (
+                record.keep_coding_instructions,
+                effective_agent_id.as_deref(),
+            ) {
+                (true, Some(id)) => agent_base_instructions(id, &agent_store).await,
+                _ => None,
+            };
+            let prefix = output_style_prefix(&record, base.as_deref());
+            if prefix.is_some() {
+                tracing::debug!(
+                    style = %record.id,
+                    keep_coding_instructions = record.keep_coding_instructions,
+                    "output style applied to this turn"
+                );
+            }
+            prefix
+        }
+        None => None,
+    };
+
     // The node's memory policy (recall mode / budget / write frequency), resolved
     // ONCE for the whole turn. Memory touches this function in three places and
     // "recall is off" has to mean all of them, so every downstream decision reads
@@ -4501,6 +4899,7 @@ pub async fn route_chat_stream(
                         fallback_chain,
                         skills,
                         skills_allowlist.clone(),
+                        style_prefix.clone(),
                         composio_actions,
                         agent_slots,
                         sampling.clone(),
@@ -4509,6 +4908,9 @@ pub async fn route_chat_stream(
                         chat_tools_enabled,
                         tool_allowlist,
                         smart_route_override,
+                        // This hop targets the gateway, so the node's own routing
+                        // preferences may ride along (see `node_routing_header`).
+                        crate::sidecar::gateway::node_routing_header(),
                         watch.clone(),
                     )
                     .await;
@@ -4558,6 +4960,7 @@ pub async fn route_chat_stream(
                 fallback_chain,
                 skills,
                 skills_allowlist.clone(),
+                style_prefix.clone(),
                 Vec::new(),
                 agent_slots,
                 sampling.clone(),
@@ -4567,6 +4970,8 @@ pub async fn route_chat_stream(
                 None,
                 // Direct-to-provider (no gateway hop) → never inject the
                 // gateway-only `ryu_smart_route` field.
+                None,
+                // …and no gateway on this hop → no `x-ryu-node-routing` either.
                 None,
                 watch.clone(),
             )
@@ -4601,6 +5006,7 @@ pub async fn route_chat_stream(
                 vec![],
                 skills,
                 skills_allowlist.clone(),
+                style_prefix.clone(),
                 Vec::new(),
                 AgentSlots::default(),
                 sampling.clone(),
@@ -4609,6 +5015,8 @@ pub async fn route_chat_stream(
                 false,
                 None,
                 // Local engine goes direct (no gateway hop) → no `ryu_smart_route`.
+                None,
+                // …and no gateway on this hop → no `x-ryu-node-routing` either.
                 None,
                 watch.clone(),
             )
@@ -4667,6 +5075,17 @@ pub async fn route_chat_stream(
                 Some((header, _ids)) => merge_system_prompt(long_term_system, Some(header)),
                 None => long_term_system,
             };
+            // The output style folds into the SAME preamble, for the same reason: an
+            // ACP subprocess makes its own provider calls, so there is no separate
+            // system message to add.
+            //
+            // Applied AFTER the skills merge, which puts it BEFORE the skills block in
+            // the text — `merge_system_prompt` prepends its second argument. That order
+            // is deliberate: a skill's own formatting instructions are task-specific and
+            // must win over the style's general shape when the two disagree. The result
+            // reads base instructions (unless the style replaced them) → style body →
+            // skills block → persona + memory.
+            let long_term_system = merge_system_prompt(long_term_system, style_prefix.clone());
             route_acp_stream(
                 req,
                 spawn_cmd,
@@ -4720,6 +5139,7 @@ pub async fn route_chat_stream(
                 vec![],
                 skills,
                 skills_allowlist,
+                style_prefix.clone(),
                 Vec::new(),
                 AgentSlots::default(),
                 sampling,
@@ -4729,6 +5149,8 @@ pub async fn route_chat_stream(
                 None,
                 // SDK app owns its own provider routing (injected OPENAI_BASE_URL);
                 // no gateway on this hop → no `ryu_smart_route`.
+                None,
+                // …and no gateway on this hop → no `x-ryu-node-routing` either.
                 None,
                 watch.clone(),
             )
@@ -4899,6 +5321,12 @@ async fn connect_openai(
     // on the gateway-forward path — the raw provider on the fallback leg never sees
     // it (an unknown body field can 400 a strict OpenAI endpoint).
     smart_route_override: Option<&Value>,
+    // This node's own routing PREFERENCES, pre-encoded as the `x-ryu-node-routing`
+    // value. Forwarded ONLY on the gateway-forward path, for the same reason
+    // `ryu_smart_route` is: a raw provider endpoint handles an unknown header far
+    // less gracefully than a gateway ignores one. `None` on an untouched install,
+    // which keeps the request byte-identical to before this channel existed.
+    node_routing: Option<String>,
 ) -> Result<reqwest::Response, String> {
     let mut payload_map = serde_json::Map::new();
     payload_map.insert("model".to_owned(), Value::String(model.to_owned()));
@@ -4974,6 +5402,15 @@ async fn connect_openai(
     }
     if let Some(ttl) = prompt_cache_pref(PROMPT_CACHE_TTL_PREF, is_prompt_cache_ttl).await {
         builder = builder.header("x-ryu-prompt-cache-ttl", ttl);
+    }
+    // This node's routing preferences (fallback order + its own extra firewall
+    // rules), which on a remote data plane have no other way to reach the fleet.
+    // Already gated to the gateway-forward leg by the caller; omitted entirely
+    // when the node has stated none. The fleet clamps every knob so it can only
+    // narrow the org's envelope, and IGNORES anything it cannot honour — a
+    // preference must never fail a turn that would otherwise succeed.
+    if let Some(prefs) = node_routing.filter(|p| !p.is_empty()) {
+        builder = builder.header("x-ryu-node-routing", prefs);
     }
     // Companion-source tag (M7 / #199): when set, the gateway applies unconditional
     // DLP/PII redaction before the provider call regardless of local firewall config.
@@ -5088,6 +5525,10 @@ async fn connect_with_fallback(
     // it is deliberately omitted there (the gateway strips the field; a provider
     // may 400 on it).
     smart_route_override: Option<&Value>,
+    // This node's pre-encoded `x-ryu-node-routing` preferences. Like
+    // `smart_route_override`, forwarded only on the primary gateway-forward
+    // attempt; the fallback leg targets a raw provider.
+    node_routing: Option<String>,
 ) -> Result<reqwest::Response, String> {
     match connect_openai(
         messages,
@@ -5106,6 +5547,7 @@ async fn connect_with_fallback(
         sampling_engine,
         tools,
         smart_route_override,
+        node_routing,
     )
     .await
     {
@@ -5144,6 +5586,10 @@ async fn connect_with_fallback(
                 tools,
                 // The fallback provider is a raw endpoint, not the gateway; never
                 // send the gateway-only `ryu_smart_route` field to it.
+                None,
+                // Same discipline for the node-routing header: a strict endpoint
+                // can reject an unknown header far less gracefully than it ignores
+                // an unknown body field.
                 None,
             )
             .await
@@ -5190,6 +5636,13 @@ async fn route_openai_stream<F, Fut>(
     // non-empty list narrows injection to its intersection with the enabled set.
     // Enforced entirely in Core (skills are injected, not gateway-gated).
     skills_allowlist: Vec<String>,
+    // The output-style prefix for this turn, already composed by the caller
+    // (`output_style_prefix`, which is where `keep-coding-instructions` is applied).
+    // `None` = no style, and the assembled messages are then byte-identical to what
+    // they were before the feature existed. Sits next to `skills_allowlist` because
+    // the two are ordered against each other: this is injected AFTER skill injection
+    // so it lands in FRONT of the skills block (docs/output-styles.md §5).
+    output_style: Option<String>,
     // Per-agent Composio action allowlist (#456). Signalled to the gateway via
     // `x-ryu-composio-actions` so its Composio tool loop offers/executes only the
     // actions this agent selected (overriding the gateway's global allowlist).
@@ -5219,6 +5672,10 @@ async fn route_openai_stream<F, Fut>(
     // gateway-forward path for an agent that has a stored override; injected into
     // the outbound body as `ryu_smart_route` for the gateway to read and strip.
     smart_route_override: Option<Value>,
+    // This node's pre-encoded `x-ryu-node-routing` preferences (fallback order +
+    // its own extra firewall rules). `Some` only on the gateway-forward path, for
+    // the same reason `smart_route_override` is.
+    node_routing: Option<String>,
     // How this turn ended, for the reactive failover wrapper. Disarmed on every
     // path but the interactive chat one.
     watch: crate::routing_policy::reactive::TurnWatch,
@@ -5242,7 +5699,7 @@ where
         .messages
         .iter()
         .map(|m| {
-            let text = {
+            let mut text = {
                 let from_content = m.content.as_text();
                 if !from_content.is_empty() {
                     from_content
@@ -5254,6 +5711,13 @@ where
                         .join("")
                 }
             };
+            // Attached documents: extracted text rides along as a labelled block
+            // appended to this message's text. Per message (not just the last), so a
+            // document attached ten turns ago is still readable when the user asks a
+            // follow-up about it.
+            if let Some(block) = document_context_block(m) {
+                text.push_str(&block);
+            }
             // Multimodal: a message carrying image `file` parts becomes an
             // OpenAI content array (text + each image as an `image_url` data-URL)
             // so a locally-served vision model (with its `--mmproj` adapter
@@ -5288,6 +5752,15 @@ where
     // lenient — a missing skill dir is not an error.
     let active_skill_ids =
         skills.inject_into_messages_filtered(&mut oai_messages, &skills_allowlist);
+
+    // Output style (docs/output-styles.md §5), injected right after the skills block
+    // and therefore in FRONT of it: a skill's own formatting instructions are
+    // task-specific and must win over the style's general shape when the two
+    // disagree. The assembled system message reads base instructions (unless the
+    // style replaced them) → style body → skills block → persona + memory.
+    if let Some(prefix) = output_style.as_deref().filter(|p| !p.is_empty()) {
+        prepend_system_prefix(&mut oai_messages, prefix);
+    }
 
     // Per-request plugin flags, copied out of `req` because the SSE generator below
     // is `'static` and cannot borrow it. A hook reads its own composer flag to
@@ -5380,6 +5853,7 @@ where
                 sampling_engine,
                 request_tools,
                 smart_route_override.as_ref(),
+                node_routing.clone(),
             )
             .await
             {
@@ -6501,7 +6975,19 @@ async fn route_acp_stream(
     // whole feature exists for.
     watch: crate::routing_policy::reactive::TurnWatch,
 ) -> Response {
-    let user_message = last_user_message(&req.messages);
+    // Attached documents fold into the turn BEFORE the emptiness guard: dropping a
+    // PDF in with no typed message is a real turn ("read this"), and refusing it as
+    // "no user message" would be the silent discard wearing an error message.
+    let mut user_message = last_user_message(&req.messages);
+    if let Some(block) = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(document_context_block)
+    {
+        user_message.push_str(&block);
+    }
     if user_message.is_empty() {
         return error_stream("No user message to send to ACP agent".to_owned());
     }
@@ -7719,6 +8205,127 @@ mod tests {
         assert_eq!(out[2].content.as_text(), "CONTEXT\n\nlatest question");
     }
 
+    // ── Attached documents (the non-image half of the `file`-part seam) ─────────
+
+    /// Build a `file` part the way the desktop composer sends an extracted document.
+    fn doc_part(filename: &str, markdown: &str) -> serde_json::Value {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(markdown);
+        serde_json::json!({
+            "type": "file",
+            "mediaType": "text/markdown",
+            "filename": filename,
+            "url": format!("data:text/markdown;base64,{b64}"),
+        })
+    }
+
+    fn user_with_parts(text: &str, parts: Vec<serde_json::Value>) -> UiMessage {
+        UiMessage {
+            role: "user".to_owned(),
+            content: UiContent::Text(text.to_owned()),
+            parts,
+        }
+    }
+
+    #[test]
+    fn attached_document_reaches_the_prompt_labelled_with_its_filename() {
+        let m = user_with_parts(
+            "summarise this",
+            vec![doc_part("q3.pdf", "# Revenue\nUp 12%.")],
+        );
+        let block = document_context_block(&m).expect("a document part yields a block");
+        assert!(block.contains("filename=\"q3.pdf\""), "got: {block}");
+        assert!(block.contains("Up 12%."), "got: {block}");
+    }
+
+    #[test]
+    fn images_and_documents_do_not_claim_each_others_parts() {
+        let image = serde_json::json!({
+            "type": "file",
+            "mediaType": "image/png",
+            "url": "data:image/png;base64,AAAA",
+        });
+        let m = user_with_parts("both", vec![image, doc_part("notes.md", "hello")]);
+        // Exactly one each — neither function eats the other's part, and nothing is
+        // dropped by both (the bug this seam exists to close).
+        assert_eq!(message_image_parts(&m).len(), 1);
+        assert_eq!(message_document_parts(&m).len(), 1);
+    }
+
+    #[test]
+    fn remote_urls_are_never_fetched_but_are_still_declared() {
+        let remote = serde_json::json!({
+            "type": "file",
+            "mediaType": "text/markdown",
+            "filename": "evil.md",
+            "url": "https://internal.example/admin",
+        });
+        let m = user_with_parts("read it", vec![remote]);
+        let block = document_context_block(&m).expect("declared, not silently dropped");
+        // The URL is never dereferenced — a client-supplied URL must not become a
+        // server-side fetch on the chat path.
+        assert!(!block.contains("internal.example"), "got: {block}");
+        assert!(block.contains("no text could be extracted"), "got: {block}");
+    }
+
+    #[test]
+    fn an_unreadable_file_part_is_declared_rather_than_dropped() {
+        // What every non-desktop client still sends: the raw document, unparsed.
+        let raw = serde_json::json!({
+            "type": "file",
+            "mediaType": "application/pdf",
+            "filename": "contract.pdf",
+            "url": "data:application/pdf;base64,JVBERi0=",
+        });
+        let m = user_with_parts("what does it say", vec![raw]);
+        let block = document_context_block(&m).expect("must not vanish");
+        assert!(block.contains("contract.pdf"), "got: {block}");
+        assert!(block.contains("application/pdf"), "got: {block}");
+    }
+
+    #[test]
+    fn plain_data_urls_decode_too() {
+        let part = serde_json::json!({
+            "type": "file",
+            "mediaType": "text/plain",
+            "filename": "a.txt",
+            "url": "data:text/plain,hello%20world",
+        });
+        let m = user_with_parts("", vec![part]);
+        assert!(document_context_block(&m).unwrap().contains("hello world"));
+    }
+
+    #[test]
+    fn a_message_with_only_a_document_still_produces_a_block() {
+        // The ACP plane's emptiness guard depends on this: attaching a file with no
+        // typed text is a real turn, not "no user message".
+        let m = user_with_parts("", vec![doc_part("spec.docx", "body text")]);
+        assert!(document_context_block(&m).is_some());
+    }
+
+    #[test]
+    fn attached_documents_are_capped_per_message() {
+        let parts: Vec<_> = (0..40)
+            .map(|i| doc_part(&format!("f{i}.md"), "x"))
+            .collect();
+        let m = user_with_parts("many", parts);
+        assert_eq!(message_document_parts(&m).len(), MAX_DOCUMENT_PARTS);
+    }
+
+    #[test]
+    fn a_blank_extraction_says_so_instead_of_looking_like_no_attachment() {
+        let m = user_with_parts("hi", vec![doc_part("blank.txt", "   \n  ")]);
+        let block = document_context_block(&m).expect("the file was still attached");
+        assert!(block.contains("blank.txt"), "got: {block}");
+        assert!(block.contains("no text could be extracted"), "got: {block}");
+    }
+
+    #[test]
+    fn a_message_with_no_file_parts_adds_nothing() {
+        let m = user_with_parts("just a question", vec![]);
+        assert!(document_context_block(&m).is_none());
+    }
+
     // ── Auto-recall block assembly (U17) ────────────────────────────────────────
     // Pure assembly + merge, exercised without a network embed.
 
@@ -8041,6 +8648,274 @@ mod tests {
         let prompt = build_acp_prompt(merged, None, "hi");
         assert!(prompt.starts_with("Just the memory block."));
         assert!(!prompt.contains("## Skill:"));
+    }
+
+    // ── Output-style injection (docs/output-styles.md §5) ──────────────────────
+    //
+    // Two things are pinned here: what `keep-coding-instructions` does to the agent's
+    // base instructions (§2), and WHERE the style lands relative to the skills block
+    // on each plane. The parser and the adherence reminder are the crate's tests;
+    // these cover only the composition this module owns.
+
+    /// Parse a real style file, so the tests exercise the same parser a `.md` on disk
+    /// and a plugin contribution both go through.
+    fn test_style(md: &str) -> ryu_output_styles::OutputStyleRecord {
+        ryu_output_styles::parse_output_style_md("eli5", md).expect("test style parses")
+    }
+
+    const KEEP_STYLE: &str =
+        "---\nname: ELI5\nkeep-coding-instructions: true\n---\n\nTalk to me like I'm 5.";
+    const REPLACE_STYLE: &str =
+        "---\nname: Plain text\nkeep-coding-instructions: false\n---\n\nNo markdown, prose only.";
+
+    #[test]
+    fn keep_coding_instructions_appends_the_style_after_base_instructions() {
+        let prefix = output_style_prefix(&test_style(KEEP_STYLE), Some("You review Rust code."))
+            .expect("a style with a body injects something");
+        // Base instructions lead, the style body follows: BOTH apply (§2).
+        assert!(
+            prefix.starts_with("You review Rust code."),
+            "base instructions lead: {prefix}"
+        );
+        assert!(prefix.contains("Talk to me like I'm 5."));
+        assert!(
+            prefix.find("You review Rust code.") < prefix.find("Talk to me like I'm 5."),
+            "the style body is appended AFTER the base instructions: {prefix}"
+        );
+    }
+
+    #[test]
+    fn keep_coding_instructions_false_replaces_base_instructions() {
+        let prefix = output_style_prefix(&test_style(REPLACE_STYLE), Some("You review Rust code."))
+            .expect("a style with a body injects something");
+        assert!(
+            !prefix.contains("You review Rust code."),
+            "the default replaces the agent's base instructions: {prefix}"
+        );
+        assert!(prefix.starts_with("No markdown, prose only."));
+        // Replacing is not "drop the reminder too" — the block is still the crate's.
+        assert_eq!(
+            prefix,
+            ryu_output_styles::style_block(&test_style(REPLACE_STYLE))
+        );
+    }
+
+    #[test]
+    fn a_body_less_style_injects_nothing_at_all() {
+        // Frontmatter-only file: listable in the picker, but there is nothing to
+        // inject, so the seams must see `None` rather than a bare reminder.
+        let record = test_style("---\nname: Empty\ndescription: nothing here\n---\n");
+        assert_eq!(
+            output_style_prefix(&record, Some("You review Rust code.")),
+            None
+        );
+    }
+
+    #[test]
+    fn no_output_style_leaves_the_acp_preamble_byte_identical() {
+        // The inert case, which is the shipped default (§8: the node default is "no
+        // style"). Both arms of the ACP seam must produce exactly today's prompt.
+        let long_term_system =
+            merge_system_prompt(Some("Remembered: the user likes tea.".to_owned()), None);
+        let with_skills =
+            merge_system_prompt(long_term_system, Some("## Skill: Greeter".to_owned()));
+        let baseline = build_acp_prompt(with_skills.clone(), None, "hi");
+        // ...and now the style line the arm actually runs, with nothing selected.
+        let styled = merge_system_prompt(with_skills, None);
+        assert_eq!(build_acp_prompt(styled, None, "hi"), baseline);
+    }
+
+    #[test]
+    fn output_style_leads_the_acp_preamble_ahead_of_the_skills_block() {
+        // The exact `AgentRoute::Acp` arm order: memory/persona, then the skills
+        // merge, then the style merge. `merge_system_prompt` PREPENDS its second
+        // argument, so applying the style last is what puts it FIRST in the text.
+        let style_prefix =
+            output_style_prefix(&test_style(KEEP_STYLE), Some("You review Rust code."));
+        let long_term_system = Some("Remembered: the user likes tea.".to_owned());
+        let with_skills = merge_system_prompt(
+            long_term_system,
+            Some("## Skill: Greeter\nAlways say hello.".to_owned()),
+        );
+        let merged = merge_system_prompt(with_skills, style_prefix);
+        let prompt = build_acp_prompt(merged, None, "what's the weather?");
+
+        let base_at = prompt
+            .find("You review Rust code.")
+            .expect("base instructions");
+        let style_at = prompt.find("Talk to me like I'm 5.").expect("style body");
+        let skills_at = prompt.find("## Skill: Greeter").expect("skills block");
+        let memory_at = prompt.find("the user likes tea.").expect("memory block");
+        // base instructions → style body → skills block → memory (§5). The style
+        // sits BEFORE the skills block on purpose: a skill's own formatting
+        // instructions are task-specific and must win over the style's general shape.
+        assert!(
+            base_at < style_at && style_at < skills_at && skills_at < memory_at,
+            "wrong assembly order: {prompt}"
+        );
+        assert!(prompt.ends_with("what's the weather?"));
+    }
+
+    #[test]
+    fn no_output_style_leaves_the_openai_messages_byte_identical() {
+        // The openai-compat twin of `no_output_style_leaves_the_acp_preamble_byte_identical`.
+        // The ACP arm is inert for free (`merge_system_prompt(x, None) == x`); this arm
+        // is inert only because of the `.filter(|p| !p.is_empty())` guard at the call
+        // site, so the guard itself is what needs pinning. Drop it and every unstyled
+        // turn — the shipped default — grows a bare adherence reminder pointing at
+        // instructions that were never injected.
+        let baseline = vec![
+            serde_json::json!({ "role": "system", "content": "## Skill: Greeter" }),
+            serde_json::json!({ "role": "user", "content": "hi" }),
+        ];
+        let mut messages = baseline.clone();
+
+        // Exactly the call-site expression, with nothing selected.
+        let output_style: Option<String> = None;
+        if let Some(prefix) = output_style.as_deref().filter(|p| !p.is_empty()) {
+            prepend_system_prefix(&mut messages, prefix);
+        }
+        assert_eq!(messages, baseline);
+
+        // And the body-less-style case, which reaches the guard as `Some("")`.
+        let empty = output_style_prefix(
+            &test_style("---\nname: Empty\ndescription: nothing\n---\n"),
+            Some("You review Rust code."),
+        );
+        if let Some(prefix) = empty.as_deref().filter(|p| !p.is_empty()) {
+            prepend_system_prefix(&mut messages, prefix);
+        }
+        assert_eq!(messages, baseline);
+    }
+
+    #[test]
+    fn output_style_leads_the_system_message_ahead_of_the_skills_block_on_the_openai_plane() {
+        // The openai-compat seam. The leading system message here is what
+        // `inject_into_messages_filtered` has already written into (skills header
+        // first, then memory), and `prepend_system_prefix` runs after it.
+        let mut messages = vec![
+            serde_json::json!({
+                "role": "system",
+                "content": "## Skill: Greeter\nAlways say hello.\n\n---\n\nRemembered: the user likes tea.",
+            }),
+            serde_json::json!({ "role": "user", "content": "what's the weather?" }),
+        ];
+        let prefix = output_style_prefix(&test_style(KEEP_STYLE), Some("You review Rust code."))
+            .expect("a style with a body injects something");
+        prepend_system_prefix(&mut messages, &prefix);
+
+        let system = messages[0]["content"]
+            .as_str()
+            .expect("system stays a string");
+        let base_at = system
+            .find("You review Rust code.")
+            .expect("base instructions");
+        let style_at = system.find("Talk to me like I'm 5.").expect("style body");
+        let skills_at = system.find("## Skill: Greeter").expect("skills block");
+        let memory_at = system.find("the user likes tea.").expect("memory block");
+        assert!(
+            base_at < style_at && style_at < skills_at && skills_at < memory_at,
+            "wrong assembly order: {system}"
+        );
+        // The user's turn is untouched and no extra system message appeared.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn the_openai_seam_creates_a_system_message_and_never_clobbers_a_multimodal_one() {
+        // No system message at all (no memory, no persona, no skills): one is added.
+        let mut bare = vec![serde_json::json!({ "role": "user", "content": "hi" })];
+        prepend_system_prefix(&mut bare, "Talk to me like I'm 5.");
+        assert_eq!(bare[0]["role"], "system");
+        assert_eq!(bare[0]["content"], "Talk to me like I'm 5.");
+
+        // A client-supplied system message whose content is a parts array is NOT a
+        // valid injection target — flattening it to a string would drop its parts,
+        // so the style gets its own message instead.
+        let parts = serde_json::json!([{ "type": "text", "text": "client preamble" }]);
+        let mut multimodal = vec![
+            serde_json::json!({ "role": "system", "content": parts.clone() }),
+            serde_json::json!({ "role": "user", "content": "hi" }),
+        ];
+        prepend_system_prefix(&mut multimodal, "Talk to me like I'm 5.");
+        assert_eq!(multimodal[0]["content"], "Talk to me like I'm 5.");
+        assert_eq!(multimodal[1]["content"], parts, "the parts array survives");
+    }
+
+    // ── Selection ladder (§5) ──────────────────────────────────────────────────
+    //
+    // Built against a local registry rather than the process-global handle, which is
+    // a `OnceLock` a test cannot re-set (and would leak into every other test in the
+    // binary). `register_plugin_style` takes whole-file markdown, so these also pin
+    // that the tiers compare ids, not names.
+
+    fn styles_registry(entries: &[(&str, &str)]) -> ryu_output_styles::OutputStyleRegistry {
+        let registry = ryu_output_styles::OutputStyleRegistry::empty();
+        for (id, md) in entries {
+            registry
+                .register_plugin_style((*id).to_owned(), md)
+                .expect("test style registers");
+        }
+        registry
+    }
+
+    #[test]
+    fn the_most_specific_selection_tier_wins() {
+        let registry = styles_registry(&[
+            ("turn", "---\nname: Turn\n---\nbody"),
+            ("conversation", "---\nname: Conversation\n---\nbody"),
+            ("node", "---\nname: Node\n---\nbody"),
+        ]);
+        let pick = |t, c, n| resolve_output_style(&registry, t, c, n).map(|r| r.id);
+        assert_eq!(
+            pick(Some("turn"), Some("conversation"), Some("node")).as_deref(),
+            Some("turn")
+        );
+        assert_eq!(
+            pick(None, Some("conversation"), Some("node")).as_deref(),
+            Some("conversation")
+        );
+        assert_eq!(pick(None, None, Some("node")).as_deref(), Some("node"));
+        assert_eq!(pick(None, None, None), None);
+        // Blank is not a selection — an empty string reaching the tier from a client
+        // body or a half-written selection file must not shadow the tier below it.
+        assert_eq!(
+            pick(Some("  "), None, Some("node")).as_deref(),
+            Some("node")
+        );
+    }
+
+    #[test]
+    fn a_selected_style_that_no_longer_exists_falls_through() {
+        // Deleted style / disabled plugin / stale picker state. There is no way to
+        // say "explicitly no style" in a tier, so a dangling id carries no intent to
+        // suppress the tier below it.
+        let registry = styles_registry(&[("node", "---\nname: Node\n---\nbody")]);
+        assert_eq!(
+            resolve_output_style(&registry, Some("deleted"), None, Some("node")).map(|r| r.id),
+            Some("node".to_owned())
+        );
+        assert_eq!(
+            resolve_output_style(&registry, Some("deleted"), None, None).map(|r| r.id),
+            None
+        );
+    }
+
+    #[test]
+    fn a_forced_plugin_style_beats_every_tier() {
+        let registry = styles_registry(&[
+            ("turn", "---\nname: Turn\n---\nbody"),
+            (
+                "forced",
+                "---\nname: Forced\nforce-for-plugin: true\n---\nbody",
+            ),
+        ]);
+        assert_eq!(
+            resolve_output_style(&registry, Some("turn"), Some("turn"), Some("turn")).map(|r| r.id),
+            Some("forced".to_owned()),
+            "force-for-plugin overrides all three tiers while its plugin is enabled"
+        );
     }
 
     // ── Plan-mode pill → in-band sentinel (Unit 7) ─────────────────────────────
@@ -8910,6 +9785,7 @@ mod tests {
             crate::inference::Engine::Other,
             &[],  // no tools
             None, // no per-agent smart-route override
+            None, // no node routing preferences
         )
         .await;
         // Both primary and fallback should fail; the error message must mention
@@ -8948,6 +9824,7 @@ mod tests {
             crate::inference::Engine::Other,
             &[],  // no tools
             None, // no per-agent smart-route override
+            None, // no node routing preferences
         )
         .await;
         let err = result.expect_err("unreachable primary");

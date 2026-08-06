@@ -102,6 +102,7 @@ impl OllamaDownloader {
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Engine,
+                role: crate::downloads::DownloadRole::Engine,
                 label: "Ollama".to_string(),
                 url,
                 dest: archive_dest,

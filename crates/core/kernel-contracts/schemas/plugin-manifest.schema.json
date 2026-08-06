@@ -315,7 +315,7 @@
       "description": "One context-menu row a plugin contributes (see\n[`Contributes::context_menu_items`]).",
       "properties": {
         "anchor": {
-          "description": "WHICH menu. Closed-ish enum by convention, open by encoding (same call as\n[`DockPanelPlacement`]): `\"conversation\"` | `\"message\"` | `\"space\"` |\n`\"agent\"` | `\"project\"` | `\"workflow\"` | `\"skill\"`. The shell owns the anchor\nset; an app cannot conjure a new menu, but an unknown value must not fail the\nload.",
+          "description": "WHICH menu. Closed-ish enum by convention, open by encoding (same call as\n[`DockPanelPlacement`]): `\"conversation\"` | `\"message\"` | `\"space\"` |\n`\"agent\"` | `\"project\"` | `\"workflow\"` | `\"skill\"` | `\"channel\"`. The shell\nowns the anchor set; an app cannot conjure a new menu, but an unknown value\nmust not fail the load.\n\nAn anchor names an ENTITY, not a place, so one declaration reaches every\nsurface that shows it. The desktop renders these in the sidebar row's menu\nAND — for whatever entity a tab is showing — in that tab's right-click menu,\non both the horizontal strip and the vertical tab list. `\"channel\"` is in the\nlist because a channel is one of those tab-visible entities; it is not a\ndesktop-only extension.",
           "type": "string"
         },
         "args": true,
@@ -430,6 +430,13 @@
           },
           "type": "array"
         },
+        "output_styles": {
+          "description": "**Output styles** the plugin ships — Markdown files that change *how* an agent\nanswers (role, tone, default response shape) by editing the system prompt for\nthe turn. See `docs/output-styles.md`.\n\nA style is NOT its own catalog kind, for exactly the argument\n[`Contributes::themes`] makes one field up: as a contribution it inherits\ninstall/uninstall/enable, versioning, signing, the Store detail page, reviews\nand the trust scorecard for free, and a plugin that ships a style ALONGSIDE\nother contributions (an app with a matching voice) stays expressible. A\n`CatalogKind::OutputStyle` would have been a second, weaker copy of all of\nthat — and `CatalogKind::ALL` is a closed five-member enum that must stay\nthat way, because every surface that switches on it exhaustively is a place a\nsixth member would have to be threaded by hand.\n\n# Safe with zero grants, unlike the other file-bearing family here\n\nThe body is prose: nothing in the pipeline evaluates it, it only ever lands in\na system prompt as text. So a style sits with themes on the safe side of the\nline — the worst a hostile one can do is make the agent tiresome — and\npointedly NOT with [`Contributes::pi_extensions`], which is unsandboxed code\nand therefore tier-gated at the materializer.\n\n# Served on the contributions endpoint\n\nUnlike [`Contributes::pi_extensions`] and [`Contributes::lsp_servers`], which\nCore consumes at their own sites, this one IS served from\n`GET /api/plugins/contributions` — the desktop composer's style picker is a\nclient-rendered surface and needs the declaration, not just its effect.\n\nSelf-contained (it names no runnable), so it stays out of\n[`Contributes::referenced_ids`].\n\n```json\n\"output_styles\": [\n  { \"id\": \"eli5\", \"file\": \"output-styles/eli5.md\" }\n]\n```",
+          "items": {
+            "$ref": "#/$defs/OutputStyleContribution"
+          },
+          "type": "array"
+        },
         "pi_extensions": {
           "description": "**Pi extensions** the plugin ships — TypeScript files the managed `ryu` (Pi)\nagent loads at process start:\n\n```json\n\"pi_extensions\": [\n  { \"id\": \"shell\", \"file\": \"pi-extensions/ryu-shell.ts\",\n    \"description\": \"background bash for the managed Pi agent\" }\n]\n```\n\nPi ships none of plan mode, sub-agents, permission prompts or background bash\nand says so deliberately in its own docs — \"you can build or install those\nworkflows as extensions or packages\". This surface is that seam: the\ncapabilities Core used to hardcode into the spawn path become plugins the user\ncan enable and disable, and a third party can ship one at all.\n\n# This is UNSANDBOXED code, and the tier gate is not optional\n\nA [`Contributes::turn_hooks`] body runs in the deny-by-default Deno sandbox\nbehind capability-gated `host.*` calls. A file named here runs **inside the Pi\nprocess** with full host privilege: the first-party ones spawn children and\nPOST to Core. That is the same arbitrary-code-execution class as\n[`PluginManifest::mcp_servers`], so Core gates it identically — Core tier is\nauto-allowed, Community tier needs an operator-allowlisted grant, and the gate\nsits at the materializer, because writing the file is what makes it run.\n\n# Core-interpreted, so a typed struct — and NOT on the contributions endpoint\n\nCore resolves each `file` and projects it into the managed Pi's config dir, so\nper this type's own doc comment it gets a typed struct and is gathered at its\nconsumption site (`pi_config::app_extensions`) rather than served from\n`GET /api/plugins/contributions` — the same disposition as\n[`Contributes::lsp_servers`].\n\nThe `file` is deliberately NOT hydrated into an inline string the way a\n`code_file` is; see [`PluginManifest::pi_extension_refs`] for why.",
           "items": {
@@ -477,9 +484,17 @@
         },
         "store_tabs": {
           "default": [],
-          "description": "App-registered **marketplace tabs** — one section in the Store's nav bar,\ncarrying the app's own installable catalog (workflow templates, meeting-notes\ntemplates, monitor presets, …). The Store-shaped sibling of\n[`Contributes::dock_panels`]: it lets an app own its browse-and-install\nsurface instead of the shell welding the section into a closed `StoreSection`\nunion. Self-contained + opaque `spec` (see [`StoreTabContribution`]).\n\n**Served OUTSIDE the enabled filter**, unlike every sibling family here. The\nStore is where an app gets installed, so gating its tab on the app's own\nenabled bit would hide the tab you install the app FROM — and every built-in\nfeature app is `NOT_PRE_INSTALLED` on a fresh machine. Each entry is tagged\nwith `plugin` plus `app_installed` / `app_enabled` so the renderer can show an\nenable-CTA instead of an empty list. The DATA the tab fetches stays gated by\nthe app's own route gate; only the declaration is unconditional.",
+          "description": "App-registered **marketplace tabs** — one section in the Store's nav bar,\ncarrying the app's own installable catalog (workflow templates, meeting-notes\ntemplates, monitor presets, …). The Store-shaped sibling of\n[`Contributes::dock_panels`]: it lets an app own its browse-and-install\nsurface instead of the shell welding the section into a closed `StoreSection`\nunion. Self-contained + opaque `spec` (see [`StoreTabContribution`]).\n\n**Served OUTSIDE the enabled filter**, unlike every sibling family here: each\nentry is tagged with `plugin` plus `app_installed` / `app_enabled` and the\nrenderer decides. Serving the declaration unconditionally keeps the door open\nfor a surface that wants the tab as an acquisition funnel; the DATA behind it\nstays gated by the app's own route gate either way.\n\nThe desktop Store deliberately renders only the tabs whose app is installed\nAND enabled. A pill present whether or not you own the app reads exactly like\na section the shell hardcoded, and clicking it produced a \"Turn on X\" prompt\nwhere a catalog belongs. Apps are acquired from the Apps tab; the app's own\nsections appear with it.",
           "items": {
             "$ref": "#/$defs/StoreTabContribution"
+          },
+          "type": "array"
+        },
+        "themes": {
+          "default": [],
+          "description": "**Colour themes** the plugin ships — the seam that makes a theme an ordinary\nmarketplace item instead of a hardcoded entry in the shell's preset table.\n\nThis is deliberately the VS Code / Zed shape: a theme is not its own catalog\nkind, it is a plugin that contributes one. That choice is load-bearing rather\nthan cosmetic — it means a theme inherits install/uninstall/enable, versioning,\nsigning, the Store detail page, reviews and the trust scorecard for free, and\nit means a plugin that ships a theme ALONGSIDE other contributions (an app with\na matching skin) is expressible. A new `CatalogKind::Theme` would have bought a\nsecond, weaker copy of all of that.\n\nEach entry is a [`ThemeContribution`]: pure design tokens, no code. Themes are\ntherefore the one contribution family that is safe with **zero** grants — the\nworst a hostile theme can do is look bad, because the shell only ever reads\n`tokens` into CSS custom properties and never evaluates them.\n\nSelf-contained (it names no runnable), so it stays out of\n[`Contributes::referenced_ids`]. Typed rather than opaque JSON because Core\ndoes interpret it: the mode/token split is what lets a client ask for \"the dark\nthemes\" without parsing every payload.",
+          "items": {
+            "$ref": "#/$defs/ThemeContribution"
           },
           "type": "array"
         },
@@ -1167,6 +1182,33 @@
       },
       "required": [
         "entry"
+      ],
+      "type": "object"
+    },
+    "OutputStyleContribution": {
+      "description": "One **output style** a plugin ships (a [`Contributes::output_styles`] row).\n\nCarries the style's *body* in one of two forms and NOTHING else — no `name`, no\n`description`, no `keep-coding-instructions`. Every one of those lives in the\nfile's own YAML frontmatter, which [`PluginManifest::hydrate_output_style_files`]\nexplains: mirroring them up here would create a second place a style's metadata\ncan be stated, and therefore a place it can disagree with itself.",
+      "properties": {
+        "file": {
+          "description": "SOURCE form: path to the Markdown file, relative to the plugin root — exactly\n`output-styles/<name>.md`. See [`validate_output_style_path`].\n\nExactly one of `file` / `source` is set. Authors write `file`;\n[`PluginManifest::hydrate_output_style_files`] turns it into `source` at parse\ntime and clears this, so a hydrated manifest is byte-indistinguishable from\none that was authored inline.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable id for this style within the plugin (`[a-z0-9][a-z0-9._-]*`).\n\nValidated with the same alphabet as a [`PiExtensionContribution::id`], and for\na related reason: the registry merges plugin, user, project and managed styles\ninto one id-keyed table where later entries win, and the persisted per-turn /\nper-conversation / node-default selection is this id. A free-form id would\nmake a selection unresolvable the moment it contained something a settings key\nor a URL path could not carry.",
+          "type": "string"
+        },
+        "source": {
+          "description": "WIRE form: the file's contents **verbatim, frontmatter included**.\n\nDeliberately the whole file rather than a pre-split body, so that a style\ncontributed by a plugin and a style sitting in a user's `output-styles/`\ndirectory are the same bytes and go through the same single parser. See\n[`PluginManifest::hydrate_output_style_files`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
       ],
       "type": "object"
     },
@@ -1980,7 +2022,7 @@
       "type": "object"
     },
     "StoreTabContribution": {
-      "description": "One app-registered **marketplace tab** — a section in the Store's nav bar whose\ncontent is the app's own installable catalog. A typed envelope around an opaque\n`spec` (the `StoreTabSpec` in `@ryu/app-host/views`: a `ViewSource` for the rows,\na `groupBy`/`groups` split into card sections, an `install` action, and per-item\nactions). Core stores it verbatim and tags it with the owning `plugin` id; the\n`spec` stays opaque so a new catalog capability is a renderer change, not a Core\nchange.\n\n`view` is the escape hatch, mirroring `SettingsTabContribution::view`: a named\nfirst-party renderer for a tab whose detail pane needs more than the declarative\nvocabulary (the workflow-template graph preview). Like settings views, the shell\nkeys its view table on the owning **plugin id**, not on this string, so a\nthird-party manifest cannot borrow a first-party component by naming it.",
+      "description": "One app-registered **marketplace tab** — a section in the Store's nav bar whose\ncontent is the app's own installable catalog. A typed envelope around an opaque\n`spec` (the `StoreTabSpec` in `@ryu/app-host/views`: a `ViewSource` for the rows,\na `groupBy`/`groups` split into card sections, an `install` action, and per-item\nactions). Core stores it verbatim and tags it with the owning `plugin` id; the\n`spec` stays opaque so a new catalog capability is a renderer change, not a Core\nchange.\n\n**There is no first-party escape hatch.** This contribution used to carry a\n`view` naming a hand-written renderer the shell kept in a plugin-id allowlist,\nfor the one tab whose detail pane the vocabulary could not express (the\nworkflow-template graph). That made the flagship example of \"an app can own a\nStore section\" the single section no other app could reproduce. The graph is a\ndeclarative primitive now (`spec.detail.graph`), the field is gone, and every\ncontributed tab — first-party or not — renders from the same spec.",
       "properties": {
         "group": {
           "description": "Which nav cluster the pill joins — the shell draws a divider wherever the\ngroup changes. Built-in groups: `discover`, `catalog`, `community`, `manage`,\n`account`. An unknown value gets its own cluster rather than being dropped.",
@@ -2021,13 +2063,6 @@
         "title": {
           "description": "Nav-pill label.",
           "type": "string"
-        },
-        "view": {
-          "description": "Named first-party renderer for this tab. When set, the shell renders that\ncomponent instead of the declarative `spec` — subject to its own plugin-id\nallowlist. Absent = purely declarative.",
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [
@@ -2141,6 +2176,66 @@
           "type": "string"
         }
       ]
+    },
+    "ThemeContribution": {
+      "description": "One colour theme a plugin contributes (`contributes.themes`).\n\nShape-identical to the shell's own `ThemeVariant` (`@ryu/ui/theme/presets`), so a\ntheme installed from the marketplace and a theme that ships in the binary are the\nsame object by the time the picker renders them — there is no second rendering\npath to keep in sync, and a plugin can never express a theme the built-ins could\nnot.\n\n# Why `tokens` is an untyped map\n\nThe keys are CSS custom properties (`--background`, `--sidebar-ring`, …). Typing\nthem as a fixed struct would mean every new token added to the design system\nsilently DROPS out of third-party themes until Core is rebuilt and redeployed —\nexactly the drift `settings_tabs` documents for its own `serde_json::Value`. The\nvalues are never evaluated, only assigned to CSS variables, so an unknown key is\ninert rather than dangerous.",
+      "properties": {
+        "id": {
+          "description": "Stable id used as the persisted preset selection. Namespace it with the\nplugin id (e.g. `\"@acme/themes:midnight\"`) so two plugins cannot collide, and\nso a selection survives the theme being renamed.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Human name shown in the theme picker.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Which mode slot this theme fills: `\"light\"` or `\"dark\"`. A plugin shipping a\npair contributes two entries, mirroring how the shell keeps an independent\npreset per mode rather than one theme with two halves.",
+          "type": "string"
+        },
+        "preview": {
+          "$ref": "#/$defs/ThemePreview",
+          "description": "The four swatch colours the picker paints before the theme is applied."
+        },
+        "tokens": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "CSS custom property name → value (e.g. `\"--background\"` → `\"oklch(1 0 0)\"`).",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "mode",
+        "preview",
+        "tokens"
+      ],
+      "type": "object"
+    },
+    "ThemePreview": {
+      "description": "The swatch a theme shows in the picker, without applying the theme.",
+      "properties": {
+        "bg": {
+          "type": "string"
+        },
+        "primary": {
+          "type": "string"
+        },
+        "surface": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bg",
+        "surface",
+        "primary",
+        "text"
+      ],
+      "type": "object"
     },
     "ToolFilterContribution": {
       "description": "One **tool filter**: a fully-qualified tool id a plugin wants withheld from the\nmodel's offered tool list.\n\nTools are namespaced `<server>__<tool>` (e.g. `browser__navigate`), so `tool`\nmust carry the namespace — a bare `navigate` would be ambiguous across servers\nand is rejected at load. A **trailing** `*` is a prefix wildcard, which is how a\nplugin withholds a whole server (`shadow__*`); it is the only wildcard position\nallowed, because an interior or leading `*` invites a pattern that silently\nmatches far more than the author pictured.\n\nThis type is declaration + validation only. The filter is **applied** where the\ntool list is assembled for the model (the MCP offer site in\n`apps/core/src/sidecar/mcp`), which calls [`ToolFilterContribution::matches`] so\nthe wildcard rule has exactly one implementation. Hiding a tool from the model\nis not a security boundary — it does not revoke the capability, it only stops the\ntool being advertised; enforcement stays with permissions and grants.",

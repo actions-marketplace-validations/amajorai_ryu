@@ -58,6 +58,7 @@ import type {
 	ComposerSettingItem,
 	ComposerSettingsSection,
 } from "@/components/agent-elements/input/composer-settings-menu.tsx";
+import { EffortSliderRow } from "@/components/agent-elements/input/effort-slider-row.tsx";
 import { groupModelItems } from "@/components/agent-elements/input/model-groups.ts";
 import { createModelMenuRenderer } from "@/components/agent-elements/input/model-menu-content.tsx";
 import {
@@ -317,6 +318,10 @@ function SettingItemRow({
  * Approval). Renders the section's custom grouped body when it has one (the
  * searchable model list), else a flat checked list with the section's optional
  * CLI-style decoration (approval tones). Hidden when it has nothing to offer.
+ *
+ * A `variant: "slider"` section (reasoning effort) is the exception: an ordered
+ * scale reads better as one stepped track than as a submenu of rows, so it is
+ * rendered inline instead of behind a sub-trigger.
  */
 function SettingSub({ section }: { section: ComposerSettingsSection }) {
 	const loadingEmpty = Boolean(section.loading) && section.items.length === 0;
@@ -330,6 +335,9 @@ function SettingSub({ section }: { section: ComposerSettingsSection }) {
 	const onSelect = (id: string) => {
 		section.onChange(id);
 	};
+	if (section.variant === "slider" && !loadingEmpty) {
+		return <EffortSliderRow onSelect={onSelect} section={section} />;
+	}
 	return (
 		<DropdownMenuSub>
 			<DropdownMenuSubTrigger>
@@ -695,6 +703,10 @@ function ProviderSubBody({
 		})),
 		value: provider.currentThinking ?? undefined,
 		onChange: onThinking,
+		// Pi's levels are an ordered effort scale, so the same stepped slider the
+		// ACP reasoning option gets. The detents follow `thinkingLevels`, whatever
+		// length the catalog reports.
+		variant: "slider",
 	};
 	return (
 		<>

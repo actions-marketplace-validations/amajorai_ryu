@@ -88,6 +88,13 @@ function MetaItem({
  * Every item is conditional. A listing that reports none of them renders nothing
  * at all rather than a row of dashes.
  */
+/** NOT MOUNTED ANY MORE. The listing detail's meta facts are now the divided
+ *  cells of `listing-detail-shell.tsx`'s {@link ListingStatStrip}, which is what
+ *  a wide dialog needs — this inline flex-wrap row read as a single ribbon of
+ *  grey text where the store's headline facts belong. Kept because it is still
+ *  the right shape for a NARROW, non-dialog surface (a card back, a hover
+ *  preview); if you are adding facts to the listing dialog, add a stat cell
+ *  instead, and delete this once something proves it has no such caller. */
 export function DetailMetaStrip({
 	detail,
 	entry,

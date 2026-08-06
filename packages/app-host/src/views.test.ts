@@ -8,8 +8,11 @@ import {
 	renderActionHttp,
 	renderTemplate,
 	type StoreCatalogItem,
+	type StoreDetailGraphSpec,
 	type StoreTabSpec,
 	sourceItemsFromResponse,
+	storeDetailObject,
+	storeGraphFromResponse,
 	storeItemHaystack,
 	storeItemsFromResponse,
 	VIEW_KINDS,
@@ -347,6 +350,80 @@ describe("storeItemsFromResponse", () => {
 		expect(
 			storeItemsFromResponse(spec, { templates: [{ name: "no id" }, 42] })
 		).toEqual([]);
+	});
+});
+
+describe("store badge transform", () => {
+	it("humanizes a wire token only when the tab asks for it", () => {
+		const rows = [{ id: "a", name: "A", pattern: "evaluator-optimizer" }];
+		const raw = storeItemsFromResponse(
+			{ source: { http: { path: "/api/x" } }, map: { badge: "pattern" } },
+			rows
+		);
+		expect(raw[0]?.badge).toBe("evaluator-optimizer");
+
+		const humanized = storeItemsFromResponse(
+			{
+				source: { http: { path: "/api/x" } },
+				map: { badge: "pattern", badgeTransform: "humanize" },
+			},
+			rows
+		);
+		expect(humanized[0]?.badge).toBe("Evaluator Optimizer");
+	});
+});
+
+describe("storeDetailObject", () => {
+	it("unwraps the declared envelope key, else returns the payload", () => {
+		expect(
+			storeDetailObject({ item: "template" }, { template: { id: "a" } })
+		).toEqual({ id: "a" });
+		expect(storeDetailObject({}, { id: "a" })).toEqual({ id: "a" });
+		expect(storeDetailObject({ item: "template" }, null)).toBeUndefined();
+	});
+});
+
+describe("storeGraphFromResponse", () => {
+	const spec: StoreDetailGraphSpec = {
+		nodes: "nodes",
+		edges: "edges",
+		nodeId: "id",
+		edgeSource: "from",
+		edgeTarget: "to",
+		edgeLabel: "branch",
+	};
+
+	it("maps nodes and edges through the declared keys", () => {
+		const graph = storeGraphFromResponse(spec, {
+			nodes: [{ id: "draft" }, { id: "review" }],
+			edges: [{ from: "draft", to: "review", branch: "true" }],
+		});
+		expect(graph.nodes).toEqual([
+			{ id: "draft", label: "draft" },
+			{ id: "review", label: "review" },
+		]);
+		expect(graph.edges).toEqual([
+			{ label: "true", source: "draft", target: "review" },
+		]);
+	});
+
+	it("drops edges that point at nodes the payload never declared", () => {
+		const graph = storeGraphFromResponse(spec, {
+			nodes: [{ id: "draft" }],
+			edges: [{ from: "draft", to: "ghost" }],
+		});
+		expect(graph.edges).toEqual([]);
+	});
+
+	it("degrades a payload it cannot parse to an empty graph", () => {
+		expect(storeGraphFromResponse(spec, null)).toEqual({
+			edges: [],
+			nodes: [],
+		});
+		expect(storeGraphFromResponse(spec, { nodes: "nope" })).toEqual({
+			edges: [],
+			nodes: [],
+		});
 	});
 });
 

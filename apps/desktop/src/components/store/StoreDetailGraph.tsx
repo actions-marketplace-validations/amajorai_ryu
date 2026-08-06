@@ -1,13 +1,17 @@
-// apps/desktop/src/components/store/WorkflowGraphPreview.tsx
+// apps/desktop/src/components/store/StoreDetailGraph.tsx
 //
-// A READ-ONLY React Flow canvas that previews a workflow template's graph in the
-// Store detail pane. Templates carry nodes + edges but NO positions (position is a
-// UI concern), so we auto-lay them out left-to-right by longest-path depth — a DAG
-// reads best that way. Interaction is fully disabled (no drag/connect/zoom/select):
-// this is a picture of the workflow, not the editor (that lives in the sandboxed
-// @ryu/workflows companion). React Flow's base CSS is already imported globally
-// in index.css.
+// A READ-ONLY React Flow canvas that draws the graph a Store tab declares through
+// `spec.detail.graph` (see `StoreDetailGraphSpec`). It began life as the workflow
+// template preview and is now the generic primitive behind it: any app whose
+// catalog rows have a shape — a workflow, a pipeline, a routing table — declares
+// the graph in its manifest instead of the shell allowlisting a component for it.
+//
+// Rows carry nodes + edges but NO positions (position is a UI concern), so we
+// auto-lay them out left-to-right by longest-path depth — a DAG reads best that
+// way. Interaction is fully disabled (no drag/connect/zoom/select): this is a
+// picture, not an editor. React Flow's base CSS is imported globally in index.css.
 
+import type { StoreGraphEdge, StoreGraphNode } from "@ryu/app-host/views";
 import {
 	Background,
 	type Edge,
@@ -16,7 +20,6 @@ import {
 	ReactFlow,
 } from "@xyflow/react";
 import { useMemo } from "react";
-import type { WorkflowEdge, WorkflowNode } from "@/src/lib/api/workflows.ts";
 
 const LAYER_X = 200;
 const ROW_Y = 74;
@@ -25,20 +28,20 @@ const NODE_WIDTH = 150;
 /** Longest-path layering: x = depth (edge distance from a root), y = order within
  *  the layer. Nodes in a cycle (durable `while` bodies) that never resolve keep
  *  depth 0 and cluster at the left — acceptable for a small preview. */
-function layoutNodes(nodes: WorkflowNode[], edges: WorkflowEdge[]): Node[] {
+function layoutNodes(nodes: StoreGraphNode[], edges: StoreGraphEdge[]): Node[] {
 	const remaining = new Map<string, number>();
 	for (const n of nodes) {
 		remaining.set(n.id, 0);
 	}
 	for (const e of edges) {
-		remaining.set(e.to, (remaining.get(e.to) ?? 0) + 1);
+		remaining.set(e.target, (remaining.get(e.target) ?? 0) + 1);
 	}
 
 	const adjacency = new Map<string, string[]>();
 	for (const e of edges) {
-		const list = adjacency.get(e.from) ?? [];
-		list.push(e.to);
-		adjacency.set(e.from, list);
+		const list = adjacency.get(e.source) ?? [];
+		list.push(e.target);
+		adjacency.set(e.source, list);
 	}
 
 	const depth = new Map<string, number>();
@@ -72,7 +75,7 @@ function layoutNodes(nodes: WorkflowNode[], edges: WorkflowEdge[]): Node[] {
 		return {
 			id: n.id,
 			position: { x: d * LAYER_X, y: row * ROW_Y },
-			data: { label: n.id },
+			data: { label: n.label },
 			style: {
 				width: NODE_WIDTH,
 				padding: "6px 10px",
@@ -86,24 +89,24 @@ function layoutNodes(nodes: WorkflowNode[], edges: WorkflowEdge[]): Node[] {
 	});
 }
 
-function toFlowEdges(edges: WorkflowEdge[]): Edge[] {
+function toFlowEdges(edges: StoreGraphEdge[]): Edge[] {
 	return edges.map((e, i) => ({
-		id: `e-${e.from}-${e.to}-${i}`,
-		source: e.from,
-		target: e.to,
-		label: e.branch ?? undefined,
+		id: `e-${e.source}-${e.target}-${i}`,
+		source: e.source,
+		target: e.target,
+		label: e.label,
 		type: "smoothstep",
 		markerEnd: { type: MarkerType.ArrowClosed },
 		style: { stroke: "var(--muted-foreground)" },
 	}));
 }
 
-export default function WorkflowGraphPreview({
+export default function StoreDetailGraph({
 	nodes,
 	edges,
 }: {
-	nodes: WorkflowNode[];
-	edges: WorkflowEdge[];
+	edges: StoreGraphEdge[];
+	nodes: StoreGraphNode[];
 }) {
 	const flowNodes = useMemo(() => layoutNodes(nodes, edges), [nodes, edges]);
 	const flowEdges = useMemo(() => toFlowEdges(edges), [edges]);

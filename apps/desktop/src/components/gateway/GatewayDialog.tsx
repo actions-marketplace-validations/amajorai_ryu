@@ -8,7 +8,6 @@ import {
 	Delete01Icon,
 	Dollar01Icon,
 	EyeIcon,
-	File01Icon,
 	GitBranchIcon,
 	Key01Icon,
 	PencilEdit01Icon,
@@ -25,9 +24,9 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	EvaluatorCatalog,
 	type EvaluatorCatalogItem,
-} from "@ryu/blocks/desktop/evaluator-catalog";
-import { Badge } from "@ryu/ui/components/badge";
-import { Button } from "@ryu/ui/components/button";
+} from "@ryu/blocks/desktop/evaluator-catalog.tsx";
+import { Badge } from "@ryu/ui/components/badge.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Dialog,
 	DialogContent,
@@ -36,40 +35,40 @@ import {
 	DialogHeader,
 	DialogTitle,
 	DialogTrigger,
-} from "@ryu/ui/components/dialog";
+} from "@ryu/ui/components/dialog.tsx";
 import {
 	Empty,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
-} from "@ryu/ui/components/empty";
-import { Input } from "@ryu/ui/components/input";
-import { Label } from "@ryu/ui/components/label";
+} from "@ryu/ui/components/empty.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Label } from "@ryu/ui/components/label.tsx";
+import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid.tsx";
 import {
 	Select,
 	SelectContent,
 	SelectItem,
 	SelectTrigger,
 	SelectValue,
-} from "@ryu/ui/components/select";
+} from "@ryu/ui/components/select.tsx";
 import {
 	SidebarGroup,
 	SidebarGroupLabel,
 	SidebarMenu,
 	SidebarMenuButton,
 	SidebarMenuItem,
-} from "@ryu/ui/components/sidebar";
-import { toast } from "@ryu/ui/components/sileo";
-import { Skeleton } from "@ryu/ui/components/skeleton";
-import { Slider } from "@ryu/ui/components/slider";
-import { Spinner } from "@ryu/ui/components/spinner";
-import { Switch } from "@ryu/ui/components/switch";
+} from "@ryu/ui/components/sidebar.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
+import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { Switch } from "@ryu/ui/components/switch.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
+} from "@ryu/ui/components/tooltip.tsx";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -90,12 +89,15 @@ import { WorkspaceSection } from "@/src/components/gateway/WorkspaceSection.tsx"
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
 import { ConnectionsTab } from "@/src/components/settings/ConnectionsTab.tsx";
 import { DangerZoneSettings } from "@/src/components/settings/DangerZoneSettings.tsx";
-import { DocumentParsingSettings } from "@/src/components/settings/DocumentParsingSettings.tsx";
 import { EmailAlertsSettings } from "@/src/components/settings/EmailAlertsSettings.tsx";
+import { EncryptionSettings } from "@/src/components/settings/EncryptionSettings.tsx";
 import { EntitySettings } from "@/src/components/settings/EntitySettings.tsx";
 import { IntegrationsTab } from "@/src/components/settings/IntegrationsTab.tsx";
 import { LlmProvidersSettings } from "@/src/components/settings/LlmProvidersSettings.tsx";
-import { NetworkSettings } from "@/src/components/settings/NetworkSettings.tsx";
+import {
+	ManagedInferenceSettings,
+	NetworkSettings,
+} from "@/src/components/settings/NetworkSettings.tsx";
 import { NodeAccessSettings } from "@/src/components/settings/NodeAccessSettings.tsx";
 import { NodePermissionsSettings } from "@/src/components/settings/NodePermissionsSettings.tsx";
 import { PrivacySettings } from "@/src/components/settings/PrivacySettings.tsx";
@@ -2536,27 +2538,17 @@ function SmartRoutingCard({
 							</p>
 						</div>
 						<div className="flex flex-col gap-1.5">
-							<div className="flex items-center justify-between">
-								<Label htmlFor="smart-similarity-threshold">
-									Similarity threshold
-								</Label>
-								<span className="text-muted-foreground text-xs tabular-nums">
-									{(draft?.similarity_threshold ?? 0.35).toFixed(2)}
-								</span>
-							</div>
-							<Slider
-								aria-label="Similarity threshold"
+							<FluidSlider
 								disabled={isDisabled}
-								id="smart-similarity-threshold"
+								format={(v) => v.toFixed(2)}
+								label="Similarity threshold"
 								max={1}
 								min={0}
-								onValueChange={(v: number | number[]) =>
-									patch({
-										similarity_threshold: Array.isArray(v) ? v[0] : v,
-									})
+								onValueChange={(similarity_threshold) =>
+									patch({ similarity_threshold })
 								}
 								step={0.05}
-								value={[draft?.similarity_threshold ?? 0.35]}
+								value={draft?.similarity_threshold ?? 0.35}
 							/>
 							<p className="text-muted-foreground text-xs">
 								Minimum cosine similarity for a rule to match. Higher is
@@ -6009,15 +6001,20 @@ const GATEWAY_SECTIONS: {
 		label: "Storage",
 		hint: "Where files, models, and databases are kept on this computer.",
 		icon: Key01Icon,
-		keywords: "storage disk path database models cache",
+		// "parsing"/"parser"/"pdf" search here on purpose. There is no Document
+		// parsing section any more — the parser is bound from the node dropdown's
+		// Toolkits row like every other swappable capability, and the only thing
+		// that tab owned alone (the node's upload ceiling) is a card on this one.
+		keywords:
+			"storage disk path database models cache upload limit size parsing parser document pdf docx",
 	},
 	{
-		value: "parsing",
-		label: "Document parsing",
-		hint: "Which app reads PDFs and Word files, and how large a file can be.",
-		icon: File01Icon,
+		value: "encryption",
+		label: "Encryption",
+		hint: "How this computer holds its key, and what is encrypted at rest.",
+		icon: SquareLock01Icon,
 		keywords:
-			"parsing parser document pdf docx xlsx markitdown docling unstructured extract text ocr upload limit size",
+			"encryption encrypted at rest master key keychain custody sealed plaintext coverage",
 	},
 	{
 		value: "updates",
@@ -6206,11 +6203,9 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	// apps register their own tabs dynamically under the Apps/Plugins headers).
 	{
 		title: "This computer",
-		// "parsing" sits beside "storage": both are about files this machine holds
-		// — where they are kept, and what can read them. A section listed in
-		// GATEWAY_SECTIONS but missing from a group here renders NOWHERE, with no
-		// type error and no warning, so the two lists move together.
-		items: ["privacy", "access", "storage", "parsing", "updates", "health"],
+		// A section listed in GATEWAY_SECTIONS but missing from a group here renders
+		// NOWHERE, with no type error and no warning, so the two lists move together.
+		items: ["privacy", "access", "storage", "encryption", "updates", "health"],
 	},
 	{ title: "Danger", items: ["danger"] },
 ];
@@ -6494,7 +6489,12 @@ export function GatewayDialog({
 					</>
 				) : null}
 				{section === "integrations" ? <IntegrationsTab /> : null}
-				{section === "network" ? <NetworkSettings /> : null}
+				{section === "network" ? (
+					<>
+						<NetworkSettings />
+						<ManagedInferenceSettings />
+					</>
+				) : null}
 				{section === "usage" ? (
 					<UsageCostSection
 						configuredProviders={health?.providers ?? []}
@@ -6511,11 +6511,11 @@ export function GatewayDialog({
 				{section === "privacy" ? <PrivacySettings /> : null}
 				{section === "access" ? <NodeAccessSettings /> : null}
 				{section === "permissions" ? <NodePermissionsSettings /> : null}
+				{/* Also carries the node's upload ceiling, which used to be the one
+				    thing the retired "Document parsing" section owned alone. The parser
+				    itself is bound from the node dropdown's Toolkits row. */}
 				{section === "storage" ? <StorageSettings /> : null}
-				{/* Node-wide `document.parse` binding + the ceiling the node enforces.
-				    Reads the active node directly (`useActiveNode`), like the other
-				    "This computer" panels, so it takes no props from the dialog. */}
-				{section === "parsing" ? <DocumentParsingSettings /> : null}
+				{section === "encryption" ? <EncryptionSettings /> : null}
 				{section === "updates" ? <UpdatesSettings /> : null}
 				{section === "health" ? <PreflightPage embedded /> : null}
 				{section === "danger" ? <DangerZoneSettings /> : null}

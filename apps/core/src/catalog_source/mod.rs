@@ -17,6 +17,7 @@ mod github_enrich;
 mod github_topic;
 pub(crate) mod manifest_surface;
 mod registry;
+pub(crate) mod skill_registries;
 mod sources;
 
 pub use github_topic::{
@@ -146,7 +147,8 @@ pub async fn github_listing_channels(
 pub use registry::{CatalogSourceRegistry, CustomSourceSpec, SourceMeta};
 pub use sources::{
     integration_brand_slug, integrations_sh_brands, with_buyer_token, HfSource, IntegrationBrand,
-    IntegrationsShSource, MarketplaceSource, ModelIndexSource, OfficialMcpSource, OkfBundleSource,
+    IntegrationConnection, IntegrationsShSource, MarketplaceSource, ModelIndexSource,
+    OfficialMcpSource, OkfBundleSource,
     RyuHostedMcpSource, RyuMarketplaceSource, SkillsShSource, SmitherySource, Source, SourceAuth,
     StubSource, RYU_MARKETPLACE_API_ENV, SMITHERY_API_KEY_PREF,
 };

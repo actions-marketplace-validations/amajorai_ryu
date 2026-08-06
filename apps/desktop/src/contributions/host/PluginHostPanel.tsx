@@ -35,9 +35,19 @@ import {
 	htmlCompanionSrcdoc,
 	thirdPartyPluginSrcdoc,
 } from "@ryu/app-host/third-party-plugin";
+import { Button } from "@ryu/ui/components/button";
+import {
+	Empty,
+	EmptyContent,
+	EmptyDescription,
+	EmptyHeader,
+	EmptyMedia,
+	EmptyTitle,
+} from "@ryu/ui/components/empty";
 import { asGlyphValue } from "@ryu/ui/components/glyph.ts";
+import { Spinner } from "@ryu/ui/components/spinner";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getActiveUserId, useSession } from "@/lib/auth-client.ts";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import {
@@ -195,6 +205,7 @@ import {
 import { createScheduledAgentWorkflow } from "@/src/lib/automations.ts";
 import { PlanCapError } from "@/src/lib/gating/planCapBridge.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
+import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 
 /** Base64-encode a UTF-8 string (btoa is Latin-1 only). Used to inline the plugin
@@ -417,6 +428,63 @@ function readHostThemeTokens(): Record<string, string> {
 	return out;
 }
 
+/** How long the sandbox bridge may take to connect before the startup state stops
+ *  claiming progress and offers a retry. Long enough that a cold, heavy bundle is
+ *  not accused of being broken; short enough that a lost handshake is not a
+ *  spinner you stare at. */
+const STALL_AFTER_MS = 8000;
+/** How long Retry stays disabled after a press. A reload is cheap but not free
+ *  (re-fetch + re-parse the bundle), and a mashed button only ever makes a slow
+ *  frame slower by restarting it. */
+const RETRY_COOLDOWN_MS = 15_000;
+
+/**
+ * The panel's centered state — startup, failure, and "nothing to show" all render
+ * through this one shape so they cannot drift into three different-looking screens.
+ * `busy` swaps the icon for a spinner; `onRetry` adds the action, disabled while
+ * `retryDisabledFor` seconds remain (armed on press and counted down in place, so
+ * the button says why it is dead).
+ */
+function PanelPlaceholder({
+	busy,
+	description,
+	onRetry,
+	retryDisabledFor = 0,
+	title,
+}: {
+	busy?: boolean;
+	description: string;
+	onRetry?: () => void;
+	retryDisabledFor?: number;
+	title: string;
+}) {
+	return (
+		<div className="flex h-full items-center justify-center p-6">
+			<Empty>
+				<EmptyHeader>
+					<EmptyMedia variant="icon">
+						{busy ? <Spinner /> : <HugeiconsIcon icon={PuzzleIcon} />}
+					</EmptyMedia>
+					<EmptyTitle>{title}</EmptyTitle>
+					<EmptyDescription>{description}</EmptyDescription>
+				</EmptyHeader>
+				{onRetry ? (
+					<EmptyContent>
+						<Button
+							disabled={retryDisabledFor > 0}
+							onClick={onRetry}
+							size="sm"
+							variant="outline"
+						>
+							{retryDisabledFor > 0 ? `Retry in ${retryDisabledFor}s` : "Retry"}
+						</Button>
+					</EmptyContent>
+				) : null}
+			</Empty>
+		</div>
+	);
+}
+
 export function PluginHostPanel({
 	companion,
 	mountContext,
@@ -473,7 +541,12 @@ export function PluginHostPanel({
 
 	// Fetch the plugin's bundled code over the trusted API. `null` (no bundle /
 	// not enabled) or an error means we render the benign fallback, never code.
-	const { data: code, isPending } = useQuery({
+	const {
+		data: code,
+		isPending,
+		isError,
+		refetch,
+	} = useQuery({
 		queryKey: ["plugin-ui-bundle", node.url, node.token, companion.pluginId],
 		// Fetch by the OWNING plugin id (the store key), not the companion id.
 		queryFn: () => fetchPluginUiBundle(toTarget(node), companion.pluginId),
@@ -481,28 +554,156 @@ export function PluginHostPanel({
 		staleTime: 60_000,
 	});
 
-	// One nonce per mount. Host-generated, never plugin/user input.
+	// Retry generation. Bumping it mints a fresh nonce → a fresh `srcdoc` → the
+	// iframe genuinely reloads (a re-render alone would not: React leaves an
+	// unchanged `srcDoc` attribute alone, so the dead document would just sit
+	// there). The nonce is also the ExtensionHost effect's key, so the bridge
+	// listener is rebuilt in step with the document it is waiting on.
+	const [attempt, setAttempt] = useState(0);
+	// One nonce per attempt. Host-generated, never plugin/user input.
 	const nonce = useMemo(
 		() =>
 			typeof crypto?.randomUUID === "function"
 				? crypto.randomUUID()
-				: `nonce-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
-		[]
+				: `nonce-${attempt}-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
+		[attempt]
 	);
+
+	// Startup progress: `stalled` flips when the bridge has not connected within
+	// STALL_AFTER_MS, which is what turns the honest "Starting…" state into an
+	// actionable one. Reset per attempt.
+	const [stalled, setStalled] = useState(false);
+	useEffect(() => {
+		if (connected) {
+			return;
+		}
+		setStalled(false);
+		const id = setTimeout(() => setStalled(true), STALL_AFTER_MS);
+		return () => clearTimeout(id);
+	}, [connected, attempt]);
+
+	// Retry cooldown, ticked only while it runs (an idle panel must not re-render
+	// once a second forever). Armed on press, not on success: the press is what
+	// costs a reload, whether or not the reload then works.
+	const [cooldownUntil, setCooldownUntil] = useState(0);
+	const [now, setNow] = useState(() => Date.now());
+	const cooldownLeftMs = Math.max(0, cooldownUntil - now);
+	const cooldownSeconds = Math.ceil(cooldownLeftMs / 1000);
+	useEffect(() => {
+		if (cooldownLeftMs <= 0) {
+			return;
+		}
+		const id = setInterval(() => setNow(Date.now()), 500);
+		return () => clearInterval(id);
+	}, [cooldownLeftMs]);
+
+	const retry = useCallback(() => {
+		setCooldownUntil(Date.now() + RETRY_COOLDOWN_MS);
+		setNow(Date.now());
+		setConnected(false);
+		setAttempt((n) => n + 1);
+		// Re-fetch too: a bundle that failed (or was served by a node still booting)
+		// must be re-read, not re-mounted from the same cached miss.
+		refetch();
+	}, [refetch]);
 
 	// The granted set comes from the plugin's GATEWAY-APPROVED grants, mapped to
 	// capabilities (unmapped grants dropped). DENY-SAFE: an empty approved list
 	// yields an empty set, so a plugin with no validated grants can call nothing.
+	//
+	// Keyed by grant CONTENT, not by the array's identity. `granted` is one of the
+	// two ExtensionHost effect deps, and that effect's cleanup closes the live RPC
+	// port — while the iframe, whose `srcdoc` did not change, never re-announces to
+	// get a new one (`handshakeAnnounceScript` clears its retry interval once the
+	// port lands, and again after HANDSHAKE_RETRY_WINDOW_MS). So an identity-only
+	// change — the contributions query refetching on window focus hands back an
+	// equal-but-new `approvedGrants` array — would silently kill the bridge of every
+	// open app the first time the window is refocused. Same set ⇒ same Set ⇒ no
+	// teardown.
+	const grantsKey = companion.approvedGrants.join(" ");
+	// biome-ignore lint/correctness/useExhaustiveDependencies: grantsKey is the content hash of approvedGrants.
 	const granted = useMemo<ReadonlySet<Capability>>(
 		() => capabilitiesFromGrants(companion.approvedGrants),
-		[companion.approvedGrants]
+		[grantsKey]
 	);
+
+	// This app's assistant-context slice + takeover token. Scoped to the plugin id
+	// so two companions of the same app share one slice (they are one app to the
+	// user) while different apps stay isolated.
+	const assistantOwner = `plugin:${companion.pluginId}`;
+
+	// A closed page is not "what the user is looking at". Drop this app's slice and
+	// its takeover when the panel unmounts — an app that crashed or was navigated
+	// away from must not keep steering the assistant.
+	useEffect(() => {
+		return () => {
+			const assistant = useAssistantStore.getState();
+			assistant.clearContextOwner(assistantOwner);
+			assistant.clearBuilder(assistantOwner);
+		};
+	}, [assistantOwner]);
 
 	// The privileged services. `listAgents` holds the token and returns a minimal
 	// projection; `registerRoute` accepts ONLY this plugin's own `/plugin/<id>`
 	// path (anti-phishing), rejecting system/other-plugin paths.
 	const services = useMemo<HostServices>(
 		() => ({
+			// ── Assistant bridge ───────────────────────────────────────────────────
+			// The app tells the ONE global "Ask Ryu" surface what its page is showing,
+			// and (optionally) lends it this page's own instructions while the page is
+			// open. Everything is scoped by the owning plugin id: an app replaces its
+			// OWN context slice and can clear only its OWN takeover, so two apps (or an
+			// app and the page under it) never clobber each other. Nothing is readable
+			// back — this is a write-only channel into the assistant's prompt.
+			assistantPublishContext: async ({ items }) => {
+				useAssistantStore.getState().publishContext(
+					assistantOwner,
+					// `source` is stamped HERE, by the shell, from the companion's real
+					// name — never taken from the app's own payload, which could claim
+					// to be anything.
+					items.map((i) => ({ ...i, source: companion.name }))
+				);
+			},
+			assistantClearContext: async () => {
+				useAssistantStore.getState().clearContextOwner(assistantOwner);
+			},
+			assistantRegisterSurface: async (surface) => {
+				useAssistantStore.getState().registerBuilder({
+					conversationId: assistantOwner,
+					// An app-defined kind, so `buildBuilderPreamble` uses the surface's
+					// own `preamble` instead of a built-in builder's instructions.
+					kind: `plugin:${companion.pluginId}`,
+					label: surface.label,
+					description: surface.description,
+					preamble: surface.preamble,
+					prompts: surface.prompts,
+					tools: surface.tools,
+					// Registering must not pop the panel open — see the store's `dock` doc.
+					dock: false,
+					snapshot: "",
+					targetId: companion.id,
+					targetName: surface.label,
+					resolveId: () => Promise.resolve(companion.id),
+					onChanged: () => undefined,
+				});
+			},
+			assistantClearSurface: async () => {
+				useAssistantStore.getState().clearBuilder(assistantOwner);
+			},
+			assistantOpen: async ({ mode, prompt }) => {
+				useAssistantStore.getState().open(mode);
+				if (prompt) {
+					// Asking on the user's behalf is a real turn on their budget, and it
+					// lands in the thread looking exactly like something they typed. So
+					// the question is ATTRIBUTED here, by the shell, from the companion's
+					// real name — the same rule the context path follows, applied to the
+					// higher-power half. `assistant.open()` with no prompt just shows the
+					// panel and writes nothing.
+					useAssistantStore
+						.getState()
+						.setPendingPrompt(`[asked by ${companion.name}] ${prompt}`);
+				}
+			},
 			listAgents: async () => {
 				const agents = await fetchAgents(toTarget(node));
 				return agents.map((a) => ({ id: a.id, name: a.name }));
@@ -1455,7 +1656,9 @@ export function PluginHostPanel({
 		[
 			node,
 			companion.id,
+			companion.name,
 			companion.pluginId,
+			assistantOwner,
 			guard,
 			limitFor,
 			canUse,
@@ -1497,24 +1700,43 @@ export function PluginHostPanel({
 		);
 	}, [code, nonce, companion.id, mountContext, themeTokens]);
 
+	const panelTitle = companion.label || companion.name;
+
+	// The bundle fetch failed (`retry: false`, so this is terminal). Distinct from
+	// "no bundle": saying "does not provide a runnable UI" for a failed fetch is a
+	// lie about the app, and it hides the one thing that would fix it — retrying.
+	if (isError) {
+		return (
+			<PanelPlaceholder
+				description="The app's interface could not be fetched from this node. It may still be starting up."
+				onRetry={retry}
+				retryDisabledFor={cooldownSeconds}
+				title={`Couldn't load ${panelTitle}`}
+			/>
+		);
+	}
+
 	if (isPending) {
 		return (
-			<div className="flex h-full items-center justify-center p-6 text-muted-foreground text-sm">
-				Loading plugin…
-			</div>
+			<PanelPlaceholder
+				busy
+				description="Fetching the app's interface from this node."
+				title={`Loading ${panelTitle}…`}
+			/>
 		);
 	}
 
 	if (!srcdoc) {
 		return (
-			<div className="flex h-full items-center justify-center p-6 text-muted-foreground text-sm">
-				This plugin does not provide a runnable UI.
-			</div>
+			<PanelPlaceholder
+				description="This app has no interface of its own — it works through the rest of Ryu."
+				title={`${panelTitle} has nothing to show here`}
+			/>
 		);
 	}
 
 	return (
-		<div className="flex h-full flex-col overflow-hidden">
+		<div className="relative flex h-full flex-col overflow-hidden">
 			{/* Visible attribution: this is plugin content, namespaced, never system
 			    chrome. */}
 			<div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-2">
@@ -1522,9 +1744,7 @@ export function PluginHostPanel({
 					className="size-4 text-muted-foreground"
 					icon={PuzzleIcon}
 				/>
-				<span className="font-medium text-sm">
-					Plugin · {companion.label || companion.name}
-				</span>
+				<span className="font-medium text-sm">Plugin · {panelTitle}</span>
 				<span className="ml-auto text-muted-foreground text-xs">
 					{connected ? "sandboxed · connected" : "sandboxed · starting…"}
 				</span>
@@ -1539,6 +1759,30 @@ export function PluginHostPanel({
 					title={`Plugin: ${companion.name}`}
 				/>
 			</div>
+			{/* The startup state, centered over the frame rather than a word in a
+			    header: until the sandbox bridge connects the frame is blank anyway (a
+			    Path-A bundle does not even evaluate before the port lands), so this IS
+			    the panel's content, not a decoration on it. Opaque so the blank frame
+			    behind it never flashes through. */}
+			{connected ? null : (
+				<div className="absolute inset-0 z-10 bg-background">
+					<PanelPlaceholder
+						busy={!stalled}
+						description={
+							stalled
+								? "The sandboxed interface hasn't connected yet. Retry to reload it."
+								: "Runs sandboxed, with only the permissions you approved."
+						}
+						onRetry={stalled ? retry : undefined}
+						retryDisabledFor={cooldownSeconds}
+						title={
+							stalled
+								? `${panelTitle} is taking a while`
+								: `Starting ${panelTitle}…`
+						}
+					/>
+				</div>
+			)}
 		</div>
 	);
 }

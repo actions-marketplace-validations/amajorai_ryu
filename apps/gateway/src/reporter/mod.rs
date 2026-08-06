@@ -340,7 +340,12 @@ async fn push_report(state: &SharedState) -> anyhow::Result<()> {
         "agentDaily": agent_daily,
     });
 
-    let url = format!("{}/aggregation/ingest", cfg.base_url.trim_end_matches('/'));
+    // `/api` is part of the route: the control plane mounts `aggregationRouter` at
+    // `/api/aggregation`, and `cfg.base_url` is the bare origin. Same omission as
+    // the credits debit join (see `pipeline/mod.rs`) — every usage rollup POSTed
+    // to `/aggregation/ingest` and 404'd, silently, because the reporter is
+    // best-effort.
+    let url = format!("{}/api/aggregation/ingest", cfg.base_url.trim_end_matches('/'));
     let resp = state
         .http
         .post(&url)

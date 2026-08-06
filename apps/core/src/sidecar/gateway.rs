@@ -33,6 +33,148 @@ const ENV_GATEWAY_URL: &str = "RYU_GATEWAY_URL";
 const ENV_GATEWAY_TOKEN: &str = "RYU_GATEWAY_TOKEN";
 /// Env var to disable Core spawning/managing the gateway (assume external).
 const ENV_GATEWAY_MANAGED: &str = "RYU_GATEWAY_MANAGED";
+/// Env var pointing the MANAGED provider at the hosted gateway fleet.
+const ENV_MANAGED_FLEET_URL: &str = "RYU_MANAGED_GATEWAY_URL";
+/// Env var carrying the org's `rgw_` token for the hosted gateway fleet.
+const ENV_MANAGED_FLEET_TOKEN: &str = "RYU_MANAGED_GATEWAY_TOKEN";
+
+/// Preference keys mirroring the two env vars above, so the desktop can wire a
+/// LOCAL node to managed inference without an env edit + restart.
+pub const MANAGED_FLEET_URL_PREF_KEY: &str = "managed-gateway-url";
+pub const MANAGED_FLEET_TOKEN_PREF_KEY: &str = "managed-gateway-token";
+
+/// Pref-seeded half of the managed-fleet coordinates.
+///
+/// `apply()` in `pi_config` is synchronous but the preferences store is async,
+/// so — exactly like `ryu_mesh`'s `MESH_PREF_ENABLED` — Core seeds this once at
+/// boot and the runtime config route updates it, letting the sync path read
+/// `env || pref` without an await.
+static MANAGED_FLEET_PREF: std::sync::RwLock<Option<(String, String)>> =
+    std::sync::RwLock::new(None);
+
+/// Seed/update the pref half of the managed-fleet coordinates. Passing `None`
+/// (or an empty url/token) clears it, which falls the managed provider back to
+/// the local gateway.
+pub fn set_managed_fleet_pref(url: Option<String>, token: Option<String>) {
+    let resolved = match (url, token) {
+        (Some(u), Some(t)) if !u.trim().is_empty() && !t.trim().is_empty() => {
+            Some((u.trim().to_owned(), t.trim().to_owned()))
+        }
+        _ => None,
+    };
+    if let Ok(mut slot) = MANAGED_FLEET_PREF.write() {
+        *slot = resolved;
+    }
+}
+
+/// The hosted gateway fleet's `(base_url, token)` for the MANAGED provider, or
+/// `None` when this node has no managed coordinates.
+///
+/// This is what makes "remote gateway for managed, local gateway for BYOK"
+/// possible on ONE node: the managed provider is billed against the org's
+/// credits and must reach the multi-tenant fleet (whose env holds the provider
+/// keys), while every BYOK provider keeps using the user's own local gateway.
+/// Without this, a self-hosted node that selected "Ryu (managed)" pointed at its
+/// OWN keyless gateway and could never actually spend the plan it paid for.
+///
+/// Env wins over the pref so an operator can pin a node; both must be present
+/// (a URL with no token would 401 against the fleet).
+pub fn managed_fleet() -> Option<(String, String)> {
+    let env_url = std::env::var(ENV_MANAGED_FLEET_URL)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let env_token = std::env::var(ENV_MANAGED_FLEET_TOKEN)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if let (Some(url), Some(token)) = (env_url, env_token) {
+        return Some((url.trim().to_owned(), token.trim().to_owned()));
+    }
+    MANAGED_FLEET_PREF.read().ok()?.clone()
+}
+
+/// This node's own routing PREFERENCES, as the encoded `x-ryu-node-routing`
+/// value (`v1.<base64url-nopad(JSON)>`), or `None` when the node has stated none.
+///
+/// # Why this exists and why it is empty today
+///
+/// On a remote data plane there is no local gateway, so `gateway.toml` is not the
+/// source for anything — the node's opinions have to travel per request or not at
+/// all. Most already do: `connect_openai` sends the slot pins, prompt-cache
+/// mode/ttl, agent id and priority, and injects `ryu_smart_route` into the body.
+/// The two that had nowhere to go are the node's preferred FALLBACK ORDER and its
+/// own EXTRA firewall rules — this is their carrier.
+///
+/// Enumerated rather than assumed: nothing on a remote node holds either today.
+/// `gateway_spawn_env`'s `GATEWAY_*` block only forwards `gateway_policy::
+/// firewall_enabled()` / `routing_enabled()`, which are process-global BOOLEANS
+/// ("force the feature on"), not a chain or a rule set — and that block is not
+/// even built in remote mode, since `start()` never spawns a local gateway there.
+/// So a node prefs STORE (plus the desktop settings that would write it) is real
+/// work that belongs to its own lane, and inventing one here would be a settings
+/// surface nobody asked for.
+///
+/// What ships instead is the seam: nothing sets the slot, so this returns `None`,
+/// so the header is omitted entirely and an untouched install is byte-identical
+/// on the wire. The receiving side is complete and independently tested. When the
+/// prefs store lands, it calls [`set_node_routing_prefs`] at boot and on change,
+/// and the channel is live with no further plumbing.
+///
+/// Sync and allocation-light (one `String` clone per turn) because it is called
+/// per request from a sync path, following [`MANAGED_FLEET_PREF`]: the
+/// preferences store is async and this path is not.
+pub fn node_routing_header() -> Option<String> {
+    NODE_ROUTING_PREF.read().ok()?.clone()
+}
+
+/// Pre-encoded `x-ryu-node-routing` value, seeded at boot and refreshed by the
+/// runtime config route — same boot-seeded-`RwLock` shape as
+/// [`MANAGED_FLEET_PREF`], and for the same reason. Encoded ONCE on write rather
+/// than per turn: the read side is on the hot path, the write side is not.
+static NODE_ROUTING_PREF: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Set (or clear) this node's routing preferences.
+///
+/// `fallback` is an ordered list of gateway provider ids. The fleet treats it as
+/// a preference over ITS OWN chain for the routed primary — ids it would not have
+/// used anyway are dropped, the primary stays pinned, and each survivor is
+/// re-checked against the org's credit pools. So an id here can reorder, never
+/// widen. `firewall` is a `FirewallOverlay`-shaped object applied as the narrowest
+/// scope and only ever additively (it can tighten a dial or append a pattern; it
+/// cannot loosen one). Both empty ⇒ the header is omitted entirely.
+#[allow(dead_code)] // The prefs store that calls this is a separate lane; see `node_routing_header`.
+pub fn set_node_routing_prefs(fallback: Vec<String>, firewall: Option<serde_json::Value>) {
+    use base64::Engine as _;
+
+    let fallback: Vec<String> = fallback
+        .into_iter()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let encoded = if fallback.is_empty() && firewall.is_none() {
+        None
+    } else {
+        let mut doc = serde_json::Map::new();
+        if !fallback.is_empty() {
+            doc.insert("fallback".to_owned(), serde_json::json!(fallback));
+        }
+        if let Some(fw) = firewall {
+            doc.insert("firewall".to_owned(), fw);
+        }
+        // A document that will not serialize is dropped rather than sent half
+        // formed — the whole channel is best-effort by design.
+        serde_json::to_vec(&serde_json::Value::Object(doc))
+            .ok()
+            .map(|bytes| {
+                format!(
+                    "v1.{}",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+                )
+            })
+    };
+    if let Ok(mut slot) = NODE_ROUTING_PREF.write() {
+        *slot = encoded;
+    }
+}
 /// Env var overriding the gateway binary path (otherwise resolved on PATH).
 const ENV_GATEWAY_BIN: &str = "RYU_GATEWAY_BIN";
 /// Default gateway binary name (resolved via PATH, including `~/.ryu/bin`).
@@ -2161,6 +2303,44 @@ pub(crate) fn lock_managed_node_env() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One test for the whole `x-ryu-node-routing` encoder, deliberately: the
+    /// slot is a process-global and cargo runs tests in one process in parallel,
+    /// so splitting these would make them observe each other's writes.
+    #[test]
+    fn node_routing_header_encodes_and_clears() {
+        // Default: an untouched node states nothing, so the header is omitted and
+        // the request stays byte-identical to before this channel existed.
+        set_node_routing_prefs(Vec::new(), None);
+        assert_eq!(node_routing_header(), None);
+
+        // Blank-only input is the same as no input — never a `v1.` of nothing.
+        set_node_routing_prefs(vec!["  ".into(), String::new()], None);
+        assert_eq!(node_routing_header(), None);
+
+        set_node_routing_prefs(
+            vec![" anthropic ".into(), "groq".into()],
+            Some(serde_json::json!({ "redact_pii": true })),
+        );
+        let raw = node_routing_header().expect("stated prefs produce a header");
+        let encoded = raw
+            .strip_prefix("v1.")
+            .expect("the version tag is part of the grammar the reader parses");
+
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .expect("base64url, no padding — header-safe by construction");
+        let doc: serde_json::Value =
+            serde_json::from_slice(&decoded).expect("the payload is compact JSON");
+        assert_eq!(doc["fallback"], serde_json::json!(["anthropic", "groq"]));
+        assert_eq!(doc["firewall"]["redact_pii"], serde_json::json!(true));
+
+        // Clearing is reachable, so a node that retracts its preferences stops
+        // sending the header rather than pinning the last value forever.
+        set_node_routing_prefs(Vec::new(), None);
+        assert_eq!(node_routing_header(), None);
+    }
 
     #[test]
     fn gateway_url_defaults_to_loopback() {

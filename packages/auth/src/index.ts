@@ -436,13 +436,19 @@ async function resolveTeamClaims(
 		return [];
 	}
 	try {
-		const roleByOrg = new Map(orgs.map((org) => [org.id, org.role]));
+		// `org.id` and `team.organizationId` are both ObjectId-backed (see the
+		// schema note in `control-plane.model.ts`), so BOTH the key and the lookup
+		// go through `String(...)`. Comparing them raw type-checks but misses by
+		// reference — two ObjectId instances for the same id are never `===` — and
+		// the `flatMap` would then drop every team, shipping `teams: []` in every
+		// token with nothing logged. Normalizing only the lookup side is the same
+		// bug wearing a green typecheck.
+		const roleByOrg = new Map(orgs.map((org) => [String(org.id), org.role]));
 		const teams = await Team.find({ _id: { $in: teamIds } }).lean();
 		return teams.flatMap((team) => {
-			const role = roleByOrg.get(team.organizationId);
-			return role
-				? [{ id: String(team._id), org: team.organizationId, role }]
-				: [];
+			const org = String(team.organizationId);
+			const role = roleByOrg.get(org);
+			return role ? [{ id: String(team._id), org, role }] : [];
 		});
 	} catch (error) {
 		console.error("Failed to resolve teams for JWT:", error, { userId });
@@ -1125,13 +1131,17 @@ export const auth = betterAuth({
 									return [];
 								}),
 						]);
+						// Both id fields are ObjectId on disk; the claim is a JSON string
+						// id, and Core compares it as text. Stringify at the boundary
+						// rather than relying on `ObjectId.toJSON()` at serialize time,
+						// so the in-process value matches what the token carries.
 						const orgs = members.map((member) => ({
-							id: member.organizationId,
+							id: String(member.organizationId),
 							role: member.role,
 						}));
 						const teams = await resolveTeamClaims(
 							user.id,
-							teamRows.map((row) => row.teamId),
+							teamRows.map((row) => String(row.teamId)),
 							orgs
 						);
 						return { ...base, orgs, teams };

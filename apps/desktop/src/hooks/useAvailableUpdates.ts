@@ -245,12 +245,17 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 		});
 	}
 
-	// Agents (npm/npx registry agents) — behind_latest on the agent or its bridge.
+	// Agents (npm/npx registry agents) — behind_latest on the agent CLI.
+	//
+	// Deliberately NOT on the bridge. An ACP bridge is spawned as `npx -y <pkg>@latest`,
+	// so npx re-resolves it on every launch: it is never a thing the user can be
+	// behind on, and there is no action that would clear such a row. Its "installed"
+	// side is itself a `@latest` probe, so the pair measures nothing but the skew
+	// between that live resolve and Core's cached npm latest — which produced a row
+	// with no version text (the text comes from the CLI pair, null here) that no
+	// press of Update could ever remove.
 	for (const entry of agentQ.data ?? []) {
-		const behind =
-			entry.versionStatus === "behind_latest" ||
-			entry.bridgeVersionStatus === "behind_latest";
-		if (entry.added && behind) {
+		if (entry.added && entry.versionStatus === "behind_latest") {
 			updates.push({
 				key: `agent:${entry.id}`,
 				kind: "agent",
@@ -376,8 +381,11 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 						throw new Error(res.error);
 					}
 					if (!res.updated) {
+						// Core distinguishes "nothing to do" from "not mine to update".
+						// Reporting the latter as up-to-date is what made the row look
+						// stuck: the version never moved and the toast said it had.
 						return {
-							detail: `${update.name} is already up to date.`,
+							detail: res.hint ?? `${update.name} is already up to date.`,
 							silent: false,
 						};
 					}
@@ -485,6 +493,9 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 					break;
 				case "agent":
 					invalidate(AGENT_CATALOG_KEY(url));
+					// The Agents page's per-row control reads a DIFFERENT key, so
+					// without this it kept offering an update already applied here.
+					invalidate(["agent-update", url, update.id]);
 					break;
 				case "plugin":
 					invalidate(APPS_KEY(url));

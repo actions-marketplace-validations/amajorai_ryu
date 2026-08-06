@@ -7,17 +7,36 @@
 // running the store-wide search for the brand name and grouping the hits per
 // realm, each with a "See all" jump into that realm's own tab (pre-filtered).
 //
-// There is no install control here: a brand is a pointer, not an installable
-// unit; you install the related Skill/MCP/Plugin from its own row's tab.
+// The brand card itself is still a pointer rather than an installable unit, but
+// its preview is NOT read-only: each directory record folded into the brand
+// (`connections`) gets the same action the record-level Apps tab gives it —
+// import an `openapi`/`graphql` entry as gateway-governed tools, jump to the MCP
+// catalog for an `mcp` entry, or open setup docs. Those actions are imported
+// from the marketplace package rather than re-implemented so the two surfaces
+// can't drift.
 
-import { ArrowRight01Icon, LinkSquare01Icon } from "@hugeicons/core-free-icons";
+import {
+	ArrowRight01Icon,
+	Download01Icon,
+	LinkSquare01Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import InfiniteSentinel from "@ryu/marketplace/catalog/chrome/infinite-sentinel";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingInfoGrid,
+	ListingSection,
+	ListingStatStrip,
+} from "@ryu/marketplace/catalog/detail/listing-detail-shell";
+import ImportToolsAction from "@ryu/marketplace/catalog/import-tools-action";
 import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
+import { safeHttpUrl } from "@ryu/marketplace/catalog/safe-url";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -29,12 +48,16 @@ import {
 } from "@ryu/ui/components/empty";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useState } from "react";
+import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useIntegrationsCatalog } from "@/src/hooks/useIntegrationsCatalog.ts";
 import {
 	type StoreSearchRealm,
 	useStoreSearch,
 } from "@/src/hooks/useStoreSearch.ts";
-import type { IntegrationBrand } from "@/src/lib/api/integrations.ts";
+import type {
+	IntegrationBrand,
+	IntegrationConnection,
+} from "@/src/lib/api/integrations.ts";
 
 /** Which catalog surfaced a brand, as a small chip on the preview. */
 const SOURCE_LABELS: Record<string, string> = {
@@ -42,10 +65,10 @@ const SOURCE_LABELS: Record<string, string> = {
 	composio: "Composio",
 };
 
-/** Directory feed tokens that name a real connection KIND (the rest — provider
- *  tags like "claude"/"openai", meta like "discovered" — are noise we drop).
- *  `api`/`openapi` both fold to "API" so the chip set reads clean. */
-const FEED_LABELS: Record<string, string> = {
+/** Directory record kinds that name a real connection (the rest — provider tags
+ *  like "claude"/"openai", meta like "discovered" — are noise we drop).
+ *  `api`/`openapi` both read "API" so the row set stays legible. */
+const KIND_LABELS: Record<string, string> = {
 	mcp: "MCP",
 	api: "API",
 	openapi: "API",
@@ -54,16 +77,26 @@ const FEED_LABELS: Record<string, string> = {
 	rest: "REST",
 };
 
-/** The distinct connection kinds a brand offers directly, per the directory. */
-function connectionKinds(feeds: string[]): string[] {
-	const seen = new Set<string>();
-	for (const feed of feeds) {
-		const label = FEED_LABELS[feed.toLowerCase()];
-		if (label) {
-			seen.add(label);
-		}
-	}
-	return [...seen];
+/** Most-actionable kind first, so a brand whose one MCP entry sits behind twenty
+ *  OpenAPI ones still leads with the one-click install. */
+const KIND_ORDER = ["mcp", "openapi", "graphql", "api", "rest", "cli"];
+
+/** How many connection rows to render before collapsing the tail into a count.
+ *  A few multi-service API brands carry a long record list, and the preview is a
+ *  preview — the realm tabs below are where you go for depth. */
+const MAX_CONNECTION_ROWS = 8;
+
+/** The brand's directory records that name a real connection kind, ordered. */
+function actionableConnections(
+	connections: IntegrationConnection[]
+): IntegrationConnection[] {
+	const rank = (kind: string) => {
+		const i = KIND_ORDER.indexOf(kind.toLowerCase());
+		return i === -1 ? KIND_ORDER.length : i;
+	};
+	return connections
+		.filter((c) => KIND_LABELS[c.kind.toLowerCase()] != null)
+		.sort((a, b) => rank(a.kind) - rank(b.kind));
 }
 
 export default function IntegrationsCatalogSection({
@@ -217,77 +250,131 @@ function IntegrationDetailPanel({
 	// Search every realm for the brand name; the hook takes the query reactively
 	// (debounced + cached), so selecting a different brand refetches on its own.
 	const { groups, loading, isEmpty, hasQuery } = useStoreSearch(brand.name);
-	const directoryKinds = connectionKinds(brand.feeds);
+	const connections = actionableConnections(brand.connections ?? []);
+
+	const domainHref = brand.domain
+		? safeHttpUrl(`https://${brand.domain}`)
+		: null;
 
 	return (
-		<div className="flex flex-col gap-5 p-4">
-			<div className="flex items-start gap-3">
-				<span className="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-muted">
-					{brand.logo ? (
-						<img
-							alt=""
-							className="size-full object-cover"
-							loading="lazy"
-							src={brand.logo}
+		<ListingDetailShell
+			actions={
+				domainHref ? (
+					<Button
+						render={
+							<a href={domainHref} rel="noopener noreferrer" target="_blank" />
+						}
+						size="sm"
+						variant="outline"
+					>
+						<HugeiconsIcon className="size-4" icon={LinkSquare01Icon} />
+						{brand.domain}
+					</Button>
+				) : null
+			}
+			aside={
+				<>
+					<ListingAsideCard title="Information">
+						<ListingInfoGrid
+							rows={[
+								{ label: "Domain", value: brand.domain ?? "Not listed" },
+								{
+									label: "Directories",
+									value: brand.sources
+										.map((s) => SOURCE_LABELS[s] ?? s)
+										.join(", "),
+								},
+								{
+									label: "Records",
+									value: `${(brand.connections ?? []).length}`,
+								},
+							]}
 						/>
-					) : (
-						<HugeiconsIcon className="size-6" icon={REALM_ICONS.plugins} />
-					)}
-				</span>
-				<div className="min-w-0 flex-1">
-					<div className="truncate font-semibold text-lg">{brand.name}</div>
-					{brand.description ? (
-						<p className="mt-0.5 text-muted-foreground text-sm">
-							{brand.description}
+					</ListingAsideCard>
+					{brand.categories.length > 0 ? (
+						<ListingAsideCard title="Categories">
+							<div className="flex flex-wrap gap-1">
+								{brand.categories.map((c) => (
+									<Badge
+										className="font-normal text-xs"
+										key={c}
+										variant="outline"
+									>
+										{c}
+									</Badge>
+								))}
+							</div>
+						</ListingAsideCard>
+					) : null}
+				</>
+			}
+			hero={
+				<ListingHero
+					badges={brand.sources.map((s) => SOURCE_LABELS[s] ?? s)}
+					icon={
+						brand.logo ? (
+							<img
+								alt=""
+								className="size-full object-cover"
+								loading="lazy"
+								src={brand.logo}
+							/>
+						) : (
+							<HugeiconsIcon className="size-8" icon={REALM_ICONS.plugins} />
+						)
+					}
+					name={brand.name}
+					tagline={brand.description}
+				/>
+			}
+			stats={
+				<ListingStatStrip
+					items={[
+						{
+							label: "Connections",
+							sub: "Directory records",
+							value: `${connections.length}`,
+						},
+						{ label: "Categories", value: `${brand.categories.length}` },
+						{ label: "Directories", value: `${brand.sources.length}` },
+						{
+							label: "In catalog",
+							value: loading ? "…" : `${groups.length}`,
+							sub: "Related realms",
+						},
+					]}
+				/>
+			}
+		>
+			{/* The directory's own records, each with the action its kind supports.
+			    Kept separate from the "Related in the catalog" block below — these
+			    connect to the service itself, that block is what the catalog already
+			    ships about it. */}
+			{connections.length > 0 ? (
+				<ListingSection title="Available connections">
+					<div className="flex flex-col gap-1.5">
+						{connections.slice(0, MAX_CONNECTION_ROWS).map((connection) => (
+							<ConnectionRow
+								brandName={brand.name}
+								connection={connection}
+								key={connection.id}
+								onOpenRealm={onOpenRealm}
+							/>
+						))}
+					</div>
+					{connections.length > MAX_CONNECTION_ROWS ? (
+						<p className="text-muted-foreground text-xs">
+							+{connections.length - MAX_CONNECTION_ROWS} more directory{" "}
+							{connections.length - MAX_CONNECTION_ROWS === 1
+								? "entry"
+								: "entries"}{" "}
+							for {brand.name}.
 						</p>
 					) : null}
-					<div className="mt-2 flex flex-wrap items-center gap-1.5">
-						{brand.sources.map((s) => (
-							<Badge key={s} variant="secondary">
-								{SOURCE_LABELS[s] ?? s}
-							</Badge>
-						))}
-						{brand.categories.slice(0, 3).map((c) => (
-							<Badge key={c} variant="outline">
-								{c}
-							</Badge>
-						))}
-					</div>
-				</div>
-			</div>
-
-			{brand.domain ? (
-				<a
-					className="inline-flex w-fit items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground"
-					href={`https://${brand.domain}`}
-					rel="noopener noreferrer"
-					target="_blank"
-				>
-					<HugeiconsIcon className="size-4" icon={LinkSquare01Icon} />
-					{brand.domain}
-				</a>
+				</ListingSection>
 			) : null}
 
-			{/* The directory's own info: which connection kinds this service offers
-			    directly (from the integrations.sh feeds). Kept separate from the
-			    "Related in the catalog" block below so the two never blur together. */}
-			{directoryKinds.length > 0 ? (
-				<div className="flex flex-col gap-1.5">
-					<span className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-						Available connections
-					</span>
-					<div className="flex flex-wrap items-center gap-1.5">
-						{directoryKinds.map((kind) => (
-							<Badge key={kind} variant="secondary">
-								{kind}
-							</Badge>
-						))}
-					</div>
-				</div>
-			) : null}
-
-			<div className="flex flex-col gap-4">
-				<p className="font-medium text-sm">Related in the catalog</p>
+			<ListingSection title="Related in the catalog">
 				{loading ? (
 					<div className="flex h-20 items-center justify-center">
 						<Spinner className="size-5" />
@@ -298,15 +385,95 @@ function IntegrationDetailPanel({
 						Nothing in the catalog references {brand.name} yet.
 					</p>
 				) : null}
-				{groups.map((group) => (
-					<RelatedRealmSection
-						brandName={brand.name}
-						group={group}
-						key={group.realm}
-						onOpenRealm={onOpenRealm}
-					/>
-				))}
-			</div>
+				<div className="flex flex-col gap-4">
+					{groups.map((group) => (
+						<RelatedRealmSection
+							brandName={brand.name}
+							group={group}
+							key={group.realm}
+							onOpenRealm={onOpenRealm}
+						/>
+					))}
+				</div>
+			</ListingSection>
+		</ListingDetailShell>
+	);
+}
+
+/** One directory record, with the action its kind actually supports.
+ *
+ *  The dispatch mirrors the record-level Apps tab exactly (see
+ *  `apps-catalog-section.tsx`): `mcp` hands off to the in-app MCP catalog (backed
+ *  by the official registry, which resolves + installs the server), `openapi` and
+ *  `graphql` import as gateway-governed `http` tools through Core, and anything
+ *  else can only offer its setup docs. Deliberately NOT a badge — a kind chip is
+ *  what made this panel unusable while every one of these paths already existed. */
+function ConnectionRow({
+	connection,
+	brandName,
+	onOpenRealm,
+}: {
+	brandName: string;
+	connection: IntegrationConnection;
+	onOpenRealm: (realm: StoreSearchRealm, query: string) => void;
+}) {
+	const node = useActiveNode();
+	const target = { url: node.url, token: node.token ?? null };
+	const kind = connection.kind.toLowerCase();
+	const docsHref = safeHttpUrl(connection.url);
+
+	let action: React.ReactNode;
+	if (kind === "mcp") {
+		action = (
+			<Button onClick={() => onOpenRealm("mcp", brandName)} size="sm">
+				<HugeiconsIcon className="size-4" icon={Download01Icon} />
+				Find in MCP catalog
+			</Button>
+		);
+	} else if (kind === "openapi") {
+		action = (
+			<ImportToolsAction
+				body={{ id: connection.id }}
+				endpoint="/api/tools/import/openapi"
+				node={target}
+			/>
+		);
+	} else if (kind === "graphql" && connection.url) {
+		action = (
+			<ImportToolsAction
+				body={{ name: connection.name, url: connection.url }}
+				endpoint="/api/tools/import/graphql"
+				node={target}
+			/>
+		);
+	} else if (docsHref) {
+		action = (
+			<Button
+				render={<a href={docsHref} rel="noopener noreferrer" target="_blank" />}
+				size="sm"
+				variant="outline"
+			>
+				<HugeiconsIcon className="size-4" icon={LinkSquare01Icon} />
+				Setup docs
+			</Button>
+		);
+	} else {
+		action = (
+			<span className="text-muted-foreground text-xs">
+				No setup URL on file
+			</span>
+		);
+	}
+
+	return (
+		<div className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-2.5 py-2">
+			<span className="flex min-w-0 items-center gap-2">
+				<Badge className="shrink-0" variant="secondary">
+					{KIND_LABELS[kind] ?? connection.kind}
+				</Badge>
+				<span className="truncate text-sm">{connection.name}</span>
+			</span>
+			<span className="shrink-0">{action}</span>
 		</div>
 	);
 }

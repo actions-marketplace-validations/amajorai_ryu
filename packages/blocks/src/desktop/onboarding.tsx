@@ -15,6 +15,8 @@ import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
+import { Input } from "@ryu/ui/components/input";
+import { Label } from "@ryu/ui/components/label";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
 import { PageHeader } from "@ryu/ui/components/page-header";
 import { PlanBadge } from "@ryu/ui/components/plan-badge";
@@ -54,6 +56,7 @@ export interface OnboardingFeatureOption {
 export type OnboardingStep =
 	| "starting"
 	| "choose"
+	| "connect"
 	| "installing"
 	| "agents"
 	| "features"
@@ -73,12 +76,16 @@ export interface OnboardingViewProps {
 	featureStepIndex?: number;
 	/** Total number of feature steps, for the "X of Y" progress hint. */
 	featureStepTotal?: number;
+	/** True when rendered inside the desktop app. The desktop can *install* a
+	 *  local Core itself, so an unreachable local path there is a retry, not the
+	 *  webapp's "download the desktop app" dead end. */
+	isDesktop?: boolean;
 	/** A local reachability probe is in flight (the card shows a checking state). */
 	localChecking?: boolean;
-	/** The local path is unreachable: no Core answered on the local node. Only the
-	 *  webapp can reach this state — the desktop gates the `choose` step on its own
-	 *  Core already running. Swaps the local card for an install prompt so the user
-	 *  is never sent into an app whose backend does not exist. */
+	/** The local path is unreachable: no Core answered on the local node, and (on
+	 *  desktop) starting one failed. On the webapp this swaps the local card for an
+	 *  install prompt so the user is never sent into an app whose backend does not
+	 *  exist; on desktop it offers a retry. */
 	localUnreachable?: boolean;
 	/** Managed adoption is in flight (polling the control plane for a node). */
 	managedBusy?: boolean;
@@ -93,10 +100,18 @@ export interface OnboardingViewProps {
 	 *  (the storyboard passes a static card). */
 	micPrompt?: ReactNode;
 	micSubmitting?: boolean;
+	/** Leave the `connect` step and return to the `choose` fork. */
+	onBackFromConnect?: () => void;
 	/** Pick the local / bring-your-own-keys path on the `choose` step. */
 	onChooseLocal?: () => void;
 	/** Pick the managed (Ryu Cloud) path on the `choose` step. */
 	onChooseManaged?: () => void;
+	/** Pick "connect to an existing node" on the `choose` step — opens the
+	 *  `connect` form rather than committing to anything. */
+	onChooseRemote?: () => void;
+	/** Submit the `connect` form: probe `url`, then adopt it as the active node.
+	 *  `token` is optional (a node with auth off accepts an empty one). */
+	onConnectRemote?: (url: string, token: string) => void;
 	onContinueAgents?: () => void;
 	onContinueMic?: () => void;
 	/** Open the desktop-app download page (webapp, local unreachable). */
@@ -111,6 +126,10 @@ export interface OnboardingViewProps {
 	/** 0–100 progress for the auto-advancing steps, derived from the phase by the
 	 *  container. Drives the real Progress bar on starting/installing/finishing. */
 	progress?: number;
+	/** The `connect` form is probing the URL the user typed. */
+	remoteChecking?: boolean;
+	/** Why the last connect attempt failed, shown under the form. Null clears it. */
+	remoteError?: string | null;
 	/** Ids of the currently-selected agents. */
 	selected?: ReadonlySet<string>;
 	step: OnboardingStep;
@@ -431,6 +450,7 @@ function FeatureStep({
 // deep-links to web pricing instead of proceeding. No key material is touched
 // here, and picking managed never provisions a server from the desktop.
 function ChooseStep({
+	isDesktop,
 	localChecking,
 	localUnreachable,
 	managedEntitled,
@@ -438,9 +458,11 @@ function ChooseStep({
 	managedLoading,
 	onChooseLocal,
 	onChooseManaged,
+	onChooseRemote,
 	onDownloadDesktop,
 }: Pick<
 	OnboardingViewProps,
+	| "isDesktop"
 	| "localChecking"
 	| "localUnreachable"
 	| "managedEntitled"
@@ -448,6 +470,7 @@ function ChooseStep({
 	| "managedLoading"
 	| "onChooseLocal"
 	| "onChooseManaged"
+	| "onChooseRemote"
 	| "onDownloadDesktop"
 >) {
 	let managedLabel = "Use Ryu Cloud";
@@ -459,6 +482,12 @@ function ChooseStep({
 		managedLabel = "Upgrade to unlock";
 	}
 	const showProBadge = !(managedEntitled || managedLoading);
+	// On desktop the local pick installs and starts Core, so "Checking…" would
+	// understate a download that can take a while; the webapp only probes.
+	let localCta = "Continue";
+	if (localChecking) {
+		localCta = isDesktop ? "Setting up…" : "Checking…";
+	}
 	const { resolvedTheme } = useTheme();
 	const metalTheme = resolvedTheme === "light" ? "light" : "dark";
 
@@ -479,7 +508,26 @@ function ChooseStep({
 
 	return (
 		<div className="flex w-full max-w-md flex-col gap-3">
-			{localUnreachable ? (
+			{localUnreachable && isDesktop ? (
+				<div className="rounded-4xl border border-border p-4 text-left">
+					<p className="font-semibold text-lg">Couldn't start local AI</p>
+					<p className="mt-1 text-muted-foreground text-sm">
+						Ryu couldn't install or start the local engine on this device. Try
+						again, or use one of the options below instead.
+					</p>
+					<Button
+						className="mt-3 w-full"
+						disabled={localChecking}
+						onClick={onChooseLocal}
+						size="lg"
+						variant="mono"
+					>
+						{localChecking ? "Starting…" : "Try again"}
+					</Button>
+				</div>
+			) : null}
+
+			{localUnreachable && !isDesktop ? (
 				<div className="rounded-4xl border border-border p-4 text-left">
 					<p className="font-semibold text-lg">Desktop app needed</p>
 					<p className="mt-1 text-muted-foreground text-sm">
@@ -504,7 +552,9 @@ function ChooseStep({
 						{localChecking ? "Checking…" : "Retry"}
 					</Button>
 				</div>
-			) : (
+			) : null}
+
+			{localUnreachable ? null : (
 				<div className="rounded-4xl border border-border p-4 text-left">
 					<p className="font-semibold text-lg">Run AI locally</p>
 					<p className="mt-1 text-muted-foreground text-sm">
@@ -518,7 +568,7 @@ function ChooseStep({
 						size="lg"
 						variant="mono"
 					>
-						{localChecking ? "Checking…" : "Continue"}
+						{localCta}
 					</Button>
 				</div>
 			)}
@@ -546,7 +596,116 @@ function ChooseStep({
 					<div className="mt-3">{managedButton}</div>
 				)}
 			</div>
+
+			{/* Third path: neither install nor buy — point the app at a Core someone
+			    else already runs (a teammate's machine, a company server, a node on
+			    the mesh). Nothing is installed on this device. */}
+			<div className="rounded-4xl border border-border p-4 text-left">
+				<p className="font-semibold text-lg">Connect to an existing node</p>
+				<p className="mt-1 text-muted-foreground text-sm">
+					Already have a Ryu node running — your team's server, or another
+					machine? Point this app at it. Nothing is installed here.
+				</p>
+				<Button
+					className="mt-3 w-full"
+					onClick={onChooseRemote}
+					size="lg"
+					variant="outline"
+				>
+					Connect
+				</Button>
+			</div>
 		</div>
+	);
+}
+
+// The `connect` step: address + optional token for a Core the user already runs.
+// The container owns the probe; this only collects and reports. The URL is the
+// only required field — a node with auth off accepts an empty token, and a wrong
+// one surfaces as `remoteError` rather than being guessed at here.
+function ConnectStep({
+	onBackFromConnect,
+	onConnectRemote,
+	remoteChecking,
+	remoteError,
+}: Pick<
+	OnboardingViewProps,
+	"onBackFromConnect" | "onConnectRemote" | "remoteChecking" | "remoteError"
+>) {
+	const [url, setUrl] = useState("");
+	const [token, setToken] = useState("");
+	const trimmedUrl = url.trim();
+	const submit = () => {
+		if (remoteChecking || trimmedUrl === "") {
+			return;
+		}
+		onConnectRemote?.(trimmedUrl, token.trim());
+	};
+
+	return (
+		<form
+			className="flex w-full max-w-md flex-col gap-4"
+			onSubmit={(e) => {
+				e.preventDefault();
+				submit();
+			}}
+		>
+			<div className="flex flex-col gap-2">
+				<Label htmlFor="onboarding-node-url">Node address</Label>
+				<Input
+					autoComplete="off"
+					autoFocus
+					id="onboarding-node-url"
+					onChange={(e) => setUrl(e.target.value)}
+					placeholder="http://192.168.1.20:7980"
+					spellCheck={false}
+					value={url}
+				/>
+				<p className="text-muted-foreground text-xs">
+					The address of the machine running Ryu Core, including the port.
+				</p>
+			</div>
+
+			<div className="flex flex-col gap-2">
+				<Label htmlFor="onboarding-node-token">Access token (optional)</Label>
+				<Input
+					autoComplete="off"
+					id="onboarding-node-token"
+					onChange={(e) => setToken(e.target.value)}
+					placeholder="Leave empty if the node has no token"
+					spellCheck={false}
+					type="password"
+					value={token}
+				/>
+				<p className="text-muted-foreground text-xs">
+					Whoever runs the node can read it from their Ryu settings.
+				</p>
+			</div>
+
+			{remoteError ? (
+				<p className="text-destructive text-sm">{remoteError}</p>
+			) : null}
+
+			<div className="mt-1 flex items-center justify-end gap-2">
+				<Button
+					disabled={remoteChecking}
+					onClick={onBackFromConnect}
+					size="sm"
+					type="button"
+					variant="ghost"
+				>
+					Back
+				</Button>
+				<Button
+					disabled={remoteChecking || trimmedUrl === ""}
+					size="lg"
+					type="submit"
+					variant="mono"
+				>
+					{remoteChecking ? "Connecting…" : "Connect"}
+				</Button>
+			</div>
+		</form>
 	);
 }
 
@@ -612,6 +771,14 @@ export function OnboardingView(props: OnboardingViewProps) {
 		return (
 			<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
 				<ChooseStep {...props} />
+			</OnboardingShell>
+		);
+	}
+
+	if (step === "connect") {
+		return (
+			<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
+				<ConnectStep {...props} />
 			</OnboardingShell>
 		);
 	}

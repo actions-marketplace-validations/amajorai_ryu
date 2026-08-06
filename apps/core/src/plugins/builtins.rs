@@ -13,7 +13,7 @@
 //! 2. The [`SYSTEM_PLUGINS`] constant — the canonical list consulted by the
 //!    `list_apps` handler to inject `built_in`, `sidecar_name`, `windows_first`,
 //!    and `local_only` into the JSON response.
-//! 3. [`is_builtin`] and [`find_system_plugin`] helpers consumed by
+//! 3. [`is_system_plugin`] and [`find_system_plugin`] helpers consumed by
 //!    `server/mod.rs`.
 //!
 //! # Core-vs-Gateway boundary
@@ -76,7 +76,7 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
     },
     // Browser is the workspace's real-Chromium sidecar (an Electron GUI app,
     // `browser` sidecar on :7993) that backs the workspace "Browser" tab. A core
-    // built-in and therefore uninstall-protected (`is_builtin`), but NOT
+    // built-in and therefore uninstall-protected (`is_system_plugin`), but NOT
     // installed-by-default: no release publishes a spawnable `ryu-browser-<os>-<arch>`
     // asset yet, so it is opt-in from the Store (see the note in `CORE_DEFAULT_ON`).
     // Cross-platform Electron, runs locally on the node.
@@ -380,6 +380,18 @@ pub const TIMELINE_PLUGIN_ID: &str = "@ryu/timeline";
 /// `/skills/new` + `/skills/:id/edit` routes resolve on every fresh install.
 pub const SKILL_EDITOR_PLUGIN_ID: &str = "@ryu/skill-editor";
 
+/// The built-in **output styles** (`docs/output-styles.md`): six prose files a user
+/// picks between in the composer to change how the agent talks.
+///
+/// Carries no runnable, sidecar, hook or grant — `contributes.output_styles` is inert
+/// text Core parses and appends to the system prompt, and `contributes.store_tabs`
+/// points the Store at Core's own `/api/output-styles`. It is a plugin rather than a
+/// hardcoded table for the reason `Contributes::themes` gives: a contribution inherits
+/// install/enable, versioning, signing, the Store detail page and reviews for free, and
+/// it is what lets a third party ship a style at all. Default-on — see the entry in
+/// [`CORE_PLUGINS`] for why that is forced by the enabled-filter rather than chosen.
+pub const OUTPUT_STYLES_PLUGIN_ID: &str = "@ryu/output-styles";
+
 /// The set of **Core-tier** built-in plugin ids (#444).
 ///
 /// Core-tier plugins are first-party and shipped with Ryu; they are seeded
@@ -600,6 +612,21 @@ pub const CORE_PLUGINS: &[&str] = &[
     // hides its New/Edit affordances unless an enabled app answers the editor path, so
     // authoring is opt-in from the Store rather than a dead button. No `requires` edge.
     SKILL_EDITOR_PLUGIN_ID,
+    // The six built-in output styles (`docs/output-styles.md`). Core-tier AND
+    // default-on, which for this one is a *reachability* decision rather than a
+    // product-taste one: `contributes.output_styles` is served enabled-filtered, so a
+    // disabled record means the composer's style picker offers nothing but "None" and
+    // the Store tab is hidden (the desktop renders a contributed tab only when its app
+    // is installed AND enabled). Default-off would have shipped a feature with no
+    // discovery path to turn itself on.
+    //
+    // Affordable because the plugin is inert: no runnables, no sidecar, no hooks, no
+    // grants — six prose files nothing evaluates. Enabling it changes what is
+    // *listable*, never what runs, because the node default is "no style" (§8) and no
+    // built-in sets `force-for-plugin`. This is the same argument `exa` makes one
+    // block down (seed a provider so the capability is non-empty), minus the caveat
+    // that sank `@ryu/browser` — there is no binary to fail to spawn.
+    OUTPUT_STYLES_PLUGIN_ID,
 ];
 
 /// The subset of [`CORE_PLUGINS`] that should be **enabled by default** on a
@@ -700,7 +727,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     //    markitdown argument above (seed a provider so the capability is non-empty):
     //    that argument only holds for a provider that can actually run.
     //  - Uninstall-protection is UNCHANGED: browser is in `SYSTEM_PLUGINS`, so
-    //    `is_uninstall_protected` still returns true via its `is_builtin` branch (it
+    //    `is_uninstall_protected` still returns true via its `is_system_plugin` branch (it
     //    never depended on the default-on branch here).
     //
     // Re-add this line the moment the release publishes an installable, spawnable
@@ -879,6 +906,19 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // surface the user cannot reach is not a setting; it contributes no runnables,
     // gates no route, and spawns no process, so enabling it costs nothing.
     LAYERS_PLUGIN_ID,
+    // The six built-in output styles. Same shape as `layers` directly above — a
+    // picker whose options the user cannot reach is not a picker — and the same
+    // zero cost: no runnables, no route gate, no process. `contributes.output_styles`
+    // and the Store tab are both served enabled-filtered, so this line is what makes
+    // the feature visible at all. Enabling it changes nothing about what RUNS: the
+    // node default is "no style", so every turn's prompt stays byte-identical until a
+    // user picks one (asserted by `no_output_style_leaves_the_acp_preamble_byte_identical`).
+    //
+    // CONSEQUENCE, deliberate: default-on ⇒ `is_uninstall_protected`, so the built-in
+    // styles can be DISABLED but not uninstalled. Correct here — they are the picker's
+    // stock options, and a user-authored style lives on disk under the user root, not
+    // in this package, so uninstalling would never have been how you get rid of one.
+    OUTPUT_STYLES_PLUGIN_ID,
 ];
 
 /// The [`crate::plugin_manifest::PluginTier`] of a plugin, derived from
@@ -925,8 +965,19 @@ pub fn is_compiled_in_manifest(manifest_id: &str) -> bool {
     .contains(manifest_id)
 }
 
-/// Returns `true` if `manifest_id` is one of the built-in system apps.
-pub fn is_builtin(manifest_id: &str) -> bool {
+/// Whether `manifest_id` is a **system plugin**: one of the [`SYSTEM_PLUGINS`]
+/// whose real run path is a sidecar or MCP provider, with the plugin record acting
+/// as the governed surface over it. System plugins are uninstall-protected (see
+/// [`is_uninstall_protected`]) because removing the record would orphan a process
+/// the seeder would then resurrect.
+///
+/// **Not a provenance check.** This was called `is_system_plugin`, which read as "ships
+/// in the binary" and is a different, larger set — that question is
+/// [`is_compiled_in_manifest`] (every [`BUILTIN_MANIFESTS`] entry). Nor is it a
+/// trust tier ([`tier_for`]) or an enablement default ([`is_default_on`]). Four
+/// independent predicates over four different sets; the old name collided with two
+/// of them. See the App lifecycle docs for the full table.
+pub fn is_system_plugin(manifest_id: &str) -> bool {
     SYSTEM_PLUGINS.iter().any(|s| s.manifest_id == manifest_id)
 }
 
@@ -1043,7 +1094,7 @@ pub fn is_mandatory(manifest_id: &str) -> bool {
 /// A plugin is uninstall-protected when removing its lifecycle record would be
 /// either meaningless or actively harmful:
 ///
-/// - **It is a built-in system app** ([`is_builtin`], the sidecar-backed
+/// - **It is a built-in system app** ([`is_system_plugin`], the sidecar-backed
 ///   ghost/shadow/spider/agentbrowser) — matching how `SystemAppCard` already
 ///   offers only enable/disable, never uninstall.
 /// - **It is default-on** ([`is_default_on`]) — this is the real correctness crux.
@@ -1054,7 +1105,7 @@ pub fn is_mandatory(manifest_id: &str) -> bool {
 ///   on the very next boot. `is_default_on` IS the resurrection set, so refusing
 ///   it is what actually prevents a "removed" plugin from coming back.
 ///
-/// The two predicates are reused as-is (no parallel list): `is_builtin` is a
+/// The two predicates are reused as-is (no parallel list): `is_system_plugin` is a
 /// strict subset of `is_default_on` here, kept in the OR as a defensive,
 /// self-documenting statement of intent.
 ///
@@ -1064,7 +1115,7 @@ pub fn is_mandatory(manifest_id: &str) -> bool {
 /// which is a coherent uninstall. User-installed Community plugins are never
 /// protected.
 pub fn is_uninstall_protected(manifest_id: &str) -> bool {
-    is_mandatory(manifest_id) || is_builtin(manifest_id) || is_default_on(manifest_id)
+    is_mandatory(manifest_id) || is_system_plugin(manifest_id) || is_default_on(manifest_id)
 }
 
 #[cfg(test)]
@@ -1089,19 +1140,41 @@ mod tests {
         );
     }
 
+    /// The built-in output styles must be reachable on a fresh install.
+    ///
+    /// This guards a gap that is invisible at the type level and silent at runtime:
+    /// both surfaces that expose a style — `contributes.output_styles` on
+    /// `GET /api/plugins/contributions`, and the Store tab (which the desktop renders
+    /// only when its app is installed AND enabled) — are served **enabled-filtered**.
+    /// Drop this id from `CORE_DEFAULT_ON` and nothing fails to compile and no test
+    /// about styles breaks; the composer's picker just quietly offers "None" forever,
+    /// with no discovery path anywhere in the product to turn it back on.
     #[test]
-    fn is_builtin_returns_true_for_known_ids() {
-        assert!(is_builtin("@ryu/ghost"));
-        assert!(is_builtin("@ryu/shadow"));
-        assert!(is_builtin("@ryu/agentbrowser"));
-        // spider is Core-tier + default-on but NOT a system plugin (no sidecar).
-        assert!(!is_builtin("@ryu/spider"));
+    fn output_styles_ship_reachable_on_a_fresh_install() {
+        assert!(
+            CORE_PLUGINS.contains(&OUTPUT_STYLES_PLUGIN_ID),
+            "output-styles must be Core-tier — CORE_DEFAULT_ON is documented as a subset of CORE_PLUGINS"
+        );
+        assert!(
+            CORE_DEFAULT_ON.contains(&OUTPUT_STYLES_PLUGIN_ID),
+            "output-styles must be default-ON or its contributions are filtered out of \
+             the composer picker and the Store tab, with no way for a user to reach it"
+        );
     }
 
     #[test]
-    fn is_builtin_returns_false_for_unknown_ids() {
-        assert!(!is_builtin("@example/research-assistant"));
-        assert!(!is_builtin("does.not.exist"));
+    fn is_system_plugin_returns_true_for_known_ids() {
+        assert!(is_system_plugin("@ryu/ghost"));
+        assert!(is_system_plugin("@ryu/shadow"));
+        assert!(is_system_plugin("@ryu/agentbrowser"));
+        // spider is Core-tier + default-on but NOT a system plugin (no sidecar).
+        assert!(!is_system_plugin("@ryu/spider"));
+    }
+
+    #[test]
+    fn is_system_plugin_returns_false_for_unknown_ids() {
+        assert!(!is_system_plugin("@example/research-assistant"));
+        assert!(!is_system_plugin("does.not.exist"));
     }
 
     #[test]
@@ -1158,7 +1231,7 @@ mod tests {
         for id in ["@ryu/ghost", "@ryu/shadow", "@ryu/agentbrowser"] {
             assert_eq!(tier_for(id), PluginTier::Core, "{id} must be Core-tier");
             assert!(is_default_on(id), "{id} must be default-on (auto-seeded)");
-            assert!(is_builtin(id), "{id} must be a system plugin");
+            assert!(is_system_plugin(id), "{id} must be a system plugin");
         }
         // Spider is Core-tier + default-on (record seeded enabled so its
         // declarative tool works out of the box) but is NOT a system plugin — it
@@ -1169,7 +1242,7 @@ mod tests {
             "spider must be Core-tier"
         );
         assert!(is_default_on("@ryu/spider"), "spider must be default-on");
-        assert!(!is_builtin("@ryu/spider"), "spider is not a system plugin");
+        assert!(!is_system_plugin("@ryu/spider"), "spider is not a system plugin");
     }
 
     #[test]
@@ -1683,12 +1756,12 @@ mod tests {
     /// The uninstall-protection predicate must cover the FULL resurrection set
     /// (`is_default_on`), not just the 4 SYSTEM plugins. `goal` isolates the
     /// `is_default_on` branch: default-on, NOT a system plugin, NOT load-bearing —
-    /// so a weak `is_builtin`-only predicate would wrongly allow uninstalling it,
+    /// so a weak `is_system_plugin`-only predicate would wrongly allow uninstalling it,
     /// and the seed would resurrect it on the next boot.
     #[test]
     fn uninstall_protection_covers_every_default_on_plugin_not_just_system_apps() {
         // A default-on, non-SYSTEM plugin is protected (the crux).
-        assert!(!is_builtin("@ryu/goal"), "goal is not a SYSTEM plugin");
+        assert!(!is_system_plugin("@ryu/goal"), "goal is not a SYSTEM plugin");
         assert!(is_default_on("@ryu/goal"));
         assert!(
             is_uninstall_protected("@ryu/goal"),
@@ -2072,7 +2145,7 @@ mod tests {
     /// a panel that 502s forever. Re-adding it to `CORE_DEFAULT_ON` without shipping
     /// that asset re-breaks the Browser tab on every fresh install, so the invariant is
     /// pinned here. Uninstall-protection must be unaffected (it comes from
-    /// `SYSTEM_PLUGINS`/`is_builtin`, not from being default-on).
+    /// `SYSTEM_PLUGINS`/`is_system_plugin`, not from being default-on).
     #[test]
     fn browser_is_installable_but_not_seeded_until_its_sidecar_ships() {
         assert!(
@@ -2087,10 +2160,10 @@ mod tests {
         );
         assert!(!is_default_on(BROWSER_PLUGIN_ID));
         // Still a SYSTEM plugin, so protection is unchanged by the line removal.
-        assert!(is_builtin(BROWSER_PLUGIN_ID));
+        assert!(is_system_plugin(BROWSER_PLUGIN_ID));
         assert!(
             is_uninstall_protected(BROWSER_PLUGIN_ID),
-            "browser is uninstall-protected via is_builtin, independently of default-on"
+            "browser is uninstall-protected via is_system_plugin, independently of default-on"
         );
     }
 

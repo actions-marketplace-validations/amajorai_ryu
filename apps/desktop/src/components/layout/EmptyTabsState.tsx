@@ -7,7 +7,6 @@
 
 import { ArrowDown01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { cn } from "@ryu/ui/lib/utils";
@@ -22,36 +21,25 @@ import {
 	Workflow,
 } from "lucide-react";
 import {
-	type ClipboardEvent,
 	type DragEvent,
 	type ReactNode,
 	useCallback,
 	useMemo,
-	useRef,
 	useState,
 } from "react";
-import { useComposerAgentControls } from "@/components/agent-elements/input/composer-agent-controls.tsx";
-import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
-import {
-	type AttachedImage,
-	InputBar,
-} from "@/components/agent-elements/input-bar.tsx";
 import { useSession } from "@/lib/auth-client.ts";
+import { useComposerSlot } from "@/src/components/assistant/useComposerSlot.tsx";
 import { GettingStartedChecklist } from "@/src/components/chat/GettingStartedChecklist.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
 import { WorkspaceBar } from "@/src/components/chat/WorkspaceBar.tsx";
-import { VoiceModeSurface } from "@/src/components/voice/VoiceModeSurface.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
-import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import { useGettingStarted } from "@/src/hooks/useGettingStarted.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
-import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
-import { transcribeAudio } from "@/src/lib/api/voice.ts";
 import { normalizeTimestamp, stampRecent } from "@/src/lib/library.ts";
 import {
 	getAgentModel,
@@ -359,13 +347,16 @@ function RecentList({
 }
 
 /**
- * The real chat composer, surfaced on the launchpad — the same `InputBar` as
- * ChatPage with the full feature set, not a stripped launcher variant: the shared
- * agent/model pickers, the "+" attach button, live voice input (STT), and voice
- * mode. Sending opens a fresh chat tab seeded with the typed text, the chosen
- * agent, and any staged image attachments (which have no conversation to live on
- * yet, so they ride the tab seed into the new chat). The model pick is persisted
- * per-agent (`setAgentModel`), so the new chat surfaces the same agent/model.
+ * The real chat composer, surfaced on the launchpad — literally the same composer
+ * the Ask Ryu dock and the builder panes render, built by the one shared
+ * `useComposerSlot`: agent/model/thinking pickers, the "+" dropdown, staged image
+ * attachments, live voice input (STT), and voice mode. It used to re-wire those
+ * pieces itself, which is exactly how the "+" here silently stayed a bare file
+ * dialog while the chat page's grew a dropdown. Sending opens a fresh chat tab
+ * seeded with the typed text, the chosen agent, the temporary-chat pick, and any
+ * staged images (which have no conversation to live on yet, so they ride the tab
+ * seed into the new chat). The model pick is persisted per-agent
+ * (`setAgentModel`), so the new chat surfaces the same agent/model.
  */
 function LaunchpadComposer() {
 	const { openTab } = useTabsContext();
@@ -373,7 +364,6 @@ function LaunchpadComposer() {
 	const { teams } = useTeams();
 	const engineModels = useEngineModels();
 	const activeNode = useActiveNode();
-	const composerShortcuts = useComposerShortcutBindings();
 
 	const [agentId, setAgentId] = useState<string | null>(() =>
 		localStorage.getItem("ryu_default_agent")
@@ -382,10 +372,10 @@ function LaunchpadComposer() {
 	const [selectedModel, setSelectedModel] = useState<string | null>(() =>
 		getAgentModel(localStorage.getItem("ryu_default_agent"))
 	);
-
-	// Staged image attachments — the launcher has no conversation yet, so they're
-	// carried into the fresh chat tab on send (via the `initialImages` tab seed).
-	const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+	// Temporary chat, picked BEFORE the thread exists — the launchpad is the
+	// new-chat surface, which is the only place ChatPage offers the toggle too. It
+	// rides the tab seed so the spawned chat opens already unsaved.
+	const [ghost, setGhost] = useState(false);
 	const [isDragOver, setIsDragOver] = useState(false);
 
 	const modelOptions = useMemo(
@@ -410,113 +400,60 @@ function LaunchpadComposer() {
 		[agentId]
 	);
 
-	// The agent's ACP-advertised Model + Thinking/approval selectors, derived the
-	// exact same way ChatPage derives them (shared hook), so the launchpad dropdown
-	// reads identically — even though no chat exists yet. Picks persist per-agent
-	// and are honoured by the new chat on send.
-	const acp = useComposerAcpSections({
-		agentId,
-		agents,
-		modelOptions,
-		engineModel: effectiveModel,
-		onEngineModelChange: handleEngineModelChange,
-	});
+	// Picking an agent clears any team target and becomes the remembered default.
+	const handleSelectAgent = useCallback((next: string) => {
+		setTeamId(null);
+		setAgentId(next);
+		localStorage.setItem("ryu_default_agent", next);
+		setSelectedModel(getAgentModel(next));
+	}, []);
 
-	// The agent + model pickers are the shared composer controls, so the launchpad
-	// reads identically to ChatPage and the Ask Ryu dock. The launchpad owns its
-	// own agent selection state (persisted to localStorage); the shared hook renders
-	// the pickers and dispatches create / team / agent picks back to these setters.
-	const { infoBar, leftActions, rightActions, sections } =
-		useComposerAgentControls({
-			agents,
-			// The launchpad always opens a new conversation.
-			atConversationStart: true,
-			teams,
-			agentId,
-			teamId,
-			onSelectAgent: (next) => {
-				setTeamId(null);
-				setAgentId(next);
-				localStorage.setItem("ryu_default_agent", next);
-				setSelectedModel(getAgentModel(next));
-			},
-			onSelectTeam: (next) => setTeamId(next),
-			onCreateAgent: () => openTab("/agents/new/edit", { title: "New agent" }),
-			modelOptions,
-			model: effectiveModel,
-			onModelChange: handleEngineModelChange,
-			modelSection: acp.modelSection,
-			extraSections: acp.extraSections,
-		});
-
-	// Voice: the node target the mic/voice-mode talk to. Read via a ref so the
-	// transcribe fn keeps a stable identity (no composer remount on node change).
+	// The node the composer's mic / voice mode / image staging talk to.
 	const target = useMemo(
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
 	);
-	const targetRef = useRef(target);
-	targetRef.current = target;
-	const voiceTranscribe = useCallback(
-		(audio: Blob) => transcribeAudio(targetRef.current, audio),
-		[]
+
+	// The launchpad owns its agent/model pick (persisted to localStorage) but
+	// nothing else — those five bindings are all the shared composer needs.
+	const runtime = useMemo(
+		() => ({
+			agentId,
+			effectiveModel,
+			modelOptions,
+			setAgentId: handleSelectAgent,
+			setModel: handleEngineModelChange,
+		}),
+		[
+			agentId,
+			effectiveModel,
+			modelOptions,
+			handleSelectAgent,
+			handleEngineModelChange,
+		]
 	);
-	// Voice mode routes ephemerally through the picked agent — there's no
-	// conversation on the launcher, so turns don't persist to a thread (the user
-	// can start from a real chat for that).
-	const voiceMode = useVoiceMode(target, { agentId: agentId ?? undefined });
 
-	const addImages = useCallback((files: File[]) => {
-		const imageFiles = files.filter((f) => f.type.startsWith("image/"));
-		for (const file of imageFiles) {
-			const reader = new FileReader();
-			reader.onload = () => {
-				setAttachedImages((prev) => [
-					...prev,
-					{
-						id: `img-${Date.now()}-${Math.random()}`,
-						filename: file.name,
-						url: reader.result as string,
-						mimeType: file.type,
-						size: file.size,
-					},
-				]);
-			};
-			reader.readAsDataURL(file);
-		}
-	}, []);
-
-	const handleAttach = useCallback(() => {
-		const input = document.createElement("input");
-		input.type = "file";
-		input.accept = "image/*";
-		input.multiple = true;
-		input.onchange = () => {
-			if (input.files) {
-				addImages(Array.from(input.files));
-			}
-		};
-		input.click();
-	}, [addImages]);
-
-	const handlePaste = useCallback(
-		(e: ClipboardEvent) => addImages(Array.from(e.clipboardData.files)),
-		[addImages]
-	);
+	// The ONE composer. No conversation id: the launchpad always opens a new chat,
+	// so voice-mode turns stay ephemeral and `atConversationStart` derives true.
+	const composer = useComposerSlot(runtime, {
+		target,
+		teams,
+		teamId,
+		onSelectTeam: setTeamId,
+		onCreateAgent: () => openTab("/agents/new/edit", { title: "New agent" }),
+		ghost: { active: ghost, onToggle: () => setGhost((on) => !on) },
+	});
+	const { addFiles, clear, images, onAttach, onPaste, onRemoveImage } =
+		composer.attachments;
+	const Composer = composer.inputBar;
 
 	const handleDrop = useCallback(
 		(e: DragEvent) => {
 			e.preventDefault();
 			setIsDragOver(false);
-			addImages(Array.from(e.dataTransfer.files));
+			addFiles(Array.from(e.dataTransfer.files));
 		},
-		[addImages]
-	);
-
-	const handleRemoveImage = useCallback(
-		(id: string) =>
-			setAttachedImages((prev) => prev.filter((img) => img.id !== id)),
-		[]
+		[addFiles]
 	);
 
 	return (
@@ -534,18 +471,16 @@ function LaunchpadComposer() {
 				}}
 				onDrop={handleDrop}
 			>
-				<InputBar
-					attachedImages={attachedImages}
+				<Composer
+					attachedImages={images}
 					autoFocus
-					infoBar={infoBar}
 					isDragOver={isDragOver}
-					leftActions={leftActions}
-					onAttach={handleAttach}
-					onPaste={handlePaste}
-					onRemoveImage={handleRemoveImage}
+					onAttach={onAttach}
+					onPaste={onPaste}
+					onRemoveImage={onRemoveImage}
 					onSend={(message: { role: "user"; content: string }) => {
 						const content = message.content.trim();
-						if (!content && attachedImages.length === 0) {
+						if (!content && images.length === 0) {
 							return;
 						}
 						openTab("/chat", {
@@ -556,28 +491,21 @@ function LaunchpadComposer() {
 							// A team target isn't carried into the tab, so for a team pick we
 							// fall back to pre-fill rather than auto-send to the wrong agent.
 							initialSubmit: teamId ? undefined : true,
-							initialImages:
-								attachedImages.length > 0 ? attachedImages : undefined,
+							initialImages: images.length > 0 ? images : undefined,
 							initialAgent: teamId ? undefined : (agentId ?? undefined),
+							initialGhost: ghost ? true : undefined,
 						});
+						// The images now live on the tab seed; drop them here so they don't
+						// re-attach to the next thing typed on the launchpad.
+						clear();
 					}}
 					onStop={() => undefined}
-					onTextareaKeyDown={(event) => {
-						if (
-							handleComposerSettingsShortcut(event, sections, composerShortcuts)
-						) {
-							event.preventDefault();
-						}
-					}}
 					placeholder="What do you want to do?"
-					rightActions={rightActions}
 					status="ready"
-					voice={{ transcribe: voiceTranscribe }}
-					voiceMode={{ onStart: voiceMode.start }}
 					workspaceBar={<WorkspaceBar target={target} />}
 				/>
 			</div>
-			{voiceMode.active && <VoiceModeSurface voice={voiceMode} />}
+			{composer.voiceModeOverlay}
 		</>
 	);
 }

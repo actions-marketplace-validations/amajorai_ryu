@@ -116,11 +116,17 @@ pub fn required_platforms(name: &str) -> &'static [&'static str] {
         // (mlx-vlm) and oMLX engines build on the same framework, so they share
         // the gate.
         "mlx" | "mlx-vlm" | "omlx" | "apfel" => &["macos"],
-        // Tailscale mesh daemon (#478): there is no auto-download yet — the
-        // sidecar PATH-adopts an official client install on every platform. This
-        // `[linux]` label reserves the future Linux-only downloader and gates the
-        // generic install route there; display + install-gate only.
-        "tailscale" => &["linux"],
+        // Tailscale mesh daemon (#478) is deliberately UNCONSTRAINED. It used to
+        // carry a `["linux"]` label meant to reserve a future Linux-only
+        // downloader, described as "display + install-gate only" — but this list
+        // feeds `supported_on_node`, whose fallback is
+        // `platforms.contains(current_os)`. On macOS and Windows that answered
+        // FALSE, so the node reported the mesh as unsupported and the install
+        // gate refused it, on the very platforms where the sidecar works: it
+        // PATH-adopts the official `tailscaled`/`tailscale` client on EVERY
+        // platform (verified enrolling a macOS node into Headscale). Re-add a
+        // platform label here only when a real platform constraint exists —
+        // not to reserve unimplemented plans.
         // microsandbox (msb microVMs) and OpenSandbox (osb) are external CLIs
         // backed by hypervisors/secure-container runtimes that exist only on
         // Linux/macOS — never Windows. Display + node-support gate only.

@@ -123,6 +123,12 @@ export type Capability =
 	| "ui.sendMessage"
 	| "widget.state"
 	| "ui.displayMode"
+	// Assistant bridge (grant `assistant:context`) — the app describes ITS page to
+	// the one global "Ask Ryu" surface: what the user is looking at, optionally its
+	// own instructions + starter prompts while that page is open, and opening the
+	// panel. Write-only in one direction: an app can steer the assistant about
+	// itself, and can never read the conversation back.
+	| "assistant.context"
 	// App host-bridge capabilities (full-page Companion apps). Gateway-sourced from
 	// the SAME grant strings the Core `PluginHookBridge` gates on (`hook:side-model`,
 	// `hook:run-agent`, `storage:kv`). Each unlocks a family of `/api/plugins/:id/host`
@@ -623,6 +629,29 @@ export interface HostServices {
 	approvalsList?(): Promise<ApprovalRecord[]>;
 	/** Reject a pending request (`POST /api/approvals/:id/reject`). */
 	approvalsReject?(input: ApprovalDecidePayload): Promise<ApprovalRecord>;
+	/** Drop this app's whole context slice from the assistant (page closed/blurred). */
+	assistantClearContext?(): Promise<void>;
+	/** Hand the assistant back to the generic "Ask Ryu" chat. */
+	assistantClearSurface?(): Promise<void>;
+	/** Open the assistant panel, optionally asking `prompt` straight away. */
+	assistantOpen?(input: {
+		mode?: "floating" | "sidebar";
+		prompt?: string;
+	}): Promise<void>;
+	/** Replace this app's context slice — "here is what the user is looking at".
+	 *  Other publishers (the page itself, other apps) keep their own slices. */
+	assistantPublishContext?(input: {
+		items: { id: string; text: string; title: string }[];
+	}): Promise<void>;
+	/** Take the assistant over while this app's surface is open: its own title,
+	 *  instructions, starter prompts and the tools it wants reached for. */
+	assistantRegisterSurface?(input: {
+		description?: string;
+		label: string;
+		preamble?: string;
+		prompts?: string[];
+		tools?: string[];
+	}): Promise<void>;
 	/** List agents (`GET /api/agents`) for the New-automation picker (id+name). */
 	calendarAgents?(): Promise<CalendarAgentRecord[]>;
 	/** Create (or update) the scheduled workflow that runs an agent on a schedule,
@@ -1307,6 +1336,45 @@ interface HostApiMethodEntry {
  *  `hostApiVersion` (see {@link ExtensionHost}). */
 export const HOST_API_VERSION: string = hostApiContract.version;
 
+/** How long a frame keeps re-announcing `ryu-plugin-ready`, and how often. */
+const HANDSHAKE_RETRY_MS = 200;
+const HANDSHAKE_RETRY_WINDOW_MS = 20_000;
+
+/**
+ * The ES5 snippet every sandboxed frame ends with: announce `ryu-plugin-ready`,
+ * then KEEP announcing until the host's port arrives.
+ *
+ * The single-shot announce this replaces was a silent, unrecoverable failure. The
+ * frame posts during head parse, and the host attaches its `message` listener from
+ * a React passive effect — which React flushes in a *scheduler task*, not
+ * synchronously at commit. The iframe's own load task can win that race (more
+ * easily the busier the shell is at mount). When it does, the one announce is
+ * dispatched to a window with no listener yet, is dropped, and nothing ever
+ * re-sends it: the host sits on "starting…" forever and the frame stays blank,
+ * because Path A only evaluates the plugin bundle *after* the port lands.
+ *
+ * Re-announcing costs one postMessage per tick and is safe by construction: the
+ * frame stops as soon as it holds a port, and the host refuses every announce
+ * after the first anyway (`alreadyConnected` in `shouldTransferPort`), so a
+ * duplicate can never mint a second channel. The window is bounded so a frame the
+ * host has genuinely abandoned does not tick forever.
+ *
+ * Expects a `port` variable in scope (the frame's channel port, null until the
+ * handshake completes) — both builders declare one.
+ */
+export function handshakeAnnounceScript(): string {
+	return `
+    function ryuAnnounceReady() {
+      window.parent.postMessage({ kind: "ryu-plugin-ready", nonce: NONCE, hostApiVersion: ${JSON.stringify(HOST_API_VERSION)} }, "*");
+    }
+    ryuAnnounceReady();
+    var ryuReadyTimer = setInterval(function () {
+      if (port) { clearInterval(ryuReadyTimer); return; }
+      ryuAnnounceReady();
+    }, ${HANDSHAKE_RETRY_MS});
+    setTimeout(function () { clearInterval(ryuReadyTimer); }, ${HANDSHAKE_RETRY_WINDOW_MS});`;
+}
+
 const HOST_API_METHODS =
 	hostApiContract.methods as readonly HostApiMethodEntry[];
 
@@ -1625,6 +1693,77 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.sendFollowUpMessage(input);
+		}
+		case "assistant.publishContext": {
+			const input = asAssistantContextArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"assistant.publishContext requires { items: [{ id, title, text }] }"
+				);
+			}
+			if (!services.assistantPublishContext) {
+				throw new CodedRpcError(
+					"server_error",
+					"assistant.publishContext is not available"
+				);
+			}
+			await services.assistantPublishContext(input);
+			return null;
+		}
+		case "assistant.clearContext": {
+			if (!services.assistantClearContext) {
+				throw new CodedRpcError(
+					"server_error",
+					"assistant.clearContext is not available"
+				);
+			}
+			await services.assistantClearContext();
+			return null;
+		}
+		case "assistant.registerSurface": {
+			const input = asAssistantSurfaceArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"assistant.registerSurface requires { label: string, … }"
+				);
+			}
+			if (!services.assistantRegisterSurface) {
+				throw new CodedRpcError(
+					"server_error",
+					"assistant.registerSurface is not available"
+				);
+			}
+			await services.assistantRegisterSurface(input);
+			return null;
+		}
+		case "assistant.clearSurface": {
+			if (!services.assistantClearSurface) {
+				throw new CodedRpcError(
+					"server_error",
+					"assistant.clearSurface is not available"
+				);
+			}
+			await services.assistantClearSurface();
+			return null;
+		}
+		case "assistant.open": {
+			const input = asAssistantOpenArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"assistant.open requires no argument or { prompt?, mode? }"
+				);
+			}
+			if (!services.assistantOpen) {
+				throw new CodedRpcError(
+					"server_error",
+					"assistant.open is not available"
+				);
+			}
+			await services.assistantOpen(input);
+			return null;
 		}
 		case "widget.setState": {
 			if (args.length !== 1) {
@@ -3486,6 +3625,140 @@ export function asPromptArg(data: unknown): { prompt: string } | null {
 		return null;
 	}
 	return { prompt: candidate.prompt };
+}
+
+// ── Assistant bridge argument validators ─────────────────────────────────────
+//
+// Everything an app publishes here ends up INSIDE a prompt sent to the user's
+// model, on the user's budget, on every turn the context changes. So the caps
+// below are not politeness — an uncapped `text` is a way to spend someone else's
+// tokens, and an uncapped item count is a way to bury the user's actual question.
+// Over-long values are TRUNCATED rather than rejected: a dashboard that grew one
+// widget too many should lose a paragraph, not lose its context entirely.
+
+/** Max context items one app may publish at once. */
+const MAX_CONTEXT_ITEMS = 8;
+/** Max characters per context item's body. */
+const MAX_CONTEXT_TEXT = 8000;
+/** Max characters for a short label (chip title, surface label). */
+const MAX_LABEL = 120;
+/** Max characters for an app-supplied preamble. */
+const MAX_PREAMBLE = 4000;
+/** Max advisory tool names / starter prompts a surface may declare. */
+const MAX_LIST_ENTRIES = 12;
+
+function clamp(value: string, max: number): string {
+	return value.length > max ? value.slice(0, max) : value;
+}
+
+/** Narrow `assistant.publishContext`'s argument to `{ items }`, dropping any
+ *  malformed item and clamping the rest. Returns null only when the envelope
+ *  itself is wrong (not an object / no `items` array). */
+export function asAssistantContextArg(data: unknown): {
+	items: { id: string; text: string; title: string }[];
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const raw = (data as Record<string, unknown>).items;
+	if (!Array.isArray(raw)) {
+		return null;
+	}
+	const items: { id: string; text: string; title: string }[] = [];
+	for (const entry of raw.slice(0, MAX_CONTEXT_ITEMS)) {
+		if (typeof entry !== "object" || entry === null) {
+			continue;
+		}
+		const c = entry as Record<string, unknown>;
+		if (typeof c.id !== "string" || c.id.length === 0) {
+			continue;
+		}
+		if (typeof c.title !== "string" || c.title.length === 0) {
+			continue;
+		}
+		items.push({
+			id: clamp(c.id, MAX_LABEL),
+			title: clamp(c.title, MAX_LABEL),
+			text: typeof c.text === "string" ? clamp(c.text, MAX_CONTEXT_TEXT) : "",
+		});
+	}
+	return { items };
+}
+
+/** Narrow a string array argument, dropping non-strings and empties. */
+function asStringList(raw: unknown): string[] | undefined {
+	if (!Array.isArray(raw)) {
+		return undefined;
+	}
+	const out = raw
+		.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+		.slice(0, MAX_LIST_ENTRIES)
+		.map((v) => clamp(v, MAX_LABEL));
+	return out.length > 0 ? out : undefined;
+}
+
+/** Narrow `assistant.registerSurface`'s argument. `label` is REQUIRED — an
+ *  unlabelled takeover would leave the user staring at a chat that has silently
+ *  changed whose instructions it is following. */
+export function asAssistantSurfaceArg(data: unknown): {
+	description?: string;
+	label: string;
+	preamble?: string;
+	prompts?: string[];
+	tools?: string[];
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const c = data as Record<string, unknown>;
+	if (typeof c.label !== "string" || c.label.trim().length === 0) {
+		return null;
+	}
+	const out: {
+		description?: string;
+		label: string;
+		preamble?: string;
+		prompts?: string[];
+		tools?: string[];
+	} = { label: clamp(c.label, MAX_LABEL) };
+	if (typeof c.description === "string" && c.description.length > 0) {
+		out.description = clamp(c.description, MAX_CONTEXT_TEXT);
+	}
+	if (typeof c.preamble === "string" && c.preamble.length > 0) {
+		out.preamble = clamp(c.preamble, MAX_PREAMBLE);
+	}
+	const tools = asStringList(c.tools);
+	if (tools) {
+		out.tools = tools;
+	}
+	const prompts = asStringList(c.prompts);
+	if (prompts) {
+		out.prompts = prompts;
+	}
+	return out;
+}
+
+/** Narrow `assistant.open`'s argument. Everything is optional (a bare
+ *  `assistant.open()` just shows the panel), so only a wrong TYPE fails. */
+export function asAssistantOpenArg(data: unknown): {
+	mode?: "floating" | "sidebar";
+	prompt?: string;
+} | null {
+	if (data === undefined || data === null) {
+		return {};
+	}
+	if (typeof data !== "object") {
+		return null;
+	}
+	const c = data as Record<string, unknown>;
+	const out: { mode?: "floating" | "sidebar"; prompt?: string } = {};
+	if (c.mode === "floating" || c.mode === "sidebar") {
+		out.mode = c.mode;
+	}
+	if (typeof c.prompt === "string" && c.prompt.trim().length > 0) {
+		out.prompt = clamp(c.prompt, MAX_CONTEXT_TEXT);
+	}
+	return out;
 }
 
 /** Narrow a `shell.openTab` argument to `{ path, … }`. `path` must be a non-empty

@@ -11,6 +11,9 @@ use serde_json::Value;
 use std::sync::OnceLock;
 
 use super::github_topic::GithubTopicSource;
+use super::skill_registries::{
+    BrowseShSource, ClawHubSource, GithubTapSource, LobeHubSource, WellKnownSource,
+};
 use super::{CatalogKind, CatalogQuery, CatalogSource, DescriptorFile, InstallDescriptor};
 use crate::model_catalog::HfEndpoint;
 
@@ -3387,8 +3390,28 @@ pub struct IntegrationBrand {
     pub categories: Vec<String>,
     pub sources: Vec<String>, // ["directory"] and/or ["composio"]
     pub feeds: Vec<String>,   // integration kinds available (mcp/api/graphql/cli)
+    /// Every directory record folded into this brand, deduped by record id. The
+    /// actionable form of `feeds`.
+    pub connections: Vec<IntegrationConnection>,
     pub domain: Option<String>,
     pub popularity: Option<u64>,
+}
+
+/// One concrete connection a brand offers, carried through the brand fold so the
+/// Integrations tab can ACT on it (import an OpenAPI/GraphQL entry as tools, jump
+/// to the MCP catalog, open setup docs). `feeds` alone is only a set of kind
+/// tokens; without the record `id`/`url` every one of those actions is
+/// unreachable, which is why the fold keeps the records rather than collapsing
+/// them into chips.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IntegrationConnection {
+    /// The integrations.sh record id (`openapi/1password-com-events`, `mcp/notion`).
+    pub id: String,
+    /// The record's integration kind (`mcp` / `openapi` / `api` / `graphql` / `cli`).
+    pub kind: String,
+    pub name: String,
+    /// The record's setup/docs/endpoint URL, when the directory carries one.
+    pub url: Option<String>,
 }
 
 /// Normalize a display name / id into a stable brand slug for dedup+matching.
@@ -3422,6 +3445,12 @@ pub async fn integrations_sh_brands() -> Vec<IntegrationBrand> {
         let mut feeds: Vec<String> = Vec::new();
         feeds.push(record.kind.clone());
         feeds.extend(record.feeds.iter().cloned());
+        let connection = IntegrationConnection {
+            id: record.id.clone(),
+            kind: record.kind.clone(),
+            name: record.name.clone(),
+            url: record.url.clone(),
+        };
         match by_slug.get_mut(&slug) {
             Some(brand) => {
                 for cat in &record.categories {
@@ -3433,6 +3462,9 @@ pub async fn integrations_sh_brands() -> Vec<IntegrationBrand> {
                     if !brand.feeds.contains(&feed) {
                         brand.feeds.push(feed);
                     }
+                }
+                if !brand.connections.iter().any(|c| c.id == connection.id) {
+                    brand.connections.push(connection);
                 }
                 if brand.description.is_none() {
                     brand.description = record.description.clone();
@@ -3457,6 +3489,7 @@ pub async fn integrations_sh_brands() -> Vec<IntegrationBrand> {
                         categories: record.categories.clone(),
                         sources: vec!["directory".into()],
                         feeds,
+                        connections: vec![connection],
                         domain: record.domain.clone(),
                         popularity: record.popularity,
                     },
@@ -3676,6 +3709,13 @@ pub enum Source {
     /// descriptor-only community listings. See `github_topic.rs`.
     GithubTopic(GithubTopicSource),
     OkfBundle(OkfBundleSource),
+    /// The non-skills.sh Skill registries (GitHub taps, `/.well-known/skills`,
+    /// browse.sh, ClawHub, LobeHub). See `skill_registries`.
+    GithubTap(GithubTapSource),
+    WellKnown(WellKnownSource),
+    BrowseSh(BrowseShSource),
+    ClawHub(ClawHubSource),
+    LobeHub(LobeHubSource),
     Stub(StubSource),
 }
 
@@ -3693,6 +3733,11 @@ impl Source {
             Source::IntegrationsSh(s) => s.id(),
             Source::GithubTopic(s) => s.id(),
             Source::OkfBundle(s) => s.id(),
+            Source::GithubTap(s) => s.id(),
+            Source::WellKnown(s) => s.id(),
+            Source::BrowseSh(s) => s.id(),
+            Source::ClawHub(s) => s.id(),
+            Source::LobeHub(s) => s.id(),
             Source::Stub(s) => s.id(),
         }
     }
@@ -3709,6 +3754,11 @@ impl Source {
             Source::IntegrationsSh(s) => s.display_name(),
             Source::GithubTopic(s) => s.display_name(),
             Source::OkfBundle(s) => s.display_name(),
+            Source::GithubTap(s) => s.display_name(),
+            Source::WellKnown(s) => s.display_name(),
+            Source::BrowseSh(s) => s.display_name(),
+            Source::ClawHub(s) => s.display_name(),
+            Source::LobeHub(s) => s.display_name(),
             Source::Stub(s) => s.display_name(),
         }
     }
@@ -3725,6 +3775,11 @@ impl Source {
             Source::IntegrationsSh(s) => s.kind(),
             Source::GithubTopic(s) => s.kind(),
             Source::OkfBundle(s) => s.kind(),
+            Source::GithubTap(s) => s.kind(),
+            Source::WellKnown(s) => s.kind(),
+            Source::BrowseSh(s) => s.kind(),
+            Source::ClawHub(s) => s.kind(),
+            Source::LobeHub(s) => s.kind(),
             Source::Stub(s) => s.kind(),
         }
     }
@@ -3750,7 +3805,17 @@ impl Source {
             Source::GithubTopic(s) => s.api_base.as_deref(),
             // A knowledge bundle surfaces its OKF source URL (git/local).
             Source::OkfBundle(s) => Some(&s.source_url),
-            Source::Smithery(_) | Source::SkillsSh(_) | Source::Stub(_) => None,
+            // A tap surfaces its repo and a well-known source its site, so the
+            // picker can show where a source points. browse.sh / ClawHub /
+            // LobeHub are host-fixed, so like skills.sh they surface nothing.
+            Source::WellKnown(s) => Some(&s.base_url),
+            Source::Smithery(_)
+            | Source::SkillsSh(_)
+            | Source::GithubTap(_)
+            | Source::BrowseSh(_)
+            | Source::ClawHub(_)
+            | Source::LobeHub(_)
+            | Source::Stub(_) => None,
         }
     }
 
@@ -3778,6 +3843,11 @@ impl Source {
             Source::IntegrationsSh(s) => s.search(client, q).await,
             Source::GithubTopic(s) => s.search(client, q).await,
             Source::OkfBundle(s) => s.search(client, q).await,
+            Source::GithubTap(s) => s.search(client, q).await,
+            Source::WellKnown(s) => s.search(client, q).await,
+            Source::BrowseSh(s) => s.search(client, q).await,
+            Source::ClawHub(s) => s.search(client, q).await,
+            Source::LobeHub(s) => s.search(client, q).await,
             Source::Stub(s) => s.search(client, q).await,
         }
     }
@@ -3794,6 +3864,11 @@ impl Source {
             Source::IntegrationsSh(s) => s.detail(client, id).await,
             Source::GithubTopic(s) => s.detail(client, id).await,
             Source::OkfBundle(s) => s.detail(client, id).await,
+            Source::GithubTap(s) => s.detail(client, id).await,
+            Source::WellKnown(s) => s.detail(client, id).await,
+            Source::BrowseSh(s) => s.detail(client, id).await,
+            Source::ClawHub(s) => s.detail(client, id).await,
+            Source::LobeHub(s) => s.detail(client, id).await,
             Source::Stub(s) => s.detail(client, id).await,
         }
     }
@@ -3814,6 +3889,11 @@ impl Source {
             Source::IntegrationsSh(s) => s.install_descriptor(client, id).await,
             Source::GithubTopic(s) => s.install_descriptor(client, id).await,
             Source::OkfBundle(s) => s.install_descriptor(client, id).await,
+            Source::GithubTap(s) => s.install_descriptor(client, id).await,
+            Source::WellKnown(s) => s.install_descriptor(client, id).await,
+            Source::BrowseSh(s) => s.install_descriptor(client, id).await,
+            Source::ClawHub(s) => s.install_descriptor(client, id).await,
+            Source::LobeHub(s) => s.install_descriptor(client, id).await,
             Source::Stub(s) => s.install_descriptor(client, id).await,
         }
     }
@@ -3883,6 +3963,14 @@ impl Source {
             Source::SkillsSh(_) => Ok(Some(
                 crate::skills_catalog::install_skill(client, id).await?,
             )),
+            // Each registry knows how to turn one of its own ids into an install:
+            // a tap hands a repo subdir to the from-source fetcher, the other
+            // three write the SKILL.md they serve. See `skill_registries`.
+            Source::GithubTap(s) => Ok(Some(s.install(client, id).await?)),
+            Source::WellKnown(s) => Ok(Some(s.install(client, id).await?)),
+            Source::BrowseSh(s) => Ok(Some(s.install(client, id).await?)),
+            Source::ClawHub(s) => Ok(Some(s.install(client, id).await?)),
+            Source::LobeHub(s) => Ok(Some(s.install(client, id).await?)),
             Source::Marketplace(s) => {
                 let descriptor = s.install_descriptor(client, id).await?;
                 let install_source = descriptor

@@ -28,11 +28,23 @@ import {
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { TelegramManagedBotPanel } from "@/src/components/channels/TelegramManagedBotPanel.tsx";
 import { ScrollFadeEffect } from "@/src/components/ui/scroll-fade-effect.tsx";
 
 const DEFAULT_AGENT = "__default__";
 const TEAM_PREFIX = "team:";
+
+/**
+ * How the user supplies a Telegram bot. `managed` is the zero-token path (Ryu's
+ * manager bot has Telegram create a bot the user owns — Bot API 9.6); `manual` is
+ * the original paste-a-@BotFather-token form, kept as the fallback for every case
+ * the managed path can't serve (support switched off server-side, an existing bot
+ * the user wants to reuse).
+ *
+ * Only Telegram has two ways in; every other platform renders `manual` only.
+ */
+type ConnectMode = "managed" | "manual";
 
 interface FormState {
 	agentId: string;
@@ -43,6 +55,24 @@ interface FormState {
 	name: string;
 	secrets: Record<string, string>;
 	systemPrompt: string;
+}
+
+/**
+ * Split the single agent/team picker value into the two mutually-exclusive bindings
+ * the server takes. Shared by the manual submit and the managed pairing, so a bot
+ * created either way answers as the same thing.
+ */
+function splitBinding(value: string): {
+	agentId: string | null;
+	teamId: string | null;
+} {
+	if (value.startsWith(TEAM_PREFIX)) {
+		return { agentId: null, teamId: value.slice(TEAM_PREFIX.length) };
+	}
+	return {
+		agentId: value === DEFAULT_AGENT ? null : value,
+		teamId: null,
+	};
 }
 
 function emptyForm(): FormState {
@@ -64,11 +94,20 @@ export function AddChannelDialog({
 	agents = [],
 	teams = [],
 	onCreate,
+	onNodeCreated,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	agents: AgentOption[];
 	teams?: AgentOption[];
+	/**
+	 * The NODE created the config itself. The managed-bot path writes it server-side
+	 * (the pairing's claim secret has to be sealed into the row and must not pass
+	 * through this webview), so `onCreate` never runs and the host has to be told
+	 * some other way — without this the list never refetches and the dialog just
+	 * vanishes with nothing to show for it.
+	 */
+	onNodeCreated?: (name: string) => void | Promise<void>;
 	onCreate: (input: {
 		channelType: ChannelType;
 		name: string;
@@ -84,69 +123,158 @@ export function AddChannelDialog({
 	const [form, setForm] = useState<FormState>(emptyForm);
 	const [saving, setSaving] = useState(false);
 	const [formError, setFormError] = useState<string | null>(null);
+	const [connectMode, setConnectMode] = useState<ConnectMode>("managed");
+	/** Set when the node reports managed bots are unavailable, so the forced switch
+	 *  to the manual fields comes with a reason instead of silently happening. */
+	const [managedNotice, setManagedNotice] = useState<string | null>(null);
 
 	const requiredKeys = REQUIRED_SECRETS[form.channelType];
 	const setup = CHANNEL_SETUP[form.channelType];
+	const managedAvailable = form.channelType === "telegram";
+	const usingManaged = managedAvailable && connectMode === "managed";
 
-	const handleSave = useCallback(async () => {
-		setFormError(null);
-		if (!form.name.trim()) {
-			setFormError("Name is required.");
-			return;
-		}
-
-		let agentId: string | null = null;
-		let teamId: string | null = null;
-		if (form.agentId.startsWith(TEAM_PREFIX)) {
-			teamId = form.agentId.slice(TEAM_PREFIX.length);
-		} else if (form.agentId !== DEFAULT_AGENT) {
-			agentId = form.agentId;
-		}
-
-		const secrets: Record<string, string> = {};
-		for (const [key, value] of Object.entries(form.secrets)) {
-			if (value.trim()) {
-				secrets[key] = value.trim();
+	/**
+	 * `secretsOverride` lets the managed path submit through this exact function
+	 * rather than a parallel one: the token arrives from the pairing poll, not from
+	 * form state, and merging it here means the required-key guard below validates
+	 * what will actually be sent.
+	 *
+	 * Returns whether the channel was actually created, so the managed path can
+	 * tell "saved and closed" from "still on screen with an error".
+	 */
+	const handleSave = useCallback(
+		async (secretsOverride?: Record<string, string>): Promise<boolean> => {
+			setFormError(null);
+			if (!form.name.trim()) {
+				setFormError("Name is required.");
+				return false;
 			}
-		}
 
-		const missing = requiredKeys.filter((k) => !secrets[k]);
-		if (missing.length > 0) {
-			setFormError(
-				`Missing required: ${missing
-					.map((k) => SECRET_LABELS[k] ?? k)
-					.join(", ")}`
-			);
-			return;
-		}
+			const { agentId, teamId } = splitBinding(form.agentId);
 
-		setSaving(true);
-		try {
-			const ok = await onCreate({
-				channelType: form.channelType,
-				name: form.name.trim(),
-				secrets,
-				agentId,
-				teamId,
-				groupReplyMode: form.groupReplyMode,
-				model: form.model.trim() || null,
-				systemPrompt: form.systemPrompt.trim() || null,
-				enabled: form.enabled,
-			});
-			if (ok) {
+			const secrets: Record<string, string> = {};
+			for (const [key, value] of Object.entries({
+				...form.secrets,
+				...secretsOverride,
+			})) {
+				if (value.trim()) {
+					secrets[key] = value.trim();
+				}
+			}
+
+			const missing = requiredKeys.filter((k) => !secrets[k]);
+			if (missing.length > 0) {
+				setFormError(
+					`Missing required: ${missing
+						.map((k) => SECRET_LABELS[k] ?? k)
+						.join(", ")}`
+				);
+				return false;
+			}
+
+			setSaving(true);
+			try {
+				const ok = await onCreate({
+					channelType: form.channelType,
+					name: form.name.trim(),
+					secrets,
+					agentId,
+					teamId,
+					groupReplyMode: form.groupReplyMode,
+					model: form.model.trim() || null,
+					systemPrompt: form.systemPrompt.trim() || null,
+					enabled: form.enabled,
+				});
+				if (ok) {
+					setForm(emptyForm());
+					setConnectMode("managed");
+					setManagedNotice(null);
+					onOpenChange(false);
+				}
+				return ok;
+			} finally {
+				setSaving(false);
+			}
+		},
+		[form, requiredKeys, onCreate, onOpenChange]
+	);
+
+	/**
+	 * What the pairing sends the node, at pairing time. It has to travel up front:
+	 * the node writes the channel config when the token arrives, minutes after this
+	 * dialog is gone, so a field not sent here is a user choice that quietly reverts
+	 * to a server default.
+	 */
+	const managedForm = useMemo(() => {
+		const { agentId, teamId } = splitBinding(form.agentId);
+		return {
+			agent_id: agentId,
+			enabled: form.enabled,
+			group_reply_mode: form.groupReplyMode,
+			model: form.model.trim() || null,
+			system_prompt: form.systemPrompt.trim() || null,
+			team_id: teamId,
+		};
+	}, [
+		form.agentId,
+		form.enabled,
+		form.groupReplyMode,
+		form.model,
+		form.systemPrompt,
+	]);
+
+	/**
+	 * The managed pairing finished. Two shapes are possible and both are terminal:
+	 * the node handed the token back (submit it through the normal form path), or
+	 * the node already wrote the channel row itself — the usual case — in which case
+	 * there is nothing left to save and the host is told so it can refresh.
+	 */
+	const handleManagedReady = useCallback(
+		(token: string | undefined) => {
+			if (!token) {
+				const created = form.name.trim();
 				setForm(emptyForm());
+				setConnectMode("managed");
+				setManagedNotice(null);
 				onOpenChange(false);
+				// The node already carried the whole form, so there is nothing to
+				// submit — but somebody still has to refetch the list and say it worked.
+				void onNodeCreated?.(created);
+				return;
 			}
-		} finally {
-			setSaving(false);
-		}
-	}, [form, requiredKeys, onCreate, onOpenChange]);
+			// Park the token in the form as well as submitting it. Telegram has
+			// already created a real bot at this point, so if the save fails (signed
+			// out, control plane down) the user must not have to mint a second one —
+			// dropping to the manual mode on failure surfaces the field that now
+			// holds it, and "Create bot" retries with no further Telegram round trip.
+			setForm((f) => ({
+				...f,
+				secrets: { ...f.secrets, bot_token: token },
+			}));
+			handleSave({ bot_token: token })
+				.then((saved) => {
+					if (!saved) {
+						setConnectMode("manual");
+					}
+				})
+				.catch(() => setConnectMode("manual"));
+		},
+		[form.name, handleSave, onNodeCreated, onOpenChange]
+	);
+
+	/** Managed bots are off server-side: drop to the manual fields with a reason. */
+	const handleManagedUnsupported = useCallback((message: string) => {
+		setManagedNotice(message);
+		setConnectMode("manual");
+	}, []);
 
 	return (
 		<Dialog
 			onOpenChange={(v) => {
 				if (!v) {
 					setForm(emptyForm());
+					setConnectMode("managed");
+					setManagedNotice(null);
 				}
 				onOpenChange(v);
 			}}
@@ -175,13 +303,18 @@ export function AddChannelDialog({
 							<Label htmlFor="channel-type">Platform</Label>
 							<NativeSelect
 								id="channel-type"
-								onChange={(e) =>
+								onChange={(e) => {
+									// Switching platform already clears the secrets; the pairing
+									// state is Telegram-only, so it has to go with them or the
+									// panel would keep polling a nonce for a bot we no longer want.
+									setConnectMode("managed");
+									setManagedNotice(null);
 									setForm((f) => ({
 										...f,
 										channelType: e.target.value as ChannelType,
 										secrets: {},
-									}))
-								}
+									}));
+								}}
 								value={form.channelType}
 							>
 								{CHANNEL_TYPES.map((t) => (
@@ -194,8 +327,43 @@ export function AddChannelDialog({
 
 						<div className="space-y-3 rounded-lg border bg-card p-4">
 							<p className="font-medium text-sm">Credentials</p>
-							<p className="text-muted-foreground text-xs">{setup.note}</p>
-							{requiredKeys.map((key) => {
+							{managedAvailable ? (
+								<div className="flex gap-2">
+									<Button
+										onClick={() => setConnectMode("managed")}
+										size="sm"
+										variant={usingManaged ? "default" : "outline"}
+									>
+										Create a bot for me
+									</Button>
+									<Button
+										onClick={() => setConnectMode("manual")}
+										size="sm"
+										variant={usingManaged ? "outline" : "default"}
+									>
+										Paste a token
+									</Button>
+								</div>
+							) : null}
+							{managedNotice ? (
+								<p className="text-muted-foreground text-xs">
+									{managedNotice} Create one with @BotFather and paste its token
+									below instead.
+								</p>
+							) : null}
+							{usingManaged ? (
+								<TelegramManagedBotPanel
+									active={open && usingManaged}
+									botName={form.name}
+									form={managedForm}
+									onReady={handleManagedReady}
+									onUnsupported={handleManagedUnsupported}
+								/>
+							) : null}
+							{usingManaged ? null : (
+								<p className="text-muted-foreground text-xs">{setup.note}</p>
+							)}
+							{(usingManaged ? [] : requiredKeys).map((key) => {
 								const help = setup.secretHelp[key];
 								return (
 									<div className="space-y-1.5" key={key}>
@@ -343,15 +511,20 @@ export function AddChannelDialog({
 					<Button onClick={() => onOpenChange(false)} variant="ghost">
 						Cancel
 					</Button>
-					<Button
-						disabled={saving}
-						onClick={() => {
-							handleSave().catch(() => undefined);
-						}}
-					>
-						{saving ? <Spinner className="size-4" /> : null}
-						Create bot
-					</Button>
+					{/* The managed path submits itself the moment Telegram hands over a
+					    token, so a manual "Create bot" here could only ever fail the
+					    bot_token guard. The panel owns the action in that mode. */}
+					{usingManaged ? null : (
+						<Button
+							disabled={saving}
+							onClick={() => {
+								handleSave().catch(() => undefined);
+							}}
+						>
+							{saving ? <Spinner className="size-4" /> : null}
+							Create bot
+						</Button>
+					)}
 				</DialogFooter>
 			</DialogContent>
 		</Dialog>

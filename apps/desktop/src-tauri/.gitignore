@@ -6,3 +6,11 @@
 # IDE
 /.idea/
 /.vscode/
+
+# Channel-tinted icon sets, expanded from icons/channel/<channel>.png by
+# scripts/release/channel-brand.mjs at build time. Derived art — the SOURCE
+# pngs under icons/channel/ are committed, these expansions are not.
+/icons/beta/
+/icons/canary/
+/icons/nightly/
+/icons/dev/

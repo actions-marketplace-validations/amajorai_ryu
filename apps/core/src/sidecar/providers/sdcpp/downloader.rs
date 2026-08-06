@@ -132,6 +132,7 @@ impl StableDiffusionDownloader {
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Media,
+                role: crate::downloads::DownloadRole::Engine,
                 label: "stable-diffusion.cpp".to_string(),
                 url,
                 dest: archive_dest,
@@ -248,6 +249,7 @@ impl StableDiffusionDownloader {
         downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Media,
+                role: crate::downloads::DownloadRole::ImageModel,
                 label: "stable-diffusion.cpp model".to_string(),
                 url: DEFAULT_MODEL_URL.to_string(),
                 dest,

@@ -36,6 +36,31 @@ export type DownloadKind =
 	| "media"
 	| "other";
 
+/**
+ * What the artifact *is*, at the granularity a person reads it (mirrors Core's
+ * `DownloadRole`). `kind` groups every weight file under `model`/`voice`; this is
+ * what the row's type badge is derived from. Optional because a task persisted by
+ * an older Core deserializes without one.
+ */
+export type DownloadRole =
+	| "engine"
+	| "chat_model"
+	| "embedding_model"
+	| "reranker_model"
+	| "classifier_model"
+	| "vision_adapter"
+	| "draft_model"
+	| "speech_model"
+	| "voice_model"
+	| "image_model"
+	| "video_model"
+	| "agent"
+	| "tool"
+	| "skill"
+	| "plugin"
+	| "extract"
+	| "other";
+
 /** One download's full state — the shape served by the snapshot + SSE deltas. */
 export interface DownloadTask {
 	created_at: number;
@@ -47,6 +72,7 @@ export interface DownloadTask {
 	label: string;
 	received_bytes: number;
 	retryable: boolean;
+	role?: DownloadRole;
 	speed_bps: number | null;
 	state: DownloadState;
 	total_bytes: number | null;
@@ -96,6 +122,42 @@ export async function listDownloadHistory(
 	} catch {
 		return [];
 	}
+}
+
+// ── Concurrency settings ────────────────────────────────────────────────────
+
+/** How the parallel-download slot count is chosen (mirrors Core). */
+export type ConcurrencyMode = "auto" | "manual";
+
+/** The live settings view: the preference plus what it resolves to. */
+export interface DownloadSettings {
+	/** Slots actually in force right now (in auto, the tuner's current pick). */
+	effective_slots: number;
+	/** True when `RYU_MAX_CONCURRENT_DOWNLOADS` pins the value; writes are refused. */
+	env_locked: boolean;
+	manual_slots: number;
+	max_slots: number;
+	/** Best aggregate throughput observed, bytes/sec. `0` before anything ran. */
+	measured_bps: number;
+	min_slots: number;
+	mode: ConcurrencyMode;
+}
+
+export function getDownloadSettings(
+	target: ApiTarget
+): Promise<DownloadSettings> {
+	return request<DownloadSettings>(target, "/api/downloads/settings");
+}
+
+export function setDownloadSettings(
+	target: ApiTarget,
+	mode: ConcurrencyMode,
+	maxConcurrent?: number
+): Promise<DownloadSettings> {
+	return request<DownloadSettings>(target, "/api/downloads/settings", {
+		body: { max_concurrent: maxConcurrent, mode },
+		method: "PUT",
+	});
 }
 
 const control = (id: string, action: string) => (target: ApiTarget) =>

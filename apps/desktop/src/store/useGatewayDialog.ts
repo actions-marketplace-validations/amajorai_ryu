@@ -37,11 +37,9 @@ export type GatewaySection =
 	| "access"
 	// Per-resource permission exceptions (which team may do what, where).
 	| "permissions"
-	// Which app extracts text from uploaded documents (the node-wide
-	// `document.parse` binding) and the ceiling it enforces. Node-level, not
-	// per-user: one provider is bound per node and serves every Space and every
-	// chat attachment on it.
-	| "parsing"
+	// No "parsing": the node-wide `document.parse` binding is picked from the node
+	// dropdown's Toolkits row, the generic surface every swappable capability uses.
+	// Its upload ceiling moved onto "storage".
 	| "updates"
 	| "health"
 	| "danger";

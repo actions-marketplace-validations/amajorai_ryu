@@ -1,0 +1,7 @@
+{
+	"stable": { "label": "Research Preview", "tile": "#000000" },
+	"beta": { "label": "Beta", "tile": "#6D28D9" },
+	"canary": { "label": "Canary", "tile": "#EA580C" },
+	"nightly": { "label": "Nightly", "tile": "#0B1533" },
+	"dev": { "label": "Dev", "tile": "#1D4ED8" }
+}

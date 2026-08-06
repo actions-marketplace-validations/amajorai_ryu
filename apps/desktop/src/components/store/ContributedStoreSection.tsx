@@ -38,6 +38,8 @@ import {
 	renderTemplate,
 	type StoreCatalogItem,
 	type StoreTabSpec,
+	storeDetailObject,
+	storeGraphFromResponse,
 	storeItemHaystack,
 	storeItemsFromResponse,
 	type ViewAction,
@@ -48,6 +50,14 @@ import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingSection,
+	ListingStatStrip,
+} from "@ryu/marketplace/catalog/detail/listing-detail-shell";
+import { safeHttpUrl } from "@ryu/marketplace/catalog/safe-url";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -69,6 +79,7 @@ import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginStoreTab } from "@/src/lib/api/plugins.ts";
+import StoreDetailGraph from "./StoreDetailGraph.tsx";
 
 const SEARCH_DEBOUNCE_MS = 200;
 
@@ -148,19 +159,6 @@ function AppOffState({
 	);
 }
 
-function ItemBadges({ item }: { item: StoreCatalogItem }) {
-	return (
-		<>
-			{item.badge ? <Badge variant="secondary">{item.badge}</Badge> : null}
-			{item.tags.slice(0, 3).map((tag) => (
-				<Badge key={tag} variant="outline">
-					{tag}
-				</Badge>
-			))}
-		</>
-	);
-}
-
 function InstalledPill() {
 	return (
 		<Badge variant="secondary">
@@ -203,17 +201,11 @@ function DetailPanel({
 		);
 	}
 	const installSpec = tab.spec?.install;
+	const sourceHref = safeHttpUrl(item.sourceUrl);
 	return (
-		<div className="scroll-fade-effect-y flex h-full flex-col gap-6 overflow-auto p-4">
-			<header className="flex flex-col gap-3">
-				<div className="flex items-start justify-between gap-3">
-					<div className="flex min-w-0 items-center gap-3">
-						<TabIcon
-							className="size-8 shrink-0 text-muted-foreground"
-							icon={item.icon ?? tab.icon}
-						/>
-						<h2 className="truncate font-semibold text-xl">{item.title}</h2>
-					</div>
+		<ListingDetailShell
+			actions={
+				<>
 					{installSpec ? (
 						<InstallAction
 							busy={busy}
@@ -222,49 +214,154 @@ function DetailPanel({
 							onInstall={onInstall}
 						/>
 					) : null}
-				</div>
-				<div className="flex flex-wrap items-center gap-2">
-					<ItemBadges item={item} />
-				</div>
-				<p className="text-muted-foreground text-sm">
+					{/* Declared per-item extras (Preview, Duplicate, …) fire against the
+					    SELECTED row, so they live here rather than on the card — a
+					    card-level slot would have to pick a row before the user did. */}
+					{tab.spec?.itemActions?.map((action) => (
+						<Button
+							key={action.id}
+							onClick={() => runAction(action, item)}
+							size="sm"
+							variant={action.style === "danger" ? "destructive" : "outline"}
+						>
+							{action.label}
+						</Button>
+					))}
+					{sourceHref ? (
+						<Button
+							render={
+								<a
+									href={sourceHref}
+									rel="noopener noreferrer"
+									target="_blank"
+								/>
+							}
+							size="sm"
+							variant="outline"
+						>
+							<HugeiconsIcon className="size-4" icon={Link01Icon} />
+							Source
+						</Button>
+					) : null}
+					{error ? (
+						<span className="ml-auto flex items-center gap-1.5 text-destructive text-sm">
+							<HugeiconsIcon className="size-4 shrink-0" icon={Alert01Icon} />
+							{error}
+						</span>
+					) : null}
+				</>
+			}
+			aside={
+				item.tags.length > 0 ? (
+					<ListingAsideCard title="Tags">
+						<div className="flex flex-wrap gap-1">
+							{item.tags.map((tag) => (
+								<Badge
+									className="font-normal text-xs"
+									key={tag}
+									variant="outline"
+								>
+									{tag}
+								</Badge>
+							))}
+						</div>
+					</ListingAsideCard>
+				) : null
+			}
+			hero={
+				<ListingHero
+					badges={[item.badge ?? null, installed ? "Added" : null].filter(
+						(b): b is string => Boolean(b)
+					)}
+					icon={<TabIcon className="size-8" icon={item.icon ?? tab.icon} />}
+					name={item.title}
+					tagline={item.description}
+				/>
+			}
+			stats={
+				<ListingStatStrip
+					items={[
+						{ label: "Catalog", value: tab.title },
+						{ label: "Status", value: installed ? "Added" : "Not added" },
+						{ label: "Tags", value: `${item.tags.length}` },
+					]}
+				/>
+			}
+		>
+			<ListingSection title="About">
+				<p className="text-muted-foreground text-sm leading-relaxed">
 					{item.description || "No description provided."}
 				</p>
-				{item.sourceUrl ? (
-					<a
-						className="flex w-fit items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground"
-						href={item.sourceUrl}
-						rel="noopener noreferrer"
-						target="_blank"
-					>
-						<HugeiconsIcon className="size-4" icon={Link01Icon} />
-						Source
-					</a>
-				) : null}
-				{error ? (
-					<p className="flex items-center gap-1.5 text-destructive text-sm">
-						<HugeiconsIcon className="size-4 shrink-0" icon={Alert01Icon} />
-						{error}
-					</p>
-				) : null}
-				{/* Declared per-item extras (Preview, Duplicate, …) fire against the
-				    SELECTED row, so they live here rather than on the card — a card-level
-				    slot would have to pick a row before the user did. */}
-				{tab.spec?.itemActions?.length ? (
-					<div className="flex flex-wrap gap-2">
-						{tab.spec.itemActions.map((action) => (
-							<Button
-								key={action.id}
-								onClick={() => runAction(action, item)}
-								size="sm"
-								variant={action.style === "danger" ? "destructive" : "outline"}
-							>
-								{action.label}
-							</Button>
-						))}
-					</div>
-				) : null}
-			</header>
-		</div>
+			</ListingSection>
+			<ContributedDetailGraph item={item} tab={tab} />
+		</ListingDetailShell>
+	);
+}
+
+/** The declared per-item detail picture (a graph today), for tabs whose spec
+ *  carries `detail.graph`. Rendered as its own component rather than inline in
+ *  {@link DetailPanel} because that function early-returns on `item === null`,
+ *  so a hook called after it would change order between renders.
+ *
+ *  Renders nothing at all unless the tab DECLARES a graph — a contributed tab
+ *  that says nothing about detail keeps exactly the panel it had before. */
+function ContributedDetailGraph({
+	tab,
+	item,
+}: {
+	item: StoreCatalogItem;
+	tab: PluginStoreTab;
+}) {
+	const node = useActiveNode();
+	const spec = tab.spec;
+	const source = spec?.detail?.source;
+	const detail = useQuery({
+		queryKey: ["store-tab-detail", tab.plugin, tab.id, item.id, node.url],
+		enabled: Boolean(source),
+		queryFn: async () => {
+			if (!source) {
+				return null;
+			}
+			const rendered = renderActionHttp(source.http, { item: item.raw });
+			// The spec may only ever name a Core-relative `/api/` path; a rendered
+			// absolute URL would turn a catalog declaration into an egress channel.
+			if (!isCoreApiPath(rendered.path)) {
+				throw new Error(
+					`store tab detail path must start with /api/: ${rendered.path}`
+				);
+			}
+			const target = toTarget(node);
+			const resp = await fetch(apiUrl(target, rendered.path), {
+				method: rendered.method,
+				headers: makeHeaders(target.token),
+			});
+			if (!resp.ok) {
+				throw new Error(`${rendered.path} failed: ${resp.status}`);
+			}
+			return (await resp.json()) as unknown;
+		},
+	});
+
+	const graph = useMemo(() => {
+		const graphSpec = spec?.detail?.graph;
+		if (!graphSpec) {
+			return null;
+		}
+		// No declared source means the row itself already carries the shape.
+		const payload = source ? detail.data : item.raw;
+		return storeGraphFromResponse(
+			graphSpec,
+			storeDetailObject(spec?.detail ?? {}, payload)
+		);
+	}, [spec, source, detail.data, item.raw]);
+
+	if (!graph || graph.nodes.length === 0) {
+		return null;
+	}
+	return (
+		<ListingSection title={spec?.detail?.graph?.title ?? "Graph"}>
+			<StoreDetailGraph edges={graph.edges} nodes={graph.nodes} />
+		</ListingSection>
 	);
 }
 

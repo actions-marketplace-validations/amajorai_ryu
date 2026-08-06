@@ -589,6 +589,7 @@ export default function ChatPage({
 	initialSubmit,
 	initialImages,
 	initialAgent,
+	initialGhost,
 	initialProject,
 }: {
 	tabConversationId?: string;
@@ -605,6 +606,10 @@ export default function ChatPage({
 	 * conversation existed, carried into this fresh tab. Consumed once on mount. */
 	initialImages?: AttachedImage[];
 	initialAgent?: string;
+	/** Open this thread already temporary — the launchpad's "+" offers the toggle
+	 * before a conversation exists, so the pick arrives as a seed rather than as a
+	 * click on this page's own row. Consumed once on mount. */
+	initialGhost?: boolean;
 	initialProject?: string;
 } = {}) {
 	// Read gateway/core reachability from the shared provider so this page and
@@ -1115,7 +1120,10 @@ export default function ChatPage({
 	// gone on close or when a fresh chat starts. Ryu's incognito thread. A ref
 	// mirrors the toggle so the once-created transport body closure reads the live
 	// value (same pattern as the double-check flag above).
-	const [ghostMode, setGhostMode] = useState(false);
+	// Seeded from the tab when the launchpad's "+" turned it on before this thread
+	// existed, so the very first turn is already unsaved (flipping it after mount
+	// would be too late — the turn would have persisted).
+	const [ghostMode, setGhostMode] = useState(Boolean(initialGhost));
 	const ghostModeRef = useRef(false);
 	ghostModeRef.current = ghostMode;
 

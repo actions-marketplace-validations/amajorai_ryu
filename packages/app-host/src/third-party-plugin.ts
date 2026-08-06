@@ -22,7 +22,7 @@
 //     containing `</script>` cannot break out of the tag. This is defense in
 //     depth, NOT the load-bearing boundary (the null-origin sandbox is).
 
-import { HOST_API_VERSION } from "./rpc.ts";
+import { handshakeAnnounceScript } from "./rpc.ts";
 
 /** Build a third-party plugin's sandboxed document.
  *
@@ -281,6 +281,17 @@ export function thirdPartyPluginSrcdoc(
           transcribe: function (args) { return call("media.transcribe", [args || {}]); }
         },
         // Read-only catalog reads (needs grant core:list_agents) — chat models + TTS engines.
+        // Assistant bridge (needs grant assistant:context). Tell the ONE global Ask
+        // Ryu panel what THIS app's page is showing, lend it this page's own
+        // instructions while the app is open, and open/ask it. Write-only: an app
+        // steers the assistant about itself and never reads the conversation back.
+        assistant: {
+          publishContext: function (items) { return call("assistant.publishContext", [{ items: items || [] }]); },
+          clearContext: function () { return call("assistant.clearContext", []); },
+          registerSurface: function (s) { return call("assistant.registerSurface", [s || {}]); },
+          clearSurface: function () { return call("assistant.clearSurface", []); },
+          open: function (a) { return call("assistant.open", [a || {}]); }
+        },
         registry: {
           engineModels: function () { return call("registry.engineModels", []); },
           ttsEngines: function () { return call("registry.ttsEngines", []); },
@@ -484,8 +495,10 @@ export function thirdPartyPluginSrcdoc(
       return new TextDecoder("utf-8").decode(bytes);
     }
 
-    // Announce readiness (host verifies event.source + this nonce).
-    window.parent.postMessage({ kind: "ryu-plugin-ready", nonce: NONCE, hostApiVersion: ${JSON.stringify(HOST_API_VERSION)} }, "*");
+    // Announce readiness (host verifies event.source + this nonce), and keep
+    // announcing until the port lands — see handshakeAnnounceScript for why a
+    // single announce is a silently unrecoverable failure on this path.
+${handshakeAnnounceScript()}
   })();
 </script>
 </body>
@@ -699,6 +712,16 @@ function htmlCompanionHeadFragment(
         video: function (a) { return call("media.video", [a || {}]); },
         tts: function (a) { return call("media.tts", [a || {}]); },
         transcribe: function (a) { return call("media.transcribe", [a || {}]); }
+      },
+      // Assistant bridge — see the sibling bridge above. Kept in step with it
+      // deliberately: a verb present in only one builder is a verb whose
+      // availability depends on how the app happened to be built.
+      assistant: {
+        publishContext: function (items) { return call("assistant.publishContext", [{ items: items || [] }]); },
+        clearContext: function () { return call("assistant.clearContext", []); },
+        registerSurface: function (s) { return call("assistant.registerSurface", [s || {}]); },
+        clearSurface: function () { return call("assistant.clearSurface", []); },
+        open: function (a) { return call("assistant.open", [a || {}]); }
       },
       registry: {
         engineModels: function () { return call("registry.engineModels", []); },
@@ -981,9 +1004,10 @@ function htmlCompanionHeadFragment(
     });
 
     // Announce readiness (host verifies event.source + this nonce, then transfers
-    // the port). Posted synchronously during head parse — the parent's ExtensionHost
-    // message listener is already attached (its effect ran before the frame loaded).
-    window.parent.postMessage({ kind: "ryu-plugin-ready", nonce: NONCE, hostApiVersion: ${JSON.stringify(HOST_API_VERSION)} }, "*");
+    // the port). Posted during head parse and RE-posted until the port arrives: the
+    // parent's listener is attached from a React passive effect, which the iframe's
+    // load task can beat — see handshakeAnnounceScript.
+${handshakeAnnounceScript()}
   })();
 </script>`;
 }

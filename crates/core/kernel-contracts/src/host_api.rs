@@ -131,6 +131,50 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     m("ui.selectFiles", "ui.displayMode", None, false, true),
     m("ui.getFileDownloadUrl", "ui.displayMode", None, false, true),
     m("ui.setOpenInAppUrl", "ui.displayMode", None, false, true),
+    // Assistant bridge (grant `assistant:context`) — an app tells the ONE global
+    // "Ask Ryu" surface what the user is looking at on ITS page, and what the
+    // assistant may do about it. Before this, page context was an in-process React
+    // hook, so only first-party desktop pages could publish and a sandboxed app had
+    // no way to be asked about. One capability gates the whole family: publishing
+    // context, taking the surface over with its own instructions, and opening the
+    // panel. All three are the same trust decision — "this app may steer the
+    // assistant while its page is open" — so splitting them would be false
+    // precision. Nothing here reads: an app can only ever describe itself.
+    m(
+        "assistant.publishContext",
+        "assistant.context",
+        Some("assistant:context"),
+        false,
+        true,
+    ),
+    m(
+        "assistant.clearContext",
+        "assistant.context",
+        Some("assistant:context"),
+        false,
+        true,
+    ),
+    m(
+        "assistant.registerSurface",
+        "assistant.context",
+        Some("assistant:context"),
+        false,
+        true,
+    ),
+    m(
+        "assistant.clearSurface",
+        "assistant.context",
+        Some("assistant:context"),
+        false,
+        true,
+    ),
+    m(
+        "assistant.open",
+        "assistant.context",
+        Some("assistant:context"),
+        false,
+        true,
+    ),
     m(
         "model.complete",
         "model.complete",

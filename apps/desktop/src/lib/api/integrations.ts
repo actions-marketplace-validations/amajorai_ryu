@@ -8,9 +8,24 @@
 
 import { type ApiTarget, request } from "./client.ts";
 
+/** One concrete connection a brand offers, straight from a directory record.
+ *  This is the actionable form of `feeds`: the record `id` is what Core's
+ *  OpenAPI importer resolves against apis.guru, and `url` is the setup/endpoint
+ *  URL. Without these two fields every connection is only a chip. */
+export interface IntegrationConnection {
+	/** Directory record id (`openapi/1password-com-events`, `mcp/notion`). */
+	id: string;
+	/** `mcp` / `openapi` / `api` / `graphql` / `cli`. */
+	kind: string;
+	name: string;
+	url: string | null;
+}
+
 /** One service/brand (Notion, Slack, …) merged across catalog sources. */
 export interface IntegrationBrand {
 	categories: string[];
+	/** Every directory record folded into this brand, deduped by record id. */
+	connections: IntegrationConnection[];
 	description: string | null;
 	domain: string | null;
 	/** Integration kinds available from the directory (mcp/api/graphql/cli). */

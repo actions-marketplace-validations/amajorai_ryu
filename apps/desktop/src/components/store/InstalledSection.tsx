@@ -19,7 +19,6 @@ import {
 	Delete02Icon,
 	Download01Icon,
 	Download04Icon,
-	GlobeIcon,
 	PackageIcon,
 	PlayIcon,
 	Settings01Icon,
@@ -36,6 +35,14 @@ import StoreItemAction, {
 	StoreItemOverflowMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import { RequiredPluginsSection } from "@ryu/marketplace/catalog/detail/dependency-graph";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingInfoGrid,
+	ListingSection,
+	ListingStatStrip,
+} from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { ListingDetailTabs } from "@ryu/marketplace/catalog/detail/listing-detail-tabs";
 import type { CatalogEntry } from "@ryu/marketplace/catalog/types";
 import {
@@ -770,67 +777,9 @@ function InstalledAppDetail({
 	const [confirmUninstall, setConfirmUninstall] = useState(false);
 
 	return (
-		<div className="flex flex-col gap-6 p-4">
-			<header className="flex flex-col gap-3">
-				<div className="flex items-start justify-between gap-3 pr-8">
-					<div className="min-w-0">
-						<h2 className="truncate font-semibold text-xl">{app.name}</h2>
-						<p className="text-muted-foreground text-sm">v{app.version}</p>
-					</div>
-					{/* A mandatory app gets no toggle at all. Core refuses the disable
-					    with a 403 and no force override, so a switch here could only
-					    flip back with an error — and a switch that refuses to move reads
-					    as a bug, not as a policy. The "Required" badge below carries the
-					    explanation instead. */}
-					{isInstalled && !app.mandatory ? (
-						<Switch
-							aria-label={
-								app.enabled ? `Disable ${app.name}` : `Enable ${app.name}`
-							}
-							checked={app.enabled}
-							disabled={busy}
-							onCheckedChange={(checked) => onToggle(app, checked)}
-						/>
-					) : null}
-				</div>
-				<div className="flex flex-wrap items-center gap-1">
-					{isInstalled ? (
-						<Badge variant={app.enabled ? "default" : "secondary"}>
-							{app.enabled ? "Enabled" : "Disabled"}
-						</Badge>
-					) : (
-						<Badge variant="secondary">Not installed</Badge>
-					)}
-					{app.mandatory ? (
-						<Badge
-							title="Part of Ryu — required for the app to run."
-							variant="secondary"
-						>
-							Required
-						</Badge>
-					) : null}
-					{app.runnables.some((r) => r.kind === AGENT_KIND) ? (
-						<Badge className="gap-1" variant="secondary">
-							<HugeiconsIcon className="size-3" icon={BotIcon} />
-							Agent
-						</Badge>
-					) : null}
-				</div>
-
-				{toggleError ? (
-					<div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-sm">
-						<span>{toggleError}</span>
-						<button
-							className="shrink-0 font-medium underline-offset-2 hover:underline"
-							onClick={onClearToggleError}
-							type="button"
-						>
-							Dismiss
-						</button>
-					</div>
-				) : null}
-
-				<div className="flex flex-wrap gap-2">
+		<ListingDetailShell
+			actions={
+				<>
 					{app.enabled && agentId ? (
 						<Button onClick={() => onLaunch(app)} size="sm" variant="default">
 							<HugeiconsIcon className="size-4" icon={PlayIcon} />
@@ -864,13 +813,106 @@ function InstalledAppDetail({
 							Uninstall
 						</Button>
 					) : null}
-				</div>
-			</header>
-
+					{/* A mandatory app gets no toggle at all. Core refuses the disable
+					    with a 403 and no force override, so a switch here could only
+					    flip back with an error — and a switch that refuses to move reads
+					    as a bug, not as a policy. The "Required" hero chip carries the
+					    explanation instead. */}
+					{isInstalled && !app.mandatory ? (
+						<label className="ml-auto flex shrink-0 items-center gap-2 text-sm">
+							{app.enabled ? "Enabled" : "Disabled"}
+							<Switch
+								aria-label={
+									app.enabled ? `Disable ${app.name}` : `Enable ${app.name}`
+								}
+								checked={app.enabled}
+								disabled={busy}
+								onCheckedChange={(checked) => onToggle(app, checked)}
+							/>
+						</label>
+					) : null}
+				</>
+			}
+			aside={
+				<>
+					<ListingAsideCard title="Information">
+						<ListingInfoGrid
+							rows={[
+								{ label: "Version", value: `v${app.version}` },
+								{
+									label: "State",
+									value: isInstalled
+										? app.enabled
+											? "Enabled"
+											: "Disabled"
+										: "Not installed",
+								},
+								{ label: "Bundles", value: `${app.runnables.length}` },
+								{
+									label: "Grants",
+									value: `${app.permissionGrants.length}`,
+								},
+							]}
+						/>
+					</ListingAsideCard>
+					<ListingAsideCard title="Plugin ID">
+						<code className="block truncate rounded bg-muted px-2 py-1 text-muted-foreground text-xs">
+							{app.id}
+						</code>
+					</ListingAsideCard>
+				</>
+			}
+			hero={
+				<ListingHero
+					badges={[
+						isInstalled
+							? app.enabled
+								? "Enabled"
+								: "Disabled"
+							: "Not installed",
+						app.mandatory ? "Required" : null,
+						app.runnables.some((r) => r.kind === AGENT_KIND) ? "Agent" : null,
+					].filter((b): b is string => Boolean(b))}
+					icon={<HugeiconsIcon className="size-8" icon={BotIcon} />}
+					name={app.name}
+					tagline={`v${app.version}`}
+				/>
+			}
+			notice={
+				toggleError ? (
+					<div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-sm">
+						<span>{toggleError}</span>
+						<button
+							className="shrink-0 font-medium underline-offset-2 hover:underline"
+							onClick={onClearToggleError}
+							type="button"
+						>
+							Dismiss
+						</button>
+					</div>
+				) : null
+			}
+			stats={
+				<ListingStatStrip
+					items={[
+						{ label: "Version", value: `v${app.version}` },
+						{
+							label: "State",
+							value: isInstalled
+								? app.enabled
+									? "Enabled"
+									: "Disabled"
+								: "Not installed",
+						},
+						{ label: "Bundles", value: `${app.runnables.length}` },
+						{ label: "Grants", value: `${app.permissionGrants.length}` },
+					]}
+				/>
+			}
+		>
 			{/* Bundled Runnable kinds */}
 			{app.runnables.length > 0 ? (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">Bundles</h3>
+				<ListingSection title="Bundles">
 					<div className="flex flex-wrap gap-1">
 						{app.runnables.map((r) => (
 							<Badge key={r.id} variant="secondary">
@@ -878,7 +920,7 @@ function InstalledAppDetail({
 							</Badge>
 						))}
 					</div>
-				</section>
+				</ListingSection>
 			) : null}
 
 			{/* Plugin-to-plugin dependencies are NOT rendered here: they are the
@@ -898,14 +940,8 @@ function InstalledAppDetail({
 
 			{/* Inline plugin settings — the fields the plugin declared in its manifest. */}
 			{hasSettings ? (
-				<section className="flex flex-col gap-2">
-					<InstalledAppSettings settingsTabs={settingsTabs} target={target} />
-				</section>
+				<InstalledAppSettings settingsTabs={settingsTabs} target={target} />
 			) : null}
-
-			<code className="truncate rounded bg-muted px-2 py-1 text-muted-foreground text-xs">
-				{app.id}
-			</code>
 
 			<AlertDialog onOpenChange={setConfirmUninstall} open={confirmUninstall}>
 				<AlertDialogContent>
@@ -931,7 +967,7 @@ function InstalledAppDetail({
 				</AlertDialogContent>
 			</AlertDialog>
 			<InstalledAppTabs app={app} target={target} />
-		</div>
+		</ListingDetailShell>
 	);
 }
 
@@ -981,40 +1017,9 @@ function BuiltInAppDetail({
 	};
 
 	return (
-		<div className="flex flex-col gap-6 p-4">
-			<header className="flex flex-col gap-3">
-				<div className="pr-8">
-					<h2 className="truncate font-semibold text-xl">{app.name}</h2>
-					<p className="text-muted-foreground text-sm">v{app.version}</p>
-				</div>
-				<div className="flex flex-wrap items-center gap-1">
-					<Badge variant="secondary">Built-in</Badge>
-					{app.windowsFirst ? (
-						<Badge className="gap-1" variant="secondary">
-							<HugeiconsIcon className="size-3" icon={ComputerIcon} />
-							Windows-first
-						</Badge>
-					) : null}
-					{app.localOnly ? (
-						<Badge className="gap-1" variant="secondary">
-							<HugeiconsIcon className="size-3" icon={GlobeIcon} />
-							Local only
-						</Badge>
-					) : null}
-					{isInstalled ? (
-						<Badge variant={isRunning ? "default" : "secondary"}>
-							{isRunning ? "Running" : "Stopped"}
-						</Badge>
-					) : (
-						<Badge variant="secondary">Not installed</Badge>
-					)}
-				</div>
-
-				{actionError ? (
-					<p className="text-destructive text-sm">{actionError}</p>
-				) : null}
-
-				<div className="flex flex-wrap gap-2">
+		<ListingDetailShell
+			actions={
+				<>
 					{isInstalled ? null : (
 						<Button
 							disabled={pending !== null || !isConfigured}
@@ -1060,30 +1065,83 @@ function BuiltInAppDetail({
 							Stop
 						</Button>
 					) : null}
-				</div>
-			</header>
-
-			<section className="flex flex-col gap-2">
-				<h3 className="font-medium text-sm">Includes</h3>
+					{actionError ? (
+						<span className="ml-auto text-destructive text-sm">
+							{actionError}
+						</span>
+					) : null}
+				</>
+			}
+			aside={
+				<>
+					<ListingAsideCard title="Information">
+						<ListingInfoGrid
+							rows={[
+								{ label: "Version", value: `v${app.version}` },
+								{ label: "Lifecycle", value: "Sidecar" },
+								{
+									label: "Sidecar",
+									value: sidecarName ?? "Not configured",
+								},
+								{
+									label: "Scope",
+									value: app.localOnly ? "Local only" : "Any node",
+								},
+							]}
+						/>
+					</ListingAsideCard>
+					{app.permissionGrants.length > 0 ? (
+						<ListingAsideCard title="Permissions">
+							<p className="font-mono text-muted-foreground text-xs">
+								{app.permissionGrants.join(", ")}
+							</p>
+						</ListingAsideCard>
+					) : null}
+					<ListingAsideCard title="Plugin ID">
+						<code className="block truncate rounded bg-muted px-2 py-1 text-muted-foreground text-xs">
+							{app.id}
+						</code>
+					</ListingAsideCard>
+				</>
+			}
+			hero={
+				<ListingHero
+					badges={[
+						"Built-in",
+						app.windowsFirst ? "Windows-first" : null,
+						app.localOnly ? "Local only" : null,
+						isInstalled ? (isRunning ? "Running" : "Stopped") : "Not installed",
+					].filter((b): b is string => Boolean(b))}
+					icon={<HugeiconsIcon className="size-8" icon={ComputerIcon} />}
+					name={app.name}
+					tagline={`v${app.version}`}
+				/>
+			}
+			stats={
+				<ListingStatStrip
+					items={[
+						{ label: "Version", value: `v${app.version}` },
+						{
+							label: "Process",
+							value: isInstalled
+								? isRunning
+									? "Running"
+									: "Stopped"
+								: "Not installed",
+						},
+						{ label: "Includes", value: `${app.runnables.length}` },
+						{ label: "Grants", value: `${app.permissionGrants.length}` },
+					]}
+				/>
+			}
+		>
+			<ListingSection title="Includes">
 				<p className="text-muted-foreground text-sm">
 					{app.runnables.length === 0
 						? "No runnables."
 						: app.runnables.map((r) => `${r.name} (${r.kind})`).join(" · ")}
 				</p>
-			</section>
-
-			{app.permissionGrants.length > 0 ? (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">Permissions</h3>
-					<p className="font-mono text-muted-foreground text-xs">
-						{app.permissionGrants.join(", ")}
-					</p>
-				</section>
-			) : null}
-
-			<code className="truncate rounded bg-muted px-2 py-1 text-muted-foreground text-xs">
-				{app.id}
-			</code>
-		</div>
+			</ListingSection>
+		</ListingDetailShell>
 	);
 }

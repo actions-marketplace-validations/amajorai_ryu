@@ -176,6 +176,80 @@ impl FieldCipher {
 /// on first use from the configured key source.
 static GLOBAL: OnceLock<FieldCipher> = OnceLock::new();
 
+/// Which of the three custody paths the process-wide key ACTUALLY came from.
+/// Set together with [`GLOBAL`], so it always describes the key in use rather
+/// than a configured preference — the two diverge, since a headless box that
+/// cannot reach a keychain lands on `File` with no configuration change at all.
+static GLOBAL_SOURCE: OnceLock<MasterKeySource> = OnceLock::new();
+
+/// Where the resolved master key came from, in the resolver's priority order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MasterKeySource {
+    /// `RYU_MASTER_KEY` — operator-injected, never written to disk by us.
+    Env,
+    /// The OS keychain (Windows Credential Manager / macOS Keychain / Linux
+    /// Secret Service). The key lives OUTSIDE the data dir it protects.
+    Keychain,
+    /// `~/.ryu/master.key` — the degraded fallback, used when no keychain is
+    /// reachable or writable. The key sits NEXT TO the data it protects, so a
+    /// copy of the data dir alone is enough to decrypt it.
+    File,
+}
+
+impl MasterKeySource {
+    /// Stable wire name for the HTTP/status surface.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::Keychain => "keychain",
+            Self::File => "file",
+        }
+    }
+}
+
+/// Non-secret description of master-key custody, for status/diagnostic surfaces.
+/// Deliberately carries NO key material — not the key, not a prefix, not a hash.
+pub struct KeyCustody {
+    /// The custody path the running process resolved to.
+    pub source: MasterKeySource,
+    /// Env var consulted first (reported so a UI can name the override).
+    pub env_var: &'static str,
+    /// Keychain service name for the master-key slot.
+    pub keychain_service: &'static str,
+    /// Profile-scoped keychain account (`master-key` / `master-key-dev`).
+    pub keychain_account: String,
+    /// Path of the file-fallback key — `Some` ONLY when it is the live source,
+    /// so the UI can point at the exact file that weakens the guarantee.
+    pub key_file: Option<PathBuf>,
+    /// Whether a legacy `memory.key` is still present in the data dir.
+    pub legacy_memory_key_present: bool,
+}
+
+/// Describe how the running process holds its at-rest master key. Resolves the
+/// key first (via [`global_cipher`]) so the answer reflects the key actually in
+/// use; returns an error when the key cannot be loaded at all (same fail-closed
+/// posture as every store).
+pub fn key_custody() -> Result<KeyCustody> {
+    // Force resolution so `GLOBAL_SOURCE` is populated. Cheap after first call.
+    let _ = global_cipher()?;
+    let host = host()?;
+    let paths = default_key_paths(&*host);
+    let source = *GLOBAL_SOURCE
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("master key source not recorded"))?;
+    Ok(KeyCustody {
+        source,
+        env_var: ENV_MASTER_KEY,
+        keychain_service: KEYRING_SERVICE,
+        keychain_account: format!("{KEYRING_ACCOUNT}{}", host.keyring_account_suffix()),
+        key_file: match source {
+            MasterKeySource::File => Some(paths.master.clone()),
+            _ => None,
+        },
+        legacy_memory_key_present: paths.legacy_memory.exists(),
+    })
+}
+
 /// Return the process-wide [`FieldCipher`]. The master key is resolved once
 /// (env → keychain → file) and cached.
 ///
@@ -190,10 +264,11 @@ pub fn global_cipher() -> Result<FieldCipher> {
         return Ok(cipher.clone());
     }
     let host = host()?;
-    let key = load_master_key(&*host).context("loading the at-rest master key")?;
+    let (key, source) = load_master_key(&*host).context("loading the at-rest master key")?;
     let cipher = FieldCipher::new(&key);
     // First writer wins; a lost race just drops a duplicate equal cipher.
     let _ = GLOBAL.set(cipher.clone());
+    let _ = GLOBAL_SOURCE.set(source);
     Ok(cipher)
 }
 
@@ -310,8 +385,10 @@ impl Keychain for OsKeychain {
 
 /// Resolve the 32-byte master key: env → keychain → file fallback, importing a
 /// legacy `memory.key` so existing encrypted memory keeps working. The keychain
-/// slot and key-file dir come from the installed [`CryptoHost`].
-fn load_master_key(host: &dyn CryptoHost) -> Result<[u8; KEY_LEN]> {
+/// slot and key-file dir come from the installed [`CryptoHost`]. Also reports
+/// WHICH path won, so a status surface can tell a keychain-held key (the real
+/// guarantee) from the file fallback (key next to the data it protects).
+fn load_master_key(host: &dyn CryptoHost) -> Result<([u8; KEY_LEN], MasterKeySource)> {
     let account = format!("{KEYRING_ACCOUNT}{}", host.keyring_account_suffix());
     load_master_key_with(
         std::env::var(ENV_MASTER_KEY).ok(),
@@ -327,11 +404,11 @@ fn load_master_key_with(
     env_value: Option<String>,
     keychain: &dyn Keychain,
     paths: &KeyPaths,
-) -> Result<[u8; KEY_LEN]> {
+) -> Result<([u8; KEY_LEN], MasterKeySource)> {
     // 1. Env override (highest priority; never written to disk/keychain by us).
     if let Some(encoded) = env_value {
         match decode_key(&encoded) {
-            Some(key) => return Ok(key),
+            Some(key) => return Ok((key, MasterKeySource::Env)),
             None => tracing::warn!("{ENV_MASTER_KEY} is not a base64 32-byte key; ignoring"),
         }
     }
@@ -342,26 +419,26 @@ fn load_master_key_with(
 
     // 2. OS keychain (default where reachable).
     match keychain.get() {
-        KeychainState::Key(key) => return Ok(key),
+        KeychainState::Key(key) => return Ok((key, MasterKeySource::Keychain)),
         KeychainState::Empty => {
             let key = legacy.unwrap_or_else(generate_key);
             if keychain.store(&key) {
-                return Ok(key);
+                return Ok((key, MasterKeySource::Keychain));
             }
             // Keychain reachable but unwritable: persist to the file fallback.
             write_key_file(&paths.master, &key)?;
-            return Ok(key);
+            return Ok((key, MasterKeySource::File));
         }
         KeychainState::Unavailable => {}
     }
 
     // 3. File fallback (headless box with no keychain): current security level.
     if let Some(key) = read_key_file(&paths.master) {
-        return Ok(key);
+        return Ok((key, MasterKeySource::File));
     }
     let key = legacy.unwrap_or_else(generate_key);
     write_key_file(&paths.master, &key)?;
-    Ok(key)
+    Ok((key, MasterKeySource::File))
 }
 
 #[cfg(unix)]
@@ -653,9 +730,10 @@ mod tests {
         let want = [9u8; KEY_LEN];
         // Keychain even *has* a different key — env must still win.
         let kc = FakeKeychain::new(KeychainState::Key([3u8; KEY_LEN]), true);
-        let got =
+        let (got, source) =
             load_master_key_with(Some(b64().encode(want)), &kc, &paths_in(dir.path())).unwrap();
         assert_eq!(got, want);
+        assert_eq!(source, MasterKeySource::Env);
     }
 
     #[test]
@@ -669,9 +747,14 @@ mod tests {
         write_key_file(&paths.legacy_memory, &legacy).unwrap();
 
         let kc = FakeKeychain::new(KeychainState::Empty, true);
-        let got = load_master_key_with(None, &kc, &paths).unwrap();
+        let (got, source) = load_master_key_with(None, &kc, &paths).unwrap();
 
         assert_eq!(got, legacy, "must adopt the legacy memory key");
+        assert_eq!(
+            source,
+            MasterKeySource::Keychain,
+            "a promoted legacy key now lives in the keychain"
+        );
         assert_eq!(
             *kc.stored.borrow(),
             Some(legacy),
@@ -686,8 +769,9 @@ mod tests {
         let existing = [5u8; KEY_LEN];
         let kc = FakeKeychain::new(KeychainState::Key(existing), true);
 
-        let got = load_master_key_with(None, &kc, &paths).unwrap();
+        let (got, source) = load_master_key_with(None, &kc, &paths).unwrap();
         assert_eq!(got, existing);
+        assert_eq!(source, MasterKeySource::Keychain);
         assert!(
             !paths.master.exists(),
             "keychain is authoritative; no file key"
@@ -701,20 +785,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
 
-        let first = load_master_key_with(
+        let (first, first_source) = load_master_key_with(
             None,
             &FakeKeychain::new(KeychainState::Unavailable, false),
             &paths,
         )
         .unwrap();
         assert!(paths.master.exists(), "file fallback must persist the key");
-        let second = load_master_key_with(
+        let (second, second_source) = load_master_key_with(
             None,
             &FakeKeychain::new(KeychainState::Unavailable, false),
             &paths,
         )
         .unwrap();
         assert_eq!(first, second, "the persisted key must reload identically");
+        // Both calls must also AGREE on custody — a status surface that reported
+        // `File` on boot and `Keychain` on a later read would be worse than none.
+        assert_eq!(first_source, MasterKeySource::File);
+        assert_eq!(second_source, MasterKeySource::File);
     }
 
     /// Empirically confirms the REAL OS keychain on this host: a clean slot reads
@@ -753,14 +841,18 @@ mod tests {
         let paths = paths_in(dir.path());
         let kc = FakeKeychain::new(KeychainState::Empty, false);
 
-        let first = load_master_key_with(None, &kc, &paths).unwrap();
+        let (first, first_source) = load_master_key_with(None, &kc, &paths).unwrap();
         assert!(paths.master.exists());
-        let second = load_master_key_with(
+        let (second, second_source) = load_master_key_with(
             None,
             &FakeKeychain::new(KeychainState::Unavailable, false),
             &paths,
         )
         .unwrap();
         assert_eq!(first, second);
+        // An unwritable keychain is NOT the keychain guarantee — the key landed in
+        // the file, and custody must say so rather than flattering the posture.
+        assert_eq!(first_source, MasterKeySource::File);
+        assert_eq!(second_source, MasterKeySource::File);
     }
 }

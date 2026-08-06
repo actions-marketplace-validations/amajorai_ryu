@@ -1,12 +1,12 @@
 {
   "name": "desktop",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "tauri build",
-    "build:dev": "tauri build --config src-tauri/tauri.dev.conf.json --features dev-variant",
+    "build:dev": "bun run brand:dev && tauri build --config src-tauri/tauri.dev.conf.json --features dev-variant",
     "tauri": "tauri",
     "dev:vite": "vite",
     "build:vite": "NODE_OPTIONS=--max-old-space-size=8192 vite build",
@@ -17,7 +17,8 @@
     "test:e2e:live": "RYU_E2E_LIVE=1 playwright test available-updates-story.live",
     "test:wiring": "bun test e2e/wiring/",
     "build:harness": "vite build --config e2e/harness/vite.harness.config.ts",
-    "clean": "rm -rf src-tauri/target dist build"
+    "clean": "rm -rf src-tauri/target dist build",
+    "brand:dev": "node ../../scripts/release/channel-brand.mjs --channel dev --config apps/desktop/src-tauri/tauri.dev.conf.json"
   },
   "dependencies": {
     "@ai-sdk/react": "catalog:",

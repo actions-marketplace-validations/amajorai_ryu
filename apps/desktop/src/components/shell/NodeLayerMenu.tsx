@@ -8,7 +8,7 @@
 // Every layer renders as the same submenu so the dropdown reads as one system:
 //
 //   ┌ trigger ─────────────────────────────┐
-//   │ ● Chat engine        llama.cpp b9670 │──▸ ┌ submenu ──────────────┐
+//   │ Chat engine        ● llama.cpp b9670 │──▸ ┌ submenu ──────────────┐
 //   └──────────────────────────────────────┘    │ llama.cpp     b9670   │ header
 //                                               │ Running · 2.1 GB      │
 //                                               ├───────────────────────┤
@@ -348,15 +348,6 @@ export function NodeLayerMenu({
 	return (
 		<DropdownMenuSub>
 			<DropdownMenuSubTrigger className="gap-2 py-1 font-normal text-xs">
-				{running !== undefined && (
-					<span
-						aria-hidden
-						className={cn(
-							"size-1.5 shrink-0 rounded-full",
-							DOT_CLASS[dotState(running)]
-						)}
-					/>
-				)}
 				{icon && (
 					<HugeiconsIcon
 						className="size-3 shrink-0 text-muted-foreground/60"
@@ -364,21 +355,35 @@ export function NodeLayerMenu({
 					/>
 				)}
 				<span className="shrink-0 text-muted-foreground">{label}</span>
-				{triggerRight ? (
-					<AutoScrollText
-						className="min-w-0 flex-1 text-right text-muted-foreground/70"
-						title={triggerRight}
-					>
-						{triggerRight}
-					</AutoScrollText>
-				) : (
-					<span className="flex-1" />
-				)}
-				{version && (
-					<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
-						{versionLabel(version)}
-					</span>
-				)}
+				{/* Right-aligned cluster. The dot reports the state of the CURRENT
+				    SELECTION named in this group ("kokoro 82m", "v0.1.4"), not of the
+				    layer slot on the left — so it leads the group instead of the row.
+				    Docked at the row's left edge it read as a status for "Speech" the
+				    label, a whole column away from the thing it actually describes. */}
+				<span className="flex min-w-0 flex-1 items-center justify-end gap-1.5">
+					{running !== undefined && (
+						<span
+							aria-hidden
+							className={cn(
+								"size-1.5 shrink-0 rounded-full",
+								DOT_CLASS[dotState(running)]
+							)}
+						/>
+					)}
+					{triggerRight ? (
+						<AutoScrollText
+							className="min-w-0 text-right text-muted-foreground/70"
+							title={triggerRight}
+						>
+							{triggerRight}
+						</AutoScrollText>
+					) : null}
+					{version && (
+						<span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">
+							{versionLabel(version)}
+						</span>
+					)}
+				</span>
 			</DropdownMenuSubTrigger>
 			<DropdownMenuSubContent className="w-64 min-w-64">
 				{/* Header: WHAT is selected right now, and how it is doing. */}

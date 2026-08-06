@@ -53,6 +53,7 @@ import {
 	sourceItemsFromResponse,
 	type ViewActionHttp,
 } from "@ryu/app-host/views";
+import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
 import { useOptionalReport } from "@ryu/marketplace/report";
 import {
 	AlertDialog,
@@ -120,8 +121,10 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
+	type Dispatch,
 	type DragEvent as ReactDragEvent,
 	type ReactNode,
+	type SetStateAction,
 	useCallback,
 	useEffect,
 	useMemo,
@@ -200,8 +203,6 @@ import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
 import {
 	getConversationTitleHistory,
-	setConversationArchived,
-	setConversationPinned,
 	type TitleHistoryEntry,
 } from "@/src/lib/api/conversation-flags.ts";
 import {
@@ -228,6 +229,7 @@ import {
 	scheduleJobFor,
 	WorkflowTriggerIcons,
 } from "@/src/lib/workflow-triggers.tsx";
+import { useConversationFlagsStore } from "@/src/store/useConversationFlagsStore.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import type { Conversation, Message } from "@/types/chat.ts";
@@ -258,9 +260,11 @@ import {
 	SECTION_ICONS,
 	SECTION_LABELS,
 	type SectionKey,
+	SURFACE_PLUGIN_OWNER,
 	saveSectionOrder,
 } from "./sidebar-sections.ts";
 import { TabGlyph, useTabBusy } from "./TitleBar.tsx";
+import { TabEntityMenuSection } from "./tab-entity-menu.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
 
 // Re-exported so the sidebar stays the single import surface for its own types
@@ -271,9 +275,9 @@ export type {
 	SectionKey,
 } from "./sidebar-sections.ts";
 
-const UNREAD_KEY = "ryu:unread-convs";
-const PINNED_KEY = "ryu:pinned-convs";
-const ARCHIVED_KEY = "ryu:archived-convs";
+// The unread/pinned/archived keys moved to `useConversationFlagsStore` with the
+// state they persist — the tab context menus toggle the same flags, and a second
+// copy of the keys is the same live desync as a second copy of the state.
 // The section order key + its reconciliation live in `sidebar-sections.ts`
 // (loadSectionOrder/saveSectionOrder), next to the section vocabulary they
 // reconcile against; read/write it through those rather than by key here.
@@ -299,7 +303,12 @@ const SECTION_PLUGIN_OWNER: Partial<Record<SectionKey, string>> = {
 	// `sidebar_sections` contribution (com.ryu.{meetings,canvas,whiteboard}), so its
 	// visibility follows the contributions feed (served only when the app is enabled),
 	// not a hardcoded owner gate.
-	spaces: "@ryu/spaces",
+	//
+	// The ids come from `SURFACE_PLUGIN_OWNER` (sidebar-sections.ts) — the ONE table
+	// naming which app owns each compiled-in surface. This map only says which
+	// sidebar KEY maps onto which of those surfaces; the Library states the same
+	// thing for its own keys against the same table.
+	spaces: SURFACE_PLUGIN_OWNER.spaces,
 	// Teams and Workflows are owner-gated for the same reason, arrived at the hard
 	// way. Both are entries in `BUILTIN_SECTIONS`, which is the CLOSED half of the
 	// vocabulary — "the shell's own pages, they ship compiled in" — so both rendered
@@ -319,8 +328,8 @@ const SECTION_PLUGIN_OWNER: Partial<Record<SectionKey, string>> = {
 	// user-visible half of that move — absent app ⇒ absent section — at one line
 	// each; rehoming the UI is a separate change and can happen later without
 	// touching this.
-	teams: "@ryu/teams",
-	workflows: "@ryu/workflows",
+	teams: SURFACE_PLUGIN_OWNER.teams,
+	workflows: SURFACE_PLUGIN_OWNER.workflows,
 };
 
 // Pin/archive/unread state is local-first: persisted in localStorage rather than
@@ -2168,6 +2177,10 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 							Split with new chat
 						</ContextMenuItem>
 					)}
+					{/* Verbs for the thing the tab is SHOWING — the same section the
+					    horizontal strip's pills get, so a vertical tab is not a
+					    second-class surface. Renders nothing for a tab with no entity. */}
+					<TabEntityMenuSection tab={tab} />
 					<ContextMenuSeparator />
 					<ContextMenuItem
 						onClick={() => openTab(tab.path, { forceNew: true })}
@@ -3505,7 +3518,7 @@ function ChannelsSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { channels, loading, authed, create } = useChannels();
+	const { channels, loading, authed, create, refresh } = useChannels();
 	const { agents } = useAgents();
 	const { teams } = useTeams();
 	const { openTab } = useTabsContext();
@@ -3635,6 +3648,12 @@ function ChannelsSection({
 						});
 						return false;
 					}
+				}}
+				onNodeCreated={async (name) => {
+					// The managed-bot path has the NODE write the config, so `create`
+					// never ran and this list still shows the old set.
+					await refresh();
+					toast.success({ title: `Channel "${name}" created` });
 				}}
 				onOpenChange={setAddDialogOpen}
 				open={addDialogOpen}
@@ -4388,18 +4407,24 @@ function PluginsSection({
 							role="button"
 							tabIndex={0}
 						>
-							{app.companion?.icon ? (
-								<Icon
-									className="size-4 shrink-0 text-muted-foreground"
-									icon={app.companion.icon}
-									size={16}
-								/>
-							) : (
-								<HugeiconsIcon
-									className="size-4 shrink-0 text-muted-foreground"
-									icon={PuzzleIcon}
-								/>
-							)}
+							{/* The app's real icon square, identical to the Store's — the
+							    manifest icon over its dither/flat background, falling back to
+							    the generative tile seeded by plugin id. Previously this took
+							    only `companion.icon` and painted it flat, so an app whose
+							    icon lives on the manifest (most of them) fell through to one
+							    repeated puzzle glyph. `companion.icon` stays as the first
+							    choice: a companion that registers its own icon is being
+							    specific about this surface. */}
+							<AppIcon
+								className="size-5 rounded-[5px]"
+								dither={app.iconDither}
+								iconBackground={app.iconBackground ?? undefined}
+								iconId={app.companion?.icon ?? app.icon}
+								iconUrl={app.iconUrl}
+								name={app.name}
+								seedId={app.id}
+								size={12}
+							/>
 							<OverflowTooltip
 								className="min-w-0 flex-1 truncate text-sm"
 								text={app.name}
@@ -6504,15 +6529,18 @@ export function SidebarPanelContent({
 	const [activeTabbedSection, setActiveTabbedSection] =
 		useState<SectionKey | null>(null);
 
-	const [unreadIds, setUnreadIds] = useState<Set<string>>(() =>
-		loadIdSet(UNREAD_KEY)
-	);
-	const [pinnedIds, setPinnedIds] = useState<Set<string>>(() =>
-		loadIdSet(PINNED_KEY)
-	);
-	const [archivedIds, setArchivedIds] = useState<Set<string>>(() =>
-		loadIdSet(ARCHIVED_KEY)
-	);
+	// Pin/archive/unread live in one module-level store (see
+	// `useConversationFlagsStore`) because the tab context menus offer the same
+	// rows; a second `useState` copy here would desync on the first toggle.
+	const unreadIds = useConversationFlagsStore((s) => s.unreadIds);
+	const pinnedIds = useConversationFlagsStore((s) => s.pinnedIds);
+	const archivedIds = useConversationFlagsStore((s) => s.archivedIds);
+	const addUnread = useConversationFlagsStore((s) => s.addUnread);
+	const mergeServerFlags = useConversationFlagsStore((s) => s.mergeServerFlags);
+	const markRead = useConversationFlagsStore((s) => s.markRead);
+	const markUnread = useConversationFlagsStore((s) => s.markUnread);
+	const handleTogglePin = useConversationFlagsStore((s) => s.togglePin);
+	const handleToggleArchive = useConversationFlagsStore((s) => s.toggleArchive);
 	const [sectionOrder, setSectionOrder] =
 		useState<SectionKey[]>(loadSectionOrder);
 	// App-registered sidebar sections from the contributions feed. Namespaced keys
@@ -6602,16 +6630,9 @@ export function SidebarPanelContent({
 			prevStatusesRef.current.set(conv.id, currStatus);
 		}
 		if (newUnreads.length > 0) {
-			setUnreadIds((prev) => {
-				const next = new Set(prev);
-				for (const id of newUnreads) {
-					next.add(id);
-				}
-				saveIdSet(UNREAD_KEY, next);
-				return next;
-			});
+			addUnread(newUnreads);
 		}
-	}, [conversations, activeConversationId]);
+	}, [conversations, activeConversationId, addUnread]);
 
 	// Merge server-backed pin/archive state (the same columns coordinator threads
 	// write) into the localStorage-seeded sets. Union, not replace: existing local
@@ -6619,37 +6640,11 @@ export function SidebarPanelContent({
 	// coordinator or another client shows up here. Going forward, toggles
 	// write-through to Core so the two stay consistent.
 	useEffect(() => {
-		const serverPinned = conversations.filter((c) => c.pinned).map((c) => c.id);
-		const serverArchived = conversations
-			.filter((c) => c.archived)
-			.map((c) => c.id);
-		if (serverPinned.length > 0) {
-			setPinnedIds((prev) => {
-				if (serverPinned.every((id) => prev.has(id))) {
-					return prev;
-				}
-				const next = new Set(prev);
-				for (const id of serverPinned) {
-					next.add(id);
-				}
-				saveIdSet(PINNED_KEY, next);
-				return next;
-			});
-		}
-		if (serverArchived.length > 0) {
-			setArchivedIds((prev) => {
-				if (serverArchived.every((id) => prev.has(id))) {
-					return prev;
-				}
-				const next = new Set(prev);
-				for (const id of serverArchived) {
-					next.add(id);
-				}
-				saveIdSet(ARCHIVED_KEY, next);
-				return next;
-			});
-		}
-	}, [conversations]);
+		mergeServerFlags({
+			pinned: conversations.filter((c) => c.pinned).map((c) => c.id),
+			archived: conversations.filter((c) => c.archived).map((c) => c.id),
+		});
+	}, [conversations, mergeServerFlags]);
 
 	// Re-sync hidden sections/chrome when another surface (Settings → Features,
 	// the onboarding features step, or another window) changes them.
@@ -6666,32 +6661,8 @@ export function SidebarPanelContent({
 		};
 	}, []);
 
-	const markRead = (id: string) => {
-		setUnreadIds((prev) => {
-			if (!prev.has(id)) {
-				return prev;
-			}
-			const next = new Set(prev);
-			next.delete(id);
-			saveIdSet(UNREAD_KEY, next);
-			return next;
-		});
-	};
-
-	const markUnread = (id: string) => {
-		setUnreadIds((prev) => {
-			if (prev.has(id)) {
-				return prev;
-			}
-			const next = new Set(prev);
-			next.add(id);
-			saveIdSet(UNREAD_KEY, next);
-			return next;
-		});
-	};
-
 	const toggleInSet = (
-		setter: typeof setPinnedIds,
+		setter: Dispatch<SetStateAction<Set<string>>>,
 		key: string,
 		id: string
 	) => {
@@ -6705,21 +6676,6 @@ export function SidebarPanelContent({
 			saveIdSet(key, next);
 			return next;
 		});
-	};
-
-	// Pin/archive toggles update local state + localStorage immediately
-	// (optimistic), then write-through to Core so the flag is server-backed and
-	// shared with coordinator threads + other clients. A failed write is
-	// non-fatal — the local mirror keeps the UI correct offline.
-	const handleTogglePin = (id: string) => {
-		const next = !pinnedIds.has(id);
-		toggleInSet(setPinnedIds, PINNED_KEY, id);
-		setConversationPinned(toTarget(activeNode), id, next);
-	};
-	const handleToggleArchive = (id: string) => {
-		const next = !archivedIds.has(id);
-		toggleInSet(setArchivedIds, ARCHIVED_KEY, id);
-		setConversationArchived(toTarget(activeNode), id, next);
 	};
 
 	const handleToggleSection = (key: SectionKey) =>
@@ -7404,14 +7360,9 @@ export function SidebarPanelContent({
 							hiddenChrome.has("node-selector") ? "pt-2" : ""
 						}`}
 					>
-						<button
-							aria-label="Home"
-							className="shrink-0 text-left transition-opacity hover:opacity-80"
-							onClick={() => openTab("/home")}
-							type="button"
-						>
+						<div className="shrink-0 text-left">
 							<Logo className="text-foreground" size="20px" variant="outline" />
-						</button>
+						</div>
 						<BorderBeam
 							borderRadius={10}
 							className="inline-flex shrink-0 overflow-visible"
@@ -7421,16 +7372,14 @@ export function SidebarPanelContent({
 							style={{ borderRadius: "999px 999px 999px 0" }}
 							theme={beamTheme}
 						>
-							<button
-								className="inline-flex h-5 items-center bg-muted px-2 font-medium text-xs leading-none transition-opacity hover:opacity-80"
-								onClick={() => openTab("/home")}
+							<div
+								className="inline-flex h-5 items-center bg-muted px-2 font-medium text-xs leading-none"
 								style={{ borderRadius: "999px 999px 999px 0" }}
-								type="button"
 							>
 								{dev || channel !== "stable"
 									? `Research Preview (${dev ? "Dev" : channel === "canary" ? "Canary" : channel === "nightly" ? "Nightly" : "Beta"})`
 									: "Research Preview"}
-							</button>
+							</div>
 						</BorderBeam>
 					</div>
 				)}

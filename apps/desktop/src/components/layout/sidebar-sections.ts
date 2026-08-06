@@ -54,6 +54,40 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 
+/**
+ * The Core app that owns a compiled-in shell surface, keyed by a SURFACE name.
+ *
+ * These surfaces (Spaces, Teams, Workflows, Agents, Meetings) ship as shell
+ * components but their DATA comes from an app whose routes are gated by
+ * `require_app_enabled` / the ext-proxy mount. With the app off every row inside
+ * them fails, so each consumer hides its entry rather than leading to a dead page.
+ *
+ * One table because the fact is one fact. It used to be written twice — once as
+ * `SECTION_PLUGIN_OWNER` in `AppSidebar` (keyed by sidebar section) and once as
+ * `SECTION_PLUGIN` in `LibraryPage` (keyed by library item type) — which is how
+ * the sidebar and the Library came to disagree about who owns Agents. Consumers
+ * map their own key onto a surface name here; nobody re-states the ownership.
+ *
+ * This is the grandfathered half. A genuinely new app-backed surface declares
+ * `sidebar_sections` in its own manifest and needs no entry here at all — that is
+ * what `com.ryu.{meetings,canvas,whiteboard}` do, and why their visibility follows
+ * the contributions feed instead of this table.
+ */
+export const SURFACE_PLUGIN_OWNER = {
+	agents: "@ryu/agents",
+	meetings: "@ryu/meetings",
+	spaces: "@ryu/spaces",
+	teams: "@ryu/teams",
+	workflows: "@ryu/workflows",
+} as const satisfies Record<string, string>;
+
+/** A surface name in {@link SURFACE_PLUGIN_OWNER}. */
+export type OwnedSurface = keyof typeof SURFACE_PLUGIN_OWNER;
+
+/** Every plugin id that owns a compiled-in shell surface. */
+export const SURFACE_OWNER_PLUGIN_IDS: readonly string[] =
+	Object.values(SURFACE_PLUGIN_OWNER);
+
 /** localStorage key holding the user's persisted top-level section order. */
 export const SECTION_ORDER_KEY = "ryu:sidebar-section-order";
 

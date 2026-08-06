@@ -12,6 +12,54 @@ use inline_eval::{
     llm_judge_backstop_kind, InlineOutcome,
 };
 
+pub mod node_routing;
+
+/// A minimal [`RequestContext`] for tests in OTHER modules (`state`, …) that need
+/// one but have no business restating all thirty-odd fields — and would silently
+/// rot every time one is added. Tests inside this module keep their own local
+/// builders, which encode per-test intent.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::RequestContext;
+
+    /// An anonymous, unbudgeted, preference-free context. Mutate the one or two
+    /// fields your test is actually about.
+    pub(crate) fn plain_request_context() -> RequestContext {
+        RequestContext {
+            request_id: "test-req".to_string(),
+            api_key: "sk-test".to_string(),
+            is_master_key: false,
+            org_id: None,
+            team_id: None,
+            project_id: None,
+            user_name: None,
+            user_id: None,
+            agent_id: None,
+            key_config: None,
+            skill_ids: None,
+            tool_actions: None,
+            tools_header_present: false,
+            slot_provider: None,
+            slot_model: None,
+            session_id: None,
+            feature: None,
+            companion_source: false,
+            tool_search_requested: false,
+            priority: crate::concurrency::Priority::Interactive,
+            tool_profile: None,
+            raw_tools: false,
+            managed_inference: false,
+            remaining_budget_micro_usd: None,
+            unrestricted_budget_micro_usd: None,
+            pool_budgets_micro_usd: std::collections::HashMap::new(),
+            resolved_policy: None,
+            prompt_cache_mode: None,
+            prompt_cache_ttl: None,
+            node_routing: None,
+        }
+    }
+}
+
 pub mod stages;
 use stages::PipelineStage;
 
@@ -179,6 +227,17 @@ pub struct RequestContext {
     pub prompt_cache_mode: Option<ryu_gw_providers::PromptCacheMode>,
     /// Per-request `cache_control.ttl`, from `x-ryu-prompt-cache-ttl` (e.g. `1h`).
     pub prompt_cache_ttl: Option<String>,
+    /// The node's stated routing preferences, from `x-ryu-node-routing` — RAW
+    /// and UNCLAMPED.
+    ///
+    /// Read it only through [`node_routing::clamp_fallback`] /
+    /// [`node_routing::clamp_firewall`], never directly. On the dynamic `rgw_`
+    /// path `key_config` is `None`, so `trusted_forwarder` cannot vouch for this
+    /// document — it is exactly as trustworthy as the bearer that carried it, and
+    /// the clamps (not authentication) are what make it safe. That is also why it
+    /// is carried on ALL auth paths rather than only the "trusted" ones: there is
+    /// no trusted tier to condition on.
+    pub node_routing: Option<node_routing::NodeRoutingPrefs>,
 }
 
 /// Describes the degraded mode the pipeline entered, if any, for this request.
@@ -297,6 +356,10 @@ pub struct AuthInputs<'a> {
     pub prompt_cache_mode: Option<ryu_gw_providers::PromptCacheMode>,
     /// Per-request prompt-cache TTL, from `x-ryu-prompt-cache-ttl`.
     pub prompt_cache_ttl: Option<String>,
+    /// The node's raw routing preferences, from `x-ryu-node-routing`. Already
+    /// parsed (an unparseable header is `None` — ignore, never reject) but NOT
+    /// yet clamped; see [`RequestContext::node_routing`].
+    pub node_routing: Option<node_routing::NodeRoutingPrefs>,
 }
 
 impl<'a> AuthInputs<'a> {
@@ -337,6 +400,7 @@ pub async fn authenticate(
         raw_tools,
         prompt_cache_mode,
         prompt_cache_ttl,
+        node_routing,
     } = inputs;
 
     // Shared builder so the anonymous / master / static / dynamic paths differ
@@ -387,6 +451,7 @@ pub async fn authenticate(
             resolved_policy,
             prompt_cache_mode,
             prompt_cache_ttl: prompt_cache_ttl.clone(),
+            node_routing: node_routing.clone(),
         }
     };
 
@@ -947,12 +1012,46 @@ async fn pre_process(
             // over eval/model routing (M3 / #164); eval-driven A/B routing only
             // applies when no slot is set and the classifier did not already choose.
             PipelineStage::Route => {
-                decision = Some(if ctx.slot_provider.is_some() || ctx.slot_model.is_some() {
+                // ALLOWLIST CLAMP on the client-supplied chat slot model. The
+                // `Policy` stage above checked `allows_model` against
+                // `body["model"]` only — but the slot below REPLACES the model
+                // actually dispatched. An `rgw_` bearer could therefore name an
+                // approved model in the body and the real one in
+                // `x-ryu-slot-chat-model`, and route around the org's
+                // `approved_models` entirely. A disallowed slot model is IGNORED
+                // (the fleet's own routing takes over) rather than rejected: the
+                // turn still runs, under a model the org DID approve.
+                //
+                // Guarded exactly like the `Policy` stage — same master-key
+                // bypass, same `resolved_policy || snapshot` fallback — so the
+                // static-key / single-org paths this bypass never touched keep
+                // their behaviour. With an empty `approved_models` (every
+                // non-allowlisted deployment) `allows_model` is `true`, so this
+                // is a no-op there.
+                let slot_model = if ctx.is_master_key {
+                    ctx.slot_model.as_deref()
+                } else {
+                    let policy = ctx
+                        .resolved_policy
+                        .clone()
+                        .unwrap_or_else(|| state.policy_snapshot());
+                    if node_routing::slot_model_allowed(ctx.slot_model.as_deref(), &policy) {
+                        ctx.slot_model.as_deref()
+                    } else {
+                        warn!(
+                            request_id = %ctx.request_id,
+                            slot_model = ?ctx.slot_model,
+                            "policy: ignoring a chat slot model outside the control-plane allowlist"
+                        );
+                        None
+                    }
+                };
+                decision = Some(if ctx.slot_provider.is_some() || slot_model.is_some() {
                     state.router.route_modality_with_slot(
                         &crate::config::Modality::Chat,
                         &requested_model,
                         ctx.slot_provider.as_ref(),
-                        ctx.slot_model.as_deref(),
+                        slot_model,
                     )
                 } else if smart_routed {
                     // The classifier already chose this model — route it straight
@@ -1692,7 +1791,7 @@ pub async fn run(
         }
     }
 
-    let fallback_chain = state.router.fallback_chain(&decision.provider);
+    let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let mut last_err: Option<GatewayError> = None;
     // Track whether the primary provider (first in chain) was skipped so we
     // can signal DegradedMode::Fallback when a later provider serves the request.
@@ -2358,7 +2457,7 @@ pub async fn run_stream(
         Some(crate::config::BudgetAction::Restrict)
     );
 
-    let fallback_chain = state.router.fallback_chain(&decision.provider);
+    let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let mut last_err: Option<GatewayError> = None;
     let primary_provider_stream = fallback_chain.first().cloned();
     let mut primary_skipped_stream = false;
@@ -2716,7 +2815,7 @@ pub async fn run_multimodal(
             e
         })?;
 
-    let fallback_chain = state.router.fallback_chain(&decision.provider);
+    let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let mut last_err: Option<GatewayError> = None;
     let primary_provider_mm = fallback_chain.first().cloned();
     let mut primary_skipped_mm = false;
@@ -3483,6 +3582,43 @@ fn enforce_budget(
 ///     segregation) ⇒ treat the whole balance as unrestricted, i.e. the pre-pool
 ///     check again, on BOTH branches. Collapsing this into `0` would gate every
 ///     request to death the moment the gateway outran the control plane.
+/// The provider chain to dispatch over: the fleet's own `fallback_chain` for the
+/// routed primary, re-ordered (never extended) by the node's stated preference.
+///
+/// The single seam all three chain-expansion sites — non-stream `run`, streaming
+/// `run_stream`, and `run_multimodal` — go through, so they cannot drift. It owns
+/// the `state.router.fallback_chain` call rather than taking a chain, which is
+/// what makes the swap a one-liner at each site: the multimodal path never runs
+/// `pre_process`, so a clamp result threaded out of `pre_process` would not have
+/// reached it at all.
+///
+/// The clamp is fed the REAL credit gate, so an entry the preference would
+/// promote is re-checked against its own credit pool. That matters because
+/// `preflight_credit_gate` in `enforce_budget` only ever saw the PRIMARY's pool,
+/// before this expansion — see [`node_routing`] for the full argument.
+fn clamped_fallback_chain(
+    state: &AppState,
+    ctx: &RequestContext,
+    decision: &RouteDecision,
+) -> Vec<ProviderId> {
+    let fleet_chain = state.router.fallback_chain(&decision.provider);
+    let clamped = node_routing::clamp_fallback(
+        ctx.node_routing.as_ref(),
+        &state.config.node_routing,
+        ctx,
+        fleet_chain,
+        |c, pool| preflight_credit_gate(c, pool).is_none(),
+    );
+    if !clamped.dropped.is_empty() {
+        debug!(
+            request_id = %ctx.request_id,
+            dropped = ?clamped.dropped,
+            "node routing: parts of the node's fallback preference were not honoured"
+        );
+    }
+    clamped.chain
+}
+
 fn preflight_credit_gate(ctx: &RequestContext, pool: Option<&str>) -> Option<GatewayError> {
     if !ctx.managed_inference {
         return None;
@@ -3730,7 +3866,23 @@ async fn debit_wallet_for_request(
         return; // is_active guarantees Some, but stay defensive.
     };
 
-    let url = format!("{}/credits/debit", credits.base_url.trim_end_matches('/'));
+    // `/api` IS PART OF THE ROUTE, and leaving it out cost real money. The control
+    // plane mounts `creditsRouter` at `/api/credits` (`packages/api/src/routers/index.ts`),
+    // and `credits.base_url` defaults to `control_plane.base_url` — the bare origin,
+    // because the sibling resolve call spells its own prefix out in full
+    // (`{}/api/control-plane/gateway/resolve` in `policy/mod.rs`). This join did
+    // not, so in production every debit POSTed to `https://api.ryuhq.com/credits/debit`
+    // and got a plain **404**. The debit hook fails OPEN, and
+    // `GATEWAY_CREDITS_FAIL_CLOSED` is unset by design, so the gateway served the
+    // request anyway and never decremented a wallet: managed inference was
+    // metered, marked-up, audited — and completely unbilled. Verified against
+    // prod (2026-08-06): `/credits/debit` ⇒ 404, `/api/credits/debit` ⇒ 200
+    // `{"applied":true}` with the SAME secret, which is why the secret looked
+    // guilty for so long.
+    let url = format!(
+        "{}/api/credits/debit",
+        credits.base_url.trim_end_matches('/')
+    );
     let body = debit_request_body(&org_id, amount, reason, &ref_id, budget_alert_tier, pool);
 
     let resp = state
@@ -4686,6 +4838,7 @@ mod tests {
             resolved_policy: None,
             prompt_cache_mode: None,
             prompt_cache_ttl: None,
+            node_routing: None,
         }
     }
 
@@ -5741,6 +5894,7 @@ mod tests {
             resolved_policy: None,
             prompt_cache_mode: None,
             prompt_cache_ttl: None,
+            node_routing: None,
         };
 
         let body = json!({
@@ -5991,6 +6145,7 @@ mod tests {
             resolved_policy: None,
             prompt_cache_mode: None,
             prompt_cache_ttl: None,
+            node_routing: None,
         };
 
         let body = Body::from(fixture);
@@ -6957,11 +7112,302 @@ mod fallback_tests {
             resolved_policy: None,
             prompt_cache_mode: None,
             prompt_cache_ttl: None,
+            node_routing: None,
         }
     }
 
     fn ping_body() -> Value {
         json!({ "model": "anything", "messages": [{"role": "user", "content": "ping"}] })
+    }
+
+    // ── node routing preferences, end to end through `run()` ─────────────────
+
+    /// `chain_state` with a third provider in the chain, so a preference has
+    /// something to actually reorder.
+    fn three_chain_state() -> AppState {
+        // Built from config, not mutated afterwards: `AppState::new_for_test`
+        // constructs the router registry from `config.routing`, so a chain widened
+        // after the fact would never reach the router.
+        let config = GatewayConfig {
+            routing: RoutingConfig {
+                default_provider: ProviderId::from("primary"),
+                fallback_chain: vec![
+                    ProviderId::from("primary"),
+                    ProviderId::from("secondary"),
+                    ProviderId::from("tertiary"),
+                ],
+                ..RoutingConfig::default()
+            },
+            firewall: FirewallConfig {
+                enabled: false,
+                ..FirewallConfig::default()
+            },
+            circuit_breaker: CircuitBreakerConfig {
+                enabled: true,
+                failure_threshold: 10,
+                reset_timeout_secs: 30,
+            },
+            ..GatewayConfig::default()
+        };
+        let audit = AuditLogger::new(&AuditConfig {
+            enabled: false,
+            db_path: String::new(),
+        })
+        .expect("disabled audit logger");
+        let evals = crate::evals::EvalsRunner::new(EvalsConfig::default());
+        AppState::new_for_test(config, audit, evals)
+    }
+
+    fn prefs(fallback: &[&str]) -> super::node_routing::NodeRoutingPrefs {
+        super::node_routing::NodeRoutingPrefs {
+            fallback: fallback.iter().map(|s| (*s).to_string()).collect(),
+            firewall: None,
+        }
+    }
+
+    /// A node preference REORDERS the fleet's chain: with the primary demoting,
+    /// the node's preferred fallback serves before the fleet's default second.
+    #[tokio::test]
+    async fn a_node_preference_reorders_the_fleet_fallback_chain() {
+        let mut state = three_chain_state();
+        let (primary, _) = StubProvider::new("primary", Mode::RateLimited);
+        let (secondary, secondary_calls) = StubProvider::new("secondary", Mode::Ok);
+        let (tertiary, tertiary_calls) = StubProvider::new("tertiary", Mode::Ok);
+        state.providers.register(primary as Arc<dyn Provider>);
+        state.providers.register(secondary as Arc<dyn Provider>);
+        state.providers.register(tertiary as Arc<dyn Provider>);
+        let state = Arc::new(state);
+
+        let mut ctx = plain_ctx();
+        ctx.node_routing = Some(prefs(&["tertiary"]));
+
+        let out = run(Arc::clone(&state), ctx, ping_body())
+            .await
+            .expect("the preferred fallback must serve");
+
+        assert_eq!(out.provider_used, "tertiary");
+        assert_eq!(
+            secondary_calls.load(Ordering::SeqCst),
+            0,
+            "the fleet's default second was reordered behind the node's preference"
+        );
+        assert_eq!(tertiary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// THE acceptance criterion: a preference may narrow and reorder the org's
+    /// envelope, never widen it. A provider the fleet's own chain does not
+    /// contain is never dispatched to, even when it is registered and healthy —
+    /// because `preflight_credit_gate` only ever gated the PRIMARY's pool.
+    #[tokio::test]
+    async fn a_node_preference_can_never_add_a_provider_to_the_chain() {
+        let mut state = chain_state(10);
+        let (primary, _) = StubProvider::new("primary", Mode::RateLimited);
+        let (secondary, secondary_calls) = StubProvider::new("secondary", Mode::Ok);
+        // Registered and perfectly healthy, but NOT in the fleet's fallback chain.
+        let (offchain, offchain_calls) = StubProvider::new("tertiary", Mode::Ok);
+        state.providers.register(primary as Arc<dyn Provider>);
+        state.providers.register(secondary as Arc<dyn Provider>);
+        state.providers.register(offchain as Arc<dyn Provider>);
+        let state = Arc::new(state);
+
+        let mut ctx = plain_ctx();
+        ctx.node_routing = Some(prefs(&["tertiary"]));
+
+        let out = run(Arc::clone(&state), ctx, ping_body())
+            .await
+            .expect("the fleet's own chain still serves the turn");
+
+        assert_eq!(out.provider_used, "secondary");
+        assert_eq!(
+            offchain_calls.load(Ordering::SeqCst),
+            0,
+            "a preference must not route out of a credit pool nothing gated"
+        );
+        assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A locked node ignores the preference wholesale — the `[node_routing]`
+    /// lever, mirroring `[prompt_cache].allow_request_override`.
+    #[tokio::test]
+    async fn a_locked_node_ignores_the_preference_end_to_end() {
+        let mut state = three_chain_state();
+        state.config.node_routing.allow_request_override = false;
+        let (primary, _) = StubProvider::new("primary", Mode::RateLimited);
+        let (secondary, secondary_calls) = StubProvider::new("secondary", Mode::Ok);
+        let (tertiary, tertiary_calls) = StubProvider::new("tertiary", Mode::Ok);
+        state.providers.register(primary as Arc<dyn Provider>);
+        state.providers.register(secondary as Arc<dyn Provider>);
+        state.providers.register(tertiary as Arc<dyn Provider>);
+        let state = Arc::new(state);
+
+        let mut ctx = plain_ctx();
+        ctx.node_routing = Some(prefs(&["tertiary"]));
+
+        let out = run(Arc::clone(&state), ctx, ping_body())
+            .await
+            .expect("the fleet order stands");
+
+        assert_eq!(out.provider_used, "secondary");
+        assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tertiary_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The polarity of the credit gate `clamped_fallback_chain` hands the clamp
+    /// (`preflight_credit_gate(..).is_none()` — `Some(err)` means REJECTED) is
+    /// expressed in exactly ONE place in production. A unit test that writes its
+    /// own closure cannot pin it: inverting the adapter leaves such a test green
+    /// while every reorder starts promoting providers the org cannot pay for.
+    ///
+    /// So this drives the real thing through `run()`. The setup is the segregated
+    /// credit-pool case, which is also the only shape where the bug is reachable:
+    /// the org has grant money in the PRIMARY's pool (so `enforce_budget` admits
+    /// the request — it gates the primary's pool only) and nothing unrestricted,
+    /// so the preferred fallback in a DIFFERENT pool is unfunded and must not be
+    /// promoted ahead of the fleet's own next choice.
+    #[tokio::test]
+    async fn credit_gate_polarity_is_wired_correctly_end_to_end() {
+        // Real provider ids, because `pool_for_gateway_provider` is a fixed table:
+        // `cloudflare` → the "cloudflare" pool, `bedrock` → "bedrock". A made-up id
+        // is untagged and would never exercise pool segregation at all.
+        let config = GatewayConfig {
+            routing: RoutingConfig {
+                default_provider: ProviderId::from("cloudflare"),
+                fallback_chain: vec![
+                    ProviderId::from("cloudflare"),
+                    ProviderId::from("secondary"),
+                    ProviderId::from("bedrock"),
+                ],
+                ..RoutingConfig::default()
+            },
+            firewall: FirewallConfig {
+                enabled: false,
+                ..FirewallConfig::default()
+            },
+            circuit_breaker: CircuitBreakerConfig {
+                enabled: true,
+                failure_threshold: 10,
+                reset_timeout_secs: 30,
+            },
+            ..GatewayConfig::default()
+        };
+        let audit = AuditLogger::new(&AuditConfig {
+            enabled: false,
+            db_path: String::new(),
+        })
+        .expect("disabled audit logger");
+        let evals = crate::evals::EvalsRunner::new(EvalsConfig::default());
+        let mut state = AppState::new_for_test(config, audit, evals);
+
+        let (primary, _) = StubProvider::new("cloudflare", Mode::RateLimited);
+        let (secondary, secondary_calls) = StubProvider::new("secondary", Mode::Ok);
+        let (bedrock, bedrock_calls) = StubProvider::new("bedrock", Mode::Ok);
+        state.providers.register(primary as Arc<dyn Provider>);
+        state.providers.register(secondary as Arc<dyn Provider>);
+        state.providers.register(bedrock as Arc<dyn Provider>);
+        let state = Arc::new(state);
+
+        let mut ctx = plain_ctx();
+        ctx.managed_inference = true;
+        // Total is positive (so the wallet is not simply empty), but ALL of it is
+        // pool-restricted to the primary's pool. Bedrock has nothing.
+        ctx.remaining_budget_micro_usd = Some(50_000);
+        ctx.unrestricted_budget_micro_usd = Some(0);
+        ctx.pool_budgets_micro_usd =
+            std::collections::HashMap::from([("cloudflare".to_string(), 50_000_i64)]);
+        ctx.node_routing = Some(prefs(&["bedrock"]));
+
+        let out = run(Arc::clone(&state), ctx, ping_body())
+            .await
+            .expect("the request is admitted on the primary's funded pool");
+
+        assert_eq!(
+            out.provider_used, "secondary",
+            "a preference must not promote a provider whose pool the org cannot pay for"
+        );
+        assert_eq!(bedrock_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ── slot-model allowlist bypass (pre-existing hole) ──────────────────────
+
+    /// `x-ryu-slot-chat-model` replaced the dispatched model AFTER the Policy
+    /// stage had only checked `body["model"]`, so an `rgw_` bearer could name an
+    /// approved model in the body and the real one in the slot headers and route
+    /// around the org's `approved_models`. The disallowed slot is now IGNORED —
+    /// the turn still runs, under a model the org did approve.
+    ///
+    /// The slot provider is set too, and that is not incidental: `route_modality`
+    /// in `ryu-gw-router` only consults `slot_model` inside the
+    /// `if let Some(provider) = slot_provider` arm, so the bypass needs BOTH
+    /// `x-ryu-slot-chat-provider` and `-model`. Verified against the router rather
+    /// than assumed from the pipeline's `slot_provider.is_some() ||
+    /// slot_model.is_some()` guard, which is looser than what actually routes.
+    #[tokio::test]
+    async fn a_slot_model_outside_the_org_allowlist_is_ignored_not_dispatched() {
+        let mut state = chain_state(10);
+        let (primary, _) = StubProvider::new("primary", Mode::Ok);
+        state.providers.register(primary as Arc<dyn Provider>);
+        let state = Arc::new(state);
+
+        let mut ctx = plain_ctx();
+        ctx.resolved_policy = Some(crate::policy::EffectivePolicy {
+            approved_models: vec!["approved-model".into()],
+            ..Default::default()
+        });
+        ctx.slot_provider = Some(ProviderId::from("primary"));
+        ctx.slot_model = Some("forbidden-model".into());
+
+        let out = run(
+            Arc::clone(&state),
+            ctx,
+            json!({
+                "model": "approved-model",
+                "messages": [{"role": "user", "content": "ping"}]
+            }),
+        )
+        .await
+        .expect("the turn still succeeds under the approved model");
+
+        assert_ne!(
+            out.model_used, "forbidden-model",
+            "the client-supplied slot model bypassed the org's approved_models"
+        );
+        assert_eq!(out.model_used, "approved-model");
+    }
+
+    /// The other half: an ALLOWED slot model still wins, so the clamp did not
+    /// break per-agent slot pinning. And with no allowlist at all (every
+    /// non-allowlisted deployment) nothing changes.
+    #[tokio::test]
+    async fn an_allowed_slot_model_and_an_empty_allowlist_both_still_pin() {
+        let mut state = chain_state(10);
+        let (primary, _) = StubProvider::new("primary", Mode::Ok);
+        state.providers.register(primary as Arc<dyn Provider>);
+        let state = Arc::new(state);
+
+        let mut ctx = plain_ctx();
+        ctx.resolved_policy = Some(crate::policy::EffectivePolicy {
+            approved_models: vec!["approved-model".into(), "slot-model".into()],
+            ..Default::default()
+        });
+        ctx.slot_provider = Some(ProviderId::from("primary"));
+        ctx.slot_model = Some("slot-model".into());
+        let out = run(
+            Arc::clone(&state),
+            ctx,
+            json!({"model": "approved-model", "messages": [{"role": "user", "content": "ping"}]}),
+        )
+        .await
+        .expect("an approved slot model dispatches");
+        assert_eq!(out.model_used, "slot-model");
+
+        let mut ctx = plain_ctx();
+        ctx.slot_provider = Some(ProviderId::from("primary"));
+        ctx.slot_model = Some("anything-at-all".into());
+        let out = run(Arc::clone(&state), ctx, ping_body())
+            .await
+            .expect("no allowlist ⇒ unchanged behaviour");
+        assert_eq!(out.model_used, "anything-at-all");
     }
 
     /// A rate-limited primary demotes to the next provider in the chain: the

@@ -54,6 +54,11 @@ export function useAgentUpdate(
 			queryClient.invalidateQueries({
 				queryKey: ["agent-update", node.url, agentId],
 			});
+			// The Downloads panel derives its agent rows from the agents catalog,
+			// not from this check — refresh both so one update clears both surfaces.
+			queryClient.invalidateQueries({
+				queryKey: ["agents", "catalog", node.url],
+			});
 		},
 	});
 

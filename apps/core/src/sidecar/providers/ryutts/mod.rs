@@ -217,6 +217,7 @@ pub async fn ensure_kokoro_runtime() -> anyhow::Result<bool> {
         let wheel = downloads
             .download_blocking(crate::downloads::DownloadSpec {
                 kind: crate::downloads::DownloadKind::Voice,
+                role: crate::downloads::DownloadRole::Engine,
                 label: "Ryu TTS sidecar".to_string(),
                 url: tts_sidecar_wheel_url(),
                 dest: dir.join("dist").join(TTS_SIDECAR_WHEEL_FILE),

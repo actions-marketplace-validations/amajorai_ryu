@@ -98,7 +98,7 @@
         "id": "home",
         "title": "Home",
         "icon": "lucide:house",
-        "target": "/home"
+        "target": "/dashboard"
       }
     ]
   }

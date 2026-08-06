@@ -196,6 +196,7 @@ pub async fn ensure_installed(
     let archive_path = downloads
         .download_blocking(crate::downloads::DownloadSpec {
             kind: crate::downloads::DownloadKind::Agent,
+            role: crate::downloads::DownloadRole::Agent,
             label: spec.label.to_string(),
             url,
             dest: archive_dest,

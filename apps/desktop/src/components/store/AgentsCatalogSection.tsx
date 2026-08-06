@@ -24,13 +24,10 @@
 
 import {
 	Alert01Icon,
-	CheckmarkCircle02Icon,
 	Delete01Icon,
 	Download01Icon,
 	Loading01Icon,
-	Refresh01Icon,
 	Robot01Icon,
-	StarIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
@@ -41,7 +38,14 @@ import StoreCatalogLayout, {
 import StoreItemAction, {
 	StoreItemContextMenuContent,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
-import { Badge } from "@ryu/ui/components/badge";
+import {
+	ListingAsideCard,
+	ListingDetailShell,
+	ListingHero,
+	ListingInfoGrid,
+	ListingSection,
+	ListingStatStrip,
+} from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
@@ -76,19 +80,6 @@ function sortAgents(agents: AgentCatalogEntry[]): AgentCatalogEntry[] {
 		}
 		return a.name.localeCompare(b.name);
 	});
-}
-
-/** Provenance/run-readiness hint from the detect flag. */
-function detectBadge(entry: AgentCatalogEntry) {
-	if (entry.detected === true) {
-		return (
-			<Badge variant="secondary">
-				<HugeiconsIcon className="size-3" icon={CheckmarkCircle02Icon} />
-				On PATH
-			</Badge>
-		);
-	}
-	return null;
 }
 
 function InstallButton({
@@ -139,50 +130,6 @@ function InstallButton({
 			<HugeiconsIcon className="size-4" icon={Download01Icon} />
 			Install
 		</InstallProgressButton>
-	);
-}
-
-function AgentBadges({ entry }: { entry: AgentCatalogEntry }) {
-	const updateAvailable =
-		entry.versionStatus === "behind_latest" ||
-		entry.bridgeVersionStatus === "behind_latest";
-	return (
-		<>
-			{entry.added ? (
-				<Badge variant="secondary">Installed</Badge>
-			) : (
-				<Badge variant="secondary">Not installed</Badge>
-			)}
-			{!entry.available && (
-				<Badge variant="outline">
-					<HugeiconsIcon className="size-3" icon={Alert01Icon} />
-					Not available on this platform
-				</Badge>
-			)}
-			{entry.recommended && (
-				<Badge>
-					<HugeiconsIcon className="size-3" icon={StarIcon} />
-					Recommended
-				</Badge>
-			)}
-			{updateAvailable && (
-				<Badge variant="outline">
-					<HugeiconsIcon className="size-3" icon={Refresh01Icon} />
-					Update available
-				</Badge>
-			)}
-			{entry.installedVersion ? (
-				<Badge variant="secondary">Agent v{entry.installedVersion}</Badge>
-			) : null}
-			{entry.installedBridgeVersion ? (
-				<Badge variant="secondary">
-					Bridge v{entry.installedBridgeVersion}
-				</Badge>
-			) : entry.latestBridgeVersion ? (
-				<Badge variant="secondary">Bridge v{entry.latestBridgeVersion}</Badge>
-			) : null}
-			{detectBadge(entry)}
-		</>
 	);
 }
 
@@ -399,57 +346,113 @@ function AgentDetailPanel({
 		);
 	}
 
+	const updateAvailable =
+		entry.versionStatus === "behind_latest" ||
+		entry.bridgeVersionStatus === "behind_latest";
+
 	return (
-		<div className="scroll-fade-effect-y flex h-full flex-col gap-6 overflow-auto p-4">
-			<header className="flex flex-col gap-3">
-				<div className="flex items-start justify-between gap-3">
-					<div className="flex min-w-0 items-center gap-3">
-						<AgentCatalogLogo
-							className="size-8 shrink-0 opacity-90"
-							entry={entry}
-							size="32px"
-						/>
-						<div className="min-w-0">
-							<h2 className="truncate font-semibold text-xl">{entry.name}</h2>
-							{(entry.latestVersion ?? entry.latestBridgeVersion) && (
-								<p className="text-muted-foreground text-sm">
-									{entry.latestVersion
-										? `Latest agent: v${entry.latestVersion}`
-										: null}
-									{entry.latestVersion && entry.latestBridgeVersion
-										? " · "
-										: null}
-									{entry.latestBridgeVersion
-										? `Latest bridge: v${entry.latestBridgeVersion}`
-										: null}
-								</p>
-							)}
-						</div>
-					</div>
+		<ListingDetailShell
+			actions={
+				<>
 					<InstallButton
 						busy={busy}
 						entry={entry}
 						onInstall={onInstall}
 						onUninstall={onUninstall}
 					/>
-				</div>
-				<div className="flex flex-wrap items-center gap-2">
-					<AgentBadges entry={entry} />
-				</div>
-				<p className="text-muted-foreground text-sm">
+					{error && (
+						<span className="ml-auto flex items-center gap-1.5 text-destructive text-sm">
+							<HugeiconsIcon className="size-4 shrink-0" icon={Alert01Icon} />
+							{error}
+						</span>
+					)}
+				</>
+			}
+			aside={
+				<ListingAsideCard title="Information">
+					<ListingInfoGrid
+						rows={[
+							{ label: "Engine", value: entry.engine ?? "—" },
+							{ label: "Transport", value: entry.transport ?? "—" },
+							{ label: "Registry ID", value: entry.registryId ?? "—" },
+							{
+								label: "On PATH",
+								value:
+									entry.detected === null
+										? "Unknown"
+										: entry.detected
+											? "Yes"
+											: "No",
+							},
+							{
+								label: "Gateway",
+								value: entry.gatewayBypass ? "Bypassed" : "Routed",
+							},
+						]}
+					/>
+				</ListingAsideCard>
+			}
+			hero={
+				<ListingHero
+					badges={[
+						entry.added ? "Installed" : "Not installed",
+						entry.recommended ? "Recommended" : null,
+						entry.available ? null : "Unavailable on this platform",
+						updateAvailable ? "Update available" : null,
+					].filter((b): b is string => Boolean(b))}
+					icon={
+						<AgentCatalogLogo
+							className="size-9 opacity-90"
+							entry={entry}
+							size="36px"
+						/>
+					}
+					name={entry.name}
+					tagline={entry.description}
+				/>
+			}
+			stats={
+				<ListingStatStrip
+					items={[
+						{
+							label: "Agent",
+							sub: entry.latestVersion
+								? `Latest v${entry.latestVersion}`
+								: undefined,
+							value: entry.installedVersion
+								? `v${entry.installedVersion}`
+								: (entry.latestVersion ?? "—"),
+						},
+						{
+							label: "Bridge",
+							sub: entry.latestBridgeVersion
+								? `Latest v${entry.latestBridgeVersion}`
+								: undefined,
+							value: entry.installedBridgeVersion
+								? `v${entry.installedBridgeVersion}`
+								: (entry.latestBridgeVersion ?? "—"),
+						},
+						{ label: "Engine", value: entry.engine ?? "—" },
+						{ label: "Transport", value: entry.transport ?? "—" },
+						{
+							label: "Status",
+							value: entry.added ? "Installed" : "Available",
+						},
+					]}
+				/>
+			}
+		>
+			<ListingSection title="About">
+				<p className="text-muted-foreground text-sm leading-relaxed">
 					{entry.description ?? "No description provided."}
 				</p>
-				{entry.installHint && (
-					<p className="text-muted-foreground text-xs">{entry.installHint}</p>
-				)}
-				{error && (
-					<p className="flex items-center gap-1.5 text-destructive text-sm">
-						<HugeiconsIcon className="size-4 shrink-0" icon={Alert01Icon} />
-						{error}
-					</p>
-				)}
-			</header>
-		</div>
+			</ListingSection>
+			{entry.installHint ? (
+				<ListingSection title="Installing">
+					<p className="text-muted-foreground text-sm">{entry.installHint}</p>
+				</ListingSection>
+			) : null}
+		</ListingDetailShell>
 	);
 }
 

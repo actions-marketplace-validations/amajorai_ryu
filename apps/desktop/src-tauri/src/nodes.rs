@@ -109,6 +109,29 @@ fn load() -> NodesConfig {
 	config
 }
 
+/// True only when `nodes.json` exists AND its default node is this machine's
+/// Core — i.e. the user has actually committed to running Ryu locally.
+///
+/// Deliberately NOT built on [`load`], which fabricates a local default when the
+/// file is missing. "No file yet" means the user has not picked a way to run Ryu
+/// (onboarding's local / cloud / existing-node fork writes the file on the pick),
+/// and boot must not download a Core binary on behalf of someone who may be
+/// about to connect to their company's node instead. False on any read or parse
+/// failure, so the cautious branch is also the fallback.
+pub fn default_node_is_local() -> bool {
+	let Ok(content) = std::fs::read_to_string(nodes_path()) else {
+		return false;
+	};
+	let Ok(config) = serde_json::from_str::<NodesConfig>(&content) else {
+		return false;
+	};
+	config
+		.nodes
+		.iter()
+		.find(|n| n.name == config.default)
+		.is_some_and(|n| is_local_node_url(&n.url))
+}
+
 /// Attach the on-disk minted token to any node pointing at THIS machine's Core.
 ///
 /// Done at load time rather than persisted into `nodes.json`, deliberately:

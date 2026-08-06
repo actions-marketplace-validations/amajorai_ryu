@@ -338,6 +338,8 @@ use utoipa::OpenApi;
         super::validate_data_path,
         // Downloads
         super::downloads_history,
+        super::downloads_settings,
+        super::set_downloads_settings,
         // Events
         super::notifications_stream,
         super::navigation_stream,
@@ -373,6 +375,12 @@ use utoipa::OpenApi;
         super::learning::score,
         super::learning::sweep,
         super::learning::synthesize,
+        // Managed bots (Telegram pairing). Neither path exposes the claim_secret or
+        // the bot token — see `server::managed_bot_api`.
+        super::managed_bot_api::begin_pairing,
+        super::managed_bot_api::poll_pairing,
+        super::managed_bot_api::confirm_pairing,
+        super::managed_bot_api::cancel_pairing,
         // MCP
         super::widgets::mcp_resources_read,
         super::mcp_updates,
@@ -386,6 +394,8 @@ use utoipa::OpenApi;
         // Uploads (user files → Uploads system space)
         super::uploads::serve_upload,
         super::uploads::upload_file,
+        // At-rest encryption posture (key custody + per-store coverage).
+        super::encryption::encryption_status,
         // Meetings runs out-of-process (`ryu-meetings` sidecar); its `/api/meetings/*`
         // spec is owned by the sidecar and served through the ext-proxy `public_mount`,
         // so it is NOT merged into Core's spec — same posture as monitors/quests.
@@ -546,6 +556,12 @@ pub fn api_doc() -> utoipa::openapi::OpenApi {
     // Core-side `catalog`/`updates`/`install-from-source` handlers stay in the main
     // doc above. Non-optional dep (the registry is kernel-required), so no cfg gate.
     doc.merge(ryu_skills::api::openapi());
+    // Output styles: the whole `/api/output-styles/*` surface lives in the extracted
+    // `ryu-output-styles` crate, which owns every `#[utoipa::path]` on it — unlike
+    // skills there is no Core-side leaf left in the main doc above, because Core
+    // `nest`s the crate's router under the entire prefix. Non-optional dep (Core
+    // resolves the style for every turn), so no cfg gate.
+    doc.merge(ryu_output_styles::api::openapi());
     doc
 }
 

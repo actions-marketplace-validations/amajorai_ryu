@@ -23,6 +23,35 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Parse the node's routing preferences off `x-ryu-node-routing` (see
+/// `api::chat` for the discipline: unparseable is ignored, never rejected).
+///
+/// Carried on the four identity-bearing modality handlers so the FALLBACK clamp
+/// applies to them: `run_multimodal` expands the chain through the same
+/// `clamped_fallback_chain` helper as `run` / `run_stream`.
+///
+/// The firewall half is chat-only in v1, and that was checked rather than
+/// assumed. `run_multimodal`'s inbound scan goes through `state.with_firewall`
+/// (the process-global node-base scanner), not `state.resolved_scanner` — its one
+/// `resolved_scanner` call is an Image-modality *logging* branch that enforces
+/// nothing. So the request overlay has no seam to land on here. That is a
+/// pre-existing gap, not one this channel introduced: the org and per-agent
+/// scopes of the node → org → agent cascade do not reach these paths either.
+/// Routing it through `resolved_scanner` is the fix, and it belongs with whoever
+/// closes the cascade gap, not bolted on behind one new knob.
+///
+/// Also deliberately NOT in v1: the modality MAP itself. Per-modality pins
+/// already travel as `x-ryu-slot-<modality>-provider` / `-model`, which these
+/// handlers read a few lines above — a second, differently-clamped way to say the
+/// same thing would be two precedence rules to keep in agreement.
+fn node_routing_prefs(
+    state: &SharedState,
+    headers: &HeaderMap,
+) -> Option<pipeline::node_routing::NodeRoutingPrefs> {
+    header_string(headers, "x-ryu-node-routing")
+        .and_then(|v| pipeline::node_routing::parse(&v, &state.config.node_routing))
+}
+
 /// POST /v1/images/generations — image generation routed through the pipeline.
 pub async fn image_generations(
     State(state): State<SharedState>,
@@ -37,6 +66,7 @@ pub async fn image_generations(
     // instead of the static modality_map entry.
     let slot_provider = header_string(&headers, "x-ryu-slot-image-provider").map(ProviderId::from);
     let slot_model = header_string(&headers, "x-ryu-slot-image-model");
+    let node_routing = node_routing_prefs(&state, &headers);
 
     let ctx = authenticate(
         &state,
@@ -46,6 +76,7 @@ pub async fn image_generations(
             agent_id,
             slot_provider,
             slot_model,
+            node_routing,
             ..Default::default()
         },
     )
@@ -80,6 +111,7 @@ pub async fn audio_speech(
     // Per-agent TTS slot override (M3 / #164).
     let slot_provider = header_string(&headers, "x-ryu-slot-tts-provider").map(ProviderId::from);
     let slot_model = header_string(&headers, "x-ryu-slot-tts-model");
+    let node_routing = node_routing_prefs(&state, &headers);
 
     let ctx = authenticate(
         &state,
@@ -89,6 +121,7 @@ pub async fn audio_speech(
             agent_id,
             slot_provider,
             slot_model,
+            node_routing,
             ..Default::default()
         },
     )
@@ -123,6 +156,7 @@ pub async fn audio_transcriptions(
     // Per-agent STT slot override (M3 / #164).
     let slot_provider = header_string(&headers, "x-ryu-slot-stt-provider").map(ProviderId::from);
     let slot_model = header_string(&headers, "x-ryu-slot-stt-model");
+    let node_routing = node_routing_prefs(&state, &headers);
 
     let ctx = authenticate(
         &state,
@@ -132,6 +166,7 @@ pub async fn audio_transcriptions(
             agent_id,
             slot_provider,
             slot_model,
+            node_routing,
             ..Default::default()
         },
     )
@@ -168,6 +203,7 @@ pub async fn video_generations(
     // Per-agent video slot override (mirrors image/tts/stt).
     let slot_provider = header_string(&headers, "x-ryu-slot-video-provider").map(ProviderId::from);
     let slot_model = header_string(&headers, "x-ryu-slot-video-model");
+    let node_routing = node_routing_prefs(&state, &headers);
 
     let ctx = authenticate(
         &state,
@@ -177,6 +213,7 @@ pub async fn video_generations(
             agent_id,
             slot_provider,
             slot_model,
+            node_routing,
             ..Default::default()
         },
     )

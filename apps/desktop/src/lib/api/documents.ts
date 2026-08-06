@@ -341,6 +341,12 @@ function toBackendList(layer: CapabilityLayer | undefined): ParseBackendList {
  * no parser" from "this node did not answer", because rendering the second as the
  * first is the exact misreport this function was written to end.
  */
+// No UI caller since the Gateway's "Document parsing" section was retired: the
+// node dropdown's Toolkits row binds `document.parse` through the same
+// `./capability-layers.ts` seam this wraps, generically, like every other
+// swappable capability. Kept as the typed, tested `document.parse` view of that
+// seam — a caller that wants the parse layer by name should use this rather than
+// re-deriving it from the raw capability model.
 export async function fetchParseBackends(
 	target: ApiTarget
 ): Promise<ParseBackendList> {

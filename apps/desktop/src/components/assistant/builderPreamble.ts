@@ -40,15 +40,60 @@ function workflowPreamble(workflowId: string, snapshot: string): string {
 	].join(" ");
 }
 
-/** Build the builder preamble for a session, keyed on its kind. */
+/**
+ * Build the preamble for a session.
+ *
+ * The two BUILT-IN kinds use the curated preambles above. Any other kind is an
+ * app-defined surface and must carry its own `preamble` — it is templated with
+ * `{{targetId}}` / `{{snapshot}}` (so a surface registered before its record
+ * exists still names the right id), and its declared `tools` are appended as a
+ * plain instruction line. Naming tools is ADVISORY: Core's chat stream takes no
+ * per-request allowlist, so this steers the model, it does not gate it.
+ *
+ * An app-defined kind with no preamble falls back to a neutral one rather than
+ * silently borrowing the workflow builder's instructions.
+ */
 export function buildBuilderPreamble(
-	kind: AssistantBuilderSession["kind"],
+	session: Pick<
+		AssistantBuilderSession,
+		"kind" | "preamble" | "targetName" | "tools"
+	>,
 	targetId: string,
 	snapshot: string
 ): string {
-	return kind === "agent"
-		? agentPreamble(targetId, snapshot)
-		: workflowPreamble(targetId, snapshot);
+	if (session.kind === "agent") {
+		return agentPreamble(targetId, snapshot);
+	}
+	if (session.kind === "workflow") {
+		return workflowPreamble(targetId, snapshot);
+	}
+	const body = session.preamble
+		? session.preamble
+				.replaceAll("{{targetId}}", targetId)
+				.replaceAll("{{snapshot}}", snapshot)
+		: appSurfaceFallback(session.targetName || session.kind, targetId);
+	const tools = session.tools?.filter((t) => t.trim().length > 0) ?? [];
+	const toolLine =
+		tools.length > 0
+			? `\n\nUse these tools to act on it: ${tools.join(", ")}. Only call a tool that actually exists.`
+			: "";
+	// A custom preamble that never mentioned the snapshot still gets it — the
+	// surface published it for a reason.
+	const snapshotLine = session.preamble?.includes("{{snapshot}}")
+		? ""
+		: `\n\nCurrent state:\n${snapshot}`;
+	return `${body}${toolLine}${snapshotLine}`;
+}
+
+/** Neutral instructions for an app-defined surface that registered without a
+ *  preamble — better than borrowing another builder's wording. */
+function appSurfaceFallback(name: string, targetId: string): string {
+	return [
+		`You are helping the user with "${name}" (id "${targetId}") inside Ryu.`,
+		"Answer about what they currently have open, and make the changes they ask",
+		"for using the tools available to you. Keep replies short and confirm what",
+		"changed.",
+	].join(" ");
 }
 
 /** Prepend the preamble to the first user message's first text part (outgoing only). */

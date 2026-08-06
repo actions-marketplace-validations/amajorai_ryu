@@ -48,6 +48,25 @@ use crate::firewall::FirewallScanner;
 /// FIX 2). [`normalize_overlay`] strips it from every org/agent overlay.
 const NODE_ONLY_WRAP_FIELD: &str = "wrap_untrusted_tool_results";
 
+/// Every field name [`apply_overlay`] consults its `locked` set for. Passed as
+/// the whole lock set when applying the REQUEST scope, which is what makes that
+/// scope additive-only by construction rather than by review — see
+/// [`FirewallResolver::resolve_with_request`]. Kept next to `apply_overlay` in
+/// spirit: adding a lockable dial there means adding it here, or the new dial
+/// silently becomes loosenable from a request header.
+const ALL_LOCKABLE_FIELDS: &[&str] = &[
+    "enabled",
+    "scan_inbound",
+    "scan_outbound",
+    "log_detections",
+    "redact_pii",
+    "redact_secrets",
+    "wrap_untrusted_tool_results",
+    "policy",
+    "alert",
+    "inspector",
+];
+
 /// The org + per-agent firewall overlays a hosted control plane cascades and
 /// hands the gateway on a resolved request (see `policy::EffectivePolicy`). The
 /// gateway does NOT re-cascade the org side — it only adds the node base (below)
@@ -209,6 +228,33 @@ impl FirewallResolver {
         agent_id: Option<&str>,
         bundle: Option<&PolicyBundle>,
     ) -> FirewallConfig {
+        self.resolve_with_request(org_id, agent_id, bundle, None)
+    }
+
+    /// [`Self::resolve`] plus a fourth, narrowest **request** scope: the node's
+    /// own extra firewall rules, arriving per request on `x-ryu-node-routing`
+    /// (already clamped by `pipeline::node_routing::clamp_firewall`).
+    ///
+    /// The additive-only rule is enforced MECHANICALLY, not by review: the
+    /// request overlay is applied with `locked` containing EVERY field name, so
+    /// every scalar goes through the same `stricter_policy` / `louder_alert` /
+    /// `stricter_inspector` / locked-`apply_bool` paths a narrower scope already
+    /// faces for an admin-locked field. Loosening is therefore structurally
+    /// impossible rather than merely unintended — a request overlay cannot
+    /// disable a node-enabled firewall, cannot downgrade Block to Warn, and
+    /// cannot quiet an alert tier. `custom_patterns` append, as they do at every
+    /// other scope: that is the whole point of the knob.
+    ///
+    /// The request scope contributes NO locks (its `locked_fields` was cleared
+    /// upstream): it is the leaf, so a lock there would freeze nothing while
+    /// still perturbing the cache key.
+    pub fn resolve_with_request(
+        &self,
+        org_id: Option<&str>,
+        agent_id: Option<&str>,
+        bundle: Option<&PolicyBundle>,
+        request_overlay: Option<&FirewallOverlay>,
+    ) -> FirewallConfig {
         let mut resolved = self.node_base();
         // Locks accumulate from broader scopes; an overlay's own locks apply only
         // to scopes narrower than it, so we grow the set AFTER applying each.
@@ -242,6 +288,19 @@ impl FirewallResolver {
             }
         }
 
+        // ── request scope (new leaf): additive only, by construction ───────────
+        // Normalized here too (defense in depth — the clamp already did it), and
+        // applied under EVERY field locked so no dial can be loosened. Its own
+        // locks are not unioned in: a leaf lock binds nothing.
+        if let Some(ov) = request_overlay {
+            let ov = normalize_overlay(ov);
+            let all_fields: HashSet<String> = ALL_LOCKABLE_FIELDS
+                .iter()
+                .map(|f| (*f).to_string())
+                .collect();
+            apply_overlay(&mut resolved, &ov, &all_fields);
+        }
+
         // Finalize the union of locks. Sort so a stable serialization → a stable
         // cache-key hash (a HashSet's iteration order is nondeterministic and
         // would defeat scanner deduplication).
@@ -255,12 +314,50 @@ impl FirewallResolver {
     /// building (and caching) one on a miss. Identical resolved configs share a
     /// single scanner. Recovers from a poisoned cache lock by building a fresh,
     /// uncached scanner (matching `with_firewall`'s fail-open discipline).
+    /// Kept as the three-scope shape (and used by this module's tests) even
+    /// though the pipeline now goes through [`Self::scanner_for_request`]: it is
+    /// the honest signature for "resolve the cascade, no per-request input", and
+    /// collapsing it into the four-arg form would push a `None` into every caller
+    /// for no gain.
+    #[allow(dead_code)]
     pub fn scanner_for(
         &self,
         org_id: Option<&str>,
         agent_id: Option<&str>,
         bundle: Option<&PolicyBundle>,
     ) -> Arc<FirewallScanner> {
+        self.scanner_for_request(org_id, agent_id, bundle, None)
+    }
+
+    /// [`Self::scanner_for`] with the per-request overlay scope
+    /// ([`Self::resolve_with_request`]).
+    ///
+    /// An overlay-bearing resolution is built fresh and **never cached**. That is
+    /// the whole mitigation for the growth vector this scope opens: the cache is
+    /// keyed by resolved-config hash and invalidated only wholesale, so one
+    /// `rgw_` bearer rotating `custom_patterns` per request would otherwise grow
+    /// it without bound. A capacity cap plus an eviction policy would work too,
+    /// but not caching at all needs no eviction semantics and keeps this file's
+    /// "whole-cache invalidation is trivially correct" posture intact.
+    ///
+    /// The cost is honestly stated: this rebuilds the WHOLE scanner, curated
+    /// pattern sets included, not just the request's own few patterns — the
+    /// curated sets dominate. That is paid only by requests that actually send a
+    /// firewall overlay (a `None` here takes the cached path unchanged), so it is
+    /// opt-in per request rather than a tax on the hot path. If overlay-bearing
+    /// traffic ever stops being rare, the fix is a bounded LRU here, not a return
+    /// to unbounded caching.
+    pub fn scanner_for_request(
+        &self,
+        org_id: Option<&str>,
+        agent_id: Option<&str>,
+        bundle: Option<&PolicyBundle>,
+        request_overlay: Option<&FirewallOverlay>,
+    ) -> Arc<FirewallScanner> {
+        if request_overlay.is_some() {
+            let cfg = self.resolve_with_request(org_id, agent_id, bundle, request_overlay);
+            return Arc::new(FirewallScanner::new_scoped(cfg));
+        }
         let cfg = self.resolve(org_id, agent_id, bundle);
         let key = config_hash(&cfg);
 
@@ -591,6 +688,126 @@ mod tests {
             locked_fields: Vec::new(),
             ..FirewallConfig::default()
         }
+    }
+
+    // ── request scope (`x-ryu-node-routing`): additive only ──────────────────
+    //
+    // The request scope is the one scope fed by an untrusted bearer, so these
+    // assert the mechanism (locked = every field), not just the outcome. An
+    // `unlocked_base` is used deliberately: it strips the DEFAULT locks, so a
+    // pass here proves the request-scope lock set is doing the work rather than
+    // the node's own default locks masking a loosening bug.
+
+    #[test]
+    fn a_request_overlay_cannot_disable_a_node_enabled_firewall() {
+        let r = FirewallResolver::new(unlocked_base());
+        let ov = FirewallOverlay {
+            enabled: Some(false),
+            scan_inbound: Some(false),
+            redact_pii: Some(false),
+            ..Default::default()
+        };
+        let cfg = r.resolve_with_request(None, None, None, Some(&ov));
+        assert!(cfg.enabled, "a request must not switch the firewall off");
+        assert!(cfg.scan_inbound, "nor stop inbound scanning");
+        assert!(cfg.redact_pii, "nor turn redaction off");
+    }
+
+    #[test]
+    fn a_request_overlay_cannot_downgrade_block_to_warn() {
+        let r = FirewallResolver::new(unlocked_base());
+        let ov = FirewallOverlay {
+            policy: Some(FirewallPolicy::WarnAndContinue),
+            alert: Some(crate::config::AlertTier::Silent),
+            ..Default::default()
+        };
+        let cfg = r.resolve_with_request(None, None, None, Some(&ov));
+        assert_eq!(cfg.policy, FirewallPolicy::Block);
+        assert_eq!(cfg.alert, unlocked_base().alert, "nor quiet the alert tier");
+    }
+
+    #[test]
+    fn a_request_overlay_may_still_tighten() {
+        // Additive-only is not read-only: narrowing is the point of the knob.
+        let mut node = unlocked_base();
+        node.policy = FirewallPolicy::WarnAndContinue;
+        node.redact_secrets = false;
+        let r = FirewallResolver::new(node);
+        let ov = FirewallOverlay {
+            policy: Some(FirewallPolicy::Block),
+            redact_secrets: Some(true),
+            ..Default::default()
+        };
+        let cfg = r.resolve_with_request(None, None, None, Some(&ov));
+        assert_eq!(cfg.policy, FirewallPolicy::Block);
+        assert!(cfg.redact_secrets);
+    }
+
+    #[test]
+    fn a_request_overlay_appends_custom_patterns() {
+        let r = FirewallResolver::new(unlocked_base());
+        let ov = FirewallOverlay {
+            custom_patterns: vec![CustomPattern {
+                name: "acme_internal_id".into(),
+                regex: r"ACME-\d{6}".into(),
+                kind: CustomPatternKind::Pii,
+            }],
+            ..Default::default()
+        };
+        let cfg = r.resolve_with_request(None, None, None, Some(&ov));
+        assert_eq!(cfg.custom_patterns.len(), 1);
+        assert_eq!(cfg.custom_patterns[0].name, "acme_internal_id");
+    }
+
+    #[test]
+    fn a_request_overlay_contributes_no_locks_to_the_resolved_config() {
+        // Request scope is the leaf: a lock there binds nothing, and would only
+        // perturb the cache key. (The clamp clears `locked_fields` upstream; this
+        // asserts the resolver does not re-introduce them either.)
+        let r = FirewallResolver::new(unlocked_base());
+        let ov = FirewallOverlay {
+            redact_pii: Some(true),
+            locked_fields: vec!["redact_pii".into()],
+            ..Default::default()
+        };
+        let cfg = r.resolve_with_request(None, None, None, Some(&ov));
+        assert!(cfg.locked_fields.is_empty());
+    }
+
+    #[test]
+    fn overlay_bearing_resolutions_never_enter_the_scanner_cache() {
+        // The growth bound. `scanner_cache` is keyed by resolved-config hash and
+        // invalidated only wholesale, so caching client-supplied patterns would
+        // let one bearer grow it without limit by rotating them per request.
+        let r = FirewallResolver::new(unlocked_base());
+        let cached_before = r.scanner_cache.read().expect("cache lock").len();
+
+        for i in 0..64 {
+            let ov = FirewallOverlay {
+                custom_patterns: vec![CustomPattern {
+                    name: format!("p{i}"),
+                    regex: format!("token-{i}"),
+                    kind: CustomPatternKind::Secret,
+                }],
+                ..Default::default()
+            };
+            let _ = r.scanner_for_request(None, None, None, Some(&ov));
+        }
+
+        assert_eq!(
+            r.scanner_cache.read().expect("cache lock").len(),
+            cached_before,
+            "64 distinct request overlays must not add 64 cache entries"
+        );
+    }
+
+    #[test]
+    fn no_request_overlay_still_shares_the_cached_scanner() {
+        // The uncached branch must not cost the common path its dedup.
+        let r = FirewallResolver::new(base());
+        let s1 = r.scanner_for_request(None, None, None, None);
+        let s2 = r.scanner_for_request(None, None, None, None);
+        assert!(Arc::ptr_eq(&s1, &s2));
     }
 
     #[test]

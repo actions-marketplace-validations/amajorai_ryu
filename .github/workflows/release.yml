@@ -244,6 +244,17 @@ jobs:
       # execute with the key in env; the action offers no hook to pre-run that in a
       # key-free step, so this residual cannot be closed at the workflow layer.
       - run: bun install
+      # Stamp the release channel onto the bundle's OS-registered identity —
+      # `productName` becomes "Ryu (Nightly)" / "(Canary)" / "(Beta)" /
+      # "(Research Preview)", and the icon is re-tinted per channel. Derived from
+      # the version already stamped above, so there is no second place to keep in
+      # sync. Runs AFTER `bun install` because the icon expansion shells out to the
+      # Tauri CLI from node_modules, and BEFORE tauri-action because bundle names
+      # are read at bundle time. It never touches `version`, `mainBinaryName` or
+      # `identifier` — see the script header for why each is off-limits.
+      - name: Brand the bundle for its release channel
+        shell: bash
+        run: node scripts/release/channel-brand.mjs
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

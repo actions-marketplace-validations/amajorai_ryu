@@ -267,7 +267,7 @@ export function HardPaywallPage({ onApplyLicenseKey }: HardPaywallPageProps) {
 							classNames={{
 								item: "border-0 bg-transparent shadow-none",
 								description: "text-foreground leading-normal",
-								title: "font-medium",
+								title: "truncate font-medium",
 							}}
 							collapsible
 							items={secondaryPlanItems}

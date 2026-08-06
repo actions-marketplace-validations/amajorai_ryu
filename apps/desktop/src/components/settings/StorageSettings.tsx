@@ -39,6 +39,11 @@ import {
 	type ValidateResult,
 	validateDataPath,
 } from "@/src/lib/api/data-path.ts";
+import {
+	fetchParseCapability,
+	type ParseCapability,
+} from "@/src/lib/api/documents.ts";
+import { formatBytes, NODE_UPLOAD_MAX_BYTES } from "@/src/lib/api/spaces.ts";
 
 /** Profiles a copy can target.
  *
@@ -63,6 +68,87 @@ function humanBytes(n: number): string {
 interface PickedTarget {
 	path: string;
 	validation: ValidateResult;
+}
+
+/**
+ * The node's upload ceiling. Read-only, and read FROM THE NODE.
+ *
+ * It lives on the Storage tab because it is a fact about what this machine will
+ * accept onto its own disk — the same subject as the data folder above it. It
+ * used to be a card on a separate "Document parsing" tab, which also carried a
+ * second copy of the `document.parse` provider picker; that picker is the node
+ * dropdown's Toolkits row, the same generic surface every other swappable
+ * capability (`web.extract`, `web.search`, …) is bound from, so the duplicate
+ * went and this row moved here.
+ *
+ * ## The number this must not print
+ *
+ * It once printed `MAX_FILE_BYTES` (200 MiB) as "Maximum file in a Space", a
+ * promise the node would not keep twice over: that constant named a route no
+ * surface in this app calls, and the route could not have honoured it anyway
+ * (registered with no `DefaultBodyLimit`, so axum's implicit 2 MiB cut in first —
+ * and its body is base64, so the true ceiling was ~1.5 MiB of file). Every upload
+ * a user can perform — chat attachment, editor paste, `ui.uploadFile` — goes to
+ * `POST /api/uploads` and stops at {@link NODE_UPLOAD_MAX_BYTES}, 32 MiB.
+ *
+ * Core has since converged the two (`MAX_FILE_BYTES = uploads::MAX_UPLOAD_BYTES`,
+ * and `/api/spaces/:id/files` now layers `SPACE_FILE_BODY_LIMIT`), so every
+ * reachable route stops at the same number. That is a reason this row is no
+ * longer WRONG, not a reason to hardcode it: it converged once and could diverge
+ * again, and a row that reads the node cannot be wrong the next time it moves.
+ * So the constant is the fallback for a failed read ONLY, and the row says so
+ * when it is used.
+ */
+function UploadCeilingSection() {
+	const getNode = useActiveNodeGetter();
+	const [capability, setCapability] = useState<ParseCapability | null>(null);
+
+	useEffect(() => {
+		let cancelled = false;
+		// Failure-tolerant: this probes the bound parse sidecar (2s budget, and it
+		// never wakes a sleeping one), so it is allowed to come back empty without
+		// taking the Storage tab down with it.
+		fetchParseCapability(toTarget(getNode()))
+			.then((next) => {
+				if (!cancelled) {
+					setCapability(next);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setCapability(null);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [getNode]);
+
+	const reported = capability?.maxInputBytes ?? 0;
+	const limit = reported > 0 ? reported : NODE_UPLOAD_MAX_BYTES;
+
+	return (
+		<SettingsSection
+			caption="What this node accepts onto its disk. Files are kept as content-addressed blobs inside the data folder above."
+			title="Upload limits"
+		>
+			<SettingsGroup>
+				<SettingsItem
+					actions={
+						<span className="text-foreground text-sm">
+							{formatBytes(limit)}
+						</span>
+					}
+					description={
+						reported > 0
+							? "Reported by this node. Chat attachments, files added to a Space and images pasted into a page all go through the same upload route, and the document parser accepts the same size, so one number governs all of them."
+							: "This node did not report its limit, so this is the desktop's built-in default — the real ceiling may differ."
+					}
+					title="Maximum file you can upload"
+				/>
+			</SettingsGroup>
+		</SettingsSection>
+	);
 }
 
 interface ProgressState {
@@ -468,6 +554,8 @@ export function StorageSettings() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+
+			<UploadCeilingSection />
 
 			<AlertDialog
 				onOpenChange={(nextOpen) => {

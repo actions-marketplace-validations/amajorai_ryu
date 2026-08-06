@@ -12,7 +12,7 @@
 // name, one-line description, and a stability badge when the listing is unfinished.
 // The platform-surface badges used to sit here too and were the one thing that made
 // a two-column grid of rows look busy — six chips under every app, mostly identical.
-// They now live in the preview's meta strip (`DetailMetaStrip`), which is where the
+// They now live in the preview's stat strip (`ListingStatStrip`), which is where the
 // rest of the "will this work for me?" metadata already is.
 
 import {

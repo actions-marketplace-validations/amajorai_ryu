@@ -15,6 +15,10 @@ import { readPersistedNumber } from "@/src/hooks/usePersistedNumber.ts";
 import { readStartupBehavior } from "@/src/hooks/useStartupBehavior.ts";
 import { readTabOpenBehavior } from "@/src/hooks/useTabOpenBehavior.ts";
 import { hasBillingAuth } from "@/src/lib/api/billing.ts";
+import {
+	DASHBOARD_DEFAULT_PATH,
+	LEGACY_DASHBOARD_PATH,
+} from "@/src/lib/dashboards/app.ts";
 import { effectivePlan } from "@/src/lib/gating/planCapBridge.ts";
 import { stampRecentFromPath } from "@/src/lib/library.ts";
 import {
@@ -59,6 +63,11 @@ export interface Tab {
 	icon?: GlyphValue;
 	id: string;
 	initialAgent?: string;
+	/** Open the chat already in temporary ("ghost") mode — the launchpad composer's
+	    "+" offers the toggle before a thread exists, and the pick has to survive the
+	    hop into the new tab or it would silently save the thread anyway.
+	    Runtime-only. */
+	initialGhost?: boolean;
 	/** One-shot image attachments staged on the launchpad composer, carried into
 	    the fresh chat tab so files picked before a conversation exists aren't lost.
 	    Runtime-only (blob data URLs) — never persisted across a session restart. */
@@ -239,6 +248,7 @@ interface TabsContextValue {
 			initialSubmit?: boolean;
 			initialImages?: AttachedImage[];
 			initialAgent?: string;
+			initialGhost?: boolean;
 			initialProject?: string;
 			/** Entity glyph to show in the tab strip (mirrors the sidebar). */
 			icon?: GlyphValue;
@@ -348,7 +358,7 @@ export function useTabsContext(): TabsContextValue {
 }
 
 const PATH_TITLES: Record<string, string> = {
-	"/home": "Home",
+	[DASHBOARD_DEFAULT_PATH]: "Home",
 	"/chat": "New chat",
 	"/agents": "Agents",
 	"/library": "Library",
@@ -638,6 +648,14 @@ interface StartupState {
 	tabs: Tab[];
 }
 
+/** Rewrite a path that a previous version persisted but no route answers to any
+ *  more. Only the Home dashboard so far: it moved off the shell's `/home` to the
+ *  path `@ryu/dashboards` declares, so a restored session would otherwise revive a
+ *  tab that resolves to "App not enabled". */
+function migrateLegacyPath(path: string): string {
+	return path === LEGACY_DASHBOARD_PATH ? DASHBOARD_DEFAULT_PATH : path;
+}
+
 function restoreSession(): StartupState | null {
 	try {
 		const raw = localStorage.getItem(SESSION_TABS_KEY);
@@ -650,7 +668,7 @@ function restoreSession(): StartupState | null {
 		}
 		const mapped: Tab[] = parsed.tabs.map((t) => ({
 			id: makeTabId(),
-			path: t.path,
+			path: migrateLegacyPath(t.path),
 			title: t.title,
 			conversationId: t.conversationId,
 			initialAgent: t.initialAgent,
@@ -707,7 +725,7 @@ function computeStartupState(): StartupState {
 	if (behavior === "home") {
 		const id = makeTabId();
 		return {
-			tabs: [{ id, path: "/home", title: "Home" }],
+			tabs: [{ id, path: DASHBOARD_DEFAULT_PATH, title: "Home" }],
 			activeId: id,
 			splits: [],
 		};
@@ -887,6 +905,7 @@ export function TabsProvider({
 				initialSubmit?: boolean;
 				initialImages?: AttachedImage[];
 				initialAgent?: string;
+				initialGhost?: boolean;
 				initialProject?: string;
 				icon?: GlyphValue;
 			}
@@ -1007,6 +1026,7 @@ export function TabsProvider({
 					initialSubmit: opts?.initialSubmit,
 					initialImages: opts?.initialImages,
 					initialAgent: opts?.initialAgent,
+					initialGhost: opts?.initialGhost,
 					initialProject: opts?.initialProject,
 					// Force a fresh mount so the page re-seeds from the new props
 					// (otherwise ChatPage keeps rendering the previous thread).
@@ -1043,6 +1063,7 @@ export function TabsProvider({
 				initialSubmit: opts?.initialSubmit,
 				initialImages: opts?.initialImages,
 				initialAgent: opts?.initialAgent,
+				initialGhost: opts?.initialGhost,
 				initialProject: opts?.initialProject,
 			});
 			setTabs((prev) => {

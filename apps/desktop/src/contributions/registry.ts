@@ -23,6 +23,8 @@ import type { ReactNode } from "react";
 export interface RouteTab {
 	conversationId?: string;
 	initialAgent?: string;
+	/** Open the seeded chat in temporary mode (the launchpad composer's pick). */
+	initialGhost?: boolean;
 	/** Seeded chat attachments. Kept as `unknown[]` so the registry has no
 	 *  coupling to the desktop's `AttachedImage` type; the `/chat` built-in casts
 	 *  it back at the call site (see `builtins.ts`). */

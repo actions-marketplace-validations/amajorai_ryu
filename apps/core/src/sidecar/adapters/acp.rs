@@ -3409,6 +3409,32 @@ pub fn binary_in_path(binary: &str) -> bool {
     false
 }
 
+/// Resolve `binary` to its real on-disk path by walking `PATH` and following
+/// symlinks.
+///
+/// `binary_in_path` answers *whether* a CLI is installed; this answers *which
+/// install owns it*, which is what decides whether Ryu can upgrade it. A global
+/// npm install lands as `<prefix>/bin/x` symlinked into `lib/node_modules/...`,
+/// so a resolved path containing a `node_modules` component is npm-managed and
+/// `npm install -g <pkg>@latest` upgrades it. Anything else (a vendor's own
+/// installer, homebrew, volta/mise, a curl script) is not ours to move.
+pub fn resolve_in_path(binary: &str) -> Option<std::path::PathBuf> {
+    let path_var = std::env::var("PATH").ok()?;
+    let ext = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    for dir in std::env::split_paths(&path_var) {
+        for candidate in [dir.join(format!("{binary}{ext}")), dir.join(binary)] {
+            if candidate.is_file() {
+                return Some(std::fs::canonicalize(&candidate).unwrap_or(candidate));
+            }
+        }
+    }
+    None
+}
+
 /// On Windows, `npx` is a `.cmd` batch file that `Command::new` can't spawn directly.
 /// Wrapping with `cmd /c` ensures the shell resolves it correctly.
 #[cfg(target_os = "windows")]

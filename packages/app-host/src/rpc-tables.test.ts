@@ -179,6 +179,14 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"shell.registerCommand": "shell.integrate",
 	"shell.registerTabIcon": "shell.integrate",
 	"shell.eventsSubscribe": "shell.integrate",
+	// Assistant bridge — added deliberately, not regenerated: an app publishes
+	// page context to the one global "Ask Ryu" surface and may take it over while
+	// its own page is open. One capability for the whole family.
+	"assistant.publishContext": "assistant.context",
+	"assistant.clearContext": "assistant.context",
+	"assistant.registerSurface": "assistant.context",
+	"assistant.clearSurface": "assistant.context",
+	"assistant.open": "assistant.context",
 };
 
 const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
@@ -211,6 +219,7 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 	"meetings:crud": "meetings.crud",
 	"skills:crud": "skills.crud",
 	"shell:integrate": "shell.integrate",
+	"assistant:context": "assistant.context",
 };
 
 const OLD_STREAMING_METHODS: readonly string[] = [

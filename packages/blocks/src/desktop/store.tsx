@@ -15,27 +15,25 @@
 // generic catalog grid via these, which faithfully matches the section shell.
 
 import {
-	ArrowUp01Icon,
 	Cancel01Icon,
 	Search01Icon,
-	SlidersHorizontalIcon,
 	StarIcon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Badge } from "@ryu/ui/components/badge";
-import { Button } from "@ryu/ui/components/button";
+import { Badge } from "@ryu/ui/components/badge.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Empty,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
-} from "@ryu/ui/components/empty";
-import { Icon } from "@ryu/ui/components/icon";
-import { Input } from "@ryu/ui/components/input";
-import { Spinner } from "@ryu/ui/components/spinner";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/empty.tsx";
+import { Icon } from "@ryu/ui/components/icon.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 export interface StoreSectionTab {
@@ -70,21 +68,108 @@ const noop = () => {
 };
 
 /**
- * Bottom-fixed filter/sort bar for the Store. Search and section tabs live in
- * the left list column ({@link StoreListHeader} in desktop); this bar only
- * exposes the expandable filters panel.
+ * The section tabs for a multi-section shell (the Store, the Library), rendered
+ * INLINE at the top of the page as an ordinary element.
+ *
+ * This used to be a floating, bottom-fixed pill bar over a translucent
+ * `bg-muted/70` backdrop, with the search field and the filter panel folded into
+ * it. That bar had to be discovered, it covered the last row of whatever was
+ * behind it, its icon-only pills only revealed their labels on hover, and it grew
+ * every time an app registered a section — which it now does, so the list is
+ * open-ended by design. Tabs belong in the page flow, at the top, labelled: they
+ * scroll with a long list instead of wrapping into a floating blob, and the
+ * controls that used to hide inside them (search, source, filters) are ordinary
+ * toolbar buttons beside the content they act on.
+ *
+ * A thin divider is drawn wherever `group` changes, so clusters still read as
+ * clusters without a second component.
  */
-export function StoreFilterBar({
-	panel,
-	panelLabel = "Filters",
-	panelIcon = SlidersHorizontalIcon,
+export function StoreSectionTabs({
+	sections,
+	active,
+	onSelect = noop,
+	className,
 }: {
-	panel?: ReactNode;
-	panelLabel?: string;
-	panelIcon?: IconSvgElement;
+	active: string;
+	className?: string;
+	onSelect?: (value: string) => void;
+	sections: StoreSectionTab[];
+}) {
+	return (
+		<div
+			aria-label="Sections"
+			className={cn(
+				"scrollbar-none flex w-full items-center gap-1 overflow-x-auto",
+				className
+			)}
+			role="tablist"
+		>
+			{sections.map((s, i) => {
+				const isActive = s.value === active;
+				const prev = i > 0 ? sections[i - 1] : undefined;
+				const showDivider = Boolean(prev && prev.group !== s.group);
+				return (
+					<Fragment key={s.value}>
+						{showDivider ? (
+							<span
+								aria-hidden
+								className="mx-1 h-4 w-px shrink-0 self-center bg-border"
+							/>
+						) : null}
+						<button
+							aria-selected={isActive}
+							className={cn(
+								"flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 font-medium text-muted-foreground text-sm outline-none transition-colors",
+								"hover:bg-accent hover:text-foreground",
+								"focus-visible:ring-2 focus-visible:ring-ring",
+								isActive && "bg-accent text-foreground"
+							)}
+							data-active={isActive}
+							onClick={() => onSelect(s.value)}
+							role="tab"
+							type="button"
+						>
+							<SectionTabIcon icon={s.icon} />
+							<span className="whitespace-nowrap">{s.label}</span>
+						</button>
+					</Fragment>
+				);
+			})}
+		</div>
+	);
+}
+
+/**
+ * A search control shaped like the toolbar buttons beside it: a compact button
+ * that expands into its input in place, and collapses again on Escape / an
+ * outside click / blur while empty.
+ *
+ * A permanently-open full-width field is the wrong default for these pages — most
+ * visits browse rather than search, and the field pushed the source and filter
+ * buttons onto their own row. Expanding in place keeps one toolbar row and keeps
+ * a non-empty query visible (it never auto-collapses while it has text).
+ */
+export function StoreSearchButton({
+	value,
+	onChange,
+	placeholder = "Search…",
+	className,
+}: {
+	className?: string;
+	onChange: (value: string) => void;
+	placeholder?: string;
+	value: string;
 }) {
 	const [open, setOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
+	const inputRef = useRef<HTMLInputElement>(null);
+	const expanded = open || value.length > 0;
+
+	useEffect(() => {
+		if (open) {
+			inputRef.current?.focus();
+		}
+	}, [open]);
 
 	useEffect(() => {
 		if (!open) {
@@ -108,274 +193,49 @@ export function StoreFilterBar({
 		};
 	}, [open]);
 
-	if (!panel) {
-		return null;
-	}
-
 	return (
-		<div
-			className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 px-4 py-3"
-			ref={rootRef}
-		>
-			<div
-				className={cn(
-					"pointer-events-auto w-full max-w-3xl origin-bottom overflow-hidden rounded-2xl bg-muted/70 shadow-lg backdrop-blur-md transition-all duration-300 ease-out",
-					open
-						? "max-h-72 translate-y-0 opacity-100"
-						: "pointer-events-none max-h-0 translate-y-2 opacity-0"
-				)}
-			>
-				{panel}
-			</div>
-
-			<button
-				aria-expanded={open}
-				aria-label={panelLabel}
-				className={cn(
-					"pointer-events-auto flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-muted/70 px-3 font-medium text-foreground/60 text-sm shadow-lg outline-none backdrop-blur-md transition-colors",
-					"hover:bg-muted hover:text-foreground",
-					"focus-visible:ring-2 focus-visible:ring-ring",
-					open && "bg-foreground text-background hover:bg-foreground/90"
-				)}
+		<div className={cn("flex items-center", className)} ref={rootRef}>
+			<Button
+				aria-label="Search"
+				className="gap-1.5"
 				onClick={() => setOpen((prev) => !prev)}
-				type="button"
+				size="sm"
+				variant={expanded ? "secondary" : "ghost"}
 			>
-				<HugeiconsIcon className="size-4 shrink-0" icon={panelIcon} />
-				<span>{panelLabel}</span>
-				<HugeiconsIcon
-					className={cn(
-						"size-3.5 shrink-0 transition-transform duration-300",
-						open && "rotate-180"
-					)}
-					icon={ArrowUp01Icon}
-				/>
-			</button>
-		</div>
-	);
-}
-
-/**
- * The Store shell's section tab nav, rendered as a floating "expandable action
- * bar" (beUI-style): a centered, rounded pill that floats above the section
- * content. Each section is an icon-only button that expands to reveal its label
- * on hover/focus; the active section always shows its label. The label width
- * tweens via the CSS `grid-template-columns` 0fr→1fr trick — no JS or
- * framer-motion, which the shared block boundary deliberately avoids.
- */
-export function StoreSectionNav({
-	sections,
-	active,
-	onSelect = noop,
-	search,
-	panel,
-	panelLabel = "Filters",
-	panelIcon = SlidersHorizontalIcon,
-}: {
-	sections: StoreSectionTab[];
-	active: string;
-	onSelect?: (value: string) => void;
-	/** Optional inline, collapsible search folded into the bar itself. */
-	search?: {
-		value: string;
-		onChange: (value: string) => void;
-		placeholder?: string;
-	};
-	/**
-	 * Optional "additional section" (filters / sort / view / CTA) that morphs up
-	 * above the bar when its toggle is pressed — beUI-style expandable tabs.
-	 */
-	panel?: ReactNode;
-	panelLabel?: string;
-	panelIcon?: IconSvgElement;
-}) {
-	// Menu-like: only one expandable region is open at a time.
-	const [mode, setMode] = useState<"none" | "search" | "panel">("none");
-	const rootRef = useRef<HTMLDivElement>(null);
-	const searchInputRef = useRef<HTMLInputElement>(null);
-
-	const searchOpen = mode === "search";
-	const panelOpen = mode === "panel";
-
-	// Escape or an outside click collapses the expanded region.
-	useEffect(() => {
-		if (mode === "none") {
-			return;
-		}
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				setMode("none");
-			}
-		};
-		const onPointer = (e: MouseEvent) => {
-			if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-				setMode("none");
-			}
-		};
-		document.addEventListener("keydown", onKey);
-		document.addEventListener("mousedown", onPointer);
-		return () => {
-			document.removeEventListener("keydown", onKey);
-			document.removeEventListener("mousedown", onPointer);
-		};
-	}, [mode]);
-
-	// Focus the field the moment the inline search expands.
-	useEffect(() => {
-		if (searchOpen) {
-			searchInputRef.current?.focus();
-		}
-	}, [searchOpen]);
-
-	// Switching sections swaps the whole toolbar (each section owns its search +
-	// filters), so collapse any open region — a panel/search left open from the
-	// previous tab shouldn't linger over the new one. `active` is intentionally a
-	// dep even though the body doesn't read it: the reset fires on tab change.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: run the reset when the active section changes.
-	useEffect(() => {
-		setMode("none");
-	}, [active]);
-
-	return (
-		<div
-			className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 px-4 py-3"
-			ref={rootRef}
-		>
-			{panel ? (
-				<div
-					className={cn(
-						"pointer-events-auto w-full max-w-3xl origin-bottom overflow-hidden rounded-2xl bg-muted/70 shadow-lg backdrop-blur-md transition-all duration-300 ease-out",
-						panelOpen
-							? "max-h-72 translate-y-0 opacity-100"
-							: "pointer-events-none max-h-0 translate-y-2 opacity-0"
-					)}
-				>
-					{panel}
-				</div>
-			) : null}
-
+				<HugeiconsIcon className="size-3.5" icon={Search01Icon} />
+				{expanded ? null : "Search"}
+			</Button>
 			<div
-				aria-label="Sections"
-				className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1 rounded-full bg-muted/70 p-1.5 shadow-lg backdrop-blur-md"
-				role="tablist"
+				className={cn(
+					"grid transition-[grid-template-columns] duration-200 ease-out",
+					expanded ? "grid-cols-[1fr]" : "grid-cols-[0fr]"
+				)}
 			>
-				{sections.map((s, i) => {
-					const isActive = s.value === active;
-					const prev = i > 0 ? sections[i - 1] : undefined;
-					const showDivider = Boolean(prev && prev.group !== s.group);
-					return (
-						<Fragment key={s.value}>
-							{showDivider ? (
-								<span
-									aria-hidden
-									className="mx-0.5 h-5 w-px shrink-0 self-center bg-border/60"
-								/>
-							) : null}
-							<button
-								aria-label={s.label}
-								aria-selected={isActive}
-								className={cn(
-									"group/action relative flex h-9 items-center rounded-full px-2.5 font-medium text-foreground/60 text-sm outline-none transition-colors",
-									"hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10",
-									"focus-visible:ring-2 focus-visible:ring-ring",
-									isActive &&
-										"bg-foreground text-background hover:bg-foreground/90 hover:text-background dark:bg-white dark:text-black dark:hover:bg-white/90"
-								)}
-								data-active={isActive}
-								onClick={() => onSelect(s.value)}
-								role="tab"
-								title={s.label}
-								type="button"
-							>
-								<SectionTabIcon icon={s.icon} />
-								<span
-									className={cn(
-										"grid transition-[grid-template-columns,opacity] duration-300 ease-out",
-										isActive
-											? "grid-cols-[1fr] opacity-100"
-											: "grid-cols-[0fr] opacity-0 group-hover/action:grid-cols-[1fr] group-hover/action:opacity-100 group-focus-visible/action:grid-cols-[1fr] group-focus-visible/action:opacity-100"
-									)}
-								>
-									<span className="min-w-0 overflow-hidden whitespace-nowrap pl-2">
-										{s.label}
-									</span>
-								</span>
-							</button>
-						</Fragment>
-					);
-				})}
-
-				{search || panel ? (
-					<span
-						aria-hidden
-						className="mx-0.5 h-5 w-px shrink-0 self-center bg-border/60"
+				<div className="min-w-0 overflow-hidden">
+					<Input
+						aria-hidden={!expanded}
+						className="h-8 w-56 max-w-[40vw] border-none bg-transparent shadow-none focus-visible:ring-0"
+						onChange={(e) => onChange(e.target.value)}
+						placeholder={placeholder}
+						ref={inputRef}
+						tabIndex={expanded ? 0 : -1}
+						value={value}
 					/>
-				) : null}
-
-				{search ? (
-					<div className="flex items-center">
-						<button
-							aria-label={searchOpen ? "Close search" : "Search"}
-							className={cn(
-								"flex h-9 shrink-0 items-center justify-center rounded-full px-2.5 text-foreground/60 outline-none transition-colors",
-								"hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10",
-								"focus-visible:ring-2 focus-visible:ring-ring",
-								searchOpen && "text-foreground"
-							)}
-							onClick={() => setMode(searchOpen ? "none" : "search")}
-							type="button"
-						>
-							<HugeiconsIcon
-								className="size-4"
-								icon={searchOpen ? Cancel01Icon : Search01Icon}
-							/>
-						</button>
-						<div
-							className={cn(
-								"grid transition-[grid-template-columns] duration-300 ease-out",
-								searchOpen ? "grid-cols-[1fr]" : "grid-cols-[0fr]"
-							)}
-						>
-							<div className="min-w-0 overflow-hidden">
-								<Input
-									aria-hidden={!searchOpen}
-									className="h-9 w-56 max-w-[40vw] border-none bg-transparent shadow-none focus-visible:ring-0"
-									onChange={(e) => search.onChange(e.target.value)}
-									placeholder={search.placeholder ?? "Search…"}
-									ref={searchInputRef}
-									tabIndex={searchOpen ? 0 : -1}
-									value={search.value}
-								/>
-							</div>
-						</div>
-					</div>
-				) : null}
-
-				{panel ? (
-					<button
-						aria-expanded={panelOpen}
-						aria-label={panelLabel}
-						className={cn(
-							"flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 font-medium text-foreground/60 text-sm outline-none transition-colors",
-							"hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10",
-							"focus-visible:ring-2 focus-visible:ring-ring",
-							panelOpen &&
-								"bg-foreground text-background hover:bg-foreground/90 hover:text-background dark:bg-white dark:text-black dark:hover:bg-white/90"
-						)}
-						onClick={() => setMode(panelOpen ? "none" : "panel")}
-						type="button"
-					>
-						<HugeiconsIcon className="size-4 shrink-0" icon={panelIcon} />
-						<span className="hidden sm:inline">{panelLabel}</span>
-						<HugeiconsIcon
-							className={cn(
-								"size-3.5 shrink-0 transition-transform duration-300",
-								panelOpen && "rotate-180"
-							)}
-							icon={ArrowUp01Icon}
-						/>
-					</button>
-				) : null}
+				</div>
 			</div>
+			{value ? (
+				<Button
+					aria-label="Clear search"
+					onClick={() => {
+						onChange("");
+						setOpen(false);
+					}}
+					size="sm"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-3.5" icon={Cancel01Icon} />
+				</Button>
+			) : null}
 		</div>
 	);
 }

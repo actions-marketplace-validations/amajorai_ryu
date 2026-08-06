@@ -22,6 +22,7 @@ import {
 	DEFAULT_LIGHT_ID,
 	findVariant,
 	loadCustomThemes,
+	loadPluginThemes,
 	STORAGE_KEYS,
 	type ThemeVariant,
 } from "@/src/lib/themes/presets.ts";
@@ -83,8 +84,10 @@ function currentContrast(): number {
 // prop — but ONLY writes it once the user picks a mode, so on a fresh install
 // the key is absent. Every read here must therefore fall back to the same
 // constant the provider is mounted with (DEFAULT_THEME_MODE), or the two
-// disagree: next-themes puts `.light` on <html> while these readers resolve
-// "system" against a dark OS and paint the DARK preset's tokens over it.
+// disagree: next-themes puts one class on <html> while these readers resolve a
+// different mode and paint the other preset's tokens over it. Both sides now
+// default to "system" and both resolve it from `prefers-color-scheme`, so a
+// fresh install follows the OS with the class and the tokens in agreement.
 function storedThemeMode(): ThemeMode {
 	const stored = localStorage.getItem("theme");
 	return stored === "light" || stored === "dark" || stored === "system"
@@ -121,7 +124,12 @@ function buildThemePrefs(): ThemePrefs {
 			localStorage.getItem(STORAGE_KEYS.darkPreset) ?? DEFAULT_DARK_ID,
 		contrast: currentContrast(),
 		radius: Number(localStorage.getItem(STORAGE_KEYS.radius) ?? DEFAULT_RADIUS),
-		customThemes: loadCustomThemes(),
+		// The island resolves the selected preset id against this list alone, so it
+		// carries every NON-built-in variant — the user's saved themes AND the ones
+		// installed from the marketplace. Sending only `loadCustomThemes()` would
+		// leave the companion unable to resolve a plugin theme and silently falling
+		// back to the default preset while the main window shows the chosen one.
+		customThemes: [...loadCustomThemes(), ...loadPluginThemes()],
 		uiFont: localStorage.getItem(STORAGE_KEYS.uiFont) ?? undefined,
 		headingFont: localStorage.getItem(STORAGE_KEYS.headingFont) ?? undefined,
 		codeFont: localStorage.getItem(STORAGE_KEYS.codeFont) ?? undefined,
@@ -209,6 +217,27 @@ export function useThemePreset() {
 		}
 		publishThemePrefs();
 	}, [theme, resolvedTheme]);
+}
+
+/**
+ * Re-resolve and re-apply whichever preset is selected for the ACTIVE mode.
+ *
+ * Needed when the pool of resolvable variants changes underneath a stable
+ * selection — installing, updating or removing a marketplace theme plugin. Without
+ * this the window keeps painting the palette it resolved at boot until the next
+ * restart, so an updated theme looks like it did not install. Also republishes to
+ * Core so the island companion re-resolves against the same list.
+ */
+export function reapplyActivePreset() {
+	const id =
+		localStorage.getItem(
+			storedIsDark() ? STORAGE_KEYS.darkPreset : STORAGE_KEYS.lightPreset
+		) ?? (storedIsDark() ? DEFAULT_DARK_ID : DEFAULT_LIGHT_ID);
+	const variant = findVariant(id);
+	if (variant) {
+		applyVariant(variant);
+	}
+	publishThemePrefs();
 }
 
 export function setLightPreset(id: string) {

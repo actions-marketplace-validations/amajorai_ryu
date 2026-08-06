@@ -38,6 +38,7 @@ const EMPTY: PluginContributions = {
 	composer_controls: [],
 	settings_tabs: [],
 	message_actions: [],
+	output_styles: [],
 	context_menu_items: [],
 	slash_commands: [],
 	turn_hooks: [],
@@ -45,6 +46,7 @@ const EMPTY: PluginContributions = {
 	views: [],
 	sidebar_sections: [],
 	sidebar_buttons: [],
+	themes: [],
 	dock_panels: [],
 	store_tabs: [],
 	channels: [],
@@ -76,10 +78,18 @@ export function pluginDockPanelKey(pluginId: string, panelId: string): string {
  *  with the desktop renderer — the desktop half of the "one spec, two renderers" proof. */
 export const DECLARATIVE_VIEW_HARNESS_PATH = "/dev/declarative-view";
 
-/** Shared, cached read of the enabled plugins' declarative contributions. */
-export function usePluginContributions(): PluginContributions {
+/**
+ * The raw shared query behind {@link usePluginContributions}.
+ *
+ * Exposed for the one class of consumer that must tell "Core says there are none"
+ * apart from "the fetch has not landed yet" — anything that MIRRORS the payload
+ * into durable storage, where treating the in-flight EMPTY as authoritative would
+ * evict real data on every cold start. Readers that only render what they are given
+ * want `usePluginContributions()` instead.
+ */
+export function usePluginContributionsQuery() {
 	const node = useActiveNode();
-	const { data } = useQuery({
+	return useQuery({
 		queryKey: ["plugin-contributions", node.url, node.token],
 		queryFn: () =>
 			getPluginContributions({ url: node.url, token: node.token ?? null }),
@@ -90,6 +100,11 @@ export function usePluginContributions(): PluginContributions {
 		staleTime: 30_000,
 		retry: false,
 	});
+}
+
+/** Shared, cached read of the enabled plugins' declarative contributions. */
+export function usePluginContributions(): PluginContributions {
+	const { data } = usePluginContributionsQuery();
 	return data ?? EMPTY;
 }
 

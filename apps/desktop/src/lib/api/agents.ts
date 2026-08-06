@@ -497,6 +497,12 @@ export interface AgentUpdateCheck {
 /** Result of POST `/api/agents/:id/update`. */
 export interface AgentUpdateResult {
 	error?: string;
+	/**
+	 * Why nothing moved, when `updated` is false without an error — e.g. the CLI
+	 * was installed by its own vendor installer, so Ryu cannot upgrade it and the
+	 * user has to run that tool. Without this a no-op read as a success.
+	 */
+	hint?: string;
 	/** The version after the update, when the runtime reports one. */
 	installedVersion?: string;
 	updated: boolean;
@@ -519,6 +525,7 @@ interface AgentUpdateCheckWire {
 
 interface AgentUpdateResultWire {
 	error?: string | null;
+	hint?: string | null;
 	installed_version?: string | null;
 	installedVersion?: string | null;
 	updated?: boolean | null;
@@ -560,6 +567,7 @@ export async function runAgentUpdate(
 		updated: w.updated ?? false,
 		installedVersion: w.installedVersion ?? w.installed_version ?? undefined,
 		error: w.error ?? undefined,
+		hint: w.hint ?? undefined,
 	};
 }
 

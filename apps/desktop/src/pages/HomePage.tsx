@@ -77,8 +77,11 @@ import {
 	DashboardGrid,
 	type WidgetLiveState,
 } from "@/src/components/dashboard/DashboardGrid.tsx";
+import { WIDGET_DEFINITIONS } from "@/src/components/dashboard/widgets/registry.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useAssistantSurface } from "@/src/hooks/useAssistantBuilder.ts";
+import { useAssistantPageContext } from "@/src/hooks/useAssistantPageContext.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type CanvasLayoutRect,
@@ -640,7 +643,85 @@ export default function HomePage() {
 		}
 	}, [dashboardId, reload]);
 
+	// Live handle on the widgets for the assistant's send-time context resolver —
+	// a dashboard refreshes itself, so the resolver must read the CURRENT board,
+	// not the one captured when the effect published.
+	const widgetsRef = useRef(widgets);
+	widgetsRef.current = widgets;
+
 	const snapshot = useMemo(() => dashboardSnapshot(widgets), [widgets]);
+
+	// ── The dashboard as an assistant surface ────────────────────────────────
+	// While the user is in "Build with AI" mode, the global Ask Ryu panel becomes
+	// THIS dashboard's builder too — same `dashboard_builder__*` tools, same live
+	// snapshot — so opening the dock does not start an unrelated second chat.
+	//
+	// Two deliberate scopings. It registers only while `builderOpen`, because a
+	// takeover replaces the generic assistant, and merely *looking at* Home is not
+	// a request to give up general chat. And `dock: false`, because the user
+	// already has the in-page pane open — popping the sidebar as well would be the
+	// app talking over them. (Retiring `DashboardBuilderChat` in favour of this one
+	// surface is the natural follow-on; it is left in place here.)
+	const widgetKinds = useMemo(
+		() => WIDGET_DEFINITIONS.map((d) => d.kind).join(", "),
+		[]
+	);
+	useAssistantSurface(
+		builderOpen
+			? {
+					kind: "dashboard",
+					dock: false,
+					label: `Build ${dashboardName}`,
+					description:
+						"Say what you want to see and I'll assemble the widgets on this board.",
+					preamble: [
+						"You are Ryu's Home dashboard builder. You are helping the user assemble",
+						'the dashboard with id "{{targetId}}". A dashboard is a grid of widgets,',
+						`each with a kind (${widgetKinds}), a data source, and a grid layout.`,
+						"When the user describes what they want to see, BUILD it by calling the",
+						"dashboard_builder tools. For edits prefer",
+						'dashboard_builder__configure_dashboard with dashboard_id "{{targetId}}"',
+						"using widgets_upsert (pass each widget's layout x/y/w/h to place it on",
+						"the 12-column grid) and widgets_remove. Pick a sensible source:",
+						"core_endpoint for internal metrics (connections, quests, monitors,",
+						"system_status, …), monitor, workflow, composio, http, or agent. If a save",
+						"is rejected, read the error and fix it. Keep replies short and confirm",
+						"what you changed.",
+						"\n\nCurrent dashboard:\n{{snapshot}}",
+					].join(" "),
+					tools: [
+						"dashboard_builder__configure_dashboard",
+						"dashboard_builder__get_dashboard",
+					],
+					prompts: [
+						"Add a chart of my monitors",
+						"Show my unread email",
+						"Tidy the layout",
+					],
+					snapshot,
+					targetId: dashboardId,
+					targetName: dashboardName,
+					resolveId: resolveDashboardId,
+					onChanged: (id) => {
+						void reload(id).then(() => setGenerating(false));
+					},
+				}
+			: null
+	);
+
+	// …and the same board as plain CONTEXT, resolved at send time. A dashboard's
+	// widgets refresh on their own, so a snapshot pushed at mount would describe a
+	// board that no longer exists by the time the user asks about it.
+	useAssistantPageContext(
+		dashboardId
+			? {
+					id: `dashboard:${dashboardId}`,
+					title: dashboardName,
+					text: snapshot,
+					getText: () => dashboardSnapshot(widgetsRef.current),
+				}
+			: null
+	);
 
 	// Dashboard controls live in the window titlebar actions instead of an
 	// in-page header row. To keep the titlebar uncluttered, everything hangs off

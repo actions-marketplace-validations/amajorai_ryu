@@ -52,8 +52,9 @@ use crate::media::{self, Attachment, AttachmentKind, VoiceDelivery};
 use crate::pairing::PairingStore;
 use crate::status::StatusReporter;
 use crate::{
-    handle_turn, pack_thread, unpack_thread, BotProfile, Channel, ChannelCaps, ChannelHost,
-    ChannelRuntime, GroupReplyMode, InboundMessage, TelegramChannelConfig,
+    handle_turn, is_token_rejected, pack_thread, unpack_thread, BotProfile, Channel, ChannelCaps,
+    ChannelHost, ChannelRuntime, GroupReplyMode, InboundMessage, TelegramChannelConfig,
+    TokenRejected,
 };
 
 /// Seconds the Telegram server holds an open `getUpdates` request waiting for
@@ -172,6 +173,16 @@ impl TelegramChannel {
     }
 
     /// Fetch the next batch of updates starting at `offset` (long poll).
+    ///
+    /// # Errors
+    /// A rejected credential comes back as [`TokenRejected`] rather than a plain
+    /// transport error, because the run loop must stop instead of back off (see
+    /// [`is_unauthorized`]). Every other failure is an ordinary `Err`.
+    ///
+    /// Transport errors are stripped of their URL first: reqwest's `Display`
+    /// unconditionally appends the request URL, and this one is
+    /// `.../bot<TOKEN>/getUpdates` — so the string that the error arm logs and
+    /// ships to the control plane would otherwise carry the bot token.
     async fn get_updates(&self, offset: i64) -> anyhow::Result<Vec<Update>> {
         let url = format!("{}/getUpdates", self.api_base);
         let resp = self
@@ -185,11 +196,26 @@ impl TelegramChannel {
             // Allow the client a little longer than the server-side long poll.
             .timeout(Duration::from_secs(LONG_POLL_SECS + 10))
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
 
-        let body: GetUpdatesResponse = resp.json().await?;
+        // Read the status BEFORE `error_for_status`, which collapses a 401 into
+        // an opaque error and never lets the body be parsed.
+        let status = resp.status();
+        if is_unauthorized(Some(status), None) {
+            return Err(TokenRejected.into());
+        }
+        let resp = resp
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+
+        let body: GetUpdatesResponse = resp.json().await.map_err(reqwest::Error::without_url)?;
         if !body.ok {
+            // The Bot API also rejects a dead token with HTTP 200 +
+            // `{"ok":false,"error_code":401}`, so the envelope gets the same rule.
+            if is_unauthorized(None, body.error_code) {
+                return Err(TokenRejected.into());
+            }
             anyhow::bail!("telegram getUpdates returned ok=false");
         }
         Ok(body.result)
@@ -683,6 +709,18 @@ impl Channel for TelegramChannel {
                         self.spawn_turn(Arc::clone(&host), inbound, draft);
                     }
                 }
+                // A rejected token is terminal for THIS adapter: the token is
+                // baked into `api_base`, so recovery means a new adapter built
+                // from a new token. Return so the host's supervisor can refresh
+                // and respawn — backing off here would poll 401 forever while
+                // the bot sits deaf.
+                Err(err) if is_token_rejected(&err) => {
+                    warn!("telegram token rejected (401); stopping this adapter so the host can refresh it");
+                    if let Some(reporter) = &self.runtime.status {
+                        reporter.error("bot token rejected by Telegram (401)").await;
+                    }
+                    return Err(err);
+                }
                 Err(err) => {
                     warn!(error = %err, "telegram getUpdates failed, backing off");
                     if let Some(reporter) = &self.runtime.status {
@@ -700,6 +738,17 @@ impl Channel for TelegramChannel {
 // Everything below takes primitives and returns values, so the wire shapes are
 // unit-testable without a Telegram to talk to. That is the whole reason the
 // `send_*` methods are thin.
+
+/// Does this `getUpdates` outcome mean "your token is not valid any more"?
+///
+/// Telegram says so two ways for the same cause, and both must classify the
+/// same: an HTTP `401` on the request, and — because a rejected call arrives with
+/// HTTP 200 (see the module header) — `{"ok":false,"error_code":401}` in the
+/// envelope. Kept as a pure predicate over the two signals so the rule that
+/// decides whether an adapter stops is testable without a Telegram to talk to.
+fn is_unauthorized(status: Option<reqwest::StatusCode>, error_code: Option<i64>) -> bool {
+    status == Some(reqwest::StatusCode::UNAUTHORIZED) || error_code == Some(401)
+}
 
 /// The guest query id inside a conversation key, if this is a guest turn.
 fn guest_query_of(chat_id: &str) -> Option<&str> {
@@ -1044,6 +1093,12 @@ struct ApiEnvelope {
 #[derive(Debug, Deserialize)]
 struct GetUpdatesResponse {
     ok: bool,
+    /// Telegram's numeric reason when `ok` is false. Only `401` is acted on (a
+    /// revoked or replaced token), but it is read here rather than at the call
+    /// site because an `ok: false` poll arrives with HTTP 200 and is otherwise
+    /// indistinguishable from a transient failure.
+    #[serde(default)]
+    error_code: Option<i64>,
     #[serde(default)]
     result: Vec<Update>,
 }
@@ -1330,6 +1385,80 @@ mod tests {
         assert_eq!(channel.name(), "telegram");
         assert_eq!(channel.model(), "gpt-4o");
         assert_eq!(channel.system_prompt(), Some("hi"));
+    }
+
+    // ─── 401 classification: a replaced token must stop the adapter ─────────
+
+    #[test]
+    fn http_401_is_unauthorized() {
+        assert!(is_unauthorized(
+            Some(reqwest::StatusCode::UNAUTHORIZED),
+            None
+        ));
+    }
+
+    #[test]
+    fn envelope_error_code_401_is_unauthorized() {
+        // The Bot API rejects a dead token with HTTP 200 + ok:false, so the
+        // envelope must classify the same as the status code.
+        assert!(is_unauthorized(Some(reqwest::StatusCode::OK), Some(401)));
+    }
+
+    #[test]
+    fn other_failures_are_not_unauthorized() {
+        // 429 and 5xx are exactly the cases the adapter must keep backing off on
+        // rather than tearing itself down for a token refresh.
+        assert!(!is_unauthorized(
+            Some(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            None
+        ));
+        assert!(!is_unauthorized(
+            Some(reqwest::StatusCode::BAD_GATEWAY),
+            None
+        ));
+        assert!(!is_unauthorized(Some(reqwest::StatusCode::OK), Some(400)));
+        assert!(!is_unauthorized(None, None));
+    }
+
+    #[test]
+    fn get_updates_response_reads_the_error_code() {
+        let body: GetUpdatesResponse =
+            serde_json::from_value(json!({ "ok": false, "error_code": 401 })).unwrap();
+        assert!(!body.ok);
+        assert!(is_unauthorized(None, body.error_code));
+    }
+
+    #[test]
+    fn get_updates_response_without_an_error_code_still_parses() {
+        // An older/other rejection carries only a description; a missing
+        // `error_code` must not fail the whole batch parse.
+        let body: GetUpdatesResponse =
+            serde_json::from_value(json!({ "ok": true, "result": [] })).unwrap();
+        assert!(body.ok);
+        assert!(body.error_code.is_none());
+    }
+
+    #[test]
+    fn token_rejected_survives_a_context_wrap() {
+        // The supervisor classifies by walking the chain, so an adapter is free
+        // to annotate the error on the way out.
+        let err = anyhow::Error::from(TokenRejected).context("telegram getUpdates");
+        assert!(is_token_rejected(&err));
+    }
+
+    #[test]
+    fn a_plain_transport_error_is_not_token_rejected() {
+        let err = anyhow::anyhow!("connection reset");
+        assert!(!is_token_rejected(&err));
+    }
+
+    #[test]
+    fn token_rejected_never_names_the_token() {
+        // The whole point of the payload-free marker: the failing URL contains
+        // the token, and this string is logged and shipped to the control plane.
+        let rendered = TokenRejected.to_string();
+        assert!(!rendered.contains("api.telegram.org"));
+        assert!(rendered.contains("401"));
     }
 
     #[test]

@@ -15,11 +15,19 @@
 // (checked first) and patterns in an ordered list — behavior-identical to the
 // interleaved chain, only relative pattern order matters (and is preserved here).
 //
-// Deliberately NOT registered here (both are wired elsewhere so this stays a pure
+// Deliberately NOT registered here (all are wired elsewhere so this stays a pure
 // behavior-preserving mirror of the old chain):
 //   - `/plugin/<id>` — registered per enabled companion by
 //     `usePluginContributionRoutes`, so a disabled plugin's route disappears
 //     (resolves null → blank) exactly as #446 item 4 wants.
+//   - The Home dashboard — registered by `useAppShellRoutes` at whatever path
+//     `@ryu/dashboards` declares in `contributes.sidebar_buttons[].target`. The
+//     component is a shell page (no companion bundle), but the feature is the app's,
+//     so the app decides both the path AND whether the route exists at all. It used
+//     to be a frozen `exact("/home", …)` here: the sidebar button was already
+//     app-registered and correctly hid itself when the (default-OFF) app was
+//     disabled, while the route stayed live — the exact disagreement
+//     `companion-alias.ts` exists to prevent. See `app-shell-routes.ts`.
 //   - The scaffold "extras" the old `TabContent` never handled (`/graph`,
 //     `/spaces/:id/graph`, `/profile`): the old chain returned `null` (blank) for those
 //     paths, so mounting a real page here would be a regression, not a refactor. Left
@@ -51,7 +59,6 @@ import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
 import ChatPage from "@/src/pages/ChatPage.tsx";
 import DownloadsPage from "@/src/pages/DownloadsPage.tsx";
 import FileEditorPage from "@/src/pages/FileEditorPage.tsx";
-import HomePage from "@/src/pages/HomePage.tsx";
 import IdentitiesPage from "@/src/pages/IdentitiesPage.tsx";
 import LibraryPage from "@/src/pages/LibraryPage.tsx";
 import PluginCompanionPage, {
@@ -185,10 +192,13 @@ export function seedBuiltinRoutes(): void {
 		});
 
 	// ── Exact routes (matched first via the O(1) map) ─────────────────────────
-	exact("/home", () => createElement(HomePage));
+	// No Home/dashboard route here — see the note above about app-owned shell
+	// pages: `@ryu/dashboards` declares its own path and `useAppShellRoutes`
+	// mints it from the feed.
 	exact("/chat", (tab) =>
 		createElement(ChatPage, {
 			initialAgent: tab.initialAgent,
+			initialGhost: tab.initialGhost,
 			initialImages: tab.initialImages as AttachedImage[] | undefined,
 			initialProject: tab.initialProject,
 			initialPrompt: tab.initialPrompt,

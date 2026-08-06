@@ -96,7 +96,7 @@ function loadManifest(dir: string): LoadedManifest {
 		const message = first?.message ?? "validation failed";
 		exitError(`manifest.json validation failed at '${field}': ${message}`);
 	}
-	return inlineCodeFiles(result.data, dir);
+	return inlineOutputStyleFiles(inlineCodeFiles(result.data, dir), dir);
 }
 
 /** Directories a `code_file` may name — mirrors Rust's `CODE_FILE_DIRS`. */
@@ -167,6 +167,84 @@ function inlineCodeFiles(
 				binding.adapter.code_file = undefined;
 			}
 		}
+	}
+
+	return out;
+}
+
+/**
+ * Largest output-style file `pack` will inline, in bytes — mirrors Rust's
+ * `MAX_OUTPUT_STYLE_BYTES`. Enforced here and not left to Core because the two
+ * bound different moments: Core rejects an oversized style at install, by which
+ * point the author has already signed and published a bundle nobody can install.
+ */
+const MAX_OUTPUT_STYLE_BYTES = 64 * 1024;
+
+/** The one directory an `output_styles[].file` may name — mirrors Rust's `OUTPUT_STYLE_DIR`. */
+const OUTPUT_STYLE_DIR = "output-styles";
+/**
+ * Mirrors `validate_output_style_path` CHARACTER FOR CHARACTER, unlike
+ * `CODE_FILE_PATH` above, which is only morally equivalent to its Rust twin. The
+ * two allowlists must accept the same set or `pack` signs a bundle Core rejects at
+ * install — the same after-the-fact failure the byte cap below exists to prevent.
+ * Hence the leading class excludes `.` but keeps `-` (Rust rejects only a leading
+ * dot), and `..` is checked separately rather than folded in, because a dot is
+ * legal mid-name and only the doubled form is traversal.
+ */
+const OUTPUT_STYLE_PATH = /^output-styles\/[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
+
+/**
+ * Replace every `output_styles[].file` with the file's contents — the same source
+ * form → wire form move `inlineCodeFiles` makes, for the same signing reason.
+ *
+ * A separate function with a separate allowlist rather than a parameterised version
+ * of `readCodeFile`, mirroring why Rust keeps `CODE_FILE_DIRS`, `PI_EXTENSION_DIR`
+ * and `OUTPUT_STYLE_DIR` as three constants instead of one: the allowlists ARE the
+ * gate, and a merged one is a single edit away from letting a style name a
+ * `hooks/*.js`, or a turn hook name a `.md` that nothing sandboxes.
+ *
+ * The inlined `source` carries the file VERBATIM, frontmatter included — Core's
+ * single `parse_output_style_md` reads a plugin style and a user's own
+ * `output-styles/*.md` the same way, and mirroring `name`/`description` up into
+ * manifest keys would create a second place a style's metadata could disagree with
+ * itself.
+ */
+function inlineOutputStyleFiles(
+	manifest: LoadedManifest,
+	dir: string
+): LoadedManifest {
+	const out = manifest as LoadedManifest & {
+		contributes?: { output_styles?: Record<string, unknown>[] };
+	};
+
+	for (const style of out.contributes?.output_styles ?? []) {
+		const rel = style.file;
+		if (typeof rel !== "string") {
+			continue;
+		}
+		const label = `output style '${String(style.id)}'`;
+		if (!OUTPUT_STYLE_PATH.test(rel) || rel.includes("..")) {
+			exitError(
+				`${label}: file '${rel}' must be exactly '${OUTPUT_STYLE_DIR}/<name>.md' with no traversal`
+			);
+		}
+		let body: string;
+		try {
+			body = readFileSync(join(dir, rel), "utf8");
+		} catch (err) {
+			exitError(`${label}: could not read file '${rel}': ${String(err)}`);
+		}
+		if (!body.trim()) {
+			exitError(`${label}: file '${rel}' is empty`);
+		}
+		const bytes = Buffer.byteLength(body, "utf8");
+		if (bytes > MAX_OUTPUT_STYLE_BYTES) {
+			exitError(
+				`${label}: file '${rel}' is ${bytes} bytes, over the ${MAX_OUTPUT_STYLE_BYTES}-byte limit`
+			);
+		}
+		style.source = body;
+		style.file = undefined;
 	}
 
 	return out;

@@ -1,0 +1,117 @@
+"use client";
+
+// beui.dev/components/motion/range-slider
+
+import { type SliderOptions, useSlider } from "@ryu/ui/hooks/use-slider.ts";
+import { SPRING_GLIDE, SPRING_PRESS } from "@ryu/ui/lib/ease";
+import { cn } from "@ryu/ui/lib/utils";
+import {
+	motion,
+	useMotionTemplate,
+	useMotionValue,
+	useReducedMotion,
+	useSpring,
+	useTransform,
+} from "motion/react";
+import { useEffect } from "react";
+
+/** Decimal places implied by the step, so 0.025 reads "0.375", not "0.375000001". */
+function decimalsForStep(step: number): number {
+	const s = step.toString();
+	const dot = s.indexOf(".");
+	return dot === -1 ? 0 : s.length - dot - 1;
+}
+
+export interface FluidSliderProps extends SliderOptions {
+	className?: string;
+	/** Formats the value shown on the right. */
+	format?: (value: number) => string;
+	/** Text shown on the left of the track. */
+	label?: string;
+}
+
+/**
+ * Thumbless slider: the whole pill is the control. The fill glides to the new
+ * value behind a rounded liquid cap, and the label reads inverted wherever the
+ * fill has covered it.
+ *
+ * Deviation from upstream: `format` defaults to the step's own precision rather
+ * than a `%` suffix, so it is a drop-in for `ElasticSlider` — every settings
+ * call site that passed no formatter keeps rendering the bare number it did.
+ */
+export function FluidSlider({
+	label,
+	// The value arrives already snapped to the step. Rounding it again would
+	// only make the label and the announcement disagree with aria-valuenow.
+	format,
+	className,
+	...options
+}: FluidSliderProps) {
+	const reduce = useReducedMotion();
+	const step = options.step ?? 1;
+	const formatValue =
+		format ?? ((v: number) => v.toFixed(decimalsForStep(step)));
+	const { percent, current, dragging, trackProps, sliderProps } = useSlider({
+		...options,
+		"aria-label": options["aria-label"] ?? label,
+		formatValueText: options.formatValueText ?? formatValue,
+	});
+
+	const target = useMotionValue(percent);
+	useEffect(() => {
+		target.set(percent);
+	}, [percent, target]);
+	const smooth = useSpring(target, SPRING_GLIDE);
+	const pos = reduce ? target : smooth;
+	// Reveal the fill by clipping a full-width layer rather than animating its
+	// width: at 0% the clip is empty, so no hairline of a sub-pixel-wide box is
+	// left behind, and the label inside is never scaled or re-laid out.
+	const uncovered = useTransform(pos, (v) => 100 - v);
+	const clipPath = useMotionTemplate`inset(0 ${uncovered}% 0 0 round 9999px)`;
+
+	const row = (
+		<>
+			{label ? <span className="truncate">{label}</span> : <span />}
+			<span className="tabular-nums">{formatValue(current)}</span>
+		</>
+	);
+
+	return (
+		<motion.div
+			{...trackProps}
+			animate={reduce ? undefined : { scale: dragging ? 1.03 : 1 }}
+			className={cn(
+				"relative flex h-12 w-full touch-none select-none overflow-hidden rounded-full bg-muted",
+				options.disabled
+					? "pointer-events-none opacity-50"
+					: "cursor-grab active:cursor-grabbing",
+				className
+			)}
+			data-slot="slider"
+			transition={SPRING_PRESS}
+		>
+			{/* uncovered label — sits on the muted track */}
+			<div className="pointer-events-none absolute inset-0 flex items-center justify-between px-5 font-medium text-foreground text-sm">
+				{row}
+			</div>
+
+			{/* fill + the same label, both clipped to the value, so the text inverts
+			    as the fill covers it and lines up glyph for glyph with the copy
+			    underneath. The clip's rounded right edge is the liquid cap. */}
+			<motion.div className="absolute inset-0" style={{ clipPath }}>
+				<div className="absolute inset-0 bg-foreground" />
+				<div className="pointer-events-none absolute inset-0 flex items-center justify-between px-5 font-medium text-background text-sm">
+					{row}
+				</div>
+			</motion.div>
+
+			{/* focusable, keyboard-controlled handle surface. The ring is inset — an
+			    outset one is clipped away by the track's overflow-hidden. */}
+			<button
+				type="button"
+				{...sliderProps}
+				className="absolute inset-0 touch-none rounded-full outline-none ring-foreground/40 ring-inset focus-visible:ring-4"
+			/>
+		</motion.div>
+	);
+}

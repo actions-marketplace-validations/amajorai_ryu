@@ -34,7 +34,7 @@
     "polar:provision-extras": "bun run scripts/polar/provision-extras.ts",
     "registry:generate": "node tools/generate-registry.mjs",
     "registry:check": "node tools/generate-registry.mjs --check",
-    "test:tools": "node --test tools/generate-registry.test.mjs tools/generate-marketplace.test.mjs scripts/release/next-version.test.mjs scripts/wipe.test.mjs",
+    "test:tools": "node --test tools/generate-registry.test.mjs tools/generate-marketplace.test.mjs scripts/release/next-version.test.mjs scripts/release/channel-brand.test.mjs scripts/wipe.test.mjs",
     "mirror:satellites": "bash tools/mirror-satellites.sh",
     "mirror:plugins": "bash tools/mirror-plugins.sh",
     "mirror:public": "bash tools/mirror-push.sh && bash tools/mirror-satellites.sh && bash tools/mirror-plugins.sh",

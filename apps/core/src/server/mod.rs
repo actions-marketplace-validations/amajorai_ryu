@@ -21,6 +21,7 @@ pub mod canvas_migrate;
 pub mod chat_suggestions;
 pub mod conversations;
 pub mod data_admin;
+pub mod encryption;
 pub mod gifs;
 pub mod git;
 // The device-registry + TRMNL display HTTP surface moved to the extracted
@@ -36,6 +37,7 @@ pub mod hardware_ws;
 // in-process `healing_api` module or `healing_routes` fn.
 pub mod identity_api;
 pub mod learning;
+pub mod managed_bot_api;
 pub mod media;
 pub mod uploads;
 /// Re-export of the extracted [`ryu_memory`] crate under the historical
@@ -2291,6 +2293,11 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // governs the whole SKILL.md discovery/authoring/catalog surface. Both route
         // blocks (catalog + CRUD/versions) live in the one fn. ──
         .merge(skills_routes(&state))
+        // ── Output styles (`/api/output-styles/*`) — the style registry + authoring
+        // + node-default selection. UNGATED on purpose (see `output_styles_routes`):
+        // a style is a Core axis like the selected model, and three of its four
+        // sources are not plugins at all. ──
+        .merge(output_styles_routes())
         // ── Composio catalog (browse the user's toolkits/actions/triggers using
         // their configured key; gateway still executes — see composio_catalog) ──
         .route("/api/composio/status", get(composio_status))
@@ -2592,7 +2599,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             "/api/conversations/:id/participants",
             get(get_participants_handler).post(add_participant_handler),
         )
-        // Branch (fork) a conversation into a new chat, ChatGPT-style.
+        // Branch (fork) a conversation into a new chat.
         .route("/api/conversations/:id/fork", post(fork_conversation))
         .route(
             "/api/conversations/:id/messages/:message_id/edit",
@@ -2706,6 +2713,10 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // the static segment is matched first. ─────────────────────────────────
         .route("/api/downloads", get(list_downloads))
         .route("/api/downloads/history", get(downloads_history))
+        .route(
+            "/api/downloads/settings",
+            get(downloads_settings).put(set_downloads_settings),
+        )
         .route("/api/downloads/stream", get(downloads_stream))
         .route("/api/downloads/:id/pause", post(download_pause))
         .route("/api/downloads/:id/resume", post(download_resume))
@@ -2795,6 +2806,12 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // instead of one it mirrored by hand.
         .route("/api/uploads/limits", get(uploads::upload_limits))
         .route("/api/uploads/:id", get(uploads::serve_upload))
+        // At-rest encryption posture: master-key custody + per-store coverage.
+        // Read-only and secret-free — see `server::encryption`.
+        .route(
+            "/api/encryption/status",
+            get(encryption::encryption_status),
+        )
         // ── Autoresearch data path (`/api/research/*`) is served out-of-process by
         // the `ryu-research` sidecar via the manifest `public_mount` — no in-process
         // route (see `@ryu/research`).
@@ -3014,7 +3031,13 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // bearer-gated and 403s every browser (Origin-bearing) request, so this
         // authenticated allowlisted proxy is the ONLY webview lane to Shadow
         // data. See `server::shadow_proxy`.
-        .merge(shadow_proxy::routes());
+        .merge(shadow_proxy::routes())
+        // ── Telegram managed-bot pairing (`/api/channels/managed-bot/*`) ─────
+        // Creates a per-user Telegram bot through Ryu's manager bot so the user
+        // never visits @BotFather. The claimed token is written to the SAME
+        // channel config a pasted token goes to, so the child bot runs on the
+        // untouched adapter. See `server::managed_bot_api`.
+        .merge(managed_bot_api::routes());
     // Agent-mail management routes (`/api/mail/*` protected CRUD) are served by the
     // `@ryu/mail` app's `ryu-mail` sidecar via the generic `public_mount` loader
     // (registered on the PUBLIC router, which enforces the same node bearer per-route);
@@ -3233,6 +3256,155 @@ fn skills_routes(state: &ServerState) -> Router<ServerState> {
             ),
             require_app_enabled,
         ))
+}
+
+/// The process-global output-style registry ([`ryu_output_styles`]), initialised on
+/// first touch.
+///
+/// # Why an accessor and not a `ServerState` field
+///
+/// Two callers need this registry and they are not ordered with respect to each
+/// other. `create_router` builds the HTTP surface (main.rs:1650) *after* it spawns
+/// the `onStartup` activation pass (main.rs:1613), and that pass is where an enabled
+/// plugin's contributed styles are re-registered after a restart
+/// ([`sync_plugin_output_styles`]). Publishing the registry as a side effect of
+/// building the router — which is what [`ryu_output_styles::routes`] does on its own
+/// — would therefore lose a race: the boot pass would register into a throwaway
+/// handle while the handlers read an empty one. Initialising on first touch makes
+/// whichever caller arrives first the one that publishes, and the crate's
+/// `OnceLock` makes the loser's `set` a harmless no-op (both then read the winner's
+/// `Arc`, which is the same disk scan).
+///
+/// [`ryu_output_styles::set_data_dir`] is called here rather than in main.rs for the
+/// same reason `ryu_skills::set_data_dir` is called before `SkillRegistry::load`: the
+/// selection file and the profile-aware user styles root must resolve against the
+/// real (possibly relocated) data folder, not the crate's `$RYU_DIR`/`~/.ryu`
+/// fallback. Both are `OnceLock`s, so the ordering only has to hold on the first
+/// call, which this fn guarantees by construction.
+fn output_style_registry() -> &'static ryu_output_styles::OutputStyleRegistry {
+    if let Some(registry) = ryu_output_styles::global_registry() {
+        return registry;
+    }
+    ryu_output_styles::set_data_dir(crate::paths::ryu_dir());
+    ryu_output_styles::set_global_registry(ryu_output_styles::OutputStyleRegistry::load());
+    ryu_output_styles::global_registry()
+        .expect("the output-style registry was just published (OnceLock::set or a racing set)")
+}
+
+/// The `/api/output-styles/*` surface (list / read / author / select), served
+/// **ungated** on the protected chain.
+///
+/// # Why no `AppGate`, unlike every sibling feature router above
+///
+/// An output style is a Core-level axis — the same kind of thing as the selected
+/// model or the default agent — not an app feature. Three of its four sources
+/// (user, project, managed; design §3) have nothing to do with any plugin, and the
+/// authoring surface writes the user root. Gating this on `@ryu/output-styles` would
+/// mean disabling the plugin that ships the six built-in styles also took away the
+/// styles the user wrote themselves, plus the picker that selects them.
+///
+/// This is *not* the [`collect_plugin_store_tabs`] carve-out ("the declaration is
+/// ungated, the data behind it keeps its own gate") — there is no gate to keep. The
+/// honesty requirement that carve-out exists to satisfy is met a different way here:
+/// a disabled plugin's styles genuinely leave the registry, because
+/// [`sync_plugin_output_styles`] unregisters them on the disable seam. So the
+/// endpoint stays reachable while its *contents* still respect enablement, which is
+/// the property that actually matters.
+///
+/// Paths come from the crate as **relative** routes, so this `nest`s rather than
+/// `merge`s (the opposite of `skills_routes`): nothing else in Core serves anything
+/// under `/api/output-styles`, so the crate owns the whole prefix.
+///
+/// Generic over the state for the same reason the crate's own `routes` is: not one
+/// handler here extracts `State`, they all read the process-global registry. Prod
+/// instantiates it at `ServerState` (inferred by the `.merge` in `create_router`);
+/// [`output_styles_route_tests`] instantiates it at `()` and drives the real
+/// function rather than a hand-rebuilt stand-in of it.
+fn output_styles_routes<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new().nest(
+        "/api/output-styles",
+        ryu_output_styles::routes::<S>(ryu_output_styles::OutputStylesCtx::new(
+            output_style_registry().clone(),
+        )),
+    )
+}
+
+/// Register (or, with `enabled == false`, unregister) every output style a plugin
+/// contributes, so the registry's plugin bag tracks the enable/disable seams.
+///
+/// The whole `source` is handed to [`ryu_output_styles::OutputStyleRegistry::register_plugin_style`],
+/// frontmatter included: design §4 keeps `parse_output_style_md` the ONE parser for
+/// disk styles and plugin styles alike, so a contribution's frontmatter is the single
+/// source of truth for its `name` / `description` / `keep-coding-instructions` and no
+/// second code path can disagree about what they mean.
+///
+/// # Ids are used verbatim, NOT namespaced by the owning plugin
+///
+/// The obvious collision-proofing — registering `<plugin>:<id>` — is wrong here, and
+/// in two independent ways:
+///
+/// 1. **It would make the style unforkable.** `ryu_output_styles::store::validate_id`
+///    rejects `:` and `/` because the id is a path component (`<id>.md`) in the user
+///    root, so `PUT /api/output-styles/@ryu%2Foutput-styles:eli5` — the "edit a plugin
+///    style" action, which design §6 defines as *fork it into the user root* — could
+///    never write its file.
+/// 2. **It would break the shadowing the merge order exists for.**
+///    `OutputStyleRegistry::all` deliberately merges the plugin bag *below* the disk
+///    records so a user's `eli5.md` wins over the plugin's `eli5`. A namespaced
+///    plugin id can never collide with a disk id (which is always a file stem), so
+///    the fork would appear as a second row next to the original instead of
+///    replacing it — and a style copied out of `~/.claude/output-styles`, which
+///    design §1 promises works unchanged, would never shadow anything.
+///
+/// The residual risk is two enabled plugins contributing the same style id: the
+/// second registration replaces the first, and disabling either removes the row. That
+/// is the same last-writer-wins shape `register_app_tool` and `register_app_skill`
+/// already have for their own flat id spaces, and unlike them it is recoverable by
+/// re-enabling. Trading it away would cost the fork.
+///
+/// Best-effort per style: a malformed contribution is logged and skipped, never fatal
+/// to the enable. `register_plugin_style` returning `Err` is the only way a broken
+/// style body becomes visible, so it is logged at `warn`, not swallowed.
+fn sync_plugin_output_styles(manifest: &crate::plugin_manifest::PluginManifest, enabled: bool) {
+    let Some(contributes) = &manifest.contributes else {
+        return;
+    };
+    if contributes.output_styles.is_empty() {
+        return;
+    }
+    let registry = output_style_registry();
+    for style in &contributes.output_styles {
+        if !enabled {
+            registry.unregister_plugin_style(&style.id);
+            continue;
+        }
+        // `source` is absent when the manifest reached us un-hydrated (the install
+        // ingest paths do not run `hydrate_output_style_files`). Skip loudly: an
+        // empty style would silently register a no-op row in the picker.
+        let Some(source) = style.source.as_deref() else {
+            tracing::warn!(
+                plugin = %manifest.id,
+                style = %style.id,
+                "output style has no inlined source (un-hydrated manifest); skipped"
+            );
+            continue;
+        };
+        match registry.register_plugin_style(style.id.clone(), source) {
+            Ok(()) => tracing::debug!(
+                plugin = %manifest.id,
+                style = %style.id,
+                "registered plugin-contributed output style"
+            ),
+            Err(e) => tracing::warn!(
+                plugin = %manifest.id,
+                style = %style.id,
+                "plugin-contributed output style rejected: {e}"
+            ),
+        }
+    }
 }
 
 /// The `/api/agents/*` catalog + CRUD + ACP session-management surface, gated on the
@@ -3945,6 +4117,28 @@ async fn set_preference(
             // Same for the Artificial Analysis API key (model-catalog stats).
             if key == crate::model_catalog::aa::AA_API_KEY_PREF_KEY {
                 crate::model_catalog::aa::set_key(&body.value).await;
+            }
+            // Managed-inference fleet coordinates. Re-read BOTH keys (the pair is
+            // meaningless half-set — a URL with no token 401s against the fleet)
+            // and refresh the process-global the synchronous `pi_config::apply`
+            // path consults, so pointing a self-hosted node at managed inference
+            // takes effect without a Core restart.
+            if key == crate::sidecar::gateway::MANAGED_FLEET_URL_PREF_KEY
+                || key == crate::sidecar::gateway::MANAGED_FLEET_TOKEN_PREF_KEY
+            {
+                let url = state
+                    .preferences
+                    .get(crate::sidecar::gateway::MANAGED_FLEET_URL_PREF_KEY)
+                    .await
+                    .ok()
+                    .flatten();
+                let token = state
+                    .preferences
+                    .get(crate::sidecar::gateway::MANAGED_FLEET_TOKEN_PREF_KEY)
+                    .await
+                    .ok()
+                    .flatten();
+                crate::sidecar::gateway::set_managed_fleet_pref(url, token);
             }
             // And the AA fetch mode (cached daily cache vs. realtime live fetch).
             if key == crate::model_catalog::aa::AA_MODE_PREF_KEY {
@@ -4857,6 +5051,58 @@ async fn list_downloads(State(state): State<ServerState>) -> Json<serde_json::Va
 async fn downloads_history(State(state): State<ServerState>) -> Json<serde_json::Value> {
     let history = state.downloads.history().await;
     Json(json!({ "history": history }))
+}
+
+/// `GET /api/downloads/settings` — how many downloads run at once, and why.
+#[utoipa::path(
+    get,
+    path = "/api/downloads/settings",
+    tag = "Downloads",
+    summary = "Get download concurrency settings",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn downloads_settings(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    Json(json!(state.downloads.settings().await))
+}
+
+#[derive(serde::Deserialize)]
+struct DownloadSettingsBody {
+    /// `"auto"` or `"manual"`.
+    mode: crate::downloads::ConcurrencyMode,
+    /// Slot count; only applied in manual mode, and clamped to the allowed range.
+    #[serde(default)]
+    max_concurrent: Option<usize>,
+}
+
+/// `PUT /api/downloads/settings` — pin the parallel-download count, or hand it
+/// back to the auto-tuner. Rejected when the value is pinned by
+/// `RYU_MAX_CONCURRENT_DOWNLOADS` (an operator's environment wins over the UI).
+#[utoipa::path(
+    put,
+    path = "/api/downloads/settings",
+    tag = "Downloads",
+    summary = "Set download concurrency settings",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 409, description = "Pinned by the environment")
+    )
+)]
+async fn set_downloads_settings(
+    State(state): State<ServerState>,
+    Json(body): Json<DownloadSettingsBody>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    match state
+        .downloads
+        .set_settings(body.mode, body.max_concurrent)
+        .await
+    {
+        Ok(view) => Ok(Json(json!(view))),
+        Err(e) => Err((
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({ "error": format!("{e:#}") })),
+        )),
+    }
 }
 
 /// `GET /api/downloads/stream` — SSE: a full snapshot on connect, then deltas.
@@ -6356,26 +6602,29 @@ async fn agent_update_check(
     Path(agent_id): Path<String>,
 ) -> Json<serde_json::Value> {
     let entry = state.agents.find_by_prefix(&agent_id).cloned();
-    let npm_package = agent_npm_package(&state, &agent_id).await;
-    let bridge_npm_package = entry
-        .as_ref()
-        .and_then(|e| e.version_probe.as_ref())
-        .and_then(|p| p.bridge_npm_package.clone());
+    let probe = entry.as_ref().and_then(|e| e.version_probe.clone());
+    let bridge_npm_package = probe.as_ref().and_then(|p| p.bridge_npm_package.clone());
+    // `agent_npm_package` parses the SPAWN command, so for an ACP agent it yields
+    // the bridge (`@zed-industries/claude-code-acp`), not the CLI the version
+    // below is probed from (`claude`). Comparing one against the other reported a
+    // permanent, unclearable update — the two packages version independently and
+    // are never equal. The CLI's own package is the only correct `latest` source.
+    let cli_npm_package = if agent_id == "ryu" {
+        agent_npm_package(&state, &agent_id).await
+    } else {
+        probe.as_ref().and_then(|p| p.npm_package.clone())
+    };
     let installed = if agent_id == "ryu" {
         crate::sidecar::adapters::acp::read_managed_pi_version()
     } else {
-        match entry
-            .as_ref()
-            .and_then(|e| e.version_probe.as_ref())
-            .and_then(|p| p.binary)
-        {
+        match probe.as_ref().and_then(|p| p.binary) {
             Some(bin) if crate::sidecar::adapters::acp::binary_in_path(bin) => {
                 crate::sidecar::adapters::acp::probe_cli_version(bin).await
             }
             _ => None,
         }
     };
-    let latest = match npm_package.as_deref() {
+    let latest = match cli_npm_package.as_deref() {
         Some(pkg) => resolve_npm_latest_for_agent(pkg).await,
         None => None,
     };
@@ -6387,11 +6636,20 @@ async fn agent_update_check(
         Some(pkg) => resolve_npm_latest_for_agent(pkg).await,
         None => entry.as_ref().and_then(|e| e.bridge_version.clone()),
     };
-    let update_available = matches!((&installed, &latest), (Some(i), Some(l)) if i != l)
-        || matches!((&installed_bridge, &latest_bridge), (Some(i), Some(l)) if i != l);
+    // Semver-ordered, exactly like the catalog's `version_status`, so this row and
+    // the Downloads row can never disagree. A raw `!=` also called a DOWNGRADE an
+    // update, and called two unparseable strings an update forever.
+    //
+    // The bridge pair is reported for information but deliberately does NOT arm the
+    // flag: the bridge is spawned as `npx -y <pkg>@latest`, so npx re-resolves it on
+    // every launch and it cannot be behind. Its "installed" side is itself a
+    // `@latest` probe, so comparing the two measures only the skew between that live
+    // resolve and Core's cached npm latest — an update nothing could apply.
+    let update_available =
+        agent_version_status(installed.as_deref(), latest.as_deref()) == Some("behind_latest");
     Json(json!({
         "id": agent_id,
-        "npmPackage": npm_package,
+        "npmPackage": cli_npm_package,
         "bridgeNpmPackage": bridge_npm_package,
         "installedVersion": installed,
         "latestVersion": latest,
@@ -6401,9 +6659,99 @@ async fn agent_update_check(
     }))
 }
 
+/// How an on-PATH agent CLI was installed, which is what decides whether Ryu can
+/// upgrade it in place.
+enum AgentInstallChannel {
+    /// Under `~/.ryu` — Core installed it with `npm install --prefix`.
+    RyuPrefix,
+    /// A global npm install: `<prefix>/bin/x` symlinked into `lib/node_modules/…`.
+    NpmGlobal,
+    /// A vendor installer, homebrew, volta/mise, a curl script. Not ours to move;
+    /// the resolved path is carried so the user is told where it actually lives.
+    External(std::path::PathBuf),
+}
+
+fn agent_install_channel(binary: &str) -> Option<AgentInstallChannel> {
+    let real = crate::sidecar::adapters::acp::resolve_in_path(binary)?;
+    if real.starts_with(crate::paths::ryu_dir()) {
+        return Some(AgentInstallChannel::RyuPrefix);
+    }
+    let component = |name: &str| {
+        real.components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new(name))
+    };
+    // A homebrew formula that happens to ship a Node CLI lands in
+    // `<prefix>/Cellar/<formula>/<ver>/libexec/lib/node_modules/…`, so the
+    // node_modules test alone would claim it. `npm install -g` would then plant a
+    // second copy in the same prefix's `lib/node_modules` and shadow brew's link —
+    // two package managers fighting over one binary. Brew's is brew's to update.
+    if component("Cellar") || component("Homebrew") {
+        return Some(AgentInstallChannel::External(real));
+    }
+    if component("node_modules") {
+        return Some(AgentInstallChannel::NpmGlobal);
+    }
+    Some(AgentInstallChannel::External(real))
+}
+
+/// `npm install <pkg>@latest`, globally or into a prefix. Mirrors the openclaw
+/// installer's invocation; bounded so a wedged registry can't hold the request open.
+async fn npm_install_agent_package(
+    pkg: &str,
+    prefix: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let spec = format!("{pkg}@latest");
+    let mut args: Vec<String> = vec!["install".to_owned()];
+    match &prefix {
+        Some(dir) => {
+            args.push("--prefix".to_owned());
+            args.push(dir.to_string_lossy().into_owned());
+        }
+        None => args.push("-g".to_owned()),
+    }
+    args.push(spec.clone());
+
+    #[cfg(target_os = "windows")]
+    let (prog, args) = ("cmd", {
+        let mut wrapped = vec!["/c".to_owned(), "npm".to_owned()];
+        wrapped.extend(args);
+        wrapped
+    });
+    #[cfg(not(target_os = "windows"))]
+    let (prog, args) = ("npm", args);
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        tokio::process::Command::new(prog)
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .no_window()
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("`npm install {spec}` timed out after 300s"))?
+    .map_err(|e| anyhow::anyhow!("spawn npm: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" ");
+        anyhow::bail!("`npm install {spec}` failed: {tail}");
+    }
+    Ok(())
+}
+
 /// `POST /api/agents/:id/update` — update the agent runtime to the latest version.
-/// For the managed Pi (`ryu`) this re-installs `@earendil-works/pi-coding-agent@latest`;
-/// for npx agents it re-warms the npx cache (which pulls the latest on fetch).
+///
+/// For the managed Pi (`ryu`) this re-installs `@earendil-works/pi-coding-agent@latest`.
+/// For everything else the update has to reach whatever the catalog's
+/// `installed_version` is PROBED from, which is the CLI on `PATH` — warming npx
+/// populates `~/.npm/_npx` and moves no binary, so an update that only warmed the
+/// cache left the row reporting the old version forever and the button looked dead.
+/// So: the npx-fetched bridge is warmed (that genuinely is its update), the CLI is
+/// re-installed through the channel that owns it, and the verdict is decided by
+/// re-probing rather than asserted. When the CLI came from outside Ryu, that is
+/// reported as `updated: false` plus a hint instead of a success that did nothing.
 #[utoipa::path(
     post,
     path = "/api/agents/{id}/update",
@@ -6431,40 +6779,96 @@ async fn agent_update(
             ),
         };
     }
-    match agent_npm_package(&state, &agent_id).await {
-        Some(pkg) => {
-            warm_npx_package(&format!("{pkg}@latest")).await;
-            if let Some(entry) = state.agents.find_by_prefix(&agent_id) {
-                if let Some(bridge) = entry
-                    .version_probe
-                    .as_ref()
-                    .and_then(|p| p.bridge_npm_package.as_deref())
-                {
-                    warm_npx_package(&format!(
-                        "{}@latest",
-                        crate::sidecar::agents::acp_registry::npm_package_name(bridge)
-                    ))
-                    .await;
-                }
-                if let Some(agent_pkg) = entry
-                    .version_probe
-                    .as_ref()
-                    .and_then(|p| p.npm_package.as_deref())
-                {
-                    warm_npx_package(&format!(
-                        "{}@latest",
-                        crate::sidecar::agents::acp_registry::npm_package_name(agent_pkg)
-                    ))
-                    .await;
-                }
-            }
-            (StatusCode::OK, Json(json!({ "updated": true })))
-        }
-        None => (
+    use crate::sidecar::agents::acp_registry::npm_package_name;
+
+    let probe = state
+        .agents
+        .find_by_prefix(&agent_id)
+        .and_then(|e| e.version_probe.clone());
+    let binary = probe.as_ref().and_then(|p| p.binary);
+    let cli_pkg = probe.as_ref().and_then(|p| p.npm_package.clone());
+    // The spawn command's package IS the bridge for an ACP agent; fall back to it
+    // so agents with no `version_probe` row still get their runtime refreshed.
+    let bridge_pkg = match probe.as_ref().and_then(|p| p.bridge_npm_package.clone()) {
+        Some(pkg) => Some(pkg),
+        None => agent_npm_package(&state, &agent_id).await,
+    };
+
+    if cli_pkg.is_none() && bridge_pkg.is_none() {
+        return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "updated": false, "error": "no updatable runtime for this agent" })),
-        ),
+        );
     }
+
+    let probe_installed = || async {
+        match binary {
+            Some(bin) if crate::sidecar::adapters::acp::binary_in_path(bin) => {
+                crate::sidecar::adapters::acp::probe_cli_version(bin).await
+            }
+            _ => None,
+        }
+    };
+    let before = probe_installed().await;
+
+    // The bridge is always npx-fetched, so warming it at `@latest` is its update.
+    if let Some(bridge) = bridge_pkg.as_deref() {
+        warm_npx_package(&format!("{}@latest", npm_package_name(bridge))).await;
+    }
+
+    // The underlying CLI, through whichever channel owns it.
+    let mut hint: Option<String> = None;
+    if let Some(pkg) = cli_pkg.as_deref() {
+        let pkg = npm_package_name(pkg);
+        let channel = binary.and_then(agent_install_channel);
+        let install = match &channel {
+            Some(AgentInstallChannel::RyuPrefix) => {
+                Some(npm_install_agent_package(&pkg, Some(crate::paths::ryu_dir())).await)
+            }
+            Some(AgentInstallChannel::NpmGlobal) => {
+                Some(npm_install_agent_package(&pkg, None).await)
+            }
+            Some(AgentInstallChannel::External(path)) => {
+                hint = Some(format!(
+                    "{} is installed at {} — outside Ryu, so Ryu cannot upgrade it. \
+                     Update it with the tool that installed it (its own `update` \
+                     command, your package manager, or a reinstall).",
+                    binary.unwrap_or(&pkg),
+                    path.display()
+                ));
+                None
+            }
+            // Not on PATH at all: this agent is npx-fetched, and the warm above
+            // (or this one, when the CLI ships separately) is the whole install.
+            None => {
+                warm_npx_package(&format!("{pkg}@latest")).await;
+                None
+            }
+        };
+        if let Some(Err(e)) = install {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "updated": false, "error": e.to_string() })),
+            );
+        }
+    }
+
+    let after = probe_installed().await;
+    // Truthful verdict: when there is a probeable CLI, "updated" means the probed
+    // version actually moved. With nothing on PATH the npx cache is the install and
+    // warming always fetches `@latest`, so that path is genuinely up to date.
+    let updated = match (&before, &after) {
+        (Some(b), Some(a)) => b != a,
+        _ => hint.is_none(),
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "updated": updated,
+            "installedVersion": after,
+            "hint": hint,
+        })),
+    )
 }
 
 /// Optional query for `GET /api/agents/:id/capabilities` — when the composer has
@@ -10607,6 +11011,14 @@ async fn activate_plugin(
         });
     }
 
+    // Register the plugin's contributed output styles into the style registry so
+    // they appear in the picker and can be selected. Synchronous + in-line (not
+    // spawned like the bundled-skills copy above): this is an in-memory parse of
+    // text the manifest already carries, with no I/O to keep off the response, and
+    // the enable response must not race the very list the caller reloads next. A
+    // no-op for every manifest with no `output_styles`.
+    sync_plugin_output_styles(manifest, true);
+
     // Collect per-Runnable outcomes for the response (success + failures both
     // surfaced so the caller can observe partial failures without silent drops).
     let statuses = runnable_results
@@ -11006,6 +11418,14 @@ pub async fn fire_activation_event(state: &ServerState, event: &str) {
                 crate::plugins::builtins::tier_for(&manifest.id),
                 approved_grants,
             );
+            // Re-register this plugin's contributed output styles, for the same
+            // reason and on the same seam: the registry's plugin bag is in-memory
+            // only (deliberately — it must survive a disk `reload()`), so without
+            // this an enabled plugin's styles would vanish from the picker after a
+            // restart while the plugin still read as enabled. Idempotent; unlike the
+            // MCP re-register above it needs no grant gate, because a style body is
+            // prose nothing evaluates (design §1, the `ThemeContribution` argument).
+            sync_plugin_output_styles(manifest, true);
         }
     }
 }
@@ -11124,9 +11544,10 @@ fn collect_plugin_slash_commands(
 ///
 /// This is safe because the tab is a *declaration*, not an authority: the rows it
 /// lists come from the app's own Core path, which keeps its own app-enabled gate
-/// (`/api/workflows/catalog` is inside `workflow_routes`). A tab whose app is off
-/// therefore renders an enable prompt rather than data — the shell learns which from
-/// the two bits stamped here.
+/// (`/api/workflows/catalog` is inside `workflow_routes`). The shell learns the
+/// app's state from the two bits stamped here and decides — the desktop Store hides
+/// a tab whose app is not installed and enabled, rather than showing a pill that
+/// only ever opens an enable prompt.
 ///
 /// The SURFACE filter still applies: a shell the app does not target cannot render
 /// the tab whatever its enabled bit says.
@@ -11223,6 +11644,67 @@ fn collect_plugin_settings_tabs(
     out
 }
 
+/// Walk the manifests and collect every `output_styles` entry of an **enabled**
+/// plugin, tagged with its owning `plugin` id.
+///
+/// # Why this one IS enabled-filtered
+///
+/// The store/settings-tab carve-outs above exist because a tab is how you reach an
+/// app that is not running yet. A style is the opposite: it is a live behaviour, and
+/// a disabled plugin must not be able to change how the agent talks. This is the
+/// same rule `contributes.themes` follows one loop below — disabling the plugin is
+/// how a user turns its contributions back off — and it agrees with the registry,
+/// which drops the same styles at the disable seam
+/// ([`sync_plugin_output_styles`]). Two views of the same set must not disagree
+/// about membership.
+///
+/// # The body is deliberately not served here
+///
+/// Each row carries the style's parsed *metadata* and never its `source`. The body
+/// is up to `MAX_OUTPUT_STYLE_BYTES` (64 KB) per style and this endpoint is polled
+/// by every shell on boot, while the body's only real consumer is the registry,
+/// which already received it at the enable seam; a client that wants the text has
+/// `GET /api/output-styles/{id}/source`. The metadata comes out of
+/// `parse_output_style_md` rather than mirrored manifest keys because design §4
+/// makes the frontmatter the single source of truth for it — an unparseable
+/// contribution is skipped here exactly as it is skipped at registration, so this
+/// list never advertises a style the picker cannot select.
+fn collect_plugin_output_styles(
+    manifests: &[crate::plugin_manifest::PluginManifest],
+    enabled_ids: &std::collections::HashSet<String>,
+    surface: Option<crate::plugin_manifest::Surface>,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for manifest in manifests {
+        if !enabled_ids.contains(&manifest.id) {
+            continue;
+        }
+        if !surface.is_none_or(|s| manifest.supports_surface(s)) {
+            continue;
+        }
+        let Some(c) = &manifest.contributes else {
+            continue;
+        };
+        for style in &c.output_styles {
+            let Some(source) = style.source.as_deref() else {
+                continue;
+            };
+            let Ok(record) = ryu_output_styles::parse_output_style_md(&style.id, source) else {
+                continue;
+            };
+            out.push(serde_json::json!({
+                "plugin": manifest.id,
+                "id": record.id,
+                "name": record.name,
+                "description": record.description,
+                "keep_coding_instructions": record.keep_coding_instructions,
+                "force_for_plugin": record.force_for_plugin,
+            }));
+        }
+    }
+    out
+}
+
 /// `GET /api/plugins/contributions` — the declarative UI contributions (composer
 /// controls, settings tabs, slash commands) of every **enabled** plugin, each
 /// tagged with its owning `plugin` id. The desktop renders the known widget types
@@ -11271,7 +11753,9 @@ async fn plugin_contributions(
     let mut views = Vec::new();
     let mut sidebar_sections = Vec::new();
     let mut sidebar_buttons = Vec::new();
+    let mut themes = Vec::new();
     let mut dock_panels = Vec::new();
+    let mut output_styles = Vec::new();
 
     // Surface filter (`targets`): a plugin that doesn't target the calling host
     // contributes nothing to it. Absent/unknown `x-ryu-surface` = no filter, and
@@ -11304,6 +11788,15 @@ async fn plugin_contributions(
     settings_tabs.extend(collect_plugin_settings_tabs(
         &manifests,
         &installed_ids,
+        &enabled_ids,
+        surface,
+    ));
+    // Output styles — enabled-filtered like the in-loop families, but collected by
+    // its own walk because building a row means PARSING the contributed markdown
+    // (design §4's one-parser rule), not cloning a `Value`; see
+    // [`collect_plugin_output_styles`].
+    output_styles.extend(collect_plugin_output_styles(
+        &manifests,
         &enabled_ids,
         surface,
     ));
@@ -11353,6 +11846,18 @@ async fn plugin_contributions(
             c.sidebar_buttons
                 .iter()
                 .filter_map(|b| serde_json::to_value(b).ok())
+                .map(tag),
+        );
+        // Colour themes (`contributes.themes`) — a marketplace theme is a plugin that
+        // contributes one, exactly as in VS Code and Zed. Enabled-gated like the rest
+        // of this loop, and deliberately so: disabling the plugin is how a user turns
+        // its themes back off, so a disabled plugin's theme must leave the picker.
+        // (The shell's own cache then drops it, and a selection pointing at it falls
+        // back to the shipped default.)
+        themes.extend(
+            c.themes
+                .iter()
+                .filter_map(|t| serde_json::to_value(t).ok())
                 .map(tag),
         );
         // Workspace dock panels — the app-owned replacement for the desktop's closed
@@ -11463,6 +11968,17 @@ async fn plugin_contributions(
                 "plugin_id": manifest.id,
                 "approved_grants": record.approved_grants,
                 "has_ui": has_ui && cfg.ui_entry.is_some(),
+                // Provenance, NOT trust tier and NOT privilege: whether this app's
+                // manifest ships compiled into the binary (`BUILTIN_MANIFESTS`). The
+                // host panel uses it for ONE presentational decision — whether the
+                // sandboxed frame needs a visible "Plugin · <name>" attribution bar so
+                // third-party content can never be mistaken for system chrome
+                // (extension-host invariant #6). A first-party app is already named by
+                // the tab that opened it, so the bar is pure noise there. Deliberately
+                // `is_compiled_in_manifest` and not `CORE_PLUGINS` (privilege) or
+                // `find_system_plugin` (the 5 sidecar system apps) — those answer
+                // different questions over different sets.
+                "first_party": crate::plugins::builtins::is_compiled_in_manifest(&manifest.id),
                 // Per-app CSP allowlist (icons/logos direct-fetch for the canvas
                 // asset picker). This widens the sandbox egress lock, so it is a
                 // TRUST-GATED field: emitted ONLY for compiled-in built-in manifests
@@ -11492,7 +12008,13 @@ async fn plugin_contributions(
         "views": views,
         "sidebar_sections": sidebar_sections,
         "sidebar_buttons": sidebar_buttons,
+        "themes": themes,
         "dock_panels": dock_panels,
+        // Contributed output styles (design §4). The DECLARATION view — which
+        // enabled plugin ships which style — next to `themes`, its closest sibling.
+        // Which style is in FORCE is a different question with a different answer,
+        // and `GET /api/output-styles` is the one place that answers it.
+        "output_styles": output_styles,
         "store_tabs": store_tabs,
         "channels": channels,
         "companions": companions,
@@ -12842,6 +13364,14 @@ async fn deactivate_plugin(
             crate::skills_catalog::plugin_skills::deactivate_plugin_skills(&plugin_id);
         });
     }
+    // Symmetric to enable, and unlike the skills above NOT files-preserving —
+    // there are no files. The contributed styles leave the registry outright, which
+    // is the whole enforcement mechanism behind serving `/api/output-styles`
+    // ungated: a disabled plugin cannot style a turn because its styles are gone,
+    // not because a route refused the caller. A user who forked one into their own
+    // root still has their copy — that fork is a disk style and was never in this
+    // bag.
+    sync_plugin_output_styles(manifest, false);
     policy_outcome
 }
 
@@ -14406,6 +14936,16 @@ fn binary_installed_on_disk(name: &str) -> bool {
     } else {
         ""
     };
+    // The mesh needs BOTH `tailscaled` (the daemon) and `tailscale` (the CLI that
+    // enrolls and queries it), and it may run an ADOPTED pair from PATH rather than
+    // a Ryu-managed one (macOS installs via Homebrew and puts nothing in
+    // `~/.ryu/bin` at all). The generic branch below checks one filename in the
+    // managed bin dir, so it would both miss every adopted install and report the
+    // mesh installed with the daemon missing. Ask the resolver instead — its answer
+    // is the one `start()` will actually act on.
+    if name == "tailscale" {
+        return crate::sidecar::tailscale::resolve_mesh_pair().is_ok();
+    }
     // Some sidecars install a binary whose filename differs from the sidecar
     // name: llamacpp (and the embeddings sidecar that shares it) ship as
     // "llama-server"; the stable-diffusion.cpp media engine ships as "sd-server".
@@ -15439,7 +15979,20 @@ pub(crate) async fn call_side_model(
         .await
         .map_err(|e| format!("gateway unreachable: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("gateway returned HTTP {}", resp.status()));
+        // Carry the gateway's OWN error text through. Without it every failure
+        // reached the user as a bare "gateway returned HTTP 400", which hides the
+        // one thing that identifies the fault (no provider for the model, missing
+        // key, quota). Truncated so a stray HTML error page can't flood the client.
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let detail = body.trim();
+        if detail.is_empty() {
+            return Err(format!("gateway returned HTTP {status} (model `{model}`)"));
+        }
+        let detail: String = detail.chars().take(400).collect();
+        return Err(format!(
+            "gateway returned HTTP {status} for model `{model}`: {detail}"
+        ));
     }
     let body: serde_json::Value = resp
         .json()
@@ -15485,6 +16038,18 @@ async fn resolve_btw_model(state: &ServerState) -> String {
             if !val.is_empty() {
                 return val;
             }
+        }
+    }
+    // Nothing configured anywhere. `DEFAULT_LLM_MODEL` is a REMOTE id
+    // (`gpt-4o-mini`), so on a node with no OpenAI credential the gateway
+    // rejected every side question and `/btw` surfaced as a bare 502 — while the
+    // main chat, pointed at a model the node can actually reach, worked fine.
+    // Borrow that model: if chat works, the side question works. The constant
+    // stays as the last resort for a node with no Pi selection at all.
+    if let Some(model) = crate::pi_config::current().model {
+        let trimmed = model.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
         }
     }
     crate::registry::DEFAULT_LLM_MODEL.to_string()
@@ -18620,9 +19185,23 @@ async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value>
 /// answers 200 with the live status so the desktop toggle reflects the PERSISTED
 /// state even when the daemon fails to start; a daemon-start failure rides in a
 /// non-contract `start_error` field (the desktop surfaces it as a warning, not a
-/// rolled-back toggle). The daemon is PATH-adopted — the official
-/// `tailscale`/`tailscaled` client must be installed; a missing client is the
-/// common `start_error`.
+/// rolled-back toggle).
+///
+/// A missing client is the common `start_error`, and it is no longer a dead end.
+/// PATH adoption still wins, but when there is no complete `tailscale`/`tailscaled`
+/// pair Ryu can install a managed one, so this handler answers with two more
+/// non-contract fields beside `start_error`:
+///
+/// - `missing_binaries: string[]` — what could not be resolved anywhere.
+/// - `can_install: bool` — whether THIS node has an install route at all (Linux
+///   archive, macOS Homebrew, or `RYU_TAILSCALE_RELEASE_URL`). True ⇒ the client
+///   should offer the install; false ⇒ tell the user how to install it themselves.
+///
+/// This handler deliberately does NOT install inline. `POST /api/setup/tailscale/install`
+/// is the install route and it backgrounds the work (`tokio::spawn`) precisely
+/// because these are minute-long transfers; running one inside the toggle handler
+/// would hang the request past any client timeout. The client drives:
+/// enable → `can_install` → install → re-POST enable.
 ///
 /// Security: enabling mesh makes this Core reachable over the tailnet, so the
 /// fail-closed token gate (`enforce_remote_auth`) requires a strong
@@ -18662,14 +19241,24 @@ async fn mesh_config(
     ryu_mesh::set_pref_enabled(body.enabled);
 
     let mut start_error: Option<String> = None;
+    let mut missing = crate::sidecar::tailscale::MissingMesh {
+        missing: Vec::new(),
+        can_install: false,
+    };
     if body.enabled {
-        // Make the daemon eligible to run, then start it (PATH-adopted). A missing
-        // official `tailscale`/`tailscaled` client is the common failure; the mesh
-        // stays enabled and the desktop surfaces the reason.
-        state.manager.mark_installed("tailscale").await;
-        if let Err(e) = state.manager.start_sidecar("tailscale").await {
-            tracing::warn!("mesh: daemon failed to start after enable: {e}");
-            start_error = Some(e.to_string());
+        // The PURE pre-check first, so a missing client is diagnosed structurally
+        // rather than scraped back out of the start error's prose.
+        if let Err(m) = crate::sidecar::tailscale::ensure_mesh_binaries() {
+            tracing::warn!("mesh: {m}");
+            start_error = Some(m.to_string());
+            missing = m;
+        } else {
+            // Make the daemon eligible to run, then start it.
+            state.manager.mark_installed("tailscale").await;
+            if let Err(e) = state.manager.start_sidecar("tailscale").await {
+                tracing::warn!("mesh: daemon failed to start after enable: {e}");
+                start_error = Some(e.to_string());
+            }
         }
     } else {
         // Best-effort stop — a daemon that never started is not an error for a
@@ -18683,9 +19272,14 @@ async fn mesh_config(
     let status = state.mesh.status().await;
     let mut value = serde_json::to_value(status).unwrap_or_default();
     if let Some(err) = start_error {
-        // Non-contract field: `MeshStatus` doesn't carry it, but the desktop reads
-        // it to warn without treating the (persisted) enable as a failure.
+        // Non-contract fields: `MeshStatus` doesn't carry them, but the desktop
+        // reads them to warn without treating the (persisted) enable as a failure —
+        // and, when `can_install` is true, to offer the install instead of a
+        // dead-end toast. Emitted only alongside `start_error`, which is already the
+        // precedent for exactly this shape, so the OpenAPI contract is unchanged.
         value["start_error"] = serde_json::Value::String(err);
+        value["missing_binaries"] = serde_json::json!(missing.missing);
+        value["can_install"] = serde_json::Value::Bool(missing.can_install);
     }
     Json(value).into_response()
 }
@@ -21272,6 +21866,10 @@ async fn build_merged_integrations(
                                 categories,
                                 sources: vec!["composio".into()],
                                 feeds: Vec::new(),
+                                // Composio brands carry no directory records; their
+                                // connection story is the Composio auth flow, not an
+                                // integrations.sh entry.
+                                connections: Vec::new(),
                                 domain: None,
                                 popularity: None,
                             },
@@ -23921,6 +24519,32 @@ async fn install_sidecar(
                 )
                 .await
                 .map(|_| "installed".to_string()),
+            // The mesh client (#478). Two legs by asset reality, not by taste — see
+            // `sidecar/tailscale/downloader.rs`: a pinned upstream `.tgz` through the
+            // download center where one exists, and Homebrew on macOS, where
+            // upstream's only download is a GUI app bundle that ships no
+            // `tailscaled`. The brew leg reports no byte progress, so it registers
+            // as an indeterminate task exactly like `apfel`.
+            //
+            // Note this is the USER-INITIATED install path. `POST /api/mesh/config`
+            // deliberately does NOT download inline (see its doc): a 38 MB transfer
+            // inside the toggle handler would hang past any client timeout.
+            "tailscale" => {
+                use crate::sidecar::tailscale::downloader::TailscaleDownloader;
+                let dl = TailscaleDownloader::new();
+                if crate::sidecar::tailscale::downloader::is_brew_leg() {
+                    downloads
+                        .register_indeterminate(
+                            "tool:tailscale".to_string(),
+                            crate::downloads::DownloadKind::Tool,
+                            "Tailscale".to_string(),
+                            dl.ensure_installed(&downloads),
+                        )
+                        .await
+                } else {
+                    dl.ensure_installed(&downloads).await
+                }
+            }
             // Docker Model Runner is adopt-only: there is nothing to download.
             // "Installing" means verifying DMR is enabled + reachable on :12434,
             // then recording a version-store marker so the engine survives a Core
@@ -23962,7 +24586,18 @@ async fn install_sidecar(
 
         match result {
             Ok(version) => {
-                setup.mark_installed(&sidecar_name).await;
+                // The mesh daemon is the ONE sidecar whose "installed" flag is owned
+                // by the mesh pref rather than by having the binaries — the same
+                // invariant `seed_installed_from_disk` and `main()` keep at boot.
+                // Marking it here would let `POST /api/sidecar/start-all` try to
+                // start a daemon for someone who installed the client but never
+                // enabled the mesh; `TailscaleManager::start` bails immediately on
+                // `!is_enabled()`, so the only possible product is a confusing
+                // error. `POST /api/mesh/config` marks it when the mesh is actually
+                // turned on.
+                if sidecar_name != "tailscale" || ryu_mesh::is_enabled() {
+                    setup.mark_installed(&sidecar_name).await;
+                }
                 tracing::info!("sidecar '{}' installed successfully", sidecar_name);
                 install_status.set_installed(&sidecar_name, version).await;
             }
@@ -29557,6 +30192,66 @@ mod pure_helper_tests {
         assert_eq!(npx_package_of("npx -y"), None);
     }
 
+    // ── agent_install_channel ────────────────────────────────────────────────
+    // Whether Ryu may upgrade an agent CLI in place is decided by where the
+    // binary actually resolves to. Getting this wrong is what made "Update" a
+    // no-op that reported success: npm/npx cannot move a vendor-installed binary.
+    #[test]
+    fn agent_install_channel_classifies_by_resolved_path() {
+        let tmp = std::env::temp_dir().join(format!("ryu-channel-{}", std::process::id()));
+        let global_bin = tmp.join("prefix/bin");
+        let global_pkg = tmp.join("prefix/lib/node_modules/@vendor/cli");
+        let vendor_bin = tmp.join("vendor/bin");
+        let brew_bin = tmp.join("brew/bin");
+        let brew_pkg = tmp.join("brew/Cellar/somecli/1.0.0/libexec/lib/node_modules/somecli");
+        std::fs::create_dir_all(&global_bin).unwrap();
+        std::fs::create_dir_all(&global_pkg).unwrap();
+        std::fs::create_dir_all(&vendor_bin).unwrap();
+        std::fs::create_dir_all(&brew_bin).unwrap();
+        std::fs::create_dir_all(&brew_pkg).unwrap();
+
+        // An npm global install: `<prefix>/bin/x` → `<prefix>/lib/node_modules/…`.
+        let real = global_pkg.join("cli.js");
+        std::fs::write(&real, "#!/usr/bin/env node\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, global_bin.join("npmcli")).unwrap();
+        // A vendor installer: a plain file with no node_modules anywhere above it.
+        std::fs::write(vendor_bin.join("vendorcli"), "#!/bin/sh\n").unwrap();
+        // A homebrew formula shipping a Node CLI: node_modules IS above it, but
+        // under Cellar — brew owns it, so `npm install -g` must not touch it.
+        let brew_real = brew_pkg.join("cli.js");
+        std::fs::write(&brew_real, "#!/usr/bin/env node\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&brew_real, brew_bin.join("brewcli")).unwrap();
+
+        let saved = std::env::var("PATH").unwrap_or_default();
+        let joined =
+            std::env::join_paths([global_bin.clone(), vendor_bin.clone(), brew_bin.clone()])
+                .unwrap();
+        // SAFETY: single-threaded test; PATH is restored before returning.
+        unsafe { std::env::set_var("PATH", &joined) };
+
+        #[cfg(unix)]
+        assert!(matches!(
+            agent_install_channel("npmcli"),
+            Some(AgentInstallChannel::NpmGlobal)
+        ));
+        assert!(matches!(
+            agent_install_channel("vendorcli"),
+            Some(AgentInstallChannel::External(_))
+        ));
+        #[cfg(unix)]
+        assert!(matches!(
+            agent_install_channel("brewcli"),
+            Some(AgentInstallChannel::External(_))
+        ));
+        // Absent from PATH ⇒ nothing to classify (an npx-fetched agent).
+        assert!(agent_install_channel("definitely-not-here").is_none());
+
+        unsafe { std::env::set_var("PATH", saved) };
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
     // ── composio_toolkit_categories ──────────────────────────────────────────
     #[test]
     fn composio_categories_accept_strings_and_objects() {
@@ -30771,5 +31466,165 @@ mod per_resource_gate_tests {
         let teams = payload["teams"].as_array().unwrap();
         assert_eq!(teams[0]["name"], "Platform");
         assert_eq!(teams[1]["name"], "t2");
+    }
+}
+
+/// The `/api/output-styles` surface, driven end-to-end through Core's own
+/// [`output_styles_routes`] rather than a hand-rebuilt stand-in of it — the mount
+/// (prefix, nesting, and the fact that no handler needs `State`) is exactly what a
+/// mistake here would break.
+///
+/// The whole module holds [`ryu_output_styles::OUTPUT_STYLES_ENV_LOCK`]: both env
+/// vars it redirects are process-global, and without the lock a parallel test's
+/// `remove_var` would drop the redirect mid-run and the `select` write would land in
+/// the developer's real `~/.claude/output-styles`.
+///
+/// One process-global side effect is deliberate and cannot be undone: the first call
+/// to [`output_style_registry`] publishes the registry into the crate's `OnceLock`
+/// for the rest of the test binary, pointed at this module's tempdir. Nothing else in
+/// `ryu-core` touches output styles, so that is contained — but a future test that
+/// does must reuse this registry rather than expect a fresh one.
+///
+/// `await_holding_lock` is allowed on purpose and is the entire point of the guard:
+/// the env redirect has to stay in force across the HTTP calls, which are the part
+/// that reads it. These are `#[tokio::test]`s on a multi-test runtime, so the
+/// deadlock the lint warns about (a blocking guard starving the executor) needs a
+/// second task contending for the same mutex — and the mutex is only ever taken by
+/// tests that are serialized by it anyway.
+#[cfg(test)]
+#[allow(clippy::await_holding_lock)]
+mod output_styles_route_tests {
+    use super::output_styles_routes;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        Router,
+    };
+    use tower::ServiceExt;
+
+    /// A user-root styles dir with one style in it, plus a selection file beside it,
+    /// with both env overrides pointed at them. `RYU_OUTPUT_STYLES_DIR` also
+    /// SUPPRESSES the project/managed tiers, which is what stops the scan from
+    /// picking up whatever `.claude/output-styles` happens to sit above the
+    /// checkout the tests run in.
+    fn styles_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let styles = dir.path().join("output-styles");
+        std::fs::create_dir_all(&styles).expect("styles dir");
+        std::fs::write(
+            styles.join("eli5.md"),
+            "---\nname: ELI5\ndescription: keep it simple pls\nkeep-coding-instructions: true\n---\n\nTalk to me like I'm 5.\n",
+        )
+        .expect("style file");
+        std::env::set_var(ryu_output_styles::ENV_OUTPUT_STYLES_DIR, &styles);
+        std::env::set_var(
+            ryu_output_styles::ENV_SELECTION_FILE,
+            dir.path().join("output-style.json"),
+        );
+        // The registry loads the disk tier ONCE, at first publication, so the second
+        // test to run would otherwise still be looking at the first one's (deleted)
+        // tempdir. Re-scanning here makes each test independent of the order they
+        // happen to run in.
+        super::output_style_registry().reload();
+        dir
+    }
+
+    // NOTE: the two env vars are deliberately NOT restored when a test ends. Removing
+    // them would hand any later test in this binary the developer's real
+    // `~/.claude/output-styles` and `~/.ryu/output-style.json`; leaving them pointed
+    // at a deleted tempdir cannot touch anything that matters.
+
+    /// A fresh router per call, because `oneshot` consumes the service — which also
+    /// proves the mount is stateless: every request re-enters through the same
+    /// process-global registry rather than one long-lived instance's captured state.
+    fn app() -> Router {
+        output_styles_routes::<()>()
+    }
+
+    async fn call(method: &str, path: &str, body: Option<&str>) -> serde_json::Value {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_owned())))
+            .expect("request builds");
+        let res = app()
+            .oneshot(request)
+            .await
+            .expect("the router is infallible");
+        assert_eq!(res.status(), StatusCode::OK, "unexpected status for {path}");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        serde_json::from_slice(&bytes).expect("the response is JSON")
+    }
+
+    /// List → select → list: the store tab's whole loop. `active` is the field the
+    /// tab maps `installed: "active"` onto, so a selection that does not come back
+    /// flagged renders the current style as "Not added" on every reload.
+    #[tokio::test]
+    async fn selecting_a_style_makes_the_next_list_report_it_active() {
+        let _guard = ryu_output_styles::OUTPUT_STYLES_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _dir = styles_fixture();
+
+        // Nothing selected on a fresh node — design §8's "the feature is inert until
+        // a user picks one".
+        let listed = call("GET", "/api/output-styles", None).await;
+        assert!(listed["selected"].is_null(), "fresh node has no selection");
+        let rows = listed["styles"].as_array().expect("styles is an array");
+        assert_eq!(rows.len(), 1, "the fixture's one style is listed: {rows:?}");
+        assert_eq!(rows[0]["id"], "eli5");
+        assert_eq!(rows[0]["name"], "ELI5");
+        assert_eq!(rows[0]["active"], false);
+
+        let selected = call(
+            "POST",
+            "/api/output-styles/select",
+            Some(r#"{"style_id":"eli5"}"#),
+        )
+        .await;
+        assert_eq!(selected["success"], true);
+        assert_eq!(selected["selected"], "eli5");
+
+        let relisted = call("GET", "/api/output-styles", None).await;
+        assert_eq!(relisted["selected"], "eli5");
+        let rows = relisted["styles"].as_array().expect("styles is an array");
+        assert_eq!(rows[0]["active"], true);
+        // Not forced: a user selection and a plugin's `force-for-plugin` are
+        // different claims, and the picker explains the second one differently.
+        assert_eq!(rows[0]["forced"], false);
+        assert!(relisted["forced"].is_null());
+    }
+
+    /// Selecting an id no style has must 404 rather than persist: a silently stored
+    /// dangling id resolves to no style on every later turn while the picker keeps
+    /// showing a selection.
+    #[tokio::test]
+    async fn selecting_an_unknown_style_is_refused_and_changes_nothing() {
+        let _guard = ryu_output_styles::OUTPUT_STYLES_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _dir = styles_fixture();
+
+        let res = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/output-styles/select")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"style_id":"no-such-style"}"#))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("the router is infallible");
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let listed = call("GET", "/api/output-styles", None).await;
+        assert!(
+            listed["selected"].is_null(),
+            "the refusal persisted nothing"
+        );
     }
 }

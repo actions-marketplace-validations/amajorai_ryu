@@ -310,6 +310,7 @@ async fn fetch_and_extract_source(
     downloads
         .download_blocking(crate::downloads::DownloadSpec {
             kind: crate::downloads::DownloadKind::Other,
+            role: crate::downloads::DownloadRole::Plugin,
             label: format!("plugin runtime source: {}", source.url),
             url: source.url.clone(),
             dest: archive_path.clone(),
@@ -412,6 +413,7 @@ async fn fetch_assets(
 
         let spec = crate::downloads::DownloadSpec {
             kind: crate::downloads::DownloadKind::Other,
+            role: crate::downloads::DownloadRole::Plugin,
             label: format!("plugin asset: {}", asset.source),
             url: url.clone(),
             dest: dest.clone(),

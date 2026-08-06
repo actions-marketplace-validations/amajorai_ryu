@@ -43,6 +43,44 @@ export interface SafeDither {
 	to?: DitherColor | number | "transparent";
 }
 
+/** The hue offset an opaque two-tone ramp puts between its two ends. Small enough
+ *  that both ends read as the same colour family, large enough that the dither has
+ *  something to blend. */
+const TWO_TONE_SPREAD = 34;
+
+/** True when this spec dissolves to transparent rather than painting edge to edge.
+ *
+ *  This is a LEGIBILITY question, not a cosmetic one, which is why it is a shared
+ *  predicate instead of an inline `=== "transparent"` at each painting site. A
+ *  two-tone ramp covers its whole box, so white-on-dither always reads. One that
+ *  dissolves leaves the far end at whatever is behind it — on a light surface that
+ *  end is nearly white, and a white glyph on it disappears entirely. Every surface
+ *  that hardcodes a light foreground over a dither must branch on this. */
+export function ditherDissolves(dither: SafeDither | null): boolean {
+	// An ABSENT `to` counts. `normalizeDither` omits a `to` it could not resolve,
+	// and `DitherGradient` defaults the prop to "transparent" — so an omitted one
+	// paints the same dissolve as an explicit one, and treating it as opaque would
+	// put a white glyph on a see-through square.
+	return !dither || dither.to === undefined || dither.to === "transparent";
+}
+
+/** Force a spec to paint edge to edge, for the surfaces whose foreground is a fixed
+ *  light colour and so cannot survive a dissolve (the detail hero and its tile).
+ *
+ *  A dissolving spec becomes a two-tone ramp in its OWN hue, so the standardized
+ *  colour a manifest declares still drives the surface — it just stays opaque. Only
+ *  a numeric hue can be offset; a named palette colour has no arithmetic, so it is
+ *  returned unchanged and that caller keeps whatever contrast it had before. */
+export function opaqueDither(dither: SafeDither | null): SafeDither | null {
+	if (!(dither && ditherDissolves(dither))) {
+		return dither;
+	}
+	if (typeof dither.from !== "number") {
+		return dither;
+	}
+	return { ...dither, to: (dither.from + TWO_TONE_SPREAD) % 360 };
+}
+
 /** Validate an untrusted {@link CardDither} into a {@link SafeDither}, or null when
  *  it can't paint. `from` MUST resolve (else the whole spec is dropped and the
  *  caller falls back to its flat/`img` path); `to` accepts "transparent" or a valid

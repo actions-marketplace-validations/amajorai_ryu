@@ -4,15 +4,9 @@
 import { BorderBeam } from "@ryu/ui/components/border-beam";
 import { useTheme } from "next-themes";
 import { useBuildProfile } from "@/src/lib/build-profile.ts";
+import { channelLabel } from "@/src/lib/channel-brand.ts";
 import { useReleaseChannel } from "@/src/lib/release-channel.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
-
-const CHANNEL_LABELS: Record<string, string> = {
-	canary: "Canary",
-	nightly: "Nightly",
-	beta: "Beta",
-	stable: "Stable",
-};
 
 /** Pulsed build-identity chip. Renders nothing on a plain Stable release build. */
 export function BuildBadge({ className }: { className?: string } = {}) {
@@ -29,7 +23,9 @@ export function BuildBadge({ className }: { className?: string } = {}) {
 
 	const labels = [
 		...(dev ? ["Dev"] : []),
-		...(showChannel ? [CHANNEL_LABELS[channel] ?? channel] : []),
+		// Same label table that names the shipped bundle, so the chip and the
+		// app's own name agree on what a channel is called.
+		...(showChannel ? [channelLabel(channel)] : []),
 	];
 	const title = labels
 		.map((label) =>

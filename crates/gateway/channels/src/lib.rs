@@ -956,6 +956,40 @@ pub async fn handle_turn<C: Channel + 'static>(
 // that used to flow. Deleting it turns that into a compile error at each call
 // site, which is where the decision belongs. Every adapter calls `handle_turn`.
 
+/// The platform rejected the adapter's own credential — its token is no longer
+/// valid, and no amount of retrying with it will help.
+///
+/// This exists as a distinct type rather than a string an operator greps for
+/// because it is the one transport failure a *supervisor* must act on instead of
+/// back off on: a Telegram token can be replaced out from under a running
+/// adapter (the owner rotates it in Telegram, or `replaceManagedBotToken` mints a
+/// new one), and the only recovery is a fresh token plus a new adapter — the
+/// token is baked into the API base at construction, so it cannot be mutated in
+/// place. Treated as a generic transport error it becomes an unauthorized poll
+/// every few seconds, forever, with the bot silently deaf.
+///
+/// Deliberately carries no payload: the failing URL contains the token, so the
+/// message must never be built from the transport error's own `Display`.
+#[derive(Debug, Clone, Copy)]
+pub struct TokenRejected;
+
+impl std::fmt::Display for TokenRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("channel credential rejected by the platform (401 unauthorized)")
+    }
+}
+
+impl std::error::Error for TokenRejected {}
+
+/// Is this error (or anything it wraps) a [`TokenRejected`]?
+///
+/// Walks the whole chain rather than testing the outermost error so an adapter
+/// stays free to add `.context(...)` on the way out without changing how a
+/// supervisor classifies the failure.
+pub fn is_token_rejected(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<TokenRejected>())
+}
+
 /// Spawn one channel's inbound loop on a dedicated task. A channel that fails to
 /// construct or whose loop errors is logged and skipped so it never takes down
 /// the gateway or any sibling channel.
@@ -963,34 +997,56 @@ pub fn spawn_channel<C: Channel + 'static>(
     host: &Arc<dyn ChannelHost>,
     channel: anyhow::Result<C>,
 ) {
-    match channel {
-        Ok(channel) => {
-            let channel = Arc::new(channel);
-            let name = channel.name();
-            let access = &channel.runtime().cfg.access;
-            match access.dm {
-                DmPolicy::Open => warn!(
-                    channel = name,
-                    "channel registered in OPEN mode — every DM is answered and billed to this operator"
-                ),
-                DmPolicy::Pairing => info!(
-                    channel = name,
-                    "channel registered with DM pairing — unknown senders get a code to be approved"
-                ),
-                DmPolicy::Allowlist | DmPolicy::Disabled => {}
-            }
-            info!(channel = name, "registering channel");
-            let host = Arc::clone(host);
-            tokio::spawn(async move {
-                if let Err(err) = channel.clone().run(host).await {
-                    warn!(channel = name, error = %err, "channel loop exited with error");
-                }
-            });
-        }
+    let host = Arc::clone(host);
+    tokio::spawn(async move {
+        // The error is already logged inside `run_channel`; a fire-and-forget
+        // caller has nothing further to do with it.
+        let _ = run_channel(&host, channel).await;
+    });
+}
+
+/// Register a channel and await its inbound loop on the *current* task,
+/// returning why it ended.
+///
+/// Split out of [`spawn_channel`] so a caller that must observe the outcome —
+/// the gateway's token-rotation supervisor, which respawns a Telegram adapter
+/// whose token was replaced ([`TokenRejected`]) — runs the same registration
+/// path (the DM-policy warning, the `registering channel` line) instead of
+/// re-deriving it and drifting from it.
+///
+/// # Errors
+/// Returns the construction error, or whatever the channel's loop exited with.
+/// Both are logged here, so the two callers stay symmetrical in the log.
+pub async fn run_channel<C: Channel + 'static>(
+    host: &Arc<dyn ChannelHost>,
+    channel: anyhow::Result<C>,
+) -> anyhow::Result<()> {
+    let channel = match channel {
+        Ok(channel) => Arc::new(channel),
         Err(err) => {
             warn!(error = %err, "failed to register channel");
+            return Err(err);
         }
+    };
+    let name = channel.name();
+    let access = &channel.runtime().cfg.access;
+    match access.dm {
+        DmPolicy::Open => warn!(
+            channel = name,
+            "channel registered in OPEN mode — every DM is answered and billed to this operator"
+        ),
+        DmPolicy::Pairing => info!(
+            channel = name,
+            "channel registered with DM pairing — unknown senders get a code to be approved"
+        ),
+        DmPolicy::Allowlist | DmPolicy::Disabled => {}
     }
+    info!(channel = name, "registering channel");
+    let result = Arc::clone(&channel).run(Arc::clone(host)).await;
+    if let Err(err) = &result {
+        warn!(channel = name, error = %err, "channel loop exited with error");
+    }
+    result
 }
 
 #[cfg(test)]

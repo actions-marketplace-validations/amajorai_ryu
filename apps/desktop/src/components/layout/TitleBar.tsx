@@ -10,7 +10,6 @@ import {
 	Calendar04Icon,
 	Cancel01Icon,
 	CheckmarkBadge02Icon,
-	ClipboardIcon,
 	Copy01Icon,
 	CpuIcon,
 	Delete02Icon,
@@ -19,7 +18,6 @@ import {
 	Folder01Icon,
 	FullScreenIcon,
 	GridIcon,
-	Home01Icon,
 	InboxIcon,
 	LibraryIcon,
 	LinkSquare02Icon,
@@ -112,11 +110,11 @@ import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { useTabCycleHotkeys } from "@/src/hooks/useTabCycleHotkeys.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { setTabSizing, useTabSizing } from "@/src/hooks/useTabSizing.ts";
-import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import { setTitlebarHidden } from "@/src/lib/decorumTitlebar.ts";
 import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
+import { TabEntityMenuSection } from "./tab-entity-menu.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
 import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
 
@@ -215,7 +213,11 @@ const COLOR_LABELS: Record<TabGroupColor, string> = {
 // the matching sidebar entry (AppSidebar's SECTION_ICONS + the NavTabButton
 // chrome) so a page's tab and its sidebar row read as the same thing.
 const PATH_ICONS: Record<string, IconSvgElement> = {
-	"/home": Home01Icon,
+	// No Home/dashboard entry: that page's path is declared by `@ryu/dashboards`
+	// (`contributes.sidebar_buttons[].target`), and its tab icon comes from the same
+	// contribution via `usePluginContributionTabIcons` — which `resolveTabIcon`
+	// consults before this map. A path key here would go stale the moment the app
+	// moved itself.
 	"/chat": Message01Icon,
 	"/agents": Target01Icon,
 	"/engines": CpuIcon,
@@ -618,12 +620,10 @@ async function moveTabToNewWindow(tab: Tab, closeTab: (id: string) => void) {
 function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 	const { activateTab, closeTab, togglePin, openTab, tabs, unloadTab } =
 		useTabsContext();
-	const { loadMessages } = useChatHistoryContext();
 	const { isDragging, showBefore, showAfter, dragHandlers } = useTabDragProps(
 		tab.id
 	);
 	const busy = useTabBusy(tab);
-	const canCopyTranscript = tab.path === "/chat" && Boolean(tab.conversationId);
 	return (
 		<ContextMenu>
 			<Tooltip>
@@ -681,20 +681,10 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 					<HugeiconsIcon className="size-4" icon={ZzzIcon} />
 					Unload tab
 				</ContextMenuItem>
-				{canCopyTranscript ? (
-					<ContextMenuItem
-						onClick={() => {
-							const conversationId = tab.conversationId;
-							if (!conversationId) {
-								return;
-							}
-							void copyChatTranscript(() => loadMessages(conversationId));
-						}}
-					>
-						<HugeiconsIcon className="size-4" icon={ClipboardIcon} />
-						Copy transcript
-					</ContextMenuItem>
-				) : null}
+				{/* Same entity section the regular pill gets — a pinned tab is still
+				    showing a chat/space/agent, so the verbs for it belong here too. */}
+				<TabEntityMenuSection tab={tab} />
+				<ContextMenuSeparator />
 				<ContextMenuItem onClick={() => openTab(tab.path, { forceNew: true })}>
 					<HugeiconsIcon className="size-4" icon={Copy01Icon} />
 					Duplicate tab
@@ -739,7 +729,6 @@ function RegularTab({
 		togglePin,
 		unloadTab,
 	} = useTabsContext();
-	const { loadMessages } = useChatHistoryContext();
 	const { isDragging, showBefore, showAfter, dragHandlers } = useTabDragProps(
 		tab.id
 	);
@@ -760,7 +749,6 @@ function RegularTab({
 	// Active tabs inside a group use a lighter fill so they read against the
 	// group's tinted bracket instead of clashing with it.
 	const activeBg = inGroup ? "bg-background/70" : "bg-muted";
-	const canCopyTranscript = tab.path === "/chat" && Boolean(tab.conversationId);
 
 	return (
 		<ContextMenu>
@@ -886,21 +874,11 @@ function RegularTab({
 				</ContextMenuItem>
 				<GroupSubmenu tab={tab} />
 				<SplitSubmenu tab={tab} />
+				{/* Verbs for the thing the tab is SHOWING (the chat, the space, …) —
+				    shell flags plus whatever apps anchor to it. Copy transcript lives
+				    there now rather than being a hardcoded chat-only row here. */}
+				<TabEntityMenuSection tab={tab} />
 				<ContextMenuSeparator />
-				{canCopyTranscript ? (
-					<ContextMenuItem
-						onClick={() => {
-							const conversationId = tab.conversationId;
-							if (!conversationId) {
-								return;
-							}
-							void copyChatTranscript(() => loadMessages(conversationId));
-						}}
-					>
-						<HugeiconsIcon className="size-4" icon={ClipboardIcon} />
-						Copy transcript
-					</ContextMenuItem>
-				) : null}
 				<ContextMenuItem onClick={() => openTab(tab.path, { forceNew: true })}>
 					<HugeiconsIcon className="size-4" icon={Copy01Icon} />
 					Duplicate tab
