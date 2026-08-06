@@ -44,6 +44,12 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"storage.set": "storage.kv",
 	"storage.delete": "storage.kv",
 	"storage.keys": "storage.kv",
+	// Added deliberately with the sealing primitive: all three share ONE
+	// capability so a grant covers seal+open+status as a unit — an app that can
+	// seal must be able to open, or it writes data it can never read back.
+	"crypto.seal": "crypto.seal",
+	"crypto.open": "crypto.seal",
+	"crypto.status": "crypto.seal",
 	"agent.run.stream": "agent.run",
 	"agent.cancel": "agent.run",
 	"spaces.createDoc": "spaces.docs",
@@ -197,6 +203,7 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 	"hook:side-model": "model.complete",
 	"hook:run-agent": "agent.run",
 	"storage:kv": "storage.kv",
+	"crypto:seal": "crypto.seal",
 	"spaces:docs": "spaces.docs",
 	"media:generate": "media.generate",
 	"media:transcribe": "media.transcribe",

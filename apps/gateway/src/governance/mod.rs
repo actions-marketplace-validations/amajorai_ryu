@@ -402,6 +402,18 @@ fn default_grant_allowlist() -> Vec<String> {
         // plugins (`goal`, `proof`) so they can persist run state. Same re-enable
         // rationale as the companion scopes above. Swappable via the env override.
         "storage:kv",
+        // The sealing primitive: an app seals/opens its OWN data under a per-plugin
+        // subkey Core derives and the app never holds (`host.crypto_*`). On the
+        // allowlist rather than owner-scoped because `crypto` is a RESERVED
+        // namespace — without an entry here no app could hold it without a Gateway
+        // Rust edit, which is the per-app-string anti-pattern this list warns about.
+        //
+        // Reviewed as SAFE to hand out broadly, which is unusual for this list and
+        // worth stating: it grants no reach outside the app's own data and no way to
+        // read a key. It strictly REDUCES what a stolen disk yields, so gating it
+        // tightly would push apps toward the plaintext path instead — the opposite
+        // of the intent. Swappable via the env override.
+        "crypto:seal",
         // The follow-up-message scope declared by the seeded widget companion
         // plugins (`checklist`, `chart-studio`, `data-grid-explorer`,
         // `decision-wizard`, `worktree-diff-review`), which post a follow-up chat

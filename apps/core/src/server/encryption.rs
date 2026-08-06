@@ -131,6 +131,22 @@ pub async fn encryption_status(State(state): State<ServerState>) -> impl IntoRes
             "detail": "Settings — including provider API keys stored here — are still written in the clear. Anyone who can read the data folder can read them.",
         },
         {
+            // Reported as PARTIAL rather than plaintext because the honest answer
+            // is per-app: Core stores whatever bytes the app hands it, and an app
+            // holding `crypto:seal` hands over ciphertext it sealed under its own
+            // subkey. Calling the whole store plaintext would understate the apps
+            // that opted in; calling it sealed would badly overstate the ones that
+            // did not. Neither number is knowable from here — Core cannot tell a
+            // sealed value from an opaque one without trying every app's key — so
+            // the counts stay null and the detail explains the split.
+            "id": "app-data",
+            "label": "App data",
+            "status": PARTIAL,
+            "sealed": serde_json::Value::Null,
+            "total": serde_json::Value::Null,
+            "detail": "Values apps store on this device are written as given. An app that requests the \"encrypt its own data\" permission seals them first, under a key derived per app that the app itself never sees; apps that do not are stored in the clear.",
+        },
+        {
             "id": "device-token",
             "label": "Device token",
             "status": PLAINTEXT,

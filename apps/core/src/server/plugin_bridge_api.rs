@@ -61,6 +61,9 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "storage.set" => Some("host.storage_set"),
         "storage.delete" => Some("host.storage_delete"),
         "storage.keys" => Some("host.storage_keys"),
+        "crypto.seal" => Some("host.crypto_seal"),
+        "crypto.open" => Some("host.crypto_open"),
+        "crypto.status" => Some("host.crypto_status"),
         "spaces.createDoc" => Some("host.spaces_create_doc"),
         "spaces.getDoc" => Some("host.spaces_get_doc"),
         "spaces.updateDoc" => Some("host.spaces_update_doc"),
@@ -573,6 +576,9 @@ mod tests {
         assert_eq!(required_grant_for("agent.run"), Some("hook:run-agent"));
         assert_eq!(required_grant_for("storage.get"), Some("storage:kv"));
         assert_eq!(required_grant_for("storage.keys"), Some("storage:kv"));
+        assert_eq!(required_grant_for("crypto.seal"), Some("crypto:seal"));
+        assert_eq!(required_grant_for("crypto.open"), Some("crypto:seal"));
+        assert_eq!(required_grant_for("crypto.status"), Some("crypto:seal"));
         assert_eq!(required_grant_for("spaces.createDoc"), Some("spaces:docs"));
         assert_eq!(required_grant_for("spaces.getDoc"), Some("spaces:docs"));
         assert_eq!(required_grant_for("spaces.updateDoc"), Some("spaces:docs"));
@@ -608,6 +614,9 @@ mod tests {
             "storage.set",
             "storage.delete",
             "storage.keys",
+            "crypto.seal",
+            "crypto.open",
+            "crypto.status",
             "spaces.createDoc",
             "spaces.getDoc",
             "spaces.updateDoc",

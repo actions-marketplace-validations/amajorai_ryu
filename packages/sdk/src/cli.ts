@@ -5,19 +5,36 @@
  * Usage:
  *   bunx ryu pack <dir>
  *   bunx ryu publish <dir>
+ *   bunx ryu agent-plugin <dir>
  *
  * Commands:
  *   pack <dir>      Validate the manifest.json in <dir> and emit a publish-ready
- *                   Plugin bundle at <dir>/dist/plugin.bundle.json.
+ *                   Plugin bundle at <dir>/dist/plugin.bundle.json, plus the
+ *                   Agent Plugins interop pair in <dir> itself.
  *                   Exits 0 on success; exits 1 with the failing field on error.
  *   publish <dir>   Validate the manifest.json and POST it to the Ryu Marketplace
  *                   publish endpoint with the author's auth token. The item is
  *                   stored as `pending` until a moderator approves it.
+ *   agent-plugin <dir>
+ *                   Emit only the Agent Plugins v1 interop pair (plugin.json and,
+ *                   when servers exist, mcp.json) derived from the manifest.json.
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
+import {
+	AGENT_PLUGIN_MANIFEST_FILE,
+	AGENT_PLUGIN_MCP_FILE,
+	isAgentPluginManifest,
+	toAgentPlugin,
+} from "./agent-plugin.ts";
 import { commandDev } from "./cli/dev.ts";
 import { PluginManifestSchema } from "./manifest.ts";
 
@@ -41,6 +58,8 @@ function printUsage(): void {
 			"  bunx ryu pack <dir>      Validate and bundle a manifest.json Plugin",
 			"  bunx ryu publish <dir>   Validate and publish a manifest.json Plugin to the Ryu Marketplace",
 			"  bunx ryu dev <entry>     Run a Runnable locally with an interactive chat loop",
+			"  bunx ryu agent-plugin <dir>",
+			"                           Emit the Agent Plugins v1 interop pair (plugin.json + mcp.json)",
 			"",
 		].join("\n")
 	);
@@ -65,12 +84,30 @@ const MANIFEST_FILE_NAMES = [
 	"ryu.json",
 ] as const;
 
+// Resolve the NATIVE manifest path in `dir`, skipping an exported Agent Plugins
+// `plugin.json`. Since `ryu pack` now writes a spec `plugin.json` into the plugin
+// root, and `plugin.json` is also a legacy alias for our own manifest, a plain
+// first-match would resolve to the spec file in any directory that has no
+// `manifest.json` — and then fail validation for missing `id`. The `$schema`
+// discriminator separates them (see `isAgentPluginManifest`).
+function resolveNativeManifestPath(dir: string): string | undefined {
+	return MANIFEST_FILE_NAMES.map((name) => join(dir, name)).find((candidate) => {
+		if (!existsSync(candidate)) {
+			return false;
+		}
+		try {
+			return !isAgentPluginManifest(JSON.parse(readFileSync(candidate, "utf8")));
+		} catch {
+			// Unparseable: let the caller surface the JSON error against this path.
+			return true;
+		}
+	});
+}
+
 // Read + parse + validate the manifest in `dir`. Exits with the failing
 // field on any error. Shared by pack and publish so both validate identically.
 function loadManifest(dir: string): LoadedManifest {
-	const manifestPath = MANIFEST_FILE_NAMES.map((name) => join(dir, name)).find(
-		(candidate) => existsSync(candidate)
-	);
+	const manifestPath = resolveNativeManifestPath(dir);
 	if (!manifestPath) {
 		exitError(`manifest.json not found in: ${dir}`);
 	}
@@ -338,6 +375,72 @@ async function bundleUiEntry(dir: string, uiEntry: string): Promise<string> {
 	return await output.text();
 }
 
+// ── Agent Plugins interop pair ───────────────────────────────────────────────
+//
+// Written into the plugin ROOT, not `dist/`, because the spec addresses a plugin
+// as a directory: `plugin.json` at the root next to `skills/` and `mcp.json`
+// (§4.2). Emitting into `dist/` would produce a manifest with no skills beside it.
+//
+// `manifest.json` remains the source of truth — the pair is derived on every pack,
+// so it cannot drift. A stale `mcp.json` from a previous pack is removed when the
+// manifest no longer declares a server, so an old file can never keep advertising
+// a server we dropped.
+// Reads the manifest RAW rather than taking the validated `LoadedManifest`: the
+// SDK's zod schema models the narrower authoring shape and strips the fields Core
+// adds — including `mcp_servers`, which is exactly what `mcp.json` is derived
+// from. Projecting from the stripped object would silently emit a plugin with no
+// MCP servers.
+function emitAgentPlugin(dir: string): void {
+	const manifestPath = resolveNativeManifestPath(dir);
+	if (!manifestPath) {
+		exitError(`manifest.json not found in: ${dir}`);
+	}
+	let manifest: Record<string, unknown>;
+	try {
+		manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<
+			string,
+			unknown
+		>;
+	} catch (err) {
+		exitError(`could not read ${manifestPath}: ${String(err)}`);
+	}
+
+	let plugin: ReturnType<typeof toAgentPlugin>["plugin"];
+	let mcp: ReturnType<typeof toAgentPlugin>["mcp"];
+	let notes: string[];
+	try {
+		({ plugin, mcp, notes } = toAgentPlugin(manifest));
+	} catch (err) {
+		exitError(`could not derive ${AGENT_PLUGIN_MANIFEST_FILE}: ${String(err)}`);
+	}
+
+	const pluginPath = join(dir, AGENT_PLUGIN_MANIFEST_FILE);
+	writeFileSync(pluginPath, `${JSON.stringify(plugin, null, 2)}\n`, "utf8");
+
+	const mcpPath = join(dir, AGENT_PLUGIN_MCP_FILE);
+	if (mcp) {
+		writeFileSync(mcpPath, `${JSON.stringify(mcp, null, 2)}\n`, "utf8");
+	} else if (existsSync(mcpPath)) {
+		rmSync(mcpPath);
+	}
+
+	const emitted = mcp
+		? `${AGENT_PLUGIN_MANIFEST_FILE} + ${AGENT_PLUGIN_MCP_FILE}`
+		: AGENT_PLUGIN_MANIFEST_FILE;
+	process.stdout.write(`agent-plugin: ${emitted} → ${dir}\n`);
+	for (const note of notes) {
+		process.stdout.write(`agent-plugin: note: ${note}\n`);
+	}
+}
+
+function commandAgentPlugin(rawDir: string): void {
+	const dir = resolve(rawDir);
+	// Validate through the normal path first, so `agent-plugin` never emits an
+	// interop pair for a manifest `pack`/`publish` would reject.
+	loadManifest(dir);
+	emitAgentPlugin(dir);
+}
+
 async function commandPack(rawDir: string): Promise<void> {
 	const dir = resolve(rawDir);
 	const manifest = loadManifest(dir);
@@ -369,6 +472,10 @@ async function commandPack(rawDir: string): Promise<void> {
 		? { ...manifestWithHash, ui_code: uiCode }
 		: manifestWithHash;
 	writeFileSync(outPath, JSON.stringify(bundle, null, 2), "utf8");
+
+	// Re-derive the Agent Plugins interop pair on every pack so a published plugin
+	// directory is also a conformant Agent Plugin and the two can never drift.
+	emitAgentPlugin(dir);
 
 	const codeNote = uiCode ? ` (+${uiCode.length}B ui_code)` : "";
 	process.stdout.write(
@@ -539,6 +646,14 @@ if (command === "pack") {
 	commandPublish(dir).catch((err: unknown) => {
 		exitError(String(err));
 	});
+} else if (command === "agent-plugin") {
+	const dir = args[0];
+	if (!dir) {
+		exitError(
+			"agent-plugin requires a directory argument: bunx ryu agent-plugin <dir>"
+		);
+	}
+	commandAgentPlugin(dir);
 } else if (command === "dev") {
 	const entry = args[0];
 	if (!entry) {

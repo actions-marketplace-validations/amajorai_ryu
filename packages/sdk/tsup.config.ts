@@ -4,6 +4,7 @@ export default defineConfig({
 	entry: {
 		index: "src/index.ts",
 		manifest: "src/manifest.ts",
+		"agent-plugin": "src/agent-plugin.ts",
 		cli: "src/cli.ts",
 		agent: "src/agent/index.ts",
 	},

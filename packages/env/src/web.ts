@@ -5,7 +5,7 @@ export const env = createEnv({
 	client: {
 		NEXT_PUBLIC_SERVER_URL: z.url(),
 		// Public canonical site URL (canonical tags, sitemap, robots, OG, JSON-LD).
-		// Defaults to https://ryu.com in metadata when unset; set the real domain in prod.
+		// Defaults to https://ryuhq.com in metadata when unset; set the real domain in prod.
 		NEXT_PUBLIC_SITE_URL: z.url().optional(),
 		// Base URL of the local Ryu Core node (:7980), the sidecar manager + chat
 		// backend. Web `/chat` proxies /api/chat/stream, /api/agents, and

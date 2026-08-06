@@ -401,7 +401,7 @@ export async function installUpdate(
 	}
 
 	const downloadsUrl =
-		verdict.html_url ?? "https://ryu.com/downloads?ref=ryu-app";
+		verdict.html_url ?? "https://ryuhq.com/downloads?ref=ryu-app";
 	const channel = getReleaseChannel();
 
 	// A restricted verdict means `latest` is NOT the newest published build — it

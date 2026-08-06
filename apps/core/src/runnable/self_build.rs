@@ -284,11 +284,11 @@ async fn install_app_tool(
             // `manifest.json`, fall back to the legacy `plugin.json` / `ryu.json`.
             // The ordering is shared with the loader — do NOT re-spell it here.
             let app_dir = validate_write_target(id)?;
-            let manifest_path = crate::plugin_manifest::MANIFEST_FILE_NAMES
-                .iter()
-                .map(|name| app_dir.join(name))
-                .find(|p| p.exists())
-                .unwrap_or_else(|| app_dir.join(crate::plugin_manifest::MANIFEST_FILE_NAME));
+            let manifest_path =
+                crate::plugin_manifest::resolve_native_manifest_path(&app_dir)
+                    .unwrap_or_else(|| {
+                        app_dir.join(crate::plugin_manifest::MANIFEST_FILE_NAME)
+                    });
             let raw = std::fs::read_to_string(&manifest_path).with_context(|| {
                 format!(
                     "plugin '{id}' not found in memory or at {}; scaffold it first",

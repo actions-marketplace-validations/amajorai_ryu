@@ -29,6 +29,7 @@
 //! live in the [`schema`] submodule; [`PluginManifestLoader`] runs validation during
 //! loading and rejects any manifest whose Runnables fail their per-kind contract.
 
+pub mod agent_plugin;
 mod builtin_code;
 pub mod schema;
 
@@ -135,6 +136,34 @@ pub fn core_version() -> semver::Version {
 /// Shared with [`crate::runnable::self_build`] so there is exactly ONE copy of
 /// this ordering inside Core.
 pub(crate) const MANIFEST_FILE_NAMES: &[&str] = &["manifest.json", "plugin.json", "ryu.json"];
+
+/// Resolve the **native** manifest in a plugin directory, skipping an Agent
+/// Plugins spec `plugin.json`.
+///
+/// `plugin.json` is both the spec's manifest name (§5.1) and a legacy alias for
+/// our own, so a plain first-match over [`MANIFEST_FILE_NAMES`] can hand a spec
+/// file to a native `serde_json::from_str::<PluginManifest>` — which fails for
+/// having no `id`/`runnables`. Every caller that wants a NATIVE manifest and does
+/// not go through [`PluginManifestLoader::translate_agent_plugin`] must use this
+/// instead of re-spelling the ordering.
+///
+/// The loader's own directory scan deliberately does NOT use this: it wants the
+/// first match either way, and translates a spec file into native form.
+#[must_use]
+pub fn resolve_native_manifest_path(dir: &Path) -> Option<PathBuf> {
+    MANIFEST_FILE_NAMES
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| {
+            if !candidate.exists() {
+                return false;
+            }
+            // Unreadable or unparseable: hand it back so the caller reports the
+            // real error against this path rather than silently skipping it.
+            std::fs::read_to_string(candidate)
+                .map_or(true, |raw| !agent_plugin::is_agent_plugin_manifest(&raw))
+        })
+}
 
 /// The canonical manifest file name — the ONE name every write/scaffold path
 /// emits. Reads accept the legacy names via [`MANIFEST_FILE_NAMES`]; writes must
@@ -1017,6 +1046,25 @@ impl PluginManifestLoader {
                     };
                     match std::fs::read_to_string(&manifest_path) {
                         Ok(raw) => {
+                            // `plugin.json` is BOTH a legacy alias for our own
+                            // manifest and the Agent Plugins spec's manifest name.
+                            // A spec file declares the canonical agent-plugins.org
+                            // `$schema`, which no native manifest has ever carried;
+                            // translate it before the native parser sees a file with
+                            // no `id`/`runnables` and rejects the plugin.
+                            let raw = match Self::translate_agent_plugin(
+                                &raw,
+                                &manifest_path,
+                            ) {
+                                Ok(translated) => translated,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "agent plugin at {} skipped: {e}",
+                                        manifest_path.display()
+                                    );
+                                    continue;
+                                }
+                            };
                             match Self::parse_and_validate(
                                 &raw,
                                 &manifest_path.to_string_lossy(),
@@ -1068,6 +1116,31 @@ impl PluginManifestLoader {
             .iter()
             .filter_map(|raw| Self::parse_and_validate(raw, "<built-in>", None, &mut seen_ids).ok())
             .collect()
+    }
+
+    /// Translate an Agent Plugins v1 manifest into the native form, or pass a
+    /// native manifest through untouched.
+    ///
+    /// Import is deliberately a translation in FRONT of the normal loader rather
+    /// than a second loader: everything Core enforces on a manifest — id
+    /// validation, legacy-id canonicalization, semver, duplicate-id rejection —
+    /// then applies to an imported plugin too, because it takes the identical
+    /// path. See [`agent_plugin`] for the spec rules and the security posture.
+    fn translate_agent_plugin(raw: &str, path: &Path) -> Result<String, String> {
+        if !agent_plugin::is_agent_plugin_manifest(raw) {
+            return Ok(raw.to_string());
+        }
+        let dir = path
+            .parent()
+            .ok_or_else(|| "manifest has no parent directory".to_string())?;
+        let imported = agent_plugin::import_manifest(dir, raw)?;
+        for note in &imported.notes {
+            // The spec requires a client to REPORT what it skipped or ignored
+            // (§6.2, §7.2.2) rather than fail, so these are warnings by contract.
+            tracing::warn!("agent plugin {}: {note}", path.display());
+        }
+        serde_json::to_string(&imported.manifest)
+            .map_err(|e| format!("could not serialize translated manifest: {e}"))
     }
 
     /// Parse one manifest and run Core's full load-time gate over it.
@@ -2884,6 +2957,47 @@ mod tests {
         let bad_dir = tmp.join("bad-plugin");
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(bad_dir.join("plugin.json"), b"not json").unwrap();
+        // An Agent Plugins v1 package: `plugin.json` here is the SPEC manifest,
+        // not our legacy alias, so it must be translated rather than rejected for
+        // having no `id`/`runnables`. Its `mcp.json` server must survive the
+        // translation as a declared `mcp_servers` entry (registration itself stays
+        // gated on the Gateway-approved `mcp:server` grant).
+        // The reverse collision: a native plugin that ALSO carries the exported
+        // spec `plugin.json` (which every packaged app and plugin now does).
+        // `manifest.json` must still win, and the spec sibling must not be read.
+        let exported_dir = tmp.join("exported-plugin");
+        std::fs::create_dir_all(&exported_dir).unwrap();
+        std::fs::write(
+            exported_dir.join("manifest.json"),
+            r#"{"id":"com.test.exported","name":"Exported","version":"0.1.0","runnables":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            exported_dir.join("plugin.json"),
+            format!(
+                r#"{{"$schema":"{}","name":"exported"}}"#,
+                agent_plugin::PLUGIN_SCHEMA_URL
+            ),
+        )
+        .unwrap();
+        let spec_dir = tmp.join("summarize");
+        std::fs::create_dir_all(&spec_dir).unwrap();
+        std::fs::write(
+            spec_dir.join("plugin.json"),
+            format!(
+                r#"{{"$schema":"{}","name":"summarize","version":"2.1.0"}}"#,
+                agent_plugin::PLUGIN_SCHEMA_URL
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            spec_dir.join("mcp.json"),
+            format!(
+                r#"{{"$schema":"{}","mcpServers":{{"sum":{{"type":"stdio","command":"npx","args":["-y","summarize-mcp"]}}}}}}"#,
+                agent_plugin::MCP_SCHEMA_URL
+            ),
+        )
+        .unwrap();
 
         std::env::set_var("RYU_PLUGINS_DIR", &tmp);
         let manifests = PluginManifestLoader::load();
@@ -2912,6 +3026,36 @@ mod tests {
         assert!(
             !manifests.iter().any(|m| m.id == "com.test.both-old"),
             "plugin.json must NOT be read when manifest.json is present"
+        );
+
+        assert!(
+            manifests.iter().any(|m| m.id == "com.test.exported"),
+            "manifest.json must win over an exported spec plugin.json sibling"
+        );
+        assert!(
+            !manifests.iter().any(|m| m.id == "@agent-plugins/exported"),
+            "the spec sibling must NOT be imported when a native manifest exists"
+        );
+
+        let imported = manifests
+            .iter()
+            .find(|m| m.id == "@agent-plugins/summarize")
+            .expect("an Agent Plugins v1 package should load through translation");
+        assert_eq!(imported.version, "2.1.0");
+        assert_eq!(
+            imported
+                .mcp_servers
+                .get("sum")
+                .map(|s| s.command.as_str()),
+            Some("npx"),
+            "the spec mcp.json server should survive translation"
+        );
+        assert!(
+            imported
+                .permission_grants
+                .iter()
+                .any(|g| g == crate::sidecar::mcp::GRANT_MCP_SERVER),
+            "an imported plugin must DECLARE the mcp grant (approval stays with the Gateway)"
         );
 
         // The legacy `RYU_APPS_DIR` must still be honoured when `RYU_PLUGINS_DIR`

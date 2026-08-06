@@ -24,6 +24,7 @@ import {
 	capabilitiesFromGrants,
 	type HostServices,
 	isShellSafeRoute,
+	type CryptoStatus,
 	type MailInbox,
 	type MailMessage,
 	type MonitorRecord,
@@ -780,6 +781,30 @@ export function PluginHostPanel({
 					"storage.keys",
 					input
 				) as Promise<string[]>,
+			// Sealing: the app hands over plaintext and gets back an opaque envelope.
+			// The key is derived per app inside Core and never crosses to the frame,
+			// so these are host round-trips rather than a local crypto helper.
+			cryptoSeal: (input) =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"crypto.seal",
+					input
+				) as Promise<string>,
+			cryptoOpen: (input) =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"crypto.open",
+					input
+				) as Promise<string>,
+			cryptoStatus: () =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"crypto.status",
+					{}
+				) as Promise<CryptoStatus>,
 			// Streaming agent.run: reply text arrives token-by-token via `emit`; the
 			// SSE fetch is aborted when `signal` fires (frame cancel).
 			runAgentStream: (input, emit, signal) =>

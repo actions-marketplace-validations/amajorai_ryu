@@ -205,6 +205,14 @@ export function thirdPartyPluginSrcdoc(
             delete: function (args) { return call("storage.delete", [args || {}]); },
             keys: function (args) { return call("storage.keys", [args || {}]); }
           },
+          // Seal/open under this app's own key (needs crypto:seal). The key is
+          // derived by Core per app and never enters the frame, so sealing is a
+          // host call rather than a local crypto routine.
+          crypto: {
+            seal: function (args) { return call("crypto.seal", [args || {}]); },
+            open: function (args) { return call("crypto.open", [args || {}]); },
+            status: function () { return call("crypto.status", []); }
+          },
           // Spaces documents (needs spaces:docs) — the app owns docs of kind
           // app:<pluginId>; persisted, search-embedded, backlinked, Space-routed.
           spaces: {
@@ -261,6 +269,14 @@ export function thirdPartyPluginSrcdoc(
           set: function (args) { return call("storage.set", [args || {}]); },
           delete: function (args) { return call("storage.delete", [args || {}]); },
           keys: function (args) { return call("storage.keys", [args || {}]); }
+        },
+        // Seal/open under this app's own key (needs crypto:seal). The key is
+        // derived by Core per app and never enters the frame, so sealing is a
+        // host call rather than a local crypto routine.
+        crypto: {
+          seal: function (args) { return call("crypto.seal", [args || {}]); },
+          open: function (args) { return call("crypto.open", [args || {}]); },
+          status: function () { return call("crypto.status", []); }
         },
         // Spaces documents (needs grant spaces:docs). The app owns docs of kind
         // app:<pluginId>; source is a string (JSON.stringify your scene).
@@ -699,6 +715,14 @@ function htmlCompanionHeadFragment(
         set: function (a) { return call("storage.set", [a || {}]); },
         delete: function (a) { return call("storage.delete", [a || {}]); },
         keys: function (a) { return call("storage.keys", [a || {}]); }
+      },
+      // Seal/open under this app's own key (needs crypto:seal). The key is
+      // derived by Core per app and never enters the frame, so sealing is a
+      // host call rather than a local crypto routine.
+      crypto: {
+        seal: function (a) { return call("crypto.seal", [a || {}]); },
+        open: function (a) { return call("crypto.open", [a || {}]); },
+        status: function () { return call("crypto.status", []); }
       },
       spaces: {
         createDoc: function (a) { return call("spaces.createDoc", [a || {}]); },

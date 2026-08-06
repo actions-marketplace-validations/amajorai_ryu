@@ -31,6 +31,11 @@ const GRANT_META: Record<string, GrantMeta> = {
 		description:
 			"Save its own settings and state locally, isolated to this app.",
 	},
+	"crypto:seal": {
+		label: "Encrypt its own data",
+		description:
+			"Protect the data it stores so it cannot be read off this device's disk. It cannot read other apps' data or reach the encryption key.",
+	},
 	// Common coarse OS-style grants (kept from the prior InstalledSection map).
 	fs: {
 		label: "Access your files",

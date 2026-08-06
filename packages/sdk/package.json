@@ -16,6 +16,11 @@
       "import": "./dist/manifest.js",
       "require": "./dist/manifest.cjs"
     },
+    "./agent-plugin": {
+      "types": "./dist/agent-plugin.d.ts",
+      "import": "./dist/agent-plugin.js",
+      "require": "./dist/agent-plugin.cjs"
+    },
     "./agent": {
       "types": "./dist/agent.d.ts",
       "import": "./dist/agent.js",

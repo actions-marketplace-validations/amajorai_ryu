@@ -205,6 +205,38 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // The **sealing primitive**: a plugin encrypts and decrypts its own data
+    // WITHOUT ever holding a key. Core derives a per-plugin subkey from the
+    // at-rest master key (`ryu_crypto::plugin_cipher`) using the bridge's
+    // path-bound plugin id, so the key never crosses the sandbox boundary and one
+    // app's ciphertext is unreadable by another (AEAD tag failure, enforced by the
+    // KDF rather than by a check a caller could skip).
+    //
+    // Named for the OPERATION (`crypto.seal`), not for a guarantee: today the key
+    // custody is at-rest (env → OS keychain → file fallback), which defends
+    // against disk/backup theft, NOT against a compromised running host. The
+    // zero-access/passcode custody in `docs/encryption-at-rest.md` §4.2 is not
+    // built; when it lands it slots in behind this same seal/open surface, so no
+    // plugin author should read `crypto.*` as an end-to-end promise.
+    //
+    // NOTE the asymmetry with the storage rows: sealing a value the plugin ALREADY
+    // owns is not new authority, so `storage.set { secure: true }` needs only
+    // `storage:kv`. `crypto:seal` gates sealing/opening ARBITRARY blobs the plugin
+    // stores outside Core (its own sidecar files, a remote it syncs to).
+    m("crypto.seal", "crypto.seal", Some("crypto:seal"), false, true),
+    m("crypto.open", "crypto.seal", Some("crypto:seal"), false, true),
+    // Non-secret custody description (`ryu_crypto::key_custody`) so an app can
+    // tell the user WHICH guarantee is live before it stores anything — a file
+    // fallback key sits next to the data it protects and is materially weaker
+    // than the keychain. Carries no key material, so it rides the same grant
+    // rather than minting a second one.
+    m(
+        "crypto.status",
+        "crypto.seal",
+        Some("crypto:seal"),
+        false,
+        true,
+    ),
     // Conversation title write for turn-hook plugins (chat-title auto-rename).
     // `mode: "auto"` respects `title_custom`; `mode: "custom"` locks the title.
     // Rust-bridge-only (`ts_host = false`): Deno turn hooks reach it via
@@ -1228,6 +1260,9 @@ mod tests {
         assert_eq!(grant_for("model.complete"), Some("hook:side-model"));
         assert_eq!(grant_for("agent.run"), Some("hook:run-agent"));
         assert_eq!(grant_for("storage.get"), Some("storage:kv"));
+        assert_eq!(grant_for("crypto.seal"), Some("crypto:seal"));
+        assert_eq!(grant_for("crypto.open"), Some("crypto:seal"));
+        assert_eq!(grant_for("crypto.status"), Some("crypto:seal"));
         assert_eq!(grant_for("spaces.createDoc"), Some("spaces:docs"));
         assert_eq!(grant_for("finetune.stream"), Some("finetune:runs"));
         assert_eq!(grant_for("view.action"), Some("views:actions"));

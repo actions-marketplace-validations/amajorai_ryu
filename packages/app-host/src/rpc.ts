@@ -1146,6 +1146,19 @@ export interface HostServices {
 		title?: string;
 		source: string;
 	}): Promise<void>;
+	/** Seal a string under this app's own key (`host.crypto_seal`, grant
+	 *  `crypto:seal`). Returns an opaque envelope to hand to `storageSet` or any
+	 *  other sink. The key is derived by Core per app and never reaches the frame,
+	 *  so this is the ONLY way an app gets encryption — there is no key accessor. */
+	cryptoSeal?(input: { value: string }): Promise<string>;
+	/** Open a value this app sealed (`host.crypto_open`). Rejects another app's
+	 *  ciphertext (different key, AEAD tag failure) and passes through values that
+	 *  were never sealed, so a store can be migrated in place. */
+	cryptoOpen?(input: { value: string }): Promise<string>;
+	/** Which key custody is live (`host.crypto_status`) — keychain vs a key file
+	 *  next to the data. Carries no key material; let an app tell the user what
+	 *  its sealed data is actually worth before storing anything sensitive. */
+	cryptoStatus?(): Promise<CryptoStatus>;
 	/** Delete a durable KV value (`host.storage_delete`). */
 	storageDelete?(input: { namespace?: string; key: string }): Promise<void>;
 	/** Read the app's own durable KV value (`host.storage_get`). `null` when unset. */
@@ -1958,6 +1971,41 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.storageKeys(input);
+		}
+		case "crypto.seal": {
+			const input = asCryptoValueArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"crypto.seal requires a { value: string }"
+				);
+			}
+			if (!services.cryptoSeal) {
+				throw new CodedRpcError("server_error", "crypto.seal is not available");
+			}
+			return await services.cryptoSeal(input);
+		}
+		case "crypto.open": {
+			const input = asCryptoValueArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"crypto.open requires a { value: string }"
+				);
+			}
+			if (!services.cryptoOpen) {
+				throw new CodedRpcError("server_error", "crypto.open is not available");
+			}
+			return await services.cryptoOpen(input);
+		}
+		case "crypto.status": {
+			if (!services.cryptoStatus) {
+				throw new CodedRpcError(
+					"server_error",
+					"crypto.status is not available"
+				);
+			}
+			return await services.cryptoStatus();
 		}
 		case "spaces.createDoc": {
 			const input = asSpacesCreateArg(args[0]);
@@ -4022,6 +4070,28 @@ export function asStorageKeysArg(data: unknown): { namespace?: string } {
 	const o = data as Record<string, unknown>;
 	const ns = optionalString(o, "namespace");
 	return typeof ns === "string" ? { namespace: ns } : {};
+}
+
+/** How the node holds the key its apps seal under (`host.crypto_status`).
+ *  Carries no key material — only which custody rung is live. `key_beside_data`
+ *  is the one an app should actually branch on: true means the key sits in a file
+ *  next to the data it protects, so sealing buys much less than it looks like. */
+export type CryptoStatus = {
+	source: string;
+	keychain_service?: string | null;
+	keychain_account?: string | null;
+	key_file?: string | null;
+	key_beside_data: boolean;
+};
+
+/** Narrow to `{ value: string }` (crypto.seal / crypto.open). Both take a single
+ *  string: seal takes plaintext, open takes a value produced by seal. */
+export function asCryptoValueArg(data: unknown): { value: string } | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const value = (data as Record<string, unknown>).value;
+	return typeof value === "string" ? { value } : null;
 }
 
 /** Narrow to `{ space_id: string, title: string }` (spaces.createDoc). */

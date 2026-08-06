@@ -21,6 +21,7 @@ import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
 	type Capability,
 	capabilitiesFromGrants,
+	type CryptoStatus,
 	type HostServices,
 	validatePluginRoute,
 } from "@ryu/app-host/rpc";
@@ -147,6 +148,26 @@ export function IslandPluginHost({
 				pluginHostInvoke(companion.pluginId, "storage.keys", input) as Promise<
 					string[]
 				>,
+			// Sealing under the app's own Core-derived key (grant `crypto:seal`).
+			// The key never reaches the frame, so these are host round-trips.
+			cryptoSeal: (input) =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"crypto.seal",
+					input
+				) as Promise<string>,
+			cryptoOpen: (input) =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"crypto.open",
+					input
+				) as Promise<string>,
+			cryptoStatus: () =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"crypto.status",
+					{}
+				) as Promise<CryptoStatus>,
 			runAgentStream: (input, emit, signal) =>
 				pluginHostInvokeStream(companion.pluginId, input, {
 					onChunk: emit,

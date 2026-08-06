@@ -20,6 +20,9 @@ use crate::workflow::delegation::{run_fanout, DelegateSpec, DelegationCaps, Perm
 const GRANT_SIDE_MODEL: &str = "hook:side-model";
 /// Grant required to call `host.storage.*`.
 const GRANT_STORAGE: &str = "storage:kv";
+/// Grant required to call `host.crypto_*` (seal/open the plugin's own data under a
+/// per-plugin subkey it never holds). See [`PluginHookBridge::crypto`].
+const GRANT_CRYPTO: &str = "crypto:seal";
 /// Grant required to call `host.runAgent` (spawn a full tool-using sub-agent).
 const GRANT_RUN_AGENT: &str = "hook:run-agent";
 /// Grant required to call `host.spaces_*` (own Space documents).
@@ -58,6 +61,9 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "storage.set" => "host.storage_set",
         "storage.delete" => "host.storage_delete",
         "storage.keys" => "host.storage_keys",
+        "crypto.seal" => "host.crypto_seal",
+        "crypto.open" => "host.crypto_open",
+        "crypto.status" => "host.crypto_status",
         "spaces.createDoc" => "host.spaces_create_doc",
         "spaces.getDoc" => "host.spaces_get_doc",
         "spaces.updateDoc" => "host.spaces_update_doc",
@@ -103,6 +109,7 @@ impl PluginHookBridge {
             "storage_get" | "storage_set" | "storage_delete" | "storage_keys" => {
                 self.storage(method, args).await
             }
+            "crypto_seal" | "crypto_open" | "crypto_status" => self.crypto(method, args).await,
             "spaces_create_doc" | "spaces_get_doc" | "spaces_update_doc" | "spaces_list_docs"
             | "spaces_delete_doc" => self.spaces(method, args).await,
             "finetune_capability"
@@ -440,6 +447,92 @@ impl PluginHookBridge {
                 Err(e) => err(e.to_string()),
             },
             _ => err(format!("unknown storage method '{method}'")),
+        }
+    }
+
+    /// `host.crypto_*` — the **sealing primitive**. A plugin encrypts and decrypts
+    /// its own data without ever holding, seeing, or naming a key.
+    ///
+    /// The key is a per-plugin subkey derived from Core's at-rest master key
+    /// (`ryu_crypto::plugin_cipher`, HKDF-SHA256 with the plugin id as `info`).
+    /// Two properties follow, and both are structural rather than checked:
+    ///
+    /// * **The key never crosses the sandbox boundary.** Only ciphertext does.
+    ///   There is deliberately no `host.crypto_getKey` — a plugin that could read
+    ///   the subkey could exfiltrate it, and the whole point is that it cannot.
+    /// * **One app cannot open another's ciphertext.** Different id, different
+    ///   subkey, so a cross-app open is an AEAD tag failure. `plugin_id` here is
+    ///   the bridge's path-bound owner id (the same property `spaces` relies on),
+    ///   so a frame cannot spoof its way into another app's data.
+    ///
+    /// The id is canonicalized before derivation: ids were rescoped to
+    /// `@scope/name` with legacy aliases still accepted at the outside edge, and
+    /// deriving from a legacy id here would silently produce a *different* subkey,
+    /// making everything the app had already sealed unopenable.
+    ///
+    /// **Guarantee, stated honestly:** this is at-rest sealing. Custody is
+    /// env → OS keychain → file fallback, which defends against a stolen disk or a
+    /// copied `~/.ryu`, NOT against a compromised running Core (which must hold the
+    /// key to function). `crypto_status` exists so an app can surface which custody
+    /// is actually live before it stores anything. Note also that there is no rekey
+    /// path anywhere in the crate: rotating the master key orphans sealed data.
+    async fn crypto(&self, method: &str, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_CRYPTO) {
+            return err(format!(
+                "capability '{GRANT_CRYPTO}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        // Canonicalize at the ONE derivation site. See the doc comment above: a
+        // legacy id here yields a different subkey and orphans existing ciphertext.
+        let canonical = crate::plugin_manifest::canonical_plugin_id(&self.plugin_id);
+        let cipher = match ryu_crypto::plugin_cipher(canonical) {
+            Ok(c) => c,
+            Err(e) => return err(format!("crypto is unavailable: {e}")),
+        };
+
+        match method {
+            "crypto_seal" => {
+                let Some(plaintext) = args.get("value").and_then(Value::as_str) else {
+                    return err("host.crypto.seal requires a string { value }".to_string());
+                };
+                match cipher.seal(plaintext) {
+                    Ok(sealed) => ok(json!(sealed)),
+                    Err(e) => err(e.to_string()),
+                }
+            }
+            "crypto_open" => {
+                let Some(stored) = args.get("value").and_then(Value::as_str) else {
+                    return err("host.crypto.open requires a string { value }".to_string());
+                };
+                match cipher.open(stored) {
+                    Ok(plain) => ok(json!(plain)),
+                    // The message deliberately does NOT echo the input: a failed
+                    // open is usually another app's ciphertext, and reflecting it
+                    // back would leak across the boundary the subkey exists to hold.
+                    Err(e) => err(format!("could not open sealed value: {e}")),
+                }
+            }
+            // Non-secret custody description, so an app can tell the user which
+            // guarantee is live. `KeyCustody` is built to carry no key material —
+            // not the key, not a prefix, not a hash — so it is safe to hand to a
+            // sandboxed frame verbatim. `key_custody` itself gates `key_file` to
+            // the `File` source (it is `None` for env/keychain), so the path is
+            // disclosed only in the case where the key sits next to the data it
+            // protects and the user genuinely needs to know.
+            "crypto_status" => match ryu_crypto::key_custody() {
+                Ok(c) => ok(json!({
+                    "source": c.source.as_str(),
+                    "keychain_service": c.keychain_service,
+                    "keychain_account": c.keychain_account,
+                    "key_file": c.key_file.map(|p| p.display().to_string()),
+                    // The weaker-than-keychain case, named plainly so a UI does not
+                    // have to re-derive the judgement from `source`.
+                    "key_beside_data": matches!(c.source, ryu_crypto::MasterKeySource::File),
+                })),
+                Err(e) => err(format!("crypto status unavailable: {e}")),
+            },
+            _ => err(format!("unknown crypto method '{method}'")),
         }
     }
 
@@ -806,6 +899,9 @@ mod tests {
                 | "storage_set"
                 | "storage_delete"
                 | "storage_keys"
+                | "crypto_seal"
+                | "crypto_open"
+                | "crypto_status"
                 | "spaces_create_doc"
                 | "spaces_get_doc"
                 | "spaces_update_doc"
@@ -867,5 +963,80 @@ mod tests {
         let g = grants(&["hook:side-model"]);
         assert!(g.contains(GRANT_SIDE_MODEL));
         assert!(!g.contains(GRANT_STORAGE));
+    }
+
+    /// The sealing key is derived from the CANONICAL plugin id, so canonicalization
+    /// must be total and idempotent. If it ever stopped being either, the subkey
+    /// would change and every value the plugin had already sealed would become
+    /// permanently unopenable — with no error louder than an AEAD tag failure.
+    /// This pins the exact composition `crypto()` performs.
+    #[test]
+    fn crypto_derives_from_a_stable_canonical_id() {
+        use crate::plugin_manifest::canonical_plugin_id;
+
+        // Idempotent: canonicalizing an already-canonical id is a no-op, so a
+        // double-canonicalized call site cannot drift from a single one.
+        for id in ["@ryu/goal", "@acme/thing", "unscoped-third-party"] {
+            assert_eq!(canonical_plugin_id(canonical_plugin_id(id)), canonical_plugin_id(id));
+        }
+
+        // A legacy (pre-scoping) id and its canonical form must land on the SAME
+        // key, or upgrading a built-in orphans its sealed data.
+        let legacy = canonical_plugin_id("goal");
+        let scoped = canonical_plugin_id("@ryu/goal");
+        assert_eq!(legacy, scoped, "legacy id must canonicalize onto the scoped id");
+    }
+
+    /// End-to-end through the real primitive with the real canonicalization: seal
+    /// round-trips, a DIFFERENT plugin cannot open it, and a master-key envelope is
+    /// refused rather than decrypted (no decryption oracle behind the grant).
+    #[test]
+    fn crypto_seals_round_trips_and_isolates_by_plugin() {
+        use crate::plugin_manifest::canonical_plugin_id;
+
+        // A unit test has no booted Core, so the crypto host seam is empty and every
+        // key lookup fails. Install a throwaway one and pin the key via the env
+        // rung of the custody ladder, so the test never touches the real keychain
+        // or `~/.ryu`. Both installs are idempotent `OnceLock`s: if the full-suite
+        // run already initialised them, the existing key is used instead — which is
+        // fine, because nothing below asserts on the key's VALUE, only on the
+        // seal/open algebra.
+        struct TestCryptoHost(std::path::PathBuf);
+        impl ryu_crypto::CryptoHost for TestCryptoHost {
+            fn keyring_account_suffix(&self) -> String {
+                "-bridge-test".to_string()
+            }
+            fn ryu_dir(&self) -> std::path::PathBuf {
+                self.0.clone()
+            }
+        }
+        // BASE64 of 32 zero bytes. It must be base64, not hex: a value that fails
+        // to decode is WARNED AND IGNORED, and the ladder falls through to the real
+        // OS keychain — which is both a slow test and one that touches the
+        // developer's actual keychain. (This test did exactly that until the key
+        // was fixed; the tell was a 46-second unit test.)
+        std::env::set_var("RYU_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        ryu_crypto::set_global_host(std::sync::Arc::new(TestCryptoHost(
+            std::env::temp_dir().join("ryu-bridge-crypto-test"),
+        )));
+
+        // No skip branch: an error here is a real failure, not an environment
+        // quirk. An earlier version returned early and the test passed while
+        // asserting nothing.
+        let mine = ryu_crypto::plugin_cipher(canonical_plugin_id("@ryu/goal"))
+            .expect("plugin cipher for @ryu/goal");
+        let sealed = mine.seal("hunter2").expect("seal");
+        assert!(sealed.starts_with("encp:v1:"), "own envelope, not the master one");
+        assert_eq!(mine.open(&sealed).expect("open"), "hunter2");
+
+        let theirs = ryu_crypto::plugin_cipher(canonical_plugin_id("@acme/other")).expect("cipher");
+        assert!(theirs.open(&sealed).is_err(), "another app must not open it");
+
+        // Master-key ciphertext is REFUSED, not decrypted. This is what keeps the
+        // grant from being a general decryption oracle over anything the app can read.
+        assert!(mine.open("enc:v1:AAAA").is_err(), "master envelope must be refused");
+
+        // Never-sealed values pass through so a store can migrate in place.
+        assert_eq!(mine.open("plain").expect("legacy passthrough"), "plain");
     }
 }

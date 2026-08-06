@@ -38,8 +38,27 @@ use rand::RngCore;
 
 /// Field-envelope prefix. Versioned so the scheme can evolve without ambiguity.
 const ENVELOPE_PREFIX: &str = "enc:v1:";
+/// Field-envelope prefix for values sealed with a **per-plugin subkey**
+/// ([`plugin_cipher`]) rather than the master key.
+///
+/// Deliberately distinct from [`ENVELOPE_PREFIX`]: plugin-sealed values live in
+/// the same `TEXT` columns as master-key-sealed ones, and a single prefix would
+/// make the two indistinguishable — opening a subkey-sealed value with
+/// [`global_cipher`] would surface as an ambiguous auth-tag failure instead of
+/// "this isn't yours". The distinct prefix lets a reader separate the three cases
+/// it must handle: legacy plaintext (return verbatim), sealed-with-my-subkey
+/// (open), sealed-but-not-mine (fail loudly).
+const PLUGIN_ENVELOPE_PREFIX: &str = "encp:v1:";
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
+
+/// HKDF salt for per-plugin subkey derivation. A fixed, non-secret domain
+/// separator (HKDF's salt is not required to be secret); the per-plugin
+/// separation comes from the `info` string, not this.
+const PLUGIN_KDF_SALT: &[u8] = b"ryu-plugin-crypto-v1";
+/// HKDF `info` prefix for per-plugin subkey derivation. The plugin's canonical id
+/// is appended to bind the subkey to exactly one plugin.
+const PLUGIN_KDF_INFO_PREFIX: &[u8] = b"ryu-plugin-crypto-v1:";
 
 /// OS keychain coordinates for the master key.
 const KEYRING_SERVICE: &str = "ryu";
@@ -141,20 +160,23 @@ impl FieldCipher {
     /// Seal a string field into the `enc:v1:` envelope for storage in a `TEXT`
     /// column. The nonce is prepended to the ciphertext, then base64-encoded.
     pub fn seal(&self, plaintext: &str) -> Result<String> {
+        self.seal_with_prefix(ENVELOPE_PREFIX, plaintext)
+    }
+
+    /// Seal under an explicit envelope prefix. Private because the prefix is a
+    /// *scheme* choice, not a caller choice: [`seal`](Self::seal) owns
+    /// `enc:v1:` (master key) and [`PluginCipher`] owns `encp:v1:` (subkey).
+    fn seal_with_prefix(&self, prefix: &str, plaintext: &str) -> Result<String> {
         let (nonce, ciphertext) = self.encrypt(plaintext.as_bytes())?;
         let mut blob = Vec::with_capacity(nonce.len() + ciphertext.len());
         blob.extend_from_slice(&nonce);
         blob.extend_from_slice(&ciphertext);
-        Ok(format!("{ENVELOPE_PREFIX}{}", b64().encode(blob)))
+        Ok(format!("{prefix}{}", b64().encode(blob)))
     }
 
-    /// Open a stored field. If it carries the `enc:v1:` prefix it is decrypted;
-    /// otherwise it is treated as **legacy plaintext** and returned verbatim. This
-    /// is what makes migration lazy: reads accept both forms, writes upgrade.
-    pub fn open(&self, stored: &str) -> Result<String> {
-        let Some(encoded) = stored.strip_prefix(ENVELOPE_PREFIX) else {
-            return Ok(stored.to_string());
-        };
+    /// Decrypt the base64 `nonce||ciphertext` body of an envelope (prefix already
+    /// stripped). Shared by both envelope schemes.
+    fn open_body(&self, encoded: &str) -> Result<String> {
         let blob = b64()
             .decode(encoded.trim())
             .context("decoding sealed field")?;
@@ -164,6 +186,16 @@ impl FieldCipher {
         let (nonce, ciphertext) = blob.split_at(NONCE_LEN);
         let plain = self.decrypt(nonce, ciphertext)?;
         Ok(String::from_utf8_lossy(&plain).into_owned())
+    }
+
+    /// Open a stored field. If it carries the `enc:v1:` prefix it is decrypted;
+    /// otherwise it is treated as **legacy plaintext** and returned verbatim. This
+    /// is what makes migration lazy: reads accept both forms, writes upgrade.
+    pub fn open(&self, stored: &str) -> Result<String> {
+        let Some(encoded) = stored.strip_prefix(ENVELOPE_PREFIX) else {
+            return Ok(stored.to_string());
+        };
+        self.open_body(encoded)
     }
 
     /// Whether a stored value is already sealed (carries the envelope prefix).
@@ -266,10 +298,127 @@ pub fn global_cipher() -> Result<FieldCipher> {
     let host = host()?;
     let (key, source) = load_master_key(&*host).context("loading the at-rest master key")?;
     let cipher = FieldCipher::new(&key);
+    // ORDER MATTERS. `GLOBAL_KEY` is set BEFORE `GLOBAL`, because the early return
+    // above keys off `GLOBAL` alone: a thread that observes `GLOBAL` set must also
+    // observe `GLOBAL_KEY` set, or `plugin_cipher` (which forces resolution through
+    // here, then reads `GLOBAL_KEY`) could race to a spurious "master key not
+    // recorded". `OnceLock`'s release/acquire ordering makes this order sufficient.
+    let _ = GLOBAL_KEY.set(key);
     // First writer wins; a lost race just drops a duplicate equal cipher.
     let _ = GLOBAL.set(cipher.clone());
     let _ = GLOBAL_SOURCE.set(source);
     Ok(cipher)
+}
+
+// ── Per-plugin subkeys (the opt-in sealing primitive) ─────────────────────────
+
+/// A cipher bound to ONE plugin, derived from the master key and usable only by
+/// that plugin. Handed out by [`plugin_cipher`]; carries no key material a caller
+/// can read, which is the point — an app seals and opens its own data without the
+/// key ever crossing the sandbox boundary.
+///
+/// **Isolation.** Two plugins get two different subkeys, so app B opening app A's
+/// ciphertext is an AEAD authentication failure, not a decrypt. That is enforced
+/// by the KDF, not by a check a caller could skip.
+#[derive(Clone)]
+pub struct PluginCipher {
+    inner: FieldCipher,
+    plugin_id: String,
+}
+
+impl PluginCipher {
+    /// The plugin this cipher is bound to (diagnostics; carries no key material).
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// Seal a string into the `encp:v1:` envelope under this plugin's subkey.
+    pub fn seal(&self, plaintext: &str) -> Result<String> {
+        self.inner.seal_with_prefix(PLUGIN_ENVELOPE_PREFIX, plaintext)
+    }
+
+    /// Open a value sealed by [`Self::seal`].
+    ///
+    /// Three cases, matching the lazy-migration convention the rest of the crate
+    /// uses:
+    /// * carries `encp:v1:` → decrypt (fails if it was sealed by a *different*
+    ///   plugin — the AEAD tag will not verify);
+    /// * carries the master-key `enc:v1:` prefix → refuse loudly, because that
+    ///   value is not this plugin's to read;
+    /// * anything else → legacy plaintext, returned verbatim, so a store that
+    ///   predates opt-in keeps reading and upgrades on next write.
+    pub fn open(&self, stored: &str) -> Result<String> {
+        if let Some(encoded) = stored.strip_prefix(PLUGIN_ENVELOPE_PREFIX) {
+            return self.inner.open_body(encoded).with_context(|| {
+                format!(
+                    "opening a value sealed for a different plugin than '{}'",
+                    self.plugin_id
+                )
+            });
+        }
+        if stored.starts_with(ENVELOPE_PREFIX) {
+            anyhow::bail!(
+                "value is sealed with the master key, not plugin '{}''s subkey",
+                self.plugin_id
+            );
+        }
+        Ok(stored.to_string())
+    }
+
+    /// Whether a stored value is sealed under a plugin subkey.
+    pub fn is_sealed(stored: &str) -> bool {
+        stored.starts_with(PLUGIN_ENVELOPE_PREFIX)
+    }
+}
+
+/// The raw master key, recorded alongside [`GLOBAL`] so subkeys can be derived
+/// from it. Private: no accessor exposes these bytes outside the crate.
+static GLOBAL_KEY: OnceLock<[u8; KEY_LEN]> = OnceLock::new();
+
+/// Derive the sealing cipher for one plugin: `HKDF-SHA256(master_key, salt,
+/// info = "ryu-plugin-crypto-v1:<plugin_id>")`.
+///
+/// **`plugin_id` must be the CANONICAL id.** Ids were rescoped to `@scope/name`
+/// with an alias map keeping legacy ids valid, and callers on the outside edge
+/// (a sidecar presenting whatever its manifest said at spawn) still send legacy
+/// forms. The id is the KDF's `info`, so deriving from a legacy id at one call
+/// site and the canonical id at another yields two different subkeys — and every
+/// previously sealed value becomes permanently unreadable, with no error beyond
+/// an auth-tag failure. Kernel callers canonicalize before calling in
+/// (`plugin_manifest::canonical_plugin_id`); this crate cannot, having no
+/// dependency on `apps/core`.
+///
+/// Fails closed for the same reason [`global_cipher`] does: no key, no cipher.
+pub fn plugin_cipher(plugin_id: &str) -> Result<PluginCipher> {
+    let plugin_id = plugin_id.trim();
+    if plugin_id.is_empty() {
+        anyhow::bail!("a plugin subkey cannot be derived for an empty plugin id");
+    }
+    // Force master-key resolution; also the fail-closed gate.
+    let _ = global_cipher()?;
+    let master = GLOBAL_KEY
+        .get()
+        .ok_or_else(|| anyhow!("master key not recorded"))?;
+    derive_plugin_cipher(master, plugin_id)
+}
+
+/// The pure half of [`plugin_cipher`]: master key + id in, subkey cipher out. Split
+/// out so the derivation's properties (per-id separation, determinism) are testable
+/// without installing a process-global [`CryptoHost`].
+fn derive_plugin_cipher(master: &[u8; KEY_LEN], plugin_id: &str) -> Result<PluginCipher> {
+    let mut info = Vec::with_capacity(PLUGIN_KDF_INFO_PREFIX.len() + plugin_id.len());
+    info.extend_from_slice(PLUGIN_KDF_INFO_PREFIX);
+    info.extend_from_slice(plugin_id.as_bytes());
+
+    let mut subkey = [0u8; KEY_LEN];
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(PLUGIN_KDF_SALT), master)
+        .expand(&info, &mut subkey)
+        .map_err(|e| anyhow!("deriving the subkey for plugin '{plugin_id}': {e}"))?;
+
+    Ok(PluginCipher {
+        inner: FieldCipher::new(&subkey),
+        plugin_id: plugin_id.to_owned(),
+    })
 }
 
 fn generate_key() -> [u8; KEY_LEN] {
@@ -543,6 +692,77 @@ mod tests {
         assert!(FieldCipher::is_sealed(&sealed));
         assert!(sealed.starts_with(ENVELOPE_PREFIX));
         assert_eq!(cipher.open(&sealed).unwrap(), "hello secret world");
+    }
+
+    fn test_plugin_cipher(plugin_id: &str) -> PluginCipher {
+        derive_plugin_cipher(&[7u8; KEY_LEN], plugin_id).unwrap()
+    }
+
+    #[test]
+    fn plugin_seal_open_round_trips_under_its_own_prefix() {
+        let cipher = test_plugin_cipher("@ryu/notes");
+        let sealed = cipher.seal("app secret").unwrap();
+        assert!(sealed.starts_with(PLUGIN_ENVELOPE_PREFIX));
+        assert!(PluginCipher::is_sealed(&sealed));
+        assert!(!sealed.contains("app secret"));
+        assert_eq!(cipher.open(&sealed).unwrap(), "app secret");
+    }
+
+    #[test]
+    fn plugin_envelope_is_distinguishable_from_the_master_envelope() {
+        // `encp:v1:` must not be mistaken for `enc:v1:` by a prefix test — a
+        // `starts_with` written the other way round would match both.
+        let plugin_sealed = test_plugin_cipher("@ryu/notes").seal("x").unwrap();
+        assert!(!FieldCipher::is_sealed(&plugin_sealed));
+        let master_sealed = test_cipher().seal("x").unwrap();
+        assert!(!PluginCipher::is_sealed(&master_sealed));
+    }
+
+    #[test]
+    fn one_plugin_cannot_open_another_plugins_value() {
+        let a = test_plugin_cipher("@ryu/notes");
+        let b = test_plugin_cipher("@ryu/mail");
+        let sealed = a.seal("only mine").unwrap();
+        // Same master key, different subkey => AEAD tag fails. Isolation is
+        // enforced by the KDF, not by a check a caller could skip.
+        assert!(b.open(&sealed).is_err());
+        assert_eq!(a.open(&sealed).unwrap(), "only mine");
+    }
+
+    #[test]
+    fn plugin_cipher_refuses_master_key_sealed_values() {
+        let sealed = test_cipher().seal("core's own row").unwrap();
+        let err = test_plugin_cipher("@ryu/notes")
+            .open(&sealed)
+            .expect_err("a plugin must not read a master-key-sealed value");
+        assert!(err.to_string().contains("master key"));
+    }
+
+    #[test]
+    fn plugin_cipher_passes_through_legacy_plaintext() {
+        // Values written before an app opted in keep reading, and upgrade on the
+        // next write — same lazy migration the master-key envelope uses.
+        let cipher = test_plugin_cipher("@ryu/notes");
+        assert_eq!(cipher.open("legacy kv value").unwrap(), "legacy kv value");
+    }
+
+    #[test]
+    fn plugin_subkey_derivation_is_deterministic_and_id_bound() {
+        // Determinism across processes is what makes stored ciphertext readable
+        // after a restart.
+        let sealed = test_plugin_cipher("@ryu/notes").seal("stable").unwrap();
+        assert_eq!(test_plugin_cipher("@ryu/notes").open(&sealed).unwrap(), "stable");
+        // A legacy (non-canonical) id derives a DIFFERENT key. This is the
+        // canonicalization trap the `plugin_cipher` docs warn about: callers must
+        // pass the canonical id, or previously sealed values stop opening.
+        assert!(test_plugin_cipher("notes").open(&sealed).is_err());
+    }
+
+    #[test]
+    fn plugin_cipher_rejects_an_empty_id() {
+        // Guarded in `plugin_cipher` (not the pure half) because an empty id would
+        // otherwise derive one shared "anonymous" subkey for every caller.
+        assert!(plugin_cipher("   ").is_err());
     }
 
     #[test]

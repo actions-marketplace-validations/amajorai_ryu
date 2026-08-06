@@ -897,6 +897,11 @@ const host = {{
     delete: (k, ns) => tools.host.storage_delete({{ key: String(k), namespace: ns }}),
     keys: (ns) => tools.host.storage_keys({{ namespace: ns }}),
   }},
+  crypto: {{
+    seal: (v) => tools.host.crypto_seal({{ value: typeof v === "string" ? v : JSON.stringify(v) }}),
+    open: (v) => tools.host.crypto_open({{ value: String(v) }}),
+    status: () => tools.host.crypto_status({{}}),
+  }},
   log: (...a) => console.log(...a),
 }};
 {entry}

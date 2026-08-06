@@ -183,6 +183,27 @@
       "tsHost": true
     },
     {
+      "capability": "crypto.seal",
+      "grant": "crypto:seal",
+      "method": "crypto.seal",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "crypto.seal",
+      "grant": "crypto:seal",
+      "method": "crypto.open",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "crypto.seal",
+      "grant": "crypto:seal",
+      "method": "crypto.status",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "conversation.title",
       "grant": "conversation:set-title",
       "method": "conversation.setTitle",
