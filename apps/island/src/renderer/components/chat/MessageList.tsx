@@ -1,5 +1,4 @@
-// Re-export shim: the transcript view now lives in @ryu/blocks/island. The
-// block's structural `IslandChatMessage` type matches this app's `ChatMessage`
-// (id/role/content/streaming), so callers pass the message list unchanged.
+// Re-export shim: the island's transcript IS the desktop message list, rendered
+// at compact density. See @ryu/blocks/island/chat/island-transcript for why.
 
-export { MessageList } from "@ryu/blocks/island/chat/message-list";
+export { IslandTranscript } from "@ryu/blocks/island/chat/island-transcript";

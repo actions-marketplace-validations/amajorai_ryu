@@ -78,6 +78,13 @@ pub const MCP_SAFE_ALLOWLIST: &[&str] = &[
     // one is a loopback overlay URL, the other a data-dir path.
     "RYU_GHOST_OVERLAY_URL",
     "GHOST_DATA_DIR",
+    // Research (same move as ghost: from a hardcoded built-in MCP provider to its
+    // app manifest's `mcp_servers`, `ryu-research mcp`). In-process, the tools read
+    // this var straight out of Core's env; spawned as a child they get nothing but
+    // this allowlist, so without the entry a dev stack's tools would silently talk
+    // to the RELEASE autoresearch engine on :8087 instead of the dev one on :9087.
+    // `profile::apply_env_defaults` seeds it; it is a loopback URL, not a secret.
+    "RYU_RESEARCH_UPSTREAM",
 ];
 
 /// Whether an env KEY is secret-like (contains any [`SENSITIVE_MARKERS`] token,
@@ -220,6 +227,27 @@ mod tests {
         assert!(!has(&out, "FOO_TOKEN"));
         assert!(!has(&out, "RANDOM_VAR"));
         assert!(!has(&out, "OPENAI_API_KEY"));
+    }
+
+    /// The severed built-ins reach their spawned MCP child ONLY through this
+    /// allowlist: `env_clear()` wipes everything else. A dropped upstream URL is a
+    /// silent wrong-target bug (dev tools hitting the release engine), not a
+    /// failure, so the pass-through is asserted rather than assumed.
+    #[test]
+    fn mcp_safe_env_keeps_the_severed_builtins_loopback_pointers() {
+        let base = pairs(&[
+            ("RYU_RESEARCH_UPSTREAM", "http://127.0.0.1:9087"),
+            ("RYU_GHOST_OVERLAY_URL", "http://127.0.0.1:7986"),
+            ("GHOST_DATA_DIR", "/home/u/.ghost"),
+            // A neighbouring RYU_* var that is NOT allowlisted must still drop —
+            // the entries above are individual decisions, not a prefix rule.
+            ("RYU_GATEWAY_URL", "http://127.0.0.1:7981"),
+        ]);
+        let out = mcp_safe_env(base);
+        assert!(has(&out, "RYU_RESEARCH_UPSTREAM"));
+        assert!(has(&out, "RYU_GHOST_OVERLAY_URL"));
+        assert!(has(&out, "GHOST_DATA_DIR"));
+        assert!(!has(&out, "RYU_GATEWAY_URL"));
     }
 
     #[test]

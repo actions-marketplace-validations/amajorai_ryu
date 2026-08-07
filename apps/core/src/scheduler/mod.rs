@@ -295,7 +295,7 @@ impl Scheduler {
                                 client
                                     .report_failure(
                                         &src,
-                                        ryu_healing::HealSource::Agent {
+                                        crate::healing_client::HealSource::Agent {
                                             agent_id: Some(agent_id),
                                         },
                                         prompt,

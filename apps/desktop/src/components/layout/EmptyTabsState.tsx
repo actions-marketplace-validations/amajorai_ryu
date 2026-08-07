@@ -46,6 +46,7 @@ import {
 	modelsForAgent,
 	setAgentModel,
 } from "@/src/lib/models.ts";
+import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 
 /** How many items each "recent" list shows before linking out to "See all". */
 const RECENT_LIMIT = 5;
@@ -360,6 +361,7 @@ function RecentList({
  */
 function LaunchpadComposer() {
 	const { openTab } = useTabsContext();
+	const { openCreateAgent } = useCreateAgentDialog();
 	const { agents } = useAgents();
 	const { teams } = useTeams();
 	const engineModels = useEngineModels();
@@ -440,7 +442,7 @@ function LaunchpadComposer() {
 		teams,
 		teamId,
 		onSelectTeam: setTeamId,
-		onCreateAgent: () => openTab("/agents/new/edit", { title: "New agent" }),
+		onCreateAgent: () => openCreateAgent(),
 		ghost: { active: ghost, onToggle: () => setGhost((on) => !on) },
 	});
 	const { addFiles, clear, images, onAttach, onPaste, onRemoveImage } =

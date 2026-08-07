@@ -15,6 +15,7 @@ import { EmployeeBadge } from "@ryu/ui/components/employee-badge";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useQuery } from "@tanstack/react-query";
 import { format, subDays } from "date-fns";
+import { useTheme } from "next-themes";
 import { useMemo } from "react";
 import {
 	fetchAgentProfile,
@@ -42,6 +43,7 @@ export function AgentProfile({
 	name,
 	onBack,
 }: AgentProfileProps) {
+	const { resolvedTheme } = useTheme();
 	const { from, to } = useMemo(() => {
 		const now = new Date();
 		return {
@@ -97,6 +99,7 @@ export function AgentProfile({
 					employeeId={agentId}
 					hiredAt={profile?.hiredAt}
 					level={profile?.level ?? 0}
+					metalTheme={resolvedTheme === "light" ? "light" : "dark"}
 					name={name}
 					role={description ?? undefined}
 					stats={[

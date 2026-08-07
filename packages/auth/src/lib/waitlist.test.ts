@@ -8,6 +8,7 @@ import {
 	isWaitlisted,
 	observedInvitesPerWeek,
 	referralUrlFor,
+	waitlistEnabledOverride,
 	waitlistEtaLabel,
 	webOrigin,
 } from "./waitlist.ts";
@@ -15,6 +16,7 @@ import {
 const ENV_KEYS = [
 	"ADMIN_EMAILS",
 	"FRONTEND_URL",
+	"WAITLIST_ENABLED",
 	"WAITLIST_INVITES_PER_WEEK",
 ] as const;
 
@@ -62,12 +64,56 @@ describe("adminEmails / isAdminEmail", () => {
 	});
 });
 
+describe("waitlistEnabledOverride", () => {
+	it("is null when unset, blank, or unparseable", () => {
+		expect(waitlistEnabledOverride()).toBeNull();
+		process.env.WAITLIST_ENABLED = "  ";
+		expect(waitlistEnabledOverride()).toBeNull();
+		process.env.WAITLIST_ENABLED = "maybe";
+		expect(waitlistEnabledOverride()).toBeNull();
+	});
+
+	it("accepts the truthy spellings, case- and space-insensitively", () => {
+		for (const raw of ["1", "true", "TRUE", " on ", "yes", "Enabled"]) {
+			process.env.WAITLIST_ENABLED = raw;
+			expect(waitlistEnabledOverride()).toBe(true);
+		}
+	});
+
+	it("accepts the falsy spellings", () => {
+		for (const raw of ["0", "false", "OFF", "no", " disabled "]) {
+			process.env.WAITLIST_ENABLED = raw;
+			expect(waitlistEnabledOverride()).toBe(false);
+		}
+	});
+});
+
 describe("isWaitlistBypassed", () => {
 	it("is bypassed when no admins are configured", () => {
 		expect(isWaitlistBypassed()).toBe(true);
 	});
 
 	it("is not bypassed once an admin allowlist exists", () => {
+		process.env.ADMIN_EMAILS = "admin@ryu.dev";
+		expect(isWaitlistBypassed()).toBe(false);
+	});
+
+	it("WAITLIST_ENABLED=true forces the queue on with no admins configured", () => {
+		process.env.WAITLIST_ENABLED = "true";
+		expect(isWaitlistBypassed()).toBe(false);
+		expect(isWaitlisted({ role: "waitlist", email: "user@x.io" })).toBe(true);
+	});
+
+	it("WAITLIST_ENABLED=false forces the queue off even with admins configured", () => {
+		process.env.ADMIN_EMAILS = "admin@ryu.dev";
+		process.env.WAITLIST_ENABLED = "false";
+		expect(isWaitlistBypassed()).toBe(true);
+		expect(isWaitlisted({ role: "waitlist", email: "user@x.io" })).toBe(false);
+	});
+
+	it("falls back to the ADMIN_EMAILS-derived state when the override is unparseable", () => {
+		process.env.WAITLIST_ENABLED = "sometimes";
+		expect(isWaitlistBypassed()).toBe(true);
 		process.env.ADMIN_EMAILS = "admin@ryu.dev";
 		expect(isWaitlistBypassed()).toBe(false);
 	});
@@ -122,11 +168,9 @@ describe("webOrigin / referralUrlFor", () => {
 		expect(webOrigin()).toBe("https://ryuhq.com");
 	});
 
-	it("builds a sign-up referral link with the code", () => {
+	it("builds a short referral link with the code", () => {
 		process.env.FRONTEND_URL = "https://ryuhq.com";
-		expect(referralUrlFor("ABCD2345")).toBe(
-			"https://ryuhq.com/login?view=signup&ref=ABCD2345"
-		);
+		expect(referralUrlFor("ABCD2345")).toBe("https://ryuhq.com/r/ABCD2345");
 	});
 });
 

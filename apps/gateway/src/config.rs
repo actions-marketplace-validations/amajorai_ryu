@@ -512,6 +512,36 @@ pub struct CreditsConfig {
     /// (orthogonal to `wallet_empty_action`). Old configs → `Silent`.
     #[serde(default)]
     pub wallet_empty_alert: AlertTier,
+    /// Hold an estimate of a managed request's cost against the org's balance
+    /// for the life of that request, so concurrent requests cannot all spend the
+    /// same balance. `GATEWAY_CREDITS_RESERVE`. Default: **true**.
+    ///
+    /// Off restores the pre-reservation behaviour: the gate becomes "is the
+    /// balance positive", every in-flight request is invisible to every other,
+    /// and the only bound on a burst is the per-org rate limit. That is a
+    /// deliberate escape hatch for an operator debugging a false 402, not a
+    /// posture anyone should run on.
+    #[serde(default = "default_true")]
+    pub reserve_enabled: bool,
+    /// Floor for a single request's reservation, in micro-USD.
+    /// `GATEWAY_CREDITS_MIN_RESERVE_MICRO_USD`. Default: 10_000 ($0.01).
+    ///
+    /// THIS FLOOR, NOT THE ESTIMATE, IS WHAT BOUNDS A BURST. The per-request
+    /// estimate is derived from `max_tokens` at the flat
+    /// `control_plane.cost_per_1k_micro_usd` rate, which is the only price basis
+    /// the gateway holds — it has no per-model price table, and for OpenRouter
+    /// traffic the true cost only arrives with the response's `usage.cost`. So
+    /// the estimate systematically UNDER-states a frontier model and cannot be
+    /// leaned on alone. The floor makes the bound explicit and model-independent:
+    /// at most `balance / min_reserve` requests can be in flight for an org, so
+    /// a $10 balance admits at most 1000 concurrent requests at the default, and
+    /// a wallet holding a fraction of a cent admits none.
+    ///
+    /// Raise it to tighten the burst bound at the cost of refusing more
+    /// legitimate concurrency; it is the one number to tune if a managed tenant
+    /// ever outruns its wallet.
+    #[serde(default = "default_min_reserve_micro_usd")]
+    pub min_reserve_micro_usd: u64,
     /// Per-request timeout in milliseconds for the debit POST. Default: 3000.
     #[serde(default = "default_credits_timeout_ms")]
     pub timeout_ms: u64,
@@ -635,6 +665,12 @@ fn default_credits_timeout_ms() -> u64 {
     3000
 }
 
+/// $0.01. See [`CreditsConfig::min_reserve_micro_usd`] for why the floor rather
+/// than the estimate is the number that bounds a burst.
+fn default_min_reserve_micro_usd() -> u64 {
+    10_000
+}
+
 fn default_sandbox_markup_bps() -> u64 {
     3000
 }
@@ -701,6 +737,8 @@ impl Default for CreditsConfig {
             wallet_empty_action: WalletEmptyAction::default(),
             wallet_empty_downgrade_to: None,
             wallet_empty_alert: AlertTier::default(),
+            reserve_enabled: default_true(),
+            min_reserve_micro_usd: default_min_reserve_micro_usd(),
             timeout_ms: default_credits_timeout_ms(),
             fail_closed: false,
             // Delegated, not repeated: these must equal the serde `default = "…"`
@@ -3491,6 +3529,16 @@ impl GatewayConfig {
                 config.credits.fail_closed = fail_closed;
             }
         }
+        if let Ok(raw) = std::env::var("GATEWAY_CREDITS_RESERVE") {
+            if let Some(enabled) = parse_bool_env(&raw) {
+                config.credits.reserve_enabled = enabled;
+            }
+        }
+        if let Ok(raw) = std::env::var("GATEWAY_CREDITS_MIN_RESERVE_MICRO_USD") {
+            if let Ok(value) = raw.trim().parse::<u64>() {
+                config.credits.min_reserve_micro_usd = value;
+            }
+        }
 
         // Fleet mode (managed-cloud WS2). A publicly-exposed multi-tenant replica
         // sets this so the admin gate stops trusting loopback peers (an external
@@ -4485,6 +4533,39 @@ mod credits_config_tests {
     }
 
     #[test]
+    fn reservation_defaults_survive_a_partial_credits_table() {
+        // THE DRIFT THIS CATCHES: `Default for CreditsConfig` and the serde
+        // `default = "…"` fns are two separate declarations of the same number.
+        // If they disagree, an ABSENT `[credits]` table and a PRESENT one that
+        // omits these keys behave differently — and for `reserve_enabled` that
+        // difference is "concurrent requests are bounded" vs "they are not".
+        let absent: crate::GatewayConfig = toml::from_str("").expect("empty config parses");
+        assert!(absent.credits.reserve_enabled);
+        assert_eq!(absent.credits.min_reserve_micro_usd, 10_000);
+
+        let partial: crate::GatewayConfig = toml::from_str(
+            r#"
+[credits]
+enabled = true
+"#,
+        )
+        .expect("partial credits table parses");
+        assert!(
+            partial.credits.reserve_enabled,
+            "omitting the key must not silently disable the reservation"
+        );
+        assert_eq!(partial.credits.min_reserve_micro_usd, 10_000);
+        assert_eq!(
+            partial.credits.reserve_enabled,
+            CreditsConfig::default().reserve_enabled
+        );
+        assert_eq!(
+            partial.credits.min_reserve_micro_usd,
+            CreditsConfig::default().min_reserve_micro_usd
+        );
+    }
+
+    #[test]
     fn tool_call_cost_is_flat_per_call_and_saturates() {
         let c = CreditsConfig {
             cost_per_tool_call_micro_usd: 500,
@@ -5082,6 +5163,8 @@ internal_secret = "..."                 # also RYU_CREDITS_INTERNAL_SECRET
 markup_bps = 0                          # platform markup in basis points (0 = pass-through)
 wallet_empty_action = "stop"            # "stop" | "downgrade"
 wallet_empty_downgrade_to = ""
+reserve_enabled = true                  # hold an estimate against the balance while a request runs
+min_reserve_micro_usd = 10000           # $0.01 floor per request; bounds concurrent burst
 timeout_ms = 3000
 "#;
 

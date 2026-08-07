@@ -15,9 +15,9 @@
 //! on approve, and an auto-fix re-run reaches Core's agent runner / workflow store.
 //! So the sidecar does NOT call back into Core; instead Core posts a failed run's
 //! context to `POST /api/healing/report-failure`, the sidecar returns a
-//! [`ryu_healing::HealVerdict`], and Core applies it via
-//! [`ryu_healing::apply_verdict`] against [`CoreHealingHost`] (the approvals write +
-//! the re-run). The three failure surfaces that stay kernel drive this client:
+//! [`HealVerdict`], and [`HealingClient::apply`] dispatches it against
+//! [`CoreHealingHost`] (the approvals write + the re-run). The three failure
+//! surfaces that stay kernel drive this client:
 //!
 //! - **run-status bus** — [`spawn`] subscribes to
 //!   [`crate::server::conversations::subscribe_run_events`], reads the failed run's
@@ -32,13 +32,22 @@
 //! bearer ([`crate::sidecar::ext_proxy::ext_token`]) the sidecar was spawned with —
 //! nothing hardcoded. Fail-open: an unreachable sidecar (Self-Healing app disabled,
 //! so the sidecar isn't spawned) means a run simply isn't auto-healed, never a wedge.
+//!
+//! **Core links no `ryu-healing` code.** The app is a satellite (AGENTS.md); the only
+//! Rust the two halves share is `ryu-healing-contracts`, a serde-only crate that
+//! neither of them owns, carrying the [`HealVerdict`] this module decodes plus the
+//! two agreements that never appear on the wire — [`HEAL_PREFIX`] and the
+//! [`truncate_context`] policy. Everything else the sidecar exposed to Core (the
+//! `HealingHost` trait, `HealSource`, `apply_verdict`) was either dead here or
+//! cheaper to state locally, so it stayed in the app.
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::json;
 
-use ryu_healing::{apply_verdict, HealSource, HealVerdict, HealingHost};
+use ryu_healing_contracts::{
+    truncate_context, HealVerdict, HEAL_PREFIX, SOURCE_KIND_AGENT, SOURCE_KIND_WORKFLOW,
+};
 
 use crate::plugins::builtins::HEALING_PLUGIN_ID;
 use crate::server::conversations::ConversationSummary;
@@ -50,58 +59,51 @@ use crate::sidecar::ext_proxy::{ext_token, node_token};
 const HEALING_SIDECAR: &str = "ryu-healing";
 
 // ---------------------------------------------------------------------------
+// HealSource — which kernel surface failed
+// ---------------------------------------------------------------------------
+
+/// What kind of run failed, at the two call sites that report one. Selects the
+/// `kind` discriminant Core sends the sidecar.
+///
+/// Core-local rather than shared: this never crosses the wire as a *type* — it is
+/// flattened to `kind` + `agent_id` strings in [`HealingClient::report_failure`] and
+/// re-parsed sidecar-side — and each side wants a different shape anyway. What DOES
+/// have to match is the `kind` spelling, so that comes from the shared contract
+/// ([`ryu_healing_contracts::SOURCE_KIND_AGENT`] / `_WORKFLOW`) rather than a literal.
+/// An enum rather than a bare `&str` keeps the flatten exhaustive, so adding a third
+/// failure surface cannot forget it.
+#[derive(Debug, Clone)]
+pub enum HealSource {
+    /// A chat / agent / scheduled-agent run: re-run the agent with a corrected
+    /// prompt.
+    Agent { agent_id: Option<String> },
+    /// A workflow run: re-run the workflow from scratch (diagnosed retry).
+    Workflow,
+}
+
+// ---------------------------------------------------------------------------
 // CoreHealingHost — the welded-coupling side (approvals write + re-run)
 // ---------------------------------------------------------------------------
 
-/// Core's implementation of [`HealingHost`], used ONLY as the [`apply_verdict`]
-/// target: its action methods (`rerun_*`, `queue_heal_*`) perform the couplings that
-/// stay kernel — the agent/workflow re-run and the approvals-inbox delivery. The
-/// read-side methods (`pref_*`, `default_diagnose_model`, `data_dir`,
-/// `call_side_model`) are now owned by the sidecar and never invoked Core-side; they
-/// are retained only to satisfy the trait.
-pub struct CoreHealingHost {
-    state: ServerState,
-}
+/// The couplings that stay kernel, and the whole reason Core is in this loop at all:
+/// a heal proposal has to land in Core's approvals inbox and an auto-fix has to
+/// re-enter Core's agent runner / workflow store, neither of which a separate
+/// process can reach. [`HealingClient::apply`] is the only caller.
+///
+/// This used to implement the app crate's `HealingHost` trait. Half of that trait
+/// (`pref_*`, `default_diagnose_model`, `data_dir`, `call_side_model`) moved to the
+/// sidecar when the engine did and was never invoked Core-side again, so the trait
+/// had become five live methods carrying five dead ones. The dead half is deleted
+/// and what is left is a plain inherent impl — Core no longer links the app to
+/// declare it.
+///
+/// Stateless: every surviving method reaches a Core process-global
+/// (`approvals::global_engine`, `agent_runner::global_agent_runner`,
+/// `workflow::rerun_run`). The `ServerState` this struct used to hold existed only
+/// for the read-side methods that moved to the sidecar.
+pub struct CoreHealingHost;
 
 impl CoreHealingHost {
-    pub fn new(state: ServerState) -> Self {
-        Self { state }
-    }
-}
-
-#[async_trait]
-impl HealingHost for CoreHealingHost {
-    async fn pref_get(&self, key: &str) -> Option<String> {
-        // Owned by the sidecar out-of-process; retained for the trait only.
-        self.state.preferences.get(key).await.ok().flatten()
-    }
-
-    async fn pref_set(&self, key: &str, value: &str) -> Result<(), String> {
-        self.state
-            .preferences
-            .set(key, value)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    fn default_diagnose_model(&self) -> String {
-        crate::registry::DEFAULT_LOCAL_CHAT_MODEL_ID.to_string()
-    }
-
-    fn data_dir(&self) -> std::path::PathBuf {
-        crate::paths::ryu_dir()
-    }
-
-    async fn call_side_model(
-        &self,
-        model: &str,
-        effort: &str,
-        system: &str,
-        user: &str,
-    ) -> Result<String, String> {
-        crate::server::call_side_model(&self.state, model, effort, system, user).await
-    }
-
     async fn rerun_agent(&self, agent_id: Option<String>, run_id: String, prompt: String) {
         if let Some(runner) = crate::sidecar::agent_runner::global_agent_runner() {
             if let Err(e) = runner.run(agent_id, run_id, prompt).await {
@@ -167,11 +169,11 @@ pub struct HealingClient {
 
 impl HealingClient {
     /// Build a client bound to the sidecar's resolved loopback port, applying
-    /// verdicts against a [`CoreHealingHost`] over `state`.
-    pub fn new(port: u16, state: ServerState) -> Self {
+    /// verdicts against a [`CoreHealingHost`].
+    pub fn new(port: u16) -> Self {
         Self {
             port,
-            host: Arc::new(CoreHealingHost::new(state)),
+            host: Arc::new(CoreHealingHost),
         }
     }
 
@@ -198,8 +200,8 @@ impl HealingClient {
         failure: String,
     ) {
         let kind = match source {
-            HealSource::Agent { .. } => "agent",
-            HealSource::Workflow => "workflow",
+            HealSource::Agent { .. } => SOURCE_KIND_AGENT,
+            HealSource::Workflow => SOURCE_KIND_WORKFLOW,
         };
         let agent_id = match &source {
             HealSource::Agent { agent_id } => agent_id.clone(),
@@ -238,7 +240,54 @@ impl HealingClient {
             }
         };
         // Core owns the welded action (approvals write / re-run).
-        apply_verdict(&*self.host, verdict).await;
+        self.apply(verdict).await;
+    }
+
+    /// Dispatch the sidecar's verdict against Core's internals — the welded half the
+    /// sidecar cannot perform itself. The mirror image of the app crate's
+    /// `apply_verdict`, which drives the same enum against the sidecar's own host;
+    /// the enum is shared, the dispatch is not, because the two sides' actions have
+    /// nothing in common beyond the vocabulary.
+    ///
+    /// The re-run id is minted here rather than carried in the verdict: it is only
+    /// meaningful at the moment the re-run starts, and its [`HEAL_PREFIX`] is the
+    /// never-heal-a-heal marker the sidecar's `decide_heal` reads back off the next
+    /// failure — which is why the prefix is a shared constant and not a literal.
+    async fn apply(&self, verdict: HealVerdict) {
+        match verdict {
+            HealVerdict::Skip { reason } => tracing::debug!("healing: skip: {reason}"),
+            HealVerdict::RerunAgent { agent_id, prompt } => {
+                let run_id = format!("{HEAL_PREFIX}{}", uuid::Uuid::new_v4().simple());
+                self.host.rerun_agent(agent_id, run_id, prompt).await;
+            }
+            HealVerdict::RerunWorkflow { source_id } => {
+                self.host.rerun_workflow(&source_id).await;
+            }
+            HealVerdict::QueueFix {
+                source_id,
+                agent_id,
+                diagnosis,
+                corrected,
+            } => {
+                self.host
+                    .queue_heal_fix(&source_id, agent_id, &diagnosis, corrected)
+                    .await;
+            }
+            HealVerdict::QueueWorkflow {
+                source_id,
+                diagnosis,
+            } => self.host.queue_heal_workflow(&source_id, &diagnosis).await,
+            HealVerdict::QueueExhausted { source_id, note } => {
+                self.host.queue_heal_exhausted(&source_id, &note).await;
+            }
+            // Binary skew, not source drift: the sidecar ships as its own executable
+            // (`RYU_HEALING_BIN`), so a newer one can answer with an action this Core
+            // has never heard of. The contract's catch-all makes that one verdict a
+            // logged no-op instead of an unparseable body that drops every heal.
+            HealVerdict::Unknown => {
+                tracing::warn!("healing: sidecar returned an unknown verdict action, ignored");
+            }
+        }
     }
 }
 
@@ -323,7 +372,7 @@ async fn handle_failed(state: &ServerState, client: &HealingClient, run: Convers
 }
 
 /// Load the failed run's last user instruction + last assistant/error output from
-/// the kernel conversation store, applying the crate's length policy.
+/// the kernel conversation store, applying the shared contract's length policy.
 async fn extract_context(state: &ServerState, conv_id: &str) -> (String, String) {
     let Ok(messages) = state.conversations.get_messages(conv_id).await else {
         return (String::new(), String::new());
@@ -337,8 +386,5 @@ async fn extract_context(state: &ServerState, conv_id: &str) -> (String, String)
             _ => {}
         }
     }
-    (
-        ryu_healing::truncate_context(&instruction),
-        ryu_healing::truncate_context(&failure),
-    )
+    (truncate_context(&instruction), truncate_context(&failure))
 }

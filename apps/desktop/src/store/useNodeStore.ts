@@ -158,18 +158,33 @@ function loadDismissedCloudUrls(): string[] {
 }
 
 /**
- * Decorate the local node list with the "Cloud" (managed) flag for any node
- * whose URL matches a managed cloud node the org can reach. Local nodes keep
- * their own name + token; only the display-time `managed` flag is added, so an
- * added cloud node shows the Cloud label and the org-wallet nudge. A managed
- * node that is NOT added locally is never injected here — it surfaces as a
- * suggestion instead (see {@link computeSuggestions}).
+ * Decorate the local node list with the "Cloud" (managed) flag — and the LIVE
+ * control-plane token — for any node whose URL matches a managed cloud node the
+ * org can reach. A managed node that is NOT added locally is never injected here
+ * — it surfaces as a suggestion instead (see {@link computeSuggestions}).
+ *
+ * WHY THE TOKEN IS ADOPTED HERE: the control plane mints a short-lived (~15 min)
+ * user JWT per `/nodes` fetch, and {@link useNodeStore.refreshCloudTokens} exists
+ * to keep an added cloud node's credential fresh. It swapped the token only into
+ * `cloudNodes` though, while every caller reads the merged `nodes` — so the
+ * persisted, hours-old token from add-time was the one actually sent, and the
+ * refresh timer changed nothing an added node could see. Merging by URL fixes
+ * that at the single point where the two lists meet, and it is also what lets a
+ * node added from a TOKENLESS connection string (the web dashboard holds no node
+ * secret to put in one) authenticate at all. A local node with no cloud match is
+ * untouched, so self-hosted/LAN tokens are never overwritten.
  */
 function decorateLocal(local: Node[], cloud: Node[]): Node[] {
-	const cloudUrls = new Set(cloud.map((n) => normalizeUrl(n.url)));
-	return local.map((n) =>
-		cloudUrls.has(normalizeUrl(n.url)) ? { ...n, managed: true } : n
-	);
+	const cloudByUrl = new Map(cloud.map((n) => [normalizeUrl(n.url), n]));
+	return local.map((n) => {
+		const match = cloudByUrl.get(normalizeUrl(n.url));
+		if (!match) {
+			return n;
+		}
+		// Keep the stored token when the control plane minted none (an older server,
+		// or a signed-out fetch): a stale credential still beats no credential.
+		return { ...n, managed: true, token: match.token ?? n.token };
+	});
 }
 
 /**

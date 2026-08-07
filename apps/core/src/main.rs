@@ -564,8 +564,10 @@ async fn main() {
         // via the command-tool allowlist, so there is no SpiderManager sidecar here.)
         // Autoresearch experiment runner (Python stdlib HTTP service). Opt-in;
         // NOT in startup_order — it only starts once a user installs it or runs
-        // `python -m ryu_research` (adopt-mode) and the /api/research path or the
-        // research__* tools reach it lazily.
+        // `python -m ryu_research` (adopt-mode). Its consumers are both
+        // out-of-process now (the `@ryu/research` app's sidecar for /api/research,
+        // and its `ryu-research mcp` stdio server for the research__* tools); they
+        // reach this engine over loopback, so Core keeps only its lifecycle.
         Arc::new(ResearchManager::new().with_downloads(download_center.clone())),
         Arc::new(LlmFit::new()),
         Arc::new(ShadowManager::new().with_downloads(download_center.clone())),
@@ -1322,13 +1324,9 @@ async fn main() {
     // via the `quests` client built above; the scheduler judge, the `JobTarget::Quest`
     // job reconcile, and the activity feed are wired through `quests_client::spawn`.
 
-    // Recipes host (ghost-os record→replay), from the extracted `ryu_recipes`
-    // crate. Installed UNCONDITIONALLY — the workflow executor's `Recipe`/
-    // `GhostAction` nodes call `ryu_recipes::run` in every build (kernel), so the
-    // host must be present even in the lean kernel (only the HTTP routes are
-    // feature-gated). The shim carries the two live-ghost couplings the crate can't
-    // own: the shared MCP registry (replay) and the dedicated recording subprocess.
-    ryu_recipes::set_global_host(std::sync::Arc::new(crate::recipes_host::CoreRecipesHost));
+    // Recipes needs no host installation: `recipes_host::CoreRecipesHost` is a
+    // plain Core type the `ghost.*` kernel capabilities call directly, and the
+    // workflow executor's `Recipe` node drives the shared MCP registry itself.
 
     // Install the webhook-ingress host BEFORE any ingress code runs (the ingress
     // start task below, and the public webhook routes in `server/mod.rs`, both
@@ -1622,8 +1620,7 @@ async fn main() {
     // `ServerState`) and spawn the run-status bus loop, which reads a failed run's
     // context from the kernel conversation store and posts it to the sidecar,
     // applying the returned verdict (Core owns the approvals write + the re-run).
-    let healing =
-        crate::healing_client::HealingClient::new(healing_sidecar_port, server_state.clone());
+    let healing = crate::healing_client::HealingClient::new(healing_sidecar_port);
     crate::healing_client::set_global_client(healing.clone());
     crate::healing_client::spawn(healing, server_state.clone());
     let auth_token = crate::node_token::active_token();

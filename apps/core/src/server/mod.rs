@@ -116,7 +116,8 @@ pub struct ServerState {
     /// ordered collection of agents + a coordination strategy) are addressed as one
     /// unit via `@team` in chat; the `@team` orchestration
     /// ([`crate::sidecar::adapters::route_team_chat_stream`]) fetches the
-    /// [`ryu_teams::TeamRecord`] through this client instead of opening the DB.
+    /// [`ryu_teams_contracts::TeamRecord`] through this client instead of opening
+    /// the DB.
     pub teams: crate::teams_client::TeamsClient,
     pub conversations: ConversationStore,
     pub memory: MemoryStore,
@@ -3000,8 +3001,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // gate it while still inheriting require_auth/attach_verified_caller.
         // ── Ghost recipes (`/api/recipes/*`) are served OUT-OF-PROCESS by the
         // `ryu-recipes` sidecar via the manifest `public_mount` (no in-process
-        // merge); the crate's replay/record engine stays compiled as a non-optional
-        // dep for the workflow GhostAction node. See `@ryu/recipes`.
+        // merge); Core links none of it. See `@ryu/recipes`.
         // ── Scheduled jobs / heartbeat ──────────────────────────────────────
         .route("/heartbeat/jobs", get(list_jobs).post(create_job))
         .route("/heartbeat/jobs/:id", get(get_job).delete(delete_job))
@@ -3059,8 +3059,8 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
     // in-process route merge. Its two live-ghost paths (replay + the recording
     // session) proxy back to Core's `/api/host/capability/ghost.*` (the shared MCP registry +
     // the recorder subprocess are kernel; see `recipes_client` + `recipes_host`).
-    // The workflow executor's `Recipe`/`GhostAction` nodes still call
-    // `ryu_recipes::run` IN-PROCESS (no HTTP round-trip) against the same host.
+    // The workflow executor's `Recipe`/`GhostAction` nodes reach the same registry
+    // directly via Core's built-in ghost MCP tool — Core links no recipes code.
     // See `@ryu/recipes` in `plugin_manifest`.
     // Healing `/api/healing/*` is now served OUT-OF-PROCESS by the `ryu-healing`
     // sidecar via the manifest `public_mount` — no in-process route merge. See
@@ -3700,12 +3700,13 @@ fn learning_routes(app_store: &PluginStore) -> Router<ServerState> {
 // Recipes `/api/recipes/*` is served OUT-OF-PROCESS by the `ryu-recipes` sidecar
 // (manifest `public_mount`, generic ext-proxy loader — the enabled-gate the old
 // `recipes_routes` AppGate applied now runs in `public_mount_proxy`). There is no
-// in-process route merge and no `recipes` cargo feature. The `ryu-recipes` crate
-// stays a NON-optional dependency: the workflow executor's `Recipe`/`GhostAction`
-// nodes call `ryu_recipes::run`/`extract_mcp_json` in every build, and Core installs
-// the live-ghost `RecipesHost` at boot (`recipes_host::CoreRecipesHost`), reached
-// both by that in-process path and by the sidecar via `/api/host/capability/ghost.*`
-// (`recipes_client`).
+// in-process route merge, no `recipes` cargo feature, and NO `ryu-recipes`
+// dependency. Two lanes reach the one shared MCP registry: the workflow executor's
+// `Recipe`/`GhostAction` nodes call Core's built-in `GHOST_RUN_TOOL` directly, and
+// the sidecar proxies back through `/api/host/capability/ghost.*` (`recipes_client`
+// → `recipes_host::CoreRecipesHost`, which also holds the recorder subprocess).
+// NOTE: the executor lane is NOT enabled-gated — a `Recipe` node replays even with
+// the app disabled. Pre-existing (the gate only ever covered the HTTP surface).
 
 /// The `/api/predict/*` surface, gated on the **Predict App** being enabled.
 ///
@@ -12552,6 +12553,20 @@ async fn apply_sidecars(
         return;
     }
     let tier = crate::plugins::builtins::tier_for(&manifest.id);
+    // The managed-bin ready notifier: a plugin that declares BOTH a sidecar and
+    // `mcp_servers` gets its registration re-run once the sidecar's binary is actually
+    // on disk. The registration below (in `activate_plugin`) runs while this download is
+    // still in flight, so without this the declared server stays skipped until the next
+    // boot. Built once per apply and shared by every spec (`Arc`: a manifest can carry
+    // inline `ui_code`). `None` for a manifest with no `mcp_servers` — nothing to re-run.
+    let mcp_registration = (enabled && !manifest.mcp_servers.is_empty()).then(|| {
+        crate::sidecar::manifest_sidecar::McpRegistration {
+            registry: state.mcp.clone(),
+            manifest: std::sync::Arc::new(manifest.clone()),
+            tier,
+            approved_grants: approved_grants.to_vec(),
+        }
+    });
     for spec in &manifest.sidecars {
         let manager = state.manager.clone();
         if enabled {
@@ -12565,12 +12580,15 @@ async fn apply_sidecars(
                 );
                 continue;
             }
-            let sidecar =
-                std::sync::Arc::new(crate::sidecar::manifest_sidecar::ManifestSidecar::new(
-                    manifest.id.clone(),
-                    spec.clone(),
-                    state.downloads.clone(),
-                ));
+            let mut built = crate::sidecar::manifest_sidecar::ManifestSidecar::new(
+                manifest.id.clone(),
+                spec.clone(),
+                state.downloads.clone(),
+            );
+            if let Some(registration) = mcp_registration.clone() {
+                built = built.with_mcp_registration(registration);
+            }
+            let sidecar = std::sync::Arc::new(built);
             // Per-app idle-stop timeout (scale-to-zero) declared on the spec, applied
             // BEFORE start so the reaper knows the window as soon as the sidecar is up.
             if let Some(secs) = spec.idle_stop_secs {

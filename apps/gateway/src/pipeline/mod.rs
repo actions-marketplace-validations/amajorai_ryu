@@ -65,7 +65,7 @@ use stages::PipelineStage;
 
 use crate::{
     audit::AuditRecord,
-    budget::BudgetDecision,
+    budget::{BudgetDecision, CreditReservation},
     cache::Cache,
     config::{AlertTier, ApiKeyConfig, BudgetAction, FirewallPolicy, Modality, ProviderId},
     error::GatewayError,
@@ -1773,7 +1773,21 @@ pub async fn run(
 
     // 6c. Per-user / per-agent budgets with local counters (U21). Stop aborts;
     // downgrade/restrict mutate the body+route in place; notify is observable.
-    let (budget, budget_alert) = enforce_budget(&state, &ctx, &mut body, &mut decision)?;
+    let BudgetOutcome {
+        decision: budget,
+        alert: budget_alert,
+        // MOVED INTO THE DEBIT TASK BELOW, not dropped at the end of this
+        // function. The debit is `tokio::spawn`ed, so returning from here would
+        // free the claim while the charge is still in flight in a detached task
+        // (up to `credits.timeout_ms`) — and `ctx.remaining_budget_micro_usd` is
+        // the cached figure, which nothing has decremented yet. The freed
+        // headroom would be immediately re-claimable against a balance that has
+        // not moved: the exact window the reservation exists to close. `.take()`
+        // rather than a move because the debit site sits inside the fallback
+        // loop; if no debit fires (credits inactive, no org) the permit stays
+        // here and drops on return, which is correct.
+        reservation: mut credit_reservation,
+    } = enforce_budget(&state, &ctx, &mut body, &mut decision)?;
     // One response, one header: firewall (Ok-path) alert first so it wins a tie
     // against a same-tier budget alert (deterministic).
     let policy_alert = merge_alert(pre_alert, budget_alert);
@@ -2153,19 +2167,29 @@ pub async fn run(
                             .as_ref()
                             .filter(|b| b.limit > 0 && b.alert >= AlertTier::Warn)
                             .map(|b| b.alert);
-                        tokio::spawn(debit_wallet_for_request(
-                            state2,
-                            org_id,
-                            request_id,
-                            "gateway_usage",
-                            cost,
-                            fail_closed_sticky,
-                            debit_alert_tier,
-                            // Authoritative pool attribution: the provider that
-                            // actually answered, not the one the pre-flight gate
-                            // guessed (a fallback may have served this).
-                            crate::credit_pools::pool_for_gateway_provider(provider.name()),
-                        ));
+                        // The credit permit rides INTO the task so it outlives
+                        // the debit, not the handler — see the binding at
+                        // `enforce_budget` above.
+                        let credit_permit = credit_reservation.take();
+                        let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
+                        tokio::spawn(async move {
+                            debit_wallet_for_request(
+                                state2,
+                                org_id,
+                                request_id,
+                                "gateway_usage",
+                                cost,
+                                fail_closed_sticky,
+                                debit_alert_tier,
+                                // Authoritative pool attribution: the provider
+                                // that actually answered, not the one the
+                                // pre-flight gate guessed (a fallback may have
+                                // served this).
+                                pool,
+                            )
+                            .await;
+                            drop(credit_permit);
+                        });
                     }
                 }
 
@@ -2402,7 +2426,17 @@ pub async fn run_stream(
     // Per-user / per-agent budgets (U21). Enforcement must run on the streaming
     // path too: Core's chat forwards `stream: true`, so without this the budget
     // would never fire for the gateway's primary caller.
-    let (budget, budget_alert) = enforce_budget(&state, &ctx, &mut body, &mut decision)?;
+    let BudgetOutcome {
+        decision: budget,
+        alert: budget_alert,
+        // NOT dropped at the end of this function. A streaming handler returns as
+        // soon as the response HEAD is ready and the bytes flow afterwards, so
+        // releasing here would free the claim while the request is still running
+        // — the exact window the reservation exists to cover. It is moved into
+        // `StreamObserverState` below and released when the stream ends by ANY
+        // means, including a client that hangs up mid-answer.
+        reservation: credit_reservation,
+    } = enforce_budget(&state, &ctx, &mut body, &mut decision)?;
     // Firewall (Ok-path) alert first so it wins a same-tier tie deterministically.
     let policy_alert = merge_alert(pre_alert, budget_alert);
 
@@ -2629,12 +2663,16 @@ pub async fn run_stream(
                         .map(|b| b.alert),
                 );
 
-                // Hold the admission slot for the *whole* stream: move the permit
-                // into the body so it drops only when the SSE is fully consumed
-                // (or the client disconnects). Until then this generation counts
-                // against the engine's slot budget.
-                let observed_body =
-                    hold_admission_until_stream_end(observed_body, admission_permit);
+                // Hold the admission slot AND the credit reservation for the
+                // *whole* stream: move both into the body so they drop only when
+                // the SSE is fully consumed (or the client disconnects). Until
+                // then this generation counts against the engine's slot budget
+                // and against the org's in-flight credit claim.
+                let observed_body = hold_admission_until_stream_end(
+                    observed_body,
+                    admission_permit,
+                    credit_reservation,
+                );
 
                 return Ok(PipelineStreamOutput {
                     body: observed_body,
@@ -2808,12 +2846,21 @@ pub async fn run_multimodal(
 
     // Budget enforcement (reuse the chat path's enforcer).
     let mut decision = decision;
-    let (budget, policy_alert) =
-        enforce_budget(&state, &ctx, &mut body, &mut decision).map_err(|e| {
-            state.metrics.inc_errors();
-            audit_failure(&state, &ctx, &requested_model, &e, start);
-            e
-        })?;
+    let BudgetOutcome {
+        decision: budget,
+        alert: policy_alert,
+        // Same shape as the non-streamed chat path, and for the same reason:
+        // the media debit is SPAWNED, so a permit dropped when this function
+        // returns would free the claim while the debit is still in flight and
+        // `remaining_budget_micro_usd` still reads the stale cached figure.
+        // `.take()`n into the task below; if no debit fires (credits inactive,
+        // no org, zero rate, empty output) it stays here and drops on return.
+        reservation: mut credit_reservation,
+    } = enforce_budget(&state, &ctx, &mut body, &mut decision).map_err(|e| {
+        state.metrics.inc_errors();
+        audit_failure(&state, &ctx, &requested_model, &e, start);
+        e
+    })?;
 
     let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let mut last_err: Option<GatewayError> = None;
@@ -2942,18 +2989,30 @@ pub async fn run_multimodal(
                     if cost > 0 && has_output {
                         let fail_closed_sticky =
                             state.config.credits.fail_closed && ctx.managed_inference;
-                        tokio::spawn(debit_wallet_for_request(
-                            state.clone(),
-                            org_id,
-                            format!("{}:{}", ctx.request_id, modality.as_str()),
-                            "media",
-                            cost,
-                            fail_closed_sticky,
-                            // Media debits carry no budget-cap tier (item 4 is
-                            // scoped to token budgets).
-                            None,
-                            crate::credit_pools::pool_for_gateway_provider(provider.name()),
-                        ));
+                        // The credit permit rides INTO the task so it outlives
+                        // the debit, not the handler. Image generation is the
+                        // most expensive per-call managed surface, so this is
+                        // the path where a freed-early claim costs the most.
+                        let credit_permit = credit_reservation.take();
+                        let state_debit = state.clone();
+                        let ref_id = format!("{}:{}", ctx.request_id, modality.as_str());
+                        let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
+                        tokio::spawn(async move {
+                            debit_wallet_for_request(
+                                state_debit,
+                                org_id,
+                                ref_id,
+                                "media",
+                                cost,
+                                fail_closed_sticky,
+                                // Media debits carry no budget-cap tier (item 4
+                                // is scoped to token budgets).
+                                None,
+                                pool,
+                            )
+                            .await;
+                            drop(credit_permit);
+                        });
                     }
                 }
 
@@ -3078,7 +3137,11 @@ pub async fn submit_video_job(
     );
     let mut decision = decision;
     // Video is job-based; the budget decision (and any alert) is not surfaced on
-    // the submit response, so the tuple is discarded wholesale.
+    // the submit response, so the outcome is discarded wholesale — INCLUDING the
+    // reservation, which is correct here and nowhere else: submit returns a job
+    // id and the render happens out of band, so there is no request lifetime for
+    // a permit to track. Video spend is bounded by `cost_per_video_micro_usd` on
+    // the post-render debit instead.
     let _budget = enforce_budget(&state, &ctx, &mut body, &mut decision).map_err(|e| {
         state.metrics.inc_errors();
         audit_failure(&state, &ctx, &requested_model, &e, start);
@@ -3407,9 +3470,9 @@ fn enforce_budget(
     ctx: &RequestContext,
     body: &mut Value,
     decision: &mut RouteDecision,
-) -> Result<(Option<BudgetDecision>, Option<PolicyAlert>), GatewayError> {
+) -> Result<BudgetOutcome, GatewayError> {
     if ctx.is_master_key {
-        return Ok((None, None));
+        return Ok(BudgetOutcome::default());
     }
     // Pre-flight credit gate (multi-tenant data plane): a managed-inference tenant
     // whose control-plane-resolved wallet is already exhausted is rejected BEFORE
@@ -3440,6 +3503,37 @@ fn enforce_budget(
         );
         return Err(err);
     }
+
+    // CLAIM THE HEADROOM THE GATE JUST APPROVED, before dispatch.
+    //
+    // The gate above answers "does this org have money", and until this claim
+    // existed that was the whole of the concurrency story: metering is post-paid,
+    // so every request in flight at one instant read the same pre-debit balance
+    // and all of them passed. One org could hold a fraction of a cent and still
+    // put an unbounded number of frontier calls on Ryu's provider account, and
+    // the only thing shortening the burst was the per-org rate limit — which is
+    // denominated in TOKENS while the wallet is denominated in DOLLARS, so it
+    // could not see price at all.
+    //
+    // The permit is returned to the caller and dropped when the request's
+    // lifetime ends (a local on the non-streaming paths, `StreamObserverState` on
+    // the streaming one). Release is `Drop`, never a call — see
+    // [`ryu_gw_budget::CreditReservation`].
+    //
+    // Refusing here is the SAME 402 as the gate: from the client's side "your
+    // wallet cannot cover this" and "your wallet cannot cover this as well as
+    // everything else you have running" are one condition, and splitting them
+    // would leak the node's concurrency accounting into a public error surface.
+    let reservation = maybe_reserve_credit(state, ctx, body, routed_pool).map_err(|err| {
+        state.metrics.inc_budget_exceeded();
+        warn!(
+            org_id = ?ctx.org_id,
+            pool = ?routed_pool,
+            "credits: in-flight reservations already claim this org's balance, rejecting pre-flight (402)"
+        );
+        err
+    })?;
+
     // Token-budget decision (U21) and the credit-wallet-empty decision (#486)
     // are both expressed as a `BudgetDecision`; pick the more severe so a single
     // `match` applies one action. The wallet decision reuses the existing budget
@@ -3471,7 +3565,11 @@ fn enforce_budget(
         most_severe(token_decision, wallet_decision),
         session_decision,
     ) else {
-        return Ok((None, None));
+        return Ok(BudgetOutcome {
+            decision: None,
+            alert: None,
+            reservation,
+        });
     };
 
     // Build the Ok/Err-path PolicyAlert once (source/scope inferred from the
@@ -3540,7 +3638,11 @@ fn enforce_budget(
         }
     }
 
-    Ok((Some(budget), alert))
+    Ok(BudgetOutcome {
+        decision: Some(budget),
+        alert,
+        reservation,
+    })
 }
 
 // ─── Credit-wallet debit hook (#486) ──────────────────────────────────────────
@@ -3617,6 +3719,108 @@ fn clamped_fallback_chain(
         );
     }
     clamped.chain
+}
+
+/// The spendable headroom `preflight_credit_gate` judges a request against, or
+/// `None` when the org has no managed cap at all.
+///
+/// Factored out of the gate so the RESERVATION is taken against exactly the
+/// number the gate approved. Deriving them separately is how a request gets
+/// admitted against pooled grant money and then reserved against the
+/// unrestricted balance — two different figures, and the mismatch would surface
+/// as spurious 402s for tenants whose money is mostly in grants.
+/// What [`enforce_budget`] hands back.
+///
+/// A struct rather than the old `(Option<BudgetDecision>, Option<PolicyAlert>)`
+/// tuple because of the third member: `reservation` is an RAII permit whose
+/// DROP releases the org's claimed headroom, so where it lives is load-bearing
+/// rather than incidental. A tuple invites `let (budget, alert) = …?;`, which
+/// silently drops a third element — releasing the claim the instant it was taken
+/// and turning the whole mechanism into a no-op that still compiles and still
+/// passes every test that does not run two requests at once. Naming the field
+/// makes ignoring it something you have to write down.
+#[derive(Default)]
+struct BudgetOutcome {
+    decision: Option<BudgetDecision>,
+    alert: Option<PolicyAlert>,
+    /// HOLD THIS FOR AS LONG AS THE REQUEST RUNS. Dropping it early re-admits
+    /// everything it was holding back.
+    reservation: Option<CreditReservation>,
+}
+
+/// Take a reservation for this request, or refuse it with the pre-flight 402.
+///
+/// `Ok(None)` is the ADMITTED-WITHOUT-A-CLAIM case and covers every request the
+/// reservation layer has no business gating: reservations switched off, a
+/// non-managed / BYOK tenant, and an org with no managed cap at all. Those are
+/// exactly the callers for whom `credit_headroom_micro_usd` returns `None`, so
+/// the absence of a cap stays a single concept rather than being re-derived
+/// here with a slightly different meaning.
+fn maybe_reserve_credit(
+    state: &AppState,
+    ctx: &RequestContext,
+    body: &Value,
+    pool: Option<&str>,
+) -> Result<Option<CreditReservation>, GatewayError> {
+    if !state.config.credits.reserve_enabled {
+        return Ok(None);
+    }
+    let Some(org_id) = ctx.org_id.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(headroom) = credit_headroom_micro_usd(ctx, pool) else {
+        return Ok(None);
+    };
+    let estimate = reservation_estimate_micro_usd(state, body);
+    state
+        .wallet
+        .try_reserve(org_id, estimate, headroom)
+        .map(Some)
+        .ok_or(GatewayError::InsufficientCredits)
+}
+
+fn credit_headroom_micro_usd(ctx: &RequestContext, pool: Option<&str>) -> Option<i64> {
+    if !ctx.managed_inference {
+        return None;
+    }
+    let total = ctx.remaining_budget_micro_usd?;
+    let unrestricted = ctx.unrestricted_budget_micro_usd.unwrap_or(total);
+    let Some(pool) = pool else {
+        return Some(unrestricted);
+    };
+    let pooled = ctx
+        .pool_budgets_micro_usd
+        .get(pool)
+        .copied()
+        .unwrap_or_default();
+    Some(unrestricted.saturating_add(pooled))
+}
+
+/// What THIS request is expected to cost, in micro-USD, for reservation only.
+///
+/// Never bills anything — the authoritative charge is the post-call debit
+/// against the real ledger. This exists solely to decide who may start.
+///
+/// The basis is `max_tokens` at the flat `control_plane.cost_per_1k_micro_usd`
+/// rate, marked up the same way the debit will be, with `min_reserve_micro_usd`
+/// as a floor. The estimate is deliberately crude and is DOCUMENTED as
+/// under-stating frontier traffic: the gateway holds no per-model price table,
+/// and for OpenRouter the true cost only arrives with the response. The floor is
+/// what actually bounds a burst — see [`crate::config::CreditsConfig::min_reserve_micro_usd`].
+///
+/// A request that names no `max_tokens` gets the floor rather than zero. Zero
+/// would mean an unbounded completion reserves nothing, which is precisely
+/// backwards: not stating a ceiling makes a request MORE expensive to serve, not
+/// less.
+fn reservation_estimate_micro_usd(state: &AppState, body: &Value) -> i64 {
+    let credits = &state.config.credits;
+    let max_tokens = body
+        .get("max_tokens")
+        .or_else(|| body.get("max_completion_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let estimate = credits.debit_amount(request_cost_micro_usd(state, 0, max_tokens));
+    estimate.max(credits.min_reserve_micro_usd).min(i64::MAX as u64) as i64
 }
 
 fn preflight_credit_gate(ctx: &RequestContext, pool: Option<&str>) -> Option<GatewayError> {
@@ -4473,18 +4677,42 @@ fn attach_stream_observer(
 fn hold_admission_until_stream_end(
     body: Body,
     permit: crate::concurrency::AdmissionPermit,
+    // The credit reservation taken at `enforce_budget`. `None` when reservations
+    // are off, the tenant is unmanaged, or the org has no managed cap.
+    credit: Option<CreditReservation>,
 ) -> Body {
+    hold_until_stream_end(body, (permit, credit))
+}
+
+/// Keep `held` alive for exactly as long as `body` is being consumed.
+///
+/// The generic version of the admission-slot hold, because a second thing now
+/// needs the identical lifetime: the engine slot and the credit reservation are
+/// both claims taken before the first byte and owed back after the last one, and
+/// "after the last one" on a streaming response is not when the handler returns.
+///
+/// WRAPPING ORDER MATTERS AND IS WHY THIS GOES OUTSIDE THE OBSERVER. The stream
+/// observer's end-of-stream hook is what awaits the wallet debit; this wrapper
+/// sits outside it, so its `next()` only returns `None` — and `held` only drops —
+/// after that debit has been issued. Wrap the other way round and the claim would
+/// be released in the window between the last byte and the debit landing, which
+/// is precisely the window a concurrent burst exploits.
+///
+/// Dropping the returned body without draining it (a client disconnect, an axum
+/// shutdown) drops `held` too, which is the point: there is no path that keeps
+/// the claim.
+fn hold_until_stream_end<T: Send + 'static>(body: Body, held: T) -> Body {
     use futures_util::StreamExt;
 
-    struct PermitHold {
+    struct Hold<T> {
         inner: axum::body::BodyDataStream,
-        // Dropped with the stream → releases the engine slot.
-        _permit: crate::concurrency::AdmissionPermit,
+        // Dropped with the stream → releases whatever it was holding.
+        _held: T,
     }
 
-    let init = PermitHold {
+    let init = Hold {
         inner: body.into_data_stream(),
-        _permit: permit,
+        _held: held,
     };
 
     let stream = futures_util::stream::unfold(init, |mut s| async move {
@@ -4902,6 +5130,165 @@ mod tests {
         );
         assert_eq!(sse_parse_cached_tokens(sse), 900);
         assert_eq!(sse_parse_cache_write_tokens(sse), 100);
+    }
+
+    /// An `AppState` whose credits config is exactly what a reservation test
+    /// needs: reservations on, a known floor, and a known flat token rate.
+    fn reserve_state(min_reserve_micro_usd: u64, cost_per_1k_micro_usd: u64) -> AppState {
+        let mut config = crate::GatewayConfig::default();
+        config.credits.reserve_enabled = true;
+        config.credits.min_reserve_micro_usd = min_reserve_micro_usd;
+        config.control_plane.cost_per_1k_micro_usd = cost_per_1k_micro_usd;
+        let audit = crate::audit::AuditLogger::new(&crate::config::AuditConfig {
+            enabled: false,
+            db_path: String::new(),
+        })
+        .expect("disabled audit logger");
+        let evals = crate::evals::EvalsRunner::new(crate::config::EvalsConfig::default());
+        AppState::new_for_test(config, audit, evals)
+    }
+
+    /// A managed-tenant context with a known unrestricted balance.
+    fn managed_ctx(balance_micro_usd: i64) -> RequestContext {
+        let mut ctx = signal_ctx(None, false, false);
+        ctx.org_id = Some("o1".to_string());
+        ctx.managed_inference = true;
+        ctx.remaining_budget_micro_usd = Some(balance_micro_usd);
+        ctx
+    }
+
+    #[test]
+    fn reservation_estimate_floors_at_the_configured_minimum() {
+        let state = reserve_state(10_000, 1);
+        // A tiny completion still claims the floor, so a burst of cheap requests
+        // is bounded by balance / floor rather than by nothing.
+        let body = json!({ "max_tokens": 1 });
+        assert_eq!(reservation_estimate_micro_usd(&state, &body), 10_000);
+    }
+
+    #[test]
+    fn reservation_estimate_scales_with_max_tokens_above_the_floor() {
+        // 1_000_000 tokens at 1000 micro-USD/1k = 1_000_000 micro-USD, over the floor.
+        let state = reserve_state(10_000, 1000);
+        let body = json!({ "max_tokens": 1_000_000 });
+        assert_eq!(reservation_estimate_micro_usd(&state, &body), 1_000_000);
+    }
+
+    #[test]
+    fn an_unbounded_completion_reserves_the_floor_not_zero() {
+        // Naming no ceiling makes a request MORE expensive to serve, not free.
+        let state = reserve_state(10_000, 1000);
+        assert_eq!(reservation_estimate_micro_usd(&state, &json!({})), 10_000);
+        // `max_completion_tokens` is the newer spelling and must read the same.
+        let aliased = json!({ "max_completion_tokens": 1_000_000 });
+        assert_eq!(reservation_estimate_micro_usd(&state, &aliased), 1_000_000);
+    }
+
+    #[test]
+    fn concurrent_managed_requests_cannot_all_spend_one_balance() {
+        // THE REGRESSION GUARD. Post-paid metering means nothing debits until a
+        // request finishes, so without the reservation every one of these sees
+        // the same balance and every one is admitted.
+        let state = reserve_state(10_000, 0);
+        let ctx = managed_ctx(50_000); // $0.05 ⇒ five $0.01 reservations
+        let body = json!({ "max_tokens": 1 });
+
+        let held: Vec<_> = (0..5)
+            .map(|_| {
+                maybe_reserve_credit(&state, &ctx, &body, None)
+                    .expect("within balance")
+                    .expect("a managed tenant takes a real permit")
+            })
+            .collect();
+        assert_eq!(held.len(), 5);
+
+        assert!(
+            matches!(
+                maybe_reserve_credit(&state, &ctx, &body, None),
+                Err(GatewayError::InsufficientCredits)
+            ),
+            "the sixth concurrent request must get the same 402 as an empty wallet"
+        );
+
+        // Finishing the in-flight work returns the headroom.
+        drop(held);
+        assert!(maybe_reserve_credit(&state, &ctx, &body, None).is_ok());
+    }
+
+    #[test]
+    fn a_dust_balance_no_longer_admits_an_expensive_request() {
+        // The old gate asked `balance <= 0`, so one micro-USD bought a frontier
+        // call. The gate is now the ESTIMATE against the balance.
+        let state = reserve_state(10_000, 0);
+        let ctx = managed_ctx(1);
+        assert!(matches!(
+            maybe_reserve_credit(&state, &ctx, &json!({}), None),
+            Err(GatewayError::InsufficientCredits)
+        ));
+    }
+
+    #[test]
+    fn reservations_are_skipped_where_they_have_no_business_gating() {
+        let state = reserve_state(10_000, 0);
+        let body = json!({ "max_tokens": 1 });
+
+        // Unmanaged (BYOK / static key): never gated.
+        let mut unmanaged = managed_ctx(0);
+        unmanaged.managed_inference = false;
+        assert!(maybe_reserve_credit(&state, &unmanaged, &body, None)
+            .expect("admitted")
+            .is_none());
+
+        // Managed but uncapped (no control-plane budget at all).
+        let mut uncapped = managed_ctx(0);
+        uncapped.remaining_budget_micro_usd = None;
+        assert!(maybe_reserve_credit(&state, &uncapped, &body, None)
+            .expect("admitted")
+            .is_none());
+
+        // No org to key the claim on.
+        let mut orgless = managed_ctx(0);
+        orgless.org_id = None;
+        assert!(maybe_reserve_credit(&state, &orgless, &body, None)
+            .expect("admitted")
+            .is_none());
+    }
+
+    #[test]
+    fn the_kill_switch_restores_the_unreserved_behaviour() {
+        let mut state = reserve_state(10_000, 0);
+        state.config.credits.reserve_enabled = false;
+        let ctx = managed_ctx(1);
+        // Same dust balance the reservation path refuses above.
+        assert!(maybe_reserve_credit(&state, &ctx, &json!({}), None)
+            .expect("admitted")
+            .is_none());
+    }
+
+    #[test]
+    fn the_reservation_is_taken_against_the_same_pool_the_gate_approved() {
+        // A tenant whose money is pool-restricted grant credit must be able to
+        // spend it: gating on the unrestricted balance alone would 402 them.
+        let state = reserve_state(10_000, 0);
+        let mut ctx = managed_ctx(0);
+        ctx.unrestricted_budget_micro_usd = Some(0);
+        ctx.pool_budgets_micro_usd =
+            std::collections::HashMap::from([("cloudflare".to_string(), 50_000)]);
+
+        assert!(
+            preflight_credit_gate(&ctx, Some("cloudflare")).is_none(),
+            "precondition: the gate admits this request on pooled money"
+        );
+        assert!(
+            maybe_reserve_credit(&state, &ctx, &json!({}), Some("cloudflare"))
+                .expect("the reservation must see the same pooled headroom")
+                .is_some()
+        );
+        // …and the pool it did NOT route to is still refused.
+        assert!(matches!(
+            maybe_reserve_credit(&state, &ctx, &json!({}), Some("openrouter")),
+            Err(GatewayError::InsufficientCredits)
+        ));
     }
 
     #[test]

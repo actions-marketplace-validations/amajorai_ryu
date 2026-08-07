@@ -11,10 +11,15 @@
 //!
 //! Both are kernel machinery (see [`crate::recipes_host`]). The sidecar therefore
 //! proxies each of those calls BACK to Core here; Core executes them against the
-//! live host and returns the RAW trait-level result. The `ryu-recipes` crate
+//! live engine and returns the RAW host-level result. The sidecar's own
 //! wrapper (`run`/`record_*`) then shapes that raw result into the final HTTP
-//! response exactly as the in-process path does — so each endpoint here mirrors ONE
-//! [`RecipesHost`] trait method, never the crate wrapper (that would double-wrap).
+//! response — so each endpoint here mirrors ONE [`CoreRecipesHost`] method, never
+//! the sidecar's wrapper (that would double-wrap).
+//!
+//! The boundary is plain JSON in both directions: Core links none of the app's
+//! Rust. The three recorder bodies (`{started_at, info}`, `{task, started_at,
+//! status}`, `{task, started_at, payload}`) are the contract, defined and pinned in
+//! [`crate::recipes_host`].
 //!
 //! Auth mirrors `monitors_client`/`meetings_client`: [`authenticate_sidecar`]
 //! (minted `RYU_EXT_TOKEN` bearer + enabled check) plus an assertion the caller IS
@@ -27,8 +32,6 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
-
-use ryu_recipes::RecipesHost;
 
 use crate::plugins::builtins::RECIPES_PLUGIN_ID;
 use crate::recipes_host::CoreRecipesHost;
@@ -86,7 +89,7 @@ pub(crate) async fn host_recipes_run(
 }
 
 /// `POST /api/host/capability/ghost.recordStart` — spawn the ghost recorder into Core's
-/// process-global slot. Body `{ task }`; returns the raw [`ryu_recipes::RecorderStarted`].
+/// process-global slot. Body `{ task }`; returns the raw `{ started_at, info }` body.
 pub(crate) async fn host_recipes_record_start(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -107,7 +110,7 @@ pub(crate) async fn host_recipes_record_start(
 }
 
 /// `POST /api/host/capability/ghost.recordStatus` — poll Core's held recorder. Returns the
-/// raw `Option<`[`ryu_recipes::RecorderStatus`]`>` (JSON `null` when idle).
+/// raw `{ task, started_at, status }` body, or JSON `null` when idle.
 pub(crate) async fn host_recipes_record_status(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -126,7 +129,7 @@ pub(crate) async fn host_recipes_record_status(
 }
 
 /// `POST /api/host/capability/ghost.recordStop` — stop and tear down Core's held recorder.
-/// Returns the raw [`ryu_recipes::RecorderStopped`].
+/// Returns the raw `{ task, started_at, payload }` body.
 pub(crate) async fn host_recipes_record_stop(
     State(state): State<ServerState>,
     headers: HeaderMap,

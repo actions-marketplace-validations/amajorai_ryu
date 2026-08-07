@@ -468,12 +468,16 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	// inline, mirroring ChatPage's handler exactly so the Ask Ryu dock reads the
 	// same. Client-only — `/api/images/generate` is one-shot and not written to the
 	// conversation store, so it isn't re-hydrated on reload. A backing engine that
-	// isn't available surfaces as an inline error part (graceful degradation).
+	// isn't available surfaces as an inline error on the same surface (graceful
+	// degradation).
 	const handleGenerateImage = useCallback(
 		async (prompt: string) => {
 			const userId = `img-user-${Date.now()}`;
 			const assistantId = `img-${Date.now()}`;
-			// Echo the prompt as a user bubble so the turn reads naturally.
+			// Echo the prompt as a user bubble, and reserve the image frame in the
+			// same tick — the `data-image-generation` part MessageList renders through
+			// the ImageGeneration surface. Status goes straight from `generating` to
+			// `complete`/`error`: this path has no progress events to report.
 			setMessages((prev) => [
 				...prev,
 				{
@@ -481,46 +485,62 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 					role: "user",
 					parts: [{ type: "text", text: prompt }],
 				} as (typeof prev)[number],
+				{
+					id: assistantId,
+					role: "assistant",
+					parts: [
+						{
+							type: "data-image-generation",
+							data: { status: "generating", prompt },
+						},
+					],
+				} as unknown as (typeof prev)[number],
 			]);
+			const settle = (parts: unknown[]) => {
+				setMessages((prev) =>
+					prev.map((m) =>
+						m.id === assistantId ? ({ ...m, parts } as typeof m) : m
+					)
+				);
+			};
 			try {
 				const urls = await generateImage(chatTarget, prompt);
-				const parts =
-					urls.length > 0
-						? urls.map((url) => ({
-								type: "file" as const,
-								mediaType: "image/png",
-								url,
-							}))
-						: [
-								{
-									type: "error" as const,
-									title: "Image generation failed",
-									message: "The image engine returned no image.",
-								},
-							];
-				setMessages((prev) => [
-					...prev,
+				const [first, ...rest] = urls;
+				if (!first) {
+					settle([
+						{
+							type: "data-image-generation",
+							data: {
+								status: "error",
+								prompt,
+								statusText: "The image engine returned no image.",
+							},
+						},
+					]);
+					return;
+				}
+				settle([
 					{
-						id: assistantId,
-						role: "assistant",
-						parts,
-					} as unknown as (typeof prev)[number],
+						type: "data-image-generation",
+						data: { status: "complete", prompt, url: first },
+					},
+					...rest.map((url) => ({
+						type: "file",
+						mediaType: "image/png",
+						url,
+					})),
 				]);
 			} catch (e) {
-				setMessages((prev) => [
-					...prev,
+				settle([
 					{
-						id: assistantId,
-						role: "assistant",
-						parts: [
-							{
-								type: "error" as const,
-								title: "Image generation failed",
-								message:
-									e instanceof Error ? e.message : "Could not generate image.",
-							},
-						],
-					} as unknown as (typeof prev)[number],
+						type: "data-image-generation",
+						data: {
+							status: "error",
+							prompt,
+							statusText:
+								e instanceof Error ? e.message : "Could not generate image.",
+						},
+					},
 				]);
 			}
 		},

@@ -1,18 +1,23 @@
-import {
-	Avatar,
-	AvatarFallback,
-	AvatarImage,
-} from "@ryu/ui/components/avatar.tsx";
+"use client";
+
 import { cn } from "@ryu/ui/lib/utils.ts";
+import { Logo } from "./logo.tsx";
+import { PassCardShell } from "./pass-card-shell.tsx";
 
 /**
- * Presentational, SSR-safe "company ID badge" for an agent-as-employee.
+ * The agent's employee badge — the same physical card object the waitlist pass
+ * is, with an agent's details on the front instead of a member's.
  *
- * Styled like a laminated corporate ID card: a lanyard notch + accent bar up
- * top, an avatar (or initials fallback), the employee's name and role, a
- * monospace employee id, the hire date, a level chip, and a compact stats row.
- * Pure: no data fetching, no effects, no access to `window`/`document`. All
- * colors come from design tokens so it reads correctly in light and dark.
+ * It shares `PassCardShell`, so it is genuinely the same card: the metal ring,
+ * the generative dither backdrop seeded from the agent's name, real thickness,
+ * the slow float, the pointer tilt, and drag-to-turn with the Ryu mark on the
+ * back. Only the front-face content is written here.
+ *
+ * It used to be a flat bordered panel with a lanyard notch that merely evoked an
+ * ID card. Reusing the shell rather than restyling this one to match is the
+ * whole point — a copy would drift the moment either card changed.
+ *
+ * Colour comes from design tokens so it reads in light and dark.
  */
 
 export interface EmployeeStat {
@@ -21,41 +26,41 @@ export interface EmployeeStat {
 }
 
 export interface EmployeeBadgeProps {
+	/**
+	 * Accepted but unused: the card leads with the agent's NAME, and a portrait
+	 * competed with it — the same call the waitlist pass made. Kept on the
+	 * interface so existing call sites keep type-checking.
+	 */
 	avatarUrl?: string;
+	className?: string;
 	employeeId: string;
 	hiredAt?: string;
 	level: number;
+	/** Which tuning of the metal ring to paint; pass the app's resolved theme. */
+	metalTheme?: "auto" | "dark" | "light";
 	name: string;
 	onClick?: () => void;
 	role?: string;
 	stats?: EmployeeStat[];
 }
 
-const WHITESPACE = /\s+/;
-const MAX_INITIALS = 2;
-const ID_PREFIX = "EMP-";
+const NON_ALPHANUMERIC = /[^a-zA-Z0-9]/g;
 const SHORT_ID_LENGTH = 6;
+/** How many stats fit across the footer before it starts to crowd. */
+const MAX_FOOTER_STATS = 3;
 
-/** Two-letter uppercase initials from a display name, for the avatar fallback. */
-export const employeeInitials = (name: string): string => {
-	const parts = name.trim().split(WHITESPACE).filter(Boolean);
-	if (parts.length === 0) {
-		return "?";
-	}
-	return parts
-		.slice(0, MAX_INITIALS)
-		.map((part) => part.charAt(0).toUpperCase())
-		.join("");
-};
-
-/** A stable, human-readable badge id like "EMP-A1B2C3" from an agent id. */
+/**
+ * A stable, human-readable badge id like "A1B2C3" from an agent id. No "EMP-"
+ * prefix any more: the card already says Ryu on the line above it.
+ */
 export const formatEmployeeId = (employeeId: string): string => {
-	const compact = employeeId.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-	const short = (compact || employeeId).slice(0, SHORT_ID_LENGTH);
-	return `${ID_PREFIX}${short || "000000"}`;
+	const compact = employeeId.replace(NON_ALPHANUMERIC, "").toUpperCase();
+	return (compact || "000000")
+		.slice(0, SHORT_ID_LENGTH)
+		.padEnd(SHORT_ID_LENGTH, "0");
 };
 
-/** Format a hire date as "Jan 5, 2026"; returns null for missing/invalid input. */
+/** Format a hire date as "Jan 5, 2026, 07:30 PM"; null for missing/invalid input. */
 const formatHiredAt = (hiredAt: string | undefined): string | null => {
 	if (!hiredAt) {
 		return null;
@@ -64,110 +69,95 @@ const formatHiredAt = (hiredAt: string | undefined): string | null => {
 	if (Number.isNaN(date.getTime())) {
 		return null;
 	}
-	return date.toLocaleDateString("en-US", {
+	return `${date.toLocaleDateString("en-US", {
 		year: "numeric",
 		month: "short",
 		day: "numeric",
-	});
+	})}, ${date.toLocaleTimeString("en-US", {
+		hour: "2-digit",
+		minute: "2-digit",
+	})}`;
 };
 
 export function EmployeeBadge({
-	avatarUrl,
-	hiredAt,
+	className,
 	employeeId,
+	hiredAt,
 	level,
+	metalTheme = "auto",
 	name,
 	onClick,
 	role,
 	stats,
 }: EmployeeBadgeProps) {
-	const initials = employeeInitials(name);
 	const hiredLabel = formatHiredAt(hiredAt);
 	const badgeId = formatEmployeeId(employeeId);
-	const interactive = typeof onClick === "function";
+	// Level sits in the header, not in the footer row. Prepending it there pushed
+	// a caller-supplied stat off the end of the slice — a silent data loss, since
+	// both call sites pass exactly three.
+	const footerStats = (stats ?? []).slice(0, MAX_FOOTER_STATS);
 
 	return (
-		<button
-			className={cn(
-				"group relative flex w-full flex-col overflow-hidden rounded-2xl border bg-card text-left text-card-foreground shadow-sm transition-all",
-				interactive &&
-					"cursor-pointer hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-			)}
-			disabled={!interactive}
-			onClick={onClick}
-			type="button"
+		<PassCardShell
+			className={cn(onClick && "cursor-pointer", className)}
+			ditherSeed={name || employeeId}
+			metalTheme={metalTheme}
 		>
-			{/* Lanyard accent bar + notch */}
+			{/* `min-h` rather than a fixed height: the name is the hero and can wrap
+			    to two or three lines, so the card grows past the floor instead of
+			    clipping. The hero block takes the slack (`flex-1`), which is what
+			    keeps a short name from leaving the footer floating in the middle. */}
+			{/* biome-ignore lint/a11y/noStaticElementInteractions: the shell owns the
+			    pointer gestures, so the click target has to be this inner surface. */}
+			{/* biome-ignore lint/a11y/useKeyWithClickEvents: as above — a nested
+			    button would swallow the shell's drag-to-turn. */}
 			<div
-				aria-hidden="true"
-				className="relative h-2 w-full"
-				style={{
-					backgroundColor: "var(--primary)",
-				}}
+				className="relative flex min-h-[27rem] w-full flex-1 flex-col gap-6 p-7"
+				onClick={onClick}
 			>
-				<span className="absolute top-1 left-1/2 h-1.5 w-8 -translate-x-1/2 rounded-full bg-card ring-1 ring-border" />
-			</div>
-
-			<div className="flex items-start gap-3 p-4">
-				<Avatar className="size-12 ring-1 ring-border" size="lg">
-					{avatarUrl ? <AvatarImage alt={name} src={avatarUrl} /> : null}
-					<AvatarFallback className="font-semibold text-sm">
-						{initials}
-					</AvatarFallback>
-				</Avatar>
-
-				<div className="flex min-w-0 flex-1 flex-col gap-0.5">
-					<span className="truncate font-semibold text-base leading-tight">
-						{name}
+				<div className="flex items-center justify-between gap-3">
+					<span className="flex items-center gap-2">
+						<Logo size="20px" variant="outline" />
+						<span className="font-medium text-sm">Ryu</span>
 					</span>
-					{role ? (
-						<span className="truncate text-muted-foreground text-xs">
-							{role}
-						</span>
-					) : null}
-					<span className="mt-1 font-mono text-[10px] text-muted-foreground uppercase tracking-wider">
-						{badgeId}
+					<span className="flex items-center gap-3 text-[11px] text-muted-foreground tabular-nums">
+						<span>Lv {level}</span>
+						<span>{badgeId}</span>
 					</span>
 				</div>
 
-				<span
-					className="flex size-9 shrink-0 flex-col items-center justify-center rounded-full font-semibold text-[10px] leading-none ring-2 ring-inset"
-					style={{
-						color: "var(--primary)",
-						backgroundColor:
-							"color-mix(in oklab, var(--primary) 12%, transparent)",
-					}}
-					title={`Level ${level}`}
-				>
-					<span className="text-[8px] text-muted-foreground uppercase">
-						Lvl
+				<div className="flex min-w-0 flex-1 flex-col justify-end gap-1.5">
+					<span className="break-words font-semibold text-5xl leading-[1.02] tracking-tight">
+						{name}
 					</span>
-					<span className="text-xs tabular-nums">{level}</span>
-				</span>
-			</div>
+					{role ? (
+						<span className="truncate text-base text-muted-foreground">
+							{role}
+						</span>
+					) : null}
+				</div>
 
-			<div className="flex flex-col gap-3 border-t px-4 py-3">
+				{/* Value above its label, sentence case: the number is the fact worth
+				    reading and the word only says which fact it is. */}
+				<div className="flex items-start justify-between gap-4">
+					{footerStats.map((stat) => (
+						<div className="flex flex-col" key={stat.label}>
+							<span className="font-medium text-xl tabular-nums leading-none">
+								{stat.value}
+							</span>
+							<span className="text-muted-foreground text-xs">
+								{stat.label}
+							</span>
+						</div>
+					))}
+				</div>
+
 				{hiredLabel ? (
-					<span className="text-[11px] text-muted-foreground">
+					<span className="text-[11px] text-muted-foreground tabular-nums">
 						Hired {hiredLabel}
 					</span>
 				) : null}
-
-				{stats && stats.length > 0 ? (
-					<div className="flex flex-wrap gap-x-4 gap-y-2">
-						{stats.map((stat) => (
-							<div className="flex flex-col" key={stat.label}>
-								<span className="font-semibold text-foreground text-sm tabular-nums">
-									{stat.value}
-								</span>
-								<span className="text-[10px] text-muted-foreground uppercase tracking-wide">
-									{stat.label}
-								</span>
-							</div>
-						))}
-					</div>
-				) : null}
 			</div>
-		</button>
+		</PassCardShell>
 	);
 }

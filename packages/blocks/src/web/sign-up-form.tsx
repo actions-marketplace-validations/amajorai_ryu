@@ -4,6 +4,7 @@ import { Button } from "@ryu/ui/components/button";
 import { Field, FieldError, FieldGroup } from "@ryu/ui/components/field";
 import { Input } from "@ryu/ui/components/input";
 import PageHeader from "@ryu/ui/components/page-header";
+import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import type { ReactNode, SVGProps } from "react";
 import { useState } from "react";
 
@@ -83,9 +84,14 @@ export default function SignUpForm({
 
 	return (
 		<div className="mx-auto flex w-full max-w-md flex-col gap-6">
-			<PageHeader subtitle="Create an account to get started" title="Welcome" />
+			{/* Single reveal for the column — see the note in sign-in-form.tsx. */}
+			<StaggerReveal>
+				<PageHeader
+					stagger={false}
+					subtitle="Create an account to get started"
+					title="Welcome"
+				/>
 
-			<div>
 				<form
 					className="space-y-4"
 					// The live app runs its own field validation in `onSubmit` and
@@ -156,7 +162,7 @@ export default function SignUpForm({
 					</Button>
 				</form>
 
-				<div className="mt-4 flex flex-col gap-4 text-center">
+				<div className="flex flex-col gap-4 text-center">
 					<Button
 						className="w-full gap-3"
 						disabled={googleLoading}
@@ -177,7 +183,7 @@ export default function SignUpForm({
 					</Button>
 				</div>
 
-				<div className="mt-4 text-center text-muted-foreground text-sm">
+				<div className="text-center text-muted-foreground text-sm">
 					By creating an account, you agree to our{" "}
 					<a className="underline" href="/terms">
 						Terms
@@ -188,7 +194,7 @@ export default function SignUpForm({
 						Privacy Policy
 					</a>
 				</div>
-			</div>
+			</StaggerReveal>
 		</div>
 	);
 }

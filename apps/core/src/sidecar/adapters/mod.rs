@@ -3186,7 +3186,7 @@ pub async fn run_reply_text(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_team_reply_text(
     conversation_id: String,
-    team: ryu_teams::TeamRecord,
+    team: ryu_teams_contracts::TeamRecord,
     text: String,
     author_name: Option<String>,
     registry: Arc<AcpAgentRegistry>,
@@ -3199,7 +3199,7 @@ pub async fn run_team_reply_text(
     skills: SkillRegistry,
     traces: TraceStore,
 ) -> anyhow::Result<String> {
-    use ryu_teams::Coordination;
+    use ryu_teams_contracts::Coordination;
 
     if team.members.is_empty() {
         anyhow::bail!(
@@ -3932,7 +3932,7 @@ fn push_member_block(
 #[allow(clippy::too_many_arguments)]
 pub async fn route_team_chat_stream(
     mut req: ChatStreamRequest,
-    team: ryu_teams::TeamRecord,
+    team: ryu_teams_contracts::TeamRecord,
     registry: Arc<AcpAgentRegistry>,
     conversations: ConversationStore,
     agent_store: AgentStore,
@@ -3943,7 +3943,7 @@ pub async fn route_team_chat_stream(
     skills: SkillRegistry,
     traces: TraceStore,
 ) -> Response {
-    use ryu_teams::Coordination;
+    use ryu_teams_contracts::Coordination;
 
     if team.members.is_empty() {
         return error_stream(format!(

@@ -17,15 +17,17 @@ import { useEffect } from "react";
 
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
-function resolveDark(prefs: ThemePrefs): boolean {
-	if (prefs.mode === "system") {
-		return window.matchMedia(DARK_QUERY).matches;
-	}
-	return prefs.mode === "dark";
-}
+// The island always resolves the DARK variant of the user's preset, whatever the
+// desktop's light/dark mode is. Its surface is a fixed near-black Siri gradient
+// (see index.css) — it has no light form. Resolving light tokens here would paint
+// `--foreground` near-black on that gradient, which is exactly what happens to
+// any token-driven component mounted inside the island (the shared desktop
+// message list, every @ryu/ui primitive). The preset id still tracks the user's
+// choice, so brand colour and radius follow the desktop.
+const ISLAND_IS_ALWAYS_DARK = true;
 
 function applyPrefs(prefs: ThemePrefs): void {
-	const dark = resolveDark(prefs);
+	const dark = ISLAND_IS_ALWAYS_DARK;
 	document.documentElement.classList.toggle("dark", dark);
 	const variant = findVariantIn(
 		activePresetId(prefs, dark),

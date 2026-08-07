@@ -30,28 +30,66 @@ export function isAdminEmail(email: string | null | undefined): boolean {
 
 // One-time-per-process flag for the bypass warning below.
 let warnedWaitlistBypass = false;
+// One-time-per-process flag for the "forced on, but unapprovable" warning.
+let warnedWaitlistUnapprovable = false;
+
+const TRUTHY = new Set(["1", "true", "on", "yes", "enabled"]);
+const FALSY = new Set(["0", "false", "off", "no", "disabled"]);
 
 /**
- * True when the waitlist gate is bypassed because `ADMIN_EMAILS` is empty.
+ * The explicit `WAITLIST_ENABLED` switch, or null when it is unset/unparseable.
  *
- * With no admin allowlist, no admin session can ever exist, so nobody could
- * ever approve anyone — every signup would dead-end on the waitlist forever
- * (the self-hosted bootstrap problem). In that configuration the waitlist is
- * disabled: new signups are approved immediately and accounts already stamped
- * `WAITLIST_ROLE` are treated as approved at gate time. Cloud deployments set
- * `ADMIN_EMAILS`, which keeps the fail-closed queue exactly as before.
+ * Before this existed the waitlist had no switch of its own: it was ON exactly
+ * when `ADMIN_EMAILS` was non-empty, so emptying the allowlist silently
+ * auto-approved every new signup with nothing in the config saying "waitlist
+ * off". This makes the intent sayable directly. Unset keeps the historical
+ * derived behaviour, so nothing changes for a deployment that never sets it.
+ */
+export function waitlistEnabledOverride(): boolean | null {
+	const raw = (process.env.WAITLIST_ENABLED ?? "").trim().toLowerCase();
+	if (TRUTHY.has(raw)) {
+		return true;
+	}
+	if (FALSY.has(raw)) {
+		return false;
+	}
+	return null;
+}
+
+/**
+ * True when the waitlist gate is bypassed — i.e. the waitlist is OFF.
+ *
+ * `WAITLIST_ENABLED` decides this outright when it is set. When it is not set
+ * (the default), the state is derived from `ADMIN_EMAILS` as it always has
+ * been: with no admin allowlist no admin session can ever exist, so nobody
+ * could ever approve anyone and every signup would dead-end on the waitlist
+ * forever (the self-hosted bootstrap problem). In that configuration the
+ * waitlist is disabled: new signups are approved immediately and accounts
+ * already stamped `WAITLIST_ROLE` are treated as approved at gate time. Cloud
+ * deployments set `ADMIN_EMAILS`, which keeps the fail-closed queue as before.
  *
  * Warns once per process when the bypass is active so operators know why the
- * waitlist isn't gating.
+ * waitlist isn't gating, and once more in the one configuration the override
+ * makes newly reachable: queue forced ON with nobody able to approve anyone.
  */
 export function isWaitlistBypassed(): boolean {
+	const override = waitlistEnabledOverride();
+	if (override !== null) {
+		if (override && adminEmails().size === 0 && !warnedWaitlistUnapprovable) {
+			warnedWaitlistUnapprovable = true;
+			console.warn(
+				"[waitlist] WAITLIST_ENABLED forces the queue ON but ADMIN_EMAILS is empty — no admin session can exist, so nobody can approve anyone and queued signups will wait forever. Set ADMIN_EMAILS as well, or unset WAITLIST_ENABLED."
+			);
+		}
+		return !override;
+	}
 	if (adminEmails().size > 0) {
 		return false;
 	}
 	if (!warnedWaitlistBypass) {
 		warnedWaitlistBypass = true;
 		console.warn(
-			"[waitlist] ADMIN_EMAILS is empty — no admin can ever approve waitlisted users, so the waitlist is bypassed: new signups are auto-approved and existing waitlisted accounts are treated as approved. Set ADMIN_EMAILS to enable the waitlist."
+			"[waitlist] ADMIN_EMAILS is empty — no admin can ever approve waitlisted users, so the waitlist is bypassed: new signups are auto-approved and existing waitlisted accounts are treated as approved. Set ADMIN_EMAILS to enable the waitlist, or WAITLIST_ENABLED=true to force it on regardless."
 		);
 	}
 	return true;
@@ -131,11 +169,14 @@ export function webOrigin(): string {
 }
 
 /**
- * A shareable referral link. Lands on the SIGN-UP view (not sign-in) with the
- * code, so a referred new user converts in one step and the referrer is credited.
+ * A shareable referral link. Short by design — `/r/CODE` rather than a
+ * query-string form — because this is a link people paste to friends, and
+ * `?view=signup&ref=` reads as machinery. The web app's `/r/[code]` route
+ * handler stores the code and forwards to the SIGN-UP view (not sign-in), so a
+ * referred new user still converts in one step and the referrer is credited.
  */
 export function referralUrlFor(code: string): string {
-	return `${webOrigin()}/login?view=signup&ref=${code}`;
+	return `${webOrigin()}/r/${code}`;
 }
 
 // How many invites we send per week, used only to turn a queue position into a

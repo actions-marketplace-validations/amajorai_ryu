@@ -21,7 +21,6 @@ pub mod composio;
 pub mod delegate;
 pub mod notify_tool;
 pub mod orchestrator;
-pub mod research;
 pub mod sandbox;
 pub mod search_conversations;
 pub mod skills_tool;
@@ -398,21 +397,46 @@ impl McpServerConfig {
 /// Lower a manifest [`McpServerDecl`] (pure kernel-contracts data) into the
 /// runtime [`McpServerConfig`] the registry spawns.
 ///
-/// Resolves `command_env`: when the declaration names an env var and that var is
-/// set to a non-empty value (e.g. a `~/.ryu/bin` path a downloader wrote to
-/// `RYU_GHOST_BIN`), it OVERRIDES the bare `command`; otherwise `command` is used
-/// verbatim. `version`/`catalog_id` are always `None` — a plugin-declared server
-/// is versioned by its owning plugin, not the MCP catalog.
+/// Resolution order for the program, highest priority first:
+///
+/// 1. **`command_env`** — when the declaration names an env var and that var is set to
+///    a non-empty value (e.g. a path a downloader or `bun dev` wrote to `RYU_GHOST_BIN`),
+///    it OVERRIDES `command`. Applied **unconditionally**, without checking that the
+///    target exists: a stale override must fail loudly, naming the bad path, rather than
+///    silently falling through to some other binary. (It is also what keeps
+///    `ghost_manifest_is_skipped_when_no_ghost_binary_exists` deterministic on a host
+///    that happens to have a real `~/.ryu/bin/ghost`.)
+/// 2. **The managed bin dir** — a *bare* `command` (no path separator) that exists at
+///    [`manifest_sidecar::managed_bin_path`] is lowered to that absolute path. This is
+///    the generic, app-agnostic seam: every Ryu-managed binary is installed to
+///    `<data dir>/bin` by `ensure_local_sidecar_present`, which is NOT on `PATH`, so
+///    without this rung a manifest could only reach its own sidecar binary by declaring
+///    a `command_env` that something else had to remember to seed. Nothing app-specific
+///    lives here — no plugin id, no port, no capability string; the manifest's `command`
+///    is the only input.
+/// 3. **`command` verbatim** — resolved by `PATH` at spawn (`Command::new`), which is
+///    what the lazy-package-runner idiom (`npx`/`bunx`/`uvx`) needs.
+///
+/// Rung 2 is what makes [`mcp_command_is_present`] answer `true` for a managed binary:
+/// the lowered command carries a separator, so the probe takes its `Path::is_file()`
+/// branch. That is also why the probe itself needs no change — it runs on the
+/// **resolved** command, per the rules on [`register_manifest_mcp_servers`].
+///
+/// `version`/`catalog_id` are always `None` — a plugin-declared server is versioned by
+/// its owning plugin, not the MCP catalog.
 pub fn mcp_server_config_from_decl(
     decl: &crate::plugin_manifest::McpServerDecl,
 ) -> McpServerConfig {
-    let command = decl
+    let env_override = decl
         .command_env
         .as_ref()
         .and_then(|var| std::env::var(var).ok())
         .map(|v| v.trim().to_owned())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| decl.command.clone());
+        .filter(|v| !v.is_empty());
+    let command = match env_override {
+        Some(overridden) => overridden,
+        None => managed_bin_fallback(&decl.command).unwrap_or_else(|| decl.command.clone()),
+    };
     McpServerConfig {
         command,
         args: decl.args.clone(),
@@ -422,6 +446,30 @@ pub fn mcp_server_config_from_decl(
         version: None,
         catalog_id: None,
     }
+}
+
+/// Rung 2 of [`mcp_server_config_from_decl`]: the absolute path of `command` inside the
+/// Ryu-managed bin dir, when `command` is a bare name and that file exists.
+///
+/// Bare-only on purpose. A declaration that already carries a path separator is a path —
+/// absolute or relative to Core's cwd — and joining it under `<data dir>/bin` would both
+/// change its meaning and let `..` segments walk out of the bin dir. `Command::new` does
+/// not consult `PATH` for such a command either, so there is nothing to improve.
+///
+/// Trimmed before the check because nothing upstream trims `decl.command` (only its
+/// `command_env` override is trimmed) — the same normalization [`mcp_command_is_present`]
+/// and [`spawn_program_for`] apply, so `" ryu-thing "` cannot resolve here and then miss
+/// there. Returns `None` on no hit, leaving the caller's fallthrough byte-identical to
+/// the pre-existing behavior (the untrimmed `decl.command`).
+fn managed_bin_fallback(command: &str) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty() || command.contains('/') || (cfg!(windows) && command.contains('\\')) {
+        return None;
+    }
+    let candidate = crate::sidecar::manifest_sidecar::managed_bin_path(command);
+    candidate
+        .is_file()
+        .then(|| candidate.to_string_lossy().into_owned())
 }
 
 /// The Gateway grant a Community-tier plugin must hold (**approved**) before Core
@@ -500,9 +548,13 @@ pub fn may_register_mcp_servers(
 /// fail-soft — never an error, never a boot failure) when its command cannot be
 /// resolved. Three properties an implementer must keep:
 ///
-/// * The probe runs on the **resolved** command — `mcp_server_config_from_decl`
-///   applies `command_env` first (`RYU_GHOST_BIN`), so an operator pointing at a
-///   binary outside `PATH` must not be told it is missing.
+/// * The probe runs on the **resolved** command — `mcp_server_config_from_decl` applies
+///   `command_env` first (`RYU_GHOST_BIN`), then lowers a bare name that exists in the
+///   Ryu-managed bin dir to its absolute path. So neither an operator pointing at a
+///   binary outside `PATH` nor a Ryu-installed sidecar binary (which lands in
+///   `<data dir>/bin`, a directory that is deliberately NOT on `PATH`) is told it is
+///   missing. Keep every resolution rung in that one function: the probe below has no
+///   knowledge of them and must not grow any.
 /// * It probes the **runner, not the payload**. `agentbrowser` is
 ///   `npx -y agent-browser mcp`: the command is `npx`, which exists, and the package
 ///   is fetched lazily on first spawn. Probing `agent-browser` would break the whole
@@ -552,11 +604,13 @@ pub fn register_manifest_mcp_servers(
         if !mcp_command_is_present(&config.command) {
             tracing::warn!(
                 "plugin '{}' declares MCP server '{name}' but its command '{}' is not \
-                 installed (not on PATH and not an existing file); registration is skipped so \
-                 the model is not offered tools that cannot spawn. Install it and restart Core \
-                 (or re-enable the app) to pick it up",
+                 installed (no `command_env` override, absent from {}, not on PATH, and not \
+                 an existing file); registration is skipped so the model is not offered tools \
+                 that cannot spawn. Install it and restart Core (or re-enable the app) to pick \
+                 it up",
                 manifest.id,
-                config.command
+                config.command,
+                crate::sidecar::download_manager::bin_dir().display()
             );
             continue;
         }
@@ -592,8 +646,15 @@ pub fn register_manifest_mcp_servers(
 ///   accepts a file `Command::new` would never look at, so the probe is the party that
 ///   is wrong here (see the note on [`spawn_program_for`]);
 /// * a command with surrounding whitespace — trimmed here, so it must be trimmed there
-///   (nothing upstream trims: `mcp_server_config_from_decl` trims only the
-///   `command_env` override, and a pasted `mcp.json` trims nothing).
+///   (nothing upstream *rewrites* an untrimmed command: `mcp_server_config_from_decl`
+///   trims the `command_env` override and trims before its managed-bin-dir lookup, but
+///   falls through with `decl.command` verbatim, and a pasted `mcp.json` trims nothing).
+///
+/// Note what is deliberately NOT here: the Ryu-managed `<data dir>/bin` lookup. That is a
+/// resolution rung, and resolution belongs to `mcp_server_config_from_decl` alone — by the
+/// time a managed binary reaches this probe its command already carries a separator and
+/// takes the file branch above. Adding a second, independent bin-dir probe here would let
+/// the two disagree, which is the exact class of bug this pairing exists to prevent.
 pub(crate) fn mcp_command_is_present(command: &str) -> bool {
     let command = command.trim();
     if command.is_empty() {
@@ -991,6 +1052,11 @@ pub struct ServerSummary {
 /// only in-crate references are tests, so the non-test build sees it as unused.
 #[allow(dead_code)]
 pub const GHOST_SERVER: &str = "ghost";
+
+/// Fully-qualified id of Ghost's recipe-replay tool (`<server>__<tool>`), as the
+/// registry namespaces it. One definition so the two kernel callers — the workflow
+/// executor's `Recipe` node and the recorder shim in `recipes_host` — cannot drift.
+pub const GHOST_RUN_TOOL: &str = "ghost__ghost_run";
 
 /// Name under which the Agent Browser MCP server is registered. Agent Browser is
 /// the default web-browsing tool (npm `agentbrowser`, launched via `npx`),
@@ -1759,7 +1825,6 @@ impl McpRegistry {
             || name == orchestrator::SERVER_NAME
             || name == skills_tool::SERVER_NAME
             || name == ui_tool::SERVER_NAME
-            || name == research::SERVER_NAME
             // The capability facade's reserved names (`web`, `browser`, `computer`,
             // `memory`). Reserved unconditionally, not only while a provider is
             // bound, so a plugin can never squat a name the facade may later serve.
@@ -1773,6 +1838,29 @@ impl McpRegistry {
             .contains_key(name)
     }
 
+    /// Which plugin, if any, currently owns the **plugin-declared** server `name`.
+    ///
+    /// Deliberately narrower than [`contains_server`](Self::contains_server), which also
+    /// answers `true` for every reserved built-in name (`threads`, `delegate`, the
+    /// capability facade, …) whether or not anything is registered. A caller asking
+    /// "would registering this declaration change anything?" must not be told yes-it-is-
+    /// already-there by a mere name reservation: a plugin server overlays a built-in of
+    /// the same name in `rebuild_servers`, so that registration is real work. The
+    /// managed-bin ready notifier
+    /// ([`manifest_sidecar::notify_managed_binary_ready`](crate::sidecar::manifest_sidecar))
+    /// is that caller — with `contains_server` its skip-if-nothing-to-do guard would fire
+    /// permanently for exactly the apps whose server name Core still reserves.
+    ///
+    /// `Some(other_plugin)` is still a "nothing would change" answer: `register_server`
+    /// refuses a name owned by a different plugin.
+    pub fn plugin_server_owner(&self, name: &str) -> Option<String> {
+        self.plugin_servers
+            .read()
+            .expect("mcp plugin_servers RwLock poisoned")
+            .get(name)
+            .map(|(owner, _)| owner.clone())
+    }
+
     /// Summaries of every registered server (for `GET /api/mcp/servers`).
     /// Includes the built-in Shadow and Exa providers alongside config
     /// servers.
@@ -1780,16 +1868,13 @@ impl McpRegistry {
         let sandbox_enabled = sandbox::is_enabled();
         let sandbox_available = cfg!(feature = "sandbox-wasmtime");
         let mut summaries = vec![
-            ServerSummary {
-                name: research::SERVER_NAME.to_owned(),
-                command: "(built-in HTTP)".to_owned(),
-                args: vec![],
-                description: Some(
-                    "Built-in autoresearch experiment runner. Install the Research sidecar (or run `python -m ryu_research`) to enable. Degrades gracefully when not running.".to_owned(),
-                ),
-                enabled: true,
-                available: Some(crate::sidecar::tools::research::is_installed()),
-            },
+            // NOTE: `research` used to head this list as a built-in HTTP provider.
+            // It is now the `@ryu/research` app's own stdio MCP server
+            // (`ryu-research mcp`, declared in that app's `manifest.json`), so it
+            // appears here only through the generic plugin-server path — listed when
+            // registered, absent when the app is disabled or its binary has not
+            // landed. That is the honest answer, and the reason the hardcoded row is
+            // gone rather than rewritten.
             ServerSummary {
                 name: web_fetch::SERVER_NAME.to_owned(),
                 command: "(built-in HTTPS)".to_owned(),
@@ -2289,12 +2374,11 @@ impl McpRegistry {
             servers.keys().cloned().collect()
         };
 
-        // Built-in autoresearch tools — drive the research sidecar's experiment
-        // loop. Always listed; dispatch reports unavailable when the sidecar is
-        // not running (opt-in / not installed).
-        let mut all = research::tools();
         // Built-in authenticated web fetch (Identity Vault credential consumer).
-        all.extend(web_fetch::tools());
+        // (The autoresearch tools used to be prepended here from a Core-side
+        // provider; they now arrive over the generic plugin-server path, from the
+        // `@ryu/research` app's own `ryu-research mcp` stdio server.)
+        let mut all = web_fetch::tools();
         // Capability facade verbs (swappable layers). Feature-detected: only the
         // verbs whose capability has a selected provider that serves them are
         // listed, so an agent never sees `web__search` on a node with no search
@@ -2974,25 +3058,6 @@ impl McpRegistry {
                 host_conversation_id,
             ))
             .await;
-        }
-
-        // Built-in Research provider: dispatched over HTTP to the sidecar.
-        // Degrades gracefully to `available: false` when the sidecar is down.
-        if server == research::SERVER_NAME {
-            if let Some(list) = allowlist {
-                let candidate = RegistryTool {
-                    id: tool_id.to_owned(),
-                    server: server.to_owned(),
-                    name: tool.to_owned(),
-                    description: None,
-                    input_schema: None,
-                    ..Default::default()
-                };
-                if !tool_allowed(&candidate, list) {
-                    return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
-                }
-            }
-            return research::dispatch(&self.http, tool, arguments).await;
         }
 
         // Built-in wasmtime sandbox provider (M6 / issue #190).
@@ -4361,6 +4426,223 @@ mod tests {
         assert!(mcp_command_is_present(&format!("  {on_path}  ")));
     }
 
+    /// A real file at [`managed_bin_path`] for a uniquely-named bare command, removed on
+    /// `Drop`.
+    ///
+    /// It writes into the process's ACTUAL data dir (`~/.ryu/bin`, or the profile/`RYU_DIR`
+    /// variant) rather than redirecting the dir at a temp path, because `paths::ryu_dir()`
+    /// is a `OnceLock` resolved on first use: setting `RYU_DIR` from a test would take
+    /// effect or not depending on which sibling test called it first, in a suite that runs
+    /// in parallel. A uuid-suffixed name cannot collide with a real installed binary, and
+    /// the file is never spawned — every assertion here is `is_file()`.
+    struct ManagedBin {
+        command: String,
+        path: std::path::PathBuf,
+    }
+
+    impl ManagedBin {
+        fn install() -> Self {
+            let command = format!("ryu-test-managed-{}", uuid::Uuid::new_v4());
+            let path = crate::sidecar::manifest_sidecar::managed_bin_path(&command);
+            std::fs::create_dir_all(path.parent().expect("bin dir has a parent"))
+                .expect("create the managed bin dir");
+            std::fs::write(&path, b"").expect("write the managed bin");
+            Self { command, path }
+        }
+    }
+
+    impl Drop for ManagedBin {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// Rung 2, the point of this seam: a bare `command` that is absent from `PATH` but
+    /// present in the Ryu-managed bin dir registers, and the config stores the ABSOLUTE
+    /// path — which is what makes the probe's file branch (and `Command::new`) find it.
+    ///
+    /// Without this, a manifest could never reach a binary Ryu itself installed:
+    /// `ensure_local_sidecar_present` writes to `<data dir>/bin`, which is deliberately
+    /// not on `PATH`, so declaring a `command_env` and hoping something seeded it was the
+    /// only working shape. App-agnostic by construction — the only input is the manifest's
+    /// `command`.
+    ///
+    /// The discriminator is the **absolute stored path**, not mere registration. Presence
+    /// alone would prove nothing: Ryu's own installer appends `<data dir>/bin` to the
+    /// user's `PATH`, so on a developer box the bare name frequently resolves through rung
+    /// 3 as well — and that is precisely the host this suite runs on. Rung 3 stores the
+    /// bare name verbatim; only rung 2 can produce the absolute path, so asserting it
+    /// is what separates the two on every host.
+    #[test]
+    fn a_bare_command_in_the_managed_bin_dir_resolves_to_its_absolute_path() {
+        let bin = ManagedBin::install();
+
+        let reg = McpRegistry::empty();
+        let mut manifest = manifest_with_mcp_server("com.test.plugin", "managed-srv");
+        let decl = manifest.mcp_servers.get_mut("managed-srv").expect("decl");
+        decl.command = bin.command.clone();
+        decl.command_env = None;
+
+        let names = register_as_enabled(&reg, &manifest, &[GRANT_MCP_SERVER]);
+
+        assert_eq!(
+            names,
+            vec!["managed-srv".to_owned()],
+            "a command installed in the managed bin dir must register"
+        );
+        let servers = reg.servers.read().expect("lock");
+        assert_eq!(
+            servers.get("managed-srv").expect("registered").command,
+            bin.path.to_string_lossy(),
+            "the stored command must be the absolute managed-bin path, not the bare name"
+        );
+    }
+
+    /// Rung 1 stays on top: an explicit `command_env` override beats a managed-bin hit,
+    /// even though both resolve. An operator or `bun dev` pointing at a locally-built
+    /// binary must not be silently overruled by whatever a release left in `~/.ryu/bin`.
+    #[test]
+    fn command_env_wins_over_a_managed_bin_dir_hit() {
+        let _lock = lock_mcp_env();
+        let bin = ManagedBin::install();
+        let previous = std::env::var("RYU_TEST_MANAGED_MCP_BIN").ok();
+        std::env::set_var("RYU_TEST_MANAGED_MCP_BIN", present_command());
+
+        let decl = crate::plugin_manifest::McpServerDecl {
+            command: bin.command.clone(),
+            command_env: Some("RYU_TEST_MANAGED_MCP_BIN".to_owned()),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            description: None,
+            enabled: true,
+        };
+        let resolved = mcp_server_config_from_decl(&decl).command;
+
+        match previous {
+            Some(prev) => std::env::set_var("RYU_TEST_MANAGED_MCP_BIN", prev),
+            None => std::env::remove_var("RYU_TEST_MANAGED_MCP_BIN"),
+        }
+
+        assert_eq!(
+            resolved,
+            present_command(),
+            "the env override must win even when the managed bin dir also has the command"
+        );
+    }
+
+    /// Rung 3 is untouched for a name that only `PATH` can resolve: the lazy-package-runner
+    /// idiom (`npx -y agent-browser mcp`) depends on the bare name surviving to
+    /// `Command::new`, and a lowered absolute path would also pin the runner to one
+    /// install for the life of the config.
+    ///
+    /// The platform shell stands in for `npx` because it is on `PATH` on every host this
+    /// suite runs on; `npx` itself would make the test depend on whether the runner is
+    /// installed. The absence precondition is asserted so a host that somehow has
+    /// `<data dir>/bin/sh` fails with the real reason instead of a bare inequality.
+    #[test]
+    fn a_bare_command_only_on_path_is_not_rewritten() {
+        let on_path = if cfg!(windows) { "cmd" } else { "sh" };
+        assert!(
+            !crate::sidecar::manifest_sidecar::managed_bin_path(on_path).is_file(),
+            "precondition: '{on_path}' must not be installed in the managed bin dir"
+        );
+
+        let decl = crate::plugin_manifest::McpServerDecl {
+            command: on_path.to_owned(),
+            command_env: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            description: None,
+            enabled: true,
+        };
+
+        assert_eq!(
+            mcp_server_config_from_decl(&decl).command,
+            on_path,
+            "a PATH-resolved runner must reach Command::new as the bare name"
+        );
+        assert!(
+            mcp_command_is_present(on_path),
+            "and it must still probe as present"
+        );
+    }
+
+    /// A `command` that already carries a path separator is a path, never a managed-bin
+    /// name: joining it under `<data dir>/bin` would change its meaning and let `..`
+    /// segments walk out of the dir. Asserted for a path that exists (so the managed-bin
+    /// rung cannot be skipped merely because the file was absent).
+    #[test]
+    fn a_command_carrying_a_path_separator_is_never_rewritten() {
+        let exe = present_command();
+        assert!(
+            exe.contains('/') || exe.contains('\\'),
+            "precondition: the test binary path carries a separator"
+        );
+
+        let decl = crate::plugin_manifest::McpServerDecl {
+            command: exe.clone(),
+            command_env: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            description: None,
+            enabled: true,
+        };
+
+        assert_eq!(
+            mcp_server_config_from_decl(&decl).command,
+            exe,
+            "a declared path must be passed through verbatim"
+        );
+    }
+
+    /// Fail-closed, with the new rung in place: a bare command that is on neither `PATH`
+    /// nor the managed bin dir, with no `command_env`, still resolves to nothing and is
+    /// still SKIPPED rather than registered — the guard that keeps a model from being
+    /// offered tools whose every call ENOENTs.
+    ///
+    /// (`register_manifest_mcp_servers` also logs a warning naming the command and the bin
+    /// dir. That is `tracing::warn!` with no subscriber installed under `cargo test`, so
+    /// what is asserted here is the skip itself, not the log line.)
+    #[test]
+    fn a_bare_command_absent_from_path_and_the_managed_bin_dir_is_still_skipped() {
+        let absent = format!("ryu-absent-mcp-{}", uuid::Uuid::new_v4());
+        assert!(
+            crate::sidecar::manifest_sidecar::which_on_path(&absent).is_none(),
+            "precondition: not on PATH"
+        );
+        assert!(
+            !crate::sidecar::manifest_sidecar::managed_bin_path(&absent).is_file(),
+            "precondition: not in the managed bin dir"
+        );
+
+        let decl = crate::plugin_manifest::McpServerDecl {
+            command: absent.clone(),
+            command_env: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            description: None,
+            enabled: true,
+        };
+        let resolved = mcp_server_config_from_decl(&decl).command;
+        assert_eq!(resolved, absent, "nothing to lower to; the bare name stands");
+        assert!(
+            !mcp_command_is_present(&resolved),
+            "and it must not probe as present"
+        );
+
+        let reg = McpRegistry::empty();
+        let mut manifest = manifest_with_mcp_server("com.test.plugin", "absent-srv");
+        manifest.mcp_servers.insert("absent-srv".to_owned(), decl);
+
+        let names = register_as_enabled(&reg, &manifest, &[GRANT_MCP_SERVER]);
+
+        assert!(
+            names.is_empty(),
+            "the managed-bin rung must not weaken the fail-closed skip, got {names:?}"
+        );
+        assert!(!reg.contains_server("absent-srv"));
+    }
+
     /// The probe's Windows half: it counts a `.cmd`/`.bat` `PATH` hit as present, and
     /// that is only true because the spawn seam rewrites such a command to its full
     /// resolved path — `Command::new("npx")` looks for `npx.exe` and nothing else
@@ -4920,11 +5202,14 @@ mod tests {
         assert!(!file.mcp_servers["git"].enabled);
         let reg = McpRegistry::from_servers(file.mcp_servers);
         assert_eq!(reg.len(), 2);
-        // Two config servers plus the 11 always-present built-in providers
-        // (research, web_fetch, sandbox, notify, channel, search_conversations,
-        // threads, delegate, orchestrator, skills, ui) — all unconditionally
-        // listed by `server_summaries`. `research` (the autoresearch experiment
-        // runner) was added in 94060a75 alongside the research sidecar. `exa`,
+        // Two config servers plus the 10 always-present built-in providers
+        // (web_fetch, sandbox, notify, channel, search_conversations, threads,
+        // delegate, orchestrator, skills, ui) — all unconditionally listed by
+        // `server_summaries`. `research` (the
+        // autoresearch experiment runner, added in 94060a75) was retired from the
+        // built-in registry when it became the `@ryu/research` app's own
+        // `ryu-research mcp` stdio server, declared in that app's manifest — so it
+        // is listed only while the app is enabled and its binary present. `exa`,
         // `spider` and `rtk` were retired from the built-in registry when they
         // became declarative plugins (see fixtures/exa.manifest.json,
         // fixtures/spider.manifest.json, fixtures/rtk.manifest.json — spider and rtk
@@ -4935,7 +5220,12 @@ mod tests {
         // `memory`), which are listed unconditionally because their names are
         // reserved whether or not a provider is currently selected.
         let summaries = reg.server_summaries();
-        assert_eq!(summaries.len(), 17);
+        assert_eq!(summaries.len(), 16);
+        assert!(
+            !summaries.iter().any(|s| s.name == "research"),
+            "`research` is no longer a hardcoded built-in — it registers (or does \
+             not) through the generic plugin-server path"
+        );
         for facade in capability_tools::SERVERS {
             assert!(
                 summaries.iter().any(|s| &s.name == facade),

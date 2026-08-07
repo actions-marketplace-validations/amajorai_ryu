@@ -169,9 +169,10 @@ pub const CLIPS_PLUGIN_ID: &str = "@ryu/clips";
 
 /// The Recipes app's plugin id — the `/api/recipes/*` record→replay surface over
 /// Ghost's RecipeStore. It `requires` the `ghost` app, so the graph refuses to
-/// disable Ghost out from under an enabled Recipes. Default-on; the HTTP routes are
-/// compile-out-able behind the `recipes` cargo feature (the extracted `ryu_recipes`
-/// engine stays compiled — the workflow executor's GhostAction node uses it).
+/// disable Ghost out from under an enabled Recipes. NOT default-on and not
+/// pre-installed (see `CORE_DEFAULT_ON` below and `seed::NOT_PRE_INSTALLED`): the
+/// whole surface is out-of-process in the `ryu-recipes` sidecar, so Core links no
+/// recipes code and there is no `recipes` cargo feature.
 pub const RECIPES_PLUGIN_ID: &str = "@ryu/recipes";
 
 /// The Mail (Agent Inboxes) app's plugin id. Unlike the gate-only apps above, Mail is
@@ -466,6 +467,15 @@ pub const CORE_PLUGINS: &[&str] = &[
     "@ryu/firewall",
     "@ryu/routing",
     "@ryu/sandbox",
+    // pxpipe — the loopback token-saving proxy. Core-tier is a REQUIREMENT, not a
+    // promotion, exactly as for `scrapling` above: it declares a managed sidecar, and
+    // `may_run_sidecar` allows one at Community tier only against the Gateway-approved
+    // `sidecar:process` grant — which the Gateway denies at enable. A Community pxpipe
+    // would install and then never spawn its proxy. Deliberately NOT in
+    // `CORE_DEFAULT_ON`: it needs Node on PATH, fetches an npm package on first start,
+    // and does nothing until the user points a provider at 127.0.0.1:47821 with their
+    // own key (it is a transparent proxy and holds no credential — see its README).
+    "@ryu/pxpipe",
     // Mail (Agent Inboxes) — manifest-driven app; its `ryu-mail` sidecar is spawned
     // by the generic loader (see MAIL_PLUGIN_ID).
     MAIL_PLUGIN_ID,

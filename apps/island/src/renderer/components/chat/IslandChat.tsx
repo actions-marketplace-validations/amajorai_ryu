@@ -3,13 +3,20 @@
 // useIslandChat, the Core reachability probe, the store prefill, and reports both
 // whether there is history (so the island grows from a compact composer bar to the
 // full panel) and the composer's height (so the compact bar tracks the draft).
+//
+// The transcript is the DESKTOP message list at compact density
+// (`IslandTranscript`), not an island-local one — so every part type the desktop
+// chat renders (tool rows, MCP widgets, generated images, reasoning) renders here
+// too, and a new one never has to be ported across.
 
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
 import { IslandChatView } from "@ryu/blocks/island/chat/island-chat";
+import { IslandTranscript } from "@ryu/blocks/island/chat/island-transcript";
 import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useIslandComposerContext } from "../../context/island-composer-context.tsx";
 import { useComposerShortcutBindings } from "../../hooks/use-composer-shortcut-bindings.ts";
+import { IslandWidgetHost } from "../../host/IslandWidgetHost.tsx";
 import { useIslandState } from "../../store/island-state.ts";
 import { useIslandChat } from "./use-island-chat.ts";
 
@@ -29,7 +36,7 @@ export function IslandChat() {
 	const [doubleCheck, setDoubleCheck] = useState(false);
 	const doubleCheckRef = useRef(doubleCheck);
 	doubleCheckRef.current = doubleCheck;
-	const { messages, sending, error, notes, send, stop, clearNotes } =
+	const { messages, sending, status, error, notes, send, stop, clearNotes } =
 		useIslandChat({
 			getAcpPayload,
 			getDoubleCheck: () => doubleCheckRef.current,
@@ -143,7 +150,6 @@ export function IslandChat() {
 					belowInputActions={belowInputActions}
 					error={error}
 					leftActions={leftActions}
-					messages={messages}
 					offline={offline}
 					onComposerKeyDown={onComposerKeyDown}
 					onComposerResize={setComposerHeight}
@@ -162,6 +168,13 @@ export function IslandChat() {
 					onStop={stop}
 					prefill={chatPrefill}
 					sending={sending}
+					transcript={
+						hasHistory ? (
+							<IslandWidgetHost>
+								<IslandTranscript messages={messages} status={status} />
+							</IslandWidgetHost>
+						) : undefined
+					}
 				/>
 			</div>
 		</div>

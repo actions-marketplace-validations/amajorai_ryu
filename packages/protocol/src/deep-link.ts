@@ -17,6 +17,12 @@
 //     ryu://skills/<source>/<id…>?node=…      install a skill
 //     ryu://nodes/connect?url=…&token=…&name=…  connect to a Core node
 //
+// The node link is also the CONNECTION STRING: one line carrying everything a
+// surface needs to add a node (address, optional bearer, label), so no surface
+// has to make a human copy three fields into three boxes. `buildRyuDeepLink`
+// emits its `url` verbatim so the string stays readable —
+// `ryu://nodes/connect?url=https://node.example.com&name=prod`.
+//
 // For models/skills, `<source>` names the catalog (huggingface, skills.sh, …) and
 // everything after it is the verbatim catalog id (joined by "/", so a Hugging Face
 // `author/repo` — INCLUDING a trailing `-GGUF` — survives intact).
@@ -286,8 +292,15 @@ function encodeQueryValue(value: string): string {
 /** Build a `ryu://` deep link from an intent (used to render "Open in Ryu"). */
 export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 	if (intent.kind === "node") {
+		// The node link doubles as the CONNECTION STRING a user copies, pastes into
+		// another surface's "Add node" field, or reads off a QR — so the base URL is
+		// emitted verbatim rather than percent-encoded. It round-trips regardless:
+		// `parseQuery` splits on `&`/`=` only and `decodeQueryValue` is identity on
+		// a URL that contains neither `%` nor `+`, which a node base URL never does.
+		// A percent-encoded url still parses, so links built by older surfaces stay
+		// valid.
 		const params = [
-			`url=${encodeQueryValue(intent.url)}`,
+			`url=${intent.url}`,
 			`name=${encodeQueryValue(intent.name)}`,
 		];
 		if (intent.token) {

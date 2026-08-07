@@ -84,6 +84,7 @@ export function PreferencesStep({
 						<GhostOrb size="50px" variant="outline" />
 					</div>
 					<PageHeader
+						stagger={false}
 						subtitle="A few general settings to start with. You can change any of them later in Settings."
 						title="Set your preferences"
 					/>

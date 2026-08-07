@@ -185,6 +185,7 @@ export function HardPaywallPage({ onApplyLicenseKey }: HardPaywallPageProps) {
 
 							<PageHeader
 								className="w-full text-center"
+								stagger={false}
 								subtitle="Get Lifetime or Pro to keep sync, pro agents, and cloud models on every device."
 								title="Choose a plan"
 								titleClassName="text-center"

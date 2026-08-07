@@ -220,4 +220,31 @@ describe("buildRyuDeepLink round-trips with parseRyuDeepLink", () => {
 			expect(parseRyuDeepLink(buildRyuDeepLink(intent))).toEqual(intent);
 		});
 	}
+
+	// The node link is what a user copies as a connection string, so its `url`
+	// stays readable rather than percent-encoded into `https%3A%2F%2F…`.
+	it("emits a readable node connection string", () => {
+		expect(
+			buildRyuDeepLink({
+				kind: "node",
+				name: "prod",
+				url: "https://node.example.com:7980",
+			})
+		).toBe("ryu://nodes/connect?url=https://node.example.com:7980&name=prod");
+	});
+
+	// Links built by older surfaces percent-encoded the url; those must keep
+	// parsing, so the readability change is additive rather than a format break.
+	it("still parses a percent-encoded node url", () => {
+		expect(
+			parseRyuDeepLink(
+				"ryu://nodes/connect?url=https%3A%2F%2Fnode.example.com%3A7980&name=prod"
+			)
+		).toEqual({
+			kind: "node",
+			name: "prod",
+			url: "https://node.example.com:7980",
+			token: null,
+		});
+	});
 });

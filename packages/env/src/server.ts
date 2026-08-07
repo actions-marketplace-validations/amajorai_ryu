@@ -61,6 +61,11 @@ export const env = createEnv({
 		// self-hosted installs (see packages/auth/lib/waitlist.ts). Cloud sets
 		// this to a non-empty allowlist so the queue is fail-closed.
 		ADMIN_EMAILS: z.string().optional(),
+		// Explicit waitlist switch, and the authority when set: "true"/"1"/"on"
+		// forces the queue ON even with no admins configured, "false"/"0"/"off"
+		// forces it OFF even with admins. Unset (the default) keeps the historical
+		// behaviour of deriving the state from whether ADMIN_EMAILS is empty.
+		WAITLIST_ENABLED: z.string().optional(),
 		// Rough waitlist throughput estimate (invites per week). Optional:
 		// packages/auth defaults to 50 when unset or invalid.
 		WAITLIST_INVITES_PER_WEEK: z.string().optional(),

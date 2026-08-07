@@ -10,6 +10,7 @@ import {
 } from "@ryu/ui/components/field";
 import { Input } from "@ryu/ui/components/input";
 import PageHeader from "@ryu/ui/components/page-header";
+import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import type { ReactNode, SVGProps } from "react";
 import { useState } from "react";
 
@@ -107,16 +108,27 @@ export default function SignInForm({
 
 	return (
 		<div className="mx-auto flex w-full max-w-md flex-col gap-6">
-			<PageHeader
-				subtitle={
-					useMagicLink
-						? "Enter your email to receive a sign in link"
-						: "Please sign in to continue"
-				}
-				title="Welcome back"
-			/>
+			{/* One reveal for the whole column, so the heading, the fields and each
+			    button below them settle in sequence off a single clock — hence
+			    `stagger={false}` on the header, which would otherwise run its own
+			    two-line cascade on a second, unsynchronised clock.
 
-			<div>
+			    The form, the alternate sign-in buttons and the terms used to share a
+			    bare grouping div; they are direct children here so each becomes its
+			    own line of the cascade rather than revealing together as one block.
+			    That also makes them children of this `gap-6` column, so the `mt-4`
+			    the latter two carried is dropped — the gap owns that spacing now. */}
+			<StaggerReveal>
+				<PageHeader
+					stagger={false}
+					subtitle={
+						useMagicLink
+							? "Enter your email to receive a sign in link"
+							: "Please sign in to continue"
+					}
+					title="Welcome back"
+				/>
+
 				<form
 					className="space-y-4"
 					onSubmit={(e) => {
@@ -197,7 +209,7 @@ export default function SignInForm({
 					</div>
 				</form>
 
-				<div className="mt-4 flex flex-col gap-4 text-center">
+				<div className="flex flex-col gap-4 text-center">
 					<div className="relative">
 						<Button
 							className="w-full gap-3"
@@ -247,7 +259,7 @@ export default function SignInForm({
 					) : null}
 				</div>
 
-				<div className="mt-4 text-center text-muted-foreground text-sm">
+				<div className="text-center text-muted-foreground text-sm">
 					By signing in, you agree to our{" "}
 					<a className="underline" href="/terms">
 						Terms
@@ -258,7 +270,7 @@ export default function SignInForm({
 						Privacy Policy
 					</a>
 				</div>
-			</div>
+			</StaggerReveal>
 		</div>
 	);
 }

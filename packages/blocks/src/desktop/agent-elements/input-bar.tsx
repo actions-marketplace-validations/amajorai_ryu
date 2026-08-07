@@ -670,20 +670,16 @@ export const InputBar = memo(function InputBar({
 
 	// Queue bar sits between a top info bar and the question bar. It only rounds
 	// its top corners when nothing (info bar) is stacked above it.
-	const hasQueue = (queueBar?.items.length ?? 0) > 0;
 	const noTopInfoBar = !shouldShowInfoBar || infoBarPosition === "bottom";
-	const queueBarNode = hasQueue ? (
-		<QueueBar
-			items={queueBar?.items}
-			onClear={queueBar?.onClear}
-			onEdit={queueBar?.onEdit}
-			onRemove={queueBar?.onRemove}
-			onSendAll={queueBar?.onSendAll}
-			onSendNow={queueBar?.onSendNow}
-			onTurnOffQueueing={queueBar?.onTurnOffQueueing}
-			roundTop={noTopInfoBar}
-		/>
-	) : null;
+	// Narrow on `queueBar` itself rather than re-reading it optionally per prop:
+	// the old form forwarded six `queueBar?.x` values, every one of them
+	// `T | undefined`, into props QueueBarProps declares as required. Spreading
+	// the narrowed object also keeps the two in step as QueueBarProps grows.
+	const queueBarNode =
+		queueBar && queueBar.items.length > 0 ? (
+			<QueueBar {...queueBar} roundTop={noTopInfoBar} />
+		) : null;
+	const hasQueue = queueBarNode !== null;
 
 	const questionBarNode =
 		shouldShowQuestionBar && activeQuestion ? (
@@ -736,7 +732,9 @@ export const InputBar = memo(function InputBar({
 					}}
 					onSubmit={(answer) => {
 						questionBarData?.onSubmit(answer);
-						setDismissedQuestionId(questionBarData?.id);
+						// `null` is this state's "nothing dismissed" value; an absent
+						// question has no id to record.
+						setDismissedQuestionId(questionBarData?.id ?? null);
 					}}
 					questionIndex={clampedQuestionIndex}
 					questions={questionSet}

@@ -75,12 +75,13 @@ type AvatarModel = {
 
 const DRAWN_DIRECTIONS = ["right", "down", "left", "up"] as const
 
-function avatarModel(
-  name: string,
-  hueProp: number | undefined,
-  mirrorProp: AvatarMirror,
-  directionProp: AvatarDirection
-): AvatarModel {
+/**
+ * Everything the seed decides, drawn from ONE PRNG stream. It lives apart from
+ * `avatarModel` so other surfaces can ask the seed for a single one of its
+ * draws — the hue, say — without re-deriving the stream order and silently
+ * drifting out of step with the avatar the answer is supposed to match.
+ */
+function seedDraw(name: string) {
   const rand = xorshift32(fnv1a(name))
   const bits = Array.from({ length: 32 }, () => rand() < 0.5)
   const drawnVertical = rand() < 0.5
@@ -88,6 +89,27 @@ function avatarModel(
   const halfDensity = Array.from({ length: 32 }, () => 0.55 + rand() * 0.45)
   const drawnDirection =
     DRAWN_DIRECTIONS[Math.floor(rand() * DRAWN_DIRECTIONS.length)] ?? "right"
+  return { bits, drawnVertical, drawnHue, halfDensity, drawnDirection }
+}
+
+/**
+ * The hue (0–360) this seed's avatar is drawn in. Exported so a surface that
+ * puts something else beside the avatar — the waitlist pass paints its shader
+ * backdrop in it — is coloured by the same draw rather than by a second,
+ * lookalike hash that would disagree for some seeds.
+ */
+export function ditherAvatarHue(name: string): number {
+  return seedDraw(name).drawnHue
+}
+
+function avatarModel(
+  name: string,
+  hueProp: number | undefined,
+  mirrorProp: AvatarMirror,
+  directionProp: AvatarDirection
+): AvatarModel {
+  const { bits, drawnVertical, drawnHue, halfDensity, drawnDirection } =
+    seedDraw(name)
 
   const vertical =
     mirrorProp === "auto" ? drawnVertical : mirrorProp === "vertical"

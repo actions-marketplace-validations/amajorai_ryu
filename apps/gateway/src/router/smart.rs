@@ -51,6 +51,10 @@ pub struct SmartRouter {
     /// Computed once on the first `Embedding`-strategy request. A `None` entry is
     /// a rule whose description could not be embedded (skipped when matching).
     rule_embeddings: OnceCell<Vec<Option<Vec<f32>>>>,
+    /// Whether the configured classifier can actually discriminate between rules,
+    /// probed once on the first `Llm`-strategy request. See
+    /// [`SmartRouter::classifier_discriminates`].
+    classifier_sane: OnceCell<bool>,
 }
 
 impl SmartRouter {
@@ -59,6 +63,7 @@ impl SmartRouter {
             config,
             decisions: DashMap::new(),
             rule_embeddings: OnceCell::new(),
+            classifier_sane: OnceCell::new(),
         }
     }
 
@@ -222,6 +227,111 @@ impl SmartRouter {
         self.model_for_match(keyword_match(&descriptions, &user_msg))
     }
 
+    /// One-time probe: can the configured classifier distinguish rules by their
+    /// *content*, or is it just picking a position?
+    ///
+    /// ## Why this exists
+    ///
+    /// A too-small classifier does not fail loudly — it answers confidently and
+    /// identically forever. Gemma 3 270M, the shipped `classify` tier default,
+    /// replies `"1"` to every message for every rule set: measured 6/6 including
+    /// the message `"hello"` against a `code`-vs-`chat` rule pair, and the answer
+    /// did not move when the rules were reversed. Four prompt variants (numbered,
+    /// no-completion-cue, few-shot, copy-the-name) were tried; none recovered it
+    /// — few-shot merely locked onto whichever example came last. The failure is
+    /// the model's, not the prompt's.
+    ///
+    /// Left unguarded that is worse than not routing: every request silently
+    /// takes rule #1's model, and nothing anywhere reports an error. The other
+    /// failure paths here (no provider, timeout, unparseable) all fail *open* and
+    /// keep the requested model; a classifier that always says `1` is the one
+    /// path that fails into a confident wrong answer.
+    ///
+    /// ## The probe
+    ///
+    /// Ask the same question twice with the rule list **reversed**. A classifier
+    /// reading the descriptions must move its answer with them (position `i`
+    /// becomes `n+1-i`); one reading only position returns the same index both
+    /// times. Two calls, once per config, at `temperature: 0`.
+    ///
+    /// Deliberately conservative — it only rejects on a *positive* demonstration
+    /// of position-locking. An inconclusive probe (either call errors, times out,
+    /// is unparseable, or answers `0` = "no rule") is treated as usable, so a
+    /// slow or terse classifier is never disabled by mistake. Fewer than two
+    /// rules cannot be reversed, so the probe is skipped.
+    async fn classifier_discriminates(
+        &self,
+        descriptions: &[String],
+        provider: &dyn ryu_gw_providers::Provider,
+        model: &str,
+    ) -> bool {
+        // `OnceCell::get_or_init` takes an async closure here (same pattern as
+        // `rule_embeddings`), so the probe runs at most once per config even
+        // under concurrent first requests.
+        let sane = self
+            .classifier_sane
+            .get_or_init(|| async {
+                if descriptions.len() < 2 {
+                    return true;
+                }
+                const PROBE: &str = "hello";
+                let n = descriptions.len();
+
+                let forward = self.probe_choice(descriptions, PROBE, provider, model).await;
+                let mut reversed: Vec<String> = descriptions.to_vec();
+                reversed.reverse();
+                let backward = self.probe_choice(&reversed, PROBE, provider, model).await;
+
+                match (forward, backward) {
+                    // Both named a real rule, and the answer did NOT follow the
+                    // reversal — the classifier is reading position, not content.
+                    (Some(a), Some(b)) if a >= 1 && b >= 1 && b != n + 1 - a => {
+                        warn!(
+                            model = %model,
+                            forward = a,
+                            reversed = b,
+                            "smart routing: classifier picked the same POSITION with the rule list \
+                             reversed, so it is not reading the rules — disabling LLM routing for \
+                             this config and keeping each request's requested model. Pick a larger \
+                             classifier_model, or use strategy=keyword."
+                        );
+                        false
+                    }
+                    // Anything else (agreement, a 0, or an inconclusive call) is
+                    // not proof of position-locking.
+                    _ => true,
+                }
+            })
+            .await;
+        *sane
+    }
+
+    /// Run one classifier call for the probe and parse its choice. Returns `None`
+    /// on any error/timeout/unparseable reply — the caller treats that as
+    /// inconclusive, never as a failure.
+    async fn probe_choice(
+        &self,
+        descriptions: &[String],
+        msg: &str,
+        provider: &dyn ryu_gw_providers::Provider,
+        model: &str,
+    ) -> Option<usize> {
+        let body = json!({
+            "model": model,
+            "messages": [{ "role": "user", "content": build_prompt(descriptions, msg) }],
+            "temperature": 0,
+            "max_tokens": 8,
+            "stream": false,
+        });
+        let fut = provider.complete(model, &body);
+        let resp = tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), fut)
+            .await
+            .ok()?
+            .ok()?;
+        let text = resp["choices"][0]["message"]["content"].as_str()?;
+        parse_choice(text, descriptions.len())
+    }
+
     /// `Llm` strategy: run the cheap classifier model once and map its reply to a
     /// target model.
     async fn classify_llm(
@@ -251,6 +361,16 @@ impl SmartRouter {
             .iter()
             .map(|r| r.description.clone())
             .collect();
+
+        // Refuse to "route" with a classifier that cannot tell the rules apart.
+        // Probed once per config; see `classifier_discriminates`.
+        if !self
+            .classifier_discriminates(&descriptions, provider, &decision.model)
+            .await
+        {
+            return None;
+        }
+
         let prompt = build_prompt(&descriptions, &user_msg);
         let body = json!({
             "model": decision.model,
@@ -322,6 +442,44 @@ mod tests {
 
     // parse_choice / build_prompt / last_user_message unit tests moved with their
     // functions to the `ryu_gw_router` crate.
+
+    /// The position-lock verdict table, over the same rule-reversal rule the
+    /// live probe applies. `n = 2`, so a content-reading classifier that says
+    /// `1` forward must say `2` reversed.
+    ///
+    /// This mirrors [`SmartRouter::classifier_discriminates`]'s decision without
+    /// standing up a provider; the network half is covered by the live pass in
+    /// `docs/tool-skill-gateway-e2e-verification.md`.
+    #[test]
+    fn position_lock_is_detected_only_on_proof() {
+        // (forward, backward, n) → is the classifier considered usable?
+        let cases = [
+            // Gemma 3 270M: "1" both ways. Position-locked.
+            ((Some(1usize), Some(1usize)), false),
+            ((Some(2), Some(2)), false),
+            // A classifier that follows the reversal: usable.
+            ((Some(1), Some(2)), true),
+            ((Some(2), Some(1)), true),
+            // "no rule matched" is a real answer, not proof of locking.
+            ((Some(0), Some(0)), true),
+            ((Some(1), Some(0)), true),
+            // Inconclusive (error / timeout / unparseable) never disables.
+            ((None, Some(1)), true),
+            ((Some(1), None), true),
+            ((None, None), true),
+        ];
+        let n = 2usize;
+        for ((forward, backward), want_usable) in cases {
+            let usable = !matches!(
+                (forward, backward),
+                (Some(a), Some(b)) if a >= 1 && b >= 1 && b != n + 1 - a
+            );
+            assert_eq!(
+                usable, want_usable,
+                "forward={forward:?} backward={backward:?} should be usable={want_usable}"
+            );
+        }
+    }
 
     #[test]
     fn inactive_config_is_not_active() {

@@ -143,7 +143,9 @@ export const ToolRenderer = memo(function ToolRenderer({
 	// degrades to a plain tool row.
 	if (partType === "data-tool-widget-available") {
 		if (!widgetHost) {
-			return <GenericTool title="App widget" />;
+			// The widget part is only minted for a COMPLETED call, so the
+			// degraded row is never in flight.
+			return <GenericTool isPending={false} title="App widget" />;
 		}
 		const WidgetRenderer = widgetHost.Renderer;
 		return <WidgetRenderer part={part as WidgetAvailablePart} />;

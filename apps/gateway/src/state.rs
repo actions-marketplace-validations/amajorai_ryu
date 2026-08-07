@@ -136,7 +136,7 @@ pub struct AppState {
     /// flag after a metered call drives its balance non-positive; the pre-call
     /// budget gate reads it. Inert unless `config.credits` is active and the
     /// request carries an org.
-    pub wallet: WalletState,
+    pub wallet: Arc<WalletState>,
     pub metrics: Metrics,
     pub composio: Option<ComposioClient>,
     /// Unified tool catalog client over Core (#475). `Some` when `providers.core`
@@ -374,7 +374,7 @@ impl AppState {
             exec_budget,
             evals,
             shared_budget,
-            wallet: WalletState::default(),
+            wallet: Arc::new(WalletState::default()),
             metrics,
             composio,
             tools,
@@ -647,7 +647,7 @@ impl AppState {
             exec_budget,
             evals,
             shared_budget,
-            wallet: WalletState::default(),
+            wallet: Arc::new(WalletState::default()),
             metrics,
             composio: None,
             tools: None,

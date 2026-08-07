@@ -10,8 +10,7 @@ import {
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Checkbox } from "@ryu/ui/components/checkbox";
-import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
-import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
+import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { Label } from "@ryu/ui/components/label";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
@@ -57,8 +56,11 @@ import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
 import { AgentLogo } from "@/src/lib/agent-logos.tsx";
 import {
+	glyphToPersonaFields,
+	personaToGlyphValue,
+} from "@/src/lib/agent-persona.ts";
+import {
 	type Agent,
-	type AgentPersona,
 	type AgentSummary,
 	type AgentTools,
 	bumpPatchVersion,
@@ -384,84 +386,6 @@ function scheduleSummary(
 const ACP_CUSTOM_ENGINE = "__acp_exec_custom__";
 /** Engine prefix Core treats as a literal ACP spawn command (`agent_route`). */
 const ACP_EXEC_PREFIX = "acp-exec:";
-
-/** Fold a saved persona into a GlyphPicker value. */
-function personaToGlyphValue(
-	persona: AgentPersona | null | undefined
-): GlyphValue {
-	if (!persona) {
-		return null;
-	}
-	if (persona.avatar_url) {
-		return { kind: "avatar", dataUrl: persona.avatar_url };
-	}
-	const ditherLayer: GlyphDitherValue | undefined =
-		persona.dither && isDitherColor(persona.dither.from)
-			? {
-					from: persona.dither.from,
-					to: isDitherColor(persona.dither.to) ? persona.dither.to : null,
-					direction:
-						persona.dither.direction === "down" ||
-						persona.dither.direction === "left" ||
-						persona.dither.direction === "right"
-							? persona.dither.direction
-							: "up",
-				}
-			: undefined;
-	if (persona.emoji) {
-		return {
-			kind: "emoji",
-			emoji: persona.emoji,
-			...(ditherLayer ? { dither: ditherLayer } : {}),
-		};
-	}
-	if (persona.icon) {
-		return {
-			kind: "icon",
-			id: persona.icon,
-			...(persona.icon_color ? { color: persona.icon_color } : {}),
-			...(ditherLayer ? { dither: ditherLayer } : {}),
-		};
-	}
-	if (persona.dicebear?.style && persona.dicebear.seed) {
-		return {
-			kind: "dicebear",
-			style: persona.dicebear.style,
-			seed: persona.dicebear.seed,
-		};
-	}
-	if (ditherLayer) {
-		return { kind: "dither", dither: ditherLayer };
-	}
-	return null;
-}
-
-/** Split a GlyphPicker value into persona avatar fields.
- * Dither may coexist with icon/emoji as a background; never with dicebear/avatar. */
-function glyphToPersonaFields(
-	glyph: GlyphValue
-): Pick<
-	AgentPersona,
-	"avatar_url" | "emoji" | "icon" | "icon_color" | "dicebear" | "dither"
-> {
-	const ditherBg =
-		glyph?.kind === "icon" || glyph?.kind === "emoji"
-			? (glyph.dither ?? null)
-			: glyph?.kind === "dither"
-				? glyph.dither
-				: null;
-	return {
-		avatar_url: glyph?.kind === "avatar" ? glyph.dataUrl : null,
-		emoji: glyph?.kind === "emoji" ? glyph.emoji : null,
-		icon: glyph?.kind === "icon" ? glyph.id : null,
-		icon_color: glyph?.kind === "icon" ? (glyph.color ?? null) : null,
-		dicebear:
-			glyph?.kind === "dicebear"
-				? { style: glyph.style, seed: glyph.seed }
-				: null,
-		dither: ditherBg,
-	};
-}
 
 function agentEngineOptionId(agent: AgentSummary): string | null {
 	if (!agent.builtIn) {

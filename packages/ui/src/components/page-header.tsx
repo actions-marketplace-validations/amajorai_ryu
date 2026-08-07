@@ -1,60 +1,80 @@
 "use client";
 
-import { motion } from "motion/react";
+import { useInView } from "motion/react";
 import type { CSSProperties, ReactNode } from "react";
+import { useRef } from "react";
 import { cn } from "../lib/utils.ts";
 
 interface PageHeaderProps {
-	animate?: boolean;
 	className?: string;
+	/**
+	 * Set to `false` where the header is already inside a `StaggerReveal`. That
+	 * wrapper reveals the header as one line among its siblings, so leaving the
+	 * internal cascade on would compound the two — 24px of travel and a double
+	 * blur on the same text.
+	 */
+	stagger?: boolean;
 	style?: CSSProperties;
 	subtitle?: ReactNode;
-	subtitleDelay?: number;
 	title: ReactNode;
 	titleClassName?: string;
-	titleDelay?: number;
 }
 
+/**
+ * The title/subtitle pair every routed page opens with.
+ *
+ * The two lines rise, sharpen and fade in one after the other once the header
+ * scrolls into view, via the shared `.t-stagger` reveal in globals.css. Nothing
+ * about the motion lives here: the durations, the 40ms offset between the lines
+ * and the `prefers-reduced-motion` fallback (lines rest visible rather than
+ * invisible) are all carried by those classes.
+ *
+ * `useInView` fires immediately for anything already on screen, so a header at
+ * the top of a page and one far below the fold need no separate mount path. The
+ * default `margin` is deliberate — the landing blocks' `-80px` shrinks the root
+ * box, which would delay a header sitting inside a short modal.
+ */
 export function PageHeader({
 	title,
 	subtitle,
 	className,
 	titleClassName,
-	animate = false,
-	titleDelay = 0.2,
-	subtitleDelay = 0.3,
+	stagger = true,
 	style,
 }: PageHeaderProps) {
-	if (animate) {
-		return (
-			<div className={cn("space-y-1 text-left", className)} style={style}>
-				<motion.h1
-					animate={{ opacity: 1, y: 0 }}
-					className={cn("font-medium text-xl", titleClassName)}
-					initial={{ opacity: 0, y: 20 }}
-					transition={{ delay: titleDelay, duration: 0.5 }}
-				>
-					{title}
-				</motion.h1>
-				{subtitle && (
-					<motion.p
-						animate={{ opacity: 1, y: 0 }}
-						className="max-w-md text-left font-medium text-muted-foreground text-xl"
-						initial={{ opacity: 0, y: 20 }}
-						transition={{ delay: subtitleDelay, duration: 0.5 }}
-					>
-						{subtitle}
-					</motion.p>
-				)}
-			</div>
-		);
-	}
+	const ref = useRef<HTMLDivElement>(null);
+	const inView = useInView(ref, { once: true });
+	const shown = stagger && inView;
 
 	return (
-		<div className={cn("space-y-1 text-left", className)} style={style}>
-			<h1 className={cn("font-medium text-xl", titleClassName)}>{title}</h1>
+		<div
+			className={cn(
+				"space-y-1 text-left",
+				stagger && "t-stagger",
+				shown && "is-shown",
+				className
+			)}
+			ref={ref}
+			style={style}
+		>
+			<h1
+				className={cn(
+					"font-medium text-xl",
+					stagger && "t-stagger-line t-stagger-line--1",
+					titleClassName
+				)}
+			>
+				{title}
+			</h1>
 			{subtitle ? (
-				<p className="font-medium text-muted-foreground text-xl">{subtitle}</p>
+				<p
+					className={cn(
+						"font-medium text-muted-foreground text-xl",
+						stagger && "t-stagger-line t-stagger-line--2"
+					)}
+				>
+					{subtitle}
+				</p>
 			) : null}
 		</div>
 	);

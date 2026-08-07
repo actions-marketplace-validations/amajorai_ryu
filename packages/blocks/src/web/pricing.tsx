@@ -1083,7 +1083,13 @@ export function PricingInstancePicker({
 							label: `${loc.city}, ${loc.country}`,
 							value: loc.id,
 						}))}
-						onValueChange={onLocationChange}
+						// The Select can emit `null` when cleared; there is no
+						// "no location" state to report, so that case is ignored.
+						onValueChange={(value) => {
+							if (value !== null) {
+								onLocationChange(value);
+							}
+						}}
 						value={location}
 					>
 						<SelectTrigger className="w-56" id="ryu-cloud-location">

@@ -501,7 +501,7 @@ function EmojiPickerNavigation({
 	"emojiLibrary" | "focusedCategory" | "i18n" | "icons"
 >) {
 	return (
-		<TooltipProvider delayDuration={500}>
+		<TooltipProvider delay={500}>
 			<nav
 				className="mb-2.5 border-0 border-b border-b-border border-solid p-1.5"
 				id="emoji-nav"

@@ -165,6 +165,24 @@ pub(crate) fn which_on_path(program: &str) -> Option<PathBuf> {
     None
 }
 
+/// Where a bare, Ryu-managed `command` lands on this host: `<data dir>/bin/<command>`
+/// (`.exe` appended on Windows).
+///
+/// Profile-aware by construction — `download_manager::bin_dir()` is
+/// `paths::ryu_dir().join("bin")`, so a `RYU_PROFILE=dev` stack resolves
+/// `~/.ryu-dev/bin` and never collides with a release stack.
+///
+/// This is only the **path computation**, deliberately: [`ensure_local_sidecar_present`]
+/// additionally requires a `<command>.version` marker matching the running Core before
+/// it reuses a bin, because a self-update must re-fetch a stale artifact. That staleness
+/// rule is download-lifecycle policy and must NOT travel with this helper — a caller that
+/// only asks "is there a binary here I could spawn?" (the MCP registration probe) would
+/// otherwise report a locally-built or hand-placed binary as missing.
+pub(crate) fn managed_bin_path(command: &str) -> PathBuf {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    crate::sidecar::download_manager::bin_dir().join(format!("{command}{ext}"))
+}
+
 /// The full loaded manifest for `plugin_id` (built-in or user-installed), or `None`
 /// when absent. Reads at spawn (rare) so it is never stale — the same pattern
 /// [`declared_permissions_for`] / [`declared_capabilities_for`] use.
@@ -503,6 +521,31 @@ fn clear_missing_sidecar_binary(name: &str) {
     }
 }
 
+/// Everything the managed-bin **ready notifier** needs to re-run the owning plugin's
+/// MCP-server registration once its binary has actually landed. Handed to
+/// [`ManifestSidecar::with_mcp_registration`] by the one production construction site
+/// (`apply_sidecars`), which already holds all four values.
+///
+/// Injected rather than read from a process global (`mcp::global_registry`) so the
+/// notifier is exercisable end-to-end by a test: `notify_managed_binary_ready` is
+/// reached through a real [`ManifestSidecar`] code path with a real
+/// [`McpRegistry`](crate::sidecar::mcp::McpRegistry), no OnceLock to win a race for.
+///
+/// `manifest` is an `Arc` because a manifest can carry inline `ui_code`/`backend_code`
+/// and every sidecar of a plugin holds one.
+#[derive(Clone)]
+pub struct McpRegistration {
+    /// The live registry the plugin's declared servers are registered into.
+    pub registry: Arc<crate::sidecar::mcp::McpRegistry>,
+    /// The owning plugin's manifest — the sole source of the `mcp_servers` declarations.
+    pub manifest: Arc<crate::plugin_manifest::PluginManifest>,
+    /// The owning plugin's tier, for the registration gate.
+    pub tier: crate::plugin_manifest::PluginTier,
+    /// The Gateway-**approved** grants from the plugin RECORD (never the manifest's own
+    /// unvalidated `permission_grants`), for the registration gate.
+    pub approved_grants: Vec<String>,
+}
+
 /// A [`Sidecar`] whose lifecycle is driven by a manifest [`SidecarSpec`].
 pub struct ManifestSidecar {
     /// Namespaced manager key (`<plugin_id>/<spec.name>`).
@@ -516,6 +559,11 @@ pub struct ManifestSidecar {
     /// as a model provider. Health is *polled*, so this latches the Unhealthy→Healthy
     /// transition: registration fires once on the way up, deregistration once on stop.
     provider_registered: Arc<AtomicBool>,
+    /// Set by [`ManifestSidecar::with_mcp_registration`] when the owning plugin declares
+    /// `mcp_servers`; drives [`notify_managed_binary_ready`] after each `Local` binary
+    /// resolution. `None` leaves the notifier off entirely (every existing caller and
+    /// every non-MCP plugin).
+    mcp: Option<McpRegistration>,
 }
 
 impl ManifestSidecar {
@@ -535,7 +583,17 @@ impl ManifestSidecar {
             downloads,
             handle: ProcessHandle::new(),
             provider_registered: Arc::new(AtomicBool::new(false)),
+            mcp: None,
         }
+    }
+
+    /// Arm the managed-bin ready notifier for this sidecar (see [`McpRegistration`] and
+    /// [`notify_managed_binary_ready`]). Opt-in: a caller that does not set it keeps the
+    /// pre-existing behavior exactly.
+    #[must_use]
+    pub fn with_mcp_registration(mut self, registration: McpRegistration) -> Self {
+        self.mcp = Some(registration);
+        self
     }
 
     /// Register this sidecar's declared model provider, if it declares one. Idempotent
@@ -990,6 +1048,29 @@ async fn ensure_local_sidecar_present(
     resolved_program: String,
     command: &str,
     downloads: &crate::downloads::DownloadCenter,
+    mcp: Option<&McpRegistration>,
+) -> String {
+    let program =
+        resolve_local_sidecar_program(name, plugin_id, resolved_program, command, downloads).await;
+    // The binary may have JUST become resolvable (installed above, or found already
+    // installed). Tell the MCP registry, which re-probes and picks up any declaration it
+    // had to skip. Unconditional — the re-probe is the authority, so a resolution that
+    // changed nothing registers nothing.
+    if let Some(registration) = mcp {
+        notify_managed_binary_ready(registration);
+    }
+    program
+}
+
+/// The resolution half of [`ensure_local_sidecar_present`] — every rung and every
+/// early return documented there. Split out so the notifier above runs on ALL of them
+/// (including the fall-through) without threading the call through four exits.
+async fn resolve_local_sidecar_program(
+    name: &str,
+    plugin_id: &str,
+    resolved_program: String,
+    command: &str,
+    downloads: &crate::downloads::DownloadCenter,
 ) -> String {
     // 1. An env override (or any resolved program) that points at a real file wins.
     if std::path::Path::new(&resolved_program).exists() {
@@ -998,7 +1079,9 @@ async fn ensure_local_sidecar_present(
     }
 
     let ext = if cfg!(windows) { ".exe" } else { "" };
-    let dest = crate::sidecar::download_manager::bin_dir().join(format!("{command}{ext}"));
+    // The one place this path is defined; `sidecar::mcp` resolves the SAME path when it
+    // decides whether a manifest-declared MCP server's bare command is installed.
+    let dest = managed_bin_path(command);
     // Version marker written next to the bin (`ryu-mail.version`) recording the Core
     // version that installed it — the single release train keeps Core + every app bin
     // in lockstep, so a marker that doesn't match the running Core means a self-update
@@ -1119,6 +1202,82 @@ async fn ensure_local_sidecar_present(
     resolved_program
 }
 
+/// The managed-bin **ready notifier**: re-run the owning plugin's MCP-server
+/// registration now that a `Local` sidecar's binary has been resolved.
+///
+/// # Why this exists
+///
+/// `mcp_server_config_from_decl` can lower a manifest's bare `command` to
+/// `<data dir>/bin/<command>` (the resolver rung), but that file only ever gets there
+/// via [`ensure_local_sidecar_present`], which runs from `ManifestSidecar::start` —
+/// **not** from enable. `activate_plugin` registers MCP servers immediately after
+/// *spawning* `apply_sidecars`, so on a fresh enable the download has not finished (and
+/// for a `lazy` sidecar has not even started): the probe correctly reports the command
+/// missing, the declaration is skipped, and — because a skip is remembered nowhere —
+/// the server stays dark until the next Core restart re-runs the `onStartup` pass. This
+/// closes that window from the other side: the moment the binary is there, ask again.
+///
+/// # Why it re-runs the whole gated function
+///
+/// It calls [`crate::sidecar::mcp::register_manifest_mcp_servers`] verbatim rather than
+/// re-implementing "register the declarations that now resolve". That function owns the
+/// tier + approved-`mcp:server` gate, the per-declaration probe, and the name-ownership
+/// check; a second path that re-derived any of them would be a second door that drifts
+/// out of step with the first. So this is not an ungated entry point — it is the same
+/// entry point, asked a second time, with the grants that came off the plugin RECORD.
+///
+/// # Cost control
+///
+/// `register_server` rebuilds the whole server map and clears the tool/resource caches,
+/// which would force every stdio server to re-spawn on the next listing. A lazy sidecar
+/// wakes repeatedly (scale-to-zero), so this returns early unless at least one declared
+/// name is still unowned — making the steady-state wake a couple of map lookups. Same
+/// reasoning as the `onStartup`-only guard on the boot re-register.
+///
+/// The guard asks `plugin_server_owner`, NOT `contains_server`: the latter answers `true`
+/// for every reserved built-in name (`research`, `threads`, the capability facade, …)
+/// whether or not anything is registered, so it would switch this notifier off
+/// permanently for precisely the apps that are taking over a name Core still reserves —
+/// silently, since registration would in fact have overlaid the built-in. That is the
+/// failure mode the extra accessor exists to avoid. Note the guard only suppresses the
+/// SUCCESS steady state: on a host where the binary never installs, the name stays
+/// unowned and every wake re-probes and re-warns, which is the honest behavior.
+///
+/// Scope: driven from the `Local` arm only, which is correct — a `Binary`-kind sidecar's
+/// bytes land under `<plugin_dir>/bin`, never in the managed bin dir the resolver rung
+/// looks at, so nothing about its download can change how a bare command resolves.
+///
+/// Returns the names registered by this pass (empty on the common no-op), for logging
+/// and for the tests that assert the seam actually fires.
+fn notify_managed_binary_ready(registration: &McpRegistration) -> Vec<String> {
+    let manifest = &registration.manifest;
+    if manifest.mcp_servers.is_empty() {
+        return Vec::new();
+    }
+    if manifest
+        .mcp_servers
+        .keys()
+        .all(|name| registration.registry.plugin_server_owner(name).is_some())
+    {
+        return Vec::new();
+    }
+    let registered = crate::sidecar::mcp::register_manifest_mcp_servers(
+        &registration.registry,
+        manifest,
+        registration.tier,
+        &registration.approved_grants,
+    );
+    if !registered.is_empty() {
+        tracing::info!(
+            plugin = %manifest.id,
+            servers = ?registered,
+            "managed binary is present: registered plugin-declared MCP server(s) that were \
+             skipped when the plugin was enabled"
+        );
+    }
+    registered
+}
+
 /// Remove the `~/.ryu/bin` binaries of a manifest's `Local`-kind sidecars — the
 /// uninstall counterpart to [`ensure_local_sidecar_present`]. Called only from the
 /// **uninstall** path (never plain disable, which keeps the bin so a re-enable is
@@ -1131,7 +1290,6 @@ async fn ensure_local_sidecar_present(
 pub(crate) async fn remove_local_sidecar_binaries(
     manifest: &crate::plugin_manifest::PluginManifest,
 ) {
-    let ext = if cfg!(windows) { ".exe" } else { "" };
     for spec in &manifest.sidecars {
         let SidecarProcess::Local(local) = &spec.process else {
             continue;
@@ -1152,8 +1310,7 @@ pub(crate) async fn remove_local_sidecar_binaries(
         if env_override.is_some() {
             continue;
         }
-        let dest =
-            crate::sidecar::download_manager::bin_dir().join(format!("{}{ext}", local.command));
+        let dest = managed_bin_path(&local.command);
         // Drop the version marker alongside the bin (best-effort; harmless if absent).
         let _ = tokio::fs::remove_file(dest.with_extension("version")).await;
         if !dest.exists() {
@@ -1220,6 +1377,7 @@ impl Sidecar for ManifestSidecar {
         let handle = self.handle.clone();
         let plugin_id = self.plugin_id.clone();
         let ext_token = self.ext_token();
+        let mcp = self.mcp.clone();
         Box::pin(async move {
             // Record the declared runtime permission posture (and warn when it is a
             // recorded-but-unenforced set on this unsandboxed native process) before
@@ -1254,12 +1412,19 @@ impl Sidecar for ManifestSidecar {
                     // Passing `name`/`plugin_id` in is what lets a resolution failure be
                     // RECORDED against this sidecar (surfaced by `health_check` +
                     // `missing_sidecar_binary_reports`) instead of swallowed into a warn.
+                    //
+                    // `mcp` is the ready notifier: once the binary is actually there, the
+                    // owning plugin's `mcp_servers` declarations are re-offered to the
+                    // registry, which had to skip them at enable time (the download had
+                    // not happened yet — for a lazy sidecar, this is the first time it
+                    // ever runs).
                     let program = ensure_local_sidecar_present(
                         &name,
                         &plugin_id,
                         program,
                         &local.command,
                         &downloads,
+                        mcp.as_ref(),
                     )
                     .await;
                     let mut env = local.env.clone();
@@ -1861,6 +2026,7 @@ mod tests {
             command.clone(),
             &command,
             &downloads,
+            None,
         )
         .await;
         assert_eq!(program, command);
@@ -1918,6 +2084,7 @@ mod tests {
             existing.to_string_lossy().into_owned(),
             "ryu-healed",
             &downloads,
+            None,
         )
         .await;
 
@@ -1927,6 +2094,296 @@ mod tests {
             "a resolved binary must clear its stale missing-binary record"
         );
         std::fs::remove_file(&existing).ok();
+    }
+
+    // ── the managed-bin ready notifier ────────────────────────────────────────────
+
+    /// A uniquely-named slot in the Ryu-managed bin dir: reserved (absent) first, so a
+    /// test can assert the enable-time skip, then `install()`ed to make the binary land.
+    /// Removed on `Drop`.
+    ///
+    /// Writes into the process's ACTUAL data dir (`~/.ryu/bin`, or the profile variant)
+    /// rather than redirecting it: `paths::ryu_dir()` is a `OnceLock` resolved on first
+    /// use, so setting `RYU_DIR` from a test would take effect or not depending on which
+    /// sibling test ran first. A uuid-suffixed name cannot collide with a real installed
+    /// binary, and it is never spawned.
+    struct ManagedBinSlot {
+        command: String,
+        path: PathBuf,
+    }
+
+    impl ManagedBinSlot {
+        fn reserve() -> Self {
+            let command = format!("ryu-test-notify-{}", uuid::Uuid::new_v4());
+            let path = managed_bin_path(&command);
+            assert!(
+                which_on_path(&command).is_none(),
+                "precondition: a uuid-named command is not on PATH"
+            );
+            assert!(!path.is_file(), "precondition: the slot starts empty");
+            Self { command, path }
+        }
+
+        /// The binary lands — deliberately WITHOUT the `<command>.version` marker
+        /// `ensure_local_sidecar_present` demands before it reuses a bin. The marker is
+        /// download-lifecycle policy; the MCP resolver rung only asks "is there a file
+        /// here", so this is also the dev-box shape (a locally built binary).
+        fn install(&self) {
+            std::fs::create_dir_all(self.path.parent().expect("bin dir has a parent"))
+                .expect("create the managed bin dir");
+            std::fs::write(&self.path, b"").expect("write the managed bin");
+        }
+    }
+
+    impl Drop for ManagedBinSlot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// A manifest declaring exactly one `mcp_servers` entry whose `command` is the bare
+    /// name of a Ryu-managed binary — the shape the managed-bin resolver rung exists for
+    /// (no `command_env` for anything to seed).
+    fn manifest_declaring_mcp_server(
+        plugin_id: &str,
+        server: &str,
+        command: &str,
+    ) -> crate::plugin_manifest::PluginManifest {
+        let mut mcp_servers = BTreeMap::new();
+        mcp_servers.insert(
+            server.to_owned(),
+            crate::plugin_manifest::McpServerDecl {
+                command: command.to_owned(),
+                command_env: None,
+                args: vec![],
+                env: BTreeMap::new(),
+                description: None,
+                enabled: true,
+            },
+        );
+        crate::plugin_manifest::PluginManifest {
+            id: plugin_id.to_owned(),
+            name: "Notifier Test".to_owned(),
+            version: "1.0.0".to_owned(),
+            mcp_servers,
+            ..Default::default()
+        }
+    }
+
+    /// The whole point of the notifier: at enable the binary is not there yet, so the
+    /// declaration is skipped and nothing remembers it — and then the sidecar's binary
+    /// lands and the server registers itself, with no restart.
+    ///
+    /// Both halves are asserted in one test on purpose: the skip is the precondition
+    /// that makes the registration meaningful. Without it, a host where the command
+    /// happened to resolve would pass while proving nothing.
+    ///
+    /// The discriminator is the stored ABSOLUTE path, not mere presence: Ryu's installer
+    /// puts `<data dir>/bin` on the user's `PATH`, so on some hosts a bare name also
+    /// resolves through the plain-`PATH` rung, which stores the name verbatim. Only the
+    /// managed-bin rung can produce the absolute path.
+    #[tokio::test]
+    async fn a_landed_managed_binary_registers_the_plugins_mcp_server() {
+        let slot = ManagedBinSlot::reserve();
+        let plugin_id = format!("com.test.notify-{}", uuid::Uuid::new_v4());
+        let server = format!("notify-srv-{}", uuid::Uuid::new_v4());
+        let sidecar_name = namespaced_name(&plugin_id, "worker");
+
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let manifest = Arc::new(manifest_declaring_mcp_server(
+            &plugin_id,
+            &server,
+            &slot.command,
+        ));
+
+        // 1. Enable time, reproduced exactly: `activate_plugin` registers the manifest's
+        //    servers while `apply_sidecars` is still fetching the binary. Nothing to
+        //    spawn, so the declaration is skipped — and a skip is remembered nowhere.
+        let at_enable = crate::sidecar::mcp::register_manifest_mcp_servers(
+            &registry,
+            &manifest,
+            PluginTier::Core,
+            &[],
+        );
+        assert!(
+            at_enable.is_empty() && !registry.contains_server(&server),
+            "precondition: with no binary on disk the declaration must be skipped"
+        );
+
+        // 2. The binary lands — the event this notifier exists to observe.
+        slot.install();
+
+        let registration = McpRegistration {
+            registry: Arc::clone(&registry),
+            manifest: Arc::clone(&manifest),
+            tier: PluginTier::Core,
+            approved_grants: Vec::new(),
+        };
+        let downloads = crate::downloads::DownloadCenter::with_default_client();
+        let program = ensure_local_sidecar_present(
+            &sidecar_name,
+            &plugin_id,
+            slot.command.clone(),
+            &slot.command,
+            &downloads,
+            Some(&registration),
+        )
+        .await;
+
+        // 3. Registered, from the real `ManifestSidecar` code path. Note the resolver
+        //    that matters is the MCP one, not this function's: with no `.version` marker
+        //    the sidecar resolution still falls through to the bare command, and the
+        //    server registers anyway.
+        assert_eq!(program, slot.command);
+        assert!(
+            registry.contains_server(&server),
+            "a binary landing must register the declaration the enable pass skipped"
+        );
+        let summary = registry
+            .server_summaries()
+            .into_iter()
+            .find(|s| s.name == server)
+            .expect("the registered server must be listed");
+        assert_eq!(
+            summary.command,
+            slot.path.to_string_lossy(),
+            "the stored command must be the absolute managed-bin path, not the bare name"
+        );
+
+        // 4. Cost control: a lazy sidecar wakes over and over, and `register_server`
+        //    rebuilds the server map + clears the tool cache. Once every declared name is
+        //    registered the notifier must do nothing at all.
+        assert!(
+            notify_managed_binary_ready(&registration).is_empty(),
+            "a wake with nothing left to register must not touch the registry"
+        );
+
+        clear_missing_sidecar_binary(&sidecar_name);
+    }
+
+    /// The skip-if-nothing-to-do guard must key on OWNERSHIP, not on "is this name known
+    /// to the registry". Core reserves a set of built-in server names
+    /// (`threads`, `research`, the capability facade, …) that `contains_server` answers
+    /// `true` for whether or not anything is registered — while a plugin registration by
+    /// that name is real work, because it overlays the built-in in `rebuild_servers`.
+    ///
+    /// Guarding on `contains_server` would therefore switch this notifier off
+    /// *permanently*, and silently, for exactly the apps that are taking a name Core
+    /// still reserves — which is the shape of every in-flight severance of a built-in
+    /// Core MCP module out to its own app. Hence `plugin_server_owner`.
+    #[tokio::test]
+    async fn a_name_core_merely_reserves_does_not_suppress_the_notifier() {
+        let slot = ManagedBinSlot::reserve();
+        slot.install();
+        let plugin_id = format!("com.test.reserved-{}", uuid::Uuid::new_v4());
+        // Any reserved built-in name works; `threads` stands in for whichever Core
+        // module an app is in the middle of taking over.
+        let server = crate::sidecar::mcp::threads::SERVER_NAME;
+        let sidecar_name = namespaced_name(&plugin_id, "worker");
+
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        assert!(
+            registry.contains_server(server),
+            "precondition: the name is reserved even though nothing is registered"
+        );
+        assert!(
+            registry.plugin_server_owner(server).is_none(),
+            "precondition: but no PLUGIN owns it, so a registration would change something"
+        );
+
+        let registration = McpRegistration {
+            registry: Arc::clone(&registry),
+            manifest: Arc::new(manifest_declaring_mcp_server(
+                &plugin_id,
+                server,
+                &slot.command,
+            )),
+            tier: PluginTier::Core,
+            approved_grants: Vec::new(),
+        };
+        let downloads = crate::downloads::DownloadCenter::with_default_client();
+        let _ = ensure_local_sidecar_present(
+            &sidecar_name,
+            &plugin_id,
+            slot.command.clone(),
+            &slot.command,
+            &downloads,
+            Some(&registration),
+        )
+        .await;
+
+        assert_eq!(
+            registry.plugin_server_owner(server).as_deref(),
+            Some(plugin_id.as_str()),
+            "a reserved-but-unowned name must not short-circuit the notifier"
+        );
+        // And now that it IS owned, the guard does its job on the next wake.
+        assert!(
+            notify_managed_binary_ready(&registration).is_empty(),
+            "once owned, a wake must not touch the registry"
+        );
+
+        clear_missing_sidecar_binary(&sidecar_name);
+    }
+
+    /// The notifier is the SAME gated door, asked twice — not a second, ungated one. A
+    /// Community-tier plugin without the approved `mcp:server` grant registers nothing
+    /// when its binary lands, exactly as it registered nothing at enable.
+    ///
+    /// This is the property that matters most here: the notifier fires from a code path
+    /// (a sidecar start / lazy wake) that has no gate of its own, so if it re-derived
+    /// "which declarations now resolve" instead of re-running
+    /// `register_manifest_mcp_servers`, a `~/.ryu/plugins` manifest could reach
+    /// `Command::new` just by shipping a binary.
+    #[tokio::test]
+    async fn the_notifier_does_not_bypass_the_tier_and_grant_gate() {
+        let slot = ManagedBinSlot::reserve();
+        slot.install();
+        let plugin_id = format!("com.test.ungated-{}", uuid::Uuid::new_v4());
+        let server = format!("ungated-srv-{}", uuid::Uuid::new_v4());
+        let sidecar_name = namespaced_name(&plugin_id, "worker");
+
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let registration = McpRegistration {
+            registry: Arc::clone(&registry),
+            manifest: Arc::new(manifest_declaring_mcp_server(
+                &plugin_id,
+                &server,
+                &slot.command,
+            )),
+            tier: PluginTier::Community,
+            approved_grants: Vec::new(),
+        };
+
+        let downloads = crate::downloads::DownloadCenter::with_default_client();
+        let _ = ensure_local_sidecar_present(
+            &sidecar_name,
+            &plugin_id,
+            slot.command.clone(),
+            &slot.command,
+            &downloads,
+            Some(&registration),
+        )
+        .await;
+
+        assert!(
+            !registry.contains_server(&server),
+            "a Community-tier plugin without the approved grant must register nothing, \
+             even though its binary is now installed and resolvable"
+        );
+        // And the grant is what unlocks it — so the skip above is the gate, not a
+        // resolution failure that would make this test vacuous.
+        let granted = McpRegistration {
+            approved_grants: vec![crate::sidecar::mcp::GRANT_MCP_SERVER.to_owned()],
+            ..registration
+        };
+        assert_eq!(
+            notify_managed_binary_ready(&granted),
+            vec![server.clone()],
+            "with the grant approved, the same landing registers the server"
+        );
+
+        clear_missing_sidecar_binary(&sidecar_name);
     }
 
     /// The surfaced half: `health_check` reports the recorded reason through

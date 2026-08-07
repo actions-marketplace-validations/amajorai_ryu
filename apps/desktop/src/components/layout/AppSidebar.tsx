@@ -230,6 +230,7 @@ import {
 	WorkflowTriggerIcons,
 } from "@/src/lib/workflow-triggers.tsx";
 import { useConversationFlagsStore } from "@/src/store/useConversationFlagsStore.ts";
+import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import type { Conversation, Message } from "@/types/chat.ts";
@@ -2361,6 +2362,7 @@ function AgentsSection({
 	pageSize,
 	sort,
 }: SectionProps) {
+	const { openCreateAgent } = useCreateAgentDialog();
 	const { openTab } = useTabsContext();
 	const { agents, loading } = useAgents();
 	const usageBarPrefs = useUsageBarPrefs();
@@ -2478,10 +2480,7 @@ function AgentsSection({
 	return (
 		<SidebarSection
 			action={
-				<SectionAddButton
-					onClick={() => openTab("/agents/new/edit", { title: "New agent" })}
-					title="New agent"
-				/>
+				<SectionAddButton onClick={() => openCreateAgent()} title="New agent" />
 			}
 			collapsed={collapsed}
 			dnd={dnd}

@@ -61,6 +61,7 @@ export default function Hero() {
 
 							<PageHeader
 								className="max-w-2xl whitespace-pre-line"
+								stagger={false}
 								title={HERO_TITLE}
 								titleClassName={landingHeadlineClass}
 							/>

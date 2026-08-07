@@ -527,6 +527,7 @@ export function PreflightPage({
 					<GhostOrb size="50px" variant="outline" />
 				</div>
 				<PageHeader
+					stagger={false}
 					subtitle={
 						health.coreState === "running"
 							? "Core is up. Check any component below, then continue."

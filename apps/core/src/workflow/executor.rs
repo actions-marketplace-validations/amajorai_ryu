@@ -238,7 +238,7 @@ pub async fn fail_run(run_id: &str, error: &str) -> Result<(), String> {
                 client
                     .report_failure(
                         &run_id,
-                        ryu_healing::HealSource::Workflow,
+                        crate::healing_client::HealSource::Workflow,
                         format!("Workflow run {run_id} failed."),
                         error,
                     )
@@ -250,14 +250,20 @@ pub async fn fail_run(run_id: &str, error: &str) -> Result<(), String> {
 }
 
 /// Re-run a failed workflow from scratch: load the failed run, load its workflow,
-/// and start a FRESH run with the same inputs under a new `healrun_`-prefixed id
-/// (the never-heal-a-heal marker, so a retry that itself fails won't be re-healed).
+/// and start a FRESH run with the same inputs under a new
+/// [`ryu_healing_contracts::HEAL_PREFIX`]-prefixed id (the never-heal-a-heal marker,
+/// so a retry that itself fails won't be re-healed — the healing sidecar reads the
+/// prefix back off the next failure, which is why it is a shared constant).
 /// Used by the self-healing loop's approved workflow fix.
 pub async fn rerun_run(run_id: &str) -> Result<WorkflowRun, String> {
     let run = store::load_run(run_id).map_err(|_| "run not found".to_string())?;
     let workflow = store::load_workflow(&run.workflow_id)
         .map_err(|_| format!("workflow '{}' not found", run.workflow_id))?;
-    let new_id = format!("healrun_{}", uuid::Uuid::new_v4().simple());
+    let new_id = format!(
+        "{}{}",
+        ryu_healing_contracts::HEAL_PREFIX,
+        uuid::Uuid::new_v4().simple()
+    );
     run_workflow(&workflow, run.input.clone(), new_id).await
 }
 
@@ -1721,10 +1727,31 @@ async fn run_recipe(recipe: &str, params: &serde_json::Value) -> Result<String, 
     // Replay routes through the live ghost engine (input synthesis + AX). The
     // params object's string leaves were already template-resolved by the caller,
     // so `{{input}}`/`{{nodes.*}}` slots are filled before substitution.
-    let result = ryu_recipes::run(recipe, params.clone())
+    //
+    // Structural twin of `run_ghost_action` below: `ghost__ghost_run` is a Core
+    // BUILT-IN MCP tool, so the node drives the shared registry directly rather
+    // than linking the out-of-process `@ryu/recipes` app. The app's own
+    // `/api/recipes/:name/run` still reaches this same engine through the generic
+    // `ghost.replay` kernel capability — two lanes, one registry.
+    //
+    // Two deliberate consequences of owning replay here: the app's
+    // `replay.ended`/`replay.failed` events do not fire on this lane (they never
+    // did — the emitter no-ops without a per-plugin `RYU_EXT_TOKEN`, which Core
+    // does not have), and the transport-error message no longer carries the app
+    // wrapper's doubled `recipe replay failed:` prefix.
+    let registry = crate::sidecar::mcp::global_registry()
+        .ok_or_else(|| "recipe node: MCP registry not initialized".to_string())?;
+    let envelope = registry
+        .call_tool(
+            crate::sidecar::mcp::GHOST_RUN_TOOL,
+            serde_json::json!({ "recipe": recipe, "params": params }),
+            None,
+        )
         .await
         .map_err(|e| format!("recipe node: '{recipe}' failed: {e}"))?;
-    Ok(result.to_string())
+    crate::sidecar::mcp::client::extract_mcp_json(&envelope)
+        .map(|v| v.to_string())
+        .map_err(|e| format!("recipe node: '{recipe}' failed: {e}"))
 }
 
 /// Pure mapping from a recorded action verb + locator/params to the
@@ -1890,7 +1917,7 @@ async fn run_ghost_action(
         .await
         .map_err(|e| format!("ghost action node: '{action}' failed: {e}"))?;
     // Unwrap ghost's `{ content: [{ text }], isError? }` envelope; surface errors.
-    ryu_recipes::extract_mcp_json(&result)
+    crate::sidecar::mcp::client::extract_mcp_json(&result)
         .map(|v| v.to_string())
         .map_err(|e| format!("ghost action node: '{action}' failed: {e}"))
 }

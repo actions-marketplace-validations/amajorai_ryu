@@ -436,6 +436,13 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../plugins-store/ghost/manifest.json"),
     include_str!("../../../../plugins-store/shadow/manifest.json"),
     include_str!("../../../../plugins-store/headroom/manifest.json"),
+    // The other cost-reduction plugin, and the other shape: `headroom` compresses
+    // gateway-routed messages through a Core-hosted transform, while `pxpipe` is a
+    // loopback proxy the user points a provider at, imaging the static half of a
+    // request so it bills as vision tokens. Core-tier (its managed sidecar would be
+    // refused at Community — see the plugin's README), never default-on: it needs
+    // Node on PATH and a hand-configured provider before it does anything.
+    include_str!("../../../../plugins-store/pxpipe/manifest.json"),
     include_str!("../../../../plugins-store/firewall/manifest.json"),
     include_str!("fixtures/routing.manifest.json"),
     include_str!("fixtures/sandbox.manifest.json"),
@@ -3130,6 +3137,41 @@ mod tests {
     /// requires Spaces; anything with explicit `targets`) is the feature working as
     /// designed. So each assertion is scoped to the undeclared case, which is the
     /// one that must never change behaviour.
+    /// EVERY compiled-in manifest must parse. `load_builtins` is a
+    /// `filter_map(...ok())` and `load` only `warn!`s, so a manifest that fails
+    /// validation does not fail loudly — the app simply CEASES TO EXIST at runtime,
+    /// with its sidecars, MCP servers and contributions along with it. That silent
+    /// mode is the reason this is asserted rather than trusted.
+    ///
+    /// The count check is the load-bearing half: iterating the survivors can never
+    /// notice the one that did not survive.
+    #[test]
+    fn every_compiled_in_manifest_parses_and_none_is_silently_dropped() {
+        let manifests = PluginManifestLoader::load_builtins();
+        assert_eq!(
+            manifests.len(),
+            BUILTIN_MANIFESTS.len(),
+            "{} of {} built-in manifests were dropped by parse/validate — run \
+             `PluginManifestLoader::load()` with tracing on to see which",
+            BUILTIN_MANIFESTS.len() - manifests.len(),
+            BUILTIN_MANIFESTS.len()
+        );
+
+        // A declared MCP server whose `command` is blank clears no gate and spawns
+        // nothing: `mcp_command_is_present` rejects empty, so the declaration is
+        // dead weight that looks live in the manifest. Generic over all built-ins —
+        // no app is named here.
+        for m in &manifests {
+            for (name, decl) in &m.mcp_servers {
+                assert!(
+                    !decl.command.trim().is_empty(),
+                    "built-in '{}' declares MCP server '{name}' with a blank command",
+                    m.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn builtins_that_declare_nothing_keep_their_old_permissive_behaviour() {
         // `load_builtins`, not `load`: the latter also scans the developer's real

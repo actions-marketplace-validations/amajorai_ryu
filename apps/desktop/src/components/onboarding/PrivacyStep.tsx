@@ -193,6 +193,7 @@ export function PrivacyStep({ busy = false, onContinue }: PrivacyStepProps) {
 						<GhostOrb size="50px" variant="outline" />
 					</div>
 					<PageHeader
+						stagger={false}
 						subtitle="Choose what Ryu can send. You can change any of it later in Settings."
 						title="Your privacy"
 					/>

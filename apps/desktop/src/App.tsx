@@ -1,3 +1,4 @@
+import { ditherAvatarSeed } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { Logo as OrbLogo } from "@ryu/ui/components/logo.tsx";
 import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
 import { DEFAULT_THEME_MODE } from "@ryu/ui/theme/prefs";
@@ -586,6 +587,11 @@ function MainApp() {
 				) : waitlisted ? (
 					<PageWrapper>
 						<WaitlistPage
+							avatarSeed={ditherAvatarSeed({
+								id: session?.user?.id,
+								email: session?.user?.email,
+								name: session?.user?.name,
+							})}
 							avatarUrl={session?.user?.image ?? null}
 							userName={session?.user?.name ?? null}
 						/>

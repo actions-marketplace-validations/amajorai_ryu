@@ -28,6 +28,7 @@ import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
+import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import {
 	type CreateMenuAction,
 	useContributedCreateActions,
@@ -54,6 +55,7 @@ export function CreateMenu() {
 	// node cap and open the same upgrade modal even when no other cap hook is up.
 	useEntityCap();
 	const { openTab } = useTabsContext();
+	const { openCreateAgent } = useCreateAgentDialog();
 	const { create: createTeam } = useTeams();
 	const { agents } = useAgents();
 	const { create: createSpace } = useSpacesContext();
@@ -101,7 +103,7 @@ export function CreateMenu() {
 		{
 			id: "agent",
 			label: "New agent",
-			onSelect: () => openTab("/agents/new/edit", { title: "New agent" }),
+			onSelect: () => openCreateAgent(),
 		},
 		{
 			id: "team",

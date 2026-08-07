@@ -1,6 +1,20 @@
 @import "@ryu/ui/globals.css";
+/* Structural CSS for the shared agent elements (markdown/diff rules + the
+   shimmer/blink/ellipsis keyframes). The island renders the desktop message list,
+   so it needs the same stylesheet the desktop imports — without it, streamed
+   markdown and tool diffs render unstyled and the loading animations don't run. */
+@import "../../../../packages/blocks/src/desktop/agent-elements/agent-ui.css";
 
 @source "./";
+/* The island renders real @ryu/blocks components — its own island shell AND the
+   desktop message list (see island-transcript). `@ryu/blocks` resolves through a
+   node_modules symlink, which Tailwind v4's automatic source detection excludes,
+   so those files must be listed explicitly or their utilities are never emitted
+   and the transcript renders unstyled. */
+@source "../../../../packages/blocks/src/island";
+@source "../../../../packages/blocks/src/desktop";
+@source "../../../../packages/blocks/src/composer";
+@source "../../../../packages/blocks/src/command";
 
 @theme inline {
 	--font-sans: "Inter Variable", sans-serif;

@@ -10,6 +10,19 @@ import { createContext, useContext } from "react";
  */
 export interface ChatDisplayPrefs {
 	/**
+	 * How much room the transcript gives each turn.
+	 * - "comfortable" (default): the full desktop chat — centred 720px column,
+	 *   generous padding, floating table of contents, pinned user message.
+	 * - "compact": the same components in a narrow surface (the island's mini
+	 *   chat, a companion popover). Tighter padding, no centring column, and the
+	 *   reading aids that need width (TOC, pinned bar) are dropped.
+	 *
+	 * This is the ONE knob that makes the desktop message list reusable in a small
+	 * surface — the alternative is a second transcript implementation that drifts
+	 * every time the desktop one gains a part type.
+	 */
+	density: "comfortable" | "compact";
+	/**
 	 * When true, bash/command tool output renders fully expanded (no height cap).
 	 * When false, output is capped at a few lines with overflow hidden.
 	 * Default: false (collapsed).
@@ -43,6 +56,7 @@ export interface ChatDisplayPrefs {
 }
 
 const DEFAULT_PREFS: ChatDisplayPrefs = {
+	density: "comfortable",
 	groupToolUses: true,
 	expandFileEdits: false,
 	expandCommands: false,

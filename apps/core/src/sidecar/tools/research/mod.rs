@@ -9,9 +9,10 @@
 //!
 //! Placement (Core vs Gateway, AGENTS.md §1): **Core** — it decides *what runs*
 //! (which experiment, in which workspace). The chat calls the researcher agent
-//! makes still route through the Gateway. Consumed by the Core `/api/research/*`
-//! data path (`server::research`) and the `research__*` MCP tools
-//! (`sidecar::mcp::research`).
+//! makes still route through the Gateway. Nothing in Core consumes the engine any
+//! more: both consumers — the `/api/research/*` data path and the `research__*` MCP
+//! tools — are served out-of-process by the `@ryu/research` app itself, which
+//! reaches the engine directly over loopback.
 //!
 //! Lifecycle mirrors [`crate::sidecar::providers::ryutts::RyuTtsManager`]: adopt
 //! an already-running server on the port (e.g. `python -m ryu_research`) rather
@@ -20,20 +21,63 @@
 //! registered so the catalog/routes can reach it, but never in `startup_order`.
 //!
 //! This module is the kernel side of the research decomposition: the `/api/research/*`
-//! proxy handlers and the `research__*` MCP tool contract moved to the `ryu-research`
-//! crate (`apps-store/research/backend`); what stays here is the generic
-//! sidecar-lifecycle plumbing (the `RyuTtsManager` analog). The port + base-URL are
-//! now defined once in the crate ([`ryu_research::RESEARCH_PORT`] /
-//! [`ryu_research::research_base_url`]) and referenced here so Core and the moved
-//! surface never disagree about where the sidecar lives.
+//! proxy handlers and the `research__*` MCP tool contract live in the `ryu-research`
+//! crate (`apps-store/research/backend`), which Core no longer links at all — its HTTP
+//! surface is served by the app's own sidecar through the generic ext-proxy, and its
+//! MCP tools by the app's own `ryu-research mcp` stdio server through the generic
+//! `mcp_servers` path. What stays here is the generic sidecar-lifecycle plumbing (the
+//! `RyuTtsManager` analog) for the **Python autoresearch engine**.
+//!
+//! ## Which port this file is about
+//!
+//! Two different processes, two different ports, and conflating them would make Core
+//! fight the app's own sidecar for a socket:
+//!
+//! - **`RYU_RESEARCH_PORT` / 7995** — the app's *Rust proxy* (`apps-store/research`'s
+//!   `sidecars[0]`). Core injects it into that child via the manifest's `port_env`;
+//!   nothing in this file touches it.
+//! - **[`ENGINE_PORT`] / 8087** — the *Python autoresearch engine* this manager
+//!   spawns (`python -m ryu_research`) and health-checks. That is the port below.
+//!
+//! The engine's address was previously read from the `ryu-research` crate. Severing
+//! that dependency relocates the constant rather than introducing one: Core already
+//! carried `8087` in [`crate::profile::apply_env_defaults`], which seeds the
+//! `RYU_RESEARCH_UPSTREAM` default the client side honours.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Context;
-use ryu_research::{research_base_url, RESEARCH_PORT};
 
 use crate::sidecar::{BoxFuture, HealthStatus, ProcessHandle, Sidecar};
+
+/// Loopback port the **Python autoresearch engine** binds to (see the module docs for
+/// why this is not the app sidecar's `RYU_RESEARCH_PORT`). Distinct from llama.cpp
+/// (8080), embeddings (8081), rerank (8082), sd (8083), mlx-vlm (8084), tts (8085),
+/// whisper (8090). Profile-shifted through [`crate::profile::port`] at the spawn site,
+/// and mirrored on the client side by the `RYU_RESEARCH_UPSTREAM` default
+/// `profile::apply_env_defaults` seeds — so both halves move together.
+const ENGINE_PORT: u16 = 8087;
+
+/// Base URL of the Python autoresearch engine, for this manager's health probes.
+///
+/// `RYU_RESEARCH_UPSTREAM` first (a bare `host:port` or a full `http(s)://…` URL),
+/// else loopback [`ENGINE_PORT`]. Byte-identical to the `research_base_url` the
+/// `ryu-research` crate applies on its own side of the wire, deliberately: the app's
+/// sidecar and MCP server read the same var, so Core probing a dev engine on :9087
+/// while the tools talk to :8087 is not a state either side can get into.
+fn engine_base_url() -> String {
+    if let Ok(up) = std::env::var("RYU_RESEARCH_UPSTREAM") {
+        let up = up.trim();
+        if !up.is_empty() {
+            if up.starts_with("http://") || up.starts_with("https://") {
+                return up.trim_end_matches('/').to_owned();
+            }
+            return format!("http://{up}");
+        }
+    }
+    format!("http://127.0.0.1:{ENGINE_PORT}")
+}
 
 /// Directory holding the installed `ryu_research` package + bundled experiments.
 /// Overridable via `RESEARCH_DIR`; defaults to `~/.ryu/research-sidecar`.
@@ -49,11 +93,11 @@ fn workspaces_dir() -> std::path::PathBuf {
     crate::paths::ryu_dir().join("research-workspaces")
 }
 
-/// Whether the sidecar *code* is installed (its package dir is present). Used by
-/// the status endpoint to report `installed`.
-pub fn is_installed() -> bool {
-    sidecar_dir().join("ryu_research").is_dir()
-}
+// NOTE: the `is_installed()` helper that used to live here is gone. Its only caller
+// was the hardcoded `research` row in `sidecar::mcp::server_summaries`, deleted with
+// the rest of that Core-side provider. The app's own binary keeps an equivalent
+// on-disk check (`SidecarHost::is_installed` in `apps-store/research/backend`), which
+// is where the honest answer belongs now that the app owns the surface.
 
 /// Resolve the Python interpreter to run the sidecar with. Prefers an explicit
 /// `RESEARCH_PYTHON`, then a venv inside the sidecar dir, then a bare `python3` /
@@ -136,7 +180,7 @@ impl ResearchManager {
     /// Returns `true` if a sidecar is already answering `/health` on the port.
     async fn server_reachable(client: &reqwest::Client) -> bool {
         client
-            .get(format!("{}/health", research_base_url()))
+            .get(format!("{}/health", engine_base_url()))
             .send()
             .await
             .map(|r| r.status().is_success())
@@ -167,9 +211,9 @@ impl Sidecar for ResearchManager {
             // Profile-aware port (release 8087, dev 9087, …): the client side is
             // steered to the same port via the `RYU_RESEARCH_UPSTREAM` env default
             // `profile::apply_env_defaults` seeds, so a dev stack never adopts the
-            // release stack's sidecar. The release profile is byte-identical to
-            // `RESEARCH_PORT` / `RESEARCH_ADDR`.
-            let research_port = crate::profile::port(RESEARCH_PORT);
+            // release stack's engine. On the release profile this is exactly
+            // [`ENGINE_PORT`], matching `engine_base_url`'s default.
+            let research_port = crate::profile::port(ENGINE_PORT);
             let research_addr = format!("127.0.0.1:{research_port}");
 
             // Adopt an already-running sidecar (e.g. `python -m ryu_research`)
@@ -280,7 +324,7 @@ impl Sidecar for ResearchManager {
                 return HealthStatus::Unhealthy("ryu-research process not running".into());
             }
             match client
-                .get(format!("{}/health", research_base_url()))
+                .get(format!("{}/health", engine_base_url()))
                 .send()
                 .await
             {

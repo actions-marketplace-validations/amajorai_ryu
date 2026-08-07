@@ -91,15 +91,16 @@ function getImageUrlFromPart(part: unknown): string | null {
 	return null;
 }
 
-interface FilePart {
-	fileName?: string;
-	filename?: string;
-	mimeType?: string;
-	name?: string;
-	size?: number;
-	type: "file";
-	url?: string;
-}
+/**
+ * The `type: "file"` message part, as it arrives on the wire.
+ *
+ * Documentation only — `getFileFromPart` type-tests each field it reads rather
+ * than asserting an unknown part into this shape. The name is spelled three
+ * different ways by different producers, hence the trio below.
+ *
+ * `{ fileName?: string; filename?: string; mimeType?: string; name?: string;
+ *    size?: number; type: "file"; url?: string }`
+ */
 
 /**
  * Sender attribution for a user bubble, carried on the AI SDK message's
@@ -174,16 +175,24 @@ function getFileFromPart(part: unknown) {
 	if (part.type !== "file") {
 		return null;
 	}
-	const filePart = part as FilePart;
-	const filename =
-		filePart.filename || filePart.name || filePart.fileName || "Attachment";
-	const isImage = filePart.mimeType?.startsWith("image/") ?? false;
-	if (isImage) {
+	// Each field is read off the checked record and type-tested individually,
+	// rather than asserting the whole thing into FilePart — a
+	// `Record<string, unknown>` does not overlap that interface, so the old
+	// `part as FilePart` was an unchecked assertion over upstream data.
+	// `nonEmpty` reproduces the previous `||` chain: a blank name falls through.
+	const nonEmpty = (value: unknown): string | undefined =>
+		typeof value === "string" && value.length > 0 ? value : undefined;
+	const mimeType = nonEmpty(part.mimeType);
+	if (mimeType?.startsWith("image/")) {
 		return null;
 	}
 	return {
-		filename,
-		size: filePart.size,
+		filename:
+			nonEmpty(part.filename) ??
+			nonEmpty(part.name) ??
+			nonEmpty(part.fileName) ??
+			"Attachment",
+		size: typeof part.size === "number" ? part.size : undefined,
 	};
 }
 
@@ -336,7 +345,7 @@ export const UserMessage = memo(function UserMessage({
 	const timestamp = createdAt ? new Date(createdAt) : null;
 
 	const TimestampNode = timestamp ? (
-		<TooltipProvider delayDuration={0}>
+		<TooltipProvider delay={0}>
 			<Tooltip>
 				<TooltipTrigger className="text-muted-foreground/70 text-xs">
 					{formatRelativeTime(timestamp)}

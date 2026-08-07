@@ -89,6 +89,7 @@ import {
 	useRecents,
 } from "@/src/lib/library.ts";
 import { WorkflowFlowStrip } from "@/src/lib/workflow-triggers.tsx";
+import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 
 /** A Library tab.
  *
@@ -269,6 +270,7 @@ function LibraryCollections({
 	};
 
 	const { openTab } = useTabsContext();
+	const { openCreateAgent } = useCreateAgentDialog();
 	const { favorites, toggle: toggleFavorite } = useFavorites();
 	const recents = useRecents();
 
@@ -698,7 +700,7 @@ function LibraryCollections({
 			case "agent":
 				return {
 					label: "New agent",
-					onCta: () => openTab("/agents/new/edit", { title: "New agent" }),
+					onCta: () => openCreateAgent(),
 				};
 			case "workflow":
 				return {

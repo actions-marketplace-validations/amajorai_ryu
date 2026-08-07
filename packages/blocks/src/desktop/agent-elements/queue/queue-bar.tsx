@@ -196,14 +196,17 @@ function QueueItem({
 				) : (
 					<>
 						<Tooltip>
-							<TooltipTrigger asChild>
-								<span
-									className="min-w-0 flex-1 cursor-default overflow-hidden whitespace-nowrap"
-									style={FADE_STYLE}
-								>
-									{item.content}
-								</span>
-							</TooltipTrigger>
+							{/* Base UI composes through `render`, not `asChild`. */}
+							<TooltipTrigger
+								render={
+									<span
+										className="min-w-0 flex-1 cursor-default overflow-hidden whitespace-nowrap"
+										style={FADE_STYLE}
+									>
+										{item.content}
+									</span>
+								}
+							/>
 							<TooltipContent
 								className="max-w-[360px] whitespace-pre-wrap break-words text-xs"
 								side="top"

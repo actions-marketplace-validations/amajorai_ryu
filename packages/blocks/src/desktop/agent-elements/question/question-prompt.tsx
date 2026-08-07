@@ -110,7 +110,7 @@ export function QuestionPrompt({
 		customEnabled,
 		initialAnswer?.kind,
 		initialAnswer?.text,
-		initialAnswer.selectedIds,
+		initialAnswer?.selectedIds,
 		initialAnswer,
 	]);
 
@@ -276,7 +276,9 @@ export function QuestionPrompt({
 											: "border-border bg-transparent text-muted-foreground"
 									)}
 								>
-									{optionBadge(activeQuestion.options?.length)}
+									{/* The custom row's badge follows the last option, so with no
+								    options it is the first letter. */}
+								{optionBadge(activeQuestion.options?.length ?? 0)}
 								</span>
 								<input
 									className="h-7 w-full rounded-md border border-border bg-background px-2 text-foreground text-sm"

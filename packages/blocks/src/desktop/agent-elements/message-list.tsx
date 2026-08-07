@@ -15,6 +15,10 @@ import {
 	MessageScrollerViewport,
 } from "@ryu/ui/components/message-scroller";
 import {
+	ImageGeneration,
+	type ImageGenerationStatus,
+} from "@ryu/ui/components/motion/image-generation.tsx";
+import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
@@ -342,6 +346,122 @@ function getAssistantImageUrl(part: unknown): string | null {
 	return null;
 }
 
+/** Longest edge, in px, a generated image occupies in the transcript. */
+const MAX_IMAGE_EDGE = 360;
+
+const IMAGE_GENERATION_STATUSES = new Set<ImageGenerationStatus>([
+	"queued",
+	"generating",
+	"refining",
+	"complete",
+	"error",
+]);
+
+export interface ImageGenerationPartData {
+	/** The prompt that produced it, shown under the frame. */
+	prompt?: string;
+	/** Where the generation is: `generating` while Core is working, then
+	 *  `complete` (with `url`) or `error` (with `statusText` = the reason). */
+	status: ImageGenerationStatus;
+	/** Overrides the component's stock status line — used to surface the engine's
+	 *  own error text instead of a generic "Generation failed". */
+	statusText?: string;
+	/** The finished image, once there is one. */
+	url?: string;
+}
+
+/**
+ * A client-only image-generation part — the *in-flight* half of an inline
+ * `/api/images/generate` turn. The producer (ChatPage / AssistantPanel) appends
+ * this the moment generation starts and rewrites the same message in place when
+ * the engine answers, so the frame is reserved up front and the finished image
+ * fades in with no layout shift. Producer and consumer agree on this exact
+ * shape, same as the `file`-part contract above.
+ */
+function getImageGenerationPart(part: unknown): ImageGenerationPartData | null {
+	if (!isRecord(part) || part.type !== "data-image-generation") {
+		return null;
+	}
+	const data = isRecord(part.data) ? part.data : {};
+	const status =
+		typeof data.status === "string" &&
+		IMAGE_GENERATION_STATUSES.has(data.status as ImageGenerationStatus)
+			? (data.status as ImageGenerationStatus)
+			: "generating";
+	return {
+		prompt: typeof data.prompt === "string" ? data.prompt : undefined,
+		status,
+		statusText:
+			typeof data.statusText === "string" ? data.statusText : undefined,
+		url: typeof data.url === "string" ? data.url : undefined,
+	};
+}
+
+/**
+ * The one inline surface for a generated image, in both its pending and its
+ * finished state. The frame is square until the image reports its own
+ * dimensions, then takes the real aspect ratio — with `object-contain` so a
+ * non-square generation (`size: "512x768"`) is never cropped.
+ *
+ * `showStatus` is off for images that merely *arrive* as `file` parts (pasted,
+ * or streamed by Core): those get the same frame, without a status line
+ * describing work that never happened here.
+ */
+function AssistantGeneratedImage({
+	prompt,
+	showStatus,
+	status,
+	statusText,
+	url,
+}: ImageGenerationPartData & { showStatus: boolean }) {
+	const [size, setSize] = useState<{ height: number; width: number } | null>(
+		null
+	);
+
+	const handleLoad = useCallback(
+		(event: React.SyntheticEvent<HTMLImageElement>) => {
+			const { naturalHeight, naturalWidth } = event.currentTarget;
+			if (naturalWidth > 0 && naturalHeight > 0) {
+				setSize({ height: naturalHeight, width: naturalWidth });
+			}
+		},
+		[]
+	);
+
+	// The frame is square until the image reports its own dimensions. A portrait
+	// generation then narrows rather than growing tall, so BOTH edges stay within
+	// the transcript's 360px budget (the old render capped height the same way).
+	const maxWidth =
+		size && size.height > size.width
+			? Math.round(MAX_IMAGE_EDGE * (size.width / size.height))
+			: MAX_IMAGE_EDGE;
+
+	return (
+		<div className="w-full" style={{ maxWidth }}>
+			<ImageGeneration
+				aspectRatio={size ? `${size.width} / ${size.height}` : "1 / 1"}
+				mediaClassName="[&>*]:object-contain [&_img]:object-contain"
+				prompt={prompt}
+				// Only ever the image's real dimensions — nothing is claimed before
+				// the engine has actually produced something.
+				resolution={size ? `${size.width} × ${size.height}` : undefined}
+				showStatus={showStatus}
+				size="fluid"
+				status={status}
+				statusText={statusText}
+			>
+				{url ? (
+					<img
+						alt={prompt ?? "Generated image"}
+						onLoad={handleLoad}
+						src={url}
+					/>
+				) : null}
+			</ImageGeneration>
+		</div>
+	);
+}
+
 /**
  * A NON-image assistant `file` part (audio, or any other mime), resolved to a
  * playable/downloadable url + its media type. Images are handled separately by
@@ -411,9 +531,13 @@ function getChangedFilesFromParts(parts: unknown[]): ChatTocFileChange[] {
 		if (!isV5ToolPart(part)) {
 			continue;
 		}
+		// Read once into a local and let `typeof` narrow it, instead of testing
+		// one cast and then re-asserting a second, incompatible one — the old
+		// `part as { toolName: string }` did not overlap `ToolPartBase` at all.
+		const rawToolName = (part as { toolName?: unknown }).toolName;
 		const toolName =
-			typeof (part as { toolName?: unknown }).toolName === "string"
-				? (part as { toolName: string }).toolName
+			typeof rawToolName === "string"
+				? rawToolName
 				: typeof part.type === "string" && part.type.startsWith("tool-")
 					? part.type.slice("tool-".length)
 					: "";
@@ -965,11 +1089,15 @@ export const MessageList = memo(function MessageList({
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [isMounted, setIsMounted] = useState(false);
 	const scrollerRef = useRef<HTMLDivElement>(null);
-	const { pinUserMessage } = useChatDisplayPrefs();
+	const { density, pinUserMessage } = useChatDisplayPrefs();
+	// A narrow surface (island mini-chat, companion popover) renders the same
+	// parts, just without the aids that need width: no centring column, tighter
+	// padding, no TOC, no pinned user bar.
+	const isCompact = density === "compact";
 
 	const { pinnedMessage, registerAnchor, scrollToPinned } =
 		usePinnedUserMessage({
-			enabled: pinUserMessage,
+			enabled: pinUserMessage && !isCompact,
 			messages,
 			scrollerRef,
 		});
@@ -1051,9 +1179,9 @@ export const MessageList = memo(function MessageList({
 		>
 			<div className="flex min-h-0 flex-1 flex-col" ref={scrollerRef}>
 				<MessageScroller className={cn("an-message-list flex-1", className)}>
-					<ChatToc items={tocItems} />
+					{isCompact ? null : <ChatToc items={tocItems} />}
 					<MessageScrollerViewport>
-						{pinUserMessage && pinnedMessage ? (
+						{pinUserMessage && !isCompact && pinnedMessage ? (
 							<div className="sticky top-0 z-20 -mb-1">
 								<div className="mx-auto w-full max-w-[720px] px-4 pt-2 pb-1">
 									<PinnedUserMessageBar
@@ -1063,7 +1191,14 @@ export const MessageList = memo(function MessageList({
 								</div>
 							</div>
 						) : null}
-						<MessageScrollerContent className="mx-auto w-full max-w-[720px] gap-2 px-4 py-6">
+						<MessageScrollerContent
+							className={cn(
+								"w-full gap-2",
+								isCompact
+									? "px-0.5 py-1"
+									: "mx-auto max-w-[720px] px-4 py-6"
+							)}
+						>
 							{turns.map((turn, turnIndex) => {
 								const isLastTurn = turnIndex === turns.length - 1;
 								const turnKey = turn.userMsg?.id ?? `turn-${turnIndex}`;
@@ -1100,7 +1235,10 @@ export const MessageList = memo(function MessageList({
 													<div
 														className="group/user-message"
 														ref={(el) => {
-															registerAnchor(turn.userMsg?.id, el);
+															// `userMsgId` above is the same id, already narrowed
+															// to a definite string; `turn.userMsg?.id` was
+															// `string | undefined` and registerAnchor needs one.
+															registerAnchor(userMsgId, el);
 														}}
 													>
 														<CustomUserMessage
@@ -1123,7 +1261,7 @@ export const MessageList = memo(function MessageList({
 																isVisible={userCopyVisible}
 																onBranch={
 																	onBranch
-																		? () => onBranch(turn.userMsg?.id)
+																		? () => onBranch(userMsgId)
 																		: undefined
 																}
 																onCopied={() => markCopied(userCopyKey)}
@@ -1237,15 +1375,18 @@ export const MessageList = memo(function MessageList({
 																<MessageHeader className="gap-2 px-0">
 																	<span>{assistantName}</span>
 																	{assistantTimestamp && (
-																		<TooltipProvider delayDuration={0}>
+																		<TooltipProvider delay={0}>
 																			<Tooltip>
-																				<TooltipTrigger asChild>
-																					<span className="inline-flex items-center text-muted-foreground/70 text-xs">
-																						{formatRelativeTime(
-																							assistantTimestamp
-																						)}
-																					</span>
-																				</TooltipTrigger>
+																				{/* Base UI composes through `render`, not `asChild`. */}
+																				<TooltipTrigger
+																					render={
+																						<span className="inline-flex items-center text-muted-foreground/70 text-xs">
+																							{formatRelativeTime(
+																								assistantTimestamp
+																							)}
+																						</span>
+																					}
+																				/>
 																				<TooltipContent>
 																					<p>
 																						{formatFullTimestamp(
@@ -1471,19 +1612,31 @@ function AssistantParts({
 				continue;
 			}
 
+			const generation = getImageGenerationPart(part);
+			if (generation) {
+				elems.push(
+					<AssistantGeneratedImage
+						key={`${msg.id}-image-generation-${i}`}
+						prompt={generation.prompt}
+						showStatus
+						status={generation.status}
+						statusText={generation.statusText}
+						url={generation.url}
+					/>
+				);
+				i++;
+				continue;
+			}
+
 			const imageUrl = getAssistantImageUrl(part);
 			if (imageUrl) {
 				elems.push(
-					<div
-						className="max-w-[360px] rounded-2xl bg-foreground/4 p-1.5"
+					<AssistantGeneratedImage
 						key={`${msg.id}-image-${i}`}
-					>
-						<img
-							alt="Generated image"
-							className="block max-h-[360px] max-w-full rounded-xl object-contain"
-							src={imageUrl}
-						/>
-					</div>
+						showStatus={false}
+						status="complete"
+						url={imageUrl}
+					/>
 				);
 				i++;
 				continue;

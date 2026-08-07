@@ -39,6 +39,7 @@ import type {
 import { InputBar } from "@/components/agent-elements/input-bar.tsx";
 import type { QueueBarProps } from "@/components/agent-elements/queue/queue-bar.tsx";
 import { formatQuotePrefix } from "@/components/agent-elements/quote.tsx";
+import { openExternal } from "@/lib/tauri-bridge.ts";
 import {
 	BtwOverlay,
 	type BtwState,
@@ -143,6 +144,7 @@ import {
 import { getRealtimeJwt, getRealtimeUserId } from "@/src/lib/realtime/jwt.ts";
 import { useRealtimeRoom } from "@/src/lib/realtime/use-realtime-room.ts";
 import { useAppStore } from "@/src/store/useAppStore.ts";
+import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useMeetingRecordingStore } from "@/src/store/useMeetingRecordingStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
@@ -662,6 +664,10 @@ export default function ChatPage({
 		[]
 	);
 
+	// "New agent…" in the composer's agent picker opens the create dialog rather
+	// than a whole editor tab.
+	const { openCreateAgent } = useCreateAgentDialog();
+
 	// Per-agent model selection for the composer model picker. Recomputed when
 	// the active agent changes; the chosen id is persisted per agent and sent in
 	// the chat body. The ref keeps the transport closure reading the live value.
@@ -987,7 +993,16 @@ export default function ChatPage({
 			sendFollowUpMessage: (input) => widgetFollowUp(chatTarget, input),
 			setWidgetState: (input) => widgetSetState(chatTarget, input),
 		};
-		return { Renderer: AppWidget, services };
+		return {
+			// The two shell facts the shared renderer can't derive: how this app
+			// opens a real browser, and which node origin proxies widget assets.
+			env: {
+				openExternal: (href: string) => openExternal(href),
+				proxyOrigin: chatTarget.url,
+			},
+			Renderer: AppWidget,
+			services,
+		};
 	}, [chatTarget]);
 
 	// Voice input: a stable transcribe fn (reads the live node target via a ref)
@@ -1241,7 +1256,12 @@ export default function ChatPage({
 		async (prompt: string) => {
 			const userId = `img-user-${Date.now()}`;
 			const assistantId = `img-${Date.now()}`;
-			// Echo the prompt as a user bubble so the turn reads naturally.
+			// Echo the prompt as a user bubble, and reserve the image frame in the
+			// same tick: MessageList renders a `data-image-generation` part through
+			// the ImageGeneration surface, so the turn shows the generation running
+			// and the finished image fades into an already-sized frame. Core has no
+			// progress events for this path, so the status goes straight from
+			// `generating` to `complete`/`error` — no fabricated intermediate steps.
 			setMessages((prev) => [
 				...prev,
 				{
@@ -1249,46 +1269,64 @@ export default function ChatPage({
 					role: "user",
 					parts: [{ type: "text", text: prompt }],
 				} as (typeof prev)[number],
+				{
+					id: assistantId,
+					role: "assistant",
+					parts: [
+						{
+							type: "data-image-generation",
+							data: { status: "generating", prompt },
+						},
+					],
+				} as unknown as (typeof prev)[number],
 			]);
+			const settle = (parts: unknown[]) => {
+				setMessages((prev) =>
+					prev.map((m) =>
+						m.id === assistantId ? ({ ...m, parts } as typeof m) : m
+					)
+				);
+			};
 			try {
 				const urls = await generateImage(chatTargetRef.current, prompt);
-				const parts =
-					urls.length > 0
-						? urls.map((url) => ({
-								type: "file" as const,
-								mediaType: "image/png",
-								url,
-							}))
-						: [
-								{
-									type: "error" as const,
-									title: "Image generation failed",
-									message: "The image engine returned no image.",
-								},
-							];
-				setMessages((prev) => [
-					...prev,
+				const [first, ...rest] = urls;
+				if (!first) {
+					settle([
+						{
+							type: "data-image-generation",
+							data: {
+								status: "error",
+								prompt,
+								statusText: "The image engine returned no image.",
+							},
+						},
+					]);
+					return;
+				}
+				// The first image drives the generation surface; any extras (n > 1)
+				// ride along as plain file parts, which render in the same frame.
+				settle([
 					{
-						id: assistantId,
-						role: "assistant",
-						parts,
-					} as unknown as (typeof prev)[number],
+						type: "data-image-generation",
+						data: { status: "complete", prompt, url: first },
+					},
+					...rest.map((url) => ({
+						type: "file",
+						mediaType: "image/png",
+						url,
+					})),
 				]);
 			} catch (e) {
-				setMessages((prev) => [
-					...prev,
+				settle([
 					{
-						id: assistantId,
-						role: "assistant",
-						parts: [
-							{
-								type: "error" as const,
-								title: "Image generation failed",
-								message:
-									e instanceof Error ? e.message : "Could not generate image.",
-							},
-						],
-					} as unknown as (typeof prev)[number],
+						type: "data-image-generation",
+						data: {
+							status: "error",
+							prompt,
+							statusText:
+								e instanceof Error ? e.message : "Could not generate image.",
+						},
+					},
 				]);
 			}
 		},
@@ -3336,7 +3374,7 @@ export default function ChatPage({
 		teams,
 		agentId,
 		teamId,
-		onCreateAgent: () => openTab("/agents/new/edit", { title: "New agent" }),
+		onCreateAgent: () => openCreateAgent(),
 		onSelectTeam: (id) => setTeamId(id),
 		onSelectAgent: (id) => {
 			setTeamId(null);

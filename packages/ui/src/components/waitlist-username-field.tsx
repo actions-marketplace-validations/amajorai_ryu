@@ -1,6 +1,8 @@
 "use client";
 
-import { useId } from "react";
+import { Edit03Icon, SeatSelectorIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { useId, useState } from "react";
 import { cn } from "../lib/utils.ts";
 import { Button } from "./button.tsx";
 import { Spinner } from "./spinner.tsx";
@@ -12,10 +14,11 @@ import { Spinner } from "./spinner.tsx";
  * the result in, because those two clients are configured differently (cookie
  * vs. bearer) and neither belongs in the shared UI package.
  *
- * Once reserved the field collapses to the confirmation line rather than staying
- * editable: reserving a handle is the one irreversible-feeling thing on the
- * page, and an input that still looks editable invites a user to believe they
- * can trade it away for another one that might already be gone.
+ * Once reserved the field collapses to a confirmation line, with a "Change
+ * handle" action that puts the input back. It does NOT stay permanently
+ * collapsed: a handle claimed in a hurry is exactly the kind of thing people
+ * want to correct, and the claim is reversible on the server anyway
+ * (`updateUser` just writes the new one).
  */
 
 /** Same shape Better Auth's username plugin enforces (3-32, word chars). */
@@ -37,6 +40,11 @@ export interface WaitlistUsernameFieldProps {
 	error?: string | null;
 	onChange: (value: string) => void;
 	onSubmit: () => void;
+	/**
+	 * Release the reserved handle. Optional: the desktop screen does not offer it,
+	 * and without it the reserved state shows only "Change handle".
+	 */
+	onUnreserve?: () => void;
 	/** In flight: checking availability and claiming. */
 	pending?: boolean;
 	/** Already reserved — renders the confirmation instead of the input. */
@@ -49,6 +57,7 @@ export function WaitlistUsernameField({
 	error,
 	onChange,
 	onSubmit,
+	onUnreserve,
 	pending = false,
 	reserved,
 	value,
@@ -57,21 +66,70 @@ export function WaitlistUsernameField({
 	const errorId = useId();
 	const normalized = normalizeWaitlistUsername(value);
 	const valid = WAITLIST_USERNAME_RE.test(normalized);
+	const [editing, setEditing] = useState(false);
 
-	if (reserved) {
+	// What closes the editor after a submit. `reserved` changing is the obvious
+	// signal, but it is not sufficient: re-confirming the handle you already have
+	// is a legitimate submit that leaves `reserved` untouched, and watching only
+	// that left the editor open forever. So the close is driven off the request
+	// finishing without an error instead, with the `reserved` watch kept for the
+	// case where the parent swaps the handle out from under us.
+	const [lastReserved, setLastReserved] = useState(reserved);
+	if (reserved !== lastReserved) {
+		setLastReserved(reserved);
+		setEditing(false);
+	}
+	const [wasPending, setWasPending] = useState(pending);
+	if (pending !== wasPending) {
+		setWasPending(pending);
+		if (wasPending && !(pending || error)) {
+			setEditing(false);
+		}
+	}
+
+	if (reserved && !editing) {
+		// No heading here: the screen's own PageHeader already says which handle is
+		// reserved, and a second title inside the field stacked two headlines down
+		// the column. This state is just the two things you can do about it.
 		return (
-			<div
-				className={cn(
-					"flex flex-col gap-1 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3",
-					className
-				)}
-			>
-				<p className="font-medium text-sm">
-					<span className="font-mono">@{reserved}</span> is reserved
-				</p>
-				<p className="text-muted-foreground text-xs">
-					It&apos;s yours the moment you&apos;re in. We&apos;ll let you know.
-				</p>
+			<div className={cn("flex flex-col gap-2 sm:flex-row", className)}>
+				<Button
+					className="flex-1"
+					onClick={() => {
+						// Prefill with the current handle so "change" starts from what they
+						// have rather than from an empty field.
+						onChange(reserved);
+						setEditing(true);
+					}}
+					size="lg"
+					type="button"
+					variant="secondary"
+				>
+					<HugeiconsIcon icon={Edit03Icon} size={18} />
+					Change handle
+				</Button>
+				{onUnreserve ? (
+					<Button
+						className="flex-1"
+						disabled={pending}
+						onClick={onUnreserve}
+						size="lg"
+						type="button"
+						variant="destructive"
+					>
+						{pending ? (
+							<span className="flex items-center gap-2">
+								<Spinner className="size-3.5" />
+								Releasing
+							</span>
+						) : (
+							<>
+								<HugeiconsIcon icon={SeatSelectorIcon} size={18} />
+								Unreserve
+							</>
+						)}
+					</Button>
+				) : null}
 			</div>
 		);
 	}
@@ -87,16 +145,17 @@ export function WaitlistUsernameField({
 			}}
 		>
 			<label className="text-muted-foreground text-xs" htmlFor={inputId}>
-				Reserve your handle
+				Meanwhile you&apos;re here, reserve your handle first
 			</label>
 			<div className="flex items-center gap-2">
 				{/* The "@" is a prefix inside the control, not part of the value, so a
 				    user who types it anyway is normalized rather than rejected. */}
-				<div className="flex h-9 min-w-0 flex-1 items-center rounded-md border bg-transparent px-3 focus-within:ring-[3px] focus-within:ring-ring/50">
-					<span
-						aria-hidden="true"
-						className="font-mono text-muted-foreground text-sm"
-					>
+				{/* Same field shape as the sign-in form's inputs — `h-16 border-0
+				    bg-muted` — so arriving from login doesn't feel like a different
+				    product. The radius follows `Input`'s `rounded-3xl` for the same
+				    reason. */}
+				<div className="flex h-16 min-w-0 flex-1 items-center rounded-3xl border-0 bg-muted px-4 focus-within:ring-[3px] focus-within:ring-ring/50">
+					<span aria-hidden="true" className="text-muted-foreground text-sm">
 						@
 					</span>
 					<input
@@ -105,7 +164,7 @@ export function WaitlistUsernameField({
 						autoCapitalize="none"
 						autoComplete="off"
 						autoCorrect="off"
-						className="min-w-0 flex-1 bg-transparent px-1 font-mono text-sm outline-none placeholder:font-sans placeholder:text-muted-foreground"
+						className="min-w-0 flex-1 bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
 						id={inputId}
 						maxLength={USERNAME_MAX_LENGTH}
 						onChange={(event) => onChange(event.target.value)}
@@ -114,14 +173,24 @@ export function WaitlistUsernameField({
 						value={value}
 					/>
 				</div>
-				<Button disabled={pending || !valid} size="sm" type="submit">
+				{/* `h-16` to match the field beside it — `size="lg"` is h-14, which
+					    left the pair a notch out of alignment. */}
+				<Button
+					className="h-16"
+					disabled={pending || !valid}
+					size="lg"
+					type="submit"
+				>
 					{pending ? (
 						<span className="flex items-center gap-2">
 							<Spinner className="size-3.5" />
 							Reserving
 						</span>
 					) : (
-						"Reserve"
+						<>
+							<HugeiconsIcon icon={SeatSelectorIcon} size={18} />
+							Reserve
+						</>
 					)}
 				</Button>
 			</div>

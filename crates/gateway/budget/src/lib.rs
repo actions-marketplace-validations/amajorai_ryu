@@ -1100,10 +1100,66 @@ impl SharedBudgetState {
 /// the flag WITHOUT inventing a balance: we know the org must be gated, we do
 /// not know what it holds, and reporting a made-up number would fire a
 /// dollar-threshold rule on a transport error.
+use std::sync::Arc;
+
+/// `in_flight_micro_usd` is the third field and the one that makes the other two
+/// safe under concurrency. See [`WalletState::try_reserve`].
 #[derive(Default)]
 pub struct WalletState {
     empty: DashMap<String, bool>,
     balance_micro_usd: DashMap<String, i64>,
+    in_flight_micro_usd: DashMap<String, i64>,
+}
+
+/// A claim on part of an org's balance, held for the life of one request.
+///
+/// RAII IS THE WHOLE DESIGN. Metering is post-paid — the request is served, then
+/// debited — so the only way to stop N concurrent requests from all spending the
+/// same balance is to subtract what is *about to* be spent before dispatch. That
+/// subtraction has to be given back on EVERY exit: success, provider error,
+/// budget rejection downstream, a client that hangs up mid-stream, a panic. A
+/// reservation that leaks is strictly worse than the overdraft it prevents,
+/// because it locks a paying customer out of their own balance until the process
+/// restarts, and it leaks silently.
+///
+/// So releasing is not a call any code path is trusted to make. It is [`Drop`],
+/// which the compiler runs on every one of those paths including unwind. The
+/// permit is moved into whatever owns the request's lifetime — a local on the
+/// non-streaming handlers, `StreamObserverState` on the streaming one — and the
+/// release happens when that owner dies. There is deliberately no public
+/// `release()`: a manual release is a second way to do it, and the two would
+/// eventually disagree.
+///
+/// The reservation is an ESTIMATE, and it is never the thing that bills. The
+/// authoritative charge is the post-call debit against the control-plane ledger;
+/// this only decides who is allowed to start.
+pub struct CreditReservation {
+    wallet: Arc<WalletState>,
+    org_id: String,
+    amount_micro_usd: i64,
+}
+
+impl CreditReservation {
+    /// What this permit is holding, in micro-USD. Observability only.
+    pub fn amount_micro_usd(&self) -> i64 {
+        self.amount_micro_usd
+    }
+}
+
+impl Drop for CreditReservation {
+    fn drop(&mut self) {
+        self.wallet
+            .release_in_flight(&self.org_id, self.amount_micro_usd);
+    }
+}
+
+impl std::fmt::Debug for CreditReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreditReservation")
+            .field("org_id", &self.org_id)
+            .field("amount_micro_usd", &self.amount_micro_usd)
+            .finish()
+    }
 }
 
 impl WalletState {
@@ -1149,6 +1205,79 @@ impl WalletState {
             return None;
         }
         self.balance_micro_usd.iter().next().map(|e| *e.value())
+    }
+
+    /// Micro-USD currently reserved by in-flight requests for an org.
+    pub fn in_flight_micro_usd(&self, org_id: &str) -> i64 {
+        self.in_flight_micro_usd
+            .get(org_id)
+            .map(|v| *v)
+            .unwrap_or(0)
+    }
+
+    /// Claim `amount_micro_usd` against `available_micro_usd`, or refuse.
+    ///
+    /// THE ONE ATOMIC STEP. `DashMap::entry` holds a per-key write lock across
+    /// the read-check-write, so two requests arriving in the same instant cannot
+    /// both observe the same headroom and both take it — which is exactly the
+    /// bug this exists to fix, and it would survive any implementation that read
+    /// the counter, decided, and then wrote.
+    ///
+    /// `available_micro_usd` is passed in rather than read from
+    /// `balance_micro_usd` because the caller knows which balance applies: the
+    /// gateway gates on the control-plane-resolved *pool-aware* figure, and a
+    /// pooled request may draw on grant money that the flat per-org balance
+    /// cached here does not describe. Keeping the policy at the call site leaves
+    /// this function with one job — arithmetic nobody else can interleave with.
+    ///
+    /// A non-positive `amount_micro_usd` reserves nothing and always succeeds
+    /// with a zero permit: an estimate of zero is a request we have no basis to
+    /// refuse, and turning "no estimate" into "denied" would take the gateway
+    /// down for every modality whose cost is not known up front.
+    pub fn try_reserve(
+        self: &Arc<Self>,
+        org_id: &str,
+        amount_micro_usd: i64,
+        available_micro_usd: i64,
+    ) -> Option<CreditReservation> {
+        let amount = amount_micro_usd.max(0);
+        let mut entry = self.in_flight_micro_usd.entry(org_id.to_string()).or_insert(0);
+        // `>` not `>=`: a request whose estimate exactly consumes the remaining
+        // balance is the last one that should be admitted, not the first one
+        // refused. Overdraft is bounded by the estimate's error, which is the
+        // honest bound — see the note on estimation at the call site.
+        if amount > 0 && entry.saturating_add(amount) > available_micro_usd {
+            return None;
+        }
+        *entry = entry.saturating_add(amount);
+        Some(CreditReservation {
+            wallet: Arc::clone(self),
+            org_id: org_id.to_string(),
+            amount_micro_usd: amount,
+        })
+    }
+
+    /// Give a claim back. Private: the only caller is [`CreditReservation::drop`],
+    /// because a release anyone can call is a release someone will call twice.
+    fn release_in_flight(&self, org_id: &str, amount_micro_usd: i64) {
+        if amount_micro_usd <= 0 {
+            return;
+        }
+        let mut remove = false;
+        if let Some(mut entry) = self.in_flight_micro_usd.get_mut(org_id) {
+            // `max(0)` is a floor against an accounting slip, not an expected
+            // path: going negative here would silently hand an org unlimited
+            // headroom, which is the failure this whole mechanism exists to
+            // prevent, so it is clamped rather than trusted.
+            *entry = (*entry - amount_micro_usd).max(0);
+            remove = *entry == 0;
+        }
+        if remove {
+            // Drop the key at zero so an idle process does not retain an entry
+            // per org it has ever served.
+            self.in_flight_micro_usd
+                .remove_if(org_id, |_, v| *v == 0);
+        }
     }
 }
 
@@ -1213,6 +1342,148 @@ mod wallet_state_tests {
         assert_eq!(w.sole_balance_micro_usd(), Some(1_000_000));
         w.set_org_balance("org_2", 9_000_000);
         assert_eq!(w.sole_balance_micro_usd(), None);
+    }
+}
+
+#[cfg(test)]
+mod credit_reservation_tests {
+    use super::WalletState;
+    use std::sync::Arc;
+
+    const USD: i64 = 1_000_000;
+
+    #[test]
+    fn concurrent_requests_cannot_all_spend_the_same_balance() {
+        // THE BUG THIS EXISTS FOR. Metering is post-paid, so without a
+        // reservation every request in flight at one instant sees the same
+        // pre-debit balance and all of them pass.
+        let w = Arc::new(WalletState::default());
+        let balance = 10 * USD;
+
+        let held: Vec<_> = (0..10)
+            .filter_map(|_| w.try_reserve("org_1", USD, balance))
+            .collect();
+
+        assert_eq!(held.len(), 10, "ten $1 requests fit in a $10 balance");
+        assert!(
+            w.try_reserve("org_1", USD, balance).is_none(),
+            "the eleventh must be refused — the balance is fully claimed"
+        );
+        assert_eq!(w.in_flight_micro_usd("org_1"), 10 * USD);
+    }
+
+    #[test]
+    fn dropping_a_permit_returns_the_headroom() {
+        let w = Arc::new(WalletState::default());
+        let balance = 2 * USD;
+
+        let first = w.try_reserve("org_1", 2 * USD, balance).unwrap();
+        assert!(w.try_reserve("org_1", USD, balance).is_none());
+
+        drop(first);
+
+        assert_eq!(w.in_flight_micro_usd("org_1"), 0);
+        assert!(
+            w.try_reserve("org_1", USD, balance).is_some(),
+            "the freed headroom is immediately reusable"
+        );
+    }
+
+    #[test]
+    fn a_permit_is_released_on_an_unwinding_path() {
+        // The reason release is `Drop` and not a call: no exit path can forget.
+        let w = Arc::new(WalletState::default());
+        let wallet = Arc::clone(&w);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = wallet.try_reserve("org_1", 5 * USD, 5 * USD).unwrap();
+            panic!("provider blew up mid-request");
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(
+            w.in_flight_micro_usd("org_1"),
+            0,
+            "an unwind must not strand the claim"
+        );
+    }
+
+    #[test]
+    fn reservations_are_per_org() {
+        let w = Arc::new(WalletState::default());
+        let _held = w.try_reserve("org_1", USD, USD).unwrap();
+        assert!(w.try_reserve("org_1", USD, USD).is_none());
+        assert!(
+            w.try_reserve("org_2", USD, USD).is_some(),
+            "one org exhausting its balance must not gate another"
+        );
+    }
+
+    #[test]
+    fn an_exactly_fitting_request_is_admitted() {
+        // `>` not `>=`: the request that exactly consumes the balance is the last
+        // one allowed in, not the first one refused.
+        let w = Arc::new(WalletState::default());
+        assert!(w.try_reserve("org_1", 5 * USD, 5 * USD).is_some());
+    }
+
+    #[test]
+    fn a_zero_estimate_is_admitted_without_claiming_anything() {
+        // Modalities whose cost is not knowable up front must not be denied;
+        // "no estimate" is not "no money".
+        let w = Arc::new(WalletState::default());
+        let permit = w.try_reserve("org_1", 0, 0).expect("admitted");
+        assert_eq!(permit.amount_micro_usd(), 0);
+        assert_eq!(w.in_flight_micro_usd("org_1"), 0);
+    }
+
+    #[test]
+    fn an_empty_balance_admits_nothing_positive() {
+        // Closes the "a wallet holding one micro-USD serves a frontier request"
+        // hole: the gate is now the ESTIMATE against the balance, not `<= 0`.
+        let w = Arc::new(WalletState::default());
+        assert!(w.try_reserve("org_1", USD, 1).is_none());
+        assert!(w.try_reserve("org_1", USD, 0).is_none());
+        assert!(w.try_reserve("org_1", USD, -5 * USD).is_none());
+    }
+
+    #[test]
+    fn the_in_flight_key_does_not_leak_per_org_forever() {
+        let w = Arc::new(WalletState::default());
+        drop(w.try_reserve("org_1", USD, USD).unwrap());
+        assert_eq!(w.in_flight_micro_usd("org_1"), 0);
+    }
+
+    #[test]
+    fn parallel_reservers_never_oversubscribe() {
+        // The check-then-write is inside one `entry` lock; this is the test that
+        // would fail if it were ever split into a read and a write.
+        let w = Arc::new(WalletState::default());
+        let balance = 50 * USD;
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let wallet = Arc::clone(&w);
+            handles.push(std::thread::spawn(move || {
+                let mut mine = Vec::new();
+                for _ in 0..25 {
+                    if let Some(p) = wallet.try_reserve("org_1", USD, balance) {
+                        mine.push(p);
+                    }
+                }
+                mine
+            }));
+        }
+        let held: Vec<_> = handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("thread panicked"))
+            .collect();
+
+        assert_eq!(
+            held.len() as i64,
+            50,
+            "exactly the balance's worth of $1 permits may exist at once"
+        );
+        assert_eq!(w.in_flight_micro_usd("org_1"), balance);
+        drop(held);
+        assert_eq!(w.in_flight_micro_usd("org_1"), 0);
     }
 }
 

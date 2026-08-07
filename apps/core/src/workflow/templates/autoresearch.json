@@ -2,7 +2,7 @@
   "meta": {
     "id": "autoresearch",
     "name": "Autoresearch",
-    "description": "A researcher agent iterates on an experiment via the research tools, keeping only improvements — a git-versioned autoresearch loop.",
+    "description": "Requires the Research app (@ryu/research) to be enabled — it provides the research__* tools this loop drives, and they do not exist on a node where the app is off. A researcher agent iterates on an experiment via those tools, keeping only improvements — a git-versioned autoresearch loop.",
     "category": "research",
     "pattern": "git-ledger-loop",
     "icon": "FlaskConical",

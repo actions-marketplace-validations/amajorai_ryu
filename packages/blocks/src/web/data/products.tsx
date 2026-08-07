@@ -31,7 +31,6 @@ import {
 	Users,
 	Zap,
 } from "lucide-react";
-import Link from "next/link";
 import type { ReactNode } from "react";
 import type {
 	BentoItem,
@@ -87,15 +86,18 @@ const MCP_GITHUB: CtaLink = {
 };
 
 function githubBentoAction(cta: CtaLink) {
+	// A plain anchor, not next/link: every caller passes an absolute github.com
+	// URL opened in a new tab, so there is no client-side navigation to do — and
+	// it sidesteps `typedRoutes`, which cannot type an external href as a Route.
 	return (
-		<Link
+		<a
 			className={cn(buttonVariants({ variant: "ghost" }), "inline-flex")}
 			href={cta.href}
 			rel="noopener noreferrer"
 			target="_blank"
 		>
 			{cta.label}
-		</Link>
+		</a>
 	);
 }
 

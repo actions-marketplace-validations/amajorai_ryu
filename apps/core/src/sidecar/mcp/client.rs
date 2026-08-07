@@ -95,6 +95,38 @@ impl McpToolResult {
     }
 }
 
+/// Unwrap a ghost MCP `tools/call` result envelope into structured JSON.
+///
+/// ghost replies `{ "content": [{ "type": "text", "text": "<json>" }], "isError"?
+/// }` (see `apps/ghost/src/mcp/server.rs`): the structured tool value is the
+/// stringified JSON inside `content[0].text`. This parses it back, surfaces
+/// `isError` as an `Err`, and falls back to the raw text/string when the payload
+/// is not JSON.
+///
+/// Lives here, next to [`McpToolResult::from_result_value`], because it parses the
+/// SAME envelope Core's own [`super::McpRegistry`] produces — `isError` + `content`
+/// out of a `tools/call` result. Pure: no state, no host, no I/O. Callers are the
+/// workflow executor's `Recipe`/`GhostAction` nodes and the recorder shim in
+/// `recipes_host`.
+pub fn extract_mcp_json(result: &Value) -> Result<Value> {
+    let text = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|first| first.get("text"))
+        .and_then(Value::as_str);
+    if result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(anyhow!("{}", text.unwrap_or("tool error")));
+    }
+    match text {
+        Some(t) => Ok(serde_json::from_str::<Value>(t).unwrap_or(Value::String(t.to_string()))),
+        None => Ok(result.clone()),
+    }
+}
+
 /// A spawnable MCP stdio server: a command plus its arguments and environment.
 #[derive(Debug, Clone)]
 pub struct McpStdioCommand {
@@ -413,6 +445,46 @@ impl McpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_unwraps_text_json() {
+        let env = json!({ "content": [{ "type": "text", "text": "{\"a\":1}" }] });
+        assert_eq!(extract_mcp_json(&env).unwrap(), json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn extract_surfaces_is_error() {
+        let env =
+            json!({ "content": [{ "type": "text", "text": "Error: boom" }], "isError": true });
+        let err = extract_mcp_json(&env).unwrap_err().to_string();
+        assert!(err.contains("boom"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn extract_falls_back_to_plain_text() {
+        let env = json!({ "content": [{ "type": "text", "text": "not json" }] });
+        assert_eq!(extract_mcp_json(&env).unwrap(), json!("not json"));
+    }
+
+    #[test]
+    fn extract_returns_whole_result_when_no_content() {
+        // No `content` array ⇒ the raw result is returned verbatim.
+        let env = json!({ "some": "value" });
+        assert_eq!(extract_mcp_json(&env).unwrap(), env);
+    }
+
+    #[test]
+    fn extract_returns_clone_when_text_missing() {
+        let env = json!({ "content": [{ "type": "image" }] });
+        assert_eq!(extract_mcp_json(&env).unwrap(), env);
+    }
+
+    #[test]
+    fn extract_is_error_without_text_uses_default_message() {
+        let env = json!({ "content": [{ "type": "text" }], "isError": true });
+        let err = extract_mcp_json(&env).unwrap_err().to_string();
+        assert!(err.contains("tool error"), "unexpected: {err}");
+    }
 
     #[test]
     fn from_result_value_splits_all_channels() {

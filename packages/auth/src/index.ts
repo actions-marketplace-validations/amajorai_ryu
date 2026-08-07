@@ -5,6 +5,7 @@ import { client } from "@ryu/db";
 import { User } from "@ryu/db/models/auth.model";
 import { Member, Team, TeamMember } from "@ryu/db/models/control-plane.model";
 import {
+	AccountExistsEmail,
 	configureContactIdSaver,
 	configureRateLimiting,
 	MagicLinkEmail,
@@ -478,6 +479,54 @@ export const auth = betterAuth({
 	emailAndPassword: {
 		enabled: true,
 		requireEmailVerification: true,
+		// `requireEmailVerification` makes Better Auth answer a sign-up for an
+		// already-registered address with a *generic success* — a synthetic user,
+		// no error, and (without this hook) no email at all. That protects against
+		// email enumeration, but it strands the person: the UI says "check your
+		// email" and nothing ever lands. This hook makes that promise true.
+		//
+		// Runs inside the sign-up handler, so after captcha and after the request
+		// body has been validated, and Better Auth dispatches it in the background
+		// so it adds no timing signal. `sendEmail` is per-recipient rate limited
+		// (60s cooldown + daily cap, see `checkEmailRateLimit`), so repeat attempts
+		// against a known address cannot be turned into a mail bomb.
+		//
+		// NOTE: `onExistingUserSignUp` is implemented in better-auth 1.5.2
+		// (`api/routes/sign-up.mjs`) but absent from its published `.d.mts`, so
+		// nothing type-checks the name — a rename on upgrade goes silently inert.
+		// Re-grep the option name in `better-auth/dist` when bumping.
+		onExistingUserSignUp: async ({
+			user,
+		}: {
+			user: EmailUser & { emailVerified?: boolean };
+		}) => {
+			try {
+				if (user.emailVerified) {
+					const frontendUrl =
+						process.env.FRONTEND_URL || "http://localhost:3001";
+					await sendEmail({
+						to: user.email,
+						subject: "You already have a Ryu account",
+						react: AccountExistsEmail({
+							userName: user.name || "there",
+							signInUrl: `${frontendUrl}/login?view=signin`,
+							resetPasswordUrl: `${frontendUrl}/login?view=forgot`,
+						}),
+					});
+					return;
+				}
+				// Account exists but was never verified: re-send the verification
+				// email so this sign-up attempt actually completes the signup.
+				await auth.api.sendVerificationEmail({
+					body: { email: user.email, callbackURL: "/" },
+				});
+			} catch (error) {
+				// Never propagate. A throw here would turn the generic 200 into a
+				// 5xx and hand back the exact enumeration oracle this branch exists
+				// to close — including on a benign rate-limit hit.
+				console.error("Failed to send existing-account sign-up email:", error);
+			}
+		},
 		sendResetPassword: async ({
 			user,
 			url,

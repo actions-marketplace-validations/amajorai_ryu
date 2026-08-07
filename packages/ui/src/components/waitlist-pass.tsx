@@ -1,10 +1,10 @@
 "use client";
 
-import { MetalFx } from "metal-fx";
-import { motion, useReducedMotion } from "motion/react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { cn } from "../lib/utils.ts";
-import { Avatar, AvatarFallback, AvatarImage } from "./avatar.tsx";
+import { EntityAvatar } from "./entity-avatar.tsx";
+import { Logo } from "./logo.tsx";
+import { PassCardShell } from "./pass-card-shell.tsx";
 
 /**
  * The membership pass a queued user sees on the waitlist screens (web
@@ -14,57 +14,68 @@ import { Avatar, AvatarFallback, AvatarImage } from "./avatar.tsx";
  *
  * Presentational and side-effect free: it takes the already-resolved queue facts
  * and renders them. All colour comes from design tokens so it reads correctly in
- * light and dark, exactly like `employee-badge.tsx`, whose laminated-ID language
- * (lanyard notch, accent bar, mono serial, stats footer) this deliberately
- * mirrors.
+ * light and dark.
  *
- * Motion: a mouse-tracked 3D tilt with a specular glare on hover, and a slow
- * continuous sway when idle so the card never sits flat. Both are suppressed
- * under `prefers-reduced-motion` — the pass is decoration, and decoration is the
- * first thing that should stop moving when a user asks for less of it.
+ * Motion: a slow unbroken turn that shows the back of the pass once a cycle, a
+ * mouse-tracked 3D tilt with a specular glare on hover, and click-and-drag (or
+ * touch-and-drag) to turn it by hand. All of it is suppressed under
+ * `prefers-reduced-motion` — the pass is decoration, and decoration is the first
+ * thing that should stop moving when a user asks for less of it. The pass is
+ * two-sided: the front carries the member's details, the back only the Ryu
+ * mark.
  *
  * The border is `metal-fx` (the same shader the onboarding "Use Ryu Cloud"
  * button wears), which paints an animated metallic ring around whatever it
  * wraps. It sits INSIDE the rotating element rather than around it: the ring is
- * a canvas positioned over the measured child, so it only travels with the sway
+ * a canvas positioned over the measured child, so it only travels with the turn
  * when a common ancestor carries the transform.
+ *
+ * The card face is printed on the `warp` shader, coloured from the member's own
+ * seed (`backdrop="warp"`), with their dither glyph moved off the backdrop and
+ * into a circle above the name. The glyph as a full-bleed texture was a pattern
+ * you had to be told was yours; a portrait-shaped one is read as an avatar
+ * without explanation, and the flowing backdrop it left behind carries the same
+ * seeded hue, so the two still say the same thing about whose card this is. The
+ * employee badge keeps the glyph backdrop — see `PassBackdrop`.
  */
 
-/** Below this position a member is "founding" rather than merely early. */
-const FOUNDING_POSITION_CUTOFF = 100;
-/** Degrees of tilt at the far edge of the card while pointing at it. */
-const TILT_DEGREES = 14;
-/** Degrees of idle sway, and how long one full cycle takes. */
-const IDLE_ROTATE_Y = 7;
-const IDLE_ROTATE_X = 3;
-const IDLE_CYCLE_SECONDS = 9;
-/** Half of the coordinate space; a pointer at the centre must read as zero tilt. */
-const CENTER = 0.5;
-/** Tilt is derived from a -50..50 offset, so halve the span to normalize it. */
-const TILT_SPAN = 50;
+export const QUEUE_STATS_MIN = 500;
+/**
+ * The name line's type ramp. The ceiling is the `text-5xl` (48px) the hero was
+ * fixed at; the floor is the size below which the name stops out-ranking the
+ * handle under it and starts reading as body copy. Stepping by 2px is finer
+ * than anyone can see and keeps the search to at most eleven measurements.
+ */
+const NAME_MAX_PX = 48;
+const NAME_MIN_PX = 26;
+/**
+ * The handle line's ramp. A reserved handle can run to 32 characters, which at
+ * the `text-base` it was set in overran the card and was cut off with an
+ * ellipsis — the one thing a handle must never be, since a truncated one is not
+ * the handle. It shrinks on the same rule as the name, just over a shorter
+ * range: it is a subtitle, so it starts small and has less room to give.
+ */
+const HANDLE_MAX_PX = 16;
+const HANDLE_MIN_PX = 11;
+/** 2px is finer than anyone can see, and keeps each search to a dozen measurements. */
+const FIT_STEP_PX = 2;
 const SERIAL_LENGTH = 6;
-/** Bars in the decorative barcode strip, and the x-pitch between them. */
-const BARCODE_BARS = 60;
-const BARCODE_PITCH = 3.3;
-const BARCODE_MAX_WIDTH = 3;
-const MAX_INITIALS = 2;
-const WHITESPACE = /\s+/;
 const NON_ALPHANUMERIC = /[^a-zA-Z0-9]/g;
 
-/**
- * Metal ring geometry. `metal-fx` ships only `button` (134×40 baseline, 1px
- * ring, shaderScale 1.6) and `circle` variants — there is no card variant, and
- * the button defaults read as a hairline with pill-sized pattern features when
- * stretched over a surface this large. So the ring is widened and the shader
- * zoomed out, and the radius is passed explicitly rather than left to be read
- * back off the computed style.
- */
-const CARD_RADIUS_PX = 28;
-const METAL_RING_PX = 3;
-const METAL_SHADER_SCALE = 0.75;
-const METAL_STRENGTH = 0.9;
-
 export interface WaitlistPassProps {
+	/**
+	 * Canonical dither seed for this member — `ditherAvatarSeed({ id, email,
+	 * name })`, the precedence every other surface keys on. Pass it and the card
+	 * draws the SAME placeholder glyph as the account menu trigger. Omit it (the
+	 * public `/pass` page has no session) and the card falls back to the handle,
+	 * which is all a reader of a shared card has anyway.
+	 */
+	avatarSeed?: string | null;
+	/**
+	 * The member's own picture, if they have set one. It wins over the generative
+	 * glyph, exactly as it does in the account menu — the card should show the
+	 * same face the rest of the app shows them.
+	 */
 	avatarUrl?: string | null;
 	className?: string;
 	/** Sign-up time (ISO). Rendered as the "member since" date. */
@@ -81,30 +92,36 @@ export interface WaitlistPassProps {
 	name?: string | null;
 	/** 1-based queue position; null while it is still loading or unknown. */
 	position?: number | null;
+	/**
+	 * Accepted but unused, like `avatarUrl`: the referral count came off the card
+	 * because it is a private number about your own account, and a pass is made to
+	 * be shown to other people. The waitlist screen still displays it.
+	 */
 	referralCount?: number;
-	/** Stable id the serial number is derived from (user id, referral code, …). */
+	/**
+	 * Accepted but unused: the serial came off the card with the "early access"
+	 * header line. `formatPassSerial` is still exported for the share image, which
+	 * does still carry one.
+	 */
 	serialSeed?: string | null;
+	/**
+	 * Queue size. No longer printed on the card, but it gates the position
+	 * readout: see `QUEUE_STATS_MIN`.
+	 */
 	totalWaiting?: number | null;
 	/** Reserved handle, without the leading "@". */
 	username?: string | null;
 }
 
-/** Two-letter uppercase initials for the avatar fallback. */
-const passInitials = (name: string): string => {
-	const parts = name.trim().split(WHITESPACE).filter(Boolean);
-	if (parts.length === 0) {
-		return "?";
-	}
-	return parts
-		.slice(0, MAX_INITIALS)
-		.map((part) => part.charAt(0).toUpperCase())
-		.join("");
-};
-
-/** A stable, human-readable pass serial like "RYU-A1B2C3". */
+/**
+ * A stable, human-readable pass serial like "A1B2C3". No "RYU-" prefix: the
+ * card already says Ryu on the line above it and again on its back.
+ */
 export const formatPassSerial = (seed: string | null | undefined): string => {
 	const compact = (seed ?? "").replace(NON_ALPHANUMERIC, "").toUpperCase();
-	return `RYU-${(compact || "000000").slice(0, SERIAL_LENGTH).padEnd(SERIAL_LENGTH, "0")}`;
+	return (compact || "000000")
+		.slice(0, SERIAL_LENGTH)
+		.padEnd(SERIAL_LENGTH, "0");
 };
 
 /** "Jan 5, 2026" from an ISO stamp; null for missing or unparseable input. */
@@ -118,31 +135,25 @@ export const formatPassDate = (
 	if (Number.isNaN(date.getTime())) {
 		return null;
 	}
-	return date.toLocaleDateString("en-US", {
+	// Date AND time. A pass is a record of a moment, and on an early-access queue
+	// the minute you joined is the part worth bragging about.
+	return `${date.toLocaleDateString("en-US", {
 		year: "numeric",
 		month: "short",
 		day: "numeric",
-	});
+	})}, ${date.toLocaleTimeString("en-US", {
+		hour: "2-digit",
+		minute: "2-digit",
+	})}`;
 };
 
 /**
- * Bar geometry for the decorative barcode, derived from the serial so a given
- * pass always draws the same bars. A strip that reshuffled on every render would
- * read as noise rather than as an identifier.
+ * A LinkedIn share URL. Unlike x.com's intent endpoint it takes no text —
+ * LinkedIn composes the post from the target page's Open Graph tags, which is
+ * exactly what `/pass` serves.
  */
-const barcodeBars = (serial: string): { width: number; x: number }[] =>
-	Array.from({ length: BARCODE_BARS }, (_, index) => ({
-		width:
-			((serial.charCodeAt(index % serial.length) + index) % BARCODE_MAX_WIDTH) +
-			1,
-		x: index * BARCODE_PITCH,
-	}));
-
-/** The tier label a position earns. Early numbers are the whole point. */
-export const passTierLabel = (position: number | null | undefined): string =>
-	typeof position === "number" && position <= FOUNDING_POSITION_CUTOFF
-		? "Founding member"
-		: "Early access";
+export const linkedInShareUrl = (url: string): string =>
+	`https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(url)}`;
 
 /**
  * An x.com compose URL. Used by both waitlist screens for the share action; the
@@ -157,256 +168,216 @@ export const xShareIntentUrl = (text: string, url?: string | null): string => {
 	return `https://x.com/intent/tweet?${params.toString()}`;
 };
 
-/** The share copy, kept next to the intent helper so both screens say the same thing. */
+/**
+ * The share copy, kept next to the intent helper so both screens say the same
+ * thing. It says what Ryu IS, not just that a queue exists: most people seeing
+ * the post have never heard the name, and "I got spot #42" tells them nothing
+ * they could act on.
+ */
+const RYU_PITCH = "Ryu is end-to-end infrastructure for AI agents.";
 export const waitlistShareText = (
 	position: number | null | undefined
 ): string =>
 	typeof position === "number"
-		? `I just claimed spot #${position} on the Ryu waitlist.`
-		: "I just claimed my spot on the Ryu waitlist.";
+		? `I just claimed spot #${position} on the Ryu waitlist. ${RYU_PITCH}`
+		: `I just claimed my spot on the Ryu waitlist. ${RYU_PITCH}`;
+
+/**
+ * The name line, scaled to the card. It starts at the `text-5xl` the hero was
+ * always set in and steps down only as far as it has to, one line, until either
+ * it fits or it hits the floor — at which point it wraps rather than shrinking
+ * into the body copy. A name is the one thing on this card that is not ours to
+ * truncate, and "Bartholomew Featherstonehaugh" set at the same size as "Ana"
+ * either overflowed the card or wrapped to three lines and pushed the footer
+ * off it.
+ *
+ * Measured rather than computed from character count: the face is a variable
+ * font, so a count-based guess is wrong by a wide margin for narrow or wide
+ * names, and the card is rendered at more than one width (the queue screen, the
+ * public `/pass` page, the desktop panel).
+ */
+function AutoFitText({
+	children,
+	className,
+	maxPx,
+	minPx,
+	stepPx = FIT_STEP_PX,
+}: {
+	children: string;
+	className?: string;
+	maxPx: number;
+	minPx: number;
+	stepPx?: number;
+}) {
+	const nodeRef = useRef<HTMLSpanElement>(null);
+	const [fontPx, setFontPx] = useState(maxPx);
+	const [wrapped, setWrapped] = useState(false);
+
+	// Layout effect, not effect: this runs between the DOM write and the paint,
+	// so the name never flashes at the wrong size on the way to the right one.
+	useLayoutEffect(() => {
+		const node = nodeRef.current;
+		const host = node?.parentElement;
+		if (!(node && host)) {
+			return;
+		}
+		const fitToWidth = () => {
+			const available = host.clientWidth;
+			if (available === 0) {
+				return;
+			}
+			// Measure on one line at every step — a wrapped line always "fits" by
+			// width, so there would be nothing left to measure against.
+			node.style.whiteSpace = "nowrap";
+			let size = maxPx;
+			node.style.fontSize = `${size}px`;
+			// `Math.max` rather than a bare subtraction: a step that does not divide
+			// the range evenly would otherwise undershoot the floor on its last
+			// pass, which is how the handle line ended up a pixel under its minimum.
+			while (size > minPx && node.scrollWidth > available) {
+				size = Math.max(minPx, size - stepPx);
+				node.style.fontSize = `${size}px`;
+			}
+			const overflowsAtFloor = node.scrollWidth > available;
+			// Only `whiteSpace` is dropped — the class owns it. `fontSize` is LEFT
+			// on the node at the size just measured, because it is also what the
+			// next render writes: clearing it made the element inherit 16px and
+			// stay there, since React sees its own unchanged `fontSize` prop and
+			// writes nothing back.
+			node.style.whiteSpace = "";
+			setFontPx(size);
+			setWrapped(overflowsAtFloor);
+		};
+		fitToWidth();
+		const observer = new ResizeObserver(fitToWidth);
+		observer.observe(host);
+		return () => observer.disconnect();
+	}, [children, maxPx, minPx, stepPx]);
+
+	return (
+		<span
+			className={cn(
+				"block",
+				wrapped ? "break-words" : "whitespace-nowrap",
+				className
+			)}
+			ref={nodeRef}
+			style={{ fontSize: `${fontPx}px` }}
+		>
+			{children}
+		</span>
+	);
+}
 
 export function WaitlistPass({
+	avatarSeed,
 	avatarUrl,
 	className,
 	joinedAt,
 	metalTheme = "auto",
 	name,
 	position,
-	referralCount = 0,
-	serialSeed,
 	totalWaiting,
 	username,
 }: WaitlistPassProps) {
-	const reduceMotion = useReducedMotion();
-	const cardRef = useRef<HTMLDivElement>(null);
-	const [hovered, setHovered] = useState(false);
-	const [tilt, setTilt] = useState({ x: 0, y: 0 });
-	const [glare, setGlare] = useState({ x: 50, y: 50 });
-
-	const handlePointerMove = useCallback(
-		(event: React.PointerEvent<HTMLDivElement>) => {
-			const node = cardRef.current;
-			if (!node) {
-				return;
-			}
-			const rect = node.getBoundingClientRect();
-			const offsetX = ((event.clientX - rect.left) / rect.width - CENTER) * 100;
-			const offsetY = ((event.clientY - rect.top) / rect.height - CENTER) * 100;
-			setGlare({ x: offsetX / 2 + 50, y: offsetY / 2 + 50 });
-			setTilt({
-				x: -(offsetY / TILT_SPAN) * TILT_DEGREES,
-				y: (offsetX / TILT_SPAN) * TILT_DEGREES,
-			});
-		},
-		[]
-	);
-
-	const handlePointerLeave = useCallback(() => {
-		setHovered(false);
-		setTilt({ x: 0, y: 0 });
-		setGlare({ x: 50, y: 50 });
-	}, []);
-
-	// Idle sway vs. pointer-driven tilt. Framer animates between the two shapes
-	// directly: the array form is the keyframed loop, the scalar form the tracked
-	// angle, and swapping between them on hover is what makes the card "settle"
-	// into the pointer instead of fighting the loop.
-	const idle = !(hovered || reduceMotion);
-	const animate = idle
-		? {
-				rotateX: [0, IDLE_ROTATE_X, 0, -IDLE_ROTATE_X, 0],
-				rotateY: [0, -IDLE_ROTATE_Y, 0, IDLE_ROTATE_Y, 0],
-				scale: 1,
-			}
-		: {
-				rotateX: reduceMotion ? 0 : tilt.x,
-				rotateY: reduceMotion ? 0 : tilt.y,
-				scale: hovered && !reduceMotion ? 1.03 : 1,
-			};
-	const transition = idle
-		? {
-				duration: IDLE_CYCLE_SECONDS,
-				ease: "easeInOut" as const,
-				repeat: Number.POSITIVE_INFINITY,
-			}
-		: { duration: 0.25, ease: "easeOut" as const };
-
 	const displayName = name?.trim() || (username ? `@${username}` : "Member");
 	const memberSince = formatPassDate(joinedAt);
-	const serial = formatPassSerial(serialSeed ?? username ?? name);
-	const tier = passTierLabel(position);
-	const bars = useMemo(() => barcodeBars(serial), [serial]);
+	const showPosition =
+		typeof totalWaiting === "number" && totalWaiting > QUEUE_STATS_MIN;
+	// TWO seeds, deliberately, because the two things they colour answer
+	// different questions.
+	//
+	// The backdrop follows the HANDLE first: it is the name the member chose, so
+	// claiming one has to repaint the card — that moment is the whole reward of
+	// reserving a handle, and a card that did not change would read as the claim
+	// not having worked.
+	const backdropSeed = username || name?.trim() || "ryu";
+	// The glyph in the circle follows the canonical avatar seed (id, then email,
+	// then name) so it is the SAME placeholder the account menu trigger draws —
+	// an avatar that disagreed with the one in the corner of the app would read
+	// as two different people. Falls back to the handle on the public `/pass`
+	// page, which has no session to key on.
+	const glyphSeed = avatarSeed || backdropSeed;
 
 	return (
-		<div
-			className={cn("w-full [perspective:1200px]", className)}
-			onPointerEnter={() => setHovered(true)}
-			onPointerLeave={handlePointerLeave}
-			onPointerMove={handlePointerMove}
-			ref={cardRef}
+		<PassCardShell
+			backdrop="warp"
+			className={className}
+			ditherSeed={backdropSeed}
+			metalTheme={metalTheme}
 		>
-			{/* The transform lives on this wrapper, one level above the metal ring,
-			    so the canvas MetalFx paints over its child travels with the sway
-			    instead of sitting flat behind a tilting card. */}
-			<motion.div
-				animate={animate}
-				className="rounded-[1.75rem] shadow-xl"
-				transition={transition}
-			>
-				<MetalFx
-					borderRadius={CARD_RADIUS_PX}
-					// The wandering halo is tuned for a pill-sized button. Over a surface
-					// this large it stops reading as a glow around an edge and becomes a
-					// blue wash across the whole card face, desaturating the content. The
-					// shader ring — the part that is actually the border — still renders.
-					disableGlow
-					// A paused instance still gets one frame painted (metal-fx keeps the
-					// last copy), so reduced motion gets a static metallic ring rather
-					// than a blank canvas.
-					paused={Boolean(reduceMotion)}
-					preset="chromatic"
-					ringCssPx={METAL_RING_PX}
-					shaderScale={METAL_SHADER_SCALE}
-					strength={METAL_STRENGTH}
-					theme={metalTheme}
-					variant="button"
-				>
-					{/* No `transform-style: preserve-3d` anywhere on this subtree,
-					    deliberately: Chromium forces it back to `flat` whenever the same
-					    element also has `overflow: hidden`, and the clip is what keeps
-					    the square accent bar inside the rounded corners while the card is
-					    tilted. Nothing here is positioned in depth, so the perspective on
-					    the outer wrapper is the only 3D this needs. */}
-					{/* `isolate` scopes the foil overlay's `mix-blend-soft-light` to the
-					    card, so it can never blend against whatever the card happens to
-					    be sitting on. */}
-					<div className="relative isolate overflow-hidden rounded-[1.75rem] border bg-card text-card-foreground">
-						{/* Lanyard slot + accent bar, the same laminated-ID language as
-				    employee-badge.tsx. */}
-						<div
-							aria-hidden="true"
-							className="relative h-2.5 w-full"
-							style={{ backgroundColor: "var(--primary)" }}
+			{/* `min-h` rather than a fixed height: the name is the hero and can
+		    wrap to two or three lines, so the card grows past the floor
+		    instead of clipping. The hero block takes the slack (`flex-1`),
+		    which is what keeps a short name from leaving the footer
+		    floating in the middle of the card. */}
+			<div className="relative flex min-h-[27rem] w-full flex-1 flex-col gap-6 p-7">
+				{/* Wordmark left, join date right. The serial and the "early
+				    access" line are gone: neither is something the owner or a
+				    reader of a shared card ever needs, and they were crowding
+				    the one thing the header should carry — whose card this is
+				    and how long they have been here. */}
+				<div className="flex items-center justify-between gap-3">
+					<span className="flex items-center gap-2">
+						<Logo size="20px" variant="outline" />
+						<span className="font-medium text-sm">Ryu</span>
+					</span>
+					<span className="text-[11px] text-muted-foreground tabular-nums">
+						{memberSince ?? ""}
+					</span>
+				</div>
+
+				<div className="flex min-w-0 flex-1 flex-col justify-end gap-1.5">
+					{/* The member's glyph, in a circle, directly above their name — the
+					    shape a reader already knows means "this person". The ring and
+					    the tinted disc under it are what keep it legible against a
+					    shader backdrop that is itself in the glyph's own hue. */}
+					{/* `EntityAvatar` rather than a hand-rolled circle: it is the one
+					    definition of "picture if there is one, generative glyph if not",
+					    and it is what the account menu trigger renders. Same component,
+					    same seed, same face. */}
+					<EntityAvatar
+						className="mb-3 size-14 shrink-0 border border-border/60 bg-background/70 backdrop-blur-sm"
+						name={displayName}
+						seed={glyphSeed}
+						src={avatarUrl}
+					/>
+					<AutoFitText
+						className="font-semibold leading-[1.02] tracking-tight"
+						maxPx={NAME_MAX_PX}
+						minPx={NAME_MIN_PX}
+					>
+						{displayName}
+					</AutoFitText>
+					{/* No placeholder for an unclaimed handle: an empty-state line
+					    under the name reads as a defect on a card whose whole job
+					    is to look like a finished object. The reserve field on the
+					    screen beside it is what prompts the claim. */}
+					{username ? (
+						<AutoFitText
+							className="text-muted-foreground"
+							maxPx={HANDLE_MAX_PX}
+							minPx={HANDLE_MIN_PX}
 						>
-							<span className="absolute top-1 left-1/2 h-1.5 w-10 -translate-x-1/2 rounded-full bg-card ring-1 ring-border" />
-						</div>
+							{`@${username}`}
+						</AutoFitText>
+					) : null}
+				</div>
 
-						{/* Iridescent foil: a fixed diagonal sheen so the card reads as
-					    laminated even when nothing is pointing at it. Deliberately faint.
-					    Measured over a white card face, the original weighting pulled the
-					    centre to rgb(200,233,255) — a blue wash rather than a graze, which
-					    desaturated the content sitting on it. The metal ring now carries
-					    most of the laminated signal, so this only has to hint at it. */}
-						<div
-							aria-hidden="true"
-							className="pointer-events-none absolute inset-0 opacity-[0.16] mix-blend-soft-light"
-							style={{
-								background:
-									"linear-gradient(115deg, transparent 24%, color-mix(in oklab, var(--primary) 32%, transparent) 44%, transparent 58%, color-mix(in oklab, var(--primary) 18%, transparent) 74%, transparent 88%)",
-							}}
-						/>
-
-						<div className="relative flex flex-col gap-5 p-6">
-							<div className="flex items-start justify-between gap-3">
-								<span className="rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 font-medium text-[10px] text-primary uppercase tracking-[0.14em]">
-									{tier}
-								</span>
-								<span className="font-mono text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
-									{serial}
-								</span>
-							</div>
-
-							<div className="flex items-center gap-3">
-								<Avatar className="size-14 ring-1 ring-border" size="lg">
-									{avatarUrl ? (
-										<AvatarImage alt={displayName} src={avatarUrl} />
-									) : null}
-									<AvatarFallback className="font-semibold text-base">
-										{passInitials(displayName)}
-									</AvatarFallback>
-								</Avatar>
-								<div className="flex min-w-0 flex-col">
-									<span className="truncate font-semibold text-lg leading-tight">
-										{displayName}
-									</span>
-									<span className="truncate font-mono text-muted-foreground text-xs">
-										{username ? `@${username}` : "handle not reserved"}
-									</span>
-								</div>
-							</div>
-
-							<div className="flex items-end justify-between gap-3 border-t pt-5">
-								<div className="flex flex-col">
-									<span className="text-[10px] text-muted-foreground uppercase tracking-[0.14em]">
-										Position
-									</span>
-									<span className="font-bold text-5xl tabular-nums leading-none">
-										#{position ?? "—"}
-									</span>
-								</div>
-								<div className="flex flex-col items-end gap-2 text-right">
-									<div className="flex flex-col">
-										<span className="text-[10px] text-muted-foreground uppercase tracking-[0.14em]">
-											Member since
-										</span>
-										<span className="font-medium text-sm tabular-nums">
-											{memberSince ?? "—"}
-										</span>
-									</div>
-									<div className="flex flex-col">
-										<span className="text-[10px] text-muted-foreground uppercase tracking-[0.14em]">
-											Referrals
-										</span>
-										<span className="font-medium text-sm tabular-nums">
-											{referralCount}
-										</span>
-									</div>
-								</div>
-							</div>
-
-							<div className="flex flex-col gap-2 border-t pt-4">
-								<svg
-									aria-hidden="true"
-									className="h-8 w-full text-foreground/70"
-									preserveAspectRatio="none"
-									role="presentation"
-									viewBox="0 0 200 32"
-								>
-									{bars.map((bar) => (
-										<rect
-											fill="currentColor"
-											height="32"
-											key={bar.x}
-											width={bar.width}
-											x={bar.x}
-										/>
-									))}
-								</svg>
-								<div className="flex items-center justify-between font-mono text-[10px] text-muted-foreground uppercase tracking-[0.14em]">
-									<span>Ryu early access</span>
-									<span className="tabular-nums">
-										{typeof totalWaiting === "number"
-											? `of ${totalWaiting.toLocaleString()}`
-											: ""}
-									</span>
-								</div>
-							</div>
-						</div>
-
-						{/* Specular glare, tracked to the pointer. Fades out on leave rather
-				    than snapping, so the highlight follows the hand off the card. */}
-						<motion.div
-							animate={{ opacity: hovered && !reduceMotion ? 1 : 0 }}
-							aria-hidden="true"
-							className="pointer-events-none absolute inset-0"
-							style={{
-								background: `radial-gradient(circle at ${glare.x}% ${glare.y}%, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0) 62%)`,
-							}}
-							transition={{ duration: 0.25 }}
-						/>
+				{/* Position alone. Value above its label, sentence case: the
+				    number is the fact worth reading and the word only says which
+				    fact it is. Referrals moved off the card — it is a private
+				    number about your own account, not something to hand to
+				    everyone who sees a shared pass. */}
+				{showPosition ? (
+					<div className="flex flex-col">
+						<span className="font-medium text-xl tabular-nums leading-none">
+							#{position ?? "—"}
+						</span>
+						<span className="text-muted-foreground text-xs">Position</span>
 					</div>
-				</MetalFx>
-			</motion.div>
-		</div>
+				) : null}
+			</div>
+		</PassCardShell>
 	);
 }

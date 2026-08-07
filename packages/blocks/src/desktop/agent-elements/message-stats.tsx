@@ -78,9 +78,14 @@ export function MessageStats({
 	const pct = hasRing ? (used / contextSize) * 100 : 0;
 	const remaining = hasRing ? Math.max(0, contextSize - used) : 0;
 
+	// Base UI carries the open/close delays on the TRIGGER (`delay`), not on the
+	// root — where they sat as unknown props that were silently dropped, so the
+	// card actually used the 600ms/300ms defaults.
 	return (
-		<HoverCard closeDelay={80} openDelay={120}>
+		<HoverCard>
 			<HoverCardTrigger
+				closeDelay={80}
+				delay={120}
 				className={cn(
 					"flex w-fit cursor-default select-none items-center gap-1.5 text-muted-foreground",
 					className

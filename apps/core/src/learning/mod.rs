@@ -2,7 +2,7 @@
 //!
 //! The learning ENGINE (sweep / PRM-score / synthesize-skill / reward-filtered
 //! cycle / autonomous skills pass) and the durable [`ryu_learning::ExperienceStore`]
-//! now live in the `ryu-learning` capability crate (`apps-store/learning/backend`),
+//! now live in the `ryu-learning` capability crate (`crates/core/learning`),
 //! ZERO-dependency on `apps/core`. This module is the Core-owned remainder that
 //! could NOT leave the process because it is welded to kernel subsystems:
 //!
@@ -47,9 +47,14 @@
 //! rationale as the `memory`/`rag` primitives: crate-extracted (swappable, zero
 //! `apps/core` dep) is the decoupling that matters; the process boundary is not.
 //! Consequences of this verdict, all already true in the tree:
-//! - The manifest (`apps-store/learning/manifest.json`, the single copy Core includes;
-//!   `apps-store/learning/manifest.json`) is **companion-only**: no `public_mount`, no
-//!   sidecar spec. Core serves `/api/learn/*` in-process (`server/learning.rs`).
+//! - The manifest (`apps-store/learning/manifest.json` — the single copy Core
+//!   `include_str!`s) is **companion-only**: no `public_mount`, no sidecar spec. Core
+//!   serves `/api/learn/*` in-process (`server/learning.rs`).
+//! - The app FACE therefore stays under `apps-store/learning/` (`manifest.json` +
+//!   `ui/`) while the ENGINE crate sits at `crates/core/learning`, with the other
+//!   extracted always-in-process Core capability crates (`ryu-activity`,
+//!   `ryu-predict`). `apps-store/*/backend` is for app backends that ship as their
+//!   own out-of-process sidecar — which Outcome B says this one never will.
 //! - Core never spawns/health-checks a learning sidecar (no `RYU_LEARNING_BIN`, no
 //!   port 8002 in `apps/core`). The `[[bin]] ryu-learning` in the crate is dormant
 //!   forward-scaffolding (proves the crate is process-shell-able; its `LearningHost`

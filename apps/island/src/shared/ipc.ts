@@ -139,6 +139,27 @@ export interface IslandAttachment {
 	path: string;
 }
 
+/**
+ * A message on the streaming chat request. Deliberately WIDER than
+ * {@link CoreChatMessage}: `/api/chat/stream` takes the full AI SDK `UIMessage`,
+ * and the island now posts back the entire message history the chat runtime
+ * holds — including assistant turns whose `parts` carry tool calls and results.
+ * Narrowing those to `{role, content}` would erase every prior tool call from
+ * the model's view of the conversation on the second turn.
+ *
+ * `parts` is `unknown[]` rather than a mirrored part union on purpose: the part
+ * shapes are the AI SDK's, they grow with the SDK, and the main process only
+ * forwards this object to Core verbatim. Typing them here would be a copy that
+ * silently rots.
+ */
+export interface CoreUiMessage {
+	/** Legacy plain-text form. Omitted when `parts` carries the content. */
+	content?: string;
+	id?: string;
+	parts?: unknown[];
+	role: "user" | "assistant" | "system";
+}
+
 /** Body for `POST /api/chat/stream` (subset of Core's `ChatStreamRequest`). */
 export interface CoreChatStreamRequest {
 	acp_config?: Record<string, string>;
@@ -150,7 +171,7 @@ export interface CoreChatStreamRequest {
 	conversation_id?: string;
 	/** Opt-in cross-session memory. Defaults to false (privacy by default). */
 	enable_long_term?: boolean;
-	messages: CoreChatMessage[];
+	messages: CoreUiMessage[];
 	/**
 	 * Whether Core should persist this turn to the conversation store. Core
 	 * defaults to `true`; the proactive suggestion engine sets it `false` so each

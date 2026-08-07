@@ -40,11 +40,32 @@ export interface WidgetHostServices {
 }
 
 /**
- * Value carried on {@link WidgetHostContext}: the desktop-authored widget
- * renderer plus the privileged services it closes over. apps/desktop provides
- * both by wrapping `<AgentChat/>` in `<WidgetHostContext.Provider>`.
+ * The two host-environment facts {@link AppWidget} cannot derive itself. Both
+ * differ per shell — Tauri vs Electron — which is why the renderer takes them
+ * through the context instead of importing an app module.
+ */
+export interface WidgetHostEnv {
+	/**
+	 * Open an http(s) URL in the user's real browser (the rpc gate has already
+	 * vetted the scheme). NEVER inside the sandboxed frame.
+	 */
+	openExternal(href: string): Promise<void> | void;
+	/**
+	 * Origin of the Core node serving this chat, used as the widget asset proxy's
+	 * base. Captured once per widget mount.
+	 */
+	proxyOrigin: string;
+}
+
+/**
+ * Value carried on {@link WidgetHostContext}: the widget renderer plus the
+ * privileged services and shell facts it closes over. A surface that wants MCP
+ * widgets to mount wraps its message list in `<WidgetHostContext.Provider>`;
+ * without one, `useWidgetHost()` returns null and a widget part degrades to a
+ * plain tool row.
  */
 export interface WidgetHostValue {
+	env: WidgetHostEnv;
 	Renderer: WidgetRendererComponent;
 	services: WidgetHostServices;
 }

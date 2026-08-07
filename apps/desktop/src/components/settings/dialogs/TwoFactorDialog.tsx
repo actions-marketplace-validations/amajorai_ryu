@@ -12,12 +12,8 @@ import {
 } from "@ryu/ui/components/dialog";
 import { IconSwap } from "@ryu/ui/components/icon-swap";
 import { Input } from "@ryu/ui/components/input";
-import {
-	InputOTP,
-	InputOTPGroup,
-	InputOTPSlot,
-} from "@ryu/ui/components/input-otp";
 import { Label } from "@ryu/ui/components/label";
+import { OTPInput, type OTPStatus } from "@ryu/ui/components/motion/otp-input";
 import { Separator } from "@ryu/ui/components/separator";
 import { TextSwap } from "@ryu/ui/components/text-swap";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
@@ -51,6 +47,7 @@ export function TwoFactorDialog({
 	const [totpUri, setTotpUri] = useState("");
 	const [backupCodes, setBackupCodes] = useState<string[]>([]);
 	const [otp, setOtp] = useState("");
+	const [otpStatus, setOtpStatus] = useState<OTPStatus>("idle");
 	const [isBusy, setIsBusy] = useState(false);
 	const [copiedAll, setCopiedAll] = useState(false);
 
@@ -62,6 +59,7 @@ export function TwoFactorDialog({
 			setTotpUri("");
 			setBackupCodes([]);
 			setOtp("");
+			setOtpStatus("idle");
 		}
 	};
 
@@ -98,6 +96,7 @@ export function TwoFactorDialog({
 			setStep("backup");
 			onStatusChange();
 		} catch (error) {
+			setOtpStatus("error");
 			sileo.error({
 				title: error instanceof Error ? error.message : "Invalid code",
 			});
@@ -299,16 +298,20 @@ export function TwoFactorDialog({
 									</DialogHeader>
 									<form className="space-y-4" onSubmit={handleVerify}>
 										<div className="flex justify-center py-2">
-											<InputOTP maxLength={6} onChange={setOtp} value={otp}>
-												<InputOTPGroup>
-													<InputOTPSlot index={0} />
-													<InputOTPSlot index={1} />
-													<InputOTPSlot index={2} />
-													<InputOTPSlot index={3} />
-													<InputOTPSlot index={4} />
-													<InputOTPSlot index={5} />
-												</InputOTPGroup>
-											</InputOTP>
+											<OTPInput
+												aria-label="Authenticator app code"
+												autoFocus
+												disabled={isBusy}
+												errorMessage="Invalid code. Try again."
+												onChange={(next) => {
+													setOtp(next);
+													if (otpStatus !== "idle") {
+														setOtpStatus("idle");
+													}
+												}}
+												status={otpStatus}
+												value={otp}
+											/>
 										</div>
 										<DialogFooter>
 											<Button

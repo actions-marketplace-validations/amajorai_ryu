@@ -35,12 +35,13 @@ export function TutorialStep() {
 			className="flex flex-col items-center gap-8"
 			data-tauri-drag-region="false"
 		>
+			{/* max-w-md: the removed `animate` branch of PageHeader carried this on
+			    the subtitle itself, and this centring column sets no width of its
+			    own — without it the sentence stretches to the shell's full width. */}
 			<PageHeader
-				animate
+				className="max-w-md"
 				subtitle="The sidebar is grouped by purpose. Here is what each section is for."
-				subtitleDelay={0.3}
 				title="Three sections, one idea"
-				titleDelay={0.2}
 			/>
 
 			<motion.div

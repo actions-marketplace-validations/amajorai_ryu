@@ -1,10 +1,15 @@
-// useIslandChat: the renderer-side chat state machine for the expanded island.
+// useIslandChat: the expanded island's chat state, running on the SAME chat
+// runtime as the desktop app.
 //
-// It drives Core's real agent path via the `window.island.core.chatStream` IPC
-// (started in U2). The main process owns the HTTP/SSE connection; this hook only
-// sends a request, accumulates `text-delta` parts into the streaming assistant
-// message, and aborts on demand. The conversation_id is generated once per app
-// session and reused so the thread continues in Core's conversation store.
+// It drives the AI SDK `useChat` over `createIslandChatTransport`, which bridges
+// Core's SSE (owned by the main process — the renderer is cross-origin to Core)
+// into a `ReadableStream<UIMessageChunk>`. The hook therefore holds real
+// `UIMessage[]` with full `parts`, not accumulated text, which is what lets the
+// island render the desktop message list verbatim: tool rows, MCP widgets,
+// generated images, reasoning and citations all arrive as parts.
+//
+// The conversation_id is generated once per app session and reused so the thread
+// continues in Core's conversation store.
 //
 // Agent routing: the chat routes to the configured `island-agents.voiceAgent`
 // (default the flagship `ryu`; empty = Core's default local model). enable_long_term
@@ -12,7 +17,14 @@
 // island-originated for Gateway DLP. When `island-tts` is enabled, each finished
 // assistant reply is spoken aloud through Core's `/api/voice/speak`.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useChat } from "@ai-sdk/react";
+import {
+	latestPluginNote,
+	latestStreamedAcpConfig,
+	latestStreamedAcpMode,
+} from "@ryu/blocks/composer/streamed-parts";
+import type { ChatStatus, UIMessage } from "ai";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	agentIdOrUndefined,
 	DEFAULT_ISLAND_AGENT_PREFS,
@@ -20,8 +32,6 @@ import {
 } from "../../../shared/agents.ts";
 import type {
 	CoreFilePart,
-	CoreStreamEndEvent,
-	CoreStreamPartEvent,
 	IslandAttachment,
 	IslandMeetingEvent,
 	ShadowContext,
@@ -31,37 +41,10 @@ import {
 	type IslandTtsPrefs,
 	parseIslandTtsPrefs,
 } from "../../../shared/tts.ts";
-
-export interface ChatMessage {
-	content: string;
-	id: string;
-	role: "assistant" | "user";
-	/** True while the assistant message is still streaming tokens. */
-	streaming?: boolean;
-}
-
-export interface IslandChatState {
-	/** Inline error when Core is unreachable or the stream fails. */
-	error: string | null;
-	messages: ChatMessage[];
-	/**
-	 * Out-of-band notes from Core's server-side turn-hooks (goal/proof/double-check),
-	 * streamed as `data-plugin_note` frames. Surfaced apart from the transcript so
-	 * they never read as assistant replies. Reset at the start of each turn.
-	 */
-	notes: string[];
-	/** True between send and the terminal stream-end event. */
-	sending: boolean;
-}
+import { createIslandChatTransport } from "../../lib/island-chat-transport.ts";
 
 /** The plugin flag key Core's double-check turn-hook reads on the request body. */
 const DOUBLE_CHECK_FLAG = "io.ryu.double-check";
-/** The SSE part type carrying a turn-hook note. */
-const PLUGIN_NOTE_PART = "data-plugin_note";
-/** The SSE part carrying an agent-requested session-config write-back. */
-const ACP_CONFIG_PART = "data-ryu-acp-config";
-/** The SSE part carrying an agent-initiated permission-mode switch. */
-const ACP_MODE_PART = "data-ryu-acp-mode";
 
 const OCR_LIMIT = 1200;
 
@@ -92,6 +75,18 @@ function getConversationId(): string {
 	return sessionConversationId;
 }
 
+/** Concatenate an assistant message's text parts (for read-back). */
+function textOf(message: UIMessage): string {
+	return (message.parts ?? [])
+		.filter(
+			(part): part is { type: "text"; text: string } =>
+				(part as { type?: string }).type === "text" &&
+				typeof (part as { text?: unknown }).text === "string"
+		)
+		.map((part) => part.text)
+		.join("");
+}
+
 export function useIslandChat(options?: {
 	getAcpPayload?: () => {
 		acp_config?: Record<string, string>;
@@ -114,32 +109,15 @@ export function useIslandChat(options?: {
 	getAcpPayloadRef.current = options?.getAcpPayload;
 	const getDoubleCheckRef = useRef(options?.getDoubleCheck);
 	getDoubleCheckRef.current = options?.getDoubleCheck;
-	// Refs, not deps: the stream subscription below is mounted once, and these
-	// callbacks are re-created by the composer on every render.
+	// Refs, not deps: the transport is created once, and these callbacks are
+	// re-created by the composer on every render.
 	const onAcpConfigRef = useRef(options?.onAcpConfig);
 	onAcpConfigRef.current = options?.onAcpConfig;
 	const onAcpModeRef = useRef(options?.onAcpMode);
 	onAcpModeRef.current = options?.onAcpMode;
-	// Monotonic across the whole session (never reset per stream) so an emission
-	// key is unique even if two streams reused an id.
-	const acpEmissionSeq = useRef(0);
-	const [state, setState] = useState<IslandChatState>({
-		messages: [],
-		sending: false,
-		error: null,
-		notes: [],
-	});
-
-	// The id of the assistant message currently receiving tokens, and the active
-	// stream id used to route part events and aborts.
-	const activeAssistantId = useRef<string | null>(null);
-	const activeStreamId = useRef<string | null>(null);
-	// Accumulated text of the in-flight assistant reply, so the terminal event can
-	// hand the full reply to text-to-speech without re-reading React state.
-	const assistantTextRef = useRef("");
 
 	// Agent + TTS routing, kept current from Core prefs (read once on mount, then
-	// updated live via SSE). Refs (not state) because the stream handlers read them
+	// updated live via SSE). Refs (not state) because the send path reads them
 	// without needing to re-render.
 	const voiceAgentRef = useRef(DEFAULT_ISLAND_AGENT_PREFS.voiceAgent);
 	const ttsPrefsRef = useRef<IslandTtsPrefs>(DEFAULT_ISLAND_TTS_PREFS);
@@ -148,6 +126,10 @@ export function useIslandChat(options?: {
 	// The audio element currently speaking a reply, so a new reply (or stop())
 	// can interrupt it.
 	const playingAudio = useRef<HTMLAudioElement | null>(null);
+
+	// Server-only text per user message id: the screen-grounding preamble goes to
+	// the model, the transcript bubble keeps the clean text the user typed.
+	const serverTextRef = useRef<Map<string, string>>(new Map());
 
 	useEffect(() => {
 		window.island.agents
@@ -252,120 +234,122 @@ export function useIslandChat(options?: {
 		},
 		[stopSpeaking]
 	);
+	const speakReplyRef = useRef(speakReply);
+	speakReplyRef.current = speakReply;
 
-	// Subscribe once to the streamed-part and stream-end events. The handlers
-	// append deltas to the in-flight assistant message and finalize on end.
-	useEffect(() => {
-		const onPart = (event: CoreStreamPartEvent): void => {
-			if (event.streamId !== activeStreamId.current) {
-				return;
-			}
-			const { part } = event;
-			if (part.type === "text-delta" && typeof part.delta === "string") {
-				const delta = part.delta;
-				assistantTextRef.current += delta;
-				setState((prev) => ({
-					...prev,
-					messages: prev.messages.map((message) =>
-						message.id === activeAssistantId.current
-							? { ...message, content: message.content + delta }
-							: message
-					),
-				}));
-			} else if (part.type === "error" && typeof part.errorText === "string") {
-				const errorText = part.errorText;
-				setState((prev) => ({ ...prev, error: errorText }));
-			} else if (part.type === PLUGIN_NOTE_PART) {
-				// A turn-hook note (goal/proof/double-check). OtherPart's index
-				// signature pollutes union narrowing, so read `data.text` defensively.
-				const data = (part as { data?: { text?: unknown } }).data;
-				const noteText = typeof data?.text === "string" ? data.text.trim() : "";
-				if (noteText.length > 0) {
-					setState((prev) => ({ ...prev, notes: [...prev.notes, noteText] }));
-				}
-			} else if (part.type === ACP_CONFIG_PART) {
-				// The agent asked the client to change session-config values it holds
-				// and re-sends every turn — an approved `ExitPlanMode` clearing the Plan
-				// mode pill is the shipped case. Hand it to the composer with a fresh
-				// emission key; without this the pill stays armed and the next turn
-				// re-enters plan mode, refusing the edits the user just approved.
-				const data = (part as { data?: { config?: unknown } }).data;
-				const config = data?.config;
-				if (
-					config &&
-					typeof config === "object" &&
-					Object.keys(config).length > 0
-				) {
-					acpEmissionSeq.current += 1;
-					onAcpConfigRef.current?.(
-						config as Record<string, string>,
-						`${event.streamId}:${acpEmissionSeq.current}`
-					);
-				}
-			} else if (part.type === ACP_MODE_PART) {
-				const data = (part as { data?: { currentModeId?: unknown } }).data;
-				const modeId =
-					typeof data?.currentModeId === "string"
-						? data.currentModeId.trim()
-						: "";
-				if (modeId.length > 0) {
-					onAcpModeRef.current?.(modeId);
-				}
-			}
-		};
+	// One transport for the session. Every per-turn field is read through a getter
+	// at send time, so a picker changed between turns takes effect on the next one
+	// without re-creating the chat.
+	const transport = useMemo(
+		() =>
+			createIslandChatTransport({
+				getRequest: () => ({
+					agent_id: agentIdOrUndefined(voiceAgentRef.current),
+					conversation_id: getConversationId(),
+					enable_long_term: false,
+					companion_source: true,
+					plugin_flags: {
+						[DOUBLE_CHECK_FLAG]: getDoubleCheckRef.current?.() ?? false,
+					},
+					...getAcpPayloadRef.current?.(),
+				}),
+				serverTextFor: (messageId) => serverTextRef.current.get(messageId),
+			}),
+		[]
+	);
 
-		const onEnd = (event: CoreStreamEndEvent): void => {
-			if (event.streamId !== activeStreamId.current) {
-				return;
-			}
-			const reason = event.reason;
-			const endError = event.error ?? null;
-			const finishedText = assistantTextRef.current;
-			setState((prev) => ({
-				...prev,
-				sending: false,
-				error: reason === "error" ? (endError ?? "Stream failed.") : prev.error,
-				messages: prev.messages.map((message) =>
-					message.id === activeAssistantId.current
-						? { ...message, streaming: false }
-						: message
-				),
-			}));
-			activeAssistantId.current = null;
-			activeStreamId.current = null;
+	const {
+		messages,
+		sendMessage,
+		status,
+		error,
+		stop: stopChat,
+	} = useChat({
+		id: getConversationId(),
+		transport,
+		onFinish: ({ message, isAbort, isError }) => {
 			// Speak the completed reply (no-op unless TTS is enabled). Only on a
 			// clean finish — not on abort or error.
-			if (reason === "done") {
-				speakReply(finishedText).catch(() => undefined);
+			if (isAbort || isError || message.role !== "assistant") {
+				return;
 			}
-		};
+			speakReplyRef.current(textOf(message)).catch(() => undefined);
+		},
+	});
 
-		const offPart = window.island.core.onStreamPart(onPart);
-		const offEnd = window.island.core.onStreamEnd(onEnd);
-		return () => {
-			offPart();
-			offEnd();
-		};
-	}, [speakReply]);
+	const sending = status === "submitted" || status === "streaming";
+	const sendingRef = useRef(sending);
+	sendingRef.current = sending;
+
+	// ── Side-channel parts ────────────────────────────────────────────────────
+	// `data-ryu-acp-*` and `data-plugin_note` ride the same stream but are not
+	// transcript content; they land in `message.parts` and are read back out here.
+	// Same derivation the desktop chat uses (@ryu/blocks/composer/streamed-parts).
+
+	const streamedAcpMode = useMemo(
+		() => latestStreamedAcpMode(messages),
+		[messages]
+	);
+	useEffect(() => {
+		if (streamedAcpMode) {
+			onAcpModeRef.current?.(streamedAcpMode);
+		}
+	}, [streamedAcpMode]);
+
+	const streamedAcpConfig = useMemo(
+		() => latestStreamedAcpConfig(messages),
+		[messages]
+	);
+	const lastAcpConfigKey = useRef<string | null>(null);
+	useEffect(() => {
+		// Keyed by EMISSION, not value: a second plan cycle re-emits the identical
+		// map and must still land, or the Plan pill stays armed and the next turn
+		// re-enters plan mode, refusing the edits the user just approved. A
+		// re-derive over the same messages yields the same key, so a mid-stream
+		// re-render no-ops instead of stomping a manual pick.
+		if (
+			!streamedAcpConfig ||
+			streamedAcpConfig.key === lastAcpConfigKey.current
+		) {
+			return;
+		}
+		lastAcpConfigKey.current = streamedAcpConfig.key;
+		onAcpConfigRef.current?.(streamedAcpConfig.value, streamedAcpConfig.key);
+	}, [streamedAcpConfig]);
+
+	// The latest turn-hook note (goal/proof/double-check), until dismissed.
+	// Surfaced apart from the transcript so it never reads as an assistant reply.
+	const [dismissedNoteKey, setDismissedNoteKey] = useState<string | null>(null);
+	const pluginNote = useMemo(() => latestPluginNote(messages), [messages]);
+	const notes = useMemo(
+		() =>
+			pluginNote && pluginNote.key !== dismissedNoteKey
+				? [pluginNote.value]
+				: [],
+		[pluginNote, dismissedNoteKey]
+	);
+	const clearNotes = useCallback((): void => {
+		setDismissedNoteKey(pluginNote?.key ?? null);
+	}, [pluginNote]);
 
 	const send = useCallback(
 		async (
 			text: string,
-			options?: { withScreen?: boolean; attachments?: IslandAttachment[] }
+			sendOptions?: { withScreen?: boolean; attachments?: IslandAttachment[] }
 		): Promise<void> => {
 			const trimmed = text.trim();
-			const attachments = options?.attachments ?? [];
+			const attachments = sendOptions?.attachments ?? [];
 			// A bare attachment with no caption is still a valid turn ("describe this
 			// image"), so allow an empty draft when images are attached.
 			if (
 				(trimmed.length === 0 && attachments.length === 0) ||
-				activeStreamId.current !== null
+				sendingRef.current
 			) {
 				return;
 			}
 
 			let outgoing = trimmed;
-			if (options?.withScreen) {
+			if (sendOptions?.withScreen) {
 				const result = await window.island.shadow.getCurrentContext();
 				if (result.available) {
 					outgoing = buildScreenPreamble(result.context) + trimmed;
@@ -387,87 +371,33 @@ export function useIslandChat(options?: {
 				trimmed.length > 0
 					? trimmed
 					: attachments.map((a) => a.name).join(", ");
-			const userMessage: ChatMessage = {
-				id: crypto.randomUUID(),
-				role: "user",
-				content: displayText,
-			};
-			const assistantMessage: ChatMessage = {
-				id: crypto.randomUUID(),
-				role: "assistant",
-				content: "",
-				streaming: true,
-			};
-			activeAssistantId.current = assistantMessage.id;
-			assistantTextRef.current = "";
 
-			// Build the Core message history from prior turns plus this one. The
-			// outgoing user content may carry the screen preamble; the displayed
-			// bubble keeps the clean text.
-			const history = state.messages.map((message) => ({
-				role: message.role,
-				content: message.content,
-			}));
-
-			setState((prev) => ({
-				...prev,
-				error: null,
-				sending: true,
-				// Fresh turn: drop any notes from the previous answer.
-				notes: [],
-				messages: [...prev.messages, userMessage, assistantMessage],
-			}));
-
-			try {
-				const handle = await window.island.core.chatStream({
-					agent_id: agentIdOrUndefined(voiceAgentRef.current),
-					conversation_id: getConversationId(),
-					enable_long_term: false,
-					companion_source: true,
-					plugin_flags: {
-						[DOUBLE_CHECK_FLAG]: getDoubleCheckRef.current?.() ?? false,
-					},
-					...getAcpPayloadRef.current?.(),
-					messages: [
-						...history,
-						{
-							role: "user",
-							content: outgoing,
-							...(fileParts.length > 0 ? { parts: fileParts } : {}),
-						},
-					],
-				});
-				activeStreamId.current = handle.streamId;
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				activeAssistantId.current = null;
-				setState((prev) => ({
-					...prev,
-					sending: false,
-					error: `Could not reach Core: ${message}`,
-					messages: prev.messages.filter(
-						(item) => item.id !== assistantMessage.id
-					),
-				}));
+			const messageId = crypto.randomUUID();
+			if (outgoing !== displayText) {
+				serverTextRef.current.set(messageId, outgoing);
 			}
+
+			sendMessage({
+				messageId,
+				parts: [{ type: "text", text: displayText }, ...fileParts],
+			} as Parameters<typeof sendMessage>[0]);
 		},
-		[state.messages]
+		[sendMessage]
 	);
 
 	const stop = useCallback((): void => {
 		stopSpeaking();
-		const streamId = activeStreamId.current;
-		if (streamId) {
-			window.island.core.abortStream(streamId).catch(() => {
-				// Aborting a stream that already finished is a no-op; ignore.
-			});
-		}
-	}, [stopSpeaking]);
+		stopChat();
+	}, [stopSpeaking, stopChat]);
 
-	// Dismiss the surfaced turn-hook notes (the banner's ✕).
-	const clearNotes = useCallback((): void => {
-		setState((prev) => ({ ...prev, notes: [] }));
-	}, []);
-
-	return { ...state, send, stop, clearNotes };
+	return {
+		clearNotes,
+		error: error?.message ?? null,
+		messages,
+		notes,
+		send,
+		sending,
+		status: status as ChatStatus,
+		stop,
+	};
 }

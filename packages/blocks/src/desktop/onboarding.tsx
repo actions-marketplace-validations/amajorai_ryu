@@ -178,6 +178,7 @@ function OnboardingShell({
 					{/* Same title + muted subtitle stack as LoginView's PageHeader.
 				    TextSwap keeps rotating loading lines from hard-cutting. */}
 					<PageHeader
+						stagger={false}
 						subtitle={subtitle ? <TextSwap>{subtitle}</TextSwap> : undefined}
 						title={<TextSwap>{title}</TextSwap>}
 					/>

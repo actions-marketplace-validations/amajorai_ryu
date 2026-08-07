@@ -56,7 +56,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
-import { buildRyuDeepLink } from "@ryuhq/protocol/deep-link";
+import { buildRyuDeepLink, parseRyuDeepLink } from "@ryuhq/protocol/deep-link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { type ReactNode, useEffect, useState } from "react";
@@ -66,6 +66,7 @@ import { WEB_URL } from "@/lib/app-urls.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { cn } from "@/lib/utils.ts";
 import { AgentAutoRoutingEditor } from "@/src/components/agents/AgentAutoRoutingEditor.tsx";
+import { CreateAgentDialog } from "@/src/components/agents/CreateAgentDialog.tsx";
 import { GatewayDialog } from "@/src/components/gateway/GatewayDialog.tsx";
 import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
 import {
@@ -605,12 +606,35 @@ export function AddNodeDialog({
 	const [name, setName] = useState("");
 	const [url, setUrl] = useState("");
 	const [token, setToken] = useState("");
+	const [link, setLink] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	// LAN discovery, folded in from the node dropdown: sweep the local /24 for
 	// reachable Core nodes and add one in a click — right where you'd otherwise
 	// type its address by hand.
 	const [scanning, setScanning] = useState(false);
 	const [discovered, setDiscovered] = useState<DiscoveredNode[] | null>(null);
+
+	// One line instead of three boxes: a `ryu://nodes/connect?…` connection string
+	// carries address, label and (when the sender had one) bearer, so copying a
+	// node between surfaces is a paste rather than a transcription. The grammar is
+	// owned by `@ryuhq/protocol/deep-link` — parsed here, never re-implemented.
+	// It only PRE-FILLS: the user still presses Add, so a string from a hostile
+	// clipboard can never connect on its own.
+	const handleLinkChange = (value: string) => {
+		setLink(value);
+		if (!value.trim()) {
+			return;
+		}
+		const parsed = parseRyuDeepLink(value);
+		if (parsed?.kind !== "node") {
+			setError("That doesn't look like a Ryu connection string");
+			return;
+		}
+		setName(parsed.name);
+		setUrl(parsed.url);
+		setToken(parsed.token ?? "");
+		setError(null);
+	};
 
 	const handleAdd = async () => {
 		setError(null);
@@ -619,6 +643,7 @@ export function AddNodeDialog({
 			setName("");
 			setUrl("");
 			setToken("");
+			setLink("");
 			onClose();
 		} catch (e) {
 			setError(String(e));
@@ -667,6 +692,26 @@ export function AddNodeDialog({
 					<DialogTitle>Add Node</DialogTitle>
 				</DialogHeader>
 				<div className="space-y-3">
+					<div className="space-y-1">
+						<Input
+							aria-label="Connection string"
+							className="font-mono text-xs"
+							id="node-link"
+							onChange={(e) => handleLinkChange(e.target.value)}
+							placeholder="ryu://nodes/connect?url=…"
+							size="lg"
+							value={link}
+						/>
+						<p className="text-[11px] text-muted-foreground">
+							Paste a connection string to fill the fields below — copy one from
+							the web dashboard or another node's Share menu.
+						</p>
+					</div>
+					<div className="flex items-center gap-2 text-[11px] text-muted-foreground/60">
+						<span className="h-px flex-1 bg-border/60" />
+						or enter it manually
+						<span className="h-px flex-1 bg-border/60" />
+					</div>
 					<Input
 						aria-label="Name"
 						id="node-name"
@@ -3057,6 +3102,9 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 				open={gatewayOpen}
 			/>
 			<AgentAutoRoutingEditor />
+			{/* Mounted once here, beside the other globally-triggered dialogs, so the
+			    six "New agent" entry points all drive one instance. */}
+			<CreateAgentDialog />
 			<ShareNodeDialog
 				magicDnsName={meshStatus?.magicDnsName ?? null}
 				node={shareNode}

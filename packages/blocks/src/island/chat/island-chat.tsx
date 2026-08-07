@@ -38,6 +38,17 @@ export interface IslandChatViewProps {
 	onStop?: () => void;
 	prefill?: string | null;
 	sending?: boolean;
+	/**
+	 * The transcript to render above the composer, replacing the built-in
+	 * plain-text {@link MessageList}. The live island passes
+	 * {@link IslandTranscript} — the real desktop message list at compact density,
+	 * so tool rows, MCP widgets and generated images render here exactly as they
+	 * do in the desktop chat.
+	 *
+	 * Static surfaces (the storyboard screens, the marketing global island) keep
+	 * passing `messages` and get the plain-text list, which needs no chat runtime.
+	 */
+	transcript?: ReactNode;
 }
 
 const noop = (): void => {
@@ -60,8 +71,9 @@ export function IslandChatView({
 	onComposerKeyDown,
 	onPrefillConsumed,
 	onRemoveAttachment,
+	transcript,
 }: IslandChatViewProps) {
-	const hasHistory = messages.length > 0;
+	const hasHistory = transcript ? true : messages.length > 0;
 
 	return (
 		<div
@@ -69,7 +81,16 @@ export function IslandChatView({
 				hasHistory ? "" : "justify-center"
 			}`}
 		>
-			{hasHistory ? (
+			{transcript ? (
+				// The real message list owns its own scroller (MessageScroller), so it
+				// gets a plain flex slot — wrapping it in `overflow-y-auto` would nest
+				// two scroll containers and break auto-scroll.
+				<div className="relative z-10 flex min-h-0 flex-1 flex-col">
+					{transcript}
+				</div>
+			) : null}
+
+			{!transcript && hasHistory ? (
 				<div className="relative z-10 min-h-0 flex-1 overflow-y-auto pr-1">
 					<MessageList messages={messages} />
 				</div>

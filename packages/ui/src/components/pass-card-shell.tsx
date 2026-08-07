@@ -1,0 +1,662 @@
+"use client";
+
+import {
+	animate,
+	motion,
+	useAnimationFrame,
+	useMotionTemplate,
+	useMotionValue,
+	useReducedMotion,
+	useSpring,
+	useTransform,
+} from "motion/react";
+import {
+	type ReactNode,
+	useCallback,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
+import { cn } from "../lib/utils.ts";
+import { DitherAvatar, ditherAvatarHue } from "./dither-kit/avatar.tsx";
+import { hueFill } from "./dither-kit/pixel.ts";
+import { Logo } from "./logo.tsx";
+import { MetalEdge } from "./metal-edge.tsx";
+import { ShaderBackground } from "./motion/shader-background.tsx";
+
+/**
+ * The card object itself — the laminated, two-sided, metal-ringed thing that
+ * turns, tilts, floats and can be dragged by hand. It carries NO content of its
+ * own: callers pass the front face as `children` and (optionally) the back as
+ * `back`.
+ *
+ * It exists as its own component because more than one surface wants this
+ * object. The waitlist pass was the first; the agent employee badge is the
+ * second. Copying ~400 lines of transform layering, extrusion geometry and
+ * pointer plumbing into a second file would guarantee the two drift, which is
+ * exactly what happened to the waitlist SCREEN before it was unified.
+ *
+ * All colour comes from design tokens so it reads in light and dark. Motion is
+ * suppressed under `prefers-reduced-motion` — the card is decoration, and
+ * decoration is the first thing that should stop moving when a user asks for
+ * less of it.
+ */
+
+/**
+ * Tilt/glare/shadow tuning, kept at the reference interactive-tilt-card values:
+ * a 15° tilt at the far edge, a 1000px perspective, a 5% lift on hover, and a
+ * glare that reaches 80% of the card before it falls off. The drop shadow is
+ * animated rather than a static `shadow-xl` — the card is meant to look like it
+ * lifts off the page when you point at it, and a fixed shadow reads as flat.
+ */
+const TILT_DEGREES = 15;
+const PERSPECTIVE_PX = 1000;
+const HOVER_SCALE = 1.05;
+const GLARE_INTENSITY = 0.5;
+const GLARE_SIZE_PERCENT = 80;
+const SHADOW_RESTING = "0 10px 30px -10px rgba(0, 0, 0, 0.2)";
+const SHADOW_HOVER = "0 25px 50px -12px rgba(0, 0, 0, 0.5)";
+const TRANSITION_SECONDS = 0.2;
+/**
+ * The idle revolution: one slow, unbroken turn, repeating forever, so the back
+ * of the pass comes into view every cycle. Linear — a constant-rate turn is the
+ * only easing that does not visibly stutter at the seam where the loop repeats.
+ * The axis is CSS `rotateY`, which swings the card left-to-right like a
+ * revolving door; `rotateX` would tumble it top-over-bottom instead.
+ */
+const FLIP_CYCLE_SECONDS = 24;
+const FULL_TURN_DEGREES = 360;
+/**
+ * Drag-to-rotate. A degree per pixel means a swipe across a 320px card turns it
+ * most of the way round, which is about right for "throw it and look at the
+ * back". Pitch is clamped well short of edge-on so the card can never be dragged
+ * into a hairline.
+ */
+/** Tuned to settle in about the 0.2s the reference tween took. */
+const TILT_SPRING = { stiffness: 320, damping: 32, mass: 0.6 } as const;
+/** Half of the coordinate space; a pointer at the centre must read as zero tilt. */
+const CENTER = 0.5;
+/** Tilt is derived from a -50..50 offset, so halve the span to normalize it. */
+const TILT_SPAN = 50;
+/**
+ * The idle float — the card rises and settles a few pixels, forever. Slow and
+ * shallow on purpose: it should read as the card being held rather than as an
+ * animation playing, so the period is long and the travel is small enough that
+ * you notice it only when you are not looking straight at it.
+ */
+const FLOAT_TRAVEL_PX = 10;
+const FLOAT_CYCLE_SECONDS = 6;
+const DRAG_DEGREES_PER_PX = 1;
+const MAX_DRAG_PITCH = 60;
+/**
+ * Below this queue size the position is hidden. A low number is the truth but
+ * it is the wrong truth to lead with: "#42" against a 60-person list reads as an
+ * empty room, so the pass shows who you are and holds the ranking until there is
+ * a crowd to be ranked against. The waitlist screen gates its own counters on
+ * the same value.
+ */
+/** The card's corner radius, in the CSS px `metal-fx` wants it in. */
+const CARD_RADIUS_PX = 28;
+
+/**
+ * Card thickness. Two faces alone turn edge-on into a hairline — a sheet of
+ * paper, not a card — so the pass is built as a solid: the faces sit half a
+ * thickness apart along Z, and the gap between them is filled.
+ *
+ * The fill is a stack of copies of the card's own rounded silhouette, one per
+ * pixel of depth, rather than four rotated slabs along the straight edges. Four
+ * slabs cannot follow a 28px corner radius, so the corners came out hollow —
+ * you could see through the card where it was rounded. A stack has no such
+ * problem: every slice is the exact outline, so the extrusion is solid the whole
+ * way round, corners included.
+ *
+ * Kept deliberately shallow. Each face carries its own metal ring, so at any
+ * real depth you see BOTH rings at once, separated by the gap — which reads as
+ * two cards stacked rather than as one thick one. A few pixels is enough to kill
+ * the paper-thin look without opening that gap.
+ */
+const CARD_THICKNESS_PX = 6;
+const CARD_HALF_THICKNESS_PX = CARD_THICKNESS_PX / 2;
+/** One slice per pixel — any coarser and the stack reads as separate planes. */
+const CARD_SLICES = CARD_THICKNESS_PX;
+
+/**
+ * The card's thickness, as a stack of its own silhouette. Each slice sits a
+ * pixel further back than the last, spanning front face to back face, so any
+ * edge-on view shows a continuous band of material instead of a hairline.
+ */
+function CardExtrusion() {
+	return (
+		<>
+			{Array.from({ length: CARD_SLICES + 1 }, (_, index) => {
+				const depth = CARD_HALF_THICKNESS_PX - index;
+				return (
+					<div
+						aria-hidden="true"
+						className="pointer-events-none absolute inset-0 rounded-[1.75rem] bg-[color-mix(in_oklab,var(--card),var(--foreground)_20%)]"
+						key={depth}
+						style={{ transform: `translateZ(${depth}px)` }}
+					/>
+				);
+			})}
+		</>
+	);
+}
+
+/**
+ * Warp backdrop tuning. The shader is a flowing four-stop gradient, and it is
+ * read here as a texture UNDER the card's content rather than as a background
+ * in its own right: the name sits on it at `text-5xl`, so the opacity is what
+ * keeps it legible. Higher in dark (the stops are dark and the type is light,
+ * so the texture only ever adds contrast) than in light, where a saturated
+ * wash would eat a black headline.
+ */
+const WARP_OPACITY_DARK = 0.55;
+const WARP_OPACITY_LIGHT = 0.3;
+/** Degrees between the seed's own hue and its companion stop. */
+const WARP_HUE_SPREAD = 42;
+/** The near-black / near-white the seeded hues are laid against. */
+const WARP_BASE_DARK = "#121212";
+const WARP_BASE_LIGHT = "#f2f2f4";
+const WARP_SPEED = 0.32;
+const WARP_SWIRL = 0.75;
+const WARP_DISTORTION = 0.22;
+const WARP_SOFTNESS = 1;
+const WARP_SCALE = 1.1;
+
+const hueHex = (hue: number): string => {
+	const [r, g, b] = hueFill(hue);
+	return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+};
+
+const DARK_SCHEME_QUERY = "(prefers-color-scheme: dark)";
+const subscribeToScheme = (onChange: () => void) => {
+	if (typeof window === "undefined" || !window.matchMedia) {
+		return () => {
+			/* nothing to unsubscribe from on the server */
+		};
+	}
+	const media = window.matchMedia(DARK_SCHEME_QUERY);
+	media.addEventListener("change", onChange);
+	return () => media.removeEventListener("change", onChange);
+};
+
+/**
+ * Resolve `metalTheme` down to a boolean the shader can be coloured from.
+ * `"auto"` is the only case that has to ask the OS — and it must ask through a
+ * subscription rather than a render-time `matchMedia` read, because a card that
+ * sampled the scheme once would keep its old palette when the user flips the OS
+ * toggle. Callers that own a manual theme pass `"dark"`/`"light"` and never
+ * reach the media query at all.
+ */
+function useIsDarkFace(metalTheme: "auto" | "dark" | "light"): boolean {
+	const prefersDark = useSyncExternalStore(
+		subscribeToScheme,
+		() => window.matchMedia(DARK_SCHEME_QUERY).matches,
+		// Server render: assume light, which is what an unstyled page is.
+		() => false
+	);
+	if (metalTheme === "auto") {
+		return prefersDark;
+	}
+	return metalTheme === "dark";
+}
+
+/**
+ * The member's own generative dither glyph, blown up to fill the card and
+ * dropped to a texture. Held at a low opacity because it has to sit under the
+ * content without competing with it; `animate={false}` because the entrance
+ * would replay on every re-render and this is a backdrop, not a subject.
+ */
+function DitherBackdrop({ seed }: { seed: string }) {
+	return <DitherAvatar animate={false} className="h-full w-full" name={seed} />;
+}
+
+/**
+ * The same seed, painted as a flowing warp shader instead of a pixel glyph. The
+ * hue comes from `ditherAvatarHue` — the avatar's OWN draw, not a second hash —
+ * so the card's backdrop is the colour of the glyph in the circle above the
+ * name, and two members never get the same card.
+ */
+function WarpBackdrop({
+	isDark,
+	reduceMotion,
+	seed,
+}: {
+	isDark: boolean;
+	reduceMotion: boolean;
+	seed: string;
+}) {
+	const hue = ditherAvatarHue(seed);
+	const base = isDark ? WARP_BASE_DARK : WARP_BASE_LIGHT;
+	return (
+		<ShaderBackground
+			className="h-full w-full"
+			colors={[base, hueHex(hue), base, hueHex(hue + WARP_HUE_SPREAD)]}
+			distortion={WARP_DISTORTION}
+			scale={WARP_SCALE}
+			softness={WARP_SOFTNESS}
+			// Frozen explicitly rather than through the shader's own reduced-motion
+			// read, for the same reason `metalTheme` is a prop: the card resolves
+			// these questions once, at the top, and hands down the answer.
+			speed={reduceMotion ? 0 : WARP_SPEED}
+			swirl={WARP_SWIRL}
+			variant="warp"
+		/>
+	);
+}
+
+/**
+ * One side of the pass: the metal ring plus the laminated card surface. Both
+ * faces render this so the back is unmistakably the same object as the front
+ * rather than a plain panel behind it.
+ */
+function PassFace({
+	backdrop,
+	children,
+	metalTheme,
+	mirrored = false,
+	reduceMotion,
+	seed,
+}: {
+	/** Which generative texture the card face is printed on. */
+	backdrop: PassBackdrop;
+	children: React.ReactNode;
+	metalTheme: "auto" | "dark" | "light";
+	/**
+	 * Flip the backdrop horizontally. The back face is the same sheet of card
+	 * seen from behind, so its pattern has to read as the front's pattern viewed
+	 * through the material — an unmirrored copy looks like a second, different
+	 * card glued on.
+	 */
+	mirrored?: boolean;
+	reduceMotion: boolean;
+	/** Name or handle the generative backdrop is derived from. */
+	seed: string;
+}) {
+	const isDark = useIsDarkFace(metalTheme);
+	const isWarp = backdrop === "warp";
+	return (
+		// `h-full` on top of the shared edge's own `w-full`: the back face is
+		// absolutely positioned to the card's box, so the ring wrapper has to be as
+		// tall as the card or its surface covers only the content and leaves a bare
+		// band above and below.
+		<MetalEdge
+			borderRadius={CARD_RADIUS_PX}
+			className="h-full"
+			paused={reduceMotion}
+			theme={metalTheme}
+		>
+			{/* `isolate` scopes the foil overlay's `mix-blend-soft-light` to the
+			    card, so it can never blend against whatever the card happens to be
+			    sitting on. `preserve-3d` lives on the flip wrapper above, never
+			    here: Chromium forces it back to `flat` on any element that also
+			    clips, and the clip is what keeps the content inside the rounded
+			    corners while the card is turning. */}
+			<div className="relative isolate flex h-full w-full flex-col overflow-hidden rounded-[1.75rem] text-card-foreground">
+				{/* The card face — fill and edge both — as its own layer rather than a
+				    `border bg-card` on the element above. MetalFx normalizes its DIRECT
+				    child's outer chrome with
+				    `background: transparent !important; border: 0 !important` so
+				    consumer button styles can't fight the ring, which silently ate both
+				    of those when they were written up there. A grandchild is outside
+				    that selector. Both matter: an opaque face is load-bearing now that
+				    the pass has two sides (a see-through face shows the other side's
+				    content mirrored through it mid-turn), and in light mode the metal
+				    ring is near-invisible along the straight edges, so without the
+				    border a white card on a white page has no edge at all. The radius
+				    is repeated here because a square border would have its corners
+				    lopped off by the parent's clip. */}
+				<div
+					aria-hidden="true"
+					className="pointer-events-none absolute inset-0 rounded-[1.75rem] border bg-card"
+				/>
+				{/* The generative backdrop, drawn from the member's own seed so the
+			    face IS them — two people never get the same card. Which texture
+			    is the caller's call: the employee badge keeps the pixel glyph,
+			    the waitlist pass is printed on the warp shader. Mirrored on the
+			    back face either way, so the pattern reads as the front's seen
+			    through the material rather than as a second card glued on. */}
+				{/* `clip-path` rather than the parent's `overflow-hidden` + radius.
+			    The warp is a WebGL canvas, so it gets its own compositing layer,
+			    and Chromium does not apply an ancestor's rounded overflow clip to
+			    a composited descendant inside a 3D rendering context — the shader
+			    painted square over the front face's corners while the back face
+			    (which carries its own transform, hence its own clip) came out
+			    right. A `clip-path` on the layer itself is honoured by the
+			    compositor, so both faces round identically. */}
+				<div
+					aria-hidden="true"
+					className={cn(
+						"pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden [clip-path:inset(0_round_1.75rem)]",
+						isWarp ? "opacity-(--pass-warp-opacity)" : "opacity-[0.14]",
+						mirrored && "-scale-x-100"
+					)}
+					style={
+						isWarp
+							? ({
+									"--pass-warp-opacity": isDark
+										? WARP_OPACITY_DARK
+										: WARP_OPACITY_LIGHT,
+								} as React.CSSProperties)
+							: undefined
+					}
+				>
+					{isWarp ? (
+						<WarpBackdrop
+							isDark={isDark}
+							reduceMotion={reduceMotion}
+							seed={seed}
+						/>
+					) : (
+						<DitherBackdrop seed={seed} />
+					)}
+				</div>
+				{/* Iridescent foil: a fixed diagonal sheen so the card reads as
+				    laminated even when nothing is pointing at it. Deliberately faint.
+				    Measured over a white card face, the original weighting pulled the
+				    centre to rgb(200,233,255) — a blue wash rather than a graze, which
+				    desaturated the content sitting on it. The metal ring now carries
+				    most of the laminated signal, so this only has to hint at it. */}
+				<div
+					aria-hidden="true"
+					className="pointer-events-none absolute inset-0 opacity-[0.16] mix-blend-soft-light"
+					style={{
+						background:
+							"linear-gradient(115deg, transparent 24%, color-mix(in oklab, var(--primary) 32%, transparent) 44%, transparent 58%, color-mix(in oklab, var(--primary) 18%, transparent) 74%, transparent 88%)",
+					}}
+				/>
+				{children}
+			</div>
+		</MetalEdge>
+	);
+}
+
+/**
+ * Which generative texture the card is printed on. `"dither"` is the pixel
+ * glyph the card shipped with and stays the default, so the agent employee
+ * badge — the shell's other consumer — is untouched by the waitlist pass
+ * moving to the shader.
+ */
+export type PassBackdrop = "dither" | "warp";
+
+export interface PassCardShellProps {
+	/** The back face. Defaults to the Ryu mark alone. */
+	back?: ReactNode;
+	/** {@link PassBackdrop}. Defaults to the pixel glyph. */
+	backdrop?: PassBackdrop;
+	/** The front face. */
+	children: ReactNode;
+	className?: string;
+	/**
+	 * Seed for the generative dither backdrop — a name or handle. The same seed
+	 * always draws the same pattern, so the backdrop identifies its owner.
+	 */
+	ditherSeed: string;
+	/**
+	 * Which tuning of the metal ring to paint. `"auto"` follows
+	 * `prefers-color-scheme`, which is wrong wherever the app has a manual theme
+	 * toggle that can disagree with the OS — callers pass their resolved theme.
+	 */
+	metalTheme?: "auto" | "dark" | "light";
+}
+
+/** The Ryu mark, the default back face. */
+export function PassGhost() {
+	return (
+		<div className="relative flex h-full w-full items-center justify-center p-7">
+			<Logo size="48px" variant="outline" />
+		</div>
+	);
+}
+
+export function PassCardShell({
+	back,
+	backdrop = "dither",
+	children,
+	className,
+	ditherSeed,
+	metalTheme = "auto",
+}: PassCardShellProps) {
+	const reduceMotion = useReducedMotion();
+	const cardRef = useRef<HTMLDivElement>(null);
+	const [hovered, setHovered] = useState(false);
+	const [dragging, setDragging] = useState(false);
+	/** Last pointer position, so a drag reads as a delta rather than a position. */
+	const lastPointer = useRef({ x: 0, y: 0 });
+
+	// Tilt and glare are motion values, NOT React state, and that is a performance
+	// decision rather than a stylistic one. Held in state, every pointermove
+	// re-rendered this component — and with it BOTH `PassFace`s, each of which
+	// mounts a WebGL metal ring. That is what made the rotation stutter. Motion
+	// values write straight to the DOM node, so a move now costs no render at all.
+	const tiltX = useMotionValue(0);
+	const tiltY = useMotionValue(0);
+	const glareX = useMotionValue(50);
+	const glareY = useMotionValue(50);
+	// Springs stand in for the reference's 0.2s ease-out: same settle, without
+	// spawning a fresh tween on every one of the ~120 moves a second a trackpad
+	// can produce.
+	const smoothTiltX = useSpring(tiltX, TILT_SPRING);
+	const smoothTiltY = useSpring(tiltY, TILT_SPRING);
+	const glareXPercent = useTransform(glareX, (value) => `${value}%`);
+	const glareYPercent = useTransform(glareY, (value) => `${value}%`);
+	const glareBackground = useMotionTemplate`radial-gradient(circle at ${glareXPercent} ${glareYPercent}, rgba(255, 255, 255, ${GLARE_INTENSITY}) 0%, rgba(255, 255, 255, 0) ${GLARE_SIZE_PERCENT}%)`;
+
+	// The idle turn is driven by a motion value ticked per frame, NOT by a
+	// keyframed `animate` that swaps out on hover. That swap is what made the card
+	// snap: handing Framer a keyframe array restarts the loop at its first frame,
+	// so releasing the pointer teleported the card back to 0° instead of settling.
+	// A motion value has no such seam — the angle simply stops accumulating while
+	// the pointer is on the card, and resumes from exactly where it stopped, which
+	// is also what lets a drag write into the same value.
+	const spin = useMotionValue(0);
+	/** Pitch contributed by dragging up/down; eases back to level on release. */
+	const dragPitch = useMotionValue(0);
+	useAnimationFrame((_, delta) => {
+		if (hovered || dragging || reduceMotion) {
+			return;
+		}
+		const degreesPerMs = FULL_TURN_DEGREES / (FLIP_CYCLE_SECONDS * 1000);
+		spin.set((spin.get() + delta * degreesPerMs) % FULL_TURN_DEGREES);
+	});
+
+	const handlePointerDown = useCallback(
+		(event: React.PointerEvent<HTMLDivElement>) => {
+			// Capture so a drag that leaves the card keeps steering it, and so the
+			// release still arrives here. Touch and mouse both come through pointer
+			// events, so this is the whole mobile story.
+			event.currentTarget.setPointerCapture(event.pointerId);
+			lastPointer.current = { x: event.clientX, y: event.clientY };
+			setDragging(true);
+			tiltX.set(0);
+			tiltY.set(0);
+		},
+		[tiltX, tiltY]
+	);
+
+	const endDrag = useCallback(
+		(event: React.PointerEvent<HTMLDivElement>) => {
+			if (!dragging) {
+				return;
+			}
+			if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+				event.currentTarget.releasePointerCapture(event.pointerId);
+			}
+			setDragging(false);
+			// Yaw keeps whatever angle the drag left it at — that IS the new resting
+			// position, and the idle turn carries on from there. Pitch is a held
+			// gesture rather than a position, so it levels out.
+			animate(dragPitch, 0, { duration: 0.4, ease: "easeOut" });
+		},
+		[dragPitch, dragging]
+	);
+
+	const handlePointerMove = useCallback(
+		(event: React.PointerEvent<HTMLDivElement>) => {
+			const node = cardRef.current;
+			if (!node) {
+				return;
+			}
+			if (dragging) {
+				const deltaX = event.clientX - lastPointer.current.x;
+				const deltaY = event.clientY - lastPointer.current.y;
+				lastPointer.current = { x: event.clientX, y: event.clientY };
+				spin.set(spin.get() + deltaX * DRAG_DEGREES_PER_PX);
+				// Dragging up should pitch the top away, hence the negated delta, and
+				// the clamp stops a long vertical drag rolling the card past edge-on.
+				const nextPitch = dragPitch.get() - deltaY * DRAG_DEGREES_PER_PX;
+				dragPitch.set(
+					Math.min(Math.max(nextPitch, -MAX_DRAG_PITCH), MAX_DRAG_PITCH)
+				);
+				return;
+			}
+			const rect = node.getBoundingClientRect();
+			const offsetX = ((event.clientX - rect.left) / rect.width - CENTER) * 100;
+			const offsetY = ((event.clientY - rect.top) / rect.height - CENTER) * 100;
+			glareX.set(offsetX / 2 + 50);
+			glareY.set(offsetY / 2 + 50);
+			tiltX.set(-(offsetY / TILT_SPAN) * TILT_DEGREES);
+			tiltY.set((offsetX / TILT_SPAN) * TILT_DEGREES);
+		},
+		[dragPitch, dragging, glareX, glareY, spin, tiltX, tiltY]
+	);
+
+	const handlePointerLeave = useCallback(() => {
+		setHovered(false);
+		tiltX.set(0);
+		tiltY.set(0);
+		glareX.set(50);
+		glareY.set(50);
+	}, [glareX, glareY, tiltX, tiltY]);
+
+	// Tilt, scale and shadow are the reference interactive-tilt-card's, which
+	// separates them across two elements: the perspective host scales, and a child
+	// carries the rotation and the drop shadow. Fusing them onto one element (as
+	// this used to) makes Framer compose scale and rotation in one matrix, and the
+	// foreshortening comes out wrong.
+	const settleTransition = {
+		duration: TRANSITION_SECONDS,
+		ease: "easeOut" as const,
+	};
+
+	return (
+		// Three layers, each owning exactly one transform, because they change on
+		// different clocks: this one scales on hover, the next turns forever, the
+		// last follows the pointer. Collapsing any two of them onto one element is
+		// what produced both the wrong-looking tilt and the snap-back on leave.
+		<motion.div
+			animate={{
+				scale: hovered && !reduceMotion ? HOVER_SCALE : 1,
+				y: reduceMotion ? 0 : [0, -FLOAT_TRAVEL_PX, 0],
+			}}
+			className={cn(
+				"w-full cursor-grab select-none [transform-style:preserve-3d] active:cursor-grabbing",
+				className
+			)}
+			// Native text/image dragging would otherwise hijack the gesture: the
+			// browser starts its own drag on mousedown-and-move over text, which
+			// swallows the pointermove events the rotation reads.
+			draggable={false}
+			onDragStart={(event) => event.preventDefault()}
+			onPointerCancel={endDrag}
+			onPointerDown={handlePointerDown}
+			onPointerEnter={() => setHovered(true)}
+			onPointerLeave={handlePointerLeave}
+			onPointerMove={handlePointerMove}
+			onPointerUp={endDrag}
+			ref={cardRef}
+			// `touchAction: none` is what makes the drag work on a phone: without it
+			// the browser claims a vertical swipe for page scrolling before the
+			// pointermove handler ever sees it.
+			style={{ perspective: `${PERSPECTIVE_PX}px`, touchAction: "none" }}
+			transition={{
+				scale: settleTransition,
+				y: {
+					duration: FLOAT_CYCLE_SECONDS,
+					ease: "easeInOut",
+					repeat: Number.POSITIVE_INFINITY,
+				},
+			}}
+		>
+			{/* The idle turn, and the same value a horizontal drag writes into — so
+			    letting go leaves the card turning on from wherever it was thrown.
+			    Reading straight off the motion value means hover or a drag interrupts
+			    it mid-angle and resuming picks up from there. */}
+			<motion.div
+				className="[transform-style:preserve-3d]"
+				style={{ rotateX: dragPitch, rotateY: spin }}
+			>
+				{/* Pointer tilt and the drop shadow, exactly as the reference pairs
+				    them. `preserve-3d` is what makes the two faces occupy real depth —
+				    it can live here because this element does not clip; each face
+				    carries its own rounded overflow clip, which Chromium would
+				    otherwise flatten. */}
+				<motion.div
+					animate={{
+						boxShadow: hovered && !reduceMotion ? SHADOW_HOVER : SHADOW_RESTING,
+					}}
+					className="relative rounded-[1.75rem] [transform-style:preserve-3d]"
+					style={
+						reduceMotion
+							? undefined
+							: { rotateX: smoothTiltX, rotateY: smoothTiltY }
+					}
+					transition={settleTransition}
+				>
+					{/* The thickness, drawn before the faces so a face always wins
+					    where they meet. */}
+					<CardExtrusion />
+
+					{/* Front. It is the only face in normal flow, so it sets the height
+				    the absolutely-positioned back is measured against, and the only one
+				    that is not absolutely positioned — hence the transform goes on a
+				    wrapper rather than onto the extrusion's own transform. */}
+					<div
+						className="[backface-visibility:hidden]"
+						style={{ transform: `translateZ(${CARD_HALF_THICKNESS_PX}px)` }}
+					>
+						<PassFace
+							backdrop={backdrop}
+							metalTheme={metalTheme}
+							reduceMotion={Boolean(reduceMotion)}
+							seed={ditherSeed}
+						>
+							{children}
+							{/* Specular glare, tracked to the pointer. Fades out on leave rather
+					    than snapping, so the highlight follows the hand off the card. */}
+							<motion.div
+								animate={{ opacity: hovered && !reduceMotion ? 1 : 0 }}
+								aria-hidden="true"
+								className="pointer-events-none absolute inset-0"
+								style={{ background: glareBackground }}
+								transition={{ duration: 0.25 }}
+							/>
+						</PassFace>
+					</div>
+
+					{/* Back. Pre-rotated a half turn about the same axis the card spins on,
+				    so it reads upright exactly when the front has turned away. Hidden
+				    from assistive tech: it carries no information the front does not. */}
+					<div
+						aria-hidden="true"
+						className="absolute inset-0 [backface-visibility:hidden]"
+						style={{
+							transform: `rotateY(180deg) translateZ(${CARD_HALF_THICKNESS_PX}px)`,
+						}}
+					>
+						<PassFace
+							backdrop={backdrop}
+							metalTheme={metalTheme}
+							mirrored
+							reduceMotion={Boolean(reduceMotion)}
+							seed={ditherSeed}
+						>
+							{back ?? <PassGhost />}
+						</PassFace>
+					</div>
+				</motion.div>
+			</motion.div>
+		</motion.div>
+	);
+}

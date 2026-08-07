@@ -90,9 +90,13 @@ export function ContextMeter({
 		});
 	}
 
+	// Delays live on the TRIGGER in Base UI (`delay`/`closeDelay`); on the root
+	// they were unknown props and silently ignored.
 	return (
-		<HoverCard closeDelay={80} openDelay={120}>
+		<HoverCard>
 			<HoverCardTrigger
+				closeDelay={80}
+				delay={120}
 				aria-label={`Context ${Math.round(pct)}% used`}
 				className={cn(
 					"flex h-7 w-fit shrink-0 cursor-default select-none items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground tabular-nums",

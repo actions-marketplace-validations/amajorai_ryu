@@ -1,30 +1,38 @@
-//! Core's implementation of the extracted [`ryu_recipes::RecipesHost`] seam.
+//! The live-ghost recorder Core holds on behalf of the out-of-process Recipes app.
 //!
-//! The `ryu-recipes` crate owns the recipe store surface, the replay/record
+//! The `ryu-recipes` sidecar owns the recipe store surface, the replay/record
 //! *logic*, the `/api/recipes/*` handlers, and the deterministic draft synthesis.
-//! What it cannot own — because they are kernel machinery that must stay in Core —
-//! are the two live-ghost couplings: the shared MCP registry (for stateless
-//! replay) and the **dedicated recording subprocess** ([`McpSession`]) held across
-//! `record_start`..`record_stop` (the in-process input tap is a shared OS resource
-//! that must survive between calls). This shim implements those two verbs; Core
-//! installs it once at boot via [`ryu_recipes::set_global_host`].
+//! What it cannot own — because it is kernel machinery that must stay in Core — is
+//! the **dedicated recording subprocess** ([`McpSession`]) held across
+//! `record_start`..`record_stop`: the in-process input tap is a shared OS resource
+//! that must survive between calls, so the session lives in a process-global slot
+//! here rather than in any single request or in the sidecar.
+//!
+//! These are plain inherent methods, not a trait impl. Core used to implement the
+//! app crate's `RecipesHost` trait, which is what made `apps/core` link the app —
+//! the dependency arrow pointed Core → app purely to satisfy the plug. The sidecar
+//! reaches these through the generic `ghost.*` kernel capabilities
+//! (`recipes_client`), which speak JSON, so no shared Rust type is needed and Core
+//! links zero app code. The JSON bodies the three recorder methods return are the
+//! wire contract: `{started_at, info}`, `{task, started_at, status}`, and
+//! `{task, started_at, payload}` — the shapes the sidecar deserializes into its own
+//! `Recorder*` structs. Changing a key here breaks the sidecar; the key-set tests
+//! below pin them.
+//!
+//! Stateless replay needs none of this: `ghost__ghost_run` goes straight through
+//! the shared MCP registry, which both the workflow executor's `Recipe` node and
+//! the `ghost.replay` capability do directly.
 //!
 //! The recording session is a process-global single slot: only one recording can
 //! be active at a time. A `tokio` mutex because the guard is held across the
 //! `.await` of a ghost `tools/call`.
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
-use ryu_recipes::{RecipesHost, RecorderStarted, RecorderStatus, RecorderStopped};
-
-use crate::sidecar::mcp::client::{McpSession, McpStdioCommand};
-
-/// Fully-qualified ghost tool id used for replay.
-const GHOST_RUN: &str = "ghost__ghost_run";
+use crate::sidecar::mcp::client::{extract_mcp_json, McpSession, McpStdioCommand};
 
 /// A live recording session: the ghost subprocess (holding the input tap) plus
 /// the metadata the desktop shows while recording.
@@ -53,17 +61,44 @@ fn ghost_command() -> McpStdioCommand {
     }
 }
 
-/// Core's `RecipesHost` — the kernel side of the recipes seam.
+// ── Wire bodies ───────────────────────────────────────────────────────────────
+//
+// The three recorder responses are a WIRE CONTRACT with the `ryu-recipes` sidecar,
+// which deserializes them into its own `RecorderStarted`/`RecorderStatus`/
+// `RecorderStopped` (bare serde derives, no rename/default). Core no longer links
+// those structs, so these constructors are the single definition of each shape —
+// built here rather than inline at the call site precisely so the tests below can
+// assert the real production bytes instead of a copy of them.
+
+/// `ghost.recordStart` response body.
+fn started_body(started_at: &str, info: Value) -> Value {
+    json!({ "started_at": started_at, "info": info })
+}
+
+/// `ghost.recordStatus` response body (the active-session arm).
+fn status_body(task: &str, started_at: &str, status: Value) -> Value {
+    json!({ "task": task, "started_at": started_at, "status": status })
+}
+
+/// `ghost.recordStop` response body.
+fn stopped_body(task: &str, started_at: &str, payload: Value) -> Value {
+    json!({ "task": task, "started_at": started_at, "payload": payload })
+}
+
+/// Core's kernel side of the recipes seam: stateless replay plus the singleton
+/// recorder subprocess.
 pub struct CoreRecipesHost;
 
-#[async_trait]
-impl RecipesHost for CoreRecipesHost {
-    async fn call_ghost_run(&self, recipe: &str, params: Value) -> Result<Value> {
+impl CoreRecipesHost {
+    /// Replay a recipe by calling `ghost__ghost_run` through the shared MCP
+    /// registry. Returns the RAW MCP `tools/call` envelope — the sidecar's `run()`
+    /// wrapper unwraps it with its own `extract_mcp_json`, so do not unwrap here.
+    pub async fn call_ghost_run(&self, recipe: &str, params: Value) -> Result<Value> {
         let registry = crate::sidecar::mcp::global_registry()
             .ok_or_else(|| anyhow!("MCP registry not initialized"))?;
         registry
             .call_tool(
-                GHOST_RUN,
+                crate::sidecar::mcp::GHOST_RUN_TOOL,
                 json!({ "recipe": recipe, "params": params }),
                 None,
             )
@@ -71,7 +106,9 @@ impl RecipesHost for CoreRecipesHost {
             .map_err(|e| anyhow!("recipe replay failed: {e}"))
     }
 
-    async fn recorder_start(&self, task: &str) -> Result<RecorderStarted> {
+    /// Spawn a dedicated ghost recorder for `task` into the process-global slot.
+    /// Wire shape: `{ started_at, info }`.
+    pub async fn recorder_start(&self, task: &str) -> Result<Value> {
         let mut guard = recording().lock().await;
         if guard.is_some() {
             return Err(anyhow!(
@@ -84,7 +121,7 @@ impl RecipesHost for CoreRecipesHost {
         let info = session
             .call_tool("ghost_learn_start", json!({ "task": task }))
             .await
-            .and_then(|r| ryu_recipes::extract_mcp_json(&r));
+            .and_then(|r| extract_mcp_json(&r));
         let info = match info {
             Ok(v) => v,
             Err(e) => {
@@ -99,10 +136,12 @@ impl RecipesHost for CoreRecipesHost {
             task: task.to_string(),
             started_at: started_at.clone(),
         });
-        Ok(RecorderStarted { started_at, info })
+        Ok(started_body(&started_at, info))
     }
 
-    async fn recorder_status(&self) -> Result<Option<RecorderStatus>> {
+    /// Poll the held recorder. `Ok(None)` when idle (the caller serialises that as
+    /// JSON `null`). Wire shape: `{ task, started_at, status }`.
+    pub async fn recorder_status(&self) -> Result<Option<Value>> {
         let mut guard = recording().lock().await;
         match guard.as_mut() {
             None => Ok(None),
@@ -111,18 +150,16 @@ impl RecipesHost for CoreRecipesHost {
                     .session
                     .call_tool("ghost_learn_status", json!({}))
                     .await
-                    .and_then(|r| ryu_recipes::extract_mcp_json(&r))
+                    .and_then(|r| extract_mcp_json(&r))
                     .unwrap_or(Value::Null);
-                Ok(Some(RecorderStatus {
-                    task: rec.task.clone(),
-                    started_at: rec.started_at.clone(),
-                    status,
-                }))
+                Ok(Some(status_body(&rec.task, &rec.started_at, status)))
             }
         }
     }
 
-    async fn recorder_stop(&self) -> Result<RecorderStopped> {
+    /// Stop and tear down the held recorder. Wire shape:
+    /// `{ task, started_at, payload }`.
+    pub async fn recorder_stop(&self) -> Result<Value> {
         let mut guard = recording().lock().await;
         let mut rec = guard
             .take()
@@ -131,13 +168,58 @@ impl RecipesHost for CoreRecipesHost {
             .session
             .call_tool("ghost_learn_stop", json!({}))
             .await
-            .and_then(|r| ryu_recipes::extract_mcp_json(&r));
+            .and_then(|r| extract_mcp_json(&r));
         rec.session.shutdown().await;
         let payload = payload?;
-        Ok(RecorderStopped {
-            task: rec.task,
-            started_at: rec.started_at,
-            payload,
-        })
+        Ok(stopped_body(&rec.task, &rec.started_at, payload))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three recorder bodies are a WIRE CONTRACT: the `ryu-recipes` sidecar
+    /// deserializes them into `RecorderStarted`/`RecorderStatus`/`RecorderStopped`
+    /// (`serde_json::from_value`, bare derives, no rename/default). Core no longer
+    /// links those structs, so nothing but these assertions stops a key rename here
+    /// from silently breaking the sidecar. The app-side counterpart lives in
+    /// `apps-store/recipes/backend/src/lib.rs` and deserializes these exact shapes.
+    fn keys(v: &Value) -> Vec<&str> {
+        let mut k: Vec<&str> = v.as_object().expect("object").keys().map(String::as_str).collect();
+        k.sort_unstable();
+        k
+    }
+
+    #[test]
+    fn recorder_started_wire_keys() {
+        let body = started_body("2026-01-01T00:00:00Z", json!({ "ok": true }));
+        assert_eq!(keys(&body), vec!["info", "started_at"]);
+        assert_eq!(body["started_at"], json!("2026-01-01T00:00:00Z"));
+        assert_eq!(body["info"], json!({ "ok": true }));
+    }
+
+    #[test]
+    fn recorder_status_wire_keys() {
+        let body = status_body("t", "2026-01-01T00:00:00Z", Value::Null);
+        assert_eq!(keys(&body), vec!["started_at", "status", "task"]);
+        assert_eq!(body["task"], json!("t"));
+        assert_eq!(body["status"], Value::Null);
+    }
+
+    #[test]
+    fn recorder_stopped_wire_keys() {
+        let body = stopped_body("t", "2026-01-01T00:00:00Z", json!({ "event_count": 0 }));
+        assert_eq!(keys(&body), vec!["payload", "started_at", "task"]);
+        assert_eq!(body["payload"], json!({ "event_count": 0 }));
+    }
+
+    /// The idle branch must still serialize as JSON `null`, exactly as
+    /// `Option<RecorderStatus>` did — the sidecar's `Option<RecorderStatus>`
+    /// deserialize depends on it.
+    #[test]
+    fn idle_status_serializes_as_null() {
+        let idle: Option<Value> = None;
+        assert_eq!(serde_json::to_value(idle).unwrap(), Value::Null);
     }
 }

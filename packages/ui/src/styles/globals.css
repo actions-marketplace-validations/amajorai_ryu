@@ -6,6 +6,21 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Dissolve the trailing edge of a clipped one-line label instead of cutting it
+   with an ellipsis — the same treatment the desktop sidebar's chat titles wear
+   (`OverflowTooltip fade`). Written as a utility because two apps' account-menu
+   triggers need it and neither can import the desktop's component. Pair it with
+   `overflow-hidden whitespace-nowrap` and a max width; a label that fits is
+   unaffected, since there is nothing past the mask's opaque stop to fade. */
+@utility text-fade-edge {
+	mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+	-webkit-mask-image: linear-gradient(
+		to right,
+		#000 calc(100% - 2.5rem),
+		transparent
+	);
+}
+
 :root {
 	--card: oklch(1 0 0);
 	--card-foreground: oklch(0.145 0 0);

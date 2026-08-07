@@ -711,8 +711,16 @@ impl ApprovalEngine {
             PendingAction::HealRerun { agent_id, prompt } => {
                 // The `healrun_` prefix is the never-heal-a-heal marker: the heal
                 // engine drops any failed event on a conversation with this prefix,
-                // so a heal-run that itself fails cannot trigger another heal.
-                let run_id = format!("healrun_{}", uuid::Uuid::new_v4().simple());
+                // so a heal-run that itself fails cannot trigger another heal. This
+                // is the DEFAULT heal path (`healing.auto-decide` is off — propose,
+                // the user disposes), so the prefix comes from the shared contract
+                // and not a literal: the engine reading it back lives in a separate
+                // binary, where a drift is an infinite heal loop, not a parse error.
+                let run_id = format!(
+                    "{}{}",
+                    ryu_healing_contracts::HEAL_PREFIX,
+                    uuid::Uuid::new_v4().simple()
+                );
                 if let Some(runner) = crate::sidecar::agent_runner::global_agent_runner() {
                     runner.run(agent_id.clone(), run_id, prompt.clone()).await?;
                 }

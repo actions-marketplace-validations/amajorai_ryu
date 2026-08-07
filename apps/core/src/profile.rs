@@ -192,8 +192,10 @@ fn default_gateway_config() -> Option<PathBuf> {
 ///   - `GATEWAY_CONFIG`     — the gateway config path (child + Core's own reader).
 ///   - `RYU_SHADOW_URL`     — every Shadow client (`clips`, `mcp/shadow`, `meetings`).
 ///   - `RYU_EMBED_BASE_URL` / `RYU_RERANKER_BASE_URL` — the RAG registry clients.
-///   - `RYU_RESEARCH_UPSTREAM` — the `ryu_research` crate's `research_base_url`
-///     (the proxy + `research__*` tools), whose port const lives out of boundary.
+///   - `RYU_RESEARCH_UPSTREAM` — the autoresearch engine's address, read by BOTH
+///     Core's engine manager (`sidecar::tools::research::engine_base_url`) and, out
+///     of boundary, the `@ryu/research` app's sidecar + `ryu-research mcp` server.
+///     The MCP child sees it only because it is on `env_scrub::MCP_SAFE_ALLOWLIST`.
 ///
 /// The matching *spawn* sides (llama.cpp chat/embed/rerank, Shadow, the SDK app,
 /// and the research sidecar) are threaded directly through [`port`] in

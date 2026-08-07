@@ -148,6 +148,7 @@ export function LoginView({
 				{waiting ? (
 					<>
 						<PageHeader
+							stagger={false}
 							subtitle={
 								userCode
 									? "Enter the code below on the verification page"
@@ -197,6 +198,7 @@ export function LoginView({
 				) : (
 					<>
 						<PageHeader
+							stagger={false}
 							subtitle="Your friendly ghost that lives on your desktop"
 							title="Hey, I'm Ryu"
 						/>

@@ -215,6 +215,7 @@ export function ColorStep({ busy = false, onContinue }: ColorStepProps) {
 						<GhostOrb size="50px" variant="outline" />
 					</div>
 					<PageHeader
+						stagger={false}
 						subtitle="Pick a look. You can change any of it later in Settings."
 						title="Make it yours"
 					/>

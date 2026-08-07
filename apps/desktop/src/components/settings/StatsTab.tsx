@@ -18,6 +18,7 @@ import { EmployeeBadge } from "@ryu/ui/components/employee-badge";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format, subDays } from "date-fns";
+import { useTheme } from "next-themes";
 import { useMemo, useState } from "react";
 import { sileo } from "sileo";
 import { useSession } from "@/lib/auth-client.ts";
@@ -415,12 +416,16 @@ interface TeamBadgeProps {
 }
 
 function TeamBadge({ agent, onSelect, stats }: TeamBadgeProps) {
+	const { resolvedTheme } = useTheme();
 	const totalTokens = stats.totals.inputTokens + stats.totals.outputTokens;
 	return (
 		<EmployeeBadge
 			employeeId={agent.id}
 			hiredAt={stats.hiredAt || undefined}
 			level={stats.level}
+			// The metal ring's `auto` follows the OS, which can disagree with the
+			// app's own toggle — feed it the theme actually on screen.
+			metalTheme={resolvedTheme === "light" ? "light" : "dark"}
 			name={agent.name}
 			onClick={onSelect}
 			role={agent.description ?? undefined}

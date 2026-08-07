@@ -284,6 +284,37 @@ Set \"flagged\" to true only if you are confident. Do not include any prose outs
 fn parse_verdict(text: &str) -> Option<InspectorVerdict> {
     let json_slice = extract_json_object(text)?;
     let raw: RawVerdict = serde_json::from_str(json_slice).ok()?;
+    // A `flagged: true` verdict must name at least one of the categories the
+    // system prompt actually declares. This is not pedantry about labels — it is
+    // the one signal that separates a judge from a model that is merely
+    // summarising the topic back at us.
+    //
+    // Gemma 3 270M — the shipped `classify` tier default — returns
+    // `{"flagged": true, "categories": ["party","birthday"]}` for "help me plan a
+    // birthday party" and `["chocolate chip cookies"]` for a recipe question,
+    // while returning `["injection","pii","secret"]` for real attacks. Measured
+    // over 14 turns (8 benign / 6 hostile) the in-enum check separated them with
+    // no crossover. Without it, `action: Block` — the default — 403s every benign
+    // turn over `min_chars`, which is what shipped.
+    //
+    // Treated as *unparseable* rather than as `flagged: false`: the judge did not
+    // answer in the vocabulary it was given, so `available` stays false and the
+    // deterministic lexical seed remains the floor. That keeps this a fail-open
+    // path consistent with the other six, and it is why a broken judge degrades
+    // to "regex only" instead of to "allow everything".
+    //
+    // Deliberately scoped to a NON-EMPTY category list. A judge that flags
+    // without naming a category (`{"flagged": true, "reason": "…"}`) is terse,
+    // not incoherent, and is still trusted — narrowing this to "categories were
+    // supplied, and none of them are ours" keeps the fix aimed at the observed
+    // failure instead of quietly weakening every well-behaved judge that omits
+    // the field.
+    if raw.flagged
+        && !raw.categories.is_empty()
+        && !raw.categories.iter().any(|c| is_known_category(c))
+    {
+        return None;
+    }
     Some(InspectorVerdict {
         flagged: raw.flagged,
         categories: raw.categories,
@@ -292,6 +323,19 @@ fn parse_verdict(text: &str) -> Option<InspectorVerdict> {
         // caller trusts its context judgment instead of the deterministic seed.
         available: true,
     })
+}
+
+/// The category vocabulary the inspector's system prompt declares. Compared
+/// case-insensitively and by prefix so that `"PII"`, `"pii_leakage"` and
+/// `"prompt-injection"` all count as the model having answered in-vocabulary —
+/// the check exists to catch topic words (`"birthday"`, `"weather"`), not to
+/// police spelling.
+fn is_known_category(c: &str) -> bool {
+    let c = c.trim().to_ascii_lowercase();
+    const KNOWN: [&str; 3] = ["injection", "pii", "secret"];
+    KNOWN
+        .iter()
+        .any(|k| c.contains(k) || k.contains(&c) && !c.is_empty())
 }
 
 /// The permissive shape we deserialize into: every field defaults so a partial
@@ -476,6 +520,61 @@ mod tests {
         .expect("clean json parses");
         assert!(v.flagged);
         assert_eq!(v.categories, vec!["injection"]);
+    }
+
+    /// The deny-all regression. These four replies are verbatim from Gemma 3
+    /// 270M (the shipped classify-tier default) answering benign turns; each
+    /// previously produced a 403 under the default `action: Block`.
+    #[test]
+    fn flagged_with_only_topic_categories_is_not_a_verdict() {
+        for reply in [
+            r#"{"flagged": true, "categories": ["party","birthday"]}"#,
+            r#"{"flagged": true, "categories": ["chocolate chip cookies"]}"#,
+            r#"{"flagged": true, "categories": ["roadmap"]}"#,
+            r#"{"flagged": true, "categories": ["weather","holiday"]}"#,
+        ] {
+            assert!(
+                parse_verdict(reply).is_none(),
+                "topic-word categories must not block: {reply}"
+            );
+        }
+    }
+
+    /// The other half: real attacks still parse and still block. Verbatim
+    /// replies from the same model on hostile turns.
+    #[test]
+    fn flagged_with_in_enum_categories_still_blocks() {
+        for reply in [
+            r#"{"flagged": true, "categories": ["injection","pii","secret"]}"#,
+            r#"{"flagged": true, "categories": ["PII"], "reason": "ssn"}"#,
+            r#"{"flagged": true, "categories": ["prompt-injection"]}"#,
+            r#"{"flagged": true, "categories": ["pii_leakage"]}"#,
+        ] {
+            let v = parse_verdict(reply).expect("in-enum verdict parses");
+            assert!(v.flagged && v.available, "must still flag: {reply}");
+        }
+    }
+
+    /// `flagged: false` needs no categories — only a *positive* claim made with
+    /// a supplied-but-foreign vocabulary is rejected.
+    #[test]
+    fn clean_verdict_needs_no_categories() {
+        let v = parse_verdict(r#"{"flagged": false, "categories": []}"#).expect("parses");
+        assert!(!v.flagged);
+        assert!(v.available, "the judge did answer; the seed must not override");
+        // A clean verdict may even carry topic words without being discarded —
+        // the in-enum rule gates blocking, not allowing.
+        let v = parse_verdict(r#"{"flagged": false, "categories": ["weather"]}"#).expect("parses");
+        assert!(!v.flagged && v.available);
+    }
+
+    /// A terse judge that flags without categories is still trusted — the
+    /// narrowing that keeps this fix from weakening well-behaved models.
+    #[test]
+    fn flagged_without_categories_is_still_a_block() {
+        let v = parse_verdict(r#"{"flagged": true, "reason": "override attempt"}"#)
+            .expect("terse verdict parses");
+        assert!(v.flagged && v.available);
     }
 
     #[test]

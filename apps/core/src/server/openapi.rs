@@ -142,8 +142,8 @@ use utoipa::OpenApi;
         super::delete_acp_session_handler,
         super::agent_update_check,
         super::agent_update,
-        // Teams `/api/teams/*` handlers moved to the extracted `ryu_teams` crate,
-        // merged as a feature-gated sub-doc in `api_doc()` (see below).
+        // Teams `/api/teams/*` handlers live in the out-of-process `ryu-teams`
+        // sidecar, which owns their spec too — nothing is merged here (see below).
         super::list_mcp_servers,
         super::create_mcp_server,
         super::list_mcp_tools,

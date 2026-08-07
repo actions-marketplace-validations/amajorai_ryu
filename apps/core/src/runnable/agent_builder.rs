@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use crate::agents::{AgentStore, CreateAgent, PersonaSlot, UpdateAgent};
 use crate::sidecar::mcp::RegistryTool;
-use ryu_teams::{Coordination, CreateTeam};
+use ryu_teams_contracts::{Coordination, CreateTeam};
 
 use crate::teams_client::{TeamSink, TeamsClient};
 
@@ -442,12 +442,59 @@ async fn create_agent_team(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use ryu_teams_contracts::TeamRecord;
+
     use super::*;
     use crate::sidecar::adapters::acp::AcpAgentRegistry;
 
     fn store() -> AgentStore {
         let registry = AcpAgentRegistry::new();
         AgentStore::open_in_memory(&registry).expect("in-memory agent store")
+    }
+
+    /// In-memory [`TeamSink`] standing in for the out-of-process sidecar.
+    ///
+    /// These tests used to write through `ryu_teams::TeamStore::open_in_memory()`,
+    /// which forced Core to link the whole teams app crate (SQLite and all) for two
+    /// unit tests. What they actually assert is ROSTER MINTING — that
+    /// `create_agent_team` creates N real agents and hands the sink a team naming
+    /// them, with the right lead and strategy — so a HashMap is a faithful double.
+    /// Persistence is the sidecar's own responsibility and is covered by its
+    /// `tests/store_behaviors.rs`; nothing but a live smoke covers the seam itself.
+    #[derive(Default)]
+    struct FakeTeamSink {
+        teams: Mutex<HashMap<String, TeamRecord>>,
+        next_id: AtomicUsize,
+    }
+
+    impl FakeTeamSink {
+        fn get(&self, id: &str) -> Option<TeamRecord> {
+            self.teams.lock().unwrap().get(id).cloned()
+        }
+    }
+
+    #[async_trait]
+    impl TeamSink for FakeTeamSink {
+        async fn create_team(&self, input: CreateTeam) -> Result<TeamRecord> {
+            let id = format!("team-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+            let record = TeamRecord {
+                id: id.clone(),
+                name: input.name,
+                description: input.description,
+                members: input.members,
+                coordination: input.coordination,
+                lead_agent_id: input.lead_agent_id,
+                created_at: None,
+                updated_at: None,
+            };
+            self.teams.lock().unwrap().insert(id, record.clone());
+            Ok(record)
+        }
     }
 
     #[test]
@@ -637,10 +684,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_agent_team_mints_members_and_team() {
-        use ryu_teams::Coordination;
-
         let store = store();
-        let teams = ryu_teams::TeamStore::open_in_memory().unwrap();
+        let teams = FakeTeamSink::default();
         let res = create_agent_team(
             json!({
                 "team_name": "Marketing",
@@ -661,7 +706,7 @@ mod tests {
 
         // Three real agent records were created.
         let team_id = res["team_id"].as_str().unwrap();
-        let team = teams.get(team_id).await.unwrap().unwrap();
+        let team = teams.get(team_id).unwrap();
         assert_eq!(team.name, "Marketing");
         assert_eq!(team.members.len(), 3);
         assert_eq!(team.coordination, Coordination::DebateSynthesis);
@@ -682,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn create_agent_team_rejects_empty_members() {
         let store = store();
-        let teams = ryu_teams::TeamStore::open_in_memory().unwrap();
+        let teams = FakeTeamSink::default();
         let err = create_agent_team(
             json!({ "team_name": "Empty", "members": [] }),
             store,

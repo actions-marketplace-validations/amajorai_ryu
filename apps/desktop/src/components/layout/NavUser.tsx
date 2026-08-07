@@ -460,7 +460,12 @@ export function NavUser({
 											</Avatar>
 											<span className="min-w-0 flex-1">
 												<span className="flex min-w-0 items-center gap-1.5">
-													<span className="truncate font-medium text-sm">
+													{/* Fades into the background rather than ending in an
+													    ellipsis, the same way an over-long chat title does
+													    in the sidebar above it. A name is not a sentence —
+													    "Jiawei Zhang-Alexande…" reads as a defect where the
+													    dissolve reads as "there is more of this". */}
+													<span className="overflow-hidden whitespace-nowrap font-medium text-fade-edge text-sm">
 														{user?.name ?? "Account"}
 													</span>
 													<PlanBadge plan={badgePlan} />

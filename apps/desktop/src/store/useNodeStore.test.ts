@@ -18,13 +18,18 @@ import type { Node } from "./useNodeStore.ts";
 // resolution before a single test could run. Stub exactly those two boundaries
 // (nothing under test calls either) and load the store dynamically afterwards, so
 // these tests actually execute instead of sitting dormant.
+// Mutable so a test can decide what the control plane "returns" for this run;
+// the module factory only ever runs once, so the indirection is what makes the
+// managed-node path testable at all.
+let managedNodes: { name: string; url: string; token?: string | null }[] = [];
 mock.module("@/src/lib/api/managed-nodes.ts", () => ({
-	fetchManagedNodes: () => Promise.resolve([]),
+	fetchManagedNodes: () => Promise.resolve(managedNodes),
 }));
 mock.module("@/src/lib/gating/planCapBridge.ts", () => ({
 	enforcePlanCap: () => undefined,
 }));
-const { useNodeStore, stopAutoSelectProbe } = await import("./useNodeStore.ts");
+const { useNodeStore, stopAutoSelectProbe, stopCloudTokenRefresh } =
+	await import("./useNodeStore.ts");
 
 const LOCAL: Node = {
 	name: "local",
@@ -297,5 +302,67 @@ describe("auto node selection", () => {
 		await useNodeStore.getState().probeAutoSelect();
 		expect(calls()).toBe(0);
 		expect(useNodeStore.getState().autoSelectedNode).toBeNull();
+	});
+});
+
+// A managed (cloud) node authenticates with a SHORT-LIVED (~15 min) user JWT the
+// control plane mints per `/nodes` fetch, so the credential an added node holds
+// has to be re-adopted on every hydrate — otherwise `refreshCloudTokens` swaps a
+// token nobody reads and the node 401s an hour into the session. This also makes
+// the web dashboard's tokenless connection string work: the browser holds no node
+// secret to put in one, so the token can only arrive this way.
+describe("managed cloud node credentials", () => {
+	const CLOUD_URL = "http://cloud-1.example.com:7980";
+
+	afterEach(() => {
+		// hydrateCloudNodes arms the JWT-refresh timer whenever it finds a cloud
+		// node; a leaked interval would keep the test runner alive.
+		stopCloudTokenRefresh();
+		managedNodes = [];
+		useNodeStore.setState({ cloudNodes: [], localNodes: [], nodes: [LOCAL] });
+	});
+
+	test("an added cloud node adopts the freshly minted token", async () => {
+		// The node as it sits on disk: added from a tokenless connect link, or
+		// holding a JWT that has since expired.
+		useNodeStore.setState({
+			localNodes: [LOCAL, { name: "cloud-prod", url: CLOUD_URL, token: null }],
+			nodes: [LOCAL],
+		});
+		managedNodes = [{ name: "prod", url: CLOUD_URL, token: "jwt-fresh" }];
+
+		await useNodeStore.getState().hydrateCloudNodes();
+
+		const added = useNodeStore
+			.getState()
+			.nodes.find((n) => n.url === CLOUD_URL);
+		expect(added?.token).toBe("jwt-fresh");
+		expect(added?.managed).toBe(true);
+		// It is added, so it must not also be offered as a suggestion.
+		expect(useNodeStore.getState().suggestedCloudNodes).toEqual([]);
+	});
+
+	test("a self-hosted node's token is never overwritten", async () => {
+		useNodeStore.setState({ localNodes: [LOCAL, REMOTE], nodes: [LOCAL] });
+		managedNodes = [{ name: "prod", url: CLOUD_URL, token: "jwt-fresh" }];
+
+		await useNodeStore.getState().hydrateCloudNodes();
+
+		const remote = useNodeStore
+			.getState()
+			.nodes.find((n) => n.name === REMOTE.name);
+		expect(remote).toEqual(REMOTE);
+	});
+
+	test("a control plane that mints no token leaves the stored one alone", async () => {
+		useNodeStore.setState({
+			localNodes: [{ name: "cloud-prod", url: CLOUD_URL, token: "stored" }],
+			nodes: [LOCAL],
+		});
+		managedNodes = [{ name: "prod", url: CLOUD_URL, token: null }];
+
+		await useNodeStore.getState().hydrateCloudNodes();
+
+		expect(useNodeStore.getState().nodes[0]?.token).toBe("stored");
 	});
 });

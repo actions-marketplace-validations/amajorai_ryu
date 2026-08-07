@@ -6,6 +6,9 @@
     "module": "ESNext",
     "skipLibCheck": true,
     "moduleResolution": "bundler",
+    // Explicit `.ts` import specifiers are the house style here; electron-vite
+    // resolves them. Without this tsc rejects all of them (264 TS5097s).
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
@@ -15,7 +18,9 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
-    "types": ["electron-vite/node"],
+    // `bun-types` alongside electron-vite's: the `*.test.ts` files import
+    // `bun:test`, which has no declarations without it (62 TS2307s).
+    "types": ["electron-vite/node", "bun-types"],
     "paths": {
       "@/*": ["./src/renderer/*"]
     }

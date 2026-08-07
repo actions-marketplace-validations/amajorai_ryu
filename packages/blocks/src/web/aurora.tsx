@@ -252,8 +252,11 @@ export default function Aurora({
 		resizeObserver.observe(ctn);
 
 		const geometry = new Triangle(gl);
+		// The shader takes position only; drop the unused uv attribute so OGL
+		// does not upload it. `delete` rather than assigning `undefined` — the
+		// attribute map's values are `Partial<Attribute>`, not optional.
 		if (geometry.attributes.uv) {
-			geometry.attributes.uv = undefined;
+			delete geometry.attributes.uv;
 		}
 
 		program = new Program(gl, {
