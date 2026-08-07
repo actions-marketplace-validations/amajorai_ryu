@@ -174,7 +174,7 @@ ryu-output-styles = { path = "../../crates/core/output-styles" }
 # Core injects a `RecipesHost` impl (`recipes_host.rs`) — the live-ghost couplings
 # (shared MCP registry + recording McpSession) — so the crate has ZERO dependency
 # on apps/core.
-ryu-recipes = { path = "../../crates/apps/recipes/backend" }
+ryu-recipes = { version = "0.1.5" }
 # Teams (agent rosters + coordination strategy, addressed as one unit via `@team`) —
 # extracted Core capability crate: SQLite store + `/api/teams/*` CRUD surface.
 # NON-optional: the `@team` chat orchestration (`sidecar::adapters::route_team_chat_stream`
@@ -184,7 +184,7 @@ ryu-recipes = { path = "../../crates/apps/recipes/backend" }
 # including the lean one; the `teams` feature gates ONLY the HTTP routes + OpenAPI. The
 # store's only host coupling (the data-dir path) is injected at open time, so the crate
 # has ZERO dependency on apps/core and needs no `TeamsHost` shim.
-ryu-teams = { path = "../../crates/apps/teams/backend" }
+ryu-teams = { version = "0.1.5" }
 # Research (autoresearch experiment runner) — extracted Core capability crate: the
 # `/api/research/*` proxy handlers + the `research__*` MCP tool contract (8 schemas +
 # HTTP dispatch) in front of the Python autoresearch sidecar (:8087). NON-optional:
@@ -194,7 +194,7 @@ ryu-teams = { path = "../../crates/apps/teams/backend" }
 # `ResearchHost` impl (`research_host.rs`) — the lazy sidecar-start + on-disk install
 # check — so the crate has ZERO dependency on apps/core. The sidecar-lifecycle manager
 # (`ResearchManager: Sidecar`) stays Core-side (kernel plumbing, the RyuTtsManager analog).
-ryu-research = { path = "../../crates/apps/research/backend" }
+ryu-research = { version = "0.1.5" }
 # Self-healing loop — extracted Core capability crate. The diagnose→propose engine,
 # the loop-prevention decision logic, the per-source attempt cap, the `healing.*`
 # prefs, the Gateway diagnosis, and the `/api/healing/*` surface now run OUT-OF-PROCESS
@@ -204,7 +204,7 @@ ryu-research = { path = "../../crates/apps/research/backend" }
 # `healing_client` posts a failed run to the sidecar, then applies the returned verdict
 # against Core's `CoreHealingHost` (the welded approvals write + agent/workflow re-run).
 # The crate has ZERO dependency on apps/core.
-ryu-healing = { path = "../../crates/apps/healing/backend" }
+ryu-healing = { version = "0.1.5" }
 # Meetings is now OUT-OF-PROCESS: the `ryu-meetings` sidecar
 # (`apps-store/meetings/backend`) owns `meetings.db`, the engine + audio/diarize
 # pipeline, and the `/api/meetings/*` surface (served to the desktop via the ext-proxy
@@ -238,7 +238,7 @@ ryu-notify = { path = "../../crates/core/notify" }
 # it stays served in-process; the `ryu-learning` sidecar bin is scaffolding until
 # broker-back endpoints exist. Core keeps only the thumbs-feedback fan-out (RAG
 # memory/retrieval sink) and the conversation-read ACL on `/api/learn/synthesize`.
-ryu-learning = { path = "../../crates/apps/learning/backend" }
+ryu-learning = { version = "0.1.5" }
 # Predictive-typing brain — extracted Core capability crate: the completion engine
 # (config, per-app allowlist, secure-field denylist, prompt assembly, reply cleanup)
 # + the `/api/predict/*` surface. Cross-cutting couplings (the plugin-owned enabled
