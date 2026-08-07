@@ -233,20 +233,31 @@ jobs:
                -o -name "*.msi" -o -name "*-setup.exe" -o -name "*.app.tar.gz" \
                -o -name "*.sig" \) \
             -not -path "*deps*" -exec cp {} dist-desktop/ \; || true
-          # macOS names the updater bundle `Ryu.app.tar.gz` with NO arch in it, so
-          # the aarch64 and x86_64 legs upload the SAME filename and `--clobber`
-          # leaves only whichever finished last — one arch's updater bundle is lost
-          # every run, and the channel feed cannot address both. Stamp the arch in.
-          # (The .dmg/.exe/.AppImage names already carry arch or are single-arch.)
+          # macOS names the updater bundle `<productName>.app.tar.gz` with NO arch
+          # in it, so the aarch64 and x86_64 legs upload the SAME filename and
+          # `--clobber` leaves only whichever finished last — one arch's updater
+          # bundle is lost every run, and the channel feed cannot address both.
+          # Stamp the arch in. (The .dmg/.exe/.AppImage names already carry arch
+          # or are single-arch.)
+          #
+          # Glob the productName rather than hardcoding "Ryu": channel-brand.mjs
+          # stamps the channel into productName before the bundle is built, so the
+          # file is e.g. `Ryu Canary.app.tar.gz`. A literal `Ryu.app.tar.gz`
+          # stopped matching the moment branding landed, silently reintroducing the
+          # exact collision this block exists to prevent.
           if [ "$RUNNER_OS" = "macOS" ]; then
             case "$TAURI_ARGS" in
               *aarch64-apple-darwin*) arch=aarch64 ;;
               *) arch=x86_64 ;;
             esac
-            for f in dist-desktop/Ryu.app.tar.gz dist-desktop/Ryu.app.tar.gz.sig; do
-              [ -e "$f" ] || continue
-              mv "$f" "${f/Ryu.app.tar.gz/Ryu-$arch.app.tar.gz}"
+            shopt -s nullglob
+            for f in dist-desktop/*.app.tar.gz dist-desktop/*.app.tar.gz.sig; do
+              base="$(basename "$f")"
+              # Already stamped (defensive: never double-stamp on a re-run).
+              case "$base" in *-"$arch".app.tar.gz|*-"$arch".app.tar.gz.sig) continue ;; esac
+              mv "$f" "dist-desktop/${base/.app.tar.gz/-$arch.app.tar.gz}"
             done
+            shopt -u nullglob
           fi
           ls -la dist-desktop || true
       - name: Upload to release

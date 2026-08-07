@@ -77,19 +77,29 @@ assets="$(gh release view "$release_tag" -R "$repo" --json assets --jq '.assets[
 platform_artifact() {
 	case "$1" in
 		# Every workflow renames per-arch before upload (two macOS legs would
-		# otherwise both be `Ryu.app.tar.gz` and clobber each other, losing one
-		# arch's updater bundle on every run). The un-suffixed fallback is for
-		# releases cut BEFORE that rename existed — v0.1.0 and earlier carry a
-		# single bundle, and treating it as aarch64 is right because macos-latest
+		# otherwise both be `<productName>.app.tar.gz` and clobber each other,
+		# losing one arch's updater bundle on every run). The un-suffixed fallback
+		# is for releases cut BEFORE that rename existed — v0.1.0 and earlier carry
+		# a single bundle, and treating it as aarch64 is right because macos-latest
 		# builds ARM. New releases populate both entries.
+		#
+		# Matched by SUFFIX, not by the literal name: `channel-brand.mjs` stamps the
+		# channel into productName, so the bundle is `Ryu Research Preview-aarch64
+		# .app.tar.gz` on stable, not `Ryu-aarch64.app.tar.gz`. The literal match
+		# silently stopped resolving when branding landed, and because a missing
+		# artifact is *omitted* rather than fatal, v0.1.5's latest.json shipped with
+		# only linux and windows — every macOS user was offered no update at all,
+		# and nothing failed. Suffix matching is what linux/windows already do.
 		darwin-aarch64)
-			if echo "$assets" | grep -qxF 'Ryu-aarch64.app.tar.gz'; then
-				echo 'Ryu-aarch64.app.tar.gz'
-			else
-				echo 'Ryu.app.tar.gz'
+			match="$(echo "$assets" | grep -E -- '-aarch64\.app\.tar\.gz$' | head -n1 || true)"
+			if [ -z "$match" ]; then
+				# Pre-rename releases: a single bundle with no arch suffix.
+				match="$(echo "$assets" | grep -E '\.app\.tar\.gz$' \
+					| grep -Ev -- '-(aarch64|x86_64)\.app\.tar\.gz$' | head -n1 || true)"
 			fi
+			echo "$match"
 			;;
-		darwin-x86_64) echo 'Ryu-x86_64.app.tar.gz' ;;
+		darwin-x86_64) echo "$assets" | grep -E -- '-x86_64\.app\.tar\.gz$' | head -n1 || true ;;
 		# Linux and Windows are single-arch in the rolling matrix. Matched by
 		# suffix because the filename carries the version, which changes per build.
 		#
