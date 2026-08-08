@@ -46,8 +46,8 @@ export const QUEUE_STATS_MIN = 500;
  * handle under it and starts reading as body copy. Stepping by 2px is finer
  * than anyone can see and keeps the search to at most eleven measurements.
  */
-const NAME_MAX_PX = 48;
-const NAME_MIN_PX = 26;
+export const NAME_MAX_PX = 48;
+export const NAME_MIN_PX = 26;
 /**
  * The handle line's ramp. A reserved handle can run to 32 characters, which at
  * the `text-base` it was set in overran the card and was cut off with an
@@ -55,10 +55,10 @@ const NAME_MIN_PX = 26;
  * the handle. It shrinks on the same rule as the name, just over a shorter
  * range: it is a subtitle, so it starts small and has less room to give.
  */
-const HANDLE_MAX_PX = 16;
-const HANDLE_MIN_PX = 11;
+export const HANDLE_MAX_PX = 16;
+export const HANDLE_MIN_PX = 11;
 /** 2px is finer than anyone can see, and keeps each search to a dozen measurements. */
-const FIT_STEP_PX = 2;
+export const FIT_STEP_PX = 2;
 const SERIAL_LENGTH = 6;
 const NON_ALPHANUMERIC = /[^a-zA-Z0-9]/g;
 
@@ -195,8 +195,14 @@ export const waitlistShareText = (
  * font, so a count-based guess is wrong by a wide margin for narrow or wide
  * names, and the card is rendered at more than one width (the queue screen, the
  * public `/pass` page, the desktop panel).
+ *
+ * Exported for the pass's OTHER faces (`tier-pass.tsx`) — not because a second
+ * card wants a different ramp, but because `pass-studio`'s painters reproduce
+ * this exact loop with `measureText` standing in for `scrollWidth`, so a face
+ * that fitted its type any other way would silently disagree with its own
+ * export.
  */
-function AutoFitText({
+export function AutoFitText({
 	children,
 	className,
 	maxPx,
@@ -304,7 +310,12 @@ export function WaitlistPass({
 			backdrop="warp"
 			className={className}
 			ditherSeed={backdropSeed}
+			edge="live"
 			metalTheme={metalTheme}
+			// No chrome until the handle is claimed: the metal edge is what the
+			// reserve step pays out, so a pass that arrives already finished has
+			// nothing left to earn.
+			ringed={Boolean(username)}
 		>
 			{/* `min-h` rather than a fixed height: the name is the hero and can
 		    wrap to two or three lines, so the card grows past the floor
@@ -332,16 +343,21 @@ export function WaitlistPass({
 					    shape a reader already knows means "this person". The ring and
 					    the tinted disc under it are what keep it legible against a
 					    shader backdrop that is itself in the glyph's own hue. */}
-					{/* `EntityAvatar` rather than a hand-rolled circle: it is the one
-					    definition of "picture if there is one, generative glyph if not",
-					    and it is what the account menu trigger renders. Same component,
-					    same seed, same face. */}
-					<EntityAvatar
-						className="mb-3 size-14 shrink-0 border border-border/60 bg-background/70 backdrop-blur-sm"
-						name={displayName}
-						seed={glyphSeed}
-						src={avatarUrl}
-					/>
+					{/* ONLY when the member has actually set a picture. The generative
+					    glyph is deliberately NOT used as the fallback here: it is seeded
+					    off the canonical avatar seed (id, then email, then name) while
+					    the card's backdrop is seeded off the HANDLE, so the two never
+					    agree on a hue and the circle read as a foreign object stuck on
+					    someone else's card. With no picture the name simply carries the
+					    card, which is what it did before the circle existed. */}
+					{avatarUrl ? (
+						<EntityAvatar
+							className="mb-3 size-14 shrink-0 border border-border/60 bg-background/70 backdrop-blur-sm"
+							name={displayName}
+							seed={glyphSeed}
+							src={avatarUrl}
+						/>
+					) : null}
 					<AutoFitText
 						className="font-semibold leading-[1.02] tracking-tight"
 						maxPx={NAME_MAX_PX}

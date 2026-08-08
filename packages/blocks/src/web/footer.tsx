@@ -53,12 +53,6 @@ export default function Footer() {
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/subscriptions"
-								>
-									Bring your subscription
-								</a>
-								<a
-									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products"
 								>
 									All products
@@ -86,12 +80,6 @@ export default function Footer() {
 									href="/products/mcp"
 								>
 									MCP
-								</a>
-								<a
-									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/marketplace"
-								>
-									Customize
 								</a>
 							</div>
 						</div>
@@ -122,32 +110,6 @@ export default function Footer() {
 									href="/perks"
 								>
 									Perks
-								</a>
-								<a
-									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/compare"
-								>
-									Compare
-								</a>
-								<a
-									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/changelog"
-								>
-									Changelog
-								</a>
-								<a
-									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/help"
-								>
-									Help
-								</a>
-								<a
-									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="https://discord.gg/46FkCKCMba"
-									rel="noopener noreferrer"
-									target="_blank"
-								>
-									Discord
 								</a>
 							</div>
 						</div>

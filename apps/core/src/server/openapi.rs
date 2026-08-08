@@ -123,6 +123,7 @@ use utoipa::OpenApi;
         super::install_agent_handler,
         super::uninstall_agent_handler,
         super::import_agent,
+        super::published_agent_install,
         super::get_agent,
         super::update_agent,
         super::delete_agent,

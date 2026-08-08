@@ -77,8 +77,8 @@ export default function WorksWith() {
 				<StaggerLines className="mx-auto max-w-5xl text-center">
 					<SectionTitle title="Bring the agents you already use" />
 					<p className={cn(sectionSubtitleClass, "max-w-5xl")}>
-						Ryu is not another closed agent. It is the interface and control
-						layer for the agents, models, providers, and tools you already run.
+						Ryu is the interface and control layer for the agents, models,
+						providers, and tools you already run.
 					</p>
 				</StaggerLines>
 			</div>

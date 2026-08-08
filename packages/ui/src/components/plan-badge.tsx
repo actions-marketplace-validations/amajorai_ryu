@@ -73,6 +73,19 @@ export function planTierGradient(plan: PlanTier): string {
 }
 
 /**
+ * The tier's short name ("Pro", "Max", …), for surfaces that print the tier as
+ * type rather than as a badge — the tier pass sets it as the card's hero.
+ *
+ * Only the label and the raw stops are exposed. `TIER_STYLES.ink` deliberately
+ * is NOT: it is calibrated for AA contrast against an OPAQUE gradient plinth,
+ * and every other surface lays these colours down as a texture under existing
+ * foreground tokens, where `pro`'s near-black ink would vanish.
+ */
+export function planTierLabel(plan: PlanTier): string {
+	return TIER_STYLES[plan].label;
+}
+
+/**
  * The tier's colours as an ordered ring, for a rotating conic-gradient card
  * border (matching the Pro card's animated border). The linear badge gradient
  * can't be spun around a card, so the border uses these raw stops instead; the
@@ -100,6 +113,20 @@ const TIER_BORDER_COLORS: Record<PlanTier, readonly string[]> = {
  * border. The angle is driven by `--tier-border-angle` in `globals.css` so the
  * sweep loops seamlessly like the Pro card border.
  */
+/**
+ * The tier's colours as a flat, ordered stop list — the same stops the badge
+ * gradient interpolates, without the `linear-gradient()` wrapper around them.
+ *
+ * For consumers that need the palette as DATA rather than as CSS: the tier pass
+ * feeds these to the warp shader so the card's field IS the badge gradient in
+ * motion, and a canvas painter cannot parse a gradient string at all. Returning
+ * the stops keeps one source of tier colour instead of a second palette that
+ * would drift the first time a tier is retuned.
+ */
+export function planTierColors(plan: PlanTier): readonly string[] {
+	return TIER_BORDER_COLORS[plan];
+}
+
 export function planTierConicGradient(plan: PlanTier): string {
 	const colors = TIER_BORDER_COLORS[plan];
 	const stops = [...colors, colors[0]].join(",");

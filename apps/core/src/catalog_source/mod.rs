@@ -1,5 +1,5 @@
 //! The **CatalogSource seam** (#459): one adapter every catalog — model, skill,
-//! MCP, plugin — routes through.
+//! MCP, plugin, knowledge, agent — routes through.
 //!
 //! The design rule (Core vs Gateway): a *source* only returns **descriptors**
 //! of what could be installed. Core keeps the privileged install path
@@ -158,7 +158,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-/// The five catalogs that share the seam. Serializes lowercase so
+/// The six catalogs that share the seam. Serializes lowercase so
 /// `?kind=model` round-trips through query params and the persistence key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -170,16 +170,28 @@ pub enum CatalogKind {
     /// Open Knowledge Format (OKF) bundles — git-shippable directories of
     /// markdown concepts, ingested into the retrieval layer on install.
     Knowledge,
+    /// User-published **agent definitions**: the portable template
+    /// [`crate::agents::AgentTemplate`] that `GET /api/agents/:id/export`
+    /// already produces (instructions, model/engine preference, declared tool
+    /// and skill dependencies). Installing one materialises a local agent
+    /// through the SAME import path, after
+    /// [`crate::agents::AgentTemplate::sanitize_for_untrusted_install`] strips
+    /// everything that would bind the installer's credentials or widen a grant.
+    ///
+    /// Distinct from the desktop's "Agents" store tab, which lists ACP *runtime*
+    /// agents (Claude Code, Codex) — those are engines, not definitions.
+    Agent,
 }
 
 impl CatalogKind {
     /// Every kind, for registry iteration and the per-kind AC.
-    pub const ALL: [CatalogKind; 5] = [
+    pub const ALL: [CatalogKind; 6] = [
         CatalogKind::Model,
         CatalogKind::Skill,
         CatalogKind::Mcp,
         CatalogKind::Plugin,
         CatalogKind::Knowledge,
+        CatalogKind::Agent,
     ];
 
     /// Lowercase wire form (also the persistence-key suffix).
@@ -190,6 +202,7 @@ impl CatalogKind {
             CatalogKind::Mcp => "mcp",
             CatalogKind::Plugin => "plugin",
             CatalogKind::Knowledge => "knowledge",
+            CatalogKind::Agent => "agent",
         }
     }
 }
@@ -209,6 +222,7 @@ impl FromStr for CatalogKind {
             "mcp" => Ok(CatalogKind::Mcp),
             "plugin" => Ok(CatalogKind::Plugin),
             "knowledge" => Ok(CatalogKind::Knowledge),
+            "agent" => Ok(CatalogKind::Agent),
             other => bail!("unknown catalog kind `{other}`"),
         }
     }
@@ -295,7 +309,7 @@ mod tests {
             // Every wire form round-trips back through FromStr.
             assert_eq!(k.as_str().parse::<CatalogKind>().unwrap(), k);
         }
-        assert_eq!(CatalogKind::ALL.len(), 5);
+        assert_eq!(CatalogKind::ALL.len(), 6);
     }
 
     #[test]
@@ -309,6 +323,7 @@ mod tests {
             "knowledge".parse::<CatalogKind>().unwrap(),
             CatalogKind::Knowledge
         );
+        assert_eq!("agent".parse::<CatalogKind>().unwrap(), CatalogKind::Agent);
         // An unknown kind errors (not a silent default) and names the offender.
         let err = "wat".parse::<CatalogKind>().unwrap_err().to_string();
         assert!(err.contains("wat"), "error should name the bad kind: {err}");

@@ -7,6 +7,7 @@
 // OpenAI-style `choices[].delta.content` fallback; structural parts yield nothing.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { installFetch } from "./test-fetch.ts";
 import { AgentsAPI } from "./agents.ts";
 import type { RyuClientOptions } from "./types.ts";
 
@@ -18,16 +19,16 @@ afterEach(() => {
 const OPTIONS: RyuClientOptions = { baseUrl: "http://localhost:7980" };
 
 function jsonOnce(body: unknown): void {
-	globalThis.fetch = (() =>
+	installFetch((() =>
 		Promise.resolve(
 			new Response(JSON.stringify(body), { status: 200 })
-		)) as typeof fetch;
+		)));
 }
 
 /** A streaming Response whose body enqueues each string as its own chunk. */
 function streamOnce(chunks: string[], init?: ResponseInit): void {
 	const encoder = new TextEncoder();
-	globalThis.fetch = (() =>
+	installFetch((() =>
 		Promise.resolve(
 			new Response(
 				new ReadableStream<Uint8Array>({
@@ -40,7 +41,7 @@ function streamOnce(chunks: string[], init?: ResponseInit): void {
 				}),
 				init
 			)
-		)) as typeof fetch;
+		)));
 }
 
 describe("AgentsAPI.list mapper", () => {

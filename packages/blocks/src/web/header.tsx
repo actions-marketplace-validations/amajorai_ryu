@@ -253,6 +253,7 @@ export default function Header({
 												pathname.startsWith("/pricing") ||
 												pathname.startsWith("/engines") ||
 												pathname.startsWith("/subscriptions") ||
+												pathname.startsWith("/community") ||
 												pathname.startsWith("/blog") ||
 												pathname.startsWith("/changelog") ||
 												pathname.startsWith("/help")) &&

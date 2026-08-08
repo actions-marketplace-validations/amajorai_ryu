@@ -18,6 +18,11 @@ export const MARKETPLACE_KINDS: { value: MarketplaceKind; label: string }[] = [
 	{ value: "plugin", label: "Plugins" },
 	{ value: "mcp", label: "Tools" },
 	{ value: "model", label: "Models" },
+	// Published agent definitions. They browse in the Store's Agents tab (the
+	// community shelf), not through a browse filter — the entry is here so this
+	// list stays a complete statement of the kinds, and so a reader does not
+	// conclude agents were left out on purpose.
+	{ value: "agent", label: "Agents" },
 ];
 
 /**

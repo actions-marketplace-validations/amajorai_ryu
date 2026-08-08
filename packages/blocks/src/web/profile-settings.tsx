@@ -644,6 +644,14 @@ export interface ProfileSettingsProps {
 	/** Profile tab. */
 	name?: string;
 	onBillingAction?: () => void;
+	/**
+	 * Cancellation, separated from {@link ProfileSettingsProps.onBillingAction}
+	 * because they are not the same act: the billing action opens the portal for
+	 * routine management (seats, payment method, plan changes), while this one is
+	 * gated behind a destructive confirmation on the surfaces that have one.
+	 * Omitted — by a surface with no cancel flow — renders no second button.
+	 */
+	onCancelPlan?: () => void;
 	onConnectGoogle?: () => void;
 	onDeleteAccount?: () => void;
 	onNameChange?: (name: string) => void;
@@ -705,6 +713,7 @@ export default function ProfileSettings({
 	planLabel = "Free",
 	hasProSubscription = false,
 	onBillingAction = noop,
+	onCancelPlan,
 	referralsSlot,
 	isSubscribed = true,
 	isLoadingSubscription = false,
@@ -948,11 +957,23 @@ export default function ProfileSettings({
 									<p className="font-medium">Current Plan</p>
 									<p className="text-muted-foreground text-sm">{planLabel}</p>
 								</div>
-								<Button onClick={onBillingAction}>
-									{hasProSubscription
-										? "Manage Subscription"
-										: "Upgrade to Pro"}
-								</Button>
+								{/* Two buttons on the paid branch, not one. "Manage
+								    Subscription" opens the portal directly; cancelling is
+								    its own control because the surface that owns it puts a
+								    destructive confirmation in front of it, and that ritual
+								    must not stand in front of updating a card. */}
+								<div className="flex items-center gap-2">
+									{hasProSubscription && onCancelPlan ? (
+										<Button onClick={onCancelPlan} variant="ghost">
+											Cancel plan
+										</Button>
+									) : null}
+									<Button onClick={onBillingAction}>
+										{hasProSubscription
+											? "Manage Subscription"
+											: "Upgrade to Pro"}
+									</Button>
+								</div>
 							</div>
 						</CardContent>
 					</Card>

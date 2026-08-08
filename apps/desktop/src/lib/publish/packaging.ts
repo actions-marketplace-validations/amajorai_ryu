@@ -4,12 +4,20 @@
 // into a Ryu plugin manifest + marketplace publish body, so a user can publish
 // their own agent to the marketplace from inside the desktop app.
 //
-// Ryu's object model: an Agent/Workflow is a Runnable; an App/Plugin is a
-// manifest.json bundling Runnables. So "publish my agent" == package the agent's
-// portable card into a plugin manifest whose `runnables` declare that agent
-// (kind="agent"), then POST it to POST /api/marketplace/publish. This mirrors
-// the SDK CLI's `ryu publish` body shape (packages/sdk/src/cli.ts) but is built
-// from a live agent record instead of a manifest.json on disk.
+// An agent publishes under the marketplace's own `agent` kind: the body carries
+// a FLAT, snake_case `descriptor` that declares what the agent is (instructions,
+// model preference) and what it expects the installer to already have (tools,
+// skills, Composio actions, Spaces by name, provider connections). It is not a
+// plugin bundle — an agent carries no code, so it ships no manifest surface.
+//
+// The descriptor is re-validated at the publish boundary
+// (`validateAgentDescriptor`, packages/api marketplace router) against a key
+// ALLOWLIST: an unknown key is a 400, and four publisher-state keys
+// (`identity_profile_ids`, `memory`, `space_ids`, `policy_ref`) are refused by
+// name. Building exactly that shape here is therefore not defensive duplication
+// — it is the contract, and {@link buildAgentDescriptor} is the single place it
+// is expressed so the Publish dialog's disclosure can render the very object
+// that gets sent rather than a prose approximation of it.
 //
 // SECURITY — never package secrets. This module serializes ONLY agent-record
 // fields, and the agent record carries no keys: BYOK/gateway keys live behind
@@ -24,8 +32,9 @@
 // `AgentTemplate` (apps/core exportAgent), which likewise carries only
 // description / system_prompt / tools / engine / model.
 
-/** The publish `kind`. Phase 5a publishes agents as a `plugin` bundle. */
-export type PublishKind = "plugin";
+/** The publish `kind`. An agent publishes as `agent`; `plugin` stays for a
+ *  manifest bundle (code), which an agent definition never is. */
+export type PublishKind = "plugin" | "agent";
 
 /** Engine ids that are a literal ACP spawn command (a local binary/command).
  *  Their raw value can embed a local filesystem path, so it is never shipped. */
@@ -168,21 +177,270 @@ export interface PublishListing {
  * construction.
  */
 export interface AgentPublishSource {
-	canCreateAgents: boolean;
 	composioActions: string[];
 	description: string | null;
 	/** Engine/model slot as stored on the record. A custom `acp-exec:` command is
 	 *  scrubbed here (a local binary path is never shipped). */
 	engine: string | null;
-	/** Recallable memory LEVELS only (user/node/project) — never the node-local
-	 *  space_ids, which are dropped upstream. */
-	memoryReadLevels: string[];
-	orchestrator: boolean;
+	/** Space NAMES the agent expects to find. Names, never the record's
+	 *  `memory.space_ids`: an id resolves to a row only the publisher has, which
+	 *  is why the publish boundary refuses `space_ids` by name and asks for this
+	 *  instead. The installer decides whether to create a matching Space. */
+	expectedSpaces: string[];
+	/** How the agent presents itself. Pure presentation — a glyph, a tone. */
+	persona: AgentPublishPersona | null;
 	skills: string[];
 	systemPrompt: string | null;
 	tools: string[];
-	/** Semver version to stamp on the manifest. */
+	/** Semver version to stamp on the listing. */
 	version: string;
+}
+
+/**
+ * The persona fields that travel, in the record's own snake_case (what
+ * `glyphToPersonaFields` produces). `display_name` is deliberately absent: the
+ * listing title is the display name, and carrying a second one would let a
+ * listing render under a name the store never moderated.
+ */
+export interface AgentPublishPersona {
+	avatar_url?: string | null;
+	dicebear?: { seed?: string | null; style?: string | null } | null;
+	dither?: {
+		direction?: string | null;
+		from?: string | null;
+		to?: string | null;
+	} | null;
+	emoji?: string | null;
+	icon?: string | null;
+	icon_color?: string | null;
+	tone?: string | null;
+}
+
+// ── The `agent` descriptor (the wire contract, and the disclosure's source) ───
+
+/** A Space the agent expects the installer to have — a name, never its contents. */
+export interface AgentSpaceDeclaration {
+	name: string;
+	purpose: string | null;
+}
+
+/** A provider connection the agent needs the installer to hold — never a token. */
+export interface AgentConnectionDeclaration {
+	provider: string;
+	purpose: string | null;
+	required: boolean;
+}
+
+/** The model/engine preference, mirroring Core's `ModelSlot`. */
+export interface AgentModelDeclaration {
+	engine: string | null;
+	model_id: string | null;
+}
+
+/** How the agent presents itself: a glyph source plus an optional tone. */
+export interface AgentAvatarDeclaration {
+	avatar_url: string | null;
+	dicebear: { seed: string | null; style: string | null } | null;
+	dither: {
+		direction: string | null;
+		from: string | null;
+		to: string | null;
+	} | null;
+	emoji: string | null;
+	icon: string | null;
+	icon_color: string | null;
+	tone: string | null;
+}
+
+/** The flat `agent` descriptor stored by the marketplace. Every key here is on
+ *  the publish boundary's allowlist; anything else is a 400. */
+export interface AgentDescriptor {
+	avatar: AgentAvatarDeclaration | null;
+	composio_actions: string[];
+	connections: AgentConnectionDeclaration[];
+	display_name: string;
+	mcp_servers: string[];
+	model: AgentModelDeclaration | null;
+	skills: string[];
+	spaces: AgentSpaceDeclaration[];
+	system_prompt: string;
+	tools: string[];
+}
+
+/** What the packaging did to the source that the publisher should be told. */
+export interface AgentPublishNotes {
+	/** The publish would be refused for this reason, or null when the agent is
+	 *  publishable. Checked here rather than left to the server so the dialog can
+	 *  say so before the user submits. */
+	blockedReason: string | null;
+	/** The agent's avatar is an inline `data:` image, which the publish boundary
+	 *  accepts only as an http(s) URL — so the listing ships without the image. */
+	droppedAvatarImage: boolean;
+	/** The engine is a local `acp-exec:` command; the model preference is dropped
+	 *  rather than shipping a path off this machine. */
+	droppedLocalCommand: boolean;
+}
+
+/** The descriptor plus what building it changed. */
+export interface AgentPublishPackage {
+	descriptor: AgentDescriptor;
+	notes: AgentPublishNotes;
+}
+
+const HTTP_URL_RE = /^https?:\/\//i;
+// Composio ids arrive either as the raw action slug (`GITHUB_CREATE_AN_ISSUE`)
+// or with the tool-allowlist prefix Core merges them under (`composio__…`).
+const COMPOSIO_PREFIX_RE = /^composio__/i;
+
+function trimOrNull(value: string | null | undefined): string | null {
+	const trimmed = (value ?? "").trim();
+	return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * The provider behind a Composio action id. Composio names actions
+ * `<TOOLKIT>_<ACTION>`, so the first segment is the toolkit — which is exactly
+ * the account the installer has to have connected for the action to run.
+ */
+function composioProvider(action: string): string | null {
+	const bare = action.trim().replace(COMPOSIO_PREFIX_RE, "");
+	const [toolkit] = bare.split("_");
+	return trimOrNull(toolkit)?.toLowerCase() ?? null;
+}
+
+/**
+ * The connections an agent needs, derived from its Composio actions. Declaring
+ * the PROVIDER (not the publisher's connected account) is the whole point: the
+ * installer reads "this needs your GitHub" and connects their own.
+ */
+function deriveConnections(
+	composioActions: string[]
+): AgentConnectionDeclaration[] {
+	const seen = new Set<string>();
+	const out: AgentConnectionDeclaration[] = [];
+	for (const action of composioActions) {
+		const provider = composioProvider(action);
+		if (!provider || seen.has(provider)) {
+			continue;
+		}
+		seen.add(provider);
+		out.push({
+			provider,
+			purpose: null,
+			// A connection an agent's actions call is one it will not work without.
+			required: true,
+		});
+	}
+	return out;
+}
+
+/** Rebuild the avatar declaration, dropping an inline `data:` image. */
+function buildAvatar(persona: AgentPublishPersona | null): {
+	avatar: AgentAvatarDeclaration | null;
+	droppedImage: boolean;
+} {
+	if (!persona) {
+		return { avatar: null, droppedImage: false };
+	}
+	const rawUrl = trimOrNull(persona.avatar_url);
+	const httpUrl = rawUrl && HTTP_URL_RE.test(rawUrl) ? rawUrl : null;
+	const dicebear = persona.dicebear
+		? {
+				seed: trimOrNull(persona.dicebear.seed),
+				style: trimOrNull(persona.dicebear.style),
+			}
+		: null;
+	const dither = persona.dither
+		? {
+				direction: trimOrNull(persona.dither.direction),
+				from: trimOrNull(persona.dither.from),
+				to: trimOrNull(persona.dither.to),
+			}
+		: null;
+	const avatar: AgentAvatarDeclaration = {
+		avatar_url: httpUrl,
+		dicebear: dicebear?.seed || dicebear?.style ? dicebear : null,
+		dither: dither?.from || dither?.to ? dither : null,
+		emoji: trimOrNull(persona.emoji),
+		icon: trimOrNull(persona.icon),
+		icon_color: trimOrNull(persona.icon_color),
+		tone: trimOrNull(persona.tone),
+	};
+	// Every glyph source counts, not just the uploaded image: a DiceBear-only or
+	// dither-only avatar is a complete avatar. `icon_color`/`tone` are modifiers.
+	const hasGlyph = Boolean(
+		avatar.avatar_url ||
+			avatar.emoji ||
+			avatar.icon ||
+			avatar.dicebear ||
+			avatar.dither
+	);
+	return {
+		avatar: hasGlyph || avatar.tone ? avatar : null,
+		droppedImage: Boolean(rawUrl && !httpUrl),
+	};
+}
+
+/**
+ * Build the `agent` descriptor — the exact object that leaves this machine.
+ *
+ * Pure and exported so the Publish dialog's disclosure renders THIS result
+ * rather than a hand-written summary of it: a disclosure that can drift from the
+ * payload is not a disclosure.
+ */
+export function buildAgentDescriptor(
+	source: AgentPublishSource,
+	displayName: string
+): AgentPublishPackage {
+	const name = displayName.trim();
+	const systemPrompt = (source.systemPrompt ?? "").trim();
+	const localCommand = isLocalAcpCommand(source.engine);
+	const engine = localCommand ? null : trimOrNull(source.engine);
+	const { avatar, droppedImage } = buildAvatar(source.persona);
+
+	const spaces: AgentSpaceDeclaration[] = [];
+	const seenSpaces = new Set<string>();
+	for (const raw of source.expectedSpaces) {
+		const spaceName = trimOrNull(raw);
+		if (!spaceName || seenSpaces.has(spaceName)) {
+			continue;
+		}
+		seenSpaces.add(spaceName);
+		spaces.push({ name: spaceName, purpose: null });
+	}
+
+	// Only the SOURCE's own blockers live here — the display name is the dialog's
+	// field and the dialog validates it, so duplicating that check would report a
+	// stale name the user has already fixed in front of them.
+	const blockedReason = systemPrompt
+		? null
+		: "This agent has no instructions to share. Instructions are what someone installs an agent for, so the marketplace refuses a publish without them.";
+
+	return {
+		descriptor: {
+			display_name: name,
+			system_prompt: systemPrompt,
+			avatar,
+			// `model_id` stays null: the record binds ONE engine/model string, and
+			// splitting it into a second field here would invent a precision the
+			// source does not have.
+			model: engine ? { engine, model_id: null } : null,
+			tools: source.tools,
+			skills: source.skills,
+			// The record binds tool NAMES, not the servers behind them, so there is
+			// no honest server list to declare. `tools` carries the dependency and
+			// the installer sees it in `requires` either way.
+			mcp_servers: [],
+			composio_actions: source.composioActions,
+			spaces,
+			connections: deriveConnections(source.composioActions),
+		},
+		notes: {
+			blockedReason,
+			droppedAvatarImage: droppedImage,
+			droppedLocalCommand: localCommand,
+		},
+	};
 }
 
 /** True when the engine is a custom local ACP command (never shippable). */
@@ -190,16 +448,22 @@ function isLocalAcpCommand(engine: string | null): boolean {
 	return typeof engine === "string" && engine.startsWith(ACP_EXEC_PREFIX);
 }
 
+function httpOrNull(value: string): string | null {
+	const trimmed = value.trim();
+	return HTTP_URL_RE.test(trimmed) ? trimmed : null;
+}
+
 /**
- * Build the marketplace publish body for an agent. Produces a plugin manifest
- * whose single runnable declares the agent (kind="agent") with its portable
- * config, plus the flat rich-listing metadata the control plane stores for the
- * App-Store-style detail preview.
+ * Build the marketplace publish body for an agent: the `agent`-kind listing
+ * metadata wrapped around the descriptor {@link buildAgentDescriptor} produced.
  *
  * `body.name` is the HUMAN display name (the listing title); `body.id` is the
- * bare-kebab plugin id (the slug, the unique ownership key) — do not conflate
- * them. The global reference form is `name@marketplace` (e.g. `ghost@ryu`), but
- * the stored id is the bare slug.
+ * bare-kebab id (the slug, the unique ownership key) — do not conflate them.
+ *
+ * The `manifest` is a stub — id/name/version and nothing else. An agent carries
+ * no executable content, so there is nothing for a manifest to describe; the
+ * field exists because the publish route signs one for provenance, and shipping
+ * a fabricated plugin bundle there would claim a code surface that isn't real.
  */
 export function buildAgentPublishBody(
 	source: AgentPublishSource,
@@ -209,68 +473,18 @@ export function buildAgentPublishBody(
 	const id = slug;
 	const displayName = listing.displayName.trim() || slug;
 	const version = source.version || "1.0.0";
-
-	// The engine slot: keep a built-in/model id (portable), but drop a custom
-	// `acp-exec:` command (it can embed a local filesystem path).
-	const model = isLocalAcpCommand(source.engine) ? null : source.engine;
-
-	// The agent runnable config. Canonical Core `AgentConfig` fields
-	// (system_prompt / model / tools) sit at the top; the richer Ryu slots ride
-	// alongside (Core ignores unknown config fields on install, and the detail
-	// dialog can surface them). No identities, no space_ids, no secrets.
-	const agentConfig: Record<string, unknown> = {
-		system_prompt: source.systemPrompt,
-		model,
-		tools: source.tools,
-		skills: source.skills,
-		composio_actions: source.composioActions,
-		memory_read_levels: source.memoryReadLevels,
-		orchestrator: source.orchestrator,
-		can_create_agents: source.canCreateAgents,
-	};
-
-	const runnableId = `agent-${slug}`;
-	const manifest: Record<string, unknown> = {
-		id,
-		name: displayName,
-		version,
-		// Declarations only; kept EMPTY so the publish is auto-approved (an empty
-		// grant set short-circuits the Gateway validation). The human capabilities
-		// below carry the store display.
-		permission_grants: [],
-		runnables: [
-			{
-				id: runnableId,
-				name: displayName,
-				kind: "agent",
-				config: agentConfig,
-			},
-		],
-	};
-
-	const capabilities = deriveCapabilities(source.tools, source.composioActions);
-	const runnablesView: PublishRunnableView[] = [
-		{ id: runnableId, name: displayName, kind: "agent", enabled: true },
-	];
-
-	const trimOrNull = (value: string): string | null => {
-		const t = value.trim();
-		return t.length > 0 ? t : null;
-	};
-	const httpOrNull = (value: string): string | null => {
-		const t = value.trim();
-		return /^https?:\/\//i.test(t) ? t : null;
-	};
+	const { descriptor } = buildAgentDescriptor(source, displayName);
 
 	return {
 		id,
-		kind: "plugin",
+		kind: "agent",
 		name: displayName,
 		version,
-		manifest,
-		// The descriptor is the manifest itself for a plugin bundle; Core maps it
-		// on install (mirrors the SDK CLI publish body).
-		descriptor: manifest,
+		manifest: { id, name: displayName, version, kind: "agent" },
+		descriptor: descriptor as unknown as Record<string, unknown>,
+		// Declarations only, kept EMPTY so the publish is auto-approved (an empty
+		// grant set short-circuits the Gateway validation). An agent runs under the
+		// installer's own grants; the human capabilities below carry the display.
 		grants: [],
 		description: trimOrNull(listing.description) ?? source.description ?? null,
 		tagline: trimOrNull(listing.tagline),
@@ -285,7 +499,8 @@ export function buildAgentPublishBody(
 		examplePrompts: listing.examplePrompts
 			.map((p) => p.trim())
 			.filter((p) => p.length > 0),
-		capabilities,
-		runnables: runnablesView,
+		capabilities: deriveCapabilities(source.tools, source.composioActions),
+		// A listing that IS the agent bundles no separate runnables.
+		runnables: [],
 	};
 }

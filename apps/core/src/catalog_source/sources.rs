@@ -2544,7 +2544,10 @@ impl RyuMarketplaceSource {
                 }
                 value
             }
-            CatalogKind::Knowledge => serde_json::json!({
+            // Knowledge and Agent share the plain card shape: neither carries a
+            // manifest surface (`requires`/`targets`/companion), and an agent's
+            // real payload is the template resolved at detail/install time.
+            CatalogKind::Knowledge | CatalogKind::Agent => serde_json::json!({
                 "id": card.id,
                 "name": card.name,
                 "description": card.description,
@@ -2658,6 +2661,30 @@ impl RyuMarketplaceSource {
                 // server-stored descriptor when present, else the whole detail.
                 Ok(InstallDescriptor {
                     kind: CatalogKind::Knowledge,
+                    source_id: self.id.clone(),
+                    repo_id: id.to_string(),
+                    files: Vec::new(),
+                    raw: if descriptor.is_null() {
+                        detail.clone()
+                    } else {
+                        descriptor
+                    },
+                })
+            }
+            CatalogKind::Agent => {
+                // Agent: the descriptor carries the portable agent template
+                // (`{ template: { kind: "agent", name, version, agent_config } }`) —
+                // byte-for-byte what `GET /api/agents/:id/export` emits, so the
+                // install path can hand it straight to the EXISTING importer. Same
+                // fallback as Knowledge: an older server that stores the template at
+                // the detail root rather than under `descriptor` still resolves.
+                //
+                // No sanitisation happens here by design: a source resolves
+                // descriptors, it never decides trust. Core strips the
+                // privilege-bearing fields at install
+                // (`AgentTemplate::sanitize_for_untrusted_install`).
+                Ok(InstallDescriptor {
+                    kind: CatalogKind::Agent,
                     source_id: self.id.clone(),
                     repo_id: id.to_string(),
                     files: Vec::new(),
@@ -4039,8 +4066,9 @@ impl Source {
 
 /// The search-envelope key the matching desktop tab expects for a given kind:
 /// model `{ models }`, skill `{ skills }`, mcp `{ servers }`, plugin `{ items }`,
-/// knowledge `{ concepts }`. Single source of truth, shared by every source that
-/// wraps per-kind cards (`MarketplaceSource` and `RyuMarketplaceSource`).
+/// knowledge `{ concepts }`, agent `{ agents }`. Single source of truth, shared by
+/// every source that wraps per-kind cards (`MarketplaceSource` and
+/// `RyuMarketplaceSource`).
 fn envelope_key(kind: CatalogKind) -> &'static str {
     match kind {
         CatalogKind::Model => "models",
@@ -4048,6 +4076,7 @@ fn envelope_key(kind: CatalogKind) -> &'static str {
         CatalogKind::Mcp => "servers",
         CatalogKind::Plugin => "items",
         CatalogKind::Knowledge => "concepts",
+        CatalogKind::Agent => "agents",
     }
 }
 
@@ -4556,6 +4585,37 @@ mod tests {
         assert_eq!(dm.files.len(), 1);
         assert_eq!(dm.files[0].url, "https://m.example/x.gguf");
         assert_eq!(dm.files[0].sha256.as_deref(), Some("abc"));
+
+        // Agent: the portable template rides through `raw` untouched — the seam
+        // resolves, Core sanitises. Both storage shapes resolve (under `descriptor`,
+        // or at the detail root when an older server stored it bare).
+        let agent = RyuMarketplaceSource::builtin(CatalogKind::Agent);
+        let template = serde_json::json!({
+            "template": {
+                "kind": "agent",
+                "name": "Researcher",
+                "version": "1.0.0",
+                "agent_config": { "system_prompt": "You research." }
+            }
+        });
+        for detail in [
+            serde_json::json!({ "descriptor": template.clone() }),
+            template.clone(),
+        ] {
+            let da = agent
+                .detail_to_descriptor("acme/researcher", &detail)
+                .expect("agent descriptor");
+            assert_eq!(da.kind, CatalogKind::Agent);
+            assert_eq!(da.source_id, client_id);
+            assert!(da.files.is_empty(), "an agent downloads nothing");
+            assert_eq!(
+                da.raw
+                    .get("template")
+                    .and_then(|t| t.get("name"))
+                    .and_then(|v| v.as_str()),
+                Some("Researcher")
+            );
+        }
 
         // Mcp: a stdio npm descriptor maps through #464's validated plan builder.
         let mcp = RyuMarketplaceSource::builtin(CatalogKind::Mcp);

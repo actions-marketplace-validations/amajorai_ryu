@@ -198,11 +198,25 @@ fn source_from_spec(spec: CustomSourceSpec) -> Source {
                 }),
             }
         }
-        other => Source::Stub(StubSource {
-            id: spec.id,
-            display_name: spec.display_name,
-            kind: other,
-        }),
+        CatalogKind::Agent => {
+            // Deliberately a labelled stub even WITH a base_url, unlike the
+            // Skill/Plugin arms. Those read `.claude-plugin/marketplace.json`, and
+            // there is no such standard for a published agent template — pointing a
+            // `MarketplaceSource` at a repo would list that repo's *plugins* as if
+            // they were agents, then fail at install with no template to import.
+            // A stub browses empty and says so, which is the honest degradation.
+            // The built-in primary (`RyuMarketplaceSource`, whose per-kind
+            // `catalog/detail` DOES carry the template) is registered in
+            // [`builtin_sources`]; give a git repo format an arm here once one exists.
+            Source::Stub(StubSource {
+                id: spec.id,
+                display_name: spec.display_name,
+                kind: CatalogKind::Agent,
+            })
+        }
+        // No catch-all arm on purpose: every kind is matched explicitly, so the
+        // compiler flags the NEXT one added instead of silently degrading it to a
+        // stub the way a trailing `other =>` did.
     }
 }
 
@@ -543,6 +557,16 @@ fn builtin_sources() -> HashMap<CatalogKind, Vec<Source>> {
             CatalogKind::Knowledge,
         ))],
     );
+    // Agent (published agent definitions). Primary: the Ryu Marketplace federated
+    // source, same as Knowledge — the marketplace already carries per-kind cards +
+    // descriptors, so a published agent needs no bespoke transport. Custom git
+    // marketplaces are added as `MarketplaceSource`s (see `source_from_spec`).
+    map.insert(
+        CatalogKind::Agent,
+        vec![Source::RyuMarketplace(RyuMarketplaceSource::builtin(
+            CatalogKind::Agent,
+        ))],
+    );
     map
 }
 
@@ -791,6 +815,23 @@ mod tests {
         ));
         assert!(matches!(
             source_from_spec(spec(CatalogKind::Knowledge, "k2", None)),
+            Source::Stub(_)
+        ));
+    }
+
+    /// Agent is the one kind a base_url does NOT upgrade out of a stub, and that
+    /// is deliberate: `MarketplaceSource` parses `.claude-plugin/marketplace.json`,
+    /// so a repo pointed at the Agent kind would advertise its PLUGINS as agents
+    /// and then fail at install with no template to import. Pinned so the arm is
+    /// not "fixed" into a `Marketplace(_)` that reintroduces the mis-listing.
+    #[test]
+    fn a_custom_agent_source_stays_a_stub_even_with_a_repo_url() {
+        assert!(matches!(
+            source_from_spec(spec(CatalogKind::Agent, "a1", Some("https://git/repo"))),
+            Source::Stub(_)
+        ));
+        assert!(matches!(
+            source_from_spec(spec(CatalogKind::Agent, "a2", None)),
             Source::Stub(_)
         ));
     }

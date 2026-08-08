@@ -89,6 +89,9 @@ const KIND_TO_REALM: Record<MarketplaceKind, StoreSearchRealm> = {
 	skill: "skills",
 	model: "models",
 	mcp: "mcp",
+	// A published agent definition browses in the Agents tab, alongside the ACP
+	// runtimes — the community shelf there is where it installs from.
+	agent: "agents",
 };
 
 export function useStoreHome(): UseStoreHomeResult {

@@ -19,6 +19,7 @@
 // the branch, at which point the corrected wording becomes the overclaim.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { installFetch } from "./test-fetch.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SpacesAPI } from "./spaces.ts";
@@ -33,7 +34,7 @@ const OPTIONS: RyuClientOptions = { baseUrl: "http://localhost:7980" };
 
 describe("SpacesAPI.list", () => {
 	test("maps snake_case spaces including document_count", async () => {
-		globalThis.fetch = (() =>
+		installFetch((() =>
 			Promise.resolve(
 				Response.json({
 					spaces: [
@@ -46,7 +47,7 @@ describe("SpacesAPI.list", () => {
 						},
 					],
 				})
-			)) as typeof fetch;
+			)));
 		const list = await new SpacesAPI(OPTIONS).list();
 		expect(list[0]).toEqual({
 			id: "s1",
@@ -59,8 +60,8 @@ describe("SpacesAPI.list", () => {
 	});
 
 	test("returns [] when spaces is absent", async () => {
-		globalThis.fetch = (() =>
-			Promise.resolve(new Response("{}"))) as typeof fetch;
+		installFetch((() =>
+			Promise.resolve(new Response("{}"))));
 		expect(await new SpacesAPI(OPTIONS).list()).toEqual([]);
 	});
 });
@@ -68,8 +69,8 @@ describe("SpacesAPI.list", () => {
 describe("SpacesAPI.search", () => {
 	test("maps matches and sends only query when limit is omitted", async () => {
 		let capturedBody: string | undefined;
-		globalThis.fetch = ((_url: string, init: RequestInit) => {
-			capturedBody = init.body as string;
+		installFetch(((_input: RequestInfo | URL, init?: RequestInit) => {
+			capturedBody = init?.body as string;
 			return Promise.resolve(
 				Response.json({
 					matches: [
@@ -82,7 +83,7 @@ describe("SpacesAPI.search", () => {
 					],
 				})
 			);
-		}) as typeof fetch;
+		}));
 		const matches = await new SpacesAPI(OPTIONS).search("s1", "hello");
 		expect(matches[0]).toEqual({
 			chunkId: "ch1",
@@ -95,17 +96,17 @@ describe("SpacesAPI.search", () => {
 
 	test("includes limit in the body when provided", async () => {
 		let capturedBody: string | undefined;
-		globalThis.fetch = ((_url: string, init: RequestInit) => {
-			capturedBody = init.body as string;
+		installFetch(((_input: RequestInfo | URL, init?: RequestInit) => {
+			capturedBody = init?.body as string;
 			return Promise.resolve(Response.json({ matches: [] }));
-		}) as typeof fetch;
+		}));
 		await new SpacesAPI(OPTIONS).search("s1", "hi", 3);
 		expect(JSON.parse(capturedBody ?? "{}")).toEqual({ query: "hi", limit: 3 });
 	});
 
 	test("returns [] when matches is absent", async () => {
-		globalThis.fetch = (() =>
-			Promise.resolve(new Response("{}"))) as typeof fetch;
+		installFetch((() =>
+			Promise.resolve(new Response("{}"))));
 		expect(await new SpacesAPI(OPTIONS).search("s1", "q")).toEqual([]);
 	});
 });

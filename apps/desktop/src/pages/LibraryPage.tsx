@@ -35,6 +35,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import {
+	FavoriteStar,
 	LibraryCard,
 	type LibraryCardData,
 	LibraryEmpty,
@@ -43,13 +44,17 @@ import {
 	LibraryLoading,
 	type LibrarySortOption,
 	LibraryToolbar,
-} from "@ryu/blocks/desktop/library";
+} from "@ryu/blocks/desktop/library.tsx";
 import {
 	StoreSearchButton,
 	type StoreSectionTab,
 	StoreSectionTabs,
-} from "@ryu/blocks/desktop/store";
-import type { ViewMode } from "@ryu/blocks/desktop/view-toggle";
+} from "@ryu/blocks/desktop/store.tsx";
+import type { ViewMode } from "@ryu/blocks/desktop/view-toggle.tsx";
+import { Badge } from "@ryu/ui/components/badge.tsx";
+import { BookCard } from "@ryu/ui/components/book-card.tsx";
+import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	type ReactNode,
 	useCallback,
@@ -57,9 +62,9 @@ import {
 	useMemo,
 	useState,
 } from "react";
+import { AgentBadgeCard } from "@/src/components/agents/AgentBadgeCard.tsx";
 import { SURFACE_PLUGIN_OWNER } from "@/src/components/layout/sidebar-sections.ts";
 import ContributedLibrarySection from "@/src/components/library/ContributedLibrarySection.tsx";
-import { SpacePreview } from "@/src/components/library/SpacePreview.tsx";
 import { MemoryLibrary } from "@/src/components/memory/MemoryLibrary.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
 import {
@@ -735,24 +740,11 @@ function LibraryCollections({
 
 	// On the mixed tabs, prefix each card with its type so kinds are legible.
 	const toCardData = (item: LibraryItem): LibraryCardData => {
-		// Previews are grid-only (list rows stay compact). The space preview
-		// fetches, so it is mounted ONLY on the dedicated Spaces tab — never on the
-		// mixed Recents/Favorites tabs that land on launch. The workflow strip is
-		// local data, so it renders wherever a workflow card appears.
-		let preview: ReactNode;
-		if (view === "grid") {
-			if (item.type === "space" && section === "space") {
-				const space = spaces.find((s) => s.id === item.id);
-				preview = (
-					<SpacePreview
-						documentCount={space?.documentCount ?? 0}
-						spaceId={item.id}
-					/>
-				);
-			} else {
-				preview = item.preview;
-			}
-		}
+		// Previews are grid-only (list rows stay compact). The workflow strip is
+		// local data, so it renders wherever a workflow card appears. Spaces used to
+		// mount a fetched markdown snippet here; the Spaces grid is a book shelf now
+		// and never reaches this card, so nothing space-shaped is left to preview.
+		const preview = view === "grid" ? item.preview : undefined;
 		return {
 			key: refKey(item.type, item.id),
 			icon: item.icon,
@@ -908,6 +900,65 @@ function LibraryCollections({
 										: `No ${sectionMeta?.label.toLowerCase() ?? "items"} yet`
 								}
 							/>
+						) : section === "space" && view === "grid" ? (
+							/* Spaces are the one collection that reads as a shelf: each is a
+							   long-lived body of documents, not a row in a list. They get the
+							   book presentation instead of the shared card — gated on the
+							   SECTION, not the item type, so a space appearing in
+							   Recents/Favorites stays a card among cards. Own container
+							   because `LibraryGrid` lays out full-width cards and a portrait
+							   book needs a fixed track. */
+							<div className="flex flex-wrap gap-6 pt-1">
+								{visibleItems.map((item) => (
+									<SpaceBook
+										favorited={favorites.some(
+											(f) => f.type === item.type && f.id === item.id
+										)}
+										item={item}
+										key={refKey(item.type, item.id)}
+										onToggleFavorite={() => toggleFavorite(item.type, item.id)}
+									/>
+								))}
+							</div>
+						) : section === "agent" && view === "grid" ? (
+							/* An agent gets the card it already has everywhere else: the
+							   employee badge, the same physical object its profile page and
+							   the Store's Agents tab show. Gated on the SECTION exactly like
+							   the shelf above — an agent surfacing in Recents/Favorites stays
+							   a card among cards, because those tabs mix types (a 27rem badge
+							   beside a 5rem chat card reads as a broken grid) and Recents is
+							   the tab the app lands on. */
+							<LibraryGrid columns={2} view={view}>
+								{visibleItems.map((item) => (
+									<AgentBadgeCard
+										action={
+											<FavoriteStar
+												favorited={favorites.some(
+													(f) => f.type === item.type && f.id === item.id
+												)}
+												onToggle={() => toggleFavorite(item.type, item.id)}
+											/>
+										}
+										employeeId={item.id}
+										footer={
+											item.badge ? (
+												<Badge variant="outline">{item.badge}</Badge>
+											) : null
+										}
+										// The badge prints "Hired …", and an agent's creation is
+										// exactly that date; the card carries it and the list row
+										// never did.
+										hiredAt={
+											agents.find((a) => a.id === item.id)?.createdAt ??
+											undefined
+										}
+										key={refKey(item.type, item.id)}
+										name={item.name}
+										onOpen={item.open}
+										role={item.subtitle}
+									/>
+								))}
+							</LibraryGrid>
 						) : (
 							<LibraryGrid columns={2} view={view}>
 								{visibleItems.map((item) => (
@@ -936,6 +987,64 @@ function LibraryCollections({
 				onSubmit={handleTeamSubmit}
 				open={teamDialogOpen}
 				team={editingTeam}
+			/>
+		</div>
+	);
+}
+
+/** One Space on the shelf.
+ *
+ *  The interaction is `LibraryCard`'s, not a new one: the whole book opens the
+ *  item, but it cannot be a `<button>` because the favorite star nested inside it
+ *  is itself interactive — so `role="button"` plus the Enter/Space handler, with
+ *  the star stopping propagation. `group` is what lets `BookCard` tilt from the
+ *  wrapper's hover and keyboard focus rather than only from a pointer over the
+ *  cover. */
+function SpaceBook({
+	favorited,
+	item,
+	onToggleFavorite,
+}: {
+	favorited: boolean;
+	item: LibraryItem;
+	onToggleFavorite: () => void;
+}) {
+	return (
+		<div
+			className="group relative cursor-pointer rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+			onClick={item.open}
+			onKeyDown={(e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					item.open();
+				}
+			}}
+			role="button"
+			tabIndex={0}
+		>
+			<BookCard
+				coverArt={
+					// Decorative: the cover already prints the name, so the generative
+					// art must not read its raw seed (a space id) out to a screen reader.
+					// Seeded by id, not name, so renaming a space keeps its cover.
+					<div aria-hidden className="size-full">
+						<DitherAvatar className="size-full" name={item.id} />
+					</div>
+				}
+				footer={item.subtitle}
+				title={item.name}
+			/>
+			{/* Floats over the cover so it costs the book no layout; revealed on
+			    hover/focus, but kept visible while starred so the state is legible at
+			    rest. */}
+			<FavoriteStar
+				className={cn(
+					"absolute top-1 right-1 bg-background/70 backdrop-blur-sm transition-opacity",
+					favorited
+						? "opacity-100"
+						: "opacity-0 focus-within:opacity-100 group-hover:opacity-100"
+				)}
+				favorited={favorited}
+				onToggle={onToggleFavorite}
 			/>
 		</div>
 	);

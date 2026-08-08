@@ -11,8 +11,10 @@
 // navigation). Those differences live behind the MarketplaceHost seam (./host);
 // the data SHAPES below are identical on both and belong here.
 
-/** The four catalog kinds the money layer covers, matching the server's kind. */
-export type MarketplaceKind = "plugin" | "skill" | "model" | "mcp";
+/** The catalog kinds the money layer covers, matching the server's kind.
+ *  `agent` is a user-published agent definition — the one kind whose listing is
+ *  a configuration rather than code. */
+export type MarketplaceKind = "plugin" | "skill" | "model" | "mcp" | "agent";
 
 /** Purchase/license lifecycle, mirroring the server's LicenseStatus. */
 export type LicenseStatus = "active" | "refunded" | "disputed";

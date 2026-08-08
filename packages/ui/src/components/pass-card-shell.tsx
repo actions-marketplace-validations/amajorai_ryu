@@ -13,6 +13,7 @@ import {
 import {
 	type ReactNode,
 	useCallback,
+	useEffect,
 	useRef,
 	useState,
 	useSyncExternalStore,
@@ -21,7 +22,7 @@ import { cn } from "../lib/utils.ts";
 import { DitherAvatar, ditherAvatarHue } from "./dither-kit/avatar.tsx";
 import { hueFill } from "./dither-kit/pixel.ts";
 import { Logo } from "./logo.tsx";
-import { MetalEdge } from "./metal-edge.tsx";
+import { METAL_EDGE_RING_PX, MetalEdge } from "./metal-edge.tsx";
 import { ShaderBackground } from "./motion/shader-background.tsx";
 
 /**
@@ -50,7 +51,7 @@ import { ShaderBackground } from "./motion/shader-background.tsx";
  * lifts off the page when you point at it, and a fixed shadow reads as flat.
  */
 const TILT_DEGREES = 15;
-const PERSPECTIVE_PX = 1000;
+export const PERSPECTIVE_PX = 1000;
 const HOVER_SCALE = 1.05;
 const GLARE_INTENSITY = 0.5;
 const GLARE_SIZE_PERCENT = 80;
@@ -64,8 +65,11 @@ const TRANSITION_SECONDS = 0.2;
  * The axis is CSS `rotateY`, which swings the card left-to-right like a
  * revolving door; `rotateX` would tumble it top-over-bottom instead.
  */
-const FLIP_CYCLE_SECONDS = 24;
+/** How long the card stays perfectly still after mount, so its rings paint. */
+const SETTLE_MS = 900;
+/** One unbroken turn per cycle, in degrees and seconds. */
 const FULL_TURN_DEGREES = 360;
+export const FLIP_CYCLE_SECONDS = 24;
 /**
  * Drag-to-rotate. A degree per pixel means a swipe across a 320px card turns it
  * most of the way round, which is about right for "throw it and look at the
@@ -84,8 +88,8 @@ const TILT_SPAN = 50;
  * animation playing, so the period is long and the travel is small enough that
  * you notice it only when you are not looking straight at it.
  */
-const FLOAT_TRAVEL_PX = 10;
-const FLOAT_CYCLE_SECONDS = 6;
+export const FLOAT_TRAVEL_PX = 10;
+export const FLOAT_CYCLE_SECONDS = 6;
 const DRAG_DEGREES_PER_PX = 1;
 const MAX_DRAG_PITCH = 60;
 /**
@@ -96,7 +100,13 @@ const MAX_DRAG_PITCH = 60;
  * the same value.
  */
 /** The card's corner radius, in the CSS px `metal-fx` wants it in. */
-const CARD_RADIUS_PX = 28;
+export const CARD_RADIUS_PX = 28;
+/**
+ * The FACE's radius — the card's, less the ring gutter it sits inside. Keeping
+ * the two in step is what makes the ring read as one even band rather than as a
+ * band that thins at the corners.
+ */
+export const FACE_RADIUS_PX = CARD_RADIUS_PX - METAL_EDGE_RING_PX;
 
 /**
  * Card thickness. Two faces alone turn edge-on into a hairline — a sheet of
@@ -115,28 +125,108 @@ const CARD_RADIUS_PX = 28;
  * two cards stacked rather than as one thick one. A few pixels is enough to kill
  * the paper-thin look without opening that gap.
  */
-const CARD_THICKNESS_PX = 6;
+export const CARD_THICKNESS_PX = 6;
 const CARD_HALF_THICKNESS_PX = CARD_THICKNESS_PX / 2;
 /** One slice per pixel — any coarser and the stack reads as separate planes. */
 const CARD_SLICES = CARD_THICKNESS_PX;
+
+/**
+ * The material the card is milled from, as seen edge-on. A flat token fill read
+ * as cardboard — the ring says the card is metal and the edge said it was not —
+ * so the slices carry a brushed-metal ramp instead: dark at the shoulders,
+ * bright across the middle, which is how a rolled edge catches light. Fixed
+ * greys rather than theme tokens, because metal is metal in both schemes; the
+ * same reason the ring's own presets are not token-derived.
+ */
+const EDGE_METAL =
+	"linear-gradient(180deg, #6e6e78 0%, #babac4 18%, #f4f4f8 34%, #9a9aa6 52%, #d8d8e0 70%, #7c7c86 100%)";
+
+/**
+ * How the card's thickness is finished. `"brushed"` is the static ramp above —
+ * cheap, and what a grid of cards should use. `"live"` gives every plane of the
+ * milled edge its own metal-fx ring, so the thickness is the same animated
+ * shader as the faces instead of a painted lookalike.
+ *
+ * `"live"` costs one metal-fx instance per slice. They share a single WebGL
+ * canvas, so the cost is per-frame 2D copies rather than contexts — fine for the
+ * one card on a pass screen, wrong for twenty badges in a list.
+ *
+ * The rings must all sit on the SAME box as the faces. The first attempt used a
+ * single wider ring at mid-depth, which is exactly the failure the thickness
+ * comment above warns about: against the two face rings it read as two cards
+ * stacked with a gap between them rather than as one solid edge.
+ */
+export type PassEdge = "brushed" | "live";
 
 /**
  * The card's thickness, as a stack of its own silhouette. Each slice sits a
  * pixel further back than the last, spanning front face to back face, so any
  * edge-on view shows a continuous band of material instead of a hairline.
  */
-function CardExtrusion() {
+function CardExtrusion({ edge, ringed }: { edge: PassEdge; ringed: boolean }) {
 	return (
 		<>
-			{Array.from({ length: CARD_SLICES + 1 }, (_, index) => {
-				const depth = CARD_HALF_THICKNESS_PX - index;
+			{Array.from({ length: CARD_SLICES - 1 }, (_, index) => {
+				// STRICTLY BETWEEN the faces: the outermost slices used to sit at
+				// ±CARD_HALF_THICKNESS_PX, i.e. in the exact plane of each face, and
+				// they are opaque across the whole box — including the transparent
+				// gutter the metal ring paints into. Coplanar opaque geometry inside a
+				// `preserve-3d` context has no defined winner, so which one you saw
+				// depended on the turn angle: the FRONT ring lost and only the back
+				// one showed, and a back-facing metal-fx instance is not repainted, so
+				// the ring that did show was a frozen frame. Hence "the border is only
+				// on the back, and it does not animate". Starting a pixel in on each
+				// side leaves both faces alone.
+				const depth = CARD_HALF_THICKNESS_PX - 1 - index;
+				// The material of the slice. A RINGED card is milled metal, so the
+				// depth carries the brushed ramp and, under `"live"`, a metal-fx ring
+				// of its own at each plane — the whole edge is then the same animated
+				// shader as the faces rather than a painted-on lookalike. One ring per
+				// plane, aligned to the same box, so edge-on they stack into a single
+				// moving band; a single wider ring at mid-depth was the first attempt
+				// and read as two cards with a gap between them.
+				//
+				// The brushed ramp stays on an UNRINGED card too. The thing an
+				// unclaimed pass withholds is the animated chrome BORDER, not the
+				// material it is milled from — a card whose edge went flat read as
+				// cardboard rather than as metal waiting to be finished.
+				const slice = (
+					<div
+						aria-hidden="true"
+						className="absolute inset-0"
+						style={{
+							backgroundImage: EDGE_METAL,
+							borderRadius: `${FACE_RADIUS_PX}px`,
+						}}
+					/>
+				);
 				return (
 					<div
 						aria-hidden="true"
-						className="pointer-events-none absolute inset-0 rounded-[1.75rem] bg-[color-mix(in_oklab,var(--card),var(--foreground)_20%)]"
+						className="pointer-events-none absolute inset-0"
 						key={depth}
 						style={{ transform: `translateZ(${depth}px)` }}
-					/>
+					>
+						{edge === "live" && ringed && depth === 0 ? (
+							// ONE hairline ring, on the middle plane only. Ringing every
+							// plane stacked five arcs that each project from a slightly
+							// different depth, and at the corners they piled into a band far
+							// thicker than the arc it was tracing — the card read as having a
+							// smaller radius than it has. A single ring at mid-depth is
+							// hidden behind the faces head-on, catches the light edge-on
+							// where the milled edge actually shows, and leaves the
+							// silhouette to the face rings.
+							<MetalEdge
+								borderRadius={CARD_RADIUS_PX}
+								className="h-full"
+								ringPx={1}
+							>
+								<div className="relative h-full w-full">{slice}</div>
+							</MetalEdge>
+						) : (
+							slice
+						)}
+					</div>
 				);
 			})}
 		</>
@@ -151,20 +241,20 @@ function CardExtrusion() {
  * so the texture only ever adds contrast) than in light, where a saturated
  * wash would eat a black headline.
  */
-const WARP_OPACITY_DARK = 0.55;
-const WARP_OPACITY_LIGHT = 0.3;
+export const WARP_OPACITY_DARK = 0.55;
+export const WARP_OPACITY_LIGHT = 0.3;
 /** Degrees between the seed's own hue and its companion stop. */
-const WARP_HUE_SPREAD = 42;
+export const WARP_HUE_SPREAD = 42;
 /** The near-black / near-white the seeded hues are laid against. */
-const WARP_BASE_DARK = "#121212";
-const WARP_BASE_LIGHT = "#f2f2f4";
-const WARP_SPEED = 0.32;
-const WARP_SWIRL = 0.75;
-const WARP_DISTORTION = 0.22;
-const WARP_SOFTNESS = 1;
-const WARP_SCALE = 1.1;
+export const WARP_BASE_DARK = "#121212";
+export const WARP_BASE_LIGHT = "#f2f2f4";
+export const WARP_SPEED = 0.32;
+export const WARP_SWIRL = 0.75;
+export const WARP_DISTORTION = 0.22;
+export const WARP_SOFTNESS = 1;
+export const WARP_SCALE = 1.1;
 
-const hueHex = (hue: number): string => {
+export const hueHex = (hue: number): string => {
 	const [r, g, b] = hueFill(hue);
 	return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 };
@@ -188,8 +278,14 @@ const subscribeToScheme = (onChange: () => void) => {
  * sampled the scheme once would keep its old palette when the user flips the OS
  * toggle. Callers that own a manual theme pass `"dark"`/`"light"` and never
  * reach the media query at all.
+ *
+ * Exported because a card's CONTENT can need the same answer the face resolves
+ * — `tier-pass.tsx` picks the base tone its warp stops are laid against — and a
+ * second `matchMedia` read at the call site would strand that palette on the
+ * old scheme when the OS toggle flips, which is the exact bug this hook exists
+ * to avoid.
  */
-function useIsDarkFace(metalTheme: "auto" | "dark" | "light"): boolean {
+export function useIsDarkFace(metalTheme: "auto" | "dark" | "light"): boolean {
 	const prefersDark = useSyncExternalStore(
 		subscribeToScheme,
 		() => window.matchMedia(DARK_SCHEME_QUERY).matches,
@@ -219,10 +315,13 @@ function DitherBackdrop({ seed }: { seed: string }) {
  * name, and two members never get the same card.
  */
 function WarpBackdrop({
+	colors,
 	isDark,
 	reduceMotion,
 	seed,
 }: {
+	/** {@link PassCardShellProps.warpColors}. Falsy → the seeded stops. */
+	colors?: readonly string[];
 	isDark: boolean;
 	reduceMotion: boolean;
 	seed: string;
@@ -232,7 +331,12 @@ function WarpBackdrop({
 	return (
 		<ShaderBackground
 			className="h-full w-full"
-			colors={[base, hueHex(hue), base, hueHex(hue + WARP_HUE_SPREAD)]}
+			// Spread rather than passed through: the shader's `colors` is a mutable
+			// `string[]`, and the override arrives readonly so a caller's palette
+			// constant cannot be written into by anything downstream.
+			colors={[
+				...(colors ?? [base, hueHex(hue), base, hueHex(hue + WARP_HUE_SPREAD)]),
+			]}
 			distortion={WARP_DISTORTION}
 			scale={WARP_SCALE}
 			softness={WARP_SOFTNESS}
@@ -247,6 +351,42 @@ function WarpBackdrop({
 }
 
 /**
+ * The card's outer frame. With `ringed` it is the metal edge; without it, the
+ * same box and the same gutter, minus the shader — so turning the ring off
+ * changes nothing about the card's geometry, only whether the band is chrome or
+ * the page showing through.
+ */
+function CardRingFrame({
+	children,
+	metalTheme,
+	ringed,
+}: {
+	children: ReactNode;
+	metalTheme: "auto" | "dark" | "light";
+	ringed: boolean;
+}) {
+	if (ringed) {
+		return (
+			<MetalEdge
+				borderRadius={CARD_RADIUS_PX}
+				className="h-full"
+				theme={metalTheme}
+			>
+				{children}
+			</MetalEdge>
+		);
+	}
+	return (
+		<div
+			className="flex h-full w-full flex-col"
+			style={{ padding: `${METAL_EDGE_RING_PX}px` }}
+		>
+			{children}
+		</div>
+	);
+}
+
+/**
  * One side of the pass: the metal ring plus the laminated card surface. Both
  * faces render this so the back is unmistakably the same object as the front
  * rather than a plain panel behind it.
@@ -257,7 +397,9 @@ function PassFace({
 	metalTheme,
 	mirrored = false,
 	reduceMotion,
+	ringed,
 	seed,
+	warpColors,
 }: {
 	/** Which generative texture the card face is printed on. */
 	backdrop: PassBackdrop;
@@ -271,8 +413,12 @@ function PassFace({
 	 */
 	mirrored?: boolean;
 	reduceMotion: boolean;
+	/** Paint the metal ring. See `PassCardShellProps.ringed`. */
+	ringed: boolean;
 	/** Name or handle the generative backdrop is derived from. */
 	seed: string;
+	/** {@link PassCardShellProps.warpColors}. */
+	warpColors?: readonly string[];
 }) {
 	const isDark = useIsDarkFace(metalTheme);
 	const isWarp = backdrop === "warp";
@@ -281,19 +427,24 @@ function PassFace({
 		// absolutely positioned to the card's box, so the ring wrapper has to be as
 		// tall as the card or its surface covers only the content and leaves a bare
 		// band above and below.
-		<MetalEdge
-			borderRadius={CARD_RADIUS_PX}
-			className="h-full"
-			paused={reduceMotion}
-			theme={metalTheme}
-		>
+		// NOT paused under reduced motion. `metal-fx` shares one GL loop across
+		// every ring on the page, so a paused card froze the invite row and the
+		// stat tiles with it — and a frozen ring reads as a dead border rather than
+		// as a considerate one. The ring is a slow shimmer inside a 2px band, not
+		// travel across the screen; the card's spin, tilt and float are what
+		// `reduceMotion` still suppresses.
+		<CardRingFrame metalTheme={metalTheme} ringed={ringed}>
 			{/* `isolate` scopes the foil overlay's `mix-blend-soft-light` to the
 			    card, so it can never blend against whatever the card happens to be
 			    sitting on. `preserve-3d` lives on the flip wrapper above, never
 			    here: Chromium forces it back to `flat` on any element that also
 			    clips, and the clip is what keeps the content inside the rounded
-			    corners while the card is turning. */}
-			<div className="relative isolate flex h-full w-full flex-col overflow-hidden rounded-[1.75rem] text-card-foreground">
+			    corners while the card is turning. The radius is the card's own less
+			    the gutter, so the face stays concentric with the ring around it. */}
+			<div
+				className="relative isolate flex h-full w-full flex-col overflow-hidden text-card-foreground"
+				style={{ borderRadius: `${FACE_RADIUS_PX}px` }}
+			>
 				{/* The card face — fill and edge both — as its own layer rather than a
 				    `border bg-card` on the element above. MetalFx normalizes its DIRECT
 				    child's outer chrome with
@@ -307,9 +458,19 @@ function PassFace({
 				    border a white card on a white page has no edge at all. The radius
 				    is repeated here because a square border would have its corners
 				    lopped off by the parent's clip. */}
+				{/* No border when the card is unringed. The border existed because in
+				    light mode the metal ring is near-invisible along the straight
+				    edges and a white card on a white page would have had no edge at
+				    all — but an unringed card is deliberately plain, and a hairline
+				    there just reads as a weaker version of the chrome it is meant to
+				    be waiting for. */}
 				<div
 					aria-hidden="true"
-					className="pointer-events-none absolute inset-0 rounded-[1.75rem] border bg-card"
+					className={cn(
+						"pointer-events-none absolute inset-0 bg-card",
+						ringed && "border"
+					)}
+					style={{ borderRadius: `${FACE_RADIUS_PX}px` }}
 				/>
 				{/* The generative backdrop, drawn from the member's own seed so the
 			    face IS them — two people never get the same card. Which texture
@@ -328,22 +489,24 @@ function PassFace({
 				<div
 					aria-hidden="true"
 					className={cn(
-						"pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden [clip-path:inset(0_round_1.75rem)]",
+						"pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden",
 						isWarp ? "opacity-(--pass-warp-opacity)" : "opacity-[0.14]",
 						mirrored && "-scale-x-100"
 					)}
-					style={
-						isWarp
+					style={{
+						clipPath: `inset(0 round ${FACE_RADIUS_PX}px)`,
+						...(isWarp
 							? ({
 									"--pass-warp-opacity": isDark
 										? WARP_OPACITY_DARK
 										: WARP_OPACITY_LIGHT,
 								} as React.CSSProperties)
-							: undefined
-					}
+							: {}),
+					}}
 				>
 					{isWarp ? (
 						<WarpBackdrop
+							colors={warpColors}
 							isDark={isDark}
 							reduceMotion={reduceMotion}
 							seed={seed}
@@ -368,7 +531,7 @@ function PassFace({
 				/>
 				{children}
 			</div>
-		</MetalEdge>
+		</CardRingFrame>
 	);
 }
 
@@ -393,12 +556,50 @@ export interface PassCardShellProps {
 	 * always draws the same pattern, so the backdrop identifies its owner.
 	 */
 	ditherSeed: string;
+	/** {@link PassEdge}. Defaults to the static brushed ramp. */
+	edge?: PassEdge;
 	/**
 	 * Which tuning of the metal ring to paint. `"auto"` follows
 	 * `prefers-color-scheme`, which is wrong wherever the app has a manual theme
 	 * toggle that can disagree with the OS — callers pass their resolved theme.
 	 */
 	metalTheme?: "auto" | "dark" | "light";
+	/**
+	 * Paint the metal ring around the card. Defaults to on.
+	 *
+	 * The waitlist pass turns it off until a handle is claimed: the chrome edge
+	 * is the card's reward for finishing the one thing the screen asks of you,
+	 * and an unclaimed pass that already looks finished takes that away.
+	 */
+	ringed?: boolean;
+	/**
+	 * Kill the card's SELF-motion: the idle revolution, the float, and the
+	 * drag-to-turn that writes into the same angle. Hover is untouched — the
+	 * tilt, the lift, the shadow and the glare all still answer the pointer, so
+	 * the card is still a card you can handle, it just does nothing on its own.
+	 *
+	 * For grids. One pass on a settings page turning forever reads as an object;
+	 * a screen of twenty doing it reads as a fault, and a drag that nudges the
+	 * yaw a few degrees is permanent once there is no idle turn to carry the card
+	 * back round — a list would quietly skew itself card by card as you clicked
+	 * through it.
+	 */
+	still?: boolean;
+	/**
+	 * Override the warp backdrop's colour stops. Ignored unless
+	 * `backdrop === "warp"`; up to ten stops, which is the shader's own ceiling.
+	 *
+	 * The seeded default answers "whose card is this"; an override answers "what
+	 * KIND of card is this" — the tier pass feeds it the plan badge's own
+	 * gradient stops so the field is the badge, in motion. Deliberately an
+	 * additive prop rather than a third `PassBackdrop` member: a `"tier"` variant
+	 * would leave `ditherSeed` semantically dangling while still being required,
+	 * and would fork three ternaries inside `PassFace`. It is also why the warp
+	 * stays the shader and does not become a CSS gradient — `pass-studio` drives
+	 * a paper-shaders mount by hand to close the loop seam on an export, and
+	 * silently exports without a clock if it does not find one.
+	 */
+	warpColors?: readonly string[];
 }
 
 /** The Ryu mark, the default back face. */
@@ -414,11 +615,32 @@ export function PassCardShell({
 	back,
 	backdrop = "dither",
 	children,
+	edge = "brushed",
+	ringed = true,
 	className,
 	ditherSeed,
 	metalTheme = "auto",
+	still = false,
+	warpColors,
 }: PassCardShellProps) {
 	const reduceMotion = useReducedMotion();
+	// The card is held STILL for its first moment on screen, and that is a
+	// correctness requirement, not a polish detail.
+	//
+	// `metal-fx` asks an IntersectionObserver once whether an instance may paint
+	// and only revises that answer when the intersection state changes. An
+	// instance created while its host is already moving can be told "not visible"
+	// on that single callback and never asked again — its ring stays blank for
+	// the life of the page, which is exactly what the waitlist screen showed
+	// while /pass, mounting a beat differently, happened to come up visible.
+	// Starting from rest means every ring is created in the state the library
+	// defaults to, and the sway that follows never turns a face far enough to be
+	// culled.
+	const [settled, setSettled] = useState(false);
+	useEffect(() => {
+		const timer = setTimeout(() => setSettled(true), SETTLE_MS);
+		return () => clearTimeout(timer);
+	}, []);
 	const cardRef = useRef<HTMLDivElement>(null);
 	const [hovered, setHovered] = useState(false);
 	const [dragging, setDragging] = useState(false);
@@ -453,8 +675,19 @@ export function PassCardShell({
 	const spin = useMotionValue(0);
 	/** Pitch contributed by dragging up/down; eases back to level on release. */
 	const dragPitch = useMotionValue(0);
+	// One slow, unbroken revolution, so the back of the pass comes into view once
+	// a cycle. Linear — a constant-rate turn is the only easing that does not
+	// visibly stutter at the seam where the loop repeats.
+	//
+	// This briefly became a bounded sway while the blank-ring bug was open, on
+	// the theory that a face turning past 90° is backface-culled and loses its
+	// metal-fx instance for good. The real cause was the MOUNT race that
+	// `settled` now closes: an instance created while the card was already moving
+	// could be told "not visible" once and never asked again. With the card
+	// starting from rest the instances come up visible, and a cull mid-cycle is
+	// recoverable — the observer fires again when the face swings back.
 	useAnimationFrame((_, delta) => {
-		if (hovered || dragging || reduceMotion) {
+		if (hovered || dragging || reduceMotion || still || !settled) {
 			return;
 		}
 		const degreesPerMs = FULL_TURN_DEGREES / (FLIP_CYCLE_SECONDS * 1000);
@@ -463,6 +696,14 @@ export function PassCardShell({
 
 	const handlePointerDown = useCallback(
 		(event: React.PointerEvent<HTMLDivElement>) => {
+			// A still card is not draggable at all. Capturing the pointer here would
+			// also swallow the click a grid card is wrapped in, and any yaw a drag
+			// left behind would be permanent — there is no idle turn to carry it
+			// back round. `dragging` therefore never becomes true, which is what
+			// keeps the move and release handlers inert too.
+			if (still) {
+				return;
+			}
 			// Capture so a drag that leaves the card keeps steering it, and so the
 			// release still arrives here. Touch and mouse both come through pointer
 			// events, so this is the whole mobile story.
@@ -472,7 +713,7 @@ export function PassCardShell({
 			tiltX.set(0);
 			tiltY.set(0);
 		},
-		[tiltX, tiltY]
+		[still, tiltX, tiltY]
 	);
 
 	const endDrag = useCallback(
@@ -548,10 +789,14 @@ export function PassCardShell({
 		<motion.div
 			animate={{
 				scale: hovered && !reduceMotion ? HOVER_SCALE : 1,
-				y: reduceMotion ? 0 : [0, -FLOAT_TRAVEL_PX, 0],
+				y: reduceMotion || still || !settled ? 0 : [0, -FLOAT_TRAVEL_PX, 0],
 			}}
 			className={cn(
-				"w-full cursor-grab select-none [transform-style:preserve-3d] active:cursor-grabbing",
+				"w-full select-none [transform-style:preserve-3d]",
+				// The grab cursors are a promise the card can only keep while it turns;
+				// a still card advertises nothing and lets its caller say what a click
+				// does.
+				!still && "cursor-grab active:cursor-grabbing",
 				className
 			)}
 			// Native text/image dragging would otherwise hijack the gesture: the
@@ -568,8 +813,13 @@ export function PassCardShell({
 			ref={cardRef}
 			// `touchAction: none` is what makes the drag work on a phone: without it
 			// the browser claims a vertical swipe for page scrolling before the
-			// pointermove handler ever sees it.
-			style={{ perspective: `${PERSPECTIVE_PX}px`, touchAction: "none" }}
+			// pointermove handler ever sees it. A still card has no drag to protect,
+			// and claiming the gesture there would stop a grid from scrolling under
+			// the finger.
+			style={{
+				perspective: `${PERSPECTIVE_PX}px`,
+				touchAction: still ? "auto" : "none",
+			}}
 			transition={{
 				scale: settleTransition,
 				y: {
@@ -606,7 +856,7 @@ export function PassCardShell({
 				>
 					{/* The thickness, drawn before the faces so a face always wins
 					    where they meet. */}
-					<CardExtrusion />
+					<CardExtrusion edge={edge} ringed={ringed} />
 
 					{/* Front. It is the only face in normal flow, so it sets the height
 				    the absolutely-positioned back is measured against, and the only one
@@ -620,7 +870,9 @@ export function PassCardShell({
 							backdrop={backdrop}
 							metalTheme={metalTheme}
 							reduceMotion={Boolean(reduceMotion)}
+							ringed={ringed}
 							seed={ditherSeed}
+							warpColors={warpColors}
 						>
 							{children}
 							{/* Specular glare, tracked to the pointer. Fades out on leave rather
@@ -650,7 +902,9 @@ export function PassCardShell({
 							metalTheme={metalTheme}
 							mirrored
 							reduceMotion={Boolean(reduceMotion)}
+							ringed={ringed}
 							seed={ditherSeed}
+							warpColors={warpColors}
 						>
 							{back ?? <PassGhost />}
 						</PassFace>

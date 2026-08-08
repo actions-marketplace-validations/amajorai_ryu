@@ -17,7 +17,7 @@
 
 import { Rocket01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Dialog,
 	DialogContent,
@@ -25,12 +25,12 @@ import {
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
-} from "@ryu/ui/components/dialog";
-import { Input } from "@ryu/ui/components/input";
-import { Label } from "@ryu/ui/components/label";
-import { Spinner } from "@ryu/ui/components/spinner";
-import { Textarea } from "@ryu/ui/components/textarea";
-import { useCallback, useMemo, useState } from "react";
+} from "@ryu/ui/components/dialog.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Label } from "@ryu/ui/components/label.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { Textarea } from "@ryu/ui/components/textarea.tsx";
+import { type ReactNode, useCallback, useMemo, useState } from "react";
 import {
 	hasMarketplaceAuth,
 	MarketplaceError,
@@ -50,6 +50,10 @@ function linesOf(value: string): string[] {
 }
 
 export interface PublishDialogProps {
+	/** Why this Runnable cannot be published at all (missing instructions, …).
+	 *  Set ⇒ submit is disabled and the reason renders in place of the error.
+	 *  Owned by the caller because only it knows the Runnable's own rules. */
+	blockedReason?: string | null;
 	/** Package the collected listing into the wire body. Owned by the caller so
 	 *  the dialog stays kind-agnostic. */
 	buildBody: (listing: PublishListing) => PublishRequest;
@@ -57,6 +61,10 @@ export interface PublishDialogProps {
 	defaultDescription?: string;
 	/** Default display name (from the Runnable). */
 	defaultDisplayName: string;
+	/** The "here is exactly what leaves your machine" panel, rendered above the
+	 *  form. Built by the caller from the payload it is about to send — this
+	 *  dialog cannot know what a given kind shares. */
+	disclosure?: ReactNode;
 	/** Human label for the thing being published, e.g. "agent". Used in copy. */
 	kindLabel: string;
 	onOpenChange: (open: boolean) => void;
@@ -68,6 +76,8 @@ export function PublishDialog({
 	defaultDisplayName,
 	defaultDescription = "",
 	buildBody,
+	blockedReason = null,
+	disclosure,
 	open,
 	onOpenChange,
 }: PublishDialogProps) {
@@ -106,6 +116,10 @@ export function PublishDialog({
 			setError("Sign in to publish to the marketplace.");
 			return;
 		}
+		if (blockedReason) {
+			setError(blockedReason);
+			return;
+		}
 		if (!displayName.trim()) {
 			setError("A display name is required.");
 			return;
@@ -141,6 +155,7 @@ export function PublishDialog({
 		}
 	}, [
 		signedIn,
+		blockedReason,
 		displayName,
 		effectiveSlug,
 		tagline,
@@ -206,6 +221,8 @@ export function PublishDialog({
 								Sign in to your Ryu account to publish to the marketplace.
 							</p>
 						)}
+
+						{disclosure}
 
 						<div className="flex flex-col gap-1.5">
 							<Label htmlFor="publish-name">Display name</Label>
@@ -312,7 +329,7 @@ export function PublishDialog({
 								Cancel
 							</Button>
 							<Button
-								disabled={submitting || !signedIn}
+								disabled={submitting || !signedIn || Boolean(blockedReason)}
 								onClick={() => handleSubmit()}
 							>
 								{submitting ? (

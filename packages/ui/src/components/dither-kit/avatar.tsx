@@ -52,18 +52,27 @@ export type DitherAvatarSeedUser = {
   id?: string | null
   email?: string | null
   name?: string | null
+  /** Reserved handle, without the leading "@". The first choice of seed. */
+  username?: string | null
 }
 
 /**
  * Canonical dither seed for a human. Every surface that renders a person's
- * dither avatar must derive the seed from THIS precedence — stable user id,
- * then email, then display name — so one human gets one avatar everywhere.
- * Ids are what the rest of the app keys on; emails and display names both
- * collide, so a seed that falls back past the id will not match that human's
- * avatar elsewhere.
+ * dither avatar must derive the seed from THIS precedence — handle, then
+ * display name, then email, then id — so one human gets one avatar everywhere.
+ *
+ * PUBLIC identity first, deliberately. The precedence used to lead with the
+ * stable user id, which is the better key in the abstract: ids never collide
+ * and never change. But the id is also invisible. Nothing else on screen is
+ * derived from it, so the avatar's colour agreed with nothing — most visibly on
+ * the membership pass, whose backdrop is seeded off the handle the member
+ * chose, leaving a glyph in one hue sitting on a card in another. Seeding off
+ * what a person is actually CALLED is what makes the whole surface read as one
+ * object. The cost is real and accepted: renaming yourself repaints your
+ * avatar, and two members with no handle and the same display name share one.
  */
 export function ditherAvatarSeed(user: DitherAvatarSeedUser): string {
-  return user.id ?? user.email ?? user.name ?? "ryu"
+  return user.username ?? user.name ?? user.email ?? user.id ?? "ryu"
 }
 
 type AvatarModel = {

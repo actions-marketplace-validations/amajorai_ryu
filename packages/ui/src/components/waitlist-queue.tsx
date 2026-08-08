@@ -6,20 +6,15 @@ import {
 	Ticket01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { BorderBeam } from "border-beam";
 import { DoorClosed, DoorOpen } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { cn } from "../lib/utils.ts";
-import {
-	Accordion,
-	AccordionContent,
-	AccordionItem,
-	AccordionTrigger,
-} from "./accordion.tsx";
-import { Button, buttonVariants } from "./button.tsx";
-import { FieldSeparator } from "./field.tsx";
+import { Button } from "./button.tsx";
 import { METAL_EDGE_TILE_RING_PX, MetalEdge } from "./metal-edge.tsx";
 import PageHeader from "./page-header.tsx";
 import { Spinner } from "./spinner.tsx";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.tsx";
 import { QUEUE_STATS_MIN, WaitlistPass } from "./waitlist-pass.tsx";
 import { WaitlistUsernameField } from "./waitlist-username-field.tsx";
 
@@ -42,6 +37,9 @@ const COOLDOWN_TICK_MS = 500;
  */
 const TILE_RADIUS_PX = 12;
 const REFERRAL_RADIUS_PX = 24;
+/** The filled surface inside each ring, rounded to stay concentric with it. */
+const TILE_FACE_RADIUS_PX = TILE_RADIUS_PX - METAL_EDGE_TILE_RING_PX;
+const REFERRAL_FACE_RADIUS_PX = REFERRAL_RADIUS_PX - METAL_EDGE_TILE_RING_PX;
 
 function readCooldownUntil(): number {
 	try {
@@ -168,6 +166,13 @@ export function WaitlistQueue({
 	userNav,
 }: WaitlistQueueProps) {
 	const [refreshing, setRefreshing] = useState(false);
+	/**
+	 * The step the member steered to, if any. Null means "follow my progress" —
+	 * see `activeStep`. Held as a plain id rather than an index so a strip that
+	 * drops its share step (no referral link yet) cannot shift the selection onto
+	 * a different panel behind the member's back.
+	 */
+	const [chosenStep, setChosenStep] = useState<string | null>(null);
 	const [cooldownUntil, setCooldownUntil] = useState<number>(readCooldownUntil);
 	const [now, setNow] = useState(() => Date.now());
 	const cooldownLeftMs = Math.max(0, cooldownUntil - now);
@@ -219,6 +224,252 @@ export function WaitlistQueue({
 		typeof totalWaiting === "number" &&
 		totalWaiting > QUEUE_STATS_MIN;
 
+	// Where the strip opens when the member has not steered it themselves: the
+	// one thing left to do. Unclaimed handle first, and once it is claimed the
+	// link that actually moves them up the queue. A suggestion, not a rail — the
+	// moment they press a step, `chosenStep` wins for the rest of the visit.
+	const activeStep =
+		chosenStep ?? (reserved && referralUrl ? "share" : "access");
+	const steps: { content: ReactNode; id: string; label: string }[] = [
+		{
+			// The overview, and the strip's default. It carries the greeting, the
+			// optional application, and the two queue numbers — everything that is
+			// context rather than an action you take on your own account.
+			content: (
+				<div className="flex flex-col gap-4">
+					<PageHeader subtitle={subtitle} title={headerTitle} />
+
+					{/* Kept on screen once applied rather than removed. A CTA that simply
+					    disappears leaves the user wondering whether the submit went
+					    through; a disabled button that states the outcome answers it. */}
+					{onApply && loaded ? (
+						<Button
+							className="w-full"
+							disabled={hasApplied}
+							onClick={onApply}
+							size="lg"
+							type="button"
+						>
+							{hasApplied ? (
+								<>
+									<HugeiconsIcon icon={CheckmarkBadge02Icon} size={18} />
+									You have requested early access
+								</>
+							) : (
+								"Apply for early access"
+							)}
+						</Button>
+					) : null}
+
+					{error ? (
+						<p className="text-muted-foreground text-sm">
+							Couldn&apos;t load your position right now. You&apos;re still on
+							the list. Refresh in a bit.
+						</p>
+					) : null}
+
+					{/* Refresh and sign out live here rather than behind a step of their
+					    own. Neither changes your place in the queue, so a step promised
+					    an action and delivered housekeeping; under the overview they read
+					    as what they are. */}
+					<div className="flex flex-col gap-2 sm:flex-row">
+						{onRefresh ? (
+							<Button
+								className="flex-1"
+								disabled={refreshing || cooldownLeftMs > 0}
+								onClick={refresh}
+								size="lg"
+								type="button"
+								variant="secondary"
+							>
+								{refreshing ? (
+									<span className="flex items-center gap-2">
+										<Spinner className="size-4" />
+										Refreshing…
+									</span>
+								) : (
+									`Refresh status${cooldownLeftMs > 0 ? ` ${cooldownSeconds}s` : ""}`
+								)}
+							</Button>
+						) : null}
+						{/* The door swings open on hover — the same gesture the account menu's
+					    sign-out used to carry, moved here now that this is the only
+					    sign-out on the screen. */}
+						<Button
+							className="group flex-1"
+							disabled={signingOut}
+							onClick={onSignOut}
+							size="lg"
+							type="button"
+							variant="destructive"
+						>
+							<DoorClosed className="size-4 transition-all duration-200 group-hover:hidden" />
+							<DoorOpen className="hidden size-4 transition-all duration-200 group-hover:block" />
+							{signingOut ? "Signing out…" : "Sign out"}
+						</Button>
+					</div>
+
+					{/* The numbers the pass doesn't carry: how many are behind you and
+					    roughly how long it takes. Held back until the queue is big
+					    enough for them to read as momentum — a two-digit "in line"
+					    undersells the product to the very people who joined earliest. */}
+					{showStats ? (
+						// The same metal edge the pass wears, so the numbers beside it
+						// read as part of the same object rather than as plain panels
+						// parked next to a fancy card. The fill sits inside the ring's
+						// own gutter (see `MetalEdge`), so its radius is the outer one
+						// less the ring — otherwise the band thins at the corners.
+						<div className="grid grid-cols-2 gap-3">
+							<MetalEdge
+								borderRadius={TILE_RADIUS_PX}
+								// `h-full` on both the ring box and the face: the grid row
+								// stretches the ring to the taller sibling, and a face that
+								// only wrapped its own text left the ring's canvas showing
+								// through underneath as a slab of bare chrome.
+								className="h-full"
+								ringPx={METAL_EDGE_TILE_RING_PX}
+								small
+								theme={metalTheme}
+							>
+								<div
+									className="h-full bg-muted px-4 py-3"
+									style={{ borderRadius: `${TILE_FACE_RADIUS_PX}px` }}
+								>
+									<p className="text-muted-foreground text-xs">In line</p>
+									<p className="font-medium text-lg tabular-nums">
+										{totalWaiting?.toLocaleString()}
+									</p>
+								</div>
+							</MetalEdge>
+							<MetalEdge
+								borderRadius={TILE_RADIUS_PX}
+								className="h-full"
+								ringPx={METAL_EDGE_TILE_RING_PX}
+								small
+								theme={metalTheme}
+							>
+								<div
+									className="h-full bg-muted px-4 py-3"
+									style={{ borderRadius: `${TILE_FACE_RADIUS_PX}px` }}
+								>
+									<p className="text-muted-foreground text-xs">
+										Estimated wait
+									</p>
+									<p className="font-medium text-lg">{eta ?? "—"}</p>
+								</div>
+							</MetalEdge>
+						</div>
+					) : null}
+				</div>
+			),
+			id: "access",
+			label: "Early access",
+		},
+		{
+			// Gated on `loaded` rather than the whole strip being gated: the sign-out
+			// under "More" has to stay reachable exactly when `/me` is slow or broken.
+			content: loaded ? (
+				<div className="flex flex-col gap-4">
+					<PageHeader
+						subtitle={
+							reserved
+								? "It's yours the moment you're in. We'll let you know."
+								: "Pick the handle you want. It's held for you from the moment you claim it."
+						}
+						title={
+							reserved ? `@${reserved} is reserved` : "Reserve your handle"
+						}
+					/>
+					<WaitlistUsernameField
+						error={handleError}
+						onChange={onChangeHandle}
+						onSubmit={onReserve}
+						onUnreserve={onUnreserve}
+						pending={reserving}
+						reserved={reserved}
+						value={handle}
+					/>
+				</div>
+			) : null,
+			id: "handle",
+			label: "Reserve your handle",
+		},
+		// Nothing to share until the server has minted a link, so the step is absent
+		// rather than present-and-empty.
+		...(referralUrl
+			? [
+					{
+						content: (
+							<div className="flex flex-col gap-3">
+								<PageHeader
+									subtitle="Want in faster? Every friend who joins on your link moves you up the queue."
+									title="Share your link"
+								/>
+								{/* The link as an object you press, not a text field you are
+								    invited to edit. A read-only input asks to be selected and
+								    copied by hand; this is one big target that does the
+								    copying, with the code carrying the weight and the origin
+								    dimmed behind it. */}
+								{/* The invite row wears the BEAM rather than the metal ring: it
+								    is the one control on this screen whose whole job is to be
+								    pressed, and a beam travelling round its edge points at it in
+								    a way a static chrome band does not. `md` is the rotate
+								    family's full-border preset. */}
+								<BorderBeam
+									borderRadius={REFERRAL_RADIUS_PX}
+									size="md"
+									theme={metalTheme === "auto" ? "auto" : metalTheme}
+								>
+									<button
+										className="flex h-16 w-full items-center justify-between gap-3 bg-muted px-5 text-left transition-colors hover:bg-[color-mix(in_oklab,var(--muted),var(--foreground)_5%)] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
+										onClick={onCopyReferral}
+										style={{ borderRadius: `${REFERRAL_FACE_RADIUS_PX}px` }}
+										type="button"
+									>
+										<span className="min-w-0 truncate">
+											<span className="text-muted-foreground">
+												{link.origin}
+											</span>
+											<span className="font-medium">{link.code}</span>
+										</span>
+										<span className="shrink-0 text-muted-foreground text-sm">
+											{copied ? "Copied" : "Copy"}
+										</span>
+									</button>
+								</BorderBeam>
+								{/* The referral count rides on the button rather than sitting
+								    in a tile of its own: it is the score for the action the
+								    button performs, and it is private, so it does not belong
+								    on the pass. */}
+								<Button
+									className="w-full"
+									onClick={onShare}
+									size="lg"
+									type="button"
+								>
+									{/* Rotated 45°: upright the ticket reads as a stub, angled it
+									    reads as one being handed over. */}
+									<HugeiconsIcon
+										className="rotate-45 text-current"
+										icon={Ticket01Icon}
+										size={18}
+										strokeWidth={2}
+									/>
+									Share your pass
+									<span className="text-primary-foreground/70 tabular-nums">
+										({referralCount.toLocaleString()}{" "}
+										{referralCount === 1 ? "friend" : "friends"} referred)
+									</span>
+								</Button>
+							</div>
+						),
+						id: "share",
+						label: "Share your link",
+					},
+				]
+			: []),
+	];
+
 	return (
 		<div
 			className={cn(
@@ -258,225 +509,28 @@ export function WaitlistQueue({
 				</div>
 
 				<div className="flex w-full flex-col gap-4">
-					<PageHeader
-						subtitle={
-							reserved
-								? "It's yours the moment you're in. We'll let you know."
-								: subtitle
-						}
-						title={headerTitle}
-					/>
-
-					{/* Kept on screen once applied rather than removed. A CTA that simply
-					    disappears leaves the user wondering whether the submit went
-					    through; a disabled button that states the outcome answers it. */}
-					{onApply && loaded ? (
-						<Button
-							className="w-full"
-							disabled={hasApplied}
-							onClick={onApply}
-							size="lg"
-							type="button"
-						>
-							{hasApplied ? (
-								<>
-									<HugeiconsIcon icon={CheckmarkBadge02Icon} size={18} />
-									You have requested early access
-								</>
-							) : (
-								"Apply for early access"
-							)}
-						</Button>
-					) : null}
-
-					{error ? (
-						<p className="text-muted-foreground text-sm">
-							Couldn&apos;t load your position right now. You&apos;re still on
-							the list. Refresh in a bit.
-						</p>
-					) : null}
-
-					{loaded ? (
-						<div className="flex flex-col gap-4">
-							{/* The numbers the pass doesn't carry: how many are behind you and
-							    roughly how long it takes. Held back until the queue is big
-							    enough for them to read as momentum — a two-digit "in line"
-							    undersells the product to the very people who joined earliest. */}
-							{showStats ? (
-								// The same metal edge the pass wears, so the numbers beside it
-								// read as part of the same object rather than as plain panels
-								// parked next to a fancy card. `keepHostStyles` because the
-								// tile's `bg-muted` fill IS its style — metal-fx would strip it.
-								<div className="grid grid-cols-2 gap-3">
-									<MetalEdge
-										borderRadius={TILE_RADIUS_PX}
-										keepHostStyles
-										ringPx={METAL_EDGE_TILE_RING_PX}
-										theme={metalTheme}
-									>
-										<div className="rounded-xl bg-muted px-4 py-3">
-											<p className="text-muted-foreground text-xs">In line</p>
-											<p className="font-medium text-lg tabular-nums">
-												{totalWaiting?.toLocaleString()}
-											</p>
-										</div>
-									</MetalEdge>
-									<MetalEdge
-										borderRadius={TILE_RADIUS_PX}
-										keepHostStyles
-										ringPx={METAL_EDGE_TILE_RING_PX}
-										theme={metalTheme}
-									>
-										<div className="rounded-xl bg-muted px-4 py-3">
-											<p className="text-muted-foreground text-xs">
-												Estimated wait
-											</p>
-											<p className="font-medium text-lg">{eta ?? "—"}</p>
-										</div>
-									</MetalEdge>
-								</div>
-							) : null}
-
-							<WaitlistUsernameField
-								error={handleError}
-								onChange={onChangeHandle}
-								onSubmit={onReserve}
-								onUnreserve={onUnreserve}
-								pending={reserving}
-								reserved={reserved}
-								value={handle}
-							/>
-
-							{referralUrl ? (
-								<div className="flex flex-col gap-3">
-									<FieldSeparator className="my-6 *:data-[slot=field-separator-content]:bg-background">
-										Or
-									</FieldSeparator>
-									<p className="text-muted-foreground text-sm">
-										Want in faster? Share your link. Every friend who joins
-										moves you up.
-									</p>
-									{/* The link as an object you press, not a text field you are
-									    invited to edit. A read-only input asks to be selected and
-									    copied by hand; this is one big target that does the
-									    copying, with the code carrying the weight and the origin
-									    dimmed behind it. */}
-									<MetalEdge
-										borderRadius={REFERRAL_RADIUS_PX}
-										keepHostStyles
-										ringPx={METAL_EDGE_TILE_RING_PX}
-										theme={metalTheme}
-									>
-										<button
-											className="flex h-16 w-full items-center justify-between gap-3 rounded-3xl bg-muted px-5 text-left transition-colors hover:bg-[color-mix(in_oklab,var(--muted),var(--foreground)_5%)] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
-											onClick={onCopyReferral}
-											type="button"
-										>
-											<span className="min-w-0 truncate">
-												<span className="text-muted-foreground">
-													{link.origin}
-												</span>
-												<span className="font-medium">{link.code}</span>
-											</span>
-											<span className="shrink-0 text-muted-foreground text-sm">
-												{copied ? "Copied" : "Copy"}
-											</span>
-										</button>
-									</MetalEdge>
-									{/* The referral count rides on the button rather than sitting
-									    in a tile of its own: it is the score for the action the
-									    button performs, and it is private, so it does not belong
-									    on the pass. */}
-									<Button
-										className="w-full"
-										onClick={onShare}
-										size="lg"
-										type="button"
-									>
-										{/* Rotated 45°: upright the ticket reads as a stub, angled it
-									    reads as one being handed over. */}
-										<HugeiconsIcon
-											className="rotate-45 text-current"
-											icon={Ticket01Icon}
-											size={18}
-											strokeWidth={2}
-										/>
-										Share your pass
-										<span className="text-primary-foreground/70 tabular-nums">
-											({referralCount.toLocaleString()}{" "}
-											{referralCount === 1 ? "friend" : "friends"} referred)
-										</span>
-									</Button>
-								</div>
-							) : null}
-						</div>
-					) : null}
-
-					{/* Folded away by default. Neither of these changes your place in the
-					    queue — which is what every control above them does — and a
-					    sign-out sitting open at the foot of the page is a mis-click
-					    waiting to happen. */}
-					<Accordion className="border-0">
-						<AccordionItem
-							className="border-0 data-open:bg-transparent"
-							value="more"
-						>
-							{/* Centred, chrome-free: the default trigger is a bordered row
-							    with the chevron pushed to the far edge, which reads as a
-							    settings list. Here it is just a label you can press. */}
-							<AccordionTrigger
-								className={cn(
-									buttonVariants({ variant: "ghost" }),
-									// `aria-expanded:bg-transparent` undoes the ghost variant's own
-									// expanded state: the accordion sets aria-expanded while open, so
-									// the trigger lit up muted the whole time the panel was showing.
-									"h-auto w-full justify-center gap-2 border-0 text-muted-foreground aria-expanded:bg-transparent **:data-[slot=accordion-trigger-icon]:ml-0"
-								)}
-							>
-								More options
-							</AccordionTrigger>
-							{/* `-mx-4` cancels the panel's own padding so these sit flush with
-							    the full-width buttons above. */}
-							<AccordionContent className="-mx-4 pt-2">
-								<div className="flex flex-col gap-2 sm:flex-row">
-									{onRefresh ? (
-										<Button
-											className="flex-1"
-											disabled={refreshing || cooldownLeftMs > 0}
-											onClick={refresh}
-											size="lg"
-											type="button"
-											variant="secondary"
-										>
-											{refreshing ? (
-												<span className="flex items-center gap-2">
-													<Spinner className="size-4" />
-													Refreshing…
-												</span>
-											) : (
-												`Refresh status${cooldownLeftMs > 0 ? ` ${cooldownSeconds}s` : ""}`
-											)}
-										</Button>
-									) : null}
-									{/* The door swings open on hover — the same gesture the account
-						    menu's sign-out used to carry, moved here now that this is the
-						    only sign-out on the screen. */}
-									<Button
-										className="group flex-1"
-										disabled={signingOut}
-										onClick={onSignOut}
-										size="lg"
-										type="button"
-										variant="destructive"
-									>
-										<DoorClosed className="size-4 transition-all duration-200 group-hover:hidden" />
-										<DoorOpen className="hidden size-4 transition-all duration-200 group-hover:block" />
-										{signingOut ? "Signing out…" : "Sign out"}
-									</Button>
-								</div>
-							</AccordionContent>
-						</AccordionItem>
-					</Accordion>
+					{/* The strip sits ABOVE the header on purpose: each step carries its
+					    own `PageHeader` as the first thing in its panel, so the heading
+					    always names what you are looking at rather than describing the
+					    screen in general. Reading order is therefore steps, then the
+					    heading for the step you are on, then its controls. */}
+					<Tabs
+						onValueChange={(next) => setChosenStep(String(next))}
+						value={activeStep}
+					>
+						<TabsList className="w-full" variant="stepper">
+							{steps.map((step) => (
+								<TabsTrigger key={step.id} value={step.id}>
+									{step.label}
+								</TabsTrigger>
+							))}
+						</TabsList>
+						{steps.map((step) => (
+							<TabsContent className="mt-8" key={step.id} value={step.id}>
+								{step.content}
+							</TabsContent>
+						))}
+					</Tabs>
 				</div>
 			</div>
 		</div>

@@ -52,8 +52,15 @@ type RawToast = (opts: SileoOptions) => string;
 // sonner. Exposed as `toast` so app code stays toast-library-agnostic.
 type ToastInput = string | ToastOptions;
 
-const asOptions = (input: ToastInput): ToastOptions =>
-	typeof input === "string" ? { title: input } : input;
+// Callers overwhelmingly write sonner's two-argument form —
+// `toast.success("Saved", { description: "…" })` — so the rest object is
+// merged over the title here. Without it those calls type-error (70 of them in
+// apps/desktop alone) and, worse, the whole second argument was DROPPED at
+// runtime: every one of those descriptions silently never rendered.
+const asOptions = (input: ToastInput, rest?: ToastOptions): ToastOptions => {
+	const base: ToastOptions = typeof input === "string" ? { title: input } : input;
+	return rest ? { ...base, ...rest } : base;
+};
 
 // sileo defaults every id-less toast to the shared id "sileo-default", so two
 // toasts fired in succession collapse into one slot — the second REPLACES the
@@ -187,12 +194,18 @@ function toastPromise<T>(
 }
 
 const toast = {
-	show: (input: ToastInput) => sileo.show(asOptions(input)),
-	message: (input: ToastInput) => sileo.show(asOptions(input)),
-	success: (input: ToastInput) => sileo.success(asOptions(input)),
-	error: (input: ToastInput) => sileo.error(asOptions(input)),
-	warning: (input: ToastInput) => sileo.warning(asOptions(input)),
-	info: (input: ToastInput) => sileo.info(asOptions(input)),
+	show: (input: ToastInput, rest?: ToastOptions) =>
+		sileo.show(asOptions(input, rest)),
+	message: (input: ToastInput, rest?: ToastOptions) =>
+		sileo.show(asOptions(input, rest)),
+	success: (input: ToastInput, rest?: ToastOptions) =>
+		sileo.success(asOptions(input, rest)),
+	error: (input: ToastInput, rest?: ToastOptions) =>
+		sileo.error(asOptions(input, rest)),
+	warning: (input: ToastInput, rest?: ToastOptions) =>
+		sileo.warning(asOptions(input, rest)),
+	info: (input: ToastInput, rest?: ToastOptions) =>
+		sileo.info(asOptions(input, rest)),
 	dismiss: (id: string) => sileo.dismiss(id),
 	promise: toastPromise,
 };

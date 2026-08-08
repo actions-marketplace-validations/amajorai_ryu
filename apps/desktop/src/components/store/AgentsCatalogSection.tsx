@@ -7,12 +7,23 @@
 // from the installed set surfaced in the chat picker.
 //
 // Uses the shared Store master-detail layout (left list, right preview) like
-// Plugins, Models, MCP, and Skills. Two per-entry signals are surfaced as badges:
+// Plugins, Models, MCP, and Skills — but the list itself is a wall of employee
+// badges (`AgentBadgeCard`), not the one-line `StoreCatalogCard` row every other
+// tab renders. An agent is the one catalog entry the app already has a physical
+// card for, and it is the same card its profile page shows. Two per-entry
+// signals are surfaced as badges:
 //   - `added`    → the agent is installed (in the picker). Drives the button mode.
 //   - `detected` → the agent's CLI binary is on PATH (null when not detectable),
 //     a hint that the agent is ready to run locally without a separate install.
 // Recommended agents (the flagship) sort first and carry a "Recommended" badge.
 // The flagship `ryu` is locked: it is always installed and cannot be removed.
+//
+// Below the runtimes sits the COMMUNITY shelf (`CommunityAgents.tsx`): agents
+// other users published, browsed from the control plane rather than Core. They
+// are a different species — a configuration someone wrote, not a vendor program —
+// so they never mix into the runtime groups, and installing one goes through
+// Core's published-agent install (which strips the privilege-bearing bindings and
+// reports them back) rather than the runtime installer used above.
 //
 // The list is GROUPED (Workflows/Engines shape): Installed → On this machine →
 // Popular → More agents → Needs manual install. The groups are a presentation of
@@ -30,8 +41,7 @@ import {
 	Robot01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
-import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
+import { InstallProgressButton } from "@ryu/blocks/desktop/install-button.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
@@ -46,25 +56,37 @@ import {
 	ListingSection,
 	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Empty,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyMedia,
 	EmptyTitle,
-} from "@ryu/ui/components/empty";
-import { Spinner } from "@ryu/ui/components/spinner";
+} from "@ryu/ui/components/empty.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { useMemo, useState } from "react";
+import { AgentBadgeCard } from "@/src/components/agents/AgentBadgeCard.tsx";
+import { useMarketplacePurchase } from "@/src/components/marketplace/useMarketplacePurchase.ts";
+import {
+	CommunityAgentDetail,
+	CommunityAgentsShelf,
+} from "@/src/components/store/CommunityAgents.tsx";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useAgentsCatalog } from "@/src/hooks/useAgentsCatalog.ts";
+import { useCommunityAgents } from "@/src/hooks/useCommunityAgents.ts";
 import {
 	type PluginSettingsOpener,
 	usePluginSettingsOpener,
 } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { groupAgents } from "@/src/lib/agent-catalog-groups.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
-import type { AgentCatalogEntry } from "@/src/lib/api/agents.ts";
+import type {
+	AgentCatalogEntry,
+	PublishedAgentInstallResult,
+} from "@/src/lib/api/agents.ts";
+import type { MarketplaceCard } from "@/src/lib/api/marketplace.ts";
 import { useInstallProgress } from "@/src/store/useDownloadsStore.ts";
 
 const SEARCH_DEBOUNCE_MS = 200;
@@ -202,7 +224,7 @@ function AgentCards({
 	return (
 		<StoreCardGrid>
 			{agents.map((entry) => (
-				<StoreCatalogCard
+				<AgentBadgeCard
 					action={
 						<AgentCardAction
 							busy={pendingId === entry.id}
@@ -210,13 +232,6 @@ function AgentCards({
 							onInstall={() => onInstall(entry.id)}
 							onOpenSettings={settingsOpener(entry.id)}
 							onUninstall={() => onUninstall(entry.id)}
-						/>
-					}
-					brandIcon={
-						<AgentCatalogLogo
-							className="size-5 opacity-90"
-							entry={entry}
-							size="20px"
 						/>
 					}
 					contextMenu={
@@ -228,11 +243,21 @@ function AgentCards({
 							/>
 						) : undefined
 					}
-					description={entry.description}
-					icon={<HugeiconsIcon icon={Robot01Icon} />}
+					employeeId={entry.id}
+					// The badge face carries the Ryu mark, so the agent's own logo goes
+					// in the footer rather than being dropped: Claude, Codex and Cursor
+					// are recognised by their marks long before their names are read.
+					footer={
+						<AgentCatalogLogo
+							className="size-5 opacity-90"
+							entry={entry}
+							size="20px"
+						/>
+					}
 					key={entry.id}
 					name={entry.name}
-					onClick={() => onSelect(entry.id)}
+					onOpen={() => onSelect(entry.id)}
+					role={entry.description}
 					selected={entry.id === selectedId}
 				/>
 			))}
@@ -471,6 +496,20 @@ export default function AgentsCatalogSection({
 		useAgentsCatalog();
 	const [errorId, setErrorId] = useState<string | null>(null);
 
+	// ── Community agents (published definitions, control plane) ────────────────
+	// A second, independent catalog: it has its own loading/error state and its own
+	// selection, because a marketplace outage must not touch the runtime list above.
+	const community = useCommunityAgents();
+	const { buy, buying, isLicensed } = useMarketplacePurchase();
+	const [selectedCommunity, setSelectedCommunity] =
+		useState<MarketplaceCard | null>(null);
+	// What Core stripped, per listing installed in this session. Keyed by listing
+	// id (not a single slot) so switching between two installed agents shows each
+	// one's own disclosure rather than the last install's.
+	const [installedRequires, setInstalledRequires] = useState<
+		Record<string, PublishedAgentInstallResult>
+	>({});
+
 	const sorted = useMemo(() => sortAgents(agents), [agents]);
 
 	const filtered = useMemo(() => {
@@ -484,6 +523,19 @@ export default function AgentsCatalogSection({
 				(entry.description?.toLowerCase().includes(q) ?? false)
 		);
 	}, [sorted, debouncedQuery]);
+
+	const filteredCommunity = useMemo(() => {
+		const q = debouncedQuery.trim().toLowerCase();
+		if (!q) {
+			return community.agents;
+		}
+		return community.agents.filter(
+			(card) =>
+				card.name.toLowerCase().includes(q) ||
+				(card.description?.toLowerCase().includes(q) ?? false) ||
+				(card.author?.toLowerCase().includes(q) ?? false)
+		);
+	}, [community.agents, debouncedQuery]);
 
 	const selectedEntry = useMemo(
 		() => filtered.find((entry) => entry.id === selectedId) ?? null,
@@ -499,42 +551,103 @@ export default function AgentsCatalogSection({
 		}
 	};
 
+	// Install a published definition. On success the listing is SELECTED even when
+	// the install came from a card, because the disclosure of what Core stripped is
+	// the part the user still has to act on — a toast alone would drop it.
+	const installCommunity = async (card: MarketplaceCard) => {
+		try {
+			const result = await community.install(card.id);
+			setInstalledRequires((prev) => ({ ...prev, [card.id]: result }));
+			setSelectedId(null);
+			setSelectedCommunity(card);
+			toast.success(`${result.agent.name} is now one of your agents`, {
+				description:
+					"Open it to grant anything it asked for — nothing was enabled for you.",
+			});
+		} catch (e) {
+			toast.error("Couldn't install this agent", {
+				description: e instanceof Error ? e.message : String(e),
+			});
+		}
+	};
+
+	const communityInstall = selectedCommunity
+		? (installedRequires[selectedCommunity.id] ?? null)
+		: null;
+
 	return (
 		<StoreCatalogLayout
 			detail={
-				<AgentDetailPanel
-					busy={pendingId === selectedId}
-					entry={selectedEntry}
-					error={errorId === selectedId ? error : null}
-					onInstall={() => {
-						if (selectedId) {
-							run(selectedId, () => install(selectedId));
+				selectedCommunity ? (
+					<CommunityAgentDetail
+						busy={
+							community.pendingId === selectedCommunity.id ||
+							buying === selectedCommunity.id
 						}
-					}}
-					onUninstall={() => {
-						if (selectedId) {
-							run(selectedId, () => uninstall(selectedId));
-						}
-					}}
-				/>
+						card={selectedCommunity}
+						isLicensed={(id) => isLicensed("agent", id)}
+						onBuy={() => buy({ id: selectedCommunity.id, kind: "agent" })}
+						onInstall={() => installCommunity(selectedCommunity)}
+						requestedSpaceCount={communityInstall?.requestedSpaceCount ?? 0}
+						requires={communityInstall?.requires ?? null}
+					/>
+				) : (
+					<AgentDetailPanel
+						busy={pendingId === selectedId}
+						entry={selectedEntry}
+						error={errorId === selectedId ? error : null}
+						onInstall={() => {
+							if (selectedId) {
+								run(selectedId, () => install(selectedId));
+							}
+						}}
+						onUninstall={() => {
+							if (selectedId) {
+								run(selectedId, () => uninstall(selectedId));
+							}
+						}}
+					/>
+				)
 			}
-			detailTitle={selectedEntry?.name ?? "Agent"}
-			hasSelection={selectedEntry != null}
+			detailTitle={selectedCommunity?.name ?? selectedEntry?.name ?? "Agent"}
+			hasSelection={selectedCommunity != null || selectedEntry != null}
 			list={
-				<AgentList
-					agents={filtered}
-					error={error}
-					grouped={debouncedQuery.trim().length === 0}
-					loading={loading}
-					onInstall={(id) => run(id, () => install(id))}
-					onSelect={setSelectedId}
-					onUninstall={(id) => run(id, () => uninstall(id))}
-					pendingId={pendingId}
-					selectedId={selectedId}
-					settingsOpener={settingsOpener}
-				/>
+				<>
+					<AgentList
+						agents={filtered}
+						error={error}
+						grouped={debouncedQuery.trim().length === 0}
+						loading={loading}
+						onInstall={(id) => run(id, () => install(id))}
+						onSelect={(id) => {
+							setSelectedCommunity(null);
+							setSelectedId(id);
+						}}
+						onUninstall={(id) => run(id, () => uninstall(id))}
+						pendingId={pendingId}
+						selectedId={selectedId}
+						settingsOpener={settingsOpener}
+					/>
+					<CommunityAgentsShelf
+						agents={filteredCommunity}
+						busyId={community.pendingId ?? buying}
+						error={community.error}
+						isLicensed={(id) => isLicensed("agent", id)}
+						loading={community.loading}
+						onBuy={(card) => buy({ id: card.id, kind: "agent" })}
+						onInstall={(card) => installCommunity(card)}
+						onSelect={(card) => {
+							setSelectedId(null);
+							setSelectedCommunity(card);
+						}}
+						selectedId={selectedCommunity?.id ?? null}
+					/>
+				</>
 			}
-			onCloseDetail={() => setSelectedId(null)}
+			onCloseDetail={() => {
+				setSelectedId(null);
+				setSelectedCommunity(null);
+			}}
 			search={{
 				value: query,
 				onChange: setQuery,

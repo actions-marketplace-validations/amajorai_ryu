@@ -191,8 +191,12 @@ export function LibraryFilterChip({
 	);
 }
 
-/** Favorite star toggle. Amber + filled when active, muted outline otherwise. */
-function FavoriteStar({
+/** Favorite star toggle. Amber + filled when active, muted outline otherwise.
+ *
+ *  Exported because the Library's bespoke grids (the Spaces shelf, the Agents
+ *  badge wall) drop `LibraryCard` for a presentation of their own but must still
+ *  offer the same star — a per-surface copy would be the third one. */
+export function FavoriteStar({
 	favorited,
 	onToggle,
 	className,

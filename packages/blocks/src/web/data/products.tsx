@@ -237,7 +237,7 @@ export const products: Product[] = [
 				description:
 					"Core is a single binary that downloads, verifies, and supervises engines and tools for you. No containers to babysit, no keys to leak, nothing leaves your device unless you say so.",
 				bullets: [
-					"Installs and health-checks ~16 sidecars with one robust pipeline",
+					"Installs and health-checks ~16 sidecars with one pipeline",
 					"Works fully offline with bundled Gemma 4",
 					"Every model call still routes through the Gateway",
 				],
@@ -1165,7 +1165,7 @@ export const products: Product[] = [
 			eyebrow: "Powered by Composio",
 			title: "Real actions, not just answers.",
 			subtitle:
-				"The paradigm is shifting from apps for humans to tools for agents. Connections give your agents authenticated access to act in the real world.",
+				"Tools are being built for agents, not just for people. Connections give your agents authenticated access to act in the real world.",
 			items: [
 				{
 					title: "Composio catalog",

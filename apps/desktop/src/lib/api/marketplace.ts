@@ -26,8 +26,12 @@
 
 import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
 
-/** The four catalog kinds, matching the server's `MarketplaceKind`. */
-export type MarketplaceKind = "plugin" | "skill" | "model" | "mcp";
+/** The catalog kinds, matching the server's `MarketplaceKind`.
+ *
+ * `agent` is a user-PUBLISHED agent definition (instructions + model preference
+ * + declared dependencies), not an ACP runtime like Claude Code — those live in
+ * Core's own agent catalog and never reach this client. */
+export type MarketplaceKind = "plugin" | "skill" | "model" | "mcp" | "agent";
 
 /** Pricing model for a paid item. Free items carry no pricing at all. */
 export type PricingModel = "one_time" | "subscription";

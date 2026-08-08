@@ -86,8 +86,8 @@ export default function EmotionalStory() {
 				<div className="mb-10 max-w-2xl">
 					<SectionTitle title="Agents are easy to demo. Running them for real is the hard part." />
 					<p className="mt-4 max-w-xl text-muted-foreground leading-relaxed">
-						Adoption is not the problem. The missing layer is what makes an
-						agent private, governable, and dependable enough to run every day.
+						The missing layer is what makes an agent private, governable, and
+						dependable enough to run every day.
 					</p>
 				</div>
 

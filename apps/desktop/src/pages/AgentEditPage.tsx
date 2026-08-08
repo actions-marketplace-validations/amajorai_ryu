@@ -6,14 +6,14 @@ import {
 	AgentSettingsForm,
 	type SlotOption,
 	type SnippetLang,
-} from "@ryu/blocks/desktop/agent-edit";
-import { Badge } from "@ryu/ui/components/badge";
-import { Button } from "@ryu/ui/components/button";
-import { Checkbox } from "@ryu/ui/components/checkbox";
+} from "@ryu/blocks/desktop/agent-edit.tsx";
+import { Badge } from "@ryu/ui/components/badge.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
+import { Checkbox } from "@ryu/ui/components/checkbox.tsx";
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
-import { Label } from "@ryu/ui/components/label";
-import { Spinner } from "@ryu/ui/components/spinner";
-import { Textarea } from "@ryu/ui/components/textarea";
+import { Label } from "@ryu/ui/components/label.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { Textarea } from "@ryu/ui/components/textarea.tsx";
 import { composeRules, parseRules } from "@ryuhq/protocol/agent-rules";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -34,6 +34,7 @@ import { OrchestrationPanel } from "@/src/components/agents/OrchestrationPanel.t
 import { RyuPiConfig } from "@/src/components/agents/RyuPiConfig.tsx";
 import { AdvancedInferenceSection } from "@/src/components/inference/AdvancedInferenceSection.tsx";
 import { ModelLaunchConfigSection } from "@/src/components/inference/ModelLaunchConfigSection.tsx";
+import { AgentPublishDisclosure } from "@/src/components/marketplace/AgentPublishDisclosure.tsx";
 import { PublishDialog } from "@/src/components/marketplace/PublishDialog.tsx";
 import { PromptStudio } from "@/src/components/PromptStudio.tsx";
 import {
@@ -94,6 +95,7 @@ import {
 import { friendlyModelDisplay } from "@/src/lib/catalog/friendly.ts";
 import {
 	type AgentPublishSource,
+	buildAgentDescriptor,
 	buildAgentPublishBody,
 	type PublishListing,
 } from "@/src/lib/publish/packaging.ts";
@@ -1055,50 +1057,78 @@ export default function AgentEditPage({
 	};
 
 	// ── Marketplace publish packaging ────────────────────────────────────────────
-	// Build the publish body from the CURRENT form state, dropping every
-	// non-portable / per-user binding: Identity Vault profiles and Memory space_ids
-	// are never passed to the packager, and a custom `acp-exec:` command is scrubbed
-	// inside it. The agent record itself carries no keys (BYOK/gateway keys live
-	// behind the separate gateway endpoints), so no secret can leak by construction.
+	// The SHAREABLE view of the current form state, built once and used twice: the
+	// dialog's disclosure renders it, and the publish body is packaged from it. One
+	// object, so what the user is shown and what is sent cannot diverge.
+	//
+	// Every non-portable / per-user binding is dropped on the way in: Identity Vault
+	// profiles and Memory space_ids are never passed to the packager (the publish
+	// boundary refuses them by name anyway), and a custom `acp-exec:` command is
+	// scrubbed inside it. The agent record itself carries no keys (BYOK/gateway keys
+	// live behind the separate gateway endpoints), so no secret can leak here by
+	// construction.
+	const publishSource: AgentPublishSource = useMemo(() => {
+		const resolvedTone =
+			tone === "custom" ? customTone.trim() || "neutral" : tone;
+		return {
+			systemPrompt: composeRules(systemPrompt, rules).trim() || null,
+			// The saved engine binding; the packager scrubs a custom `acp-exec:`
+			// command (a local binary path is never shipped).
+			engine:
+				chatModel === ACP_CUSTOM_ENGINE
+					? `${ACP_EXEC_PREFIX}${acpCommand.trim()}`
+					: chatModel || null,
+			tools: Array.from(selectedTools),
+			composioActions: Array.from(selectedComposio),
+			skills: Array.from(selectedSkills),
+			// Space NAMES, resolved from the ids this agent reads — the ids
+			// themselves resolve to rows only this node has, which is exactly why
+			// the publish boundary refuses them and asks for names instead.
+			expectedSpaces: Array.from(memorySpaceIds)
+				.map(
+					(spaceId) => availableSpaces.find((s) => s.id === spaceId)?.name ?? ""
+				)
+				.filter((spaceName) => spaceName.length > 0),
+			// Presentation only: the glyph and tone, never the persona display name
+			// (the listing title is the name the store moderates).
+			persona: {
+				tone: resolvedTone === "neutral" ? null : resolvedTone,
+				...glyphToPersonaFields(avatarGlyph),
+			},
+			description: description.trim() || null,
+			version: existing?.version ?? "1.0.0",
+		};
+	}, [
+		systemPrompt,
+		rules,
+		chatModel,
+		acpCommand,
+		selectedTools,
+		selectedComposio,
+		selectedSkills,
+		memorySpaceIds,
+		availableSpaces,
+		tone,
+		customTone,
+		avatarGlyph,
+		description,
+		existing?.version,
+	]);
+
+	// The descriptor that will be sent, kept live so the dialog can disclose it and
+	// refuse a publish the marketplace would reject (an agent with no instructions).
+	const publishPackage = useMemo(
+		() => buildAgentDescriptor(publishSource, name.trim()),
+		[publishSource, name]
+	);
+
 	const buildPublishBody = useCallback(
-		(listing: PublishListing): PublishRequest => {
-			const source: AgentPublishSource = {
-				systemPrompt: composeRules(systemPrompt, rules).trim() || null,
-				// The saved engine binding; the packager scrubs a custom `acp-exec:`
-				// command (a local binary path is never shipped).
-				engine:
-					chatModel === ACP_CUSTOM_ENGINE
-						? `${ACP_EXEC_PREFIX}${acpCommand.trim()}`
-						: chatModel || null,
-				tools: Array.from(selectedTools),
-				composioActions: Array.from(selectedComposio),
-				skills: Array.from(selectedSkills),
-				// Recallable memory LEVELS only — never the node-local space_ids.
-				memoryReadLevels: Array.from(memoryReadLevels),
-				orchestrator,
-				canCreateAgents,
-				description: description.trim() || null,
-				version: existing?.version ?? "1.0.0",
-			};
-			return buildAgentPublishBody(
-				source,
+		(listing: PublishListing): PublishRequest =>
+			buildAgentPublishBody(
+				publishSource,
 				listing
-			) as unknown as PublishRequest;
-		},
-		[
-			systemPrompt,
-			rules,
-			chatModel,
-			acpCommand,
-			selectedTools,
-			selectedComposio,
-			selectedSkills,
-			memoryReadLevels,
-			orchestrator,
-			canCreateAgents,
-			description,
-			existing?.version,
-		]
+			) as unknown as PublishRequest,
+		[publishSource]
 	);
 
 	// Publish is offered only for a saved, custom agent (built-ins are Ryu's; a
@@ -1320,9 +1350,16 @@ export default function AgentEditPage({
 				) : null}
 				{canPublish ? (
 					<PublishDialog
+						blockedReason={publishPackage.notes.blockedReason}
 						buildBody={buildPublishBody}
 						defaultDescription={description}
 						defaultDisplayName={personaDisplayName.trim() || name}
+						disclosure={
+							<AgentPublishDisclosure
+								descriptor={publishPackage.descriptor}
+								notes={publishPackage.notes}
+							/>
+						}
 						kindLabel="agent"
 						onOpenChange={setPublishOpen}
 						open={publishOpen}

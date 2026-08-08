@@ -3435,6 +3435,12 @@ fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
             post(uninstall_agent_handler),
         )
         .route("/api/agents/import", post(import_agent))
+        // Install a PUBLISHED agent definition (CatalogKind::Agent). Sibling of
+        // `/api/agents/catalog/install` above, which installs an ACP runtime.
+        .route(
+            "/api/agents/published/install",
+            post(published_agent_install),
+        )
         .route(
             "/api/agents/:id",
             get(get_agent).put(update_agent).delete(delete_agent),
@@ -14936,6 +14942,128 @@ async fn import_agent(
     }
 }
 
+/// The active [`CatalogKind::Agent`] source (defaults to the built-in primary).
+async fn active_published_agent_source(state: &ServerState) -> Option<crate::catalog_source::Source>
+{
+    state
+        .catalog_sources
+        .get_active(
+            crate::catalog_source::CatalogKind::Agent,
+            &state.preferences,
+        )
+        .await
+}
+
+#[derive(serde::Deserialize)]
+struct PublishedAgentInstallBody {
+    /// The published agent's catalog id, as listed by the active Agent source.
+    id: String,
+}
+
+/// `POST /api/agents/published/install { id }` — install a **published** agent
+/// definition from the `agent` catalog.
+///
+/// Distinct from `/api/agents/catalog/install`, which installs an ACP *runtime*
+/// (Claude Code, Codex). This one materialises an agent DEFINITION: the seam
+/// resolves a descriptor carrying the same portable template
+/// `GET /api/agents/:id/export` emits, and Core hands it to the existing importer
+/// ([`crate::agents::AgentTemplate::into_create_agent`]) — there is deliberately
+/// no second importer to drift from the first.
+///
+/// The template is third-party content, so it goes through
+/// [`crate::agents::AgentTemplate::sanitize_for_untrusted_install`] first: the
+/// installer's Identity Vault bindings, Composio actions, Spaces/memory scopes and
+/// Gateway policy reference are removed and returned in `requires` for the user to
+/// grant deliberately. Nothing is auto-enabled and nothing is auto-installed —
+/// declared tool/MCP dependencies are reported, never resolved here.
+#[utoipa::path(
+    post,
+    path = "/api/agents/published/install",
+    tag = "Agents",
+    summary = "Install a published agent definition from the catalog",
+    request_body = serde_json::Value,
+    responses((status = 201, description = "Created", body = serde_json::Value))
+)]
+async fn published_agent_install(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<PublishedAgentInstallBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let id = body.id.trim().to_string();
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "`id` is required" })),
+        );
+    }
+    // Forward the caller's bearer to the marketplace install handoff (#491) so a
+    // PAID listing is denied unless the buyer org holds a license.
+    let buyer_token = buyer_bearer_from_headers(&headers);
+
+    let Some(source) = active_published_agent_source(&state).await else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "success": false, "error": "no active agent source" })),
+        );
+    };
+    let descriptor = match crate::catalog_source::with_buyer_token(
+        buyer_token,
+        source.install_descriptor(&state.client, &id),
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "success": false, "error": e.to_string() })),
+            );
+        }
+    };
+
+    // The template rides in the descriptor's opaque `raw`, either under `template`
+    // (the export envelope the publisher uploaded) or at the root when the source
+    // stored it bare — the same two shapes `import_agent` already accepts.
+    let raw_template = descriptor
+        .raw
+        .get("template")
+        .cloned()
+        .unwrap_or(descriptor.raw);
+    let template: crate::agents::AgentTemplate = match serde_json::from_value(raw_template) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "success": false,
+                    "error": format!("published agent `{id}` has no valid template: {e}"),
+                })),
+            );
+        }
+    };
+    if template.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "success": false,
+                "error": format!("published agent `{id}` has no name"),
+            })),
+        );
+    }
+
+    let (template, requires) = template.sanitize_for_untrusted_install();
+    match state.agent_store.create(template.into_create_agent()).await {
+        Ok(record) => (
+            StatusCode::CREATED,
+            Json(json!({ "success": true, "agent": record, "requires": requires })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": e.to_string() })),
+        ),
+    }
+}
+
 /// True if `name`'s installed binary is present on disk (or the sidecar ships no
 /// file-based binary, in which case we trust the version store). Centralizes the
 /// `llamacpp`→`llama-server` and `.exe` handling used by every install-status
@@ -23016,7 +23144,8 @@ async fn system_info_handler() -> Json<serde_json::Value> {
 
 // ── CatalogSource seam (#459) ────────────────────────────────────────────────
 //
-// One adapter every catalog (model/skill/mcp/plugin) routes through. These
+// One adapter every catalog (model/skill/mcp/plugin/knowledge/agent) routes
+// through. These
 // endpoints list the sources per kind, add a user custom source, and persist
 // the active selection. See `crate::catalog_source`.
 
@@ -23026,7 +23155,7 @@ fn parse_catalog_kind(s: Option<&str>) -> Result<crate::catalog_source::CatalogK
         .ok_or(StatusCode::BAD_REQUEST)
 }
 
-/// `GET /api/catalog/sources?kind=<model|skill|mcp|plugin>`
+/// `GET /api/catalog/sources?kind=<model|skill|mcp|plugin|knowledge|agent>`
 /// → `{ kind, active, sources: [{ id, display_name, builtin, base_url? }] }`
 #[utoipa::path(
     get,
@@ -23045,7 +23174,7 @@ async fn catalog_sources_list(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(
-                    json!({ "error": "missing or unknown `kind` (model|skill|mcp|plugin|knowledge)" }),
+                    json!({ "error": "missing or unknown `kind` (model|skill|mcp|plugin|knowledge|agent)" }),
                 ),
             );
         }

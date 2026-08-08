@@ -15,7 +15,7 @@
 // the presence of `transport` (only registry built-ins serialize it).
 
 import { track } from "@/src/lib/analytics.ts";
-import { type ApiTarget, request } from "./client.ts";
+import { type ApiTarget, buyerTokenHeader, request } from "./client.ts";
 import type { SamplingConfig } from "./inference.ts";
 
 /**
@@ -471,6 +471,101 @@ export async function uninstallAgent(
 		body: { id },
 	});
 	track({ event: "agent_uninstalled", agent_id: id });
+}
+
+/**
+ * What a PUBLISHED agent asked for and did not get on install. Mirrors Core's
+ * `AgentInstallDisclosure` (`apps/core/src/agents/mod.rs`): every field is a
+ * declaration the installer must grant themselves in the agent editor, never
+ * something the install turned on. Absent fields are omitted on the wire, so
+ * every one is optional here.
+ */
+export interface AgentInstallDisclosure {
+	/** Composio actions the template requested. Removed: their `composio__*` ids
+	 *  widen the effective tool allowlist against the installer's own accounts. */
+	composioActions: string[];
+	/** Identity Vault profiles the template named. Removed: a bound profile reads
+	 *  as a credential under the gateway grant. */
+	identityProfileIds: string[];
+	/** Memory scope levels the template asked to recall from. Removed. */
+	memoryReadLevels: string[];
+	/** True when the template asked to write memories. Removed. */
+	memoryWriteEnabled: boolean;
+	/** Gateway policy the template pointed at (firewall/DLP/budget). Removed. */
+	policyId: string | null;
+	/** A remote avatar URL the template shipped. Removed (install-time beacon). */
+	remoteAvatarUrl: string | null;
+	/** True when the published instructions were truncated to Core's cap. */
+	systemPromptTruncated: boolean;
+	/** Tool / MCP-server ids the agent expects to reach. KEPT on the record (an
+	 *  empty list reads as "no filter"), listed because the servers behind them
+	 *  may not be installed on this node. */
+	tools: string[];
+}
+
+interface AgentInstallDisclosureWire {
+	composio_actions?: string[];
+	identity_profile_ids?: string[];
+	memory_read_levels?: string[];
+	memory_write_enabled?: boolean;
+	policy_id?: string | null;
+	remote_avatar_url?: string | null;
+	space_ids?: string[];
+	system_prompt_truncated?: boolean;
+	tools?: string[];
+}
+
+/** The Spaces a published agent wanted injected are disclosed as ids by Core;
+ *  they are the PUBLISHER's Space ids, so they are reported as a count only. */
+export interface PublishedAgentInstallResult {
+	agent: Agent;
+	/** How many of the publisher's Space bindings were dropped. Ids, not names —
+	 *  they resolve to nothing here, so only the fact is worth showing. */
+	requestedSpaceCount: number;
+	requires: AgentInstallDisclosure;
+}
+
+/**
+ * Install a PUBLISHED agent definition from the marketplace `agent` catalog via
+ * `POST /api/agents/published/install`.
+ *
+ * Distinct from {@link installAgent}, which adds an ACP *runtime* (Claude Code,
+ * Codex) to the picker. This one materialises an agent DEFINITION as a new local
+ * agent record. Core resolves the listing through its catalog seam, strips the
+ * privilege-bearing bindings, and returns what it removed in `requires` — which
+ * is what the caller shows the user to accept.
+ */
+export async function installPublishedAgent(
+	target: ApiTarget,
+	id: string
+): Promise<PublishedAgentInstallResult> {
+	const json = await request<{
+		agent: AgentRecordWire;
+		requires?: AgentInstallDisclosureWire;
+	}>(target, "/api/agents/published/install", {
+		method: "POST",
+		body: { id },
+		// A published agent may be PAID. Core forwards this control-plane bearer to
+		// the marketplace install handoff so the entitlement check can resolve the
+		// buyer org; without it a bought listing is denied as if unowned.
+		headers: buyerTokenHeader(),
+	});
+	const wire = json.requires ?? {};
+	track({ event: "agent_installed", agent_id: id });
+	return {
+		agent: toAgent(json.agent),
+		requires: {
+			composioActions: wire.composio_actions ?? [],
+			identityProfileIds: wire.identity_profile_ids ?? [],
+			memoryReadLevels: wire.memory_read_levels ?? [],
+			memoryWriteEnabled: wire.memory_write_enabled ?? false,
+			policyId: wire.policy_id ?? null,
+			remoteAvatarUrl: wire.remote_avatar_url ?? null,
+			systemPromptTruncated: wire.system_prompt_truncated ?? false,
+			tools: wire.tools ?? [],
+		},
+		requestedSpaceCount: (wire.space_ids ?? []).length,
+	};
 }
 
 // ---------------------------------------------------------------------------

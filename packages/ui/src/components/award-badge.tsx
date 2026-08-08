@@ -97,7 +97,8 @@ function leanMatrix(rect: DOMRect, clientX: number, clientY: number): string {
 	const skewX =
 		0.25 * ((yCenter - clientY) / yCenter - (xCenter - clientX) / xCenter);
 	const tiltX =
-		MAX_ROTATE - ((MAX_ROTATE - MIN_ROTATE) * Math.abs(rect.right - clientX)) / width;
+		MAX_ROTATE -
+		((MAX_ROTATE - MIN_ROTATE) * Math.abs(rect.right - clientX)) / width;
 	const tiltY =
 		MAX_ROTATE - ((MAX_ROTATE - MIN_ROTATE) * (rect.top - clientY)) / height;
 	const rollZ = 0.2 - (0.8 * (rect.top - clientY)) / height;
@@ -148,7 +149,8 @@ export function AwardBadge({ className, href, place, type }: AwardBadgeProps) {
 			const xCenter = (rect.left + rect.right) / 2;
 			const yCenter = (rect.top + rect.bottom) / 2;
 			setSheenDegrees(
-				(Math.abs(xCenter - event.clientX) + Math.abs(yCenter - event.clientY)) /
+				(Math.abs(xCenter - event.clientX) +
+					Math.abs(yCenter - event.clientY)) /
 					SHEEN_TRAVEL_DIVISOR
 			);
 		},
@@ -160,7 +162,8 @@ export function AwardBadge({ className, href, place, type }: AwardBadgeProps) {
 		setSheenDegrees(0);
 	}, []);
 
-	const fill = PLACE_FILLS[(place ?? 0) - 1] ?? PLACE_FILLS[DEFAULT_PLACE_INDEX];
+	const fill =
+		PLACE_FILLS[(place ?? 0) - 1] ?? PLACE_FILLS[DEFAULT_PLACE_INDEX];
 	const label = `${TITLES[type]}${place ? ` #${place}` : ""}`;
 
 	return (
@@ -207,22 +210,10 @@ export function AwardBadge({ className, href, place, type }: AwardBadgeProps) {
 						x="4"
 						y="4"
 					/>
-					<text
-						fill="#666666"
-						fontSize="9"
-						fontWeight="bold"
-						x="53"
-						y="20"
-					>
+					<text fill="#666666" fontSize="9" fontWeight="bold" x="53" y="20">
 						PRODUCT HUNT
 					</text>
-					<text
-						fill="#666666"
-						fontSize="16"
-						fontWeight="bold"
-						x="52"
-						y="40"
-					>
+					<text fill="#666666" fontSize="16" fontWeight="bold" x="52" y="40">
 						{label}
 					</text>
 					<g transform="translate(8, 9)">

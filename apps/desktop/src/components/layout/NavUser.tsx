@@ -1,5 +1,6 @@
 import { settingsApi, useSubscription } from "@ryu/settings";
 import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
+import { FadeOverflowText } from "@ryu/ui/components/fade-overflow-text";
 import { NavBeamCta } from "@ryu/ui/components/border-beam";
 import {
 	ContextMenu,
@@ -432,7 +433,11 @@ export function NavUser({
 					{showUser && (
 						<ContextMenu>
 							<ContextMenuTrigger>
-								<div className="min-w-0 max-w-[160px]">
+								{/* Wider than the 160px it was: even a two-word name faded out
+								    mid-surname, which read as broken rather than as clipped. No
+								    min width — the row shrinks to fit, so a floor there only pads
+								    the gap between the avatar and the name. */}
+								<div className="min-w-0 max-w-[15rem]">
 									<DropdownMenu>
 										<DropdownMenuTrigger
 											render={
@@ -465,10 +470,10 @@ export function NavUser({
 													    in the sidebar above it. A name is not a sentence —
 													    "Jiawei Zhang-Alexande…" reads as a defect where the
 													    dissolve reads as "there is more of this". */}
-													<span className="overflow-hidden whitespace-nowrap font-medium text-fade-edge text-sm">
+													<FadeOverflowText className="min-w-0 flex-1 font-medium text-sm">
 														{user?.name ?? "Account"}
-													</span>
-													<PlanBadge plan={badgePlan} />
+													</FadeOverflowText>
+													<PlanBadge className="shrink-0" plan={badgePlan} />
 												</span>
 											</span>
 										</DropdownMenuTrigger>

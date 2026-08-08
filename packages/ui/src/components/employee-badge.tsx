@@ -35,13 +35,25 @@ export interface EmployeeBadgeProps {
 	className?: string;
 	employeeId: string;
 	hiredAt?: string;
-	level: number;
+	/**
+	 * Omit where there is no level to show. A catalog listing has never worked a
+	 * day, and printing "Lv 0" on every card in a grid states a fact nobody asked
+	 * for — the badge id alone is the right header there.
+	 */
+	level?: number;
 	/** Which tuning of the metal ring to paint; pass the app's resolved theme. */
 	metalTheme?: "auto" | "dark" | "light";
 	name: string;
 	onClick?: () => void;
 	role?: string;
 	stats?: EmployeeStat[];
+	/**
+	 * Freeze the card's self-motion for a grid — see {@link PassCardShell}'s
+	 * `still`. Hover still tilts and glares; the badge simply stops turning and
+	 * floating on its own, because twenty of those on one screen is a fault
+	 * rather than a flourish.
+	 */
+	still?: boolean;
 }
 
 const NON_ALPHANUMERIC = /[^a-zA-Z0-9]/g;
@@ -89,6 +101,7 @@ export function EmployeeBadge({
 	onClick,
 	role,
 	stats,
+	still = false,
 }: EmployeeBadgeProps) {
 	const hiredLabel = formatHiredAt(hiredAt);
 	const badgeId = formatEmployeeId(employeeId);
@@ -102,6 +115,7 @@ export function EmployeeBadge({
 			className={cn(onClick && "cursor-pointer", className)}
 			ditherSeed={name || employeeId}
 			metalTheme={metalTheme}
+			still={still}
 		>
 			{/* `min-h` rather than a fixed height: the name is the hero and can wrap
 			    to two or three lines, so the card grows past the floor instead of
@@ -121,7 +135,7 @@ export function EmployeeBadge({
 						<span className="font-medium text-sm">Ryu</span>
 					</span>
 					<span className="flex items-center gap-3 text-[11px] text-muted-foreground tabular-nums">
-						<span>Lv {level}</span>
+						{level === undefined ? null : <span>Lv {level}</span>}
 						<span>{badgeId}</span>
 					</span>
 				</div>

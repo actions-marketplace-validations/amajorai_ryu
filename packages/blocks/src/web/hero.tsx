@@ -1,5 +1,6 @@
 "use client";
 
+import { AwardBadge } from "@ryu/ui/components/award-badge";
 import { buttonVariants } from "@ryu/ui/components/button";
 import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
@@ -13,11 +14,21 @@ import { landingHeadlineClass } from "./landing-typography.ts";
 
 const DECOSMIC_HREF = "https://decosmic.com";
 const AMAJOR_HREF = "https://amajor.ai";
+/** Placeholder — swap for the real Product Hunt post URL before flipping the flag. */
+const PRODUCT_HUNT_HREF = "https://www.producthunt.com/products/ryu";
 
 const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
 
+/**
+ * The Product Hunt badge is staged, not live: flip this to `true` on the day the
+ * award is actually won. It gates the *render*, not a `hidden` class, because a
+ * CSS-hidden badge still ships in the DOM — crawlers, scrapers and view-source
+ * would all find us claiming an award we have not won yet.
+ */
+const SHOW_AWARD_BADGE = false;
+
 const HERO_TITLE =
-	"We scale companies to 24/7 private and secure AI agent-native ops without hiring, in minutes.";
+	"We give companies private, secure, 24/7 agent operations without hiring a platform team.";
 
 export default function Hero() {
 	return (
@@ -26,6 +37,18 @@ export default function Hero() {
 				<div className="mx-auto w-full max-w-6xl px-4 py-8 md:py-12">
 					<div className="space-y-8">
 						<StaggerReveal>
+							{/* Wrapped so StaggerReveal's cloned className/style land on a real
+							    DOM node — AwardBadge takes className but not style. */}
+							{SHOW_AWARD_BADGE && (
+								<div>
+									<AwardBadge
+										href={PRODUCT_HUNT_HREF}
+										place={1}
+										type="product-of-the-day"
+									/>
+								</div>
+							)}
+
 							<p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-muted-foreground text-xs tracking-tight md:text-sm">
 								From the team behind{" "}
 								<a

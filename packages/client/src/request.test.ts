@@ -5,6 +5,7 @@
 // empty-body → undefined, and non-2xx → Error carrying status + response body).
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { installFetch } from "./test-fetch.ts";
 import { buildHeaders, buildUrl, request } from "./request.ts";
 import type { RyuClientOptions } from "./types.ts";
 
@@ -60,11 +61,12 @@ describe("request", () => {
 	test("sends url + headers and parses a JSON response", async () => {
 		let capturedUrl: string | undefined;
 		let capturedInit: RequestInit | undefined;
-		globalThis.fetch = ((url: string, init: RequestInit) => {
+		installFetch(((input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
 			capturedUrl = url;
 			capturedInit = init;
 			return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
-		}) as typeof fetch;
+		}));
 
 		const data = await request<{ ok: boolean }>(opts({ token: "t" }), "/api/x");
 		expect(data).toEqual({ ok: true });
@@ -75,14 +77,14 @@ describe("request", () => {
 	});
 
 	test("returns undefined for an empty (no-content) body", async () => {
-		globalThis.fetch = (() =>
-			Promise.resolve(new Response("", { status: 204 }))) as typeof fetch;
+		installFetch((() =>
+			Promise.resolve(new Response("", { status: 204 }))));
 		expect(await request(opts(), "/api/x")).toBeUndefined();
 	});
 
 	test("throws with the path, status, and body text on non-2xx", async () => {
-		globalThis.fetch = (() =>
-			Promise.resolve(new Response("boom", { status: 500 }))) as typeof fetch;
+		installFetch((() =>
+			Promise.resolve(new Response("boom", { status: 500 }))));
 		await expect(request(opts(), "/api/x")).rejects.toThrow(
 			"RyuClient: /api/x failed (500): boom"
 		);
@@ -90,10 +92,11 @@ describe("request", () => {
 
 	test("forwards method and body from init", async () => {
 		let capturedInit: RequestInit | undefined;
-		globalThis.fetch = ((_url: string, init: RequestInit) => {
+		installFetch(((input: RequestInfo | URL, init?: RequestInit) => {
+			const _url = String(input);
 			capturedInit = init;
 			return Promise.resolve(new Response("{}", { status: 200 }));
-		}) as typeof fetch;
+		}));
 		await request(opts(), "/api/x", {
 			method: "POST",
 			body: JSON.stringify({ a: 1 }),

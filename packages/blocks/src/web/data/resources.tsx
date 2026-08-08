@@ -10,6 +10,7 @@ import {
 	Scale,
 	Store,
 	Tag,
+	Users,
 } from "lucide-react";
 
 /* Resources power the marketing header's "Resources" mega-menu. They are the
@@ -101,6 +102,13 @@ export const resources: Resource[] = [
 		description: "Route Claude Code and Codex on the plan you already pay for.",
 		href: "/subscriptions",
 		Icon: KeyRound,
+	},
+	{
+		category: "Explore",
+		label: "Community stats",
+		description: "Tokens, cost, and compression saved across the community.",
+		href: "/community",
+		Icon: Users,
 	},
 
 	/* ============================= SUPPORT ========================== */

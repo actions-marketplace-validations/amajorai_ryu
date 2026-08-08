@@ -5,6 +5,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { useId, useState } from "react";
 import { cn } from "../lib/utils.ts";
 import { Button } from "./button.tsx";
+import { METAL_EDGE_TILE_RING_PX, MetalEdge } from "./metal-edge.tsx";
 import { Spinner } from "./spinner.tsx";
 
 /**
@@ -23,6 +24,12 @@ import { Spinner } from "./spinner.tsx";
 
 /** Same shape Better Auth's username plugin enforces (3-32, word chars). */
 export const WAITLIST_USERNAME_RE = /^[a-zA-Z0-9_]{3,32}$/;
+/**
+ * The field's corner radius (Tailwind `rounded-3xl`) in the CSS px `metal-fx`
+ * wants it in, and the fill's radius inside the ring's gutter.
+ */
+const FIELD_RADIUS_PX = 24;
+const FIELD_FACE_RADIUS_PX = FIELD_RADIUS_PX - METAL_EDGE_TILE_RING_PX;
 const USERNAME_MAX_LENGTH = 32;
 const LEADING_AT = /^@+/;
 
@@ -144,39 +151,71 @@ export function WaitlistUsernameField({
 				}
 			}}
 		>
-			<label className="text-muted-foreground text-xs" htmlFor={inputId}>
-				Meanwhile you&apos;re here, reserve your handle first
+			{/* No visible label: the step's own heading already says "Reserve your
+			    handle" directly above this field, and a second instruction under it
+			    was the same sentence twice. Screen readers still get one. */}
+			<label className="sr-only" htmlFor={inputId}>
+				Reserve your handle
 			</label>
-			<div className="flex items-center gap-2">
+			{/* Stacked, not side by side. This column is `max-w-sm`, and in a row the
+			    Reserve button left the field about sixty pixels wide — too little to
+			    read the handle you are typing. */}
+			<div className="flex flex-col gap-2">
 				{/* The "@" is a prefix inside the control, not part of the value, so a
 				    user who types it anyway is normalized rather than rejected. */}
 				{/* Same field shape as the sign-in form's inputs — `h-16 border-0
 				    bg-muted` — so arriving from login doesn't feel like a different
 				    product. The radius follows `Input`'s `rounded-3xl` for the same
 				    reason. */}
-				<div className="flex h-16 min-w-0 flex-1 items-center rounded-3xl border-0 bg-muted px-4 focus-within:ring-[3px] focus-within:ring-ring/50">
-					<span aria-hidden="true" className="text-muted-foreground text-sm">
-						@
-					</span>
-					<input
-						aria-describedby={error ? errorId : undefined}
-						aria-invalid={Boolean(error)}
-						autoCapitalize="none"
-						autoComplete="off"
-						autoCorrect="off"
-						className="min-w-0 flex-1 bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
-						id={inputId}
-						maxLength={USERNAME_MAX_LENGTH}
-						onChange={(event) => onChange(event.target.value)}
-						placeholder="yourname"
-						spellCheck={false}
-						value={value}
-					/>
+				{/* The same metal edge the pass and the invite row wear, so the one
+				    field on this screen that decides your handle reads as part of the
+				    same object rather than as a plain form control beside it. The fill
+				    sits inside the ring's own gutter (see `MetalEdge`) and is rounded by
+				    the outer radius less the ring, or the band thins at the corners. */}
+				{/* The flex item is this wrapper, not the ring: `metal-fx`'s root is
+				    `display: inline-flex`, so it sizes to its content and its own
+				    `w-full` has nothing to resolve against until a flexed parent gives
+				    it a width. Without this the field collapsed to about 60px. */}
+				<div className="min-w-0 flex-1">
+					<MetalEdge
+						borderRadius={FIELD_RADIUS_PX}
+						ringPx={METAL_EDGE_TILE_RING_PX}
+						small
+					>
+						<div
+							// `w-full`, not `flex-1`: the parent is now the ring's own column
+							// gutter, so a flex-grow here grows nothing and the field collapsed
+							// to its content width.
+							className="flex h-16 w-full min-w-0 items-center border-0 bg-muted px-4 focus-within:ring-[3px] focus-within:ring-ring/50"
+							style={{ borderRadius: `${FIELD_FACE_RADIUS_PX}px` }}
+						>
+							<span
+								aria-hidden="true"
+								className="text-muted-foreground text-sm"
+							>
+								@
+							</span>
+							<input
+								aria-describedby={error ? errorId : undefined}
+								aria-invalid={Boolean(error)}
+								autoCapitalize="none"
+								autoComplete="off"
+								autoCorrect="off"
+								className="min-w-0 flex-1 bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
+								id={inputId}
+								maxLength={USERNAME_MAX_LENGTH}
+								onChange={(event) => onChange(event.target.value)}
+								placeholder="yourname"
+								spellCheck={false}
+								value={value}
+							/>
+						</div>
+					</MetalEdge>
 				</div>
 				{/* `h-16` to match the field beside it — `size="lg"` is h-14, which
 					    left the pair a notch out of alignment. */}
 				<Button
-					className="h-16"
+					className="h-16 w-full"
 					disabled={pending || !valid}
 					size="lg"
 					type="submit"
@@ -200,8 +239,7 @@ export function WaitlistUsernameField({
 				</p>
 			) : (
 				<p className="text-muted-foreground text-xs">
-					3–32 letters, numbers or underscores. Yours to keep when you&apos;re
-					in.
+					3–32 letters, numbers or underscores.
 				</p>
 			)}
 		</form>

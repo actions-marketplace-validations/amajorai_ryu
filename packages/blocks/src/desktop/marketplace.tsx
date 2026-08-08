@@ -39,7 +39,14 @@ import { Input } from "@ryu/ui/components/input";
 import { Spinner } from "@ryu/ui/components/spinner";
 import type { ReactNode } from "react";
 
-export type MarketplaceItemKind = "plugin" | "skill" | "model" | "mcp";
+/** Mirrors the control plane's `MarketplaceKind`. `agent` is a user-published
+ *  agent definition — a configuration, not code. */
+export type MarketplaceItemKind =
+	| "plugin"
+	| "skill"
+	| "model"
+	| "mcp"
+	| "agent";
 
 export type MarketplaceVerification =
 	| "verified"

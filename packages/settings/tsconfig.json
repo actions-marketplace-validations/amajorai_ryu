@@ -1,6 +1,12 @@
 {
   "extends": "@ryu/config/tsconfig.base.json",
   "compilerOptions": {
+    // This package imports with explicit `.ts`/`.tsx` specifiers like the rest
+    // of the tree; the sibling app configs (e.g. apps-store/*/ui) already set
+    // this pair. Without them tsc rejects every such import — all 40 of this
+    // package's errors were that one flag.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "baseUrl": ".",
     "jsx": "react-jsx",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
