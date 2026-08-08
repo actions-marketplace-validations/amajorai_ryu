@@ -259,6 +259,10 @@ jobs:
             done
             shopt -u nullglob
           fi
+          # Same rename the release workflow does — see its copy for why. Kept in
+          # step across all three workflows so a channel build's artifacts are
+          # named by the same rule as a stable one.
+          node scripts/release/artifact-name.mjs --dir dist-desktop
           ls -la dist-desktop || true
       - name: Upload to release
         env:
