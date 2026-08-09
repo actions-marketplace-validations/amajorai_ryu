@@ -198,6 +198,15 @@ fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
 /// `<event>` progress events with a `phase` of
 /// `downloading` | `installing` | `done` | `error` so the UI can show status.
 ///
+/// The `downloading` phase is emitted repeatedly as the body streams, carrying
+/// `received` / `total` byte counts. It used to fire ONCE and then sit on a
+/// `resp.bytes()` that buffers the whole asset — 119 MB for core, 40 MB for the
+/// gateway — so onboarding showed "Downloading Ryu Core…" and then nothing at all
+/// for minutes, which is what reads as "stuck forever". Streaming is what makes
+/// the wait legible; `RESPONSE_TIMEOUT` now bounds the *headers* rather than the
+/// whole transfer, so a slow-but-alive download is no longer killed at 600s while
+/// a dead connection still fails fast.
+///
 /// This is the shared core of every installer — `download_core_binary` and the
 /// gateway/optional-app installers all funnel through it, parameterised by
 /// (`asset`, `dest_file`, `event`).
@@ -207,15 +216,21 @@ async fn download_release_binary(
 	dest: PathBuf,
 	event: &str,
 ) -> Result<PathBuf, String> {
+	use std::io::Write as _;
+
 	let url = format!("{RELEASE_BASE}/{asset}");
 
 	let _ = app.emit(
 		event,
-		serde_json::json!({ "phase": "downloading", "asset": asset }),
+		serde_json::json!({ "phase": "downloading", "asset": asset, "received": 0 }),
 	);
 
 	let client = reqwest::Client::builder()
-		.timeout(std::time::Duration::from_secs(600))
+		// Bounds the connect + response-headers phase only, NOT the body stream:
+		// a 119 MB asset on a slow link legitimately outruns any whole-request
+		// budget, while an unreachable host still fails in seconds.
+		.connect_timeout(std::time::Duration::from_secs(30))
+		.read_timeout(std::time::Duration::from_secs(120))
 		.build()
 		.map_err(|e| e.to_string())?;
 	let resp = client
@@ -228,9 +243,6 @@ async fn download_release_binary(
 		let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
 		return Err(err);
 	}
-	let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-
-	let _ = app.emit(event, serde_json::json!({ "phase": "installing" }));
 
 	if let Some(parent) = dest.parent() {
 		std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
@@ -238,7 +250,48 @@ async fn download_release_binary(
 	// Write to a temp path then rename, so an interrupted download never leaves a
 	// truncated binary that looks installed.
 	let tmp = dest.with_extension("download");
-	std::fs::write(&tmp, &bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+	let total = resp.content_length();
+	let mut received: u64 = 0;
+	// Emit at most one event per 1 MB so a fast download doesn't flood the webview
+	// with thousands of IPC messages.
+	const PROGRESS_STEP: u64 = 1024 * 1024;
+	let mut next_emit = PROGRESS_STEP;
+	let mut resp = resp;
+	{
+		let mut file =
+			std::fs::File::create(&tmp).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+		loop {
+			let chunk = match resp.chunk().await {
+				Ok(Some(c)) => c,
+				Ok(None) => break,
+				Err(e) => {
+					let err = format!("download {url}: {e}");
+					let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
+					let _ = std::fs::remove_file(&tmp);
+					return Err(err);
+				}
+			};
+			file.write_all(&chunk)
+				.map_err(|e| format!("write {}: {e}", tmp.display()))?;
+			received += chunk.len() as u64;
+			if received >= next_emit {
+				next_emit = received + PROGRESS_STEP;
+				let _ = app.emit(
+					event,
+					serde_json::json!({
+						"phase": "downloading",
+						"asset": asset,
+						"received": received,
+						"total": total,
+					}),
+				);
+			}
+		}
+		file.flush()
+			.map_err(|e| format!("write {}: {e}", tmp.display()))?;
+	}
+
+	let _ = app.emit(event, serde_json::json!({ "phase": "installing" }));
 
 	#[cfg(unix)]
 	{

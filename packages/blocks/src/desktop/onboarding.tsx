@@ -82,6 +82,10 @@ export interface OnboardingViewProps {
 	isDesktop?: boolean;
 	/** A local reachability probe is in flight (the card shows a checking state). */
 	localChecking?: boolean;
+	/** Why the local path failed, in the backend's own words. Shown in place of
+	 *  the generic copy on the unreachable card so a 404 on the release asset or a
+	 *  failed write names itself instead of reading as "something went wrong". */
+	localError?: string | null;
 	/** The local path is unreachable: no Core answered on the local node, and (on
 	 *  desktop) starting one failed. On the webapp this swaps the local card for an
 	 *  install prompt so the user is never sent into an app whose backend does not
@@ -453,6 +457,7 @@ function FeatureStep({
 function ChooseStep({
 	isDesktop,
 	localChecking,
+	localError,
 	localUnreachable,
 	managedEntitled,
 	managedBusy,
@@ -465,6 +470,7 @@ function ChooseStep({
 	OnboardingViewProps,
 	| "isDesktop"
 	| "localChecking"
+	| "localError"
 	| "localUnreachable"
 	| "managedEntitled"
 	| "managedBusy"
@@ -507,17 +513,37 @@ function ChooseStep({
 		</Button>
 	);
 
-	return (
-		<div className="flex w-full max-w-md flex-col gap-3">
-			{localUnreachable && isDesktop ? (
-				<div className="rounded-4xl border border-border p-4 text-left">
-					<p className="font-semibold text-lg">Couldn't start local AI</p>
-					<p className="mt-1 text-muted-foreground text-sm">
-						Ryu couldn't install or start the local engine on this device. Try
-						again, or use one of the options below instead.
+	// Cloud spans the full width on the first row; local + connect share the row
+	// below it. The three cards are borderless `bg-muted` tiles — the outline
+	// variant read as a form, and the fill separates them from the shell without
+	// one. `col-span-2` on the cloud tile is what makes it the header row, so the
+	// two cells under it must each stay exactly one column: the `localUnreachable`
+	// variants REPLACE the local card in its own cell rather than being emitted as
+	// extra siblings, which would push `connect` onto a third row.
+	const card = "rounded-4xl bg-muted p-4 text-left";
+	const cell = `${card} flex flex-col`;
+
+	let localCard: ReactNode;
+	if (localUnreachable && isDesktop) {
+		localCard = (
+			<div className={cell}>
+				<p className="font-semibold text-lg">Couldn't start local AI</p>
+				<p className="mt-1 text-muted-foreground text-sm">
+					Ryu couldn't install or start the local engine on this device. Try
+					again, or use one of the other options.
+				</p>
+				{/* The backend's own message, kept verbatim under the friendly line
+				    rather than replacing it: it is the only clue distinguishing a 404
+				    on the release asset from a full disk, and it is a URL, so it needs
+				    `break-all` or it runs straight out of the card. */}
+				{localError ? (
+					<p className="mt-2 break-all text-muted-foreground/70 text-xs">
+						{localError}
 					</p>
+				) : null}
+				<div className="mt-auto pt-3">
 					<Button
-						className="mt-3 w-full"
+						className="w-full"
 						disabled={localChecking}
 						onClick={onChooseLocal}
 						size="lg"
@@ -526,17 +552,19 @@ function ChooseStep({
 						{localChecking ? "Starting…" : "Try again"}
 					</Button>
 				</div>
-			) : null}
-
-			{localUnreachable && !isDesktop ? (
-				<div className="rounded-4xl border border-border p-4 text-left">
-					<p className="font-semibold text-lg">Desktop app needed</p>
-					<p className="mt-1 text-muted-foreground text-sm">
-						To run AI on this device, install the Ryu desktop app first. Then
-						come back and try again.
-					</p>
+			</div>
+		);
+	} else if (localUnreachable) {
+		localCard = (
+			<div className={cell}>
+				<p className="font-semibold text-lg">Desktop app needed</p>
+				<p className="mt-1 text-muted-foreground text-sm">
+					To run AI on this device, install the Ryu desktop app first. Then come
+					back and try again.
+				</p>
+				<div className="mt-auto pt-3">
 					<Button
-						className="mt-3 w-full"
+						className="w-full"
 						onClick={onDownloadDesktop}
 						size="lg"
 						variant="mono"
@@ -553,17 +581,19 @@ function ChooseStep({
 						{localChecking ? "Checking…" : "Retry"}
 					</Button>
 				</div>
-			) : null}
-
-			{localUnreachable ? null : (
-				<div className="rounded-4xl border border-border p-4 text-left">
-					<p className="font-semibold text-lg">Run AI locally</p>
-					<p className="mt-1 text-muted-foreground text-sm">
-						Run AI on this device, or connect your own keys. Private, free, and
-						works offline.
-					</p>
+			</div>
+		);
+	} else {
+		localCard = (
+			<div className={cell}>
+				<p className="font-semibold text-lg">Run AI locally</p>
+				<p className="mt-1 text-muted-foreground text-sm">
+					Run AI on this device, or connect your own keys. Private, free, and
+					works offline.
+				</p>
+				<div className="mt-auto pt-3">
 					<Button
-						className="mt-3 w-full"
+						className="w-full"
 						disabled={localChecking}
 						onClick={onChooseLocal}
 						size="lg"
@@ -572,9 +602,13 @@ function ChooseStep({
 						{localCta}
 					</Button>
 				</div>
-			)}
+			</div>
+		);
+	}
 
-			<div className="rounded-4xl border border-border p-4 text-left">
+	return (
+		<div className="grid w-full max-w-2xl grid-cols-2 gap-3">
+			<div className={`${card} col-span-2`}>
 				<div className="flex items-center gap-2">
 					<p className="font-semibold text-lg">Use Ryu Cloud</p>
 					{showProBadge ? <PlanBadge plan="pro" size="sm" /> : null}
@@ -598,23 +632,27 @@ function ChooseStep({
 				)}
 			</div>
 
+			{localCard}
+
 			{/* Third path: neither install nor buy — point the app at a Core someone
 			    else already runs (a teammate's machine, a company server, a node on
 			    the mesh). Nothing is installed on this device. */}
-			<div className="rounded-4xl border border-border p-4 text-left">
+			<div className={cell}>
 				<p className="font-semibold text-lg">Connect to an existing node</p>
 				<p className="mt-1 text-muted-foreground text-sm">
-					Already have a Ryu node running — your team's server, or another
+					Already have a Ryu node running on your team's server, or another
 					machine? Point this app at it. Nothing is installed here.
 				</p>
-				<Button
-					className="mt-3 w-full"
-					onClick={onChooseRemote}
-					size="lg"
-					variant="outline"
-				>
-					Connect
-				</Button>
+				<div className="mt-auto pt-3">
+					<Button
+						className="w-full"
+						onClick={onChooseRemote}
+						size="lg"
+						variant="outline"
+					>
+						Connect
+					</Button>
+				</div>
 			</div>
 		</div>
 	);

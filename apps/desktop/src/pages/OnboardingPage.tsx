@@ -1,6 +1,7 @@
 import { OnboardingView } from "@ryu/blocks/desktop/onboarding";
 import { Button } from "@ryu/ui/components/button";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { sileo } from "sileo";
 import { WEB_URL } from "@/lib/app-urls.ts";
@@ -140,6 +141,13 @@ const ROTATING_SUBTITLES: Partial<Record<Phase, string[]>> = {
 const ROTATE_INTERVAL_MS = 2600;
 
 const POLL_INTERVAL_MS = 2000;
+// Every Core request onboarding makes carries this. `fetch` has no default
+// timeout, so one unanswered request is enough to freeze a whole phase — which
+// is exactly how the setup screen used to hang with no way out.
+const REQUEST_TIMEOUT_MS = 15 * 1000;
+// The agent catalog gets a longer one: Core spawns a `--version` probe per agent
+// (and an npm lookup per bridge), each bounded at 30s on its side.
+const AGENT_CATALOG_TIMEOUT_MS = 60 * 1000;
 // How long onboarding will sit on the "installing" screen waiting for the local
 // inference stack. A fast (cached) install finishes well inside this and the user
 // lands ready. But the install is a sizable model/binary download that can run
@@ -196,36 +204,60 @@ async function adoptManagedNode(
  */
 async function waitForLocalStack(
 	node: { url: string; token: string | null },
-	isCancelled: () => boolean
+	isCancelled: () => boolean,
+	report: LocalStatusReporter
 ): Promise<void> {
-	const deadline = Date.now() + MAX_BLOCK_MS;
-	let triggered = false;
-	while (Date.now() < deadline && !isCancelled()) {
-		try {
-			const catalog = await fetchCatalog(node.url, node.token ?? null);
-			const entry = catalog.find((c) => c.name === LOCAL_STACK);
-			if (
-				entry?.installState === "installed" ||
-				entry?.installState === "failed"
-			) {
+	const poll = async () => {
+		const deadline = Date.now() + MAX_BLOCK_MS;
+		let triggered = false;
+		while (Date.now() < deadline && !isCancelled()) {
+			try {
+				const catalog = await fetchCatalog(
+					node.url,
+					node.token ?? null,
+					AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+				);
+				const entry = catalog.find((c) => c.name === LOCAL_STACK);
+				if (entry?.installState === "installed") {
+					report.done("Local AI engine ready");
+					report.status(null);
+					return;
+				}
+				if (entry?.installState === "failed") {
+					report.status(null);
+					return;
+				}
+				if (entry?.installState === "installing") {
+					report.status("Installing the local AI engine…", STAGE_ENGINE);
+				}
+				// Nothing has started the install (macOS path) — start it once, then
+				// keep polling. Best-effort: a failed kick just leaves us polling.
+				if (!triggered && entry?.installState === "not_installed") {
+					triggered = true;
+					report.status("Installing the local AI engine…", STAGE_ENGINE);
+					await installSidecar(
+						node.url,
+						node.token ?? null,
+						LOCAL_STACK,
+						false,
+						AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+					).catch(() => undefined);
+				}
+			} catch {
+				// Keep polling on transient network errors.
+			}
+			await sleep(POLL_INTERVAL_MS);
+			if (isCancelled()) {
 				return;
 			}
-			// Nothing has started the install (macOS path) — start it once, then
-			// keep polling. Best-effort: a failed kick just leaves us polling.
-			if (!triggered && entry?.installState === "not_installed") {
-				triggered = true;
-				await installSidecar(node.url, node.token ?? null, LOCAL_STACK).catch(
-					() => undefined
-				);
-			}
-		} catch {
-			// Keep polling on transient network errors.
 		}
-		await sleep(POLL_INTERVAL_MS);
-		if (isCancelled()) {
-			return;
-		}
-	}
+	};
+	// The `Date.now() < deadline` check only runs BETWEEN iterations, so a single
+	// request that never settles used to pin this phase forever — the 45s budget
+	// was never enforced. Every request inside now carries its own timeout, and
+	// this race is the belt-and-braces: the budget is honoured even if one does
+	// not. The install keeps running in the background either way.
+	await Promise.race([poll(), sleep(MAX_BLOCK_MS)]);
 	// Grace budget elapsed and the stack is still installing — proceed anyway and
 	// let it finish in the background rather than stranding the user here.
 }
@@ -236,6 +268,9 @@ async function waitForLocalStack(
 // dropping the user into an app with no backend.
 const CORE_BOOT_MAX_MS = 5 * 60 * 1000;
 const CORE_BOOT_POLL_MS = 1500;
+// After this much of the boot wait, the status admits the wait is long rather
+// than repeating "Starting Ryu…" for another four minutes.
+const CORE_BOOT_SLOW_MS = 45 * 1000;
 // A typed node address gets one short probe — long enough for a LAN round trip,
 // short enough that a wrong address fails fast.
 const CONNECT_PROBE_TIMEOUT_MS = 6000;
@@ -250,26 +285,140 @@ const CONNECT_PROBE_TIMEOUT_MS = 6000;
  * never downloads one — so the install is deferred to the explicit local pick
  * rather than run at boot.
  */
-async function startLocalCore(isCancelled: () => boolean): Promise<boolean> {
+async function startLocalCore(
+	isCancelled: () => boolean,
+	report: LocalStatusReporter
+): Promise<{ error?: string; ok: boolean }> {
+	const onStatus = report.status;
 	if ((await getRyuStatus().catch(() => "stopped")) === "running") {
-		return true;
+		onStatus(null, null);
+		return { ok: true };
 	}
-	// Best-effort: a download failure still leaves an older binary usable, and the
-	// start below reports the real outcome.
-	await ensureCoreInstalled().catch(() => undefined);
+	onStatus("Getting Ryu ready…", STAGE_PREPARING);
+	// A download failure still leaves an older binary usable, so this is not fatal
+	// on its own — but it must not be SWALLOWED either. Both halves used to be
+	// `.catch(() => undefined)`, so a 404 on the release asset (or a full disk)
+	// bought five silent minutes of polling for a binary that was never on disk,
+	// and then a generic "couldn't start" card that named nothing.
+	const installError = await ensureCoreInstalled().then(
+		() => null,
+		(err: unknown) => (err instanceof Error ? err.message : String(err))
+	);
 	if (isCancelled()) {
-		return false;
+		return { ok: false };
 	}
-	await startRyuCore().catch(() => undefined);
+	const startError = await startRyuCore().then(
+		() => null,
+		(err: unknown) => (err instanceof Error ? err.message : String(err))
+	);
+	// Nothing to wait for: the install failed AND the spawn found no binary to
+	// run. Report the install error (the useful one) immediately instead of
+	// burning the whole boot budget.
+	if (installError !== null && startError !== null) {
+		return { error: installError, ok: false };
+	}
 
-	const deadline = Date.now() + CORE_BOOT_MAX_MS;
+	// The download is over but the pick is not: Core still has to boot and answer
+	// its health check, which is up to CORE_BOOT_MAX_MS. The installer stops
+	// emitting at `done`, so without a status of our own the card would revert to
+	// its marketing copy and sit there for five minutes — the same "nothing is
+	// happening" shape, just moved past the download.
+	const started = Date.now();
+	const deadline = started + CORE_BOOT_MAX_MS;
+	onStatus("Starting Ryu…", STAGE_BOOTING);
 	while (Date.now() < deadline && !isCancelled()) {
 		if ((await getRyuStatus().catch(() => "stopped")) === "running") {
-			return true;
+			report.done("Ryu is running");
+			onStatus(null, null);
+			return { ok: true };
+		}
+		if (Date.now() - started > CORE_BOOT_SLOW_MS) {
+			onStatus(
+				"Still starting, the first launch takes a little longer…",
+				STAGE_BOOTING
+			);
 		}
 		await sleep(CORE_BOOT_POLL_MS);
 	}
-	return false;
+	onStatus(null, null);
+	// Health never answered. `startError` is null on the common shape of this
+	// failure (the spawn succeeded, Core died or hung on boot), so say what we
+	// actually observed rather than handing the card an empty detail line.
+	return {
+		error:
+			startError ??
+			`Ryu Core was started but never answered its health check within ${Math.round(
+				CORE_BOOT_MAX_MS / 60_000
+			)} minutes.`,
+		ok: false,
+	};
+}
+
+/** A `<bin>-install-progress` event from the Rust release-hub installer. */
+interface InstallProgress {
+	error?: string;
+	phase: "downloading" | "installing" | "done" | "error";
+	received?: number;
+	total?: number | null;
+}
+
+const MB = 1024 * 1024;
+// The two binaries download inside the `installing` phase, so their real fraction
+// is mapped into a band that starts where the phase starts and stops short of the
+// phase's own placeholder — the bar only ever moves forward as the flow advances
+// from download → boot → local-stack wait.
+const DOWNLOAD_BAND_START = 12;
+const DOWNLOAD_BAND_END = 55;
+// The stages either side of the download, which have no measurable fraction of
+// their own. They bracket the band so the bar only ever moves forward across the
+// whole pick: prepare → download → unpack → boot → the phase's own 60 for the
+// local-stack wait that follows.
+const STAGE_PREPARING = 8;
+const STAGE_BOOTING = 58;
+const STAGE_ENGINE = 70;
+const STAGE_AGENTS = 82;
+
+/** How the async local bring-up talks to the screen: `status` is what is
+ *  happening now (null retires the line), `done` records something finished so it
+ *  keeps its turn in the rotation afterwards. */
+interface LocalStatusReporter {
+	done: (line: string) => void;
+	status: (line: string | null, percent?: number | null) => void;
+}
+
+/** The download's real completion as a bar percentage, or null when the release
+ *  hub sent no `Content-Length` (nothing honest to draw — the phase placeholder
+ *  takes over). */
+function downloadPercent(p: InstallProgress): number | null {
+	if (!p.total) {
+		return null;
+	}
+	const fraction = Math.min(1, (p.received ?? 0) / p.total);
+	return Math.round(
+		DOWNLOAD_BAND_START + (DOWNLOAD_BAND_END - DOWNLOAD_BAND_START) * fraction
+	);
+}
+
+/** "Downloading Ryu Core 42%". The percentage is of THIS step's own download,
+ *  not of setup as a whole: each binary counts 0–100 for itself, which is what
+ *  makes the number mean something while it is on screen. Falls back to a raw
+ *  size only when the release hub sends no `Content-Length` (no denominator, so
+ *  no honest percentage), and to the bare label before the first chunk lands. */
+function downloadLabel(label: string, p: InstallProgress): string {
+	const received = p.received ?? 0;
+	if (received === 0) {
+		return `${label}…`;
+	}
+	if (!p.total) {
+		return `${label} ${Math.round(received / MB)} MB`;
+	}
+	return `${label} ${stepPercent(received, p.total)}%`;
+}
+
+/** This step's own completion, 0–100, clamped so a `Content-Length` that
+ *  undercounts can never print 103%. */
+function stepPercent(received: number, total: number): number {
+	return Math.min(100, Math.round((received / total) * 100));
 }
 
 /** Normalize a typed node address: trim, add a scheme if omitted, drop the
@@ -352,7 +501,14 @@ async function loadOnboardingAgents(
 	target: ApiTarget
 ): Promise<OnboardingAgents> {
 	try {
-		const agents = await fetchAgentCatalog(target);
+		// Core probes every agent's CLI and its npm registry entry to build this,
+		// so it is the slowest call onboarding makes — and with no timeout it was
+		// able to pin the `installing` phase indefinitely. A miss is harmless: the
+		// catch below drops through to "no agents to offer" and onboarding moves on.
+		const agents = await fetchAgentCatalog(
+			target,
+			AbortSignal.timeout(AGENT_CATALOG_TIMEOUT_MS)
+		);
 		const installable = agents.filter((a) => a.id !== "ryu" && !a.added);
 		const found = installable.filter((a) => a.detected === true);
 		const suggested = SUGGESTED_AGENT_IDS.map((id) =>
@@ -374,8 +530,10 @@ export default function OnboardingPage() {
 	// the managed (Ryu Cloud) option on the plan's managed-inference flag.
 	const { entitlement, loading: entitlementLoading } = useCreditsWallet();
 	const [phase, setPhase] = useState<Phase>("starting");
-	// Index into the rotating copy for the current auto-advancing phase.
-	const [rotateIndex, setRotateIndex] = useState(0);
+	// The line currently on screen for an auto-advancing phase. It is set by the
+	// rotation tick below, which alternates the flavour copy with whatever is
+	// REALLY happening, so the loop is never pure theatre.
+	const [loopLine, setLoopLine] = useState<string | null>(null);
 	// Managed adoption is polling the control plane for a provisioned node.
 	const [managedBusy, setManagedBusy] = useState(false);
 	// Webapp-only: the local reachability probe behind the "local" pick. The
@@ -385,6 +543,20 @@ export default function OnboardingPage() {
 	// waitForLocalStack budget and then drop the user into a broken app.
 	const [localChecking, setLocalChecking] = useState(false);
 	const [localUnreachable, setLocalUnreachable] = useState(false);
+	// Why the local pick failed, in Core's own words ("HTTP 404" on a missing
+	// release asset, a write error, …). The card used to say only "something went
+	// wrong", which is unactionable for the one path that installs software.
+	const [localError, setLocalError] = useState<string | null>(null);
+	// What the local bring-up is doing RIGHT NOW ("Downloading Ryu Core — 42 of
+	// 119 MB"), and the things it has already finished ("Ryu Core installed",
+	// "Model gateway installed"). Refs, not state: the byte count updates every
+	// megabyte and re-rendering the headline that often would fight TextSwap's
+	// crossfade. The rotation tick samples them instead, so the text changes on
+	// its own cadence while the progress BAR — which is smooth by nature — tracks
+	// `localPercent` live.
+	const liveStatusRef = useRef<string | null>(null);
+	const doneStatusRef = useRef<string[]>([]);
+	const [localPercent, setLocalPercent] = useState<number | null>(null);
 	// Which path the user picked on `choose`, or null while they are still on the
 	// fork. Only the local path cares whether this device's Core came up, so this
 	// is what gates the "Couldn't start Ryu" screen — a user on a remote or cloud
@@ -403,6 +575,67 @@ export default function OnboardingPage() {
 			cancelledRef.current = true;
 		};
 	}, []);
+
+	// The stages the installer events cannot see — preparing, Core booting, the
+	// local engine install, agent detection. A fixed bar position rather than a
+	// fraction; null hands the bar back to the phase's own placeholder.
+	const reportLocalStatus = useCallback(
+		(status: string | null, percent?: number | null) => {
+			liveStatusRef.current = status;
+			setLocalPercent(percent ?? null);
+		},
+		[]
+	);
+
+	/** Record something that has actually COMPLETED. These keep appearing in the
+	 *  loop after the fact, which is the point: the gateway and the local engine
+	 *  install silently today, so nothing on screen ever admitted they existed. */
+	const reportDone = useCallback((line: string) => {
+		const log = doneStatusRef.current;
+		if (log.at(-1) !== line) {
+			log.push(line);
+		}
+	}, []);
+
+	/** The pair handed to every async leg of the local bring-up. */
+	const localReport = useMemo<LocalStatusReporter>(
+		() => ({ done: reportDone, status: reportLocalStatus }),
+		[reportDone, reportLocalStatus]
+	);
+
+	// Mirror the installers' progress events. BOTH binaries report here — the
+	// gateway is 40 MB of the ~160 MB a local pick downloads and nothing ever said
+	// so, which is why setup looked like it stalled after "Ryu Core installed".
+	useEffect(() => {
+		const unlisteners: (() => void)[] = [];
+		for (const [event, name] of [
+			["core-install-progress", "Ryu Core"],
+			["gateway-install-progress", "the model gateway"],
+		] as const) {
+			listen<InstallProgress>(event, ({ payload }) => {
+				if (payload.phase === "downloading") {
+					liveStatusRef.current = downloadLabel(`Downloading ${name}`, payload);
+					setLocalPercent(downloadPercent(payload));
+				} else if (payload.phase === "installing") {
+					liveStatusRef.current = `Installing ${name}…`;
+					setLocalPercent(DOWNLOAD_BAND_END);
+				} else if (payload.phase === "done") {
+					// Core's `done` lands while the gateway leg and the boot wait are
+					// still ahead, so this only retires the LIVE line — the milestone
+					// keeps it in the loop.
+					reportDone(`${name} installed`);
+					liveStatusRef.current = null;
+				} else if (payload.phase === "error") {
+					liveStatusRef.current = null;
+				}
+			}).then((fn) => unlisteners.push(fn));
+		}
+		return () => {
+			for (const fn of unlisteners) {
+				fn();
+			}
+		};
+	}, [reportDone]);
 
 	// Agents found on the user's system (pre-selected) and the curated suggested
 	// set (opt-in). Only the flagship Ryu agent is installed by default.
@@ -488,12 +721,14 @@ export default function OnboardingPage() {
 			// onboarding so it's ready by first chat. Fire-and-forget (no `await`) and
 			// non-fatal — it must never block or fail onboarding, and dev is a no-op.
 			// installAndLaunchIsland().catch(() => undefined);
-			await waitForLocalStack(node, () => cancelledRef.current);
+			await waitForLocalStack(node, () => cancelledRef.current, localReport);
 			if (cancelledRef.current) {
 				return;
 			}
 
+			localReport.status("Looking for agents on your system…", STAGE_AGENTS);
 			const { found, suggested } = await loadOnboardingAgents(target);
+			localReport.status(null);
 			if (cancelledRef.current) {
 				return;
 			}
@@ -509,7 +744,7 @@ export default function OnboardingPage() {
 
 			goToFeatures([]);
 		},
-		[goToFeatures]
+		[goToFeatures, localReport]
 	);
 
 	// Present the local / cloud / existing-node fork immediately. This used to
@@ -535,13 +770,25 @@ export default function OnboardingPage() {
 	// 3. Confirm it answers before committing. `waitForLocalStack` swallows every
 	//    error and proceeds anyway after 45s, so an unreachable node used to end
 	//    with the user inside a fully broken app and onboarding marked complete.
-	//    Instead stay on `choose`, where the other two paths are still offered.
+	//    Instead fall BACK to `choose`, where the other two paths are still offered.
+	//
+	// The pick leaves the fork immediately for the `installing` phase. Everything
+	// after the press — the 160 MB download, Core's boot, the local-stack wait — is
+	// one continuous wait with one progress bar and one status line, rather than a
+	// second progress surface bolted onto the choice card. The card only has to
+	// render the FAILURE, which is the one outcome that returns here.
 	const handleChooseLocal = useCallback(() => {
 		if (localChecking) {
 			return;
 		}
 		setMode("local");
 		setLocalChecking(true);
+		// Seed the bar before the first await so the phase's flat placeholder never
+		// flashes ahead of the real download and then jumps backwards.
+		liveStatusRef.current = "Getting Ryu ready…";
+		doneStatusRef.current = [];
+		setLocalPercent(STAGE_PREPARING);
+		setPhase("installing");
 		(async () => {
 			const nodes = useNodeStore.getState().nodes;
 			const node = nodes.find(isLocalNode) ?? LOCAL_FALLBACK;
@@ -549,15 +796,21 @@ export default function OnboardingPage() {
 			// answered, so this IS the reachability proof — no second probe, and no
 			// dependency on `nodes.json` existing yet (on a fresh install the file is
 			// written a few lines below, by `setDefault`).
-			const up = await startLocalCore(() => cancelledRef.current);
+			const started = await startLocalCore(
+				() => cancelledRef.current,
+				localReport
+			);
 			if (cancelledRef.current) {
 				return;
 			}
 			setLocalChecking(false);
-			if (!up) {
+			if (!started.ok) {
+				setLocalError(started.error ?? null);
 				setLocalUnreachable(true);
+				setPhase("choose");
 				return;
 			}
+			setLocalError(null);
 			setLocalUnreachable(false);
 			// Point the app at the node we just verified, so the rest of onboarding
 			// and the app itself talk to it rather than a stale cloud default.
@@ -567,9 +820,10 @@ export default function OnboardingPage() {
 			if (!cancelledRef.current) {
 				setLocalChecking(false);
 				setLocalUnreachable(true);
+				setPhase("choose");
 			}
 		});
-	}, [beginLocalSetup, localChecking, setDefault]);
+	}, [beginLocalSetup, localChecking, localReport, setDefault]);
 
 	// The only in-product path to a local node: the desktop app hosts it.
 	const handleDownloadDesktop = useCallback(() => {
@@ -747,9 +1001,21 @@ export default function OnboardingPage() {
 		// one at boot. Same explicit local-node resolution as the local pick;
 		// `getActiveNode()` here could be the cloud node we just failed to adopt.
 		setMode("local");
-		startLocalCore(() => cancelledRef.current)
-			.then((up) => {
-				if (!up || cancelledRef.current) {
+		// Same `localChecking` bookkeeping the direct local pick does. Without it
+		// this path showed no download progress at all, and — because `coreFailed`
+		// is `coreStatus === "stopped" && mode === "local" && !localChecking` —
+		// flipping `mode` to "local" after App.tsx's startup grace had elapsed
+		// replaced the running 160 MB download with the "Couldn't start Ryu"
+		// restart screen.
+		setLocalChecking(true);
+		liveStatusRef.current = "Getting Ryu ready…";
+		setLocalPercent(STAGE_PREPARING);
+		setPhase("installing");
+		startLocalCore(() => cancelledRef.current, localReport)
+			.then((started) => {
+				setLocalChecking(false);
+				if (!started.ok || cancelledRef.current) {
+					setLocalError(started.error ?? null);
 					setLocalUnreachable(true);
 					setPhase("choose");
 					return undefined;
@@ -766,21 +1032,39 @@ export default function OnboardingPage() {
 		setDefault,
 		goToFeatures,
 		beginLocalSetup,
+		localReport,
 	]);
 
-	// Cycle the header line while a long auto-advancing phase is on
-	// screen so the view never looks frozen. Resets to the first line whenever
-	// the phase flips, and tears the interval down on any phase the map doesn't
-	// cover.
+	// Cycle the header line while a long auto-advancing phase is on screen, so the
+	// view never looks frozen — but alternate the flavour copy with the REAL state
+	// of the work: what is downloading right now, or the last thing that finished.
+	// A pure flavour loop is indistinguishable from a hang, and it was hiding two
+	// entire install legs (gateway, local engine) behind "Teaching Ryu to think".
 	useEffect(() => {
-		const messages = ROTATING_SUBTITLES[phase];
-		if (!messages) {
+		const flavour = ROTATING_SUBTITLES[phase];
+		if (!flavour) {
+			setLoopLine(null);
 			return;
 		}
-		setRotateIndex(0);
-		const id = setInterval(() => {
-			setRotateIndex((i) => (i + 1) % messages.length);
-		}, ROTATE_INTERVAL_MS);
+		let tick = 0;
+		let flavourIndex = 0;
+		const advance = () => {
+			const real =
+				liveStatusRef.current ?? doneStatusRef.current.at(-1) ?? null;
+			// Every other tick is the real line, when there is one. The flavour index
+			// advances only on flavour turns, so nothing is skipped — and on a phase
+			// with no real state to report (the cloud paths) every tick is flavour and
+			// the loop behaves exactly as it did before.
+			if (tick % 2 === 1 && real) {
+				setLoopLine(real);
+			} else {
+				setLoopLine(flavour[flavourIndex % flavour.length] ?? null);
+				flavourIndex += 1;
+			}
+			tick += 1;
+		};
+		advance();
+		const id = setInterval(advance, ROTATE_INTERVAL_MS);
 		return () => clearInterval(id);
 	}, [phase]);
 
@@ -801,9 +1085,8 @@ export default function OnboardingPage() {
 	// On the auto-advancing phases the rotating copy IS the headline; everywhere
 	// else the static title/subtitle pair carries the step. Every non-rotating
 	// phase has a PHASE_TITLES entry, so the fallthrough is always defined.
-	const rotating = ROTATING_SUBTITLES[phase]?.[rotateIndex];
-	const subtitle = rotating ? undefined : PHASE_SUBTITLES[phase];
-	const title = rotating ?? PHASE_TITLES[phase]!;
+	const subtitle = loopLine ? undefined : PHASE_SUBTITLES[phase];
+	const title = loopLine ?? PHASE_TITLES[phase]!;
 
 	// Restart the whole app so it re-attempts startup from scratch; fall back to a
 	// plain reload if the Tauri process plugin isn't reachable.
@@ -960,6 +1243,7 @@ export default function OnboardingPage() {
 				featureStepTotal={TOGGLEABLE_FEATURES.length}
 				isDesktop
 				localChecking={localChecking}
+				localError={localError}
 				localUnreachable={localUnreachable}
 				managedBusy={managedBusy}
 				managedEntitled={Boolean(entitlement?.managedInference)}
@@ -978,7 +1262,7 @@ export default function OnboardingPage() {
 				onSkipFeature={() => applyFeatureChoice(false)}
 				onSkipMic={handleSkipMic}
 				onToggleAgent={toggle}
-				progress={PHASE_PROGRESS[phase]}
+				progress={localPercent ?? PHASE_PROGRESS[phase]}
 				remoteChecking={remoteChecking}
 				remoteError={remoteError}
 				selected={selected}

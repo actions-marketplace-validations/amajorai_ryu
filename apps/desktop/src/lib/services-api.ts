@@ -95,11 +95,13 @@ async function postAction(
 	nodeUrl: string,
 	token: string | null,
 	path: string,
-	label: string
+	label: string,
+	signal?: AbortSignal
 ): Promise<void> {
 	const resp = await fetch(`${nodeUrl}${path}`, {
 		method: "POST",
 		headers: makeHeaders(token),
+		signal,
 	});
 	let body: { success?: boolean; error?: string } | null = null;
 	try {
@@ -115,12 +117,21 @@ async function postAction(
 	}
 }
 
+/**
+ * The engine/app catalog. `signal` is optional and exists for callers that poll
+ * this in a loop with a wall-clock budget — onboarding's local-stack wait, above
+ * all. `fetch` has no default timeout, so a Core that accepts the connection and
+ * never answers used to hang the await forever, and a `while (Date.now() < ...)`
+ * deadline around it never got another turn to fire.
+ */
 export async function fetchCatalog(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	signal?: AbortSignal
 ): Promise<CatalogItem[]> {
 	const resp = await fetch(`${nodeUrl}/api/catalog`, {
 		headers: makeHeaders(token),
+		signal,
 	});
 	if (!resp.ok) {
 		throw new Error(`catalog fetch failed: ${resp.status}`);
@@ -208,14 +219,16 @@ export async function installSidecar(
 	nodeUrl: string,
 	token: string | null,
 	name: string,
-	force = false
+	force = false,
+	signal?: AbortSignal
 ): Promise<void> {
 	const query = force ? "?force=true" : "";
 	await postAction(
 		nodeUrl,
 		token,
 		`/api/setup/${name}/install${query}`,
-		force ? "update" : "install"
+		force ? "update" : "install",
+		signal
 	);
 }
 

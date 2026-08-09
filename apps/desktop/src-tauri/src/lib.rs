@@ -222,10 +222,22 @@ async fn ensure_core_installed(app: tauri::AppHandle) -> Result<String, String> 
 	}
 	#[cfg(not(debug_assertions))]
 	{
+		// The gateway is Core's managed sidecar and takes every model call, so it
+		// has to be on disk BEFORE Core spawns. The boot path installs it, but a
+		// fresh install never reaches that branch: it only downloads when the
+		// default node is already local, which is false until this very pick. So
+		// the local pick used to leave a Core with no gateway and degraded chat.
+		// Loud-but-non-fatal, exactly as the boot path treats it.
 		if let Some(p) = resolve_core_binary() {
+			if let Err(e) = crate::core::install::ensure_gateway_installed(&app).await {
+				tracing::error!("Failed to auto-install ryu-gateway: {}", e);
+			}
 			return Ok(p.to_string_lossy().to_string());
 		}
 		let p = crate::core::install::download_core_binary(&app).await?;
+		if let Err(e) = crate::core::install::ensure_gateway_installed(&app).await {
+			tracing::error!("Failed to auto-install ryu-gateway: {}", e);
+		}
 		Ok(p.to_string_lossy().to_string())
 	}
 }

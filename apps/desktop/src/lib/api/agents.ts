@@ -440,11 +440,13 @@ function toCatalogEntry(a: AgentCatalogEntryWire): AgentCatalogEntry {
 
 /** Browse the installable agent catalog (every built-in, with detect/added flags). */
 export async function fetchAgentCatalog(
-	target: ApiTarget
+	target: ApiTarget,
+	signal?: AbortSignal
 ): Promise<AgentCatalogEntry[]> {
 	const json = await request<{ agents?: AgentCatalogEntryWire[] }>(
 		target,
-		"/api/agents/catalog"
+		"/api/agents/catalog",
+		signal ? { signal } : undefined
 	);
 	return (json.agents ?? []).map(toCatalogEntry);
 }

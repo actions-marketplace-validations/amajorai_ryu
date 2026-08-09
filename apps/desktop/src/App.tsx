@@ -65,6 +65,25 @@ function getTauriWindowLabel(): string {
 
 const WINDOW_LABEL = getTauriWindowLabel();
 
+const MB = 1024 * 1024;
+
+/** "42%" for the sidecar-install progress toast — this binary's own completion,
+ *  matching the line onboarding shows. Falls back to a raw size when the release
+ *  hub sends no `Content-Length` (no denominator, so no honest percentage), and
+ *  to a plain wait line before the first chunk lands. */
+function downloadProgressLabel(
+	received?: number,
+	total?: number | null
+): string {
+	if (!received) {
+		return "Starting the download…";
+	}
+	if (!total) {
+		return `${Math.round(received / MB)} MB`;
+	}
+	return `${Math.min(100, Math.round((received / total) * 100))}%`;
+}
+
 // Remembers the last server-confirmed "approved" so a transient control-plane
 // outage doesn't lock an already-approved user out of the app. Cleared on a
 // definite "pending" and on sign-out.
@@ -224,26 +243,53 @@ function MainApp() {
 	}, [setCoreStatus]);
 
 	useEffect(() => {
-		// Surface ryu-core auto-install progress emitted by the Rust setup hook when
-		// a fresh production install downloads the binary from the release hub. A
-		// no-op in dev (turbo owns the binary, so the backend never emits these).
-		let unlisten: (() => void) | undefined;
-		listen<{ phase: string; error?: string }>(
-			"core-install-progress",
-			({ payload }) => {
+		// Surface sidecar auto-install progress emitted by the Rust installers when a
+		// fresh production install pulls the binaries from the release hub. A no-op in
+		// dev (turbo owns them, so the backend never emits these).
+		//
+		// BOTH required binaries report here. Only core did before, so a local setup
+		// went quiet after "Ryu Core installed" while the 40 MB gateway — which Core
+		// hands every model call — downloaded with nothing on screen at all.
+		const unlisteners: (() => void)[] = [];
+		for (const [event, name] of [
+			["core-install-progress", "Ryu Core"],
+			["gateway-install-progress", "the model gateway"],
+		] as const) {
+			listen<{
+				error?: string;
+				phase: string;
+				received?: number;
+				total?: number | null;
+			}>(event, ({ payload }) => {
 				if (payload.phase === "downloading") {
-					toast.info("Downloading Ryu Core…");
+					// One long-lived progress toast, updated in place as bytes land: the
+					// installer streams the body and reports on the way, and a
+					// `type: "loading"` toast takes the shared progress slot so each
+					// update replaces the last instead of stacking. A single fire-and-
+					// forget "Downloading…" was the only feedback for the whole download.
+					toast.show({
+						title: `Downloading ${name}`,
+						description: downloadProgressLabel(payload.received, payload.total),
+						type: "loading",
+						duration: null,
+					});
+				} else if (payload.phase === "installing") {
+					toast.show({
+						title: `Installing ${name}`,
+						type: "loading",
+						duration: null,
+					});
 				} else if (payload.phase === "done") {
-					toast.success("Ryu Core installed");
+					toast.success(`${name} installed`);
 				} else if (payload.phase === "error") {
-					toast.error(payload.error ?? "Couldn't install Ryu Core");
+					toast.error(payload.error ?? `Couldn't install ${name}`);
 				}
-			}
-		).then((fn) => {
-			unlisten = fn;
-		});
+			}).then((fn) => unlisteners.push(fn));
+		}
 		return () => {
-			unlisten?.();
+			for (const fn of unlisteners) {
+				fn();
+			}
 		};
 	}, []);
 
