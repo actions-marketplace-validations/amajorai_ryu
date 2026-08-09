@@ -21,13 +21,27 @@ export type IslandState =
 export interface IslandSnapshot {
 	hasPromo: boolean;
 	state: IslandState;
+	/**
+	 * Hide the persistent island entirely. Set by surfaces that draw their OWN
+	 * island — today the landing hero's scripted workflow loop — so the page never
+	 * shows two Ryu islands at once (the same reason `/pitch` drops it wholesale).
+	 */
+	suppressed: boolean;
 }
 
 // Default: collapsed — only the logo circle shows, docked bottom-left. No
 // long/expanded island until the user taps or a promo
 // surfaces it.
-let snapshot: IslandSnapshot = { state: "collapsed", hasPromo: false };
-const SERVER_SNAPSHOT: IslandSnapshot = { state: "collapsed", hasPromo: false };
+let snapshot: IslandSnapshot = {
+	state: "collapsed",
+	hasPromo: false,
+	suppressed: false,
+};
+const SERVER_SNAPSHOT: IslandSnapshot = {
+	state: "collapsed",
+	hasPromo: false,
+	suppressed: false,
+};
 const listeners = new Set<() => void>();
 
 function emit(): void {
@@ -49,6 +63,14 @@ export function setIslandHasPromo(hasPromo: boolean): void {
 		return;
 	}
 	snapshot = { ...snapshot, hasPromo };
+	emit();
+}
+
+export function setIslandSuppressed(suppressed: boolean): void {
+	if (snapshot.suppressed === suppressed) {
+		return;
+	}
+	snapshot = { ...snapshot, suppressed };
 	emit();
 }
 

@@ -7,9 +7,9 @@ import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { cn } from "@ryu/ui/lib/utils";
 import { Library } from "lucide-react";
 import Link from "next/link";
-import AppShowcase from "./app-showcase.tsx";
 import { HeroAvatarSocialProof } from "./c-avatar-20.tsx";
 import { DownloadMenu } from "./download-menu.tsx";
+import HeroWorkflowLoop from "./hero-workflow-loop.tsx";
 import { landingHeadlineClass } from "./landing-typography.ts";
 
 const DECOSMIC_HREF = "https://decosmic.com";
@@ -106,7 +106,7 @@ export default function Hero() {
 					</div>
 				</div>
 
-				{/* The real desktop app + floating Island, interactive */}
+				{/* The real desktop app + floating Island, running one workflow on a loop */}
 				<div className="relative z-0 w-full px-4 py-6 md:px-8 md:py-8">
 					<div className="relative mx-auto flex min-h-[28rem] w-full max-w-7xl items-center justify-center md:min-h-[34rem]">
 						<div
@@ -114,7 +114,7 @@ export default function Hero() {
 							className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl bg-[url('/background.png')] bg-center bg-cover opacity-80"
 						/>
 						<div className="relative z-10 w-full max-w-6xl py-4 md:py-6">
-							<AppShowcase />
+							<HeroWorkflowLoop />
 						</div>
 					</div>
 				</div>

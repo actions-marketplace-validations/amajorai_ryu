@@ -57,6 +57,7 @@ import {
 	syncPolarCustomer,
 } from "./lib/payments.ts";
 import { runRefereeGrantHook } from "./lib/referral-grant-hook.ts";
+import { stepUpGate } from "./lib/step-up-plugin.ts";
 import {
 	ADMIN_ROLE,
 	APPROVED_ROLE,
@@ -457,6 +458,42 @@ async function resolveTeamClaims(
 	}
 }
 
+/**
+ * Stamp `ADMIN_ROLE` on an allowlisted address that does not carry it yet.
+ *
+ * The role is written ONCE, in the user-create hook, from `isAdminEmail(email)`.
+ * So an address added to `ADMIN_EMAILS` AFTER its account already existed never
+ * receives the role — the server-side gates still let them through (they read
+ * the allowlist directly), but everything that can only see the session, which
+ * is every client-side admin affordance and the Better Auth admin plugin's own
+ * `adminRoles` check, treats them as an ordinary user. That is an admin who is
+ * allowed in and cannot find the door.
+ *
+ * Reconciling on session create is the same lazy-heal idiom the referral code
+ * already uses, and it grants nothing new: the create hook's own comment says
+ * the allowlist is exactly who should hold this role, and the allowlist is
+ * already sufficient for the server-side admin gates and for impersonation
+ * (`support-access.ts`). This only makes the stored role agree with it.
+ *
+ * Fail-open: a lookup error must never block login.
+ */
+async function reconcileAdminRole(userId: string): Promise<void> {
+	try {
+		const record = await User.findById(userId)
+			.select("email role")
+			.lean<{ email?: string; role?: string }>();
+		if (!record?.email || record.role === ADMIN_ROLE) {
+			return;
+		}
+		if (!isAdminEmail(record.email)) {
+			return;
+		}
+		await User.updateOne({ _id: userId }, { $set: { role: ADMIN_ROLE } });
+	} catch (error) {
+		console.error("Failed to reconcile admin role:", error);
+	}
+}
+
 export const auth = betterAuth({
 	database: mongodbAdapter(client),
 	trustedOrigins: parseCorsOrigins(),
@@ -735,6 +772,10 @@ export const auth = betterAuth({
 		session: {
 			create: {
 				before: async (session: { userId: string }) => {
+					// Make the stored role agree with the admin allowlist before the
+					// session exists, so the very first render of this session already
+					// shows an allowlisted admin their admin affordances.
+					await reconcileAdminRole(session.userId);
 					// Start every new session scoped to the user's personal org so
 					// org-scoped reads (the control plane reads the `member` collection)
 					// resolve immediately on first login. Earliest membership = the
@@ -1316,5 +1357,11 @@ export const auth = betterAuth({
 				}
 			},
 		}),
+		// LAST on purpose. Before-hooks run in `[config.hooks.before, ...plugins]`
+		// order, so this has to sit after `bearer` — which rewrites an
+		// `Authorization` header into the session cookie — or the gate resolves no
+		// session for token callers and silently waves them through. See the note
+		// in lib/step-up-plugin.ts.
+		stepUpGate(),
 	],
 });

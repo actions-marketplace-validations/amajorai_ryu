@@ -76,7 +76,6 @@ export default function DeviceActivate({
 								disabled={isSubmitting}
 								errorMessage={error ?? undefined}
 								groupSize={DEVICE_CODE_GROUP}
-								hint="e.g. ABCD-1234"
 								length={length}
 								onChange={onUserCodeChange}
 								onComplete={onCodeComplete}

@@ -28,6 +28,39 @@ export function isAdminEmail(email: string | null | undefined): boolean {
 	return adminEmails().has(email.toLowerCase());
 }
 
+/**
+ * The second, historically-separate admin allowlist:
+ * `RYU_MARKETPLACE_ADMIN_EMAILS`, which gates marketplace moderation, staff
+ * picks and the affiliate program.
+ *
+ * It exists because those routers predate the `role` field and were written
+ * against their own variable. It is exported so those two routers can accept it
+ * EXPLICITLY, alongside `isAdmin`, rather than each re-reading `process.env`
+ * behind a private helper (which is how the variable came to be unset in
+ * production while every page in front of it looked fine). It is deliberately
+ * not part of `isAdmin` — see the note there. Same fail-closed shape as
+ * `adminEmails()`: unset contributes nobody.
+ */
+export function marketplaceAdminEmails(): Set<string> {
+	const raw = process.env.RYU_MARKETPLACE_ADMIN_EMAILS ?? "";
+	return new Set(
+		raw
+			.split(/[\s,]+/)
+			.map((e) => e.trim().toLowerCase())
+			.filter((e) => e.length > 0)
+	);
+}
+
+/** True when the given email is in the marketplace admin allowlist. */
+export function isMarketplaceAdminEmail(
+	email: string | null | undefined
+): boolean {
+	if (!email) {
+		return false;
+	}
+	return marketplaceAdminEmails().has(email.toLowerCase());
+}
+
 // One-time-per-process flag for the bypass warning below.
 let warnedWaitlistBypass = false;
 // One-time-per-process flag for the "forced on, but unapprovable" warning.
@@ -123,15 +156,34 @@ export const APPROVED_ROLE = "user";
 export const ADMIN_ROLE = "admin";
 
 /**
- * True when the user is an admin. Two independent designations both count:
+ * True when the user is a PLATFORM admin. Two independent designations count:
  *   - the `ADMIN_EMAILS` allowlist (the bootstrap authority; the first admin,
  *     before any DB row is stamped), and
  *   - the Better Auth admin-plugin `role` of ADMIN_ROLE ("admin"), delegated by
  *     an existing admin.
+ *
  * The env allowlist is server-only, so on the client this resolves to the role
  * check alone. The route guard (`requireAdminSession`) and every client-side
  * admin affordance MUST use this single predicate — otherwise a role-only admin
- * is shown an Admin entry that the guard then bounces back to /dashboard.
+ * is shown an Admin entry that the guard then bounces back to /dashboard, and
+ * every API route behind an admin page must use it too, or the page loads and
+ * every request on it 403s. That was the bug this predicate exists to prevent.
+ *
+ * `role: "admin"` is a REAL, separately-writable designation: the Better Auth
+ * admin plugin's `set-role` endpoint and direct DB stamps both produce accounts
+ * that are on no allowlist. Do not assume role ⟺ allowlist; production has an
+ * account that is one and not the other.
+ *
+ * NOT included, on purpose: `RYU_MARKETPLACE_ADMIN_EMAILS`. That list names
+ * marketplace moderators, and this predicate also gates campaign creation, the
+ * referral PAYOUT SWEEP, the certification queue that serves answer keys, and
+ * waitlist approvals. Folding it in here would hand every future marketplace
+ * moderator all of that silently. The marketplace and affiliate routers accept
+ * it explicitly alongside this predicate — see `isMarketplaceAdminEmail` — which
+ * keeps a marketplace-only admin scoped to the marketplace.
+ *
+ * The other gate deliberately NOT on this predicate is the fleet-global key
+ * vault (`packages/api/src/routers/key-vault.ts`) — see the comment there.
  */
 export function isAdmin(user: {
 	role?: string | null;

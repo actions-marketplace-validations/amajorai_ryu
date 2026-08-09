@@ -15,6 +15,7 @@
  */
 
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
+import { cn } from "@ryu/ui/lib/utils";
 import { AnimatePresence, motion } from "motion/react";
 import {
 	useCallback,
@@ -29,6 +30,18 @@ import { IslandChatView } from "../island/chat/island-chat.tsx";
 import type { IslandChatMessage } from "../island/chat/message-list.tsx";
 import { ExpandedPanelShell } from "../island/expanded-panel-shell.tsx";
 import { IslandSuggestionChip } from "../island/suggestion-chip.tsx";
+import {
+	CONTENT_SPRING,
+	DETAIL_SIZES,
+	ISLAND_CSS,
+	ISLAND_SPRING,
+	type IslandAction,
+	IslandActionPills,
+	LOGO_CIRCLE,
+	SHAPE_BASE,
+	SPLIT_GAP,
+	TRANSLUCENT_SKIN,
+} from "./island-shapes.tsx";
 import {
 	EDGE_MARGIN_PX,
 	nearestSnapZone,
@@ -56,105 +69,14 @@ const DEFAULT_ZONE = 6;
 // explicit list so the overlay maps over stable keys, not array indices.
 const ZONES = [0, 1, 2, 3, 4, 5, 6, 7, 8] as const;
 
-/* ── island-config (inlined from apps/island/.../island-config.ts) ─────────── */
-
-const LOGO_CIRCLE = { width: 40, height: 40, radius: 20 } as const;
-const SPLIT_GAP = 8;
-const DETAIL_SIZES: Partial<
-	Record<IslandState, { width: number; height: number; radius: number }>
-> = {
-	idle: { width: 96, height: 40, radius: 20 },
-	suggestion: { width: 300, height: 62, radius: 20 },
-	expanded: { width: 400, height: 480, radius: 28 },
-	promo: { width: 400, height: 440, radius: 28 },
-};
-const ACTION_PILL_WIDTH = 72;
-const ACTION_PILL_HEIGHT = 30;
-const SUGGESTION_STACK_GAP = 8;
-const ISLAND_SPRING = { type: "spring", bounce: 0.16, duration: 0.5 } as const;
-const CONTENT_SPRING = {
-	type: "spring",
-	bounce: 0.12,
-	duration: 0.35,
-} as const;
 // Ghost/overlay corner radius: match the dragged island's shape, capped so a big
 // panel is not over-rounded (verbatim from the real overlay.ts).
 const GHOST_RADIUS = Math.min(RESTING_PILL.height / 2, 28);
 
-/* ── shape skins (verbatim from Island.tsx — the "latest" Siri-border look) ── */
+// Width of the "Home" mini-island — narrower than the default action pill.
+const HOME_PILL_WIDTH = 56;
 
-const SHAPE_BASE =
-	"island-siri-border relative shrink-0 overflow-hidden shadow-2xl";
-const TRANSLUCENT_SKIN =
-	"bg-gradient-to-b from-neutral-950/85 via-neutral-950/65 to-neutral-900/35 text-neutral-100 backdrop-blur-2xl";
-const ACTION_PILL_BASE =
-	"island-siri-border relative flex shrink-0 items-center justify-center overflow-hidden whitespace-nowrap rounded-full font-medium text-xs shadow-xl backdrop-blur-2xl";
-const ACTION_PILL_PRIMARY =
-	"bg-amber-400/25 text-amber-50 hover:bg-amber-400/40";
-const ACTION_PILL_DEFAULT =
-	"bg-neutral-900/70 text-neutral-200 hover:bg-neutral-800/85";
-
-/* ── the Siri border + snap-zone overlay CSS, mirrored from the real app ────── */
-
-const ISLAND_CSS = `
-.island-siri-border::after {
-	content: "";
-	position: absolute;
-	inset: 0;
-	z-index: 2;
-	border-radius: inherit;
-	padding: 1.5px;
-	background: radial-gradient(
-		130% 150% at 50% 118%,
-		rgba(255, 255, 255, 0.9) 0%,
-		rgba(255, 255, 255, 0.45) 28%,
-		rgba(255, 255, 255, 0.12) 48%,
-		transparent 64%
-	);
-	-webkit-mask:
-		linear-gradient(#000 0 0) content-box,
-		linear-gradient(#000 0 0);
-	-webkit-mask-composite: xor;
-	mask-composite: exclude;
-	pointer-events: none;
-}
-.island-zone-overlay {
-	opacity: 0;
-	transition: opacity 0.14s ease;
-}
-.island-zone-overlay[data-shown="true"] {
-	opacity: 1;
-}
-.island-zone-backdrop {
-	position: absolute;
-	inset: 0;
-	background: rgba(0, 0, 0, 0.4);
-}
-.island-zone-ghost {
-	position: absolute;
-	box-sizing: border-box;
-	border: 1.5px dashed rgba(255, 255, 255, 0.35);
-	background: rgba(255, 255, 255, 0.04);
-	transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
-}
-.island-zone-ghost.active {
-	border: 2px solid rgba(255, 255, 255, 0.95);
-	background: rgba(130, 175, 255, 0.18);
-	box-shadow:
-		0 0 0 1px rgba(8, 10, 16, 0.3),
-		0 10px 44px rgba(60, 110, 220, 0.5);
-}
-`;
-
-/* ── action mini-islands (verbatim morph from Island.tsx) ──────────────────── */
-
-interface SuggestionAction {
-	key: string;
-	label: string;
-	onClick: () => void;
-	primary?: boolean;
-	width?: number;
-}
+/* ── action mini-islands (shapes live in island-shapes.tsx) ───────────────── */
 
 function SuggestionActionPills({
 	state,
@@ -174,37 +96,13 @@ function SuggestionActionPills({
 	if (state !== "suggestion") {
 		return null;
 	}
-	const actions: SuggestionAction[] = [
+	const actions: IslandAction[] = [
 		{ key: "accept", label: acceptLabel, onClick: onAccept, primary: true },
 		{ key: "snooze", label: "Snooze", onClick: onSnooze },
 		{ key: "dismiss", label: "Dismiss", onClick: onDismiss },
-		{ key: "home", label: "Home", onClick: onHome, width: 56 },
+		{ key: "home", label: "Home", onClick: onHome, width: HOME_PILL_WIDTH },
 	];
-	return (
-		<div
-			className="flex"
-			style={{
-				gap: SPLIT_GAP,
-				marginLeft: LOGO_CIRCLE.width + SPLIT_GAP,
-				marginTop: SUGGESTION_STACK_GAP,
-			}}
-		>
-			{actions.map((action, index) => (
-				<motion.button
-					animate={{ width: action.width ?? ACTION_PILL_WIDTH, opacity: 1 }}
-					className={`${ACTION_PILL_BASE} ${action.primary ? ACTION_PILL_PRIMARY : ACTION_PILL_DEFAULT}`}
-					initial={{ width: 0, opacity: 0 }}
-					key={action.key}
-					onClick={action.onClick}
-					style={{ height: ACTION_PILL_HEIGHT }}
-					transition={{ ...ISLAND_SPRING, delay: index * 0.05 }}
-					type="button"
-				>
-					{action.label}
-				</motion.button>
-			))}
-		</div>
-	);
+	return <IslandActionPills actions={actions} />;
 }
 
 /* ── the island detail content, by state ───────────────────────────────────── */
@@ -416,7 +314,11 @@ function IslandColumn({
 							<AnimatePresence initial={false} mode="wait">
 								<motion.div
 									animate={{ opacity: 1, scale: 1, y: 0 }}
-									className={`${detailContentClass}${stripIsHandle ? "cursor-grab touch-none active:cursor-grabbing" : ""}`}
+									className={cn(
+										detailContentClass,
+										stripIsHandle &&
+											"cursor-grab touch-none active:cursor-grabbing"
+									)}
 									exit={{ opacity: 0, scale: 0.92, y: -6 }}
 									initial={{ opacity: 0, scale: 0.92, y: 6 }}
 									key={state}
@@ -777,7 +679,12 @@ function FloatingIsland({
 
 // Mounted once in the web root layout so the island appears on every page.
 export function GlobalIsland() {
-	const { state, hasPromo } = useIslandStore();
+	const { state, hasPromo, suppressed } = useIslandStore();
+	// A surface that draws its own island (the landing hero's workflow loop) takes
+	// the floor while it is on screen — one island at a time, always.
+	if (suppressed) {
+		return null;
+	}
 	return (
 		<FloatingIsland
 			hasPromo={hasPromo}

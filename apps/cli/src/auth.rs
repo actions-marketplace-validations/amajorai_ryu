@@ -243,26 +243,58 @@ async fn check_resp(resp: reqwest::Response) -> Result<serde_json::Value> {
     resp.json().await.context("failed to parse response")
 }
 
-async fn authed_get(backend_url: &str, path: &str, token: &str) -> Result<serde_json::Value> {
-    let resp = HTTP
-        .get(format!("{backend_url}{path}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .context("network request failed")?;
+/// Send a request; if the control plane answers "prove it's you first", run the
+/// terminal prompt and send it again.
+///
+/// The retry is what makes the gate usable from a shell: without it a `ryu`
+/// command against a gated endpoint would simply fail with a code the user has
+/// no way to supply. `try_clone` is what allows the replay — it returns None
+/// only for a streaming body, which none of these helpers use.
+async fn send_with_step_up(
+    request: reqwest::RequestBuilder,
+    backend_url: &str,
+    token: &str,
+) -> Result<serde_json::Value> {
+    let replay = request.try_clone();
+    let resp = request.send().await.context("network request failed")?;
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        if crate::step_up::is_step_up_required(&body) {
+            let scope = crate::step_up::scope_from_body(&body)
+                .ok_or_else(|| anyhow!("the server asked for confirmation but named no scope"))?;
+            crate::step_up::ensure(backend_url, token, &scope).await?;
+            let again = replay
+                .ok_or_else(|| anyhow!("could not retry the request after confirming"))?;
+            let resp = again.send().await.context("network request failed")?;
+            return check_resp(resp).await;
+        }
+        anyhow::bail!("{} (HTTP 403)", extract_error(&body));
+    }
     check_resp(resp).await
 }
 
-async fn authed_delete(backend_url: &str, path: &str, token: &str) -> Result<serde_json::Value> {
-    let resp = HTTP
-        .delete(format!("{backend_url}{path}"))
+fn authed(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    builder
         .header("Authorization", format!("Bearer {token}"))
         .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .context("network request failed")?;
-    check_resp(resp).await
+}
+
+async fn authed_get(backend_url: &str, path: &str, token: &str) -> Result<serde_json::Value> {
+    send_with_step_up(
+        authed(HTTP.get(format!("{backend_url}{path}")), token),
+        backend_url,
+        token,
+    )
+    .await
+}
+
+async fn authed_delete(backend_url: &str, path: &str, token: &str) -> Result<serde_json::Value> {
+    send_with_step_up(
+        authed(HTTP.delete(format!("{backend_url}{path}")), token),
+        backend_url,
+        token,
+    )
+    .await
 }
 
 async fn authed_put_json(
@@ -271,16 +303,14 @@ async fn authed_put_json(
     token: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let resp = HTTP
-        .put(format!("{backend_url}{path}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .json(body)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .context("network request failed")?;
-    check_resp(resp).await
+    send_with_step_up(
+        authed(HTTP.put(format!("{backend_url}{path}")), token)
+            .header("Content-Type", "application/json")
+            .json(body),
+        backend_url,
+        token,
+    )
+    .await
 }
 
 // ── Full session (richer than fetch_user_info) ────────────────────────────

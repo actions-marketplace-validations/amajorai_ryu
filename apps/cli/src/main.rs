@@ -5,6 +5,7 @@ mod bootstrap;
 mod chat;
 mod config;
 mod nodes;
+mod step_up;
 mod ui;
 
 #[cfg(test)]
