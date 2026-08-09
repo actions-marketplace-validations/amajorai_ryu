@@ -52,6 +52,7 @@
         "@ryu/hotkeys": "workspace:*",
         "@ryu/marketplace": "workspace:*",
         "@ryu/settings": "workspace:*",
+        "@ryu/step-up": "workspace:*",
         "@ryu/ui": "workspace:*",
         "@ryuhq/core-client": "workspace:*",
         "@ryuhq/protocol": "workspace:*",
@@ -277,6 +278,7 @@
         "@ryu/app-host": "workspace:*",
         "@ryu/command": "workspace:*",
         "@ryu/hotkeys": "workspace:*",
+        "@ryu/step-up": "workspace:*",
         "@ryu/ui": "workspace:*",
         "@streamdown/code": "^1.1.1",
         "@tabler/icons-react": "^3.41.1",
@@ -467,6 +469,14 @@
         "next",
         "react-router-dom",
       ],
+    },
+    "packages/step-up": {
+      "name": "@ryu/step-up",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@ryu/config": "workspace:*",
+        "typescript": "^5",
+      },
     },
     "packages/ui": {
       "name": "@ryu/ui",
@@ -1777,6 +1787,8 @@
     "@ryu/marketplace": ["@ryu/marketplace@workspace:packages/marketplace"],
 
     "@ryu/settings": ["@ryu/settings@workspace:packages/settings"],
+
+    "@ryu/step-up": ["@ryu/step-up@workspace:packages/step-up"],
 
     "@ryu/ui": ["@ryu/ui@workspace:packages/ui"],
 

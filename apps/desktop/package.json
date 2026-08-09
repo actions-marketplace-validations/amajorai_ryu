@@ -39,6 +39,7 @@
     "@ryu/hotkeys": "workspace:*",
     "@ryu/marketplace": "workspace:*",
     "@ryu/settings": "workspace:*",
+    "@ryu/step-up": "workspace:*",
     "@ryu/ui": "workspace:*",
     "@ryuhq/core-client": "workspace:*",
     "@ryuhq/protocol": "workspace:*",
