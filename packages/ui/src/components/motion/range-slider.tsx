@@ -28,6 +28,13 @@ const MAX_TICKS = 50;
 
 export interface RangeSliderProps extends SliderOptions {
 	className?: string;
+	/**
+	 * Colour of the filled span, as any CSS colour. Left unset the fill keeps its
+	 * neutral `foreground/15` tone; set it when the level itself carries meaning
+	 * (the composer's effort ladder ramps its fill green → purple) and the change
+	 * cross-fades as the value moves.
+	 */
+	fillColor?: string;
 	/** Render a tick dot at each step. */
 	showTicks?: boolean;
 }
@@ -40,6 +47,7 @@ export interface RangeSliderProps extends SliderOptions {
 export function RangeSlider({
 	showTicks = true,
 	className,
+	fillColor,
 	...options
 }: RangeSliderProps) {
 	const reduce = useReducedMotion();
@@ -82,10 +90,16 @@ export function RangeSlider({
 			)}
 			data-slot="slider"
 		>
-			{/* fill — runs from the left edge to the thumb, consistent tone */}
+			{/* fill — runs from the left edge to the thumb. Neutral by default; a
+			    `fillColor` tints it and cross-fades as the value lands elsewhere. */}
 			<motion.div
-				className="absolute inset-y-0 left-0 bg-foreground/15"
-				style={{ width: left }}
+				className={cn(
+					"absolute inset-y-0 left-0",
+					fillColor
+						? "transition-[background-color] duration-300 ease-out"
+						: "bg-foreground/15"
+				)}
+				style={{ width: left, backgroundColor: fillColor }}
 			/>
 
 			{/* Ticks, inset by half the thumb's width. That inset is the span the

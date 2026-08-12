@@ -247,6 +247,14 @@ fn default_grant_allowlist() -> Vec<String> {
         "mcp:spider",
         "mcp:agentbrowser",
         "mcp:scrapling",
+        // `@ryu/news` and `@ryu/tuition` are apps rather than plugins, but they hit
+        // the same rule for the same reason: each declares its OWN server in
+        // `mcp_servers` (`news`, `tuition`) and grants itself `mcp:<that server>`.
+        // Owning the server does not help — `mcp` is reserved, so the owner-scoped
+        // rule skips it and the exact string has to be here or a disable→re-enable
+        // is denied with GrantsDenied.
+        "mcp:news",
+        "mcp:tuition",
         // `exa` is a declarative `http` plugin (fixtures/exa.manifest.json), so it
         // declares an egress grant, not an `mcp:<name>` server grant — its enable
         // path validates this exact scope instead.
