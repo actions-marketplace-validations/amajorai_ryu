@@ -1,6 +1,6 @@
 import { useStepUp as useSharedStepUp } from "@ryu/blocks/web/use-step-up.tsx";
 import { stepUpClient } from "@/lib/step-up.ts";
-import { useSettingsDialog } from "@/store/useSettingsDialog.ts";
+import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 
 /**
  * The desktop app's binding of the shared "confirm it's you" prompt.
