@@ -7,7 +7,7 @@
   "keywords": ["canvas", "media", "nodes", "generative", "workflow"],
   "category": "Creative",
   "icon": "ai-image",
-  "iconDither": { "from": 225, "to": 259, "direction": "right" },
+  "iconDither": { "from": 225, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

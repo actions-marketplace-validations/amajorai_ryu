@@ -2,6 +2,7 @@
 
 // beui.dev/components/motion/range-slider
 
+import { useContrastInk } from "@ryu/ui/hooks/use-contrast-ink.ts";
 import { type SliderOptions, useSlider } from "@ryu/ui/hooks/use-slider.ts";
 import { SPRING_GLIDE, SPRING_PRESS } from "@ryu/ui/lib/ease";
 import { cn } from "@ryu/ui/lib/utils";
@@ -48,6 +49,10 @@ export function FluidSlider({
 	...options
 }: FluidSliderProps) {
 	const reduce = useReducedMotion();
+	// The fill is `--primary`, which the Appearance colour picker and plugin
+	// themes can set to anything — so the label that rides on top of it resolves
+	// its ink from the live token rather than assuming light-on-brand.
+	const fillInk = useContrastInk("--primary");
 	const step = options.step ?? 1;
 	const formatValue =
 		format ?? ((v: number) => v.toFixed(decimalsForStep(step)));
@@ -99,8 +104,11 @@ export function FluidSlider({
 			    as the fill covers it and lines up glyph for glyph with the copy
 			    underneath. The clip's rounded right edge is the liquid cap. */}
 			<motion.div className="absolute inset-0" style={{ clipPath }}>
-				<div className="absolute inset-0 bg-foreground" />
-				<div className="pointer-events-none absolute inset-0 flex items-center justify-between px-5 font-medium text-background text-sm">
+				<div className="absolute inset-0 bg-primary" />
+				<div
+					className="pointer-events-none absolute inset-0 flex items-center justify-between px-5 font-medium text-sm"
+					style={{ color: fillInk }}
+				>
 					{row}
 				</div>
 			</motion.div>
@@ -110,7 +118,7 @@ export function FluidSlider({
 			<button
 				type="button"
 				{...sliderProps}
-				className="absolute inset-0 touch-none rounded-full outline-none ring-foreground/40 ring-inset focus-visible:ring-4"
+				className="absolute inset-0 touch-none rounded-full outline-none ring-primary/40 ring-inset focus-visible:ring-4"
 			/>
 		</motion.div>
 	);

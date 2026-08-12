@@ -7,7 +7,7 @@
   "tagline": "Let the agent delegate work to child agents",
   "keywords": ["subagent", "delegation", "automation", "agent"],
   "icon": "user-multiple-02",
-  "iconDither": { "from": 12, "to": 46, "direction": "down" },
+  "iconDither": { "from": 12, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

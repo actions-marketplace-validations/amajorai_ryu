@@ -106,14 +106,17 @@ export default function Hero() {
 					</div>
 				</div>
 
-				{/* The real desktop app + floating Island, running one workflow on a loop */}
+				{/* The real desktop app + floating Island, running one workflow on a loop.
+				    The background image is read as the DESKTOP WALLPAPER: the window is
+				    inset in it and the Island floats on it, above the window — so the
+				    padding here is the wallpaper margin, not decoration. */}
 				<div className="relative z-0 w-full px-4 py-6 md:px-8 md:py-8">
 					<div className="relative mx-auto flex min-h-[28rem] w-full max-w-7xl items-center justify-center md:min-h-[34rem]">
 						<div
 							aria-hidden="true"
 							className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl bg-[url('/background.png')] bg-center bg-cover opacity-80"
 						/>
-						<div className="relative z-10 w-full max-w-6xl py-4 md:py-6">
+						<div className="relative z-10 w-full max-w-6xl py-8 md:py-12">
 							<HeroWorkflowLoop />
 						</div>
 					</div>

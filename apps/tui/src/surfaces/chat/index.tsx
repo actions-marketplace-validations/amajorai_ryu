@@ -276,9 +276,9 @@ function ChatSurface({ active, paneId }: SurfaceProps) {
 			}
 			const [cmd, ...rest] = text.slice(1).split(WHITESPACE);
 			const arg = rest.join(" ").trim();
-			// /goal and /proof are owned by Core's server-side turn-hooks: let them
-			// through as normal chat messages (not handled here).
-			if (cmd === "goal" || cmd === "proof") {
+			// /goal, /proof and /receipt are owned by Core's server-side turn-hooks:
+			// let them through as normal chat messages (not handled here).
+			if (cmd === "goal" || cmd === "proof" || cmd === "receipt") {
 				return false;
 			}
 			switch (cmd) {

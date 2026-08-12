@@ -110,6 +110,10 @@ mod replicate_auth;
 mod routing_policy;
 mod rtk_config;
 mod runnable;
+/// The OS-style "boot with the extension layer off" switch (apps, plugins,
+/// skills, user MCP servers, the scheduler). Resolved once, below, BEFORE
+/// anything it suppresses has a chance to spawn.
+mod safe_mode;
 mod sandbox;
 mod scheduler;
 mod search_host;
@@ -255,6 +259,13 @@ async fn main() {
     // `release` profile, and any env var the user already set wins. The matching
     // sidecar SPAWN ports are threaded through `profile::port` in `sidecar/**`.
     crate::profile::apply_env_defaults();
+
+    // PATH enrichment: add the user's own bin directories that a GUI launcher
+    // does not pass down. Must run before ANY CLI probe or spawn, so agent
+    // detection and agent execution resolve names against the same PATH — see
+    // `PathManager::enrich_process_path` for why a desktop-launched Core would
+    // otherwise report every installed agent CLI as missing.
+    crate::sidecar::path_manager::PathManager::enrich_process_path();
 
     // Node auth token: resolve `RYU_TOKEN` (operator env > persisted file > mint a
     // fresh one) and EXPORT it back into this process's environment.
@@ -837,6 +848,35 @@ async fn main() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open preferences store: {e:#}"),
     };
+    // ── Safe Mode (see `crate::safe_mode`) ────────────────────────────────────
+    //
+    // Resolved HERE and nowhere else. Everything the flag suppresses — the
+    // default-on plugin seed, the MCP registry, the sidecar `start_all`, the
+    // scheduler tick loop — is constructed further down this function, so this
+    // read has to land ahead of all of them. Consulting the flag at request time
+    // instead would mean boot already paid every cost the user is trying to
+    // measure away, and the switch would look like it did nothing.
+    //
+    // Three tiers, env → sentinel file → preference. The sentinel exists so a node
+    // that cannot come up (wedged store, hanging boot) can still be forced into
+    // safe mode without HTTP or a healthy `preferences.db`.
+    {
+        let pref = preferences
+            .get(crate::safe_mode::SAFE_MODE_PREF_KEY)
+            .await
+            .ok()
+            .flatten();
+        let env = std::env::var(crate::safe_mode::SAFE_MODE_ENV).ok();
+        let source = crate::safe_mode::resolve_from(env.as_deref(), pref.as_deref());
+        crate::safe_mode::set_resolved(source);
+        if source != crate::safe_mode::SafeModeSource::Off {
+            tracing::warn!(
+                source = source.as_str(),
+                "SAFE MODE: booting with apps, plugins, skills, user MCP servers and \
+                 the scheduler disabled. Chat, agents and settings stay available."
+            );
+        }
+    }
     // Mesh enable (#478): seed the desktop-driven `mesh-enabled` pref into the
     // process-global that `ryu_mesh::is_enabled()` consults. The `RYU_MESH_ENABLED`
     // env still wins when set. Placed here — after the prefs store opens and BEFORE
@@ -1212,7 +1252,15 @@ async fn main() {
     //
     // One-time and user-respecting: a plugin with any existing record (enabled OR
     // disabled) is left alone, so a user's disable survives restarts.
-    {
+    //
+    // Skipped entirely under Safe Mode. Both calls WRITE lifecycle records, and
+    // safe mode's whole non-destructive property is that it never writes the
+    // `enabled` column — a seed or a migration running in a diagnostic boot would
+    // persist state the user never asked for. Both are one-time and gated on
+    // record presence / schema version, so the next normal boot performs them.
+    if crate::safe_mode::is_active() {
+        tracing::info!("safe mode: skipping default-on plugin seed and one-time migrations");
+    } else {
         let manifests = app_manifests.read().await.clone();
         crate::plugins::seed::seed_default_on(&app_store, &manifests).await;
         // Repairs ALREADY-INSTALLED stores that the seed loop deliberately skips
@@ -1508,19 +1556,19 @@ async fn main() {
     // beacon (OFF by default) before `preferences` moves into ServerState below.
     let stats_preferences = preferences.clone();
 
-    // Auto-rename (ChatGPT/Claude-style): the store sends each conversation that
-    // gets its first user message on this channel; the consumer (spawned below,
-    // once `ServerState` exists) asks the default local model for a concise title.
-    let (auto_title_tx, auto_title_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // NOTE: chat auto-rename is NOT wired here. Core titles a conversation from
+    // its first user message when it persists the turn, and the LLM rename on top
+    // of that belongs to the `@ryu/chat-title` turn-hook plugin (default-on),
+    // which owns the cadence, the toggle and the model. The background titler that
+    // used to run from this file could only reach an active *local* engine, so it
+    // no-opped on cloud-only nodes and left every chat on its placeholder.
     // Room-keyed realtime fan-out registry (Phase 1). Built ONCE here and shared
     // (Clone is Arc-backed) between the conversation store — which publishes a live
     // `Events` frame on every persisted turn — and `ServerState` below, which the
     // `/api/realtime/ws` handler subscribes against. Both MUST be the same instance
     // or publishes reach a registry no socket is listening to.
     let realtime = ryu_realtime::RoomRegistry::new();
-    let conversations = conversations
-        .with_auto_title(auto_title_tx)
-        .with_realtime(realtime.clone());
+    let conversations = conversations.with_realtime(realtime.clone());
 
     // Authoritative CRDT document engine (Phase 3). Backed by `~/.ryu/collab.db`
     // (an append-only update log + compacted snapshots), keyed by document id.
@@ -1652,15 +1700,6 @@ async fn main() {
         });
     }
 
-    // Background auto-rename consumer: drains conversation ids whose first user
-    // message just landed and titles each with the default local model.
-    {
-        let title_state = server_state.clone();
-        tokio::spawn(async move {
-            crate::server::auto_title::run_auto_title_loop(title_state, auto_title_rx).await;
-        });
-    }
-
     // Resolve the bind address ONCE (the same chain the listener uses below) and
     // hand it to the fail-closed gate so a `--bind=0.0.0.0` flag cannot bypass the
     // RYU_BIND-only check (#478 V1).
@@ -1767,9 +1806,18 @@ async fn main() {
     // Start the scheduled-job tick loop (reloads jobs from disk so schedules
     // survive a Core restart). The App store rides along so a job an App created
     // stops firing while that App is disabled or uninstalled.
-    scheduler::Scheduler::new()
-        .with_apps(scheduler_apps)
-        .spawn();
+    //
+    // Not spawned under Safe Mode. A scheduler is a background CPU source that
+    // fires work the user did not ask for during the run they are measuring —
+    // cron jobs, monitor checks, warmup pings. Jobs are reloaded from disk on
+    // every boot, so nothing is lost: a normal restart resumes the schedule.
+    if crate::safe_mode::is_active() {
+        tracing::info!("safe mode: scheduled-job tick loop not started");
+    } else {
+        scheduler::Scheduler::new()
+            .with_apps(scheduler_apps)
+            .spawn();
+    }
 
     // Start the opt-in cross-device conversation sync loop (M10). A no-op every
     // tick until the user opts in (env `RYU_SYNC_ENABLED` or the
@@ -1972,6 +2020,23 @@ async fn main() {
     if ryu_mesh::is_enabled() {
         setup.mark_installed("tailscale").await;
         tracing::info!("mesh: enabled, Tailscale daemon will start with the other sidecars");
+        // Self-heal a mesh-on node with no client: the pref says this machine wants
+        // a tailnet, so get it one rather than letting `start_all` log a missing
+        // binary the user never sees. Background (this is a ~38 MB transfer or a
+        // `brew install`) and gated on `is_enabled()` above, so a mesh-OFF install
+        // still never downloads anything — the invariant the `startup_order` note
+        // and `seed_installed_from_disk`'s skip both protect. The task starts the
+        // daemon itself, after `start_all` has already skipped it.
+        if crate::sidecar::tailscale::ensure_mesh_binaries().is_err()
+            && crate::sidecar::tailscale::downloader::can_install()
+        {
+            tracing::info!("mesh: enabled but no Tailscale client — installing one now");
+            crate::server::spawn_mesh_client_install(
+                download_center.clone(),
+                Arc::clone(&sidecars),
+                Arc::clone(&install_status),
+            );
+        }
     }
 
     // Start sidecars in background (only installed ones will actually start)

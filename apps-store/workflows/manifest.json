@@ -9,7 +9,7 @@
   "icon": "workflow-square-01",
   "iconDither": {
     "from": 299,
-    "to": 333,
+    "to": "transparent",
     "direction": "down"
   },
   "surfaces": {

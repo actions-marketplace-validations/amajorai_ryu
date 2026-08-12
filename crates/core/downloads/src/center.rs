@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,6 +51,14 @@ type Term = Option<std::result::Result<PathBuf, String>>;
 struct TaskCtl {
     control: watch::Sender<Control>,
     done: watch::Sender<Term>,
+    /// Monotonic registration stamp. Byte transfers dedup by id in [`DownloadCenter::spawn`],
+    /// but an indeterminate registration cannot (its future's output type is the
+    /// caller's, so a second caller can't be handed the first one's result) — it
+    /// replaces the map entry instead. Without a stamp the FIRST of two same-id
+    /// registrations to finish would then delete the SECOND one's live control
+    /// handle, leaving a running install that Cancel silently no-ops on. Removal
+    /// is therefore conditional on the stamp still being the caller's own.
+    seq: u64,
 }
 
 /// A resizable concurrency gate.
@@ -129,6 +137,8 @@ struct Inner {
     /// survives a restart even though live terminal tasks are dropped from the
     /// active registry. Persisted to `~/.ryu/downloads-history.json`.
     history: Mutex<Vec<DownloadTask>>,
+    /// Source of the [`TaskCtl::seq`] stamps.
+    next_seq: AtomicU64,
 }
 
 /// Process-wide download registry. Cheap to clone (wraps an `Arc`).
@@ -251,6 +261,7 @@ impl DownloadCenter {
                 tuner_started: AtomicBool::new(false),
                 client,
                 history: Mutex::new(Vec::new()),
+                next_seq: AtomicU64::new(1),
             }),
         }
     }
@@ -523,6 +534,7 @@ impl DownloadCenter {
         };
         let (control_tx, mut control_rx) = watch::channel(Control::Run);
         let (done_tx, _done_rx) = watch::channel::<Term>(None);
+        let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
         {
             let mut handles = self.inner.handles.lock().await;
             handles.insert(
@@ -530,6 +542,7 @@ impl DownloadCenter {
                 TaskCtl {
                     control: control_tx,
                     done: done_tx,
+                    seq,
                 },
             );
         }
@@ -554,7 +567,14 @@ impl DownloadCenter {
             r = &mut fut => Some(r),
         };
 
-        self.inner.handles.lock().await.remove(&id);
+        // Only retire OUR registration — a later same-id registration owns the map
+        // entry now, and dropping it would strand a running install with no Cancel.
+        {
+            let mut handles = self.inner.handles.lock().await;
+            if handles.get(&id).is_some_and(|h| h.seq == seq) {
+                handles.remove(&id);
+            }
+        }
         match outcome {
             Some(Ok(value)) => {
                 patch(&self.inner, &id, false, |t| {
@@ -664,6 +684,7 @@ impl DownloadCenter {
                 TaskCtl {
                     control: control_tx.clone(),
                     done: done_tx.clone(),
+                    seq: self.inner.next_seq.fetch_add(1, Ordering::Relaxed),
                 },
             );
             drop(handles);
@@ -1425,6 +1446,88 @@ mod tests {
             .unwrap();
         assert_eq!(t.state, DownloadState::Failed);
         assert!(t.retryable);
+    }
+
+    /// Two indeterminate registrations can legitimately share an id — the same
+    /// artifact installed from two surfaces (an agent runtime reachable from both
+    /// the Agents tab and the Engines tab), or a retry racing the first attempt.
+    /// Unlike a byte transfer, they cannot dedup: the future's output type belongs
+    /// to the caller, so the second registration replaces the map entry.
+    ///
+    /// The bug that guards against: when the FIRST one finished it removed the id
+    /// unconditionally, deleting the SECOND one's live control handle — so Cancel
+    /// on the still-running install silently no-opped and the row could never be
+    /// stopped. Removal is stamped, so only the owning registration retires it.
+    #[tokio::test]
+    async fn a_finished_registration_does_not_strand_a_later_same_id_one() {
+        ensure_host();
+        let center = DownloadCenter::with_default_client();
+
+        // Wait until the registration wearing `label` owns the id.
+        async fn until_registered(center: &DownloadCenter, label: &str) {
+            for _ in 0..1000 {
+                if center
+                    .snapshot()
+                    .await
+                    .iter()
+                    .any(|t| t.id == "ind:shared" && t.label == label)
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("registration `{label}` never appeared");
+        }
+
+        let (release_first, first_held) = tokio::sync::oneshot::channel::<()>();
+        let first = {
+            let center = center.clone();
+            tokio::spawn(async move {
+                center
+                    .register_indeterminate(
+                        "ind:shared".into(),
+                        DownloadKind::Agent,
+                        "first".into(),
+                        async {
+                            let _ = first_held.await;
+                            Ok(1)
+                        },
+                    )
+                    .await
+            })
+        };
+        until_registered(&center, "first").await;
+
+        let (_release_second, second_held) = tokio::sync::oneshot::channel::<()>();
+        let second = {
+            let center = center.clone();
+            tokio::spawn(async move {
+                center
+                    .register_indeterminate(
+                        "ind:shared".into(),
+                        DownloadKind::Agent,
+                        "second".into(),
+                        async {
+                            let _ = second_held.await;
+                            Ok(2)
+                        },
+                    )
+                    .await
+            })
+        };
+        until_registered(&center, "second").await;
+
+        // The FIRST registration finishes while the SECOND still holds the id.
+        drop(release_first);
+        assert_eq!(first.await.expect("task joined").unwrap(), 1);
+
+        // The second is still cancelable: its control handle survived.
+        assert!(
+            center.cancel("ind:shared").await,
+            "cancel must still reach the registration that owns the id"
+        );
+        let outcome = second.await.expect("task joined");
+        assert!(outcome.is_err(), "a cancelled registration returns an error");
     }
 
     /// A download waiting on the concurrency gate must report `Queued`, not

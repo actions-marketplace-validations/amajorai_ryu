@@ -397,7 +397,18 @@ export function ComposerSettingsMenu({
 											</span>
 										</span>
 									</DropdownMenuSubTrigger>
-									<DropdownMenuSubContent className="max-h-80 min-w-[220px] max-w-[300px] overflow-hidden p-0">
+									{/* Same rule as the universal picker's `SettingSub`: a
+									    `renderContent` body brings its own scroller (double
+									    scrollers feel stuck), but a plain item list has none,
+									    so it must scroll here or be clipped unreachably. */}
+									<DropdownMenuSubContent
+										className={cn(
+											"max-h-80 min-w-[220px] max-w-[300px] p-0",
+											section.renderContent
+												? "overflow-hidden"
+												: "overflow-y-auto"
+										)}
+									>
 										{sectionBody}
 									</DropdownMenuSubContent>
 								</DropdownMenuSub>

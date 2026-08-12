@@ -178,6 +178,9 @@ export interface AgentChatProps {
 	 * context-usage ring in each completed assistant turn's stats footer.
 	 */
 	contextSize?: number;
+	/** Identity of the thread being shown. Fires the open-at-bottom jump once per
+	 * conversation; pass the conversation id when the surface has one. */
+	conversationKey?: string;
 	/** Current signed-in user info for displaying avatar/name on own messages. */
 	currentUser?: {
 		avatar?: string;
@@ -235,6 +238,13 @@ export interface AgentChatProps {
 		action: ContributedMessageAction,
 		value?: string
 	) => void;
+	/** Notified whenever the composer's text changes, including when a send clears
+	 * it (called with `""`). Deliberately generic: the surface decides what an
+	 * unsent draft is worth — the desktop persists it through `@ryu/drafts` so it
+	 * survives the tab, another surface may ignore it entirely. This component
+	 * still OWNS the text; the callback only observes it. Debounce on your side —
+	 * this fires per keystroke. */
+	onDraftChange?: (draft: string) => void;
 	/** Edit a previously-sent user message into a new version (ChatGPT/Claude-style
 	 * branching); receives the message id and the new text. When omitted, no edit
 	 * affordance is shown. */
@@ -248,6 +258,14 @@ export interface AgentChatProps {
 		rating: "up" | "down" | null,
 		isLatest: boolean
 	) => void;
+
+	/**
+	 * Open the full context-window breakdown (the workspace Context tab). When
+	 * provided, the composer's context ring becomes a button; omit it and the
+	 * ring stays a read-only readout, which is what surfaces with no workspace
+	 * docks (island, extension) want.
+	 */
+	onOpenContext?: () => void;
 	/** Open a project file referenced by assistant output or tool summaries. */
 	onOpenFile?: (path: string) => void;
 	/** Quote a text selection in a message. When provided, selecting message text

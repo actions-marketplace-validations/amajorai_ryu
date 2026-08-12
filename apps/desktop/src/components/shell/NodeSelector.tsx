@@ -10,23 +10,29 @@ import {
 	ComputerIcon,
 	Copy01Icon,
 	CpuIcon,
+	Database01Icon,
 	Delete01Icon,
 	DollarCircleIcon,
 	Download04Icon,
 	File01Icon,
 	FileSearchIcon,
 	GlobeIcon,
+	Image01Icon,
 	LaptopIcon,
 	Layers01Icon,
 	Link01Icon,
 	Mic01Icon,
 	PackageIcon,
+	RankingIcon,
+	Router01Icon,
 	Search01Icon,
+	ServerStack01Icon,
 	Settings01Icon,
 	Share08Icon,
 	ViewIcon,
 	ViewOffSlashIcon,
 	VolumeHighIcon,
+	WifiConnected01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
@@ -100,8 +106,16 @@ import type {
 import {
 	BEARER_SOURCE_NONE,
 	fetchMeshPeers,
+	fetchMeshStatus,
 	fetchWebhookIngressStatus,
 	ingressLabel,
+	MESH_BACKEND_HEADSCALE,
+	MESH_BACKEND_PREF,
+	MESH_BACKEND_TAILSCALE,
+	MESH_LOGIN_SERVER_PREF,
+	type MeshBackend,
+	parseMeshBackend,
+	setMeshEnabled,
 	type WebhookIngressStatus,
 } from "@/src/lib/api/mesh.ts";
 import {
@@ -118,8 +132,10 @@ import {
 	DESKTOP_TTS_ENGINE_KEY,
 	DESKTOP_TTS_VOICE_KEY,
 	getDesktopTtsPrefs,
+	getPreference,
 	getVoiceInputPrefs,
 	setDesktopTtsPref,
+	setPreference,
 	setVoiceInputPrefs,
 	subscribeDesktopTtsPrefs,
 	VOICE_ENGINES,
@@ -153,6 +169,7 @@ import {
 } from "@/src/store/useNodeStore.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { AutoScrollText } from "./AutoScrollText.tsx";
+import { watchMeshInstall } from "./mesh-install.ts";
 import {
 	type LayerAction,
 	type LayerOption,
@@ -1125,6 +1142,10 @@ function ServiceRow({
 	updateAvailable = false,
 	onUpdate,
 	onLaunch,
+	currentLabel,
+	icon,
+	idleCaption,
+	idleTone = "down",
 }: {
 	label: string;
 	running: boolean | null;
@@ -1133,6 +1154,22 @@ function ServiceRow({
 	onChanged: () => Promise<void>;
 	/** Optional resource sample; when running, renders a "1.2 GB · 12%" caption. */
 	detail?: SidecarDetail;
+	/** Submenu-header name of the thing behind this row, when it differs from the
+	 *  row's own label ("Embeddings" is served by "llama.cpp"). Defaults to
+	 *  `label`, which is right for a service that names itself (Core, Gateway). */
+	currentLabel?: string;
+	icon?: IconSvgElement;
+	/** Caption for the stopped state. Defaults to "Stopped" — override for a
+	 *  sidecar whose stopped state is normal rather than a fault. */
+	idleCaption?: string;
+	/** How "stopped" READS, which is not the same question as whether it is
+	 *  stopped. `"down"` (default) paints the red dot: this thing is supposed to
+	 *  be up, so down is a fault. `"neutral"` paints the grey dot for a lazily
+	 *  started sidecar that is *designed* to sit stopped until first use — the
+	 *  reranker only wakes on the first Space search, so a red dot there would
+	 *  report a healthy fresh install as broken, permanently. The start/stop
+	 *  action still reads the REAL state either way. */
+	idleTone?: "down" | "neutral";
 	/** Hide the start/stop toggle, showing status + usage only. Used for chat
 	 *  engines, which are swap-managed (mutually exclusive) rather than
 	 *  independently start/stoppable — toggling one here would desync the active
@@ -1172,10 +1209,23 @@ function ServiceRow({
 	};
 
 	const handleToggle = async (next: boolean) => {
-		if (next) {
-			await startSidecar(target, sidecarKey);
-		} else {
-			await stopSidecar(target, sidecarKey);
+		try {
+			if (next) {
+				await startSidecar(target, sidecarKey);
+			} else {
+				await stopSidecar(target, sidecarKey);
+			}
+		} catch (e) {
+			// NodeLayerMenu swallows the rejection (it only owns the spinner), so a
+			// refusal has to be surfaced here or the row just silently does nothing
+			// — the live case being a reranker whose 438 MB model was never
+			// downloaded.
+			sileo.error({
+				title:
+					e instanceof Error
+						? e.message
+						: `Couldn't ${next ? "start" : "stop"} ${label}`,
+			});
 		}
 		// Give the process a moment to settle before re-polling status.
 		await new Promise<void>((resolve) => setTimeout(resolve, 1000));
@@ -1207,38 +1257,83 @@ function ServiceRow({
 		});
 	}
 
+	const idle = idleTone === "neutral";
 	let caption: string;
 	if (running === null) {
 		caption = "Status unknown";
 	} else if (running) {
 		caption = usage ? `Running · ${usage}` : "Running";
 	} else {
-		caption = "Stopped";
+		caption = idleCaption ?? "Stopped";
 	}
 
 	return (
 		<NodeLayerMenu
 			actions={actions}
 			caption={caption}
-			currentLabel={label}
+			currentLabel={currentLabel ?? label}
+			icon={icon}
 			label={label}
-			running={running}
-			trailing={usage ?? (running === false ? "stopped" : null)}
+			// The dot reports the READING, not the raw state — see `idleTone`.
+			running={idle && running === false ? null : running}
+			trailing={
+				usage ?? (running === false ? (idle ? "idle" : "stopped") : null)
+			}
 			version={version}
 		/>
 	);
 }
 
-/** The run-alongside modality groups, in display order. These map to the
- *  catalog's SidecarCategory: voice=speech, media=image, embedding=embeddings.
+/** The run-alongside modality groups the CATALOG drives, in display order. These
+ *  map to the catalog's SidecarCategory: voice=speech, media=image.
  *  The `provider` (chat) category is NOT here — it is the single mutually-
- *  exclusive slot and gets its own swap layer. Agents/tools aren't engines. */
+ *  exclusive slot and gets its own swap layer. Agents/tools aren't engines.
+ *
+ *  `embedding` is deliberately absent even though the category exists. No
+ *  embedding engine is a Store entry (see the NOTE in Core's
+ *  `catalog/registry.rs`, test-locked at `embedding.len() == 0`): the local
+ *  embeddings server is backing infrastructure that auto-starts, so it is
+ *  rendered below as a status-driven row instead. Listing it here produced a
+ *  group that was filtered out for having zero items on every node ever — i.e.
+ *  the reason the dropdown had no Embeddings row at all. */
 const RUN_ALONGSIDE_GROUPS: Array<{
 	category: CatalogItem["category"];
+	icon: IconSvgElement;
+	label: string;
+}> = [{ label: "Image", category: "media", icon: Image01Icon }];
+
+/**
+ * The two llama.cpp-derived engines that serve retrieval, keyed by their sidecar
+ * name. Neither is a catalog entry (see {@link RUN_ALONGSIDE_GROUPS}), so they
+ * are driven straight off `/api/sidecar/status`, which reports both: the
+ * embeddings server from `startup_order`, the reranker from the registered-but-
+ * not-auto-started tail.
+ *
+ * The reranker's `idleTone` is the load-bearing bit: Core starts it lazily on
+ * the first Space search, so "stopped" is its healthy resting state, not a
+ * fault.
+ */
+const RETRIEVAL_ENGINES: Array<{
+	icon: IconSvgElement;
+	idleCaption?: string;
+	idleTone?: "down" | "neutral";
+	key: string;
 	label: string;
 }> = [
-	{ label: "Image", category: "media" },
-	{ label: "Embeddings", category: "embedding" },
+	{
+		key: "llamacpp-embed",
+		label: "Embeddings",
+		icon: Database01Icon,
+		// In `startup_order` — down really does mean broken here.
+		idleCaption: "Stopped · semantic search falls back to keywords",
+	},
+	{
+		key: "llamacpp-rerank",
+		label: "Reranker",
+		icon: RankingIcon,
+		idleTone: "neutral",
+		idleCaption: "Idle · wakes on the first Space search",
+	},
 ];
 
 /**
@@ -1442,7 +1537,12 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 		items: catalog.filter((item) => item.category === group.category),
 	})).filter((group) => group.items.length > 0);
 
-	if (providers.length === 0 && groups.length === 0) {
+	// Presence in the status map, not a hardcoded assumption: an older Core that
+	// doesn't report a key simply doesn't get the row, and an unreachable node
+	// (empty map) fabricates none.
+	const retrieval = RETRIEVAL_ENGINES.filter((engine) => engine.key in details);
+
+	if (providers.length === 0 && groups.length === 0 && retrieval.length === 0) {
 		return null;
 	}
 
@@ -1512,6 +1612,7 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 								: "Nothing installed yet"
 						}
 						currentLabel={currentLabel}
+						icon={group.icon}
 						installed={installed.map(
 							(item): LayerOption => ({
 								name: item.name,
@@ -1531,6 +1632,24 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 					/>
 				);
 			})}
+			{/* The retrieval engines. Both are llama.cpp processes on their own
+			    ports, started/stopped as sidecars — not swappable, so they get a
+			    status row each rather than a catalog-backed group. */}
+			{retrieval.map((engine) => (
+				<ServiceRow
+					currentLabel="llama.cpp"
+					detail={details[engine.key]}
+					icon={engine.icon}
+					idleCaption={engine.idleCaption}
+					idleTone={engine.idleTone}
+					key={engine.key}
+					label={engine.label}
+					onChanged={refresh}
+					running={details[engine.key]?.running ?? null}
+					sidecarKey={engine.key}
+					target={target}
+				/>
+			))}
 		</div>
 	);
 }
@@ -2139,6 +2258,226 @@ function layerCaption(entry: CapabilityLayerEntry): string {
 	return where ? `${base} · ${where}` : base;
 }
 
+/** Human label for a tunnel backend. */
+const TUNNEL_LABEL: Record<MeshBackend, string> = {
+	[MESH_BACKEND_HEADSCALE]: "Headscale",
+	[MESH_BACKEND_TAILSCALE]: "Tailscale",
+};
+
+/**
+ * The **Tunnel** toolkit: which control plane this node's mesh enrols against,
+ * and the enable/disable for the mesh itself.
+ *
+ * It sits in the Toolkits block because that is what the user is picking — the
+ * thing behind "can my nodes reach each other" — but it is NOT a capability
+ * contribution: no plugin provides a tunnel, so it reads the node's own
+ * `mesh-backend` pref instead of the capability ladder. Headscale is the default,
+ * because self-hosting the control plane is the point.
+ *
+ * Turning it on INSTALLS the client. The mesh needs the official
+ * `tailscale`/`tailscaled` pair, and Core downloads (or brews) one when this node
+ * has none — the same deal the engines get. `installing` on the enable response is
+ * that signal; {@link watchMeshInstall} waits it out.
+ *
+ * A backend swap is a SETTING, not a migration: a node already enrolled with one
+ * control plane stays enrolled until it re-runs `tailscale up` with an auth key
+ * for the new one. The daemon is restarted so a key that IS present applies, and
+ * the toast says as much rather than implying the node has moved.
+ */
+function useTunnel(target: ApiTarget) {
+	return useQuery({
+		queryKey: ["node-tunnel", target.url],
+		queryFn: async () => {
+			// `/api/mesh/status` answers 200 with `enabled:false` on a mesh-off node
+			// and 404s on a Core with no mesh plane — only the 404 hides this row.
+			const status = await fetchMeshStatus(target);
+			const [backendPref, loginServer] = await Promise.all([
+				getPreference(target, MESH_BACKEND_PREF).catch(() => null),
+				getPreference(target, MESH_LOGIN_SERVER_PREF).catch(() => null),
+			]);
+			return {
+				status,
+				backend: parseMeshBackend(backendPref),
+				loginServer: loginServer?.trim() ?? "",
+			};
+		},
+		refetchInterval: 15_000,
+		retry: false,
+	});
+}
+
+type TunnelQuery = ReturnType<typeof useTunnel>;
+
+function TunnelLayer({
+	target,
+	query,
+}: {
+	query: TunnelQuery;
+	target: ApiTarget;
+}) {
+	const openGateway = useGatewayDialog((s) => s.openGateway);
+
+	const status = query.data?.status ?? null;
+	const backend = query.data?.backend ?? MESH_BACKEND_HEADSCALE;
+	const loginServer = query.data?.loginServer ?? "";
+	const enabled = status?.enabled ?? false;
+	const needsControlServer =
+		backend === MESH_BACKEND_HEADSCALE && loginServer === "";
+
+	const toggleMesh = async (next: boolean) => {
+		try {
+			const result = await setMeshEnabled(target, next);
+			await query.refetch();
+			if (next && result.installing) {
+				await watchMeshInstall(target);
+				await query.refetch();
+				return;
+			}
+			if (next && result.startError) {
+				sileo.warning({
+					title: result.canInstall
+						? "Mesh on, but the tunnel didn't connect"
+						: "Mesh on — install the Tailscale client",
+					description: result.startError,
+				});
+				return;
+			}
+			sileo.success({
+				title: next ? "Tunnel on" : "Tunnel off",
+				description: next
+					? `This node joins the tailnet via ${TUNNEL_LABEL[backend]}.`
+					: "This node has left the tailnet.",
+			});
+		} catch (e) {
+			sileo.error({
+				title:
+					e instanceof Error ? e.message : "Couldn't change the tunnel state",
+			});
+		}
+	};
+
+	const pickBackend = async (next: MeshBackend) => {
+		if (next === backend) {
+			return;
+		}
+		const ok = await setPreference(target, MESH_BACKEND_PREF, next);
+		if (!ok) {
+			sileo.error({
+				title: `Couldn't switch the tunnel to ${TUNNEL_LABEL[next]}`,
+			});
+			return;
+		}
+		await query.refetch();
+		if (next === MESH_BACKEND_HEADSCALE && loginServer === "") {
+			// Core REFUSES to enrol against Headscale with no control server rather
+			// than silently falling back to Tailscale's SaaS, so say so here instead
+			// of letting the node fail at start with the same sentence.
+			sileo.warning({
+				title: "Tunnel set to Headscale",
+				description: "Add your control server URL to finish setting it up.",
+				button: {
+					title: "Add URL",
+					onClick: () => openGateway("network"),
+				},
+			});
+			return;
+		}
+		if (enabled) {
+			// Restart so a present auth key re-runs `tailscale up` against the new
+			// control plane. Without one the daemon simply keeps its existing
+			// enrolment — which the description says plainly.
+			try {
+				await stopSidecar(target, "tailscale");
+				await startSidecar(target, "tailscale");
+			} catch {
+				// Not fatal: the pref is saved, and a node restart applies it anyway.
+			}
+			await query.refetch();
+		}
+		sileo.success({
+			title: `Tunnel → ${TUNNEL_LABEL[next]}`,
+			description: enabled
+				? "An already-enrolled node keeps its current tailnet until it re-enrols with an auth key for the new control plane."
+				: undefined,
+		});
+	};
+
+	// No mesh plane on this Core (an older binary) — no row, rather than a fake one.
+	if (status === null) {
+		return null;
+	}
+
+	const actions: LayerAction[] = [
+		{
+			id: enabled ? "disable" : "enable",
+			label: enabled ? "Turn off" : "Turn on",
+			busyLabel: enabled ? "Turning off…" : "Connecting…",
+			// No download icon on "Turn on": most nodes already have the client, and
+			// promising a download on a machine that just starts a daemon is the kind
+			// of small lie that makes a UI untrustworthy.
+			run: () => toggleMesh(!enabled),
+			tone: enabled ? "destructive" : "default",
+		},
+	];
+	if (needsControlServer) {
+		actions.push({
+			id: "control-server",
+			label: "Set control server URL…",
+			icon: Settings01Icon,
+			run: () => openGateway("network"),
+		});
+	}
+
+	const caption = (() => {
+		if (needsControlServer) {
+			return "Needs a control server URL";
+		}
+		if (!enabled) {
+			return backend === MESH_BACKEND_HEADSCALE
+				? `Off · ${loginServer}`
+				: "Off · Tailscale SaaS";
+		}
+		if (status.reachable) {
+			return status.magicDnsName
+				? `Connected as ${status.magicDnsName}`
+				: "Connected";
+		}
+		return "Connecting…";
+	})();
+
+	return (
+		<NodeLayerMenu
+			actions={actions}
+			caption={caption}
+			currentLabel={TUNNEL_LABEL[backend]}
+			icon={WifiConnected01Icon}
+			installed={[
+				{
+					name: MESH_BACKEND_HEADSCALE,
+					label: TUNNEL_LABEL[MESH_BACKEND_HEADSCALE],
+					active: backend === MESH_BACKEND_HEADSCALE,
+					// Honest about the one thing that stops it working. The row stays
+					// SELECTABLE — picking it is how a user gets the prompt for the URL.
+					detail: loginServer === "" ? "needs control server" : "self-hosted",
+					select: () => pickBackend(MESH_BACKEND_HEADSCALE),
+				},
+				{
+					name: MESH_BACKEND_TAILSCALE,
+					label: TUNNEL_LABEL[MESH_BACKEND_TAILSCALE],
+					active: backend === MESH_BACKEND_TAILSCALE,
+					detail: "hosted",
+					select: () => pickBackend(MESH_BACKEND_TAILSCALE),
+				},
+			]}
+			label="Tunnel"
+			// The mesh is a real process, so the dot means connected — not "a backend
+			// is selected". A selected-but-off tunnel is honestly down.
+			running={enabled ? status.reachable : false}
+			selectionMode="swap"
+		/>
+	);
+}
+
 /**
  * The "Toolkits" block in the node dropdown: every SELECTABLE capability on the
  * node. Named "Toolkits" in the UI because that is what a user is picking - the
@@ -2166,6 +2505,10 @@ function LayersSection({
 }) {
 	const { layers, refresh, select } = useCapabilityLayers(target, enabled);
 	const rows = orderCapabilityLayers(layers);
+	// Hoisted out of `TunnelLayer` so the block knows whether it has ANY row
+	// before drawing its header — a Core with no mesh plane and no capability
+	// providers must render nothing, not a "Toolkits" heading over emptiness.
+	const tunnel = useTunnel(target);
 
 	// Enabling a candidate for a toolkit that currently has none. Distinct from
 	// `pick`: there is nothing to swap TO yet, so the action is a lifecycle change
@@ -2209,7 +2552,12 @@ function LayersSection({
 		}
 	};
 
-	if (!enabled || rows.length === 0) {
+	// The Tunnel keeps the block alive on its own: it is a NODE capability, not a
+	// plugin contribution, so it is there on an install with no capability
+	// providers at all. Only a Core without the mesh plane (404 → no tunnel data)
+	// AND no capabilities collapses the block entirely.
+	const hasTunnel = tunnel.data?.status != null;
+	if (!enabled || (rows.length === 0 && !hasTunnel)) {
 		return null;
 	}
 
@@ -2218,6 +2566,7 @@ function LayersSection({
 			<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
 				Toolkits
 			</p>
+			<TunnelLayer query={tunnel} target={target} />
 			{rows.map(({ entry, icon, label }) => (
 				<NodeLayerMenu
 					// Candidates that exist but are not enabled. Load-bearing for
@@ -3010,6 +3359,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							Services
 						</p>
 						<ServiceRow
+							icon={ServerStack01Icon}
 							label="Core"
 							onChanged={refresh}
 							onUpdate={handleAppUpdate}
@@ -3020,6 +3370,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							version={appVersion}
 						/>
 						<ServiceRow
+							icon={Router01Icon}
 							label={
 								gatewayReachable && providerCount > 0
 									? `Gateway · ${providerCount} provider${providerCount === 1 ? "" : "s"}`

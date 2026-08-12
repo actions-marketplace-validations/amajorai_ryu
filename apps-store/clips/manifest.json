@@ -7,7 +7,7 @@
   "tagline": "Capture and browse screen clips",
   "keywords": ["clips", "screen", "capture", "video"],
   "icon": "film-01",
-  "iconDither": { "from": 327, "to": 1, "direction": "down" },
+  "iconDither": { "from": 327, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

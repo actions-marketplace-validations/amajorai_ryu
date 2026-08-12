@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Search-and-extract for agents via the Tavily API (https://tavily.com), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Tavily without changing what agents call. Requires a BYOK Tavily API key.",
   "iconUrl": "https://avatars.githubusercontent.com/u/170207473?v=4",
-  "iconDither": { "from": 272, "to": 306, "direction": "down" },
+  "iconDither": { "from": 272, "to": "transparent", "direction": "down" },
   "tagline": "Agent-tuned web search and extraction",
   "keywords": ["search", "web", "extract"],
   "category": "Search",

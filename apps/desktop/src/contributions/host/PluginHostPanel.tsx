@@ -170,6 +170,11 @@ import {
 	snapshotSkill,
 	updateSkill,
 } from "@/src/lib/api/skills.ts";
+import { blueprintRequest } from "@/src/lib/api/blueprint.ts";
+import { newsRequest } from "@/src/lib/api/news.ts";
+import { reasoningRequest } from "@/src/lib/api/reasoning.ts";
+import { tuitionRequest } from "@/src/lib/api/tuition.ts";
+import { socialRequest } from "@/src/lib/api/social.ts";
 import { fileToDataUrl, uploadUserFile } from "@/src/lib/api/uploads.ts";
 import { generateVideo as apiGenerateVideo } from "@/src/lib/api/video.ts";
 import {
@@ -1426,6 +1431,58 @@ export function PluginHostPanel({
 					title: title ?? "Notes",
 				}),
 			meetingsOpenList: () => openTab("/meetings", { title: "Meetings" }),
+			// Outpost — the @ryu/social companion renders the compose → calendar → queue
+			// → inbox surface. Host-direct (the monitors pattern), but through ONE
+			// forwarder rather than a verb per endpoint: the companion's ~35 client calls
+			// all arrive as `socialRequest`, which re-issues them against Core's
+			// `/api/social` public mount with the node bearer attached (social:crud).
+			//
+			// SECURITY: `socialRequest` in `lib/api/social.ts` owns the check, and it is
+			// the reason a generic forwarder is safe here — the frame supplies only a
+			// SUB-PATH, which must start with `/`, must not be protocol-relative, must
+			// carry no backslash, and must contain no `..` segment. The URL is then built
+			// from the fixed `/api/social` base, so the frame can never choose a host, an
+			// absolute URL, or another Core API. `rpc.ts`'s `asSocialRequestArg` applies
+			// the identical rules one layer earlier; the duplication is deliberate, since
+			// either layer alone would be the only thing standing between a sandboxed
+			// frame and the node's credentials.
+			//
+			// `open`/`openList` are shell-navigation verbs. `/social` resolves through the
+			// generic companion-alias route, and `/social/:id` through the pattern that
+			// bakes the post id into the frame as `window.ryu.context.postId`.
+			socialRequest: (input) => socialRequest(toTarget(node), input),
+			// Automated Reasoning — the @ryu/reasoning companion authors formal policies
+			// and runs the solver playground. Same one-forwarder shape as Outpost, and
+			// the same security note applies: `reasoningRequest` in `lib/api/reasoning.ts`
+			// owns the path check (leading slash, not protocol-relative, no backslash,
+			// resolving under `/api/reasoning` per the WHATWG parser rather than a literal
+			// `..` blocklist), and `rpc.ts`'s `asReasoningRequestArg` applies the identical
+			// rules one layer earlier. There is no `open` verb because the companion is the
+			// whole surface — it never navigates the shell.
+			reasoningRequest: (input) => reasoningRequest(toTarget(node), input),
+			// Tuition and Wire: the same one-forwarder shape, and the same security note
+			// — each `*Request` re-validates the frame-chosen sub-path against its own
+			// mount before building a URL, independently of the check `@ryu/app-host/rpc`
+			// already ran. Two layers on purpose: either alone would be the only thing
+			// between a sandboxed frame and the node's credentials.
+			tuitionRequest: (input) => tuitionRequest(toTarget(node), input),
+			newsRequest: (input) => newsRequest(toTarget(node), input),
+			// Blueprint — the @ryu/blueprint companion renders a plan an agent published
+			// and records the reviewer's annotations and verdict. Same one-forwarder shape
+			// again, and the same security note, with one twist worth spelling out: the
+			// path segments the frame concatenates are PLAN IDS an agent chose, so the
+			// untrusted string reaching `resolveBlueprintPath` in `lib/api/blueprint.ts`
+			// has not passed a human. That check (leading slash, not protocol-relative, no
+			// backslash, resolving under `/api/blueprint` per the WHATWG parser rather than
+			// a literal `..` blocklist) and `rpc.ts`'s `asBlueprintRequestArg` one layer
+			// earlier are both load-bearing. No `open` verb: the review surface is the
+			// companion, so it never navigates the shell.
+			blueprintRequest: (input) => blueprintRequest(toTarget(node), input),
+			socialOpen: ({ postId, title }) =>
+				openTab(postId ? `/social/${postId}` : "/social", {
+					title: title ?? "Outpost",
+				}),
+			socialOpenList: () => openTab("/social", { title: "Outpost" }),
 			// Skill authoring — the @ryu/skill-editor companion authors a user-owned
 			// Agent Skill (SKILL.md). Host-direct (the monitors pattern): the host holds the
 			// node token and calls the existing `skills.ts` authoring client (createSkill/

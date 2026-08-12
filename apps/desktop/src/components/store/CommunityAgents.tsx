@@ -28,6 +28,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { StoreCardGrid } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
+import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import {
 	ListingAsideCard,
 	ListingDetailShell,
@@ -155,18 +156,17 @@ export function CommunityAgentsShelf({
 	}
 	return (
 		<section className="mb-6">
-			<div className="mb-2 flex items-center gap-2 px-1">
-				<h3 className="font-medium text-muted-foreground text-xs uppercase tracking-widest">
-					From the community
-				</h3>
-				{loading && agents.length === 0 ? (
-					<Spinner className="size-3.5 text-muted-foreground" />
-				) : null}
-			</div>
-			<p className="mb-3 px-1 text-muted-foreground text-xs">
-				Agents other people wrote and published — instructions and settings, not
-				programs. Installing one adds it to your agents; it turns nothing on.
-			</p>
+			<StoreShelfHeading
+				action={
+					loading && agents.length === 0 ? (
+						<Spinner className="size-3.5 text-muted-foreground" />
+					) : null
+				}
+				className="mb-3"
+				description="Agents other people wrote and published — instructions and settings, not programs. Installing one adds it to your agents; it turns nothing on."
+			>
+				From the community
+			</StoreShelfHeading>
 			<StoreCardGrid>
 				{agents.map((card) => (
 					<AgentBadgeCard

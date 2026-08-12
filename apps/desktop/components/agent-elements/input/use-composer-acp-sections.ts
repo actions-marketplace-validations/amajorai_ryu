@@ -119,6 +119,15 @@ export interface ComposerAcpSectionsParams {
 	/** Persist an engine-catalog model pick (non-ACP fallback). */
 	onEngineModelChange: (modelId: string) => void;
 	/**
+	 * Announce a session control the USER just picked (labels, not ids). A chat
+	 * surface passes this to tell the user WHEN the pick lands: the selections are
+	 * sticky and ride the next turn's request body, so nothing visibly changes
+	 * until they send again. Surfaces with no turn to apply to — the per-agent
+	 * submenu in the universal picker, which builds these sections for agents that
+	 * are not even active — leave it out.
+	 */
+	onSelectionApplied?: (setting: string, value: string) => void;
+	/**
 	 * Session-config values the AGENT asked the client to update, observed on the
 	 * live chat stream (Core's `data-ryu-acp-config` part). Session-scoped
 	 * surfaces (launchpad/dock) leave this undefined. See the shared primitive.
@@ -148,6 +157,7 @@ export function useComposerAcpSections({
 	modelOptions,
 	engineModel,
 	onEngineModelChange,
+	onSelectionApplied,
 	streamedMode,
 	streamedConfig,
 }: ComposerAcpSectionsParams): ComposerAcpSectionsResult {
@@ -229,6 +239,7 @@ export function useComposerAcpSections({
 		modelDisplayName,
 		modelOptions,
 		onEngineModelChange,
+		onSelectionApplied,
 		reasoningOff,
 		store: ACP_SELECTION_STORE,
 		streamedConfig,

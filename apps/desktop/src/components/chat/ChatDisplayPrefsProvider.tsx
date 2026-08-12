@@ -43,7 +43,12 @@ export function ChatDisplayPrefs({ children }: { children: ReactNode }) {
 	const [groupToolUses] = usePersistedToggle("ryu:group-tool-uses", true);
 	const [expandFileEdits] = usePersistedToggle("ryu:expand-file-edits", false);
 	const [expandCommands] = usePersistedToggle("ryu:expand-commands", false);
+	const [expandCodeBlocks] = usePersistedToggle(
+		"ryu:expand-code-blocks",
+		false
+	);
 	const [pinUserMessage] = usePersistedToggle("ryu:pin-user-message", true);
+	const [openAtBottom] = usePersistedToggle("ryu:open-chat-at-bottom", true);
 
 	// Two-level motion control: a global master ("Enable animations") and a
 	// per-feature toggle ("Animate streaming text"). Global overrides individual,
@@ -66,6 +71,8 @@ export function ChatDisplayPrefs({ children }: { children: ReactNode }) {
 				groupToolUses,
 				expandFileEdits,
 				expandCommands,
+				expandCodeBlocks,
+				openAtBottom,
 				pinUserMessage,
 				streamAnimation,
 			}}

@@ -1,10 +1,11 @@
 // apps/desktop/src/components/chat/WorkspaceHeader.tsx
 //
 // Composer branch selector. Reads the active workspace folder from
-// useWorkspaceStore, polls Core's GET /api/git/status?cwd=<path> for the current
-// branch + dirty state, and on click opens a popover listing local branches
-// (GET /api/git/branches) that can be switched to (POST /api/git/checkout).
-// Renders nothing when no folder is selected or the folder is not a git repo.
+// useWorkspaceStore, takes branch + dirty state from the shared useGitStatus
+// hook (one poll shared with every other git surface), and on click opens a
+// popover listing local branches (GET /api/git/branches) that can be switched to
+// (POST /api/git/checkout). Renders nothing when no folder is selected or the
+// folder is not a git repo.
 
 import { Tick02Icon, WorkflowCircle06Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -21,89 +22,32 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
 import { cn } from "@ryu/ui/lib/utils";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import {
 	WORKSPACE_SELECT_ITEM,
 	WORKSPACE_SELECT_LABEL,
 	WORKSPACE_SELECT_POPOVER,
 	WORKSPACE_SELECT_TRIGGER,
 } from "@/components/agent-elements/input/composer-select.ts";
+import { invalidateGitStatus, useGitStatus } from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import {
-	checkoutBranch,
-	fetchGitBranches,
-	fetchGitStatus,
-} from "@/src/lib/api/git.ts";
+import { checkoutBranch, fetchGitBranches } from "@/src/lib/api/git.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 interface WorkspaceHeaderProps {
 	target: ApiTarget;
 }
 
-const POLL_INTERVAL_MS = 5000;
-
 export function WorkspaceHeader({ target }: WorkspaceHeaderProps) {
 	const folder = useWorkspaceStore((s) => s.folder);
-	const [branch, setBranch] = useState<string | null>(null);
-	const [dirty, setDirty] = useState(false);
+	const { status } = useGitStatus(target, folder);
+	const branch = status.is_repo ? status.branch : null;
+	const dirty = status.is_repo && status.dirty;
 	const [open, setOpen] = useState(false);
 	const [branches, setBranches] = useState<string[]>([]);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [switching, setSwitching] = useState<string | null>(null);
-	const abortRef = useRef<AbortController | null>(null);
-
-	const poll = useCallback(async () => {
-		if (!folder) {
-			return;
-		}
-		const status = await fetchGitStatus(target, folder);
-		if (status.is_repo) {
-			setBranch(status.branch);
-			setDirty(status.dirty);
-		} else {
-			setBranch(null);
-			setDirty(false);
-		}
-	}, [folder, target]);
-
-	useEffect(() => {
-		if (!folder) {
-			setBranch(null);
-			setDirty(false);
-			return;
-		}
-
-		let active = true;
-
-		const run = async () => {
-			abortRef.current?.abort();
-			const controller = new AbortController();
-			abortRef.current = controller;
-
-			const status = await fetchGitStatus(target, folder, controller.signal);
-			if (!active) {
-				return;
-			}
-
-			if (status.is_repo) {
-				setBranch(status.branch);
-				setDirty(status.dirty);
-			} else {
-				setBranch(null);
-				setDirty(false);
-			}
-		};
-
-		run();
-		const id = setInterval(run, POLL_INTERVAL_MS);
-
-		return () => {
-			active = false;
-			clearInterval(id);
-			abortRef.current?.abort();
-		};
-	}, [folder, target]);
 
 	const loadBranches = useCallback(async () => {
 		if (!folder) {
@@ -114,7 +58,10 @@ export function WorkspaceHeader({ target }: WorkspaceHeaderProps) {
 		const result = await fetchGitBranches(target, folder);
 		setBranches(result.branches);
 		if (result.current) {
-			setBranch(result.current);
+			// The branch list is authoritative about the current branch, so let
+			// every other surface pick the same answer up rather than tracking a
+			// private copy here.
+			invalidateGitStatus(folder);
 		}
 		setLoading(false);
 	}, [folder, target]);
@@ -141,14 +88,15 @@ export function WorkspaceHeader({ target }: WorkspaceHeaderProps) {
 			const result = await checkoutBranch(target, folder, nextBranch);
 			setSwitching(null);
 			if (result.success) {
-				setBranch(result.branch ?? nextBranch);
 				setOpen(false);
-				poll().catch(() => undefined);
+				// A checkout changes the branch *and* the numbers, and it changes
+				// them for every surface — not just this one.
+				invalidateGitStatus(folder);
 			} else {
 				setError(result.error ?? "Failed to switch branch");
 			}
 		},
-		[branch, folder, target, poll]
+		[branch, folder, target]
 	);
 
 	if (!(folder && branch)) {

@@ -14,6 +14,7 @@ import {
 	setSpaceIcon as apiSetSpaceIcon,
 	setSpaceRetrievalMode as apiSetSpaceRetrievalMode,
 	updateDocument as apiUpdateDocument,
+	uploadSpaceFile as apiUploadSpaceFile,
 	fetchDocument,
 	fetchDocuments,
 	fetchSpaces,
@@ -23,6 +24,7 @@ import {
 	type SpaceDocument,
 	type SpaceDocumentContent,
 	type SpaceMatch,
+	type UploadedSpaceFile,
 } from "@/src/lib/api/spaces.ts";
 import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
@@ -102,6 +104,22 @@ export interface UseSpacesResult {
 	/** Set or clear a Space glyph. */
 	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
 	spaces: Space[];
+	/**
+	 * Store a binary file as a file document in a Space.
+	 *
+	 * Unlike every other mutation here this does **not** `reload()`, because it is
+	 * the one that is normally called in a batch: N files would mean N full
+	 * refetches, each one re-rendering the list mid-upload. The caller reloads once
+	 * when its batch settles — {@link reload} is exposed for exactly that.
+	 *
+	 * Resolves to the stored document *and* its extraction outcome; a resolved
+	 * promise means the bytes landed, not that the contents are searchable.
+	 */
+	uploadFile: (
+		spaceId: string,
+		file: File,
+		opts?: { onProgress?: (fraction: number) => void; signal?: AbortSignal }
+	) => Promise<UploadedSpaceFile>;
 }
 
 /// Loads Spaces from the active Core node and exposes create/delete plus the
@@ -232,6 +250,15 @@ export function useSpaces(): UseSpacesResult {
 		[url, token, reload]
 	);
 
+	const uploadFile = useCallback(
+		(
+			spaceId: string,
+			file: File,
+			opts?: { onProgress?: (fraction: number) => void; signal?: AbortSignal }
+		) => apiUploadSpaceFile({ url, token }, spaceId, file, opts),
+		[url, token]
+	);
+
 	const getDocument = useCallback(
 		(spaceId: string, documentId: string) =>
 			fetchDocument({ url, token }, spaceId, documentId),
@@ -309,5 +336,6 @@ export function useSpaces(): UseSpacesResult {
 		setSpaceIcon,
 		setRetrievalMode,
 		setDocumentIcon,
+		uploadFile,
 	};
 }

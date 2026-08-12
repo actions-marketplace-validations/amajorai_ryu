@@ -16,12 +16,19 @@ import {
 } from "@ryu/blocks/desktop/store";
 import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
 import { Button } from "@ryu/ui/components/button";
+import { Logo } from "@ryu/ui/components/logo";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
 } from "@ryu/ui/components/popover";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+	type ReactNode,
+	useCallback,
+	useEffect,
+	useMemo,
+	useState,
+} from "react";
 import { DesktopMarketplaceHost } from "@/src/components/marketplace/host.tsx";
 import AccountSection from "@/src/components/store/AccountSection.tsx";
 import AgentsCatalogSection from "@/src/components/store/AgentsCatalogSection.tsx";
@@ -79,6 +86,8 @@ const SECTIONS: {
 	value: BuiltinStoreSection;
 	label: string;
 	icon: IconSvgElement;
+	/** Optional rendered mark shown instead of `icon` — see StoreSectionTab. */
+	iconNode?: ReactNode;
 	group: string;
 }[] = [
 	// Home: the app-store landing — featured rail + a row per realm, so
@@ -120,10 +129,15 @@ const SECTIONS: {
 	},
 	// MCP servers from the official registry (and registries behind the seam).
 	{ value: "mcp", label: "MCP", icon: REALM_ICONS.mcp, group: "catalog" },
+	// Agents wears the Ryu mark itself, not a glyph: an agent IS a Ryu employee
+	// (the catalog's cards are its employee badges), and the target glyph every
+	// other realm-style icon sat beside said nothing about that. `icon` stays as
+	// the path fallback for any surface that can only render an IconSvgElement.
 	{
 		value: "agents",
 		label: "Agents",
 		icon: REALM_ICONS.agents,
+		iconNode: <Logo size="16px" variant="outline" />,
 		group: "catalog",
 	},
 	// Workflow Templates used to sit here as a hardcoded row. It is now registered by

@@ -1075,6 +1075,86 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // Outpost (`@ryu/social`). THREE rows, not one per endpoint: `social.request` is a
+    // generic forwarder the host re-issues against Core's `/api/social<path>` public
+    // mount, so the sidecar's 33 routes cost one row here instead of 33 six-file
+    // changes. It grants no authority that did not exist — that mount already answers
+    // any client holding the node token, which is exactly what the host holds — and the
+    // real gates stay put: `social:crud` on the verb, and Core's ext-proxy route
+    // allowlist on the paths. The two navigation verbs cannot be forwarded (opening a
+    // shell tab is the one thing a sandboxed frame genuinely cannot do), so they stay
+    // named.
+    m(
+        "social.request",
+        "social.crud",
+        Some("social:crud"),
+        false,
+        true,
+    ),
+    m("social.open", "social.crud", Some("social:crud"), false, true),
+    m(
+        "social.openList",
+        "social.crud",
+        Some("social:crud"),
+        false,
+        true,
+    ),
+    // Automated Reasoning (`@ryu/reasoning`). ONE row, the Outpost shape: the
+    // companion's calls all arrive as `reasoning.request` and the host re-issues them
+    // against Core's `/api/reasoning<path>` public mount. A verb per endpoint would
+    // cost seven rows for a surface that is CRUD plus two verbs, and every future
+    // route would be a six-file change. It grants nothing new — that mount already
+    // answers any client holding the node token, which is what the host holds — and
+    // the gates stay `reasoning:check` on the verb plus Core's ext-proxy route
+    // allowlist on the paths. There is no navigation verb: the companion is the whole
+    // surface, so it never needs to open a shell tab.
+    m(
+        "reasoning.request",
+        "reasoning.check",
+        Some("reasoning:check"),
+        false,
+        true,
+    ),
+    // Tuition (`@ryu/tuition`) and Wire (`@ryu/news`). The same ONE-row forwarder as
+    // Reasoning directly above: every call each companion makes arrives as
+    // `<app>.request` and the host re-issues it against that app's `public_mount`.
+    // Twenty-four and nineteen sidecar routes respectively would otherwise be
+    // forty-three rows across six files, and both surfaces are still growing.
+    //
+    // Neither grants anything new. The mount already answers any client holding the
+    // node token, which is what the host holds; the gates stay the verb's own grant
+    // plus Core's ext-proxy route allowlist, which 404s any sub-path the manifest did
+    // not declare. Neither has a navigation verb: the companion is the whole surface,
+    // so it never needs to open a shell tab.
+    m(
+        "tuition.request",
+        "tuition.crud",
+        Some("tuition:crud"),
+        false,
+        true,
+    ),
+    m("news.request", "news.crud", Some("news:crud"), false, true),
+    // Blueprint (`@ryu/blueprint`). Same ONE-row forwarder as Reasoning directly
+    // above and Outpost above that: every call the plan-review companion makes
+    // arrives as `blueprint.request` and the host re-issues it against Core's
+    // `/api/blueprint<path>` public mount. Eleven sidecar routes — plans, revisions,
+    // the revision diff, annotations, the verdict, per-step status, the rendered
+    // feedback — would otherwise be eleven rows across six files, and the surface is
+    // still growing (revision diff and artifact review are round-two).
+    //
+    // It grants nothing new: that mount already answers any client holding the node
+    // token, which is what the host holds. The gates stay `blueprint:review` on the
+    // verb plus Core's ext-proxy route allowlist on the paths — which is the reason
+    // the manifest must enumerate every route it wants reachable, not a wildcard.
+    // No navigation verb: the companion IS the whole review surface, so it never
+    // opens a shell tab.
+    m(
+        "blueprint.request",
+        "blueprint.review",
+        Some("blueprint:review"),
+        false,
+        true,
+    ),
     m(
         "skills.getSource",
         "skills.crud",

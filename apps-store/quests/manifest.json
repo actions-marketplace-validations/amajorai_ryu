@@ -7,7 +7,7 @@
   "tagline": "Your todos, found for you",
   "keywords": ["tasks", "todos", "productivity", "tracking"],
   "icon": "target-02",
-  "iconDither": { "from": 294, "to": 328, "direction": "right" },
+  "iconDither": { "from": 294, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

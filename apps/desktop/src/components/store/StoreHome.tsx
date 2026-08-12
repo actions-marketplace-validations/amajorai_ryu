@@ -233,6 +233,18 @@ function FeaturedSlide({
 				opacity={0.9}
 				to="transparent"
 			/>
+			{/* Scrim, same reasoning as the listing hero's. This wash DISSOLVES to
+			    transparent, and the slide's own surface under it is `bg-card` — which
+			    is white in light theme. Wherever the dissolve has run out, the white
+			    copy below was landing on white; whether that happened at all depended
+			    on which of the four directions the slide's id hashed to, so it was
+			    invisible on most slides and unreadable on the ones that fade downward.
+			    Weighted to the bottom two thirds, where all the copy sits, so the art
+			    still reads across the top of the slide. */}
+			<div
+				aria-hidden="true"
+				className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/40 to-transparent"
+			/>
 			<div className="relative flex items-end gap-4">
 				<FeaturedLogo iconUrl={card.iconUrl ?? null} name={card.name} />
 				<div className="min-w-0 flex-1">

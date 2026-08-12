@@ -55,6 +55,40 @@ fn apply_node_routing_header(
     }
 }
 
+/// Fold the caller's `anthropic-beta` header into the body as the private
+/// `ryu_anthropic_beta` field.
+///
+/// Anthropic betas (code execution, extended cache TTLs, …) are opted into on a
+/// REQUEST HEADER, but the only thing that reaches [`Provider::complete`] is the
+/// OpenAI-compat body — so the header rides along as a private `ryu_*` body
+/// field, exactly like `ryu_smart_route` does for the per-agent smart-routing
+/// override (see [`crate::pipeline`]). The Anthropic provider is its intended
+/// reader, and it builds its own whitelist payload from the body, so the field
+/// cannot leak upstream there whether or not it is read. Every other provider
+/// clones the body VERBATIM, so the field is stripped before dispatch
+/// (`pipeline::strip_anthropic_beta_for`) — an unknown top-level field 400s a
+/// strict OpenAI endpoint.
+///
+/// An absent or empty header inserts NOTHING, so a request that did not ask for a
+/// beta is byte-identical to what the caller sent.
+fn apply_anthropic_beta(headers: &HeaderMap, body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    // The field is private to the header seam, so a client-supplied one is
+    // always dropped first. Without this a caller could set arbitrary Anthropic
+    // betas by writing the private field straight into the JSON body, bypassing
+    // the header that is supposed to be its only source.
+    obj.remove(pipeline::ANTHROPIC_BETA_FIELD);
+    let Some(betas) = header_string(headers, "anthropic-beta") else {
+        return;
+    };
+    obj.insert(
+        pipeline::ANTHROPIC_BETA_FIELD.to_string(),
+        Value::String(betas),
+    );
+}
+
 /// Attach `x-budget-*` headers so the client can observe budget state and the
 /// action that was taken (U21 acceptance criterion: observable to the client).
 fn apply_budget_headers(hdrs: &mut HeaderMap, budget: &BudgetDecision) {
@@ -77,7 +111,7 @@ fn apply_budget_headers(hdrs: &mut HeaderMap, budget: &BudgetDecision) {
 pub async fn chat_completions(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Result<Response, GatewayError> {
     let raw_key = headers.get("authorization").and_then(|v| v.to_str().ok());
 
@@ -202,6 +236,9 @@ pub async fn chat_completions(
     .await?;
     debug!(request_id = %ctx.request_id, "chat_completions: authenticated");
 
+    // Caller-requested Anthropic betas, carried to the provider on the body.
+    apply_anthropic_beta(&headers, &mut body);
+
     let is_stream = body["stream"].as_bool().unwrap_or(false);
 
     if is_stream {
@@ -306,5 +343,66 @@ pub async fn chat_completions(
         }
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn headers_with(name: &'static str, value: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(name, HeaderValue::from_static(value));
+        headers
+    }
+
+    #[test]
+    fn anthropic_beta_header_becomes_the_private_body_field() {
+        let mut body = json!({ "model": "claude-sonnet-4-5", "messages": [] });
+        apply_anthropic_beta(
+            &headers_with("anthropic-beta", "code-execution-2025-05-22"),
+            &mut body,
+        );
+        assert_eq!(
+            body[pipeline::ANTHROPIC_BETA_FIELD],
+            json!("code-execution-2025-05-22")
+        );
+    }
+
+    #[test]
+    fn multiple_betas_pass_through_as_the_comma_separated_string() {
+        // The provider consumes one comma-separated string, so the header value is
+        // forwarded verbatim rather than split and re-joined here.
+        let mut body = json!({ "model": "claude-sonnet-4-5" });
+        apply_anthropic_beta(
+            &headers_with(
+                "anthropic-beta",
+                "code-execution-2025-05-22,files-api-2025-04-14",
+            ),
+            &mut body,
+        );
+        assert_eq!(
+            body[pipeline::ANTHROPIC_BETA_FIELD],
+            json!("code-execution-2025-05-22,files-api-2025-04-14")
+        );
+    }
+
+    #[test]
+    fn no_header_leaves_the_body_byte_identical() {
+        let original = json!({ "model": "gpt-4o", "messages": [], "stream": true });
+        let mut body = original.clone();
+        apply_anthropic_beta(&HeaderMap::new(), &mut body);
+        assert_eq!(body, original, "an untouched request must stay untouched");
+    }
+
+    #[test]
+    fn blank_header_inserts_nothing() {
+        // A whitespace-only value is not an opt-in; inserting it would send an
+        // empty `anthropic-beta` to the provider.
+        let original = json!({ "model": "claude-sonnet-4-5" });
+        let mut body = original.clone();
+        apply_anthropic_beta(&headers_with("anthropic-beta", "   "), &mut body);
+        assert_eq!(body, original);
     }
 }

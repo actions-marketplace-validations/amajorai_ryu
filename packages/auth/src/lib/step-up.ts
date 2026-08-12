@@ -45,6 +45,15 @@ export const STEP_UP_SCOPES = [
 	"node.destroy",
 	/** Any Ryu-staff (platform-admin) mutation, in /admin and its routers. */
 	"platform.admin",
+	/**
+	 * Fold another account into this one (see `docs/account-merge.md`). The one
+	 * account-level action that IS listed, because unlike the three below it is
+	 * not self-gated: the request body carries no password, and the confirmation
+	 * mail that follows goes to the OTHER address — so without this, a stolen
+	 * session plus access to any second mailbox the attacker already controls is
+	 * enough to absorb someone's account.
+	 */
+	"account.merge",
 ] as const;
 
 /**
@@ -88,6 +97,7 @@ const WINDOW_MS: Record<StepUpScope, number> = {
 	"org.credentials": 10 * MINUTE_MS,
 	"node.destroy": 5 * MINUTE_MS,
 	"platform.admin": 30 * MINUTE_MS,
+	"account.merge": 5 * MINUTE_MS,
 };
 
 /** True when `value` is one of the known scopes. */
@@ -131,6 +141,7 @@ const SCOPE_LABELS: Record<StepUpScope, string> = {
 	"org.members": "change who can access a workspace",
 	"node.destroy": "remove a cloud node",
 	"platform.admin": "use Ryu staff powers",
+	"account.merge": "merge another account into this one",
 };
 
 /** Plain-language description of what a step-up on `scope` authorizes. */

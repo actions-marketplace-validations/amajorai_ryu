@@ -5,7 +5,7 @@
   "description": "A real-Chromium browser (Electron) Ryu runs as a local sidecar and exposes as the grant-gated `browser.control` capability: list/open/navigate tabs, screenshot, read titles, take an accessibility snapshot with stable element refs, and drive the page with synthetic click/type/scroll input. Core spawns the sidecar lazily and idle-stops it; the desktop Browser panel drives it through the ext-proxy.",
   "keywords": ["browser", "chromium", "automation", "web"],
   "icon": "browser",
-  "iconDither": { "from": 351, "to": 317, "direction": "left" },
+  "iconDither": { "from": 351, "to": "transparent", "direction": "down" },
   "tagline": "Real-Chromium browser control for agents",
   "category": "Browsers",
   "surfaces": {

@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Hosted multi-page web crawling via the Spider Cloud API (https://spider.cloud), exposed as one declarative HTTP tool. Provides the swappable `web.crawl` layer as a SECOND provider alongside the local `spider` CLI, so selecting it re-points the stable `web__crawl` tool at a hosted crawler that needs no local binary. The crawl is synchronous — `run_in_background` defaults to false and one request returns every fetched page's content, so there is no job id to poll. The canonical `depth` argument is deliberately DROPPED: Spider Cloud documents `depth: 0` as \"no limit will be applied\", the exact inverse of the canonical contract's \"0 = the start page only\". Requires a BYOK Spider Cloud API key.",
   "iconUrl": "https://avatars.githubusercontent.com/u/112983871?v=4",
-  "iconDither": { "from": 335, "to": 9, "direction": "right" },
+  "iconDither": { "from": 335, "to": "transparent", "direction": "down" },
   "tagline": "Hosted site crawling, no local binary",
   "keywords": ["web", "crawl", "scraping"],
   "category": "Search",

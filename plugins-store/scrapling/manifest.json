@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Adaptive web-page extraction via the Scrapling MCP server (https://scrapling.readthedocs.io), a BYO local install. Provides the swappable `web.extract` layer as a THIRD provider alongside the local `spider` CLI and the hosted BYOK services, so selecting it re-points the stable `web__extract` tool at a fetcher that impersonates a real browser TLS fingerprint. No API key. Requires `pip install \"scrapling[ai]\"` and the `scrapling` binary on PATH; until then the MCP server does not start and the layer falls back to whichever other provider you select. Deliberately provides NO `web.crawl`: neither the MCP server nor the CLI follows links — only Scrapling's Python `Spider` class crawls, and it is not reachable over MCP.",
   "iconUrl": "https://avatars.githubusercontent.com/u/20604835?v=4",
-  "iconDither": { "from": 219, "to": 253, "direction": "left" },
+  "iconDither": { "from": 219, "to": "transparent", "direction": "down" },
   "tagline": "Anti-bot page extraction, no API key",
   "keywords": ["web", "scraping", "extract"],
   "category": "Search",

@@ -51,6 +51,12 @@ export interface ComposerToolbarProps {
 	 * the `ContextMeter` also self-hides when the window size or usage is unknown.
 	 */
 	contextMeter?: ContextUsage;
+	/**
+	 * Open the full context breakdown (the workspace Context tab). Omit and the
+	 * meter stays a read-only ring — surfaces without workspace docks pass
+	 * nothing.
+	 */
+	contextMeterOnOpen?: () => void;
 	disabled?: boolean;
 
 	/**
@@ -293,6 +299,7 @@ export function ComposerToolbar({
 	onSubmit,
 	canQueue,
 	contextMeter,
+	contextMeterOnOpen,
 	voiceMode,
 	compact,
 	center,
@@ -350,7 +357,9 @@ export function ComposerToolbar({
 		<div className={cn("flex items-center gap-1", compact && "shrink-0")}>
 			{/* Context-window meter sits leftmost in the trailing cluster, just
 			    before the model selector — the window is a model attribute. */}
-			{contextMeter ? <ContextMeter usage={contextMeter} /> : null}
+			{contextMeter ? (
+				<ContextMeter onOpen={contextMeterOnOpen} usage={contextMeter} />
+			) : null}
 			{/* Model selector (host-supplied) sits to the left of the mic. */}
 			{rightActions}
 			{/* Recording is shown as the full-width waveform that replaces the
@@ -381,16 +390,21 @@ export function ComposerToolbar({
 				</Button>
 			)}
 			{/* When live voice-mode owns the trailing slot, STT dictation moves to
-				    its own small mic button here (left of the trailing waveform). */}
-			{hasVoice && voiceMode && (
-				<VoiceInputButton
-					disabled={voiceDisabled}
-					isRecording={isRecording}
-					isTranscribing={isTranscribing}
-					onStart={onStartVoice}
-					onStop={onStopVoice}
-				/>
-			)}
+				    its own small mic button here (left of the trailing waveform).
+				    Hidden while a run streams — the trailing slot is Stop then, and a
+				    mic beside it invites dictating into a composer that can't send. An
+				    in-flight recording keeps its control so it can still be stopped. */}
+			{hasVoice &&
+				voiceMode &&
+				(!isStreaming || isRecording || isTranscribing) && (
+					<VoiceInputButton
+						disabled={voiceDisabled}
+						isRecording={isRecording}
+						isTranscribing={isTranscribing}
+						onStart={onStartVoice}
+						onStop={onStopVoice}
+					/>
+				)}
 			{/* Trailing action: live voice-mode waveform when the composer is empty
 				    (or the STT mic when no voice-mode is wired), morphing into Send once
 				    the user types, or Stop while streaming. */}

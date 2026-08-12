@@ -7,7 +7,7 @@
   "keywords": ["developer", "hooks", "example", "reference"],
   "category": "Developer Tools",
   "icon": "eye",
-  "iconDither": { "from": 267, "to": 301, "direction": "right" },
+  "iconDither": { "from": 267, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

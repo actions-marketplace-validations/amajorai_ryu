@@ -3,6 +3,7 @@ import { ClipboardIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { StreamedAcpConfig } from "@ryu/blocks/composer/composer-acp-sections.ts";
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts.ts";
+import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-usage.tsx";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,
@@ -18,7 +19,14 @@ import {
 import type { JoinAck } from "@ryuhq/core-client/realtime";
 import { DefaultChatTransport } from "ai";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useId,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { AgentChat } from "@/components/agent-elements/agent-chat.tsx";
 import {
 	EmptyStateHeader,
@@ -80,6 +88,8 @@ import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { AppWidget } from "@/src/contributions/host/AppWidget.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
+import { useComposerAutoQueue } from "@/src/hooks/useComposerAutoQueue.ts";
+import { useComposerDraftAutosave } from "@/src/hooks/useComposerDraftAutosave.ts";
 import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
@@ -144,6 +154,7 @@ import {
 import { getRealtimeJwt, getRealtimeUserId } from "@/src/lib/realtime/jwt.ts";
 import { useRealtimeRoom } from "@/src/lib/realtime/use-realtime-room.ts";
 import { useAppStore } from "@/src/store/useAppStore.ts";
+import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
 import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useMeetingRecordingStore } from "@/src/store/useMeetingRecordingStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
@@ -761,8 +772,13 @@ export default function ChatPage({
 	// Remember the last picked agent so a new chat opens with it preselected. The
 	// agent itself is owned by Core (CRUD via U6); this is only the local "last
 	// used" hint, not agent storage.
-	const { openTab, updateTabBusy, tabs, clearScrollToMessage } =
-		useTabsContext();
+	const {
+		openTab,
+		updateTabBusy,
+		bindTabConversation,
+		tabs,
+		clearScrollToMessage,
+	} = useTabsContext();
 	const currentTabId = useCurrentTabId();
 	const scrollToMessageId = currentTabId
 		? tabs.find((t) => t.id === currentTabId)?.scrollToMessageId
@@ -872,12 +888,37 @@ export default function ChatPage({
 	const [streamedAcpConfig, setStreamedAcpConfig] =
 		useState<StreamedAcpConfig | null>(null);
 
+	// Whether a turn is in flight, for the pick notice below. A ref because the
+	// notice callback is created here, ABOVE `useChat`'s `status` (assigned into
+	// this ref right after that hook), and reading it live would be a TDZ error.
+	const turnInFlightRef = useRef(false);
+	// Changing Approval / Model / Thinking mid-chat is silent by design: the pick
+	// is sticky, rides the NEXT turn's request body, and Core re-applies it to the
+	// live ACP session before that turn's prompt (`apply_turn_config`). Nothing on
+	// screen moves, so without this the user has no way to know the switch took —
+	// the "did my bypass-permissions click do anything?" gap. One fixed toast slot
+	// so dragging the thinking slider across detents replaces in place instead of
+	// stacking a toast per detent.
+	const handleAcpSelectionApplied = useCallback(
+		(setting: string, value: string) => {
+			toast.info({
+				id: "ryu-acp-selection-applied",
+				title: `${setting}: ${value}`,
+				description: turnInFlightRef.current
+					? "Applies after the current response."
+					: "Applies from your next message.",
+			});
+		},
+		[]
+	);
+
 	const acp = useComposerAcpSections({
 		agentId,
 		agents,
 		modelOptions,
 		engineModel: effectiveModel,
 		onEngineModelChange: handleModelChange,
+		onSelectionApplied: handleAcpSelectionApplied,
 		streamedMode: streamedAcpMode,
 		streamedConfig: streamedAcpConfig,
 	});
@@ -932,6 +973,7 @@ export default function ChatPage({
 		editMessage,
 		regenerateMessage,
 		selectVersion,
+		seedTitleFromFirstMessage,
 		refresh,
 	} = useChatHistoryContext();
 
@@ -1087,14 +1129,6 @@ export default function ChatPage({
 	const convIdRef = useRef<string | null>(convId);
 	convIdRef.current = convId;
 
-	// Tracks which requested tool calls the user has acted on, so the approval
-	// footer in chat is shown once per pending tool and dismissed after a
-	// decision. Core auto-runs the call, so approving just dismisses the prompt;
-	// rejecting stops the in-flight stream.
-	const [toolDecisions, setToolDecisions] = useState<
-		Record<string, "approved" | "rejected">
-	>({});
-
 	// #403: Tracks user messages that were blocked so they still appear in the
 	// thread even when the send is prevented.
 	const [blockedMessages, setBlockedMessages] = useState<
@@ -1142,6 +1176,33 @@ export default function ChatPage({
 	const ghostModeRef = useRef(false);
 	ghostModeRef.current = ghostMode;
 
+	// Write this tab's thread back onto its Tab record. A tab opened blank ("New
+	// chat") only learns its conversation id on the first send, and nothing used
+	// to tell TabsContext — so the tab stayed unbound for its whole life:
+	// session restore reopened it EMPTY (the thread was only reachable from the
+	// sidebar), and a sidebar click on that same thread missed `openTab`'s
+	// conversation dedup and stacked a SECOND tab on it. Two chat tabs on one
+	// conversation share a single `useChat({ id })` instance, so the late mount's
+	// blank state clobbers the live one and both stop updating — the "opened it
+	// again and the new tab is broken" report.
+	//
+	// A ghost (temporary) thread never binds: it must leave no durable trace, and
+	// a persisted binding would restore a tab pointing at a conversation Core
+	// never wrote. Unbinding is equally load-bearing — a tab that starts a fresh
+	// thread must drop its old id, or a click on the OLD conversation would dedup
+	// onto a tab that is showing something else.
+	//
+	// The binding carries the id only, never a title: the tab label already has a
+	// single writer (`useTitleBar` → `updateTabTitle`, below), and a second one
+	// here would race it for ghost threads ("Temporary chat" vs the default).
+	const boundConversationId = ghostMode ? undefined : (convId ?? undefined);
+	useEffect(() => {
+		if (!currentTabId) {
+			return;
+		}
+		bindTabConversation(currentTabId, boundConversationId);
+	}, [currentTabId, boundConversationId, bindTabConversation]);
+
 	// Plugin notes (e.g. the double-check review) arrive as `data-plugin_note`
 	// stream parts; dismissed ids are tracked so a note clears once acknowledged.
 	const [dismissedPluginNotes, setDismissedPluginNotes] = useState<Set<string>>(
@@ -1156,6 +1217,7 @@ export default function ChatPage({
 		stop,
 		status,
 		error,
+		clearError,
 	} = useChat({
 		id: chatId,
 		transport: new DefaultChatTransport({
@@ -1240,6 +1302,11 @@ export default function ChatPage({
 			},
 		}),
 	});
+
+	// Feeds the session-control pick notice above, which is defined before this
+	// hook (it is passed into the composer's ACP sections) and so cannot read
+	// `status` directly.
+	turnInFlightRef.current = status === "streaming" || status === "submitted";
 
 	// Per-message send time (ms), keyed by message id. Persisted history seeds this
 	// with Core's server-stamped `created_at`; live turns (which arrive over the SSE
@@ -1475,6 +1542,97 @@ export default function ChatPage({
 		}
 		return null;
 	}, [messages, resolvedPermissions]);
+
+	// Deliver a decision for one permission request. Split out of
+	// `handleRespondPermission` (which only ever knows about the composer's
+	// latest prompt) so the inline approval on a tool row can answer the exact
+	// request that gates *that* call.
+	const respondToPermission = useCallback(
+		(requestId: string, optionId: string | null) => {
+			setResolvedPermissions((prev) => {
+				if (prev.has(requestId)) {
+					return prev;
+				}
+				const next = new Set(prev);
+				next.add(requestId);
+				return next;
+			});
+			respondPermission(chatTargetRef.current, requestId, optionId).catch(
+				() => {
+					// Optimistically cleared already; a failed POST just means the
+					// request had already timed out/resolved server-side.
+				}
+			);
+		},
+		[]
+	);
+
+	// Every unresolved permission request, keyed by the tool call it gates. The
+	// `toolCall` payload is the ACP `ToolCallUpdate` Core forwarded verbatim, so
+	// its `toolCallId` is the SAME id the tool part was opened under — that is
+	// what lets the approval render on the tool row instead of floating free.
+	const permissionsByToolCall = useMemo(() => {
+		const out = new Map<string, ActivePermission>();
+		for (const m of messages) {
+			if (m.role !== "assistant" || !m.parts) {
+				continue;
+			}
+			for (const part of m.parts) {
+				const p = part as { type?: string; data?: unknown };
+				if (p.type !== "data-ryu-permission") {
+					continue;
+				}
+				const data = p.data as ActivePermission | undefined;
+				if (!data?.requestId || resolvedPermissions.has(data.requestId)) {
+					continue;
+				}
+				const tc = data.toolCall as
+					| { toolCallId?: unknown; tool_call_id?: unknown }
+					| null
+					| undefined;
+				const toolCallId =
+					typeof tc?.toolCallId === "string"
+						? tc.toolCallId
+						: typeof tc?.tool_call_id === "string"
+							? tc.tool_call_id
+							: null;
+				if (toolCallId) {
+					out.set(toolCallId, data);
+				}
+			}
+		}
+		return out;
+	}, [messages, resolvedPermissions]);
+
+	// The inline approval on the tool row is the primary surface. The composer
+	// prompt stays as the fallback for a request whose tool call has no row in
+	// the thread — otherwise the same question is asked twice, in two places.
+	const composerPermission = useMemo<ActivePermission | null>(() => {
+		if (!activePermission) {
+			return null;
+		}
+		for (const m of messages) {
+			if (m.role !== "assistant" || !m.parts) {
+				continue;
+			}
+			for (const part of m.parts) {
+				const p = part as { type?: string; toolCallId?: string };
+				const isTool =
+					p.type === "dynamic-tool" ||
+					(typeof p.type === "string" && p.type.startsWith("tool-"));
+				if (!(isTool && p.toolCallId)) {
+					continue;
+				}
+				if (
+					permissionsByToolCall.get(p.toolCallId)?.requestId ===
+					activePermission.requestId
+				) {
+					return null;
+				}
+			}
+		}
+		return activePermission;
+	}, [activePermission, messages, permissionsByToolCall]);
 
 	// Slash commands contributed by enabled Core plugins (e.g. `/proof` from the
 	// proof-of-work turn-hook plugin). Core tags each with its owning `plugin` id
@@ -1753,19 +1911,9 @@ export default function ChatPage({
 			if (!requestId) {
 				return;
 			}
-			setResolvedPermissions((prev) => {
-				const next = new Set(prev);
-				next.add(requestId);
-				return next;
-			});
-			respondPermission(chatTargetRef.current, requestId, optionId).catch(
-				() => {
-					// Optimistically cleared already; a failed POST just means the
-					// request had already timed out/resolved server-side.
-				}
-			);
+			respondToPermission(requestId, optionId);
 		},
-		[activePermission]
+		[activePermission, respondToPermission]
 	);
 
 	const permissionRef = useRef<{
@@ -1773,7 +1921,7 @@ export default function ChatPage({
 		onRespond: (optionId: string | null) => void;
 	}>({ permission: null, onRespond: handleRespondPermission });
 	permissionRef.current = {
-		permission: activePermission,
+		permission: composerPermission,
 		onRespond: handleRespondPermission,
 	};
 
@@ -1862,12 +2010,55 @@ export default function ChatPage({
 	// Re-hydrate messages when the user switches back to this tab. If the ACP
 	// agent is still running, reconnect to Core's live stream resume endpoint so
 	// text deltas appear in real time. Otherwise just load persisted history.
-	const prevIsActiveTab = useRef(isActiveTab);
+	//
+	// "error" re-hydrates alongside "ready": a turn whose stream died (Core
+	// restarted, network dropped) leaves useChat parked in `error` forever, and
+	// gating re-hydration on "ready" alone meant that tab NEVER refreshed again —
+	// it showed the truncated thread for the rest of the session even though Core
+	// had the finished turn persisted. There is no live stream to clobber in the
+	// error state, so reloading is safe. (A turn stuck in "streaming" without a
+	// terminal frame is still not re-hydrated — clobbering a genuinely live turn
+	// would be worse.)
+	//
+	// Reloading history alone would leave the tab READ-ONLY: `handleComposerSubmit`
+	// only sends on `status === "ready"` and otherwise parks the message in the
+	// send queue, which drains on "ready" — so a chat stuck in `error` swallowed
+	// every subsequent message. `clearError()` returns the Chat to "ready" once the
+	// persisted thread is back on screen, which is also what drains that queue.
+	//
+	// Seeded `false`, not `isActiveTab`: seeding it from the live value meant the
+	// mount pass counted as "was already active", so a tab that mounts on an
+	// existing conversation NEVER attempted a resume. Reopening the app (or a
+	// thread) while Core was mid-turn therefore showed a frozen partial reply and
+	// an idle composer — no live text, no Stop — until the tab was toggled away
+	// and back. A fresh chat has no `convId`, so this stays a no-op there.
+	const prevIsActiveTab = useRef(false);
 	const resumeAbort = useRef<AbortController | null>(null);
+	// A resumed turn streams through `setMessages` below, NOT through `useChat`,
+	// so its `status` stays "ready" for the whole reply — which left the composer
+	// showing the idle trailing button (voice mode) with no Stop while text was
+	// visibly arriving. Track the resumed stream explicitly and fold it into the
+	// status handed to the chat surface so Stop appears for it too.
+	const [resumeStreaming, setResumeStreaming] = useState(false);
+	// True until this effect has taken its branch once. The mount pass must NOT
+	// re-hydrate: the effect above already owns mount hydration, and its mapping
+	// is the richer one (prefers structured `parts`, marks #404 stale-running
+	// turns "⚠️ Interrupted", seeds `messageSentAtRef` with the server stamps).
+	// Two hydrations racing on the same tab would let the lossy one win at random,
+	// so on mount we read history only to seed the resume reader.
+	// Keyed off the first effect INVOCATION, not the first time the branch is
+	// taken: a tab that mounts on a fresh chat (no `convId`) skips the branch, so
+	// a "first branch entry" flag would still read as the mount pass on a later
+	// re-activation and skip the `clearError()` that un-sticks an error-parked
+	// thread. Mount is the only pass that races the hydrator.
+	const didMountPass = useRef(false);
 	useEffect(() => {
+		const isMountPass = !didMountPass.current;
+		didMountPass.current = true;
 		const wasActive = prevIsActiveTab.current;
 		prevIsActiveTab.current = isActiveTab;
-		if (!wasActive && isActiveTab && status === "ready" && convId) {
+		const settled = status === "ready" || status === "error";
+		if (!wasActive && isActiveTab && settled && convId) {
 			// First, load persisted messages to restore history up to the
 			// incremental-flush point. Then attempt a live resume.
 			const controller = new AbortController();
@@ -1878,7 +2069,7 @@ export default function ChatPage({
 				if (controller.signal.aborted) {
 					return;
 				}
-				if (history.length > 0) {
+				if (history.length > 0 && !isMountPass) {
 					setVersions(buildVersions(history));
 					setMessages(
 						history.map((m) => ({
@@ -1887,6 +2078,11 @@ export default function ChatPage({
 							parts: hydrateMessageParts(m),
 						}))
 					);
+				}
+				// Persisted state is on screen — take the chat out of `error` so the
+				// composer (and any queued messages) work again. No-op when ready.
+				if (!isMountPass) {
+					clearError();
 				}
 				// Try to reconnect to the running turn's live stream.
 				const resumeUrl = chatStreamResumeUrl(chatTargetRef.current, convId);
@@ -1897,6 +2093,8 @@ export default function ChatPage({
 						if (!(resp.ok && resp.body)) {
 							return; // 404 = no running turn
 						}
+						// A live turn IS attached — the composer must show Stop.
+						setResumeStreaming(true);
 						const reader = resp.body.getReader();
 						const decoder = new TextDecoder();
 						let buffer = "";
@@ -1987,13 +2185,34 @@ export default function ChatPage({
 					.catch(() => {
 						// Resume failed (no live turn / network error) — persisted
 						// history is already loaded above, nothing more to do.
+					})
+					.finally(() => {
+						setResumeStreaming(false);
 					});
 			});
 		}
 		return () => {
 			resumeAbort.current?.abort();
+			setResumeStreaming(false);
 		};
-	}, [isActiveTab, status, convId, loadMessages, setMessages, refresh]);
+	}, [
+		isActiveTab,
+		status,
+		convId,
+		loadMessages,
+		setMessages,
+		refresh,
+		clearError,
+	]);
+
+	// The turn state everything user-facing keys off. `status` alone reports
+	// "ready" through a whole resumed reply (that stream is ours, not useChat's),
+	// which showed the composer as idle — no Stop, voice mode in the trailing
+	// slot — and let a fresh send interleave with the running turn instead of
+	// queueing behind it. Every consumer of "is a turn in flight" uses this;
+	// `status` stays the raw useChat value for the stream plumbing itself.
+	const effectiveStatus: typeof status =
+		resumeStreaming && status === "ready" ? "streaming" : status;
 
 	// ── Multi-user collaboration (Phase 2): live chat fan-out + presence ────────
 	// Join this conversation's realtime room (only once a real `convId` exists —
@@ -2444,6 +2663,19 @@ export default function ChatPage({
 				setActiveConversationId(newId);
 			}
 
+			// Name the thread after what the user just asked, right now. Core derives
+			// the identical title when it persists this turn, so this only removes the
+			// wait — without it the row reads "New Chat" for the whole first reply
+			// (the list is only re-fetched once the turn completes). The chat-title
+			// plugin replaces it with a model-written name after that reply lands.
+			// Ghost chats are absent from the list, so the seed is a no-op for them.
+			if (!ghostMode) {
+				const titleTargetId = convIdRef.current ?? draftConvId.current;
+				if (titleTargetId) {
+					seedTitleFromFirstMessage(titleTargetId, message.content);
+				}
+			}
+
 			// #415: Record the targeted agent for this upcoming assistant turn so we
 			// can label the response bubble with the right agent name.
 			const assistantIdx = messages.filter(
@@ -2489,6 +2721,7 @@ export default function ChatPage({
 			messages,
 			ghostMode,
 			createConversation,
+			seedTitleFromFirstMessage,
 			setActiveConversationId,
 			sendMessage,
 			stopTyping,
@@ -2553,6 +2786,18 @@ export default function ChatPage({
 		setRightPanelOpen(true);
 	}, []);
 
+	// Open the context-window breakdown in the right panel (composer ring click).
+	// Same nonce-per-click flow as the subagent tab, but the request carries no
+	// payload: the panel reads `contextView` live so it keeps tracking the
+	// conversation instead of freezing at the moment it was opened.
+	const [contextReq, setContextReq] = useState<{ nonce: number } | null>(null);
+	const contextNonce = useRef(0);
+	const handleOpenContext = useCallback(() => {
+		contextNonce.current += 1;
+		setContextReq({ nonce: contextNonce.current });
+		setRightPanelOpen(true);
+	}, []);
+
 	// Sidebar → side chat: the sidebar selects the thread then dispatches this
 	// event. Only the tab whose conversation matches opens the overlay; if the
 	// tab is still mounting (convId not yet set), stash it and flush once convId
@@ -2599,11 +2844,48 @@ export default function ChatPage({
 	// `conversation_id` on each turn.
 	const handleStop = useCallback(() => {
 		stop();
+		// A resumed turn is read by our own fetch, not by useChat — `stop()` does
+		// not touch it, so abort that reader explicitly or Stop would look dead.
+		resumeAbort.current?.abort();
+		setResumeStreaming(false);
 		const conversationId = convIdRef.current ?? draftConvId.current;
 		cancelChat(chatTargetRef.current, conversationId).catch(() => {
 			// No live turn (or Core unreachable) — the SSE abort above still stands.
 		});
 	}, [stop]);
+
+	// Publish this tab's chat-owned shortcut handlers while it is the FOCUSED tab.
+	// Every chat tab stays mounted, and the hotkey provider keeps one handler per
+	// action id (last-writer-wins), so binding `chat.stop` inside ChatPage would
+	// let a hidden tab own it and abort the wrong stream. Layout binds the ids
+	// once and reads this slot; the owner token means a deactivating tab only
+	// clears the slot when a newer tab has not already claimed it.
+	const hotkeyOwner = useId();
+	const publishHotkeyTargets = useChatHotkeyTargets((s) => s.publish);
+	const clearHotkeyTargets = useChatHotkeyTargets((s) => s.clearIfOwner);
+	useEffect(() => {
+		if (!isActiveTab) {
+			clearHotkeyTargets(hotkeyOwner);
+			return;
+		}
+		publishHotkeyTargets(hotkeyOwner, {
+			// `effectiveStatus`, not `status`: a resumed turn streams outside
+			// useChat, and Stop must stay live for it.
+			isStreaming:
+				effectiveStatus === "streaming" || effectiveStatus === "submitted",
+			stop: handleStop,
+			startVoiceMode: voiceMode.start,
+		});
+		return () => clearHotkeyTargets(hotkeyOwner);
+	}, [
+		isActiveTab,
+		hotkeyOwner,
+		effectiveStatus,
+		handleStop,
+		voiceMode.start,
+		publishHotkeyTargets,
+		clearHotkeyTargets,
+	]);
 
 	// Branch ("fork into new chat"): copy this conversation's
 	// history up to the chosen message into a fresh conversation and open it in a
@@ -2835,9 +3117,13 @@ export default function ChatPage({
 		sendNow: sendQueuedNow,
 		sendAll: sendQueuedAll,
 	} = useMessageQueue({
-		status,
+		status: effectiveStatus,
 		send: handleSend,
-		stop,
+		// `handleStop`, not useChat's bare `stop`: the queue's force-send path
+		// interrupts the run and waits for the status to return to "ready". Raw
+		// `stop()` leaves a resumed reader attached, so `effectiveStatus` would
+		// stay "streaming" and the forced item would never drain.
+		stop: handleStop,
 		blocked: composerBlocked,
 	});
 
@@ -2922,7 +3208,23 @@ export default function ChatPage({
 		setQuote(null);
 	}, [activeConversationId]);
 
-	const handleComposerSubmit = useCallback(
+	// Mirror unsent composer text into the `@ryu/drafts` outbox so closing the tab
+	// does not destroy it. A no-op unless that app is enabled, and a blank composer
+	// deletes the draft — which is also how a SEND clears it, since submitting
+	// empties the text.
+	const draftContext = useMemo(
+		() => ({
+			conversationId: activeConversationId ?? undefined,
+			agentId: agentId ?? undefined,
+			model: effectiveModel ?? undefined,
+			folderPath: folder ?? undefined,
+		}),
+		[activeConversationId, agentId, effectiveModel, folder]
+	);
+	const autosaveDraft = useComposerDraftAutosave(draftContext);
+	const maybeAutoQueue = useComposerAutoQueue(draftContext);
+
+	const submitNow = useCallback(
 		(message: { role: "user"; content: string }) => {
 			// `/btw …` is a client-side command. `/goal …` is now handled
 			// server-side by the io.ryu.goal plugin, so it is sent as a normal
@@ -2946,7 +3248,7 @@ export default function ChatPage({
 				handleSend(outgoing);
 				return;
 			}
-			if (status === "ready") {
+			if (effectiveStatus === "ready") {
 				handleSend(outgoing);
 			} else {
 				enqueueMessage(outgoing.content);
@@ -2954,12 +3256,28 @@ export default function ChatPage({
 		},
 		[
 			composerBlocked,
-			status,
+			effectiveStatus,
 			handleSend,
 			enqueueMessage,
 			maybeHandleBtwCommand,
 			quote,
 		]
+	);
+
+	// The auto-queue gate sits IN FRONT of the send, not inside it: when the node is
+	// already at its concurrency ceiling and the user has asked for queueing, the
+	// message becomes an armed draft and no turn starts. Only MANUAL sends pass
+	// through here — the launchpad/dispatcher auto-submit path below calls
+	// `submitNow` directly, because a draft the dispatcher just released for having
+	// a free slot must not be re-queued by a reading taken a moment later.
+	const handleComposerSubmit = useCallback(
+		async (message: { role: "user"; content: string }) => {
+			if (await maybeAutoQueue(message.content)) {
+				return;
+			}
+			submitNow(message);
+		},
+		[maybeAutoQueue, submitNow]
 	);
 
 	// Queued messages belong to the conversation they were typed in. Switching
@@ -3005,7 +3323,7 @@ export default function ChatPage({
 		}
 		autoSubmitFired.current = true;
 		// Hand the seeded message to the SAME entry point a manual send uses.
-		// `handleComposerSubmit` already routes every state safely — it sends when
+		// `submitNow` already routes every state safely — it sends when
 		// ready, ENQUEUES when the turn isn't ready yet (the queue drains on ready),
 		// and records into `blockedMessages` (visible error state) when the
 		// gateway/Core is down. The previous `if (composerBlocked || status !==
@@ -3014,8 +3332,8 @@ export default function ChatPage({
 		// suppressed for `initialSubmit`), so a bailed effect made the message
 		// silently vanish after the redirect from the empty-tabs shell — the user
 		// landed on an empty new chat with nothing sent.
-		handleComposerSubmit({ role: "user", content });
-	}, [initialSubmit, initialPrompt, initialImages, handleComposerSubmit]);
+		submitNow({ role: "user", content });
+	}, [initialSubmit, initialPrompt, initialImages, submitNow]);
 
 	useEffect(() => {
 		const conv = activeConversationId
@@ -3035,36 +3353,25 @@ export default function ChatPage({
 		}
 	}, [activeConversationId, getConversation, agentId]);
 
-	const decideTool = useCallback(
-		(toolCallId: string, decision: "approved" | "rejected") => {
-			setToolDecisions((prev) => ({ ...prev, [toolCallId]: decision }));
-			if (decision === "rejected") {
-				stop();
-			}
-		},
-		[stop]
-	);
-
-	// Attach an approval footer to any requested-but-unresolved tool call the user
-	// has not yet acted on. This wires the shared ToolApprovalFooter into the chat
-	// tool loop: a tool part in `input-available` state (the agent asked to run it)
-	// gets an `approval` object the MCP tool renderer surfaces as the footer.
+	// Attach the approval footer to the tool row an agent is actually BLOCKED on.
+	// The gate is a real `data-ryu-permission` request from Core (the ACP
+	// `session/request_permission` seam), never the part's own stream state.
+	//
+	// It used to key off `state === "input-available"`, which is wrong twice
+	// over. Core opens every ACP tool call with a `tool-input-available` frame the
+	// moment the call arrives, and the ACP wire sends that first frame with
+	// `rawInput: {}` — arguments stream in afterwards and correct the part in
+	// place. So the footer appeared the instant a tool started, before the agent
+	// had generated the command or diff it was asking permission for. And the
+	// decision never left the client: "Approve" only hid the buttons, "Skip"
+	// aborted the whole turn. Nothing was ever waiting on either answer, because
+	// the request that does block is resolved over `/api/chat/permission`.
 	//
 	// #403: Also patch in friendly error cards for failed assistant turns.
 	const errorString =
 		error instanceof Error ? error.message : error ? String(error) : null;
 
 	const messagesWithApproval = useMemo(() => {
-		// When the active ACP mode is a bypass/full-access variant, tools run
-		// without user approval — skip injecting the approval footer entirely.
-		const mode = (acpModeRef.current ?? "").toLowerCase();
-		const isBypassMode =
-			mode.includes("bypass") ||
-			mode.includes("full access") ||
-			mode.includes("full-access") ||
-			mode.includes("fullaccess") ||
-			mode.includes("yolo");
-
 		return messages.map((m) => {
 			if (m.role !== "assistant" || !m.parts) {
 				return m;
@@ -3098,35 +3405,31 @@ export default function ChatPage({
 				const isTool =
 					p.type === "dynamic-tool" ||
 					(typeof p.type === "string" && p.type.startsWith("tool-"));
-				if (
-					isBypassMode ||
-					!isTool ||
-					p.state !== "input-available" ||
-					!p.toolCallId ||
-					toolDecisions[p.toolCallId]
-				) {
+				if (!(isTool && p.toolCallId)) {
 					return part;
 				}
-				const toolCallId = p.toolCallId;
+				const pending = permissionsByToolCall.get(p.toolCallId);
+				if (!pending) {
+					return part;
+				}
 				changed = true;
-				// The approval object is consumed by the MCP tool renderer; it isn't
+				// The approval object is consumed by the tool renderers; it isn't
 				// part of the AI SDK part schema, so reattach the original part type.
 				return {
 					...p,
 					input: {
 						...(p.input ?? {}),
 						approval: {
-							approveLabel: "Approve",
-							rejectLabel: "Skip",
-							onApprove: () => decideTool(toolCallId, "approved"),
-							onReject: () => decideTool(toolCallId, "rejected"),
+							options: pending.options,
+							onSelect: (optionId: string | null) =>
+								respondToPermission(pending.requestId, optionId),
 						},
 					},
 				} as typeof part;
 			});
 			return changed ? { ...m, parts } : m;
 		});
-	}, [messages, toolDecisions, decideTool, errorString]);
+	}, [messages, permissionsByToolCall, respondToPermission, errorString]);
 
 	// #403: Synthesise blocked-message entries as visible user messages so they
 	// appear in the thread even when not sent. Append them after the real messages.
@@ -3277,6 +3580,14 @@ export default function ChatPage({
 	// ("+" · input · model · mic · send): the agent/model cluster moves to the
 	// right of the input and the usage meters fold into its dropdown. The fresh
 	// launchpad surface (no history) keeps the roomy left-aligned stacked layout.
+	// The SAME usage the composer ring shows, derived here too so the Context
+	// panel and the ring can never report different numbers (the ring derives it
+	// internally from the identical inputs — see `deriveContextUsage`).
+	const contextUsage = useMemo(
+		() => deriveContextUsage(processedMessages, contextSize),
+		[processedMessages, contextSize]
+	);
+
 	const composerCompact = processedMessages.length > 0;
 	const composerCompactRef = useRef(composerCompact);
 	composerCompactRef.current = composerCompact;
@@ -3696,6 +4007,12 @@ export default function ChatPage({
 	return (
 		<WorkspacePanels
 			bottomOpen={bottomPanelOpen}
+			contextRequest={contextReq}
+			contextView={{
+				conversationId: activeConversationId ?? draftConvId.current,
+				target: chatTarget,
+				usage: contextUsage,
+			}}
 			cowork={coworkData}
 			folder={folder}
 			onBottomOpenChange={setBottomPanelOpen}
@@ -3740,6 +4057,10 @@ export default function ChatPage({
 							// conversation rests below the frosted bar yet scrolls under it.
 							classNames={{ messageList: "pt-12" }}
 							contextSize={contextSize}
+							// Opening this thread jumps the transcript to the newest
+							// message; the id is what makes that fire once per
+							// conversation rather than on every history rewrite.
+							conversationKey={convId ?? undefined}
 							currentUser={{
 								avatar: oidcUser?.picture,
 								id: myUserId ?? undefined,
@@ -3786,10 +4107,12 @@ export default function ChatPage({
 									? handleContributedMessageAction
 									: undefined
 							}
+							onDraftChange={autosaveDraft}
 							onEditMessage={
 								activeConversationId ? handleEditMessage : undefined
 							}
 							onFeedback={activeConversationId ? handleFeedback : undefined}
+							onOpenContext={handleOpenContext}
 							onQuote={setQuote}
 							onRegenerateMessage={
 								activeConversationId ? handleRegenerateMessage : undefined
@@ -3804,7 +4127,7 @@ export default function ChatPage({
 							seedDraft={initialSubmit ? undefined : initialPrompt}
 							showCopyToolbar
 							slots={{ InputBar: councilInputBar }}
-							status={status}
+							status={effectiveStatus}
 							toolRenderers={{}}
 							versions={versions}
 						/>

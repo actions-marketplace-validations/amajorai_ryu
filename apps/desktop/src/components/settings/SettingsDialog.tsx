@@ -10,7 +10,8 @@ import {
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { useSession } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
@@ -36,6 +37,7 @@ import { DeveloperTab } from "./DeveloperTab.tsx";
 import { EntitySettings } from "./EntitySettings.tsx";
 import { GeneralTab } from "./GeneralTab.tsx";
 import { KeyboardShortcutsTab } from "./KeyboardShortcutsTab.tsx";
+import { ServicesOrgSwitcher } from "./ServicesOrgSwitcher.tsx";
 import { SessionsTab } from "./SessionsTab.tsx";
 import { TeamsBillingTab } from "./TeamsBillingTab.tsx";
 import { TtsEngineSettings } from "./TtsEngineSettings.tsx";
@@ -57,6 +59,14 @@ interface NavItem {
 }
 
 interface NavGroup {
+	/**
+	 * Renders between the group label and its first item. Exists for exactly one
+	 * case — the workspace switcher above Billing — because every item in the
+	 * Services group is org-scoped and the group needed one control saying WHICH
+	 * org, rather than four tabs each repeating (and potentially disagreeing
+	 * about) the answer.
+	 */
+	header?: ReactNode;
 	items: NavItem[];
 	title?: string;
 }
@@ -101,6 +111,8 @@ const NAV_GROUPS: NavGroup[] = [
 	},
 	{
 		title: "Services",
+		// The scope of everything under this heading, stated once at the top of it.
+		header: <ServicesOrgSwitcher />,
 		items: [
 			{ value: "billing", label: "Billing" },
 			{ value: "referrals", label: "Referrals" },
@@ -109,6 +121,29 @@ const NAV_GROUPS: NavGroup[] = [
 		],
 	},
 ];
+
+/**
+ * The Referrals tab, with the two things `ReferralsTab` cannot resolve itself:
+ * whose name goes on the invite pass, and which metal ring to paint on it.
+ *
+ * Its own component rather than inline in `SectionContent`, because both facts
+ * come from hooks (`useSession`, `useTheme`) and `SectionContent` is a switch —
+ * calling hooks in one arm of it would be a conditional hook.
+ */
+function ReferralsSection() {
+	const { data: session } = useSession();
+	const { resolvedTheme } = useTheme();
+	return (
+		<ReferralsTab
+			holderName={session?.user?.name ?? null}
+			// The app's RESOLVED theme, not the OS's: this shell has a manual toggle
+			// that can disagree with `prefers-color-scheme`, and a ring following the
+			// OS would be the one part of the card lit for the wrong scheme.
+			metalTheme={resolvedTheme === "dark" ? "dark" : "light"}
+			onOpenExternal={openExternal}
+		/>
+	);
+}
 
 function SectionContent({ value }: { value: SectionValue }) {
 	switch (value) {
@@ -129,7 +164,7 @@ function SectionContent({ value }: { value: SectionValue }) {
 		case "billing":
 			return <BillingTab />;
 		case "referrals":
-			return <ReferralsTab onOpenExternal={openExternal} />;
+			return <ReferralsSection />;
 		case "teams":
 			return <TeamsBillingTab />;
 		case "credits":
@@ -186,7 +221,12 @@ export function SettingsDialog({
 		return map;
 	}, [appEntities, pluginEntities]);
 
-	const navGroups = useMemo(
+	// Annotated as `NavGroup[]` rather than inferred: the dynamic Apps/Plugins
+	// groups come back as `EntityNavGroup`, which is structurally a `NavGroup`
+	// without the optional `header`. Left to inference the array widens to a
+	// union, and reading `group.header` off it is an error even though every
+	// member legitimately lacks the field.
+	const navGroups = useMemo<NavGroup[]>(
 		() => [...NAV_GROUPS, ...buildEntityNavGroups(appEntities, pluginEntities)],
 		[appEntities, pluginEntities]
 	);
@@ -260,6 +300,7 @@ export function SettingsDialog({
 										{group.title && (
 											<SidebarGroupLabel>{group.title}</SidebarGroupLabel>
 										)}
+										{group.header}
 										<SidebarMenu>
 											{group.items.map((item) => (
 												<SidebarMenuItem key={item.value}>

@@ -122,6 +122,26 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 		category: "Chat",
 		defaultBinding: "Mod+N",
 	},
+	// Both of these act on the FOCUSED chat. Every chat tab stays mounted, so the
+	// handler cannot be registered per-tab (last-writer-wins would let a hidden tab
+	// own it). The active tab publishes into `useChatHotkeyTargets` and Layout
+	// binds these ids once — see that store for the full argument.
+	{
+		id: "chat.stop",
+		label: "Stop the current reply",
+		category: "Chat",
+		defaultBinding: "Mod+Shift+Backspace",
+		description:
+			"Interrupt the reply streaming in the focused chat. Does nothing when that chat has no turn in flight.",
+	},
+	{
+		id: "chat.voice-mode",
+		label: "Start voice mode",
+		category: "Chat",
+		defaultBinding: null,
+		description:
+			"Open the realtime voice overlay for the focused chat. Unbound by default — this is the IN-APP overlay, distinct from the system-wide push-to-talk and dictation shortcuts under Global.",
+	},
 	// --- Composer (focus-scoped: only fire inside the prompt input) ---
 	{
 		id: "composer.cycle-agent",

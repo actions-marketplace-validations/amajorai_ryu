@@ -19,6 +19,14 @@
 //   3. ONE COLUMN when narrow. Below the breakpoint the rail stacks under the main
 //      column — the small-window presentation, which must not be a squeezed
 //      two-up.
+//   4. THE HERO TILE'S WASH COVERS ITS BOX. Not geometry, but the same "only a real
+//      browser can answer it" class: the tile's glyph is hardcoded `text-white`
+//      because it sits on the hero above the scrim, so the wash under it must be
+//      opaque. Every packaged manifest now declares a spec that DISSOLVES to
+//      transparent, and painted as-is the tile's far end would be the banner
+//      behind it — near-white in light theme, taking the glyph with it. The hero
+//      runs the spec through `opaqueDither` for exactly this, and the only honest
+//      check of that is reading the canvas's own alpha.
 
 import { expect, test } from "@playwright/test";
 
@@ -71,6 +79,48 @@ test("stat strip scrolls inside its own band", async ({ page }) => {
 			document.documentElement.clientWidth
 	);
 	expect(overflow).toBeLessThanOrEqual(1);
+});
+
+test("the hero tile's wash stays opaque under its white glyph", async ({
+	page,
+}) => {
+	await page.setViewportSize(WIDE);
+	// Two canvases live in the hero: the full-bleed banner and the icon tile. They
+	// are told apart by size rather than by DOM order, because order is an
+	// implementation detail of the hero's markup and a box under ~7rem can only be
+	// the tile (the banner spans the dialog).
+	const canvases = page.locator("[data-testid='dialog'] canvas");
+	await expect(canvases.first()).toBeVisible();
+	const total = await canvases.count();
+	const tiles: number[] = [];
+	for (let i = 0; i < total; i++) {
+		const box = await canvases.nth(i).boundingBox();
+		if (box && box.width <= 112) {
+			tiles.push(i);
+		}
+	}
+	expect(tiles).toHaveLength(1);
+
+	// The MINIMUM alpha across the whole backing canvas, not a sampled pixel: a
+	// dissolve is a gradient, so any single sample can land on the solid end and
+	// pass while the other end is see-through. A two-tone ramp paints every cell,
+	// so its minimum is the opacity multiplier — full here.
+	const minAlpha = await canvases.nth(tiles[0]).evaluate((el) => {
+		const canvas = el as HTMLCanvasElement;
+		const ctx = canvas.getContext("2d");
+		if (!ctx) {
+			throw new Error("no 2d context on the tile canvas");
+		}
+		const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+		let min = 255;
+		for (let i = 3; i < data.length; i += 4) {
+			if (data[i] < min) {
+				min = data[i];
+			}
+		}
+		return min;
+	});
+	expect(minAlpha).toBeGreaterThan(200);
 });
 
 test("stacks to one column when narrow", async ({ page }) => {

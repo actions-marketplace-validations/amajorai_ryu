@@ -13,6 +13,7 @@ import {
 	MessageScrollerItem,
 	MessageScrollerProvider,
 	MessageScrollerViewport,
+	useMessageScroller,
 } from "@ryu/ui/components/message-scroller";
 import {
 	ImageGeneration,
@@ -84,6 +85,14 @@ export interface MessageListProps {
 	 * this size) in its stats footer. Omitted ⇒ speed only, no ring.
 	 */
 	contextSize?: number;
+	/**
+	 * Identity of the thread being shown, used to fire the open-at-bottom jump
+	 * once per conversation (see {@link ChatDisplayPrefs.openAtBottom}). Pass the
+	 * conversation id when the surface has one — the fallback (the first
+	 * message's id) also changes when history is rewritten, e.g. editing the
+	 * opening user message mints a new id and would re-jump.
+	 */
+	conversationKey?: string;
 	/**
 	 * Current signed-in user info for displaying avatar/name on own messages.
 	 */
@@ -1056,6 +1065,76 @@ function groupMessagesIntoTurns(messages: UIMessage[]) {
 	return turns;
 }
 
+/**
+ * Jumps the transcript to the newest message once per conversation.
+ *
+ * The scroller positions itself at the end when content first arrives, which
+ * covers a chat hydrating in front of you (ChatPage loads history *after* mount).
+ * What it does not cover is a transcript whose history lands while the surface
+ * has NO layout — a tab restored behind `display:none`, or a background pane —
+ * because there is nothing to scroll at that moment and the placement is never
+ * revisited when the tab is shown. Measured in the chat-scroll story: that case
+ * opens ~7200px up, at the very start of the conversation. A wheel/touch/key
+ * event during the load has the same effect, dropping the scroller out of its
+ * follow-the-bottom mode for good.
+ *
+ * So the jump is made explicit: try on mount, on hydration, and again whenever
+ * the surface gains layout, then stop until the conversation changes so a
+ * scrolled-up read is never yanked back down.
+ *
+ * Rendered inside `MessageScrollerProvider`; renders nothing.
+ */
+function OpenAtBottom({
+	containerRef,
+	enabled,
+	hasMessages,
+	conversationKey,
+}: {
+	containerRef: React.RefObject<HTMLDivElement | null>;
+	enabled: boolean;
+	hasMessages: boolean;
+	conversationKey: string | null;
+}) {
+	const { scrollToEnd } = useMessageScroller();
+	const settledKeyRef = useRef<string | null>(null);
+
+	useEffect(() => {
+		if (
+			!(enabled && hasMessages && conversationKey) ||
+			settledKeyRef.current === conversationKey
+		) {
+			return;
+		}
+		const container = containerRef.current;
+		if (!container) {
+			return;
+		}
+		const jump = () => {
+			// A surface with no layout yet (a tab still hidden behind `display:none`)
+			// would scroll a zero-height viewport and settle on nothing, so wait for
+			// the ResizeObserver below to report real height.
+			if (container.clientHeight === 0) {
+				return;
+			}
+			if (scrollToEnd({ behavior: "auto" })) {
+				settledKeyRef.current = conversationKey;
+			}
+		};
+		jump();
+		if (
+			settledKeyRef.current === conversationKey ||
+			typeof ResizeObserver === "undefined"
+		) {
+			return;
+		}
+		const observer = new ResizeObserver(jump);
+		observer.observe(container);
+		return () => observer.disconnect();
+	}, [containerRef, conversationKey, enabled, hasMessages, scrollToEnd]);
+
+	return null;
+}
+
 export const MessageList = memo(function MessageList({
 	messages,
 	status,
@@ -1083,13 +1162,14 @@ export const MessageList = memo(function MessageList({
 	classNames,
 	toolRenderers,
 	contextSize,
+	conversationKey,
 }: MessageListProps) {
 	const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
 	// Which user message is currently in inline-edit mode (null = none).
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [isMounted, setIsMounted] = useState(false);
 	const scrollerRef = useRef<HTMLDivElement>(null);
-	const { density, pinUserMessage } = useChatDisplayPrefs();
+	const { density, openAtBottom, pinUserMessage } = useChatDisplayPrefs();
 	// A narrow surface (island mini-chat, companion popover) renders the same
 	// parts, just without the aids that need width: no centring column, tighter
 	// padding, no TOC, no pinned user bar.
@@ -1178,6 +1258,15 @@ export const MessageList = memo(function MessageList({
 			defaultScrollPosition={initialScrollBehavior === "top" ? "start" : "end"}
 		>
 			<div className="flex min-h-0 flex-1 flex-col" ref={scrollerRef}>
+				{/* A surface that deliberately reads top-down (a static transcript)
+				    opts out via `initialScrollBehavior="top"`; the user opts out via
+				    Appearance → "Open chats at the latest message". */}
+				<OpenAtBottom
+					containerRef={scrollerRef}
+					conversationKey={conversationKey ?? normalizedMessages[0]?.id ?? null}
+					enabled={openAtBottom && initialScrollBehavior !== "top"}
+					hasMessages={normalizedMessages.length > 0}
+				/>
 				<MessageScroller className={cn("an-message-list flex-1", className)}>
 					{isCompact ? null : <ChatToc items={tocItems} />}
 					<MessageScrollerViewport>
@@ -1194,9 +1283,7 @@ export const MessageList = memo(function MessageList({
 						<MessageScrollerContent
 							className={cn(
 								"w-full gap-2",
-								isCompact
-									? "px-0.5 py-1"
-									: "mx-auto max-w-[720px] px-4 py-6"
+								isCompact ? "px-0.5 py-1" : "mx-auto max-w-[720px] px-4 py-6"
 							)}
 						>
 							{turns.map((turn, turnIndex) => {

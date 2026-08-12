@@ -7,8 +7,8 @@
 // placement, order) and the shell renders it, which also means disabling the app
 // removes the tab with no shell change. The shell keeps owning the panels that
 // are genuinely shell infrastructure (terminal, code review, files, cowork,
-// subagent, artifact, inspector) — those are not apps and have nothing to
-// contribute from.
+// subagent, artifact, inspector, mission) — those are not apps and have nothing
+// to contribute from.
 //
 // Everything here is PURE (no React, no fetch) so the ordering/placement/
 // resolution rules are unit-testable; the rendering half lives in
@@ -31,7 +31,9 @@ export type BuiltinTabKind =
 	| "cowork"
 	| "subagent"
 	| "artifact"
-	| "inspector";
+	| "inspector"
+	| "context"
+	| "mission";
 
 /** A contributed panel's tab kind: the `plugin:<pluginId>:<panelId>` key minted
  *  by {@link pluginDockPanelKey}. Kept as a template-literal type so a tab kind
@@ -52,8 +54,18 @@ export function isPluginTabKind(kind: DockTabKind): kind is PluginTabKind {
  *
  * Workspace infrastructure (terminal, files, changes, app panels) belongs to the
  * project, not a single chat — pinning opts them into that shared strip. Chat-run
- * panels (cowork / subagent / artifact / inspector) stay conversation-local and
- * are never pinnable.
+ * panels (cowork / subagent / artifact / inspector / context / mission) stay
+ * conversation-local and are never pinnable: each describes ONE conversation's
+ * run, so sharing the live instance across the folder's chats would show the
+ * wrong thread's data — a context breakdown would show the wrong chat's numbers,
+ * a turn digest the wrong chat's work.
+ *
+ * This is also why a conversation-local panel cannot be an app's
+ * `contributes.dock_panels` entry, however much it looks like one: every plugin
+ * kind IS pinnable (below), so `WorkspacePanels` hands it to the project dock
+ * store on creation and `ProjectDockHost` mounts it OUTSIDE the chat, where the
+ * per-chat props it would need do not exist. Mission Control's cross-chat half
+ * is an app; its in-chat panel is shell infrastructure, for that reason.
  */
 export function isPinnableDockTabKind(kind: DockTabKind): boolean {
 	if (isPluginTabKind(kind)) {

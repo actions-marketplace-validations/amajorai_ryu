@@ -25,6 +25,7 @@ import {
 } from "@/src/lib/api/mesh.ts";
 import { getPreference, setPreference } from "@/src/lib/api/preferences.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
+import { watchMeshInstall } from "../shell/mesh-install.ts";
 import {
 	SettingsGroup,
 	SettingsItem,
@@ -78,20 +79,30 @@ export function NetworkSettings() {
 	}, []);
 
 	// Enable/disable the mesh plane. Core persists the `mesh-enabled` pref,
-	// flips its in-process signal, and starts/stops the Tailscale daemon
-	// (PATH-adopted — the official `tailscale` client must be on this machine).
+	// flips its in-process signal, and starts/stops the Tailscale daemon.
 	// A daemon-start failure resolves (not rejects) with `startError`, because the
 	// mesh is still enabled — the toggle reflects the persisted state and the
 	// warning explains why it isn't connected.
+	//
+	// A MISSING client is no longer such a failure: Core installs one (`installing`)
+	// and starts the daemon itself when it lands, so this shows progress and polls
+	// the status instead of a warning the user has to act on.
 	const handleToggleMesh = async (enabled: boolean) => {
 		setSavingMesh(true);
 		const target = toTarget(useNodeStore.getState().getActiveNode());
 		try {
-			const { startError, status } = await setMeshEnabled(target, enabled);
+			const { startError, status, installing, canInstall } =
+				await setMeshEnabled(target, enabled);
 			setMeshStatus(status);
+			if (enabled && installing) {
+				await watchMeshInstall(target, setMeshStatus);
+				return;
+			}
 			if (enabled && startError) {
 				sileo.warning({
-					title: "Mesh enabled, but the daemon didn't start",
+					title: canInstall
+						? "Mesh enabled, but the daemon didn't start"
+						: "Mesh enabled — install the Tailscale client",
 					description: startError,
 				});
 				return;
@@ -146,7 +157,7 @@ export function NetworkSettings() {
 
 	return (
 		<SettingsSection
-			caption="Join this node to a Tailscale tailnet so it can reach — and be reached by — other Ryu nodes. Uses the official tailscale + tailscaled client in userspace networking mode (no admin rights), which must be installed on this machine."
+			caption="Join this node to a tailnet so it can reach — and be reached by — other Ryu nodes. Uses the official tailscale + tailscaled client in userspace networking mode (no admin rights); Ryu installs it for you if this machine doesn't have it. Pick the control plane (Headscale or Tailscale) from Tunnel in the node menu."
 			title="Mesh (Tailscale / Headscale)"
 		>
 			<SettingsGroup>

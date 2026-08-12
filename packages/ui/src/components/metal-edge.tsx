@@ -206,7 +206,31 @@ export function MetalEdge({
 			// width inside a full-width column and the ring tracks the content while
 			// the layout does not. `.metal-fx-content` is `width: 100%` but not
 			// `height: 100%`, hence the second selector.
-			className={cn("w-full [&>.metal-fx-content]:h-full", className)}
+			//
+			// The visibility/opacity pair is the fail-open, and it is load-bearing rather
+			// than cosmetic. `metal-fx` holds its host at `opacity: 0;
+			// visibility: hidden` (inline, hence the `!`) until the shader copies its
+			// FIRST frame, and it only ever copies for an instance its
+			// IntersectionObserver has called visible. The library's host is a button
+			// whose content is its own decoration, so hiding it costs nothing there —
+			// but every consumer here nests real content inside the ring, and on the
+			// pass card the host is the card FACE. An instance that mounts off-screen,
+			// or that is told "not visible" on the single callback the observer gives
+			// it, therefore takes the whole face down with it and leaves the card as a
+			// bare brushed-metal slab: the extrusion, with nothing in front of it.
+			// Forcing the host visible degrades that to what it should always have
+			// been — a card with no chrome on its edge yet.
+			//
+			// `inherit` rather than `visible`: `visibility` is an INHERITED property,
+			// so a hard `visible !important` here would also out-vote an ancestor that
+			// hides a whole subtree that way — a closed tab panel, an `invisible`
+			// wrapper, a popover on its way out — and every consumer of this wrapper
+			// would start showing through them. Inheriting overrides only the
+			// library's own inline value and leaves the page's intent intact.
+			className={cn(
+				"w-full opacity-100! [visibility:inherit]! [&>.metal-fx-content]:h-full",
+				className
+			)}
 			// The wandering halo is tuned for a pill-sized button; over a card it
 			// stops reading as a glow around an edge and becomes a wash across the
 			// whole face. The shader ring — the part that IS the border — still

@@ -630,6 +630,14 @@ export interface ProfileSettingsProps {
 	changePasswordSlot?: ReactNode;
 	email?: string;
 	emailChangeStatusSlot?: ReactNode;
+	/**
+	 * App-local "merge another account" dialog and its pending-request banner
+	 * (injected by the live page), mirroring the change-email pair above. Sits in
+	 * the account tab next to the email row because it is the same concern: which
+	 * addresses get you into this account.
+	 */
+	mergeAccountsSlot?: ReactNode;
+	mergeStatusSlot?: ReactNode;
 	/** Connections tab. */
 	googleConnected?: boolean;
 	hasProSubscription?: boolean;
@@ -707,6 +715,8 @@ export default function ProfileSettings({
 	twoFactorEnabled = false,
 	changeEmailSlot,
 	emailChangeStatusSlot,
+	mergeAccountsSlot,
+	mergeStatusSlot,
 	changePasswordSlot,
 	twoFactorSlot,
 	onDeleteAccount = noop,
@@ -882,6 +892,24 @@ export default function ProfileSettings({
 								</Item>
 
 								{emailChangeStatusSlot}
+
+								{mergeAccountsSlot ? (
+									<>
+										<ItemSeparator />
+										<Item>
+											<ItemContent>
+												<ItemTitle>Merge another account</ItemTitle>
+												<ItemDescription>
+													Signed up twice? Fold the other account&apos;s
+													workspaces, credit and history into this one. Both
+													inboxes have to confirm, and it can&apos;t be undone.
+												</ItemDescription>
+											</ItemContent>
+											<ItemActions>{mergeAccountsSlot}</ItemActions>
+										</Item>
+										{mergeStatusSlot}
+									</>
+								) : null}
 
 								<ItemSeparator />
 

@@ -54,6 +54,7 @@ import {
 	type ViewActionHttp,
 } from "@ryu/app-host/views";
 import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
+import { iconCacheKey } from "@ryu/marketplace/catalog/icon-cache";
 import { useOptionalReport } from "@ryu/marketplace/report";
 import {
 	AlertDialog,
@@ -147,6 +148,7 @@ import {
 } from "@/src/components/layout/ProjectIconDialog.tsx";
 import { ProjectSettingsDialog } from "@/src/components/layout/ProjectSettingsDialog.tsx";
 import { NodeSelector } from "@/src/components/shell/NodeSelector.tsx";
+import { AddToSpaceDialog } from "@/src/components/spaces/AddToSpaceDialog.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
 import {
 	TeamDialog,
@@ -1369,7 +1371,14 @@ function ChatRow({
 							>
 								<SidebarItemPreview content={previewContent}>
 									{isRunning ? (
-										<span className="an-text-shimmer an-text-shimmer--active inline-block max-w-full truncate text-sm [animation-duration:2s]">
+										// align-bottom, not the default baseline: an inline-block with
+										// `overflow:hidden` takes its bottom edge as its baseline, so a
+										// baseline-aligned shimmer sits ON the line's baseline and the
+										// strut's descender is reserved *below* it — the trigger box grows
+										// to 25px and the title reads as sitting high. The resting branch
+										// is a plain inline span (20px), so without this the row would
+										// also jump the moment a run starts or ends.
+										<span className="an-text-shimmer an-text-shimmer--active inline-block max-w-full truncate align-bottom text-sm [animation-duration:2s]">
 											{conv.title}
 										</span>
 									) : (
@@ -2135,7 +2144,10 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 							<span
 								className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState}`}
 							>
-								<span className="an-text-shimmer an-text-shimmer--active inline-block max-w-full truncate [animation-duration:2s]">
+								{/* align-bottom: see the chat-row shimmer above — a baseline-aligned
+								    overflow-hidden inline-block reserves the strut descender below the
+								    text, which pushes the busy title off the row's vertical centre. */}
+								<span className="an-text-shimmer an-text-shimmer--active inline-block max-w-full truncate align-bottom [animation-duration:2s]">
 									{tab.title}
 								</span>
 							</span>
@@ -3026,6 +3038,7 @@ function SpaceSidebarRow({
 	space,
 	appIcon,
 	listDocuments,
+	onAdd,
 	onOpen,
 	onOpenInNewTab,
 	onOpenDoc,
@@ -3038,6 +3051,9 @@ function SpaceSidebarRow({
 	 *  user-created space, which keeps the default glyph. */
 	appIcon?: string;
 	listDocuments: (spaceId: string) => Promise<SpaceDocument[]>;
+	/** Open the add-to-space dialog for THIS space (upload / new page / new
+	 *  database) — the hover "+" every other section's rows made people expect. */
+	onAdd: () => void;
 	onOpen: () => void;
 	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
 	onOpenInNewTab: () => void;
@@ -3076,7 +3092,7 @@ function SpaceSidebarRow({
 				<ContextMenuTrigger>
 					{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
 					<div
-						className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+						className="group/row group/subsection flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
 						onAuxClick={(e) => {
 							if (e.button === 1) {
 								e.preventDefault();
@@ -3123,8 +3139,22 @@ function SpaceSidebarRow({
 							fade
 							text={space.name}
 						/>
-						<span className="shrink-0 text-muted-foreground/70 text-xs tabular-nums">
-							{space.documentCount}
+						{/* Count and "+" share one slot, swapped on hover the same way the
+						    glyph above swaps to its chevron — an h-8 row has no width for
+						    both, and overlaying keeps the row from reflowing under the
+						    pointer. The button stays mounted (opacity-driven, not
+						    `hidden`) so it is still reachable by keyboard. */}
+						<span className="relative flex min-w-5 shrink-0 items-center justify-center">
+							<span className="text-muted-foreground/70 text-xs tabular-nums transition-opacity group-hover/row:opacity-0">
+								{space.documentCount}
+							</span>
+							<span className="absolute inset-0 flex items-center justify-center">
+								<SubSectionActionButton
+									icon={Add01Icon}
+									onClick={onAdd}
+									title={`Add to ${space.name}`}
+								/>
+							</span>
 						</span>
 					</div>
 				</ContextMenuTrigger>
@@ -3197,6 +3227,11 @@ function SpacesSection({
 		setDocumentIcon,
 	} = useSpacesContext();
 	const [createOpen, setCreateOpen] = useState(false);
+	// The row "+" target. Held at section level, and the dialog below stays mounted
+	// across `null`, so an upload started from one row keeps running (and keeps
+	// reporting) if the user closes it — its queue lives in that component.
+	const [addTargetId, setAddTargetId] = useState<string | null>(null);
+	const [addOpen, setAddOpen] = useState(false);
 	// Deleting a space is permanent, so the right-click Delete action opens a
 	// confirmation dialog (rather than removing it outright); the pending target
 	// is held here so the single shared dialog knows which space to delete.
@@ -3275,6 +3310,10 @@ function SpacesSection({
 				appIcon={appIconBySpaceName.get(space.name.toLowerCase())}
 				key={space.id}
 				listDocuments={listDocuments}
+				onAdd={() => {
+					setAddTargetId(space.id);
+					setAddOpen(true);
+				}}
 				onOpen={() => openSpace(space)}
 				onOpenDoc={(doc, forceNew) => openDoc(space.id, doc, forceNew)}
 				onOpenInNewTab={() => openSpace(space, true)}
@@ -3343,6 +3382,11 @@ function SpacesSection({
 				onClose={() => setCreateOpen(false)}
 				onCreate={create}
 				open={createOpen}
+			/>
+			<AddToSpaceDialog
+				onClose={() => setAddOpen(false)}
+				open={addOpen}
+				spaceId={addTargetId}
 			/>
 			<AlertDialog
 				onOpenChange={(open) => {
@@ -4415,6 +4459,10 @@ function PluginsSection({
 							    choice: a companion that registers its own icon is being
 							    specific about this surface. */}
 							<AppIcon
+								cacheKey={iconCacheKey(
+									app.id,
+									app.installedVersion ?? app.version
+								)}
 								className="size-5 rounded-[5px]"
 								dither={app.iconDither}
 								iconBackground={app.iconBackground ?? undefined}
@@ -4513,6 +4561,15 @@ function AppsSection({
 	const { openTab } = useTabsContext();
 	const { companions } = usePluginContributions();
 	const report = useOptionalReport();
+	// The owning plugin of each companion, so a row can paint the app's real
+	// manifest art. A companion contribution carries only its own optional `icon`;
+	// most apps declare their icon on the MANIFEST, which is why every row here
+	// used to fall through to one repeated grid glyph.
+	const { apps } = useApps();
+	const pluginsById = useMemo(
+		() => new Map(apps.map((a) => [a.id, a])),
+		[apps]
+	);
 
 	// Critical: an always-rendered empty header would appear for every user on
 	// upgrade (loadSectionOrder splices missing default keys into persisted orders),
@@ -4535,6 +4592,7 @@ function AppsSection({
 			<SidebarMenu className="gap-0.5">
 				{companions.map((c) => {
 					const label = c.label || c.name;
+					const owner = c.pluginId ? pluginsById.get(c.pluginId) : undefined;
 					const open = (forceNew = false) =>
 						openTab(pluginCompanionPath(c.id), { title: label, forceNew });
 					const reportApp = () => {
@@ -4567,18 +4625,27 @@ function AppsSection({
 										role="button"
 										tabIndex={0}
 									>
-										{c.icon ? (
-											<Icon
-												className="size-4 shrink-0 text-muted-foreground"
-												icon={c.icon}
-												size={16}
-											/>
-										) : (
-											<HugeiconsIcon
-												className="size-4 shrink-0 text-muted-foreground"
-												icon={GridIcon}
-											/>
-										)}
+										{/* The app's own icon square, identical to the Store's and
+										    to the Plugins section's. `c.icon` first — a companion
+										    that registers its own glyph is being specific about
+										    this surface — then the owning plugin's manifest art,
+										    then the generative tile. Seeded by the PLUGIN id, never
+										    the companion id, so an app that appears in both
+										    sections tiles the same way in both. */}
+										<AppIcon
+											cacheKey={iconCacheKey(
+												c.pluginId || c.id,
+												owner?.installedVersion ?? owner?.version
+											)}
+											className="size-5 rounded-[5px]"
+											dither={owner?.iconDither}
+											iconBackground={owner?.iconBackground}
+											iconId={c.icon ?? owner?.icon}
+											iconUrl={owner?.iconUrl}
+											name={label}
+											seedId={c.pluginId || c.id}
+											size={12}
+										/>
 										<OverflowTooltip
 											className="min-w-0 flex-1 truncate text-sm"
 											text={label}

@@ -9,8 +9,8 @@
   "icon": "health",
   "iconDither": {
     "from": 270,
-    "to": 304,
-    "direction": "up"
+    "to": "transparent",
+    "direction": "down"
   },
   "surfaces": {
     "gateway": {

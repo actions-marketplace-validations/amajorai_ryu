@@ -100,6 +100,38 @@ pub fn estimate_tokens(text: &str) -> usize {
     (text.len() as f32 / CHARS_PER_TOKEN).ceil() as usize
 }
 
+/// A message's token estimate split by what produced it, so the context
+/// breakdown panel can charge conversation text, attached documents and images
+/// to separate segments. The trimmer only ever wants the sum
+/// ([`estimate_ui_message_tokens`]); the split exists purely for reporting.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct MessageEstimate {
+    /// Attached-document text folded into the prompt verbatim.
+    pub documents: usize,
+    /// Flat per-image cost (never the base64 payload).
+    pub images: usize,
+    /// Conversation text plus the per-message role/formatting overhead.
+    pub text: usize,
+}
+
+impl MessageEstimate {
+    pub(crate) fn total(&self) -> usize {
+        self.text + self.documents + self.images
+    }
+}
+
+/// Estimate a UI message's tokens, split by source. See [`MessageEstimate`].
+pub(crate) fn estimate_ui_message_parts(msg: &UiMessage) -> MessageEstimate {
+    let text = ui_message_text(msg);
+    let documents = document_context_block(msg).unwrap_or_default();
+    let images = message_image_parts(msg).len();
+    MessageEstimate {
+        text: estimate_tokens(&text) + PER_MESSAGE_OVERHEAD,
+        documents: estimate_tokens(&documents),
+        images: images * IMAGE_TOKEN_COST,
+    }
+}
+
 /// Estimate a UI message's tokens: its text parts plus a flat per-image cost
 /// and the per-message overhead. Base64 image data is intentionally ignored.
 ///
@@ -108,13 +140,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// window carrying a 40-page PDF estimate as an empty message, and the trimmer would
 /// keep history it has no room for.
 fn estimate_ui_message_tokens(msg: &UiMessage) -> usize {
-    let text = ui_message_text(msg);
-    let documents = document_context_block(msg).unwrap_or_default();
-    let images = message_image_parts(msg).len();
-    estimate_tokens(&text)
-        + estimate_tokens(&documents)
-        + images * IMAGE_TOKEN_COST
-        + PER_MESSAGE_OVERHEAD
+    estimate_ui_message_parts(msg).total()
 }
 
 /// The plain text of a UI message (content string or joined `text` parts).

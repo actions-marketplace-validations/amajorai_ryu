@@ -367,8 +367,13 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	const restoreContext = useAssistantStore((s) => s.restoreContext);
 
 	const { openTab, tabs, activeTabId } = useTabsContext();
-	const { createConversation, setActiveConversationId, loadMessages, refresh } =
-		useChatHistoryContext();
+	const {
+		createConversation,
+		seedTitleFromFirstMessage,
+		setActiveConversationId,
+		loadMessages,
+		refresh,
+	} = useChatHistoryContext();
 
 	const activeNode = useActiveNode();
 	const chatTarget: ApiTarget = useMemo(
@@ -788,6 +793,11 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 				setConversationId(convId);
 				setActiveConversationId(convId);
 			}
+			// Same default naming as the main chat: the thread is called what the
+			// user asked from the moment they send, not after the reply lands. Seeded
+			// from the raw message (never the resolved context block below, which is
+			// machine text the user did not write).
+			seedTitleFromFirstMessage(convId, msg.content);
 			// Drain the composer's staged attachments SYNCHRONOUSLY, before the async
 			// context resolve. A page's `getText` may genuinely await, and anything the
 			// composer re-renders in that window would take the staged images/clip with
@@ -814,6 +824,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 			messages.length,
 			genericRuntime.agentId,
 			createConversation,
+			seedTitleFromFirstMessage,
 			setConversationId,
 			setActiveConversationId,
 			sendMessage,

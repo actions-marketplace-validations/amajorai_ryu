@@ -133,6 +133,22 @@ export async function fetchMeshStatus(
  * should reflect the toggle as enabled and surface `startError` as a warning.
  */
 export interface SetMeshEnabledResult {
+	/**
+	 * This node has a route to install the client itself (Linux archive, macOS
+	 * Homebrew, or `RYU_TAILSCALE_RELEASE_URL`). False — Windows, or a Mac with no
+	 * Homebrew — means the only honest response is telling the user how to install
+	 * it themselves; offering an install that is guaranteed to bail is worse.
+	 */
+	canInstall: boolean;
+	/**
+	 * Core started installing the Tailscale client for this enable. The mesh IS
+	 * on; Core starts the daemon itself once the binaries land, so the caller
+	 * shows progress and re-reads the status rather than surfacing `startError` as
+	 * a failure.
+	 */
+	installing: boolean;
+	/** Binaries that could not be resolved anywhere (`tailscaled`, `tailscale`). */
+	missingBinaries: string[];
 	startError: string | null;
 	status: MeshStatus;
 }
@@ -151,15 +167,56 @@ export async function setMeshEnabled(
 	target: ApiTarget,
 	enabled: boolean
 ): Promise<SetMeshEnabledResult> {
-	const raw = await request<RawMeshStatus & { start_error?: string | null }>(
-		target,
-		"/api/mesh/config",
-		{ method: "POST", body: { enabled } }
-	);
+	const raw = await request<
+		RawMeshStatus & {
+			can_install?: boolean;
+			installing?: boolean;
+			missing_binaries?: string[];
+			start_error?: string | null;
+		}
+	>(target, "/api/mesh/config", { method: "POST", body: { enabled } });
 	return {
 		startError: raw.start_error ?? null,
+		// All three ride WITH `start_error` and are absent on a clean enable, so
+		// they default to the "nothing is wrong" reading rather than to `false`
+		// meaning "cannot install".
+		installing: raw.installing ?? false,
+		canInstall: raw.can_install ?? false,
+		missingBinaries: raw.missing_binaries ?? [],
 		status: normalizeMeshStatus(raw),
 	};
+}
+
+// ── Tunnel backend (`mesh-backend` pref) ──────────────────────────────────────
+//
+// Which control plane this node enrolls against. A SETTING, distinct from
+// `MeshStatus.backend`, which is derived from the control server the daemon
+// reports once connected — before a node has ever enrolled there is nothing to
+// derive, so the picker reads this instead.
+
+/** Self-hosted Headscale — the default. Needs a control server URL. */
+export const MESH_BACKEND_HEADSCALE = "headscale";
+/** Tailscale's SaaS coordination server. */
+export const MESH_BACKEND_TAILSCALE = "tailscale";
+
+export type MeshBackend =
+	| typeof MESH_BACKEND_HEADSCALE
+	| typeof MESH_BACKEND_TAILSCALE;
+
+/** The `mesh-backend` pref key, mirroring `MESH_BACKEND_PREF_KEY` in Core. */
+export const MESH_BACKEND_PREF = "mesh-backend";
+/** The `mesh-login-server` pref key — the Headscale control server URL. */
+export const MESH_LOGIN_SERVER_PREF = "mesh-login-server";
+
+/**
+ * Normalize a stored `mesh-backend` value. Unset or unrecognized reads as
+ * Headscale — the same default Core's `parse_backend` applies, so the picker and
+ * the daemon never disagree about what an unconfigured node will do.
+ */
+export function parseMeshBackend(raw: string | null | undefined): MeshBackend {
+	return raw?.trim().toLowerCase() === MESH_BACKEND_TAILSCALE
+		? MESH_BACKEND_TAILSCALE
+		: MESH_BACKEND_HEADSCALE;
 }
 
 // ── Mesh peers + candidate bearer (`GET /api/mesh/peers`, P7) ──────────────────

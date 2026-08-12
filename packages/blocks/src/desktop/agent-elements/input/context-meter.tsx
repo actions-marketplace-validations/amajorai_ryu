@@ -43,6 +43,12 @@ function BreakdownRow({
  * reasoning / total) and the window utilization, mirroring assistant-ui's
  * ContextDisplay.
  *
+ * With `onOpen` the meter also becomes a button that opens the full Context
+ * panel — the hover card is the summary, the panel is the per-category
+ * attribution (skills, tool definitions, memory, history). Without it the meter
+ * stays a non-interactive readout, so surfaces with no workspace docks (the
+ * island, the extension) are unaffected.
+ *
  * Renders nothing until the window size is known AND a turn has reported usage
  * (usage is live-only), so a fresh/reloaded chat shows no meter rather than a
  * misleading empty ring.
@@ -50,9 +56,12 @@ function BreakdownRow({
 export function ContextMeter({
 	usage,
 	className,
+	onOpen,
 }: {
 	usage: ContextUsage;
 	className?: string;
+	/** Open the full breakdown. Omit to leave the meter non-interactive. */
+	onOpen?: () => void;
 }) {
 	const { used, total } = usage;
 	if (!(total > 0) || used <= 0) {
@@ -92,18 +101,34 @@ export function ContextMeter({
 
 	// Delays live on the TRIGGER in Base UI (`delay`/`closeDelay`); on the root
 	// they were unknown props and silently ignored.
+	//
+	// Clickability arrives through `render`, NOT by nesting a <button> child:
+	// a Base UI trigger renders its own element and wrapping a button inside one
+	// crashes. `render` swaps the element the trigger IS, which keeps the hover
+	// card and the click on the same node.
 	return (
 		<HoverCard>
 			<HoverCardTrigger
-				closeDelay={80}
-				delay={120}
-				aria-label={`Context ${Math.round(pct)}% used`}
+				aria-label={
+					onOpen
+						? `Context ${Math.round(pct)}% used — open breakdown`
+						: `Context ${Math.round(pct)}% used`
+				}
 				className={cn(
-					"flex h-7 w-fit shrink-0 cursor-default select-none items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground tabular-nums",
+					"flex h-7 w-fit shrink-0 select-none items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground tabular-nums",
+					onOpen
+						? "cursor-pointer hover:bg-accent hover:text-foreground"
+						: "cursor-default",
 					near && "text-amber-500",
 					over && "text-destructive",
 					className
 				)}
+				closeDelay={80}
+				delay={120}
+				onClick={onOpen}
+				// A real <button> only when it does something: rendering one with no
+				// handler would put an empty stop in the composer's tab order.
+				render={onOpen ? <button type="button" /> : undefined}
 			>
 				<ContextRing pct={pct} />
 				<span>{Math.round(pct)}%</span>
@@ -127,6 +152,11 @@ export function ContextMeter({
 						muted
 						value={`${remaining.toLocaleString()} tokens`}
 					/>
+					{onOpen ? (
+						<div className="pt-1 text-[11px] text-muted-foreground">
+							Click for the full breakdown
+						</div>
+					) : null}
 				</div>
 			</HoverCardContent>
 		</HoverCard>

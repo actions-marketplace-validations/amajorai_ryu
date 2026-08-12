@@ -35,12 +35,9 @@ import { WorktreePicker } from "@/src/components/chat/WorktreePicker.tsx";
 import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkContextPanel.tsx";
 import { CoworkContextPanel } from "@/src/components/panels/CoworkContextPanel.tsx";
 import type { BouncyAccordionItem } from "@/src/components/ui/bouncy-accordion.tsx";
+import { invalidateGitStatus, useGitStatus } from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import {
-	commitPush,
-	fetchGitStatus,
-	type GitStatus,
-} from "@/src/lib/api/git.ts";
+import { commitPush, type GitStatus } from "@/src/lib/api/git.ts";
 
 interface PinnedSummaryPanelProps {
 	conversationId?: string | null;
@@ -213,7 +210,6 @@ export function PinnedSummaryPanel({
 	cowork,
 	onDismiss,
 }: PinnedSummaryPanelProps) {
-	const [git, setGit] = useState<GitStatus | null>(null);
 	const [commit, setCommit] = useState<CommitState>({ status: "idle" });
 
 	// In floating-overlay mode (onDismiss set) the panel overlaps the message
@@ -245,42 +241,22 @@ export function PinnedSummaryPanel({
 		return () => document.removeEventListener("pointerdown", handlePointerDown);
 	}, [onDismiss]);
 
-	// Git status refreshes when the run goes idle, so the count tracks the agent.
-	const _chatStatus = cowork.chatStatus;
-
 	const targetRef = useRef(target);
 	targetRef.current = target;
 
-	// Refresh git status when the folder changes or a run goes idle, so the
-	// changed-files count and ahead/behind track what the agent just did.
-	useEffect(() => {
-		if (!folder) {
-			setGit(null);
-			return;
-		}
-		const controller = new AbortController();
-		fetchGitStatus(targetRef.current, folder, controller.signal)
-			.then((status) => {
-				if (!controller.signal.aborted) {
-					setGit(status.is_repo ? status : null);
-				}
-			})
-			.catch(() => {
-				/* treated as "not a repo" */
-			});
-		return () => controller.abort();
-	}, [folder]);
+	// Shared with every other git surface, so this panel's counts can never
+	// disagree with the branch pill above it.
+	const { status: gitStatus } = useGitStatus(target, folder);
+	const git = gitStatus.is_repo ? gitStatus : null;
 
-	const refreshGit = () => {
-		if (!folder) {
-			return;
+	// An agent run mutates the tree, so re-read the moment it goes idle instead
+	// of waiting out the poll interval.
+	const chatStatus = cowork.chatStatus;
+	useEffect(() => {
+		if (folder && chatStatus !== "streaming" && chatStatus !== "submitted") {
+			invalidateGitStatus(folder);
 		}
-		fetchGitStatus(targetRef.current, folder)
-			.then((status) => setGit(status.is_repo ? status : null))
-			.catch(() => {
-				/* ignore */
-			});
-	};
+	}, [chatStatus, folder]);
 
 	const handleCommitPush = async () => {
 		if (!folder || commit.status === "loading") {
@@ -293,7 +269,8 @@ export function PinnedSummaryPanel({
 				? `Pushed ${result.commit ?? "commit"}`
 				: "Pushed (nothing to commit)";
 			setCommit({ status: "done", label });
-			refreshGit();
+			// Everything on screen just changed, not only this panel.
+			invalidateGitStatus(folder);
 		} else {
 			setCommit({
 				status: "error",

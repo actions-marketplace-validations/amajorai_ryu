@@ -51,12 +51,32 @@ export interface StoreSectionTab {
 	 * primitive (Iconify `prefix:name`, a bare Hugeicons name, or a URL).
 	 */
 	icon: IconSvgElement | string;
+	/**
+	 * A rendered glyph that REPLACES `icon` for this tab — for a section whose
+	 * mark is a component rather than a path set (Agents wears the animated Ryu
+	 * logo). A separate slot rather than widening `icon`: `IconSvgElement` is an
+	 * array type and so is a `ReactNode` fragment, so a `typeof icon === "string"`
+	 * narrowing cannot tell the two apart and would hand a component to
+	 * `HugeiconsIcon`. `icon` stays required so every tab keeps a path fallback.
+	 */
+	iconNode?: ReactNode;
 	label: string;
 	value: string;
 }
 
 /** Render either glyph form of a {@link StoreSectionTab.icon}. */
-function SectionTabIcon({ icon }: { icon: IconSvgElement | string }) {
+function SectionTabIcon({
+	icon,
+	iconNode,
+}: {
+	icon: IconSvgElement | string;
+	iconNode?: ReactNode;
+}) {
+	if (iconNode) {
+		return (
+			<span className="flex size-4 shrink-0 items-center">{iconNode}</span>
+		);
+	}
 	if (typeof icon === "string") {
 		return <Icon className="shrink-0" icon={icon} size={16} />;
 	}
@@ -129,7 +149,7 @@ export function StoreSectionTabs({
 							role="tab"
 							type="button"
 						>
-							<SectionTabIcon icon={s.icon} />
+							<SectionTabIcon icon={s.icon} iconNode={s.iconNode} />
 							<span className="whitespace-nowrap">{s.label}</span>
 						</button>
 					</Fragment>

@@ -25,10 +25,21 @@ if (!Number.isFinite(everyN) || everyN < 1) {
 if (everyN > 100) {
 	everyN = 100;
 }
+// The first completed reply is its own trigger, independent of the interval:
+// without it a chat reads as its raw first message (the placeholder Core derives
+// on persist) until turn N, which is the whole "why is everything still called
+// after my opening line" complaint. Default on; `auto-title-on-first-turn=false`
+// restores the pure every-N cadence.
+const onFirstTurn =
+	(await host.getPreference({ key: "auto-title-on-first-turn" })) !== "false";
 const assistantTurns = (ctx.transcript || []).filter(
 	(m) => m.role === "assistant"
 ).length;
-if (assistantTurns < 1 || assistantTurns % everyN !== 0) {
+if (assistantTurns < 1) {
+	return { kind: "none" };
+}
+const isFirstTurn = assistantTurns === 1 && onFirstTurn;
+if (!isFirstTurn && assistantTurns % everyN !== 0) {
 	return { kind: "none" };
 }
 const recent = (ctx.transcript || [])

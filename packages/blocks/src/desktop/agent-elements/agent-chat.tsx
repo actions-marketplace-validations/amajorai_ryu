@@ -40,6 +40,7 @@ export function AgentChat({
 	assistantName,
 	currentUser,
 	seedDraft,
+	onDraftChange,
 	suggestions,
 	followUps,
 	emptyStatePosition = "default",
@@ -52,6 +53,8 @@ export function AgentChat({
 	className,
 	style,
 	contextSize,
+	conversationKey,
+	onOpenContext,
 }: AgentChatProps) {
 	const rootRef = useRef<HTMLDivElement>(null);
 	const [draft, setDraft] = useState("");
@@ -65,6 +68,16 @@ export function AgentChat({
 			setDraft(seedDraft);
 		}
 	}, [seedDraft]);
+
+	// Observe the composer text for surfaces that persist it (the desktop keeps
+	// unsent text as a draft). A ref for the callback so a consumer passing an
+	// inline arrow does not re-fire this on every render — the DRAFT changing is
+	// the event, not the identity of the listener.
+	const draftListener = useRef(onDraftChange);
+	draftListener.current = onDraftChange;
+	useEffect(() => {
+		draftListener.current?.(draft);
+	}, [draft]);
 
 	const ResolvedInputBar = slots?.InputBar ?? InputBar;
 
@@ -142,6 +155,7 @@ export function AgentChat({
 				) : undefined
 			}
 			contextMeter={contextMeter}
+			contextMeterOnOpen={onOpenContext}
 			isDragOver={attachments?.isDragOver}
 			onAttach={attachments?.onAttach}
 			onChange={setDraft}
@@ -213,6 +227,7 @@ export function AgentChat({
 					className={classNames?.messageList}
 					classNames={classNames}
 					contextSize={contextSize}
+					conversationKey={conversationKey}
 					currentUser={currentUser}
 					enableImagePreview={enableImagePreview}
 					feedback={feedback}

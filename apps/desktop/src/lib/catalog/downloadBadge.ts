@@ -117,6 +117,11 @@ const ROLE_BADGE: Record<DownloadRole, DownloadBadge | null> = {
 		tooltip: "An app or plugin and the files it needs to run.",
 		tone: "neutral",
 	},
+	mcp_server: {
+		label: "MCP",
+		tooltip: "A tool server agents can connect to.",
+		tone: "blue",
+	},
 	extract: {
 		label: "Unpacking",
 		tooltip:
@@ -132,6 +137,7 @@ const KIND_BADGE: Partial<Record<DownloadKind, DownloadBadge>> = {
 	agent: ROLE_BADGE.agent as DownloadBadge,
 	tool: ROLE_BADGE.tool as DownloadBadge,
 	skill: ROLE_BADGE.skill as DownloadBadge,
+	mcp: ROLE_BADGE.mcp_server as DownloadBadge,
 	embedding: ROLE_BADGE.embedding_model as DownloadBadge,
 	voice: ROLE_BADGE.voice_model as DownloadBadge,
 	media: ROLE_BADGE.image_model as DownloadBadge,

@@ -22,6 +22,7 @@ import {
 	asAssistantContextArg,
 	asAssistantOpenArg,
 	asAssistantSurfaceArg,
+	asBlueprintRequestArg,
 	asCalendarCreateAutomationArg,
 	asFinetuneIdArg,
 	asMailCreateArg,
@@ -51,6 +52,8 @@ import {
 	asSkillTitleArg,
 	asSkillUpdateArg,
 	asSkillVersionRefArg,
+	asReasoningRequestArg,
+	asSocialRequestArg,
 	asSpacesListArg,
 	asSuggestionFeedbackArg,
 	asTemplateInstallArg,
@@ -738,5 +741,208 @@ describe("assistant bridge validators", () => {
 		expect(asAssistantOpenArg({ mode: "fullscreen", prompt: "  " })).toEqual(
 			{}
 		);
+	});
+});
+
+// ── `social.request` — the one generic forwarder ────────────────────────────────
+//
+// This validator is the security boundary for a verb that carries the node bearer.
+// A frame holding only `social:crud` supplies `path`; if that path can resolve
+// outside `/api/social`, the frame reaches any API on the node with the host's
+// credentials attached — and Core's own dot-segment guard never fires, because the
+// request that leaves the desktop is already addressed to the escaped path.
+describe("asSocialRequestArg", () => {
+	it("keeps a normal sub-path, defaults the method, forwards the body verbatim", () => {
+		expect(asSocialRequestArg({ path: "/posts?workspace_id=default" })).toEqual({
+			path: "/posts?workspace_id=default",
+			method: "GET",
+		});
+		expect(
+			asSocialRequestArg({ path: "/posts", method: "POST", body: { a: 1 } })
+		).toEqual({ path: "/posts", method: "POST", body: { a: 1 } });
+	});
+
+	it("rejects a path that is not a rooted sub-path", () => {
+		expect(asSocialRequestArg({ path: "https://evil.example/x" })).toBeNull();
+		expect(asSocialRequestArg({ path: "//evil.example/x" })).toBeNull();
+		expect(asSocialRequestArg({ path: "posts" })).toBeNull();
+		expect(asSocialRequestArg({ path: "/\\..\\settings" })).toBeNull();
+		expect(asSocialRequestArg({ path: 42 })).toBeNull();
+		expect(asSocialRequestArg(null)).toBeNull();
+	});
+
+	it("rejects a literal `..` climb out of the mount", () => {
+		expect(asSocialRequestArg({ path: "/../plugins" })).toBeNull();
+		expect(asSocialRequestArg({ path: "/posts/../../settings" })).toBeNull();
+	});
+
+	// The regression. `fetch` reads the WHATWG URL parser's output, not the raw
+	// string, and that parser collapses every one of these into a `..` segment. A
+	// literal-`..` blocklist passed them all: `/%2e%2e/settings` arrived at
+	// `/api/settings`, and two levels escaped `/api/*` entirely.
+	it("rejects a PERCENT-ENCODED climb, in every casing the URL parser folds", () => {
+		for (const path of [
+			"/%2e%2e/settings",
+			"/%2E%2E/settings",
+			"/.%2e/settings",
+			"/%2e./settings",
+			"/%2e%2e/%2e%2e/plugins/@ryu/social/host",
+			"/posts/%2e%2e/%2e%2e/conversations",
+		]) {
+			expect(asSocialRequestArg({ path })).toBeNull();
+		}
+	});
+
+	it("returns the NORMALIZED path, so nothing downstream re-derives a different one", () => {
+		// A climb that stays inside the mount is legal, but what comes back is what
+		// the parser resolved — never the frame's raw string.
+		expect(asSocialRequestArg({ path: "/posts/%2e%2e/drafts" })).toEqual({
+			path: "/drafts",
+			method: "GET",
+		});
+		expect(asSocialRequestArg({ path: "/a/b/../../queue?limit=5" })).toEqual({
+			path: "/queue?limit=5",
+			method: "GET",
+		});
+	});
+
+	it("refuses a method outside the closed set rather than downgrading it", () => {
+		expect(asSocialRequestArg({ path: "/posts", method: "PUT" })).toBeNull();
+		expect(asSocialRequestArg({ path: "/posts", method: "get" })).toBeNull();
+	});
+});
+
+describe("asReasoningRequestArg", () => {
+	it("keeps a normal sub-path, defaults the method, forwards the body verbatim", () => {
+		expect(asReasoningRequestArg({ path: "/policies" })).toEqual({
+			path: "/policies",
+			method: "GET",
+		});
+		expect(
+			asReasoningRequestArg({
+				path: "/check",
+				method: "POST",
+				body: { policy_id: "hr" },
+			})
+		).toEqual({ path: "/check", method: "POST", body: { policy_id: "hr" } });
+	});
+
+	it("rejects a path that is not a rooted sub-path", () => {
+		expect(asReasoningRequestArg({ path: "https://evil.example/x" })).toBeNull();
+		expect(asReasoningRequestArg({ path: "//evil.example/x" })).toBeNull();
+		expect(asReasoningRequestArg({ path: "policies" })).toBeNull();
+		expect(asReasoningRequestArg({ path: "/\\..\\settings" })).toBeNull();
+		expect(asReasoningRequestArg({ path: 42 })).toBeNull();
+		expect(asReasoningRequestArg(null)).toBeNull();
+	});
+
+	// The same regression the Outpost forwarder was fixed for. Sharing
+	// `resolveMountedRequestPath` is what makes these pass here without a second
+	// implementation having to relearn it.
+	it("rejects a climb out of the mount, literal and percent-encoded", () => {
+		for (const path of [
+			"/../plugins",
+			"/policies/../../settings",
+			"/%2e%2e/settings",
+			"/%2E%2E/settings",
+			"/.%2e/settings",
+			"/%2e./settings",
+			"/policies/%2e%2e/%2e%2e/conversations",
+		]) {
+			expect(asReasoningRequestArg({ path })).toBeNull();
+		}
+	});
+
+	it("returns the NORMALIZED path, so nothing downstream re-derives a different one", () => {
+		expect(asReasoningRequestArg({ path: "/policies/%2e%2e/check" })).toEqual({
+			path: "/check",
+			method: "GET",
+		});
+	});
+
+	it("serves PUT (the policy-update verb) and refuses anything outside the set", () => {
+		expect(asReasoningRequestArg({ path: "/policies/hr", method: "PUT" })).toEqual({
+			path: "/policies/hr",
+			method: "PUT",
+		});
+		expect(asReasoningRequestArg({ path: "/policies", method: "PATCH" })).toBeNull();
+		expect(asReasoningRequestArg({ path: "/policies", method: "get" })).toBeNull();
+	});
+});
+
+describe("asBlueprintRequestArg", () => {
+	it("keeps a normal sub-path, defaults the method, forwards the body verbatim", () => {
+		expect(asBlueprintRequestArg({ path: "/plans" })).toEqual({
+			path: "/plans",
+			method: "GET",
+		});
+		expect(
+			asBlueprintRequestArg({
+				path: "/plans/p_migrate/annotations",
+				method: "POST",
+				body: { kind: "blocker", target: { type: "step", id: "s_migrate" } },
+			})
+		).toEqual({
+			path: "/plans/p_migrate/annotations",
+			method: "POST",
+			body: { kind: "blocker", target: { type: "step", id: "s_migrate" } },
+		});
+	});
+
+	it("keeps the query string, which the plan list and the diff both need", () => {
+		expect(asBlueprintRequestArg({ path: "/plans?status=in_review" })).toEqual({
+			path: "/plans?status=in_review",
+			method: "GET",
+		});
+		expect(
+			asBlueprintRequestArg({ path: "/plans/p_x/diff?from=1&to=2" })
+		).toEqual({ path: "/plans/p_x/diff?from=1&to=2", method: "GET" });
+	});
+
+	it("rejects a path that is not a rooted sub-path", () => {
+		expect(asBlueprintRequestArg({ path: "https://evil.example/x" })).toBeNull();
+		expect(asBlueprintRequestArg({ path: "//evil.example/x" })).toBeNull();
+		expect(asBlueprintRequestArg({ path: "plans" })).toBeNull();
+		expect(asBlueprintRequestArg({ path: "/\\..\\settings" })).toBeNull();
+		expect(asBlueprintRequestArg({ path: 42 })).toBeNull();
+		expect(asBlueprintRequestArg(null)).toBeNull();
+	});
+
+	// A plan id is the most attacker-adjacent string this verb ever sees: it comes
+	// from whatever an agent passed to `plan_publish` and it lands mid-path in almost
+	// every route. Sharing `resolveMountedRequestPath` is what makes the encoded forms
+	// fail here without a second implementation having to relearn that a literal `..`
+	// blocklist loses to the URL parser's own decoding.
+	it("rejects a climb out of the mount, literal and percent-encoded", () => {
+		for (const path of [
+			"/../plugins",
+			"/plans/../../settings",
+			"/%2e%2e/settings",
+			"/%2E%2E/settings",
+			"/.%2e/settings",
+			"/%2e./settings",
+			"/plans/%2e%2e/%2e%2e/conversations",
+		]) {
+			expect(asBlueprintRequestArg({ path })).toBeNull();
+		}
+	});
+
+	it("returns the NORMALIZED path, so nothing downstream re-derives a different one", () => {
+		expect(asBlueprintRequestArg({ path: "/plans/%2e%2e/plans" })).toEqual({
+			path: "/plans",
+			method: "GET",
+		});
+	});
+
+	// Three verbs, not four. The plan surface is append-only — revising a plan POSTs a
+	// new revision rather than editing one — so a PUT reaching the sidecar would be a
+	// 405, and advertising it here would only move the failure later.
+	it("serves GET/POST/DELETE and refuses everything else", () => {
+		expect(
+			asBlueprintRequestArg({ path: "/plans/p_x", method: "DELETE" })
+		).toEqual({ path: "/plans/p_x", method: "DELETE" });
+		expect(asBlueprintRequestArg({ path: "/plans", method: "PUT" })).toBeNull();
+		expect(asBlueprintRequestArg({ path: "/plans", method: "PATCH" })).toBeNull();
+		expect(asBlueprintRequestArg({ path: "/plans", method: "get" })).toBeNull();
 	});
 });

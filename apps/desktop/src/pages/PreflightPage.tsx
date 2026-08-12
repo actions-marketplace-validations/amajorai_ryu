@@ -32,6 +32,10 @@ import { applyReleaseUpdate } from "@/src/components/updater/AutoUpdater.tsx";
 import { useEngines } from "@/src/hooks/useEngines.ts";
 import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
+	applySafeMode,
+	readSafeModeSentinel,
+} from "@/src/lib/api/safe-mode.ts";
+import {
 	fetchHealth,
 	fetchSystemStatus,
 	restartGateway,
@@ -218,6 +222,29 @@ export function PreflightPage({
 	const { health, refresh } = usePreflightHealth();
 	const { engines } = useEngines();
 	const [open, setOpen] = useState<string | null>("core");
+	// Safe Mode's on-disk sentinel. Read here rather than from Core because this
+	// page's whole audience is nodes that may not be answering — and a "boot without
+	// extensions" escape hatch that needs a healthy Core to reach is no escape hatch.
+	const [safeModeArmed, setSafeModeArmed] = useState(false);
+	// Re-read on the page's own cadence, not once on mount: Safe Mode can be armed
+	// from Settings and this page reached without a remount, and a stale button
+	// would offer "Restart in Safe Mode" on a node that is already in it.
+	useEffect(() => {
+		let cancelled = false;
+		const tick = () => {
+			readSafeModeSentinel().then((armed) => {
+				if (!cancelled) {
+					setSafeModeArmed(armed);
+				}
+			});
+		};
+		tick();
+		const id = setInterval(tick, POLL_INTERVAL_MS);
+		return () => {
+			cancelled = true;
+			clearInterval(id);
+		};
+	}, []);
 
 	const target = activeTarget();
 
@@ -307,6 +334,27 @@ export function PreflightPage({
 							onRun={async () => {
 								await restartRyuCore();
 								toast.info("Restarting Core…");
+							}}
+						/>
+						{/* Safe Mode: restart with apps, plugins, skills, user MCP servers
+						    and the scheduler switched off, to find out whether one of them
+						    is what's wrong. Nothing is uninstalled — it only changes what
+						    loads, so leaving it puts everything back. */}
+						<ActionButton
+							busyLabel={safeModeArmed ? "Restoring…" : "Arming…"}
+							label={safeModeArmed ? "Leave Safe Mode" : "Restart in Safe Mode"}
+							onRun={async () => {
+								const next = !safeModeArmed;
+								// Core first when it is up, so BOTH persistence tiers move
+								// together — see `applySafeMode`.
+								await applySafeMode(target, next);
+								setSafeModeArmed(next);
+								await restartRyuCore();
+								toast.info(
+									next
+										? "Restarting in Safe Mode — apps, plugins and skills won't load"
+										: "Restarting normally — apps, plugins and skills are back"
+								);
 							}}
 						/>
 						{coreUpdateAvailable && health.coreUpdate ? (

@@ -27,18 +27,15 @@ import {
 	PopoverTrigger,
 } from "@ryu/ui/components/popover";
 import { cn } from "@ryu/ui/lib/utils";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import {
 	WORKSPACE_SELECT_LABEL,
 	WORKSPACE_SELECT_POPOVER,
 	WORKSPACE_SELECT_TRIGGER,
 } from "@/components/agent-elements/input/composer-select.ts";
+import { useGitStatus, useWorktreeStatus } from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import {
-	fetchGitStatus,
-	fetchWorktreeStatus,
-	type WorktreeStatus,
-} from "@/src/lib/api/git.ts";
+import type { WorktreeStatus } from "@/src/lib/api/git.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 interface WorktreePickerProps {
@@ -46,8 +43,6 @@ interface WorktreePickerProps {
 	conversationId?: string | null;
 	target: ApiTarget;
 }
-
-const POLL_INTERVAL_MS = 5000;
 
 const NO_WORKTREE: WorktreeStatus = {
 	active: false,
@@ -81,59 +76,17 @@ export function WorktreePicker({
 		(s) => s.regenerateWorktreeBranch
 	);
 
-	const [isRepo, setIsRepo] = useState(false);
-	const [status, setStatus] = useState<WorktreeStatus>(NO_WORKTREE);
 	const [open, setOpen] = useState(false);
-	const abortRef = useRef<AbortController | null>(null);
 
-	// One-shot git-repo probe whenever the folder changes — the worktree control
-	// only applies to git repositories.
-	useEffect(() => {
-		if (!folder) {
-			setIsRepo(false);
-			return;
-		}
-		let active = true;
-		fetchGitStatus(target, folder)
-			.then((s) => {
-				if (active) {
-					setIsRepo(s.is_repo);
-				}
-			})
-			.catch(() => undefined);
-		return () => {
-			active = false;
-		};
-	}, [folder, target]);
-
-	// Poll this conversation's live worktree status (created lazily on first run).
-	useEffect(() => {
-		if (!(folder && conversationId)) {
-			setStatus(NO_WORKTREE);
-			return;
-		}
-		let active = true;
-		const run = async () => {
-			abortRef.current?.abort();
-			const controller = new AbortController();
-			abortRef.current = controller;
-			const next = await fetchWorktreeStatus(
-				target,
-				conversationId,
-				controller.signal
-			);
-			if (active) {
-				setStatus(next);
-			}
-		};
-		run();
-		const id = setInterval(run, POLL_INTERVAL_MS);
-		return () => {
-			active = false;
-			clearInterval(id);
-			abortRef.current?.abort();
-		};
-	}, [folder, conversationId, target]);
+	// Both reads are shared: the repo probe rides the same status query as every
+	// other git surface, and the worktree status is shared with WorkspacePicker
+	// rather than polled a second time on a second timer.
+	const isRepo = useGitStatus(target, folder).status.is_repo;
+	const worktreeStatus = useWorktreeStatus(
+		target,
+		folder ? conversationId : null
+	);
+	const status = folder ? worktreeStatus : NO_WORKTREE;
 
 	const handleSelectLocal = useCallback(() => {
 		setWorktreeMode(false);

@@ -134,6 +134,26 @@ pub enum PendingAction {
     /// failed run's id; the workflow + inputs are re-derived from it and dispatched
     /// under a fresh `healrun_` run.
     HealWorkflowRerun { run_id: String },
+    /// Post a turn on the user's behalf, requested by an APP through the
+    /// `chat.startTurn` kernel capability (see `server::host_chat`).
+    ///
+    /// Unlike [`PendingAction::TriggerAgent`] directly above — which runs with
+    /// `persist = false` and leaves no conversation — this writes a real thread the
+    /// user can open, because "send this message for me" that produces nothing to
+    /// read is not a send.
+    ///
+    /// `plugin_id` is carried for the inbox row and the audit trail: an approval
+    /// that says only "a message will be sent" does not let anyone decide, and
+    /// which app asked is the whole basis for deciding.
+    AppSendTurn {
+        plugin_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        conversation_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
     /// Execute a gated agent tool call on approve. Captures the full re-dispatch
     /// context so the approved run is identical to the one that was gated; run
     /// through the registry's no-gate entry so it never re-raises an approval.
@@ -225,6 +245,37 @@ impl ApprovalRequest {
             decided_at: None,
             expires_at: None,
         }
+    }
+
+    /// Build a request for an APP that wants to post a turn on the user's behalf
+    /// (the `chat.startTurn` kernel capability).
+    ///
+    /// The summary carries the app id and the message itself, truncated. Both are
+    /// load-bearing: "an app wants to send a message" is not a decidable prompt —
+    /// which app, and saying what, is the entire basis for approving or refusing.
+    pub fn for_app_send(plugin_id: &str, text: &str, action: PendingAction) -> Self {
+        /// How much of the message the inbox row shows. Long enough to recognise
+        /// what is being sent, short enough not to turn the row into a transcript.
+        const SUMMARY_CHARS: usize = 200;
+        // Truncate on a CHAR boundary — `text` is arbitrary user input, and slicing
+        // a multi-byte grapheme by byte index panics.
+        let preview: String = if text.chars().count() > SUMMARY_CHARS {
+            let head: String = text.chars().take(SUMMARY_CHARS).collect();
+            format!("{head}…")
+        } else {
+            text.to_owned()
+        };
+        let mut req = Self::new(
+            ApprovalKind::TriggerRun,
+            format!("{plugin_id} wants to send a message as you"),
+            format!(
+                "The {plugin_id} app is asking to post this message to an agent on your behalf, \
+                 which will spend usage on your account:\n\n{preview}"
+            ),
+            Some(action),
+        );
+        req.source_ref = Some(plugin_id.to_owned());
+        req
     }
 
     /// Build a request for a gated agent tool call (slice 2). `risk_tags` come
@@ -726,6 +777,10 @@ impl ApprovalEngine {
                 }
                 Ok(None)
             }
+            PendingAction::AppSendTurn { .. } => {
+                execute_app_send_turn(action).await?;
+                Ok(None)
+            }
             PendingAction::HealWorkflowRerun { run_id } => {
                 crate::workflow::rerun_run(run_id)
                     .await
@@ -825,6 +880,46 @@ async fn reject_action(action: &PendingAction) {
 /// other tool; only its connect/consent elicitation runs ungated (that path
 /// returns an `__ryu_elicitation__` envelope instead of executing).
 #[allow(clippy::too_many_arguments)]
+/// Run an app-requested turn, persisted into a conversation the user can open.
+///
+/// A free function, and the ONE implementation of an app send: both the
+/// approval-gated path (via [`ApprovalEngine::execute_action`]) and the
+/// gate-off path in `server::host_chat` call exactly this, so an approved send and
+/// an unattended one cannot drift into behaving differently.
+///
+/// `run_worker` rather than `run` because it is the `persist = true` primitive —
+/// both the user instruction and the reply are written to history. `isolate =
+/// false` and no `cwd`: a message the user asked to be sent belongs in an ordinary
+/// conversation, not in a coordinator's throwaway git worktree.
+pub async fn execute_app_send_turn(action: &PendingAction) -> anyhow::Result<()> {
+    let PendingAction::AppSendTurn {
+        agent_id,
+        conversation_id,
+        text,
+        ..
+    } = action
+    else {
+        return Err(anyhow::anyhow!("not an app send"));
+    };
+    let Some(runner) = crate::sidecar::agent_runner::global_agent_runner() else {
+        // No runner ⇒ nothing can answer. Reported rather than swallowed: the
+        // caller marked a queued message as dispatched on the strength of this.
+        return Err(anyhow::anyhow!(
+            "no agent runner is published on this node; the message was not sent"
+        ));
+    };
+    runner
+        .run_worker(
+            agent_id.clone(),
+            conversation_id.clone(),
+            text.clone(),
+            None,
+            false,
+        )
+        .await
+        .map(|_reply| ())
+}
+
 pub async fn gate_tool_call(
     tool_id: &str,
     arguments: &serde_json::Value,

@@ -7,7 +7,7 @@
   "keywords": ["security", "firewall", "gateway", "prompt-injection", "pii"],
   "category": "Security",
   "icon": "firewall",
-  "iconDither": { "from": 252, "to": 286, "direction": "up" },
+  "iconDither": { "from": 252, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

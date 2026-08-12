@@ -17,11 +17,12 @@ import {
 	type CreditGrantPoolView,
 	type CreditLedgerRow,
 	CreditsView,
-} from "@ryu/blocks/desktop/credits";
+} from "@ryu/blocks/desktop/credits.tsx";
 import { useCallback, useMemo, useState } from "react";
 import { sileo } from "sileo";
 import { FRONTEND_URL } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { CreditTransferCard } from "@/src/components/settings/CreditTransferCard.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import {
 	CREDIT_LEDGER_REASONS,
@@ -200,58 +201,66 @@ export default function CreditsPage() {
 			: null;
 
 	return (
-		<CreditsView
-			authed={authed}
-			billingUnavailable={billingUnavailable}
-			busyPack={busyPack}
-			customAmount={customAmount}
-			entitlement={
-				entitlement
-					? {
-							managedInference: entitlement.managedInference,
-							monthlyCreditPoolMicroUsd: entitlement.monthlyCreditPoolMicroUsd,
-							plan: entitlement.plan,
-							planLabel: entitlement.plan
-								? (PLAN_LABELS[entitlement.plan] ?? entitlement.plan)
-								: undefined,
-							seats: entitlement.seats,
-						}
-					: null
-			}
-			errorMessage={error ? error.message : null}
-			grantPools={grantPoolViews}
-			ledger={pagedLedger}
-			ledgerPage={safeLedgerPage}
-			loading={loading}
-			maxTopupDollars={MAX_TOPUP_DOLLARS}
-			minTopupDollars={MIN_TOPUP_DOLLARS}
-			noOrgMessage={noOrgMessage}
-			onCreateOrganization={() => {
-				openExternal(ORGANIZATIONS_URL).catch(() => undefined);
-			}}
-			onCustomAmountChange={setCustomAmount}
-			onNextPage={() =>
-				setLedgerPage(Math.min(totalPages - 1, safeLedgerPage + 1))
-			}
-			onPrevPage={() => setLedgerPage(Math.max(0, safeLedgerPage - 1))}
-			onRefresh={() => {
-				refresh().catch(() => undefined);
-			}}
-			onTopupCustom={handleCustomTopup}
-			onTopupPack={(pack) => {
-				void startTopup({ pack: pack as CreditPack }).catch(() => undefined);
-			}}
-			packs={[...CREDIT_PACKS]}
-			totalPages={totalPages}
-			wallet={
-				wallet
-					? {
-							balanceMicroUsd: wallet.balanceMicroUsd,
-							currency: wallet.currency,
-						}
-					: null
-			}
-			walletEmpty={walletEmpty}
-		/>
+		<div className="space-y-4">
+			<CreditsView
+				authed={authed}
+				billingUnavailable={billingUnavailable}
+				busyPack={busyPack}
+				customAmount={customAmount}
+				entitlement={
+					entitlement
+						? {
+								managedInference: entitlement.managedInference,
+								monthlyCreditPoolMicroUsd:
+									entitlement.monthlyCreditPoolMicroUsd,
+								plan: entitlement.plan,
+								planLabel: entitlement.plan
+									? (PLAN_LABELS[entitlement.plan] ?? entitlement.plan)
+									: undefined,
+								seats: entitlement.seats,
+							}
+						: null
+				}
+				errorMessage={error ? error.message : null}
+				grantPools={grantPoolViews}
+				ledger={pagedLedger}
+				ledgerPage={safeLedgerPage}
+				loading={loading}
+				maxTopupDollars={MAX_TOPUP_DOLLARS}
+				minTopupDollars={MIN_TOPUP_DOLLARS}
+				noOrgMessage={noOrgMessage}
+				onCreateOrganization={() => {
+					openExternal(ORGANIZATIONS_URL).catch(() => undefined);
+				}}
+				onCustomAmountChange={setCustomAmount}
+				onNextPage={() =>
+					setLedgerPage(Math.min(totalPages - 1, safeLedgerPage + 1))
+				}
+				onPrevPage={() => setLedgerPage(Math.max(0, safeLedgerPage - 1))}
+				onRefresh={() => {
+					refresh().catch(() => undefined);
+				}}
+				onTopupCustom={handleCustomTopup}
+				onTopupPack={(pack) => {
+					void startTopup({ pack: pack as CreditPack }).catch(() => undefined);
+				}}
+				packs={[...CREDIT_PACKS]}
+				totalPages={totalPages}
+				wallet={
+					wallet
+						? {
+								balanceMicroUsd: wallet.balanceMicroUsd,
+								currency: wallet.currency,
+							}
+						: null
+				}
+				walletEmpty={walletEmpty}
+			/>
+			{/* Rendered BESIDE `CreditsView` rather than inside it: the view is the
+			    shared presentational block the storyboard renders with mock data, and
+			    a transfer form needs live org membership and a mutation. Keeping it
+			    out preserves the block's "no data fetching" contract. */}
+			<CreditTransferCard />
+		</div>
 	);
 }

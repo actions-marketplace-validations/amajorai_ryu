@@ -212,7 +212,7 @@ function IslandDetailContent({
 								body: "Just scratch the card to reveal your code",
 							}
 						: {
-								title: "Prep for your 3pm with Block71?",
+								title: "Prep for your 3pm with Acme?",
 								body: "I can draft a brief from last week's notes",
 							}
 				}

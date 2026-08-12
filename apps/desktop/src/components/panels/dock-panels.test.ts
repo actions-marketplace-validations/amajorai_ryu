@@ -49,6 +49,7 @@ const BUILTIN_KINDS: BuiltinTabKind[] = [
 	"subagent",
 	"artifact",
 	"inspector",
+	"context",
 ];
 
 describe("tab kinds", () => {
@@ -194,5 +195,6 @@ describe("isPinnableDockTabKind", () => {
 		expect(isPinnableDockTabKind("subagent")).toBe(false);
 		expect(isPinnableDockTabKind("artifact")).toBe(false);
 		expect(isPinnableDockTabKind("inspector")).toBe(false);
+		expect(isPinnableDockTabKind("context")).toBe(false);
 	});
 });

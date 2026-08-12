@@ -188,6 +188,7 @@ use utoipa::OpenApi;
         super::set_conversation_archived_handler,
         super::set_conversation_title_handler,
         super::get_conversation_title_history_handler,
+        super::get_conversation_context_handler,
         super::get_participants_handler,
         super::add_participant_handler,
         super::remove_participant_handler,
@@ -273,6 +274,8 @@ use utoipa::OpenApi;
         super::preferences_stream,
         super::get_preference,
         super::set_preference,
+        super::get_safe_mode,
+        super::set_safe_mode,
         super::get_capability_bindings,
         super::set_capability_bindings,
 // Activity

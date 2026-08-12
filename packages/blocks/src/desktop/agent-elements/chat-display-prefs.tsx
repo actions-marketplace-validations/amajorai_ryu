@@ -23,6 +23,18 @@ export interface ChatDisplayPrefs {
 	 */
 	density: "comfortable" | "compact";
 	/**
+	 * When true, fenced code blocks in assistant markdown render at their full
+	 * height. When false, a long block is capped and scrolls inside its own box,
+	 * so one 300-line paste cannot bury the rest of the reply.
+	 *
+	 * This is the "Tool detail" knob reaching past tool calls: a reply's code is
+	 * the same kind of bulk the Bash/Edit caps already govern, and capping it is
+	 * what makes the Compact level actually compact. Capped means SCROLLABLE, not
+	 * clipped — code the model wrote must always stay readable and selectable.
+	 * Default: false (capped).
+	 */
+	expandCodeBlocks: boolean;
+	/**
 	 * When true, bash/command tool output renders fully expanded (no height cap).
 	 * When false, output is capped at a few lines with overflow hidden.
 	 * Default: false (collapsed).
@@ -40,6 +52,14 @@ export interface ChatDisplayPrefs {
 	 * Default: true.
 	 */
 	groupToolUses: boolean;
+	/**
+	 * When true, opening a conversation jumps the transcript to the newest message
+	 * instead of leaving it wherever the scroller happened to settle while the
+	 * history was still loading. The jump fires once per conversation (on mount,
+	 * on hydration, and when the surface first gains layout — a tab restored
+	 * behind `display:none` has none), never mid-read. Default: true.
+	 */
+	openAtBottom: boolean;
 	/**
 	 * When true, the latest scrolled-past user message stays pinned at the top of
 	 * the chat while reading a long assistant reply (Cursor-style). Default: true.
@@ -60,6 +80,8 @@ const DEFAULT_PREFS: ChatDisplayPrefs = {
 	groupToolUses: true,
 	expandFileEdits: false,
 	expandCommands: false,
+	expandCodeBlocks: false,
+	openAtBottom: true,
 	pinUserMessage: true,
 	streamAnimation: true,
 };

@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Browser automation via the `agent-browser` CLI's MCP server (https://agent-browser.dev). Provides the swappable `browser.control` layer, so selecting it re-points the stable `browser__*` tools at agent-browser without changing what agents call. Launched via `npx agent-browser mcp`; needs Node on PATH.",
   "icon": "ai-browser",
-  "iconDither": { "from": 3, "to": 329, "direction": "right" },
+  "iconDither": { "from": 3, "to": "transparent", "direction": "down" },
   "tagline": "A second real browser for the browser.control layer",
   "keywords": ["browser", "automation", "web"],
   "category": "Browsers",

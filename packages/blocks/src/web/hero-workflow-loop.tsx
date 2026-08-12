@@ -7,6 +7,12 @@
  *
  *   Island (always on top, glanceable)  →  Desktop app (where the work runs)
  *
+ * The stage reads as a real desktop: the hero's background image is the
+ * wallpaper, the scaled window is the app, and the island floats OUTSIDE that
+ * window — centred on the wallpaper above it — because that is where an
+ * always-on-top pill actually lives. The phase strip and the surface legend sit
+ * BELOW the window so the top of the frame is the island's alone.
+ *
  * The beat list is the whole script: every visual — island state, cursor,
  * transcript contents, caption, phase chip — is DERIVED from the current beat
  * index, so the loop restarting is just `index = 0` and there is no accumulated
@@ -81,12 +87,12 @@ const IDLE_THREAD: UIMessage[] = [
 	textMessage(
 		"idle-assistant",
 		"assistant",
-		"Two things: the Block71 sync at 3, and the Q3 report draft. I'll watch the call and pick up anything that turns into work."
+		"Two things: the Acme sync at 3, and the Q3 report draft. I'll watch the call and pick up anything that turns into work."
 	),
 ];
 
 const TASK_PROMPT =
-	"Draft the Block71 follow-up, log it against the deal, and post the summary to #sales.";
+	"Draft the Acme follow-up, log it against the deal, and post the summary to #sales.";
 
 /**
  * The assistant turn, part by part. The loop reveals these one at a time, with
@@ -95,25 +101,25 @@ const TASK_PROMPT =
 const RUN_PARTS: Part[] = [
 	{
 		type: "text",
-		text: "On it. Reading today's Block71 transcript from your Meetings space — that stays on this machine.",
+		text: "On it. Reading today's Acme transcript from your Meetings space — that stays on this machine.",
 	},
 	toolPart(
 		"Read",
-		{ file_path: "~/Ryu/Spaces/Meetings/block71-sync.md" },
+		{ file_path: "~/Ryu/Spaces/Meetings/acme-sync.md" },
 		{ preview: "42 min transcript · 3 action items · decision due Friday" }
 	),
 	toolPart(
 		"mcp__gmail__create_draft",
 		{
-			to: "ops@block71.co",
-			subject: "Block71 × Ryu — follow-up and next steps",
+			to: "sarah@acme.com",
+			subject: "Acme — follow-up and next steps",
 		},
 		{ id: "draft_8241", status: "draft saved" }
 	),
 	toolPart(
 		"mcp__hubspot__create_note",
 		{
-			deal: "Block71 — pilot",
+			deal: "Acme — pilot",
 			body: "3 action items agreed, decision due Friday.",
 		},
 		{ id: "note_5512" }
@@ -122,7 +128,7 @@ const RUN_PARTS: Part[] = [
 		"mcp__slack__send_message",
 		{
 			channel: "#sales",
-			text: "Block71 pilot: follow-up drafted, decision due Friday.",
+			text: "Acme pilot: follow-up drafted, decision due Friday.",
 		},
 		{ ok: true }
 	),
@@ -314,7 +320,7 @@ const PHASES: { id: Phase; label: string }[] = [
 ];
 
 const SUGGESTION = {
-	title: "Your Block71 sync just ended",
+	title: "Your Acme sync just ended",
 	// One line: the island's chip truncates, it never wraps.
 	body: "Draft the follow-up and log the deal?",
 };
@@ -484,8 +490,9 @@ function DemoIsland({
 /* ── the annotations that name each surface ────────────────────────────────── */
 
 /**
- * The two-surface legend. It rides ABOVE the window rather than floating inside
- * it: labels dropped on the app chrome cover the very UI they are naming.
+ * The two-surface legend. It rides BELOW the window rather than floating inside
+ * it: labels dropped on the app chrome cover the very UI they are naming, and
+ * the space above the window belongs to the island.
  */
 function SurfaceLegend({ focus }: { focus: Beat["focus"] }) {
 	const surfaces = [
@@ -528,7 +535,11 @@ function SurfaceLegend({ focus }: { focus: Beat["focus"] }) {
 	);
 }
 
-/** The three dots that travel from the island to the window on the handoff. */
+/**
+ * The three dots that travel from the island to the window on the handoff. It
+ * spans the island band AND the window, so the dots cross the wallpaper gap the
+ * way the handoff actually reads — top-centre, down into the transcript.
+ */
 function HandoffTrail({ shown }: { shown: boolean }) {
 	if (!shown) {
 		return null;
@@ -540,9 +551,9 @@ function HandoffTrail({ shown }: { shown: boolean }) {
 		>
 			{[0, 1, 2].map((index) => (
 				<motion.span
-					animate={{ left: "58%", top: "22%", opacity: [0, 1, 0] }}
+					animate={{ left: "56%", top: "46%", opacity: [0, 1, 0] }}
 					className="absolute size-1.5 rounded-full bg-amber-300 shadow-[0_0_12px_2px_rgba(252,211,77,0.55)]"
-					initial={{ left: "31%", top: "74%", opacity: 0 }}
+					initial={{ left: "50%", top: "12%", opacity: 0 }}
 					key={`trail-${index}`}
 					transition={{ duration: 0.9, delay: index * 0.16, ease: "easeOut" }}
 				/>
@@ -634,6 +645,16 @@ function PhaseStrip({ phase }: { phase: Phase }) {
 const STAGE_WIDTH = 1120;
 const STAGE_HEIGHT = 600;
 const MIN_STAGE_SCALE = 0.5;
+
+// The strip of wallpaper the island owns, above the window. Tall enough for the
+// island's tallest state (suggestion chip + the pill row that morphs out under
+// it) and fixed, not min-height: the island is hidden during a takeover, and a
+// collapsing band would make the window jump the moment a visitor types. It is
+// drawn at stage scale so the island keeps its proportion to the app it sits on.
+const SUGGESTION_DETAIL_HEIGHT = DETAIL_SIZES.suggestion?.height ?? 62;
+const ISLAND_BAND =
+	SUGGESTION_DETAIL_HEIGHT + SUGGESTION_STACK_GAP + ACTION_PILL_HEIGHT;
+const ISLAND_BAND_GAP = 18;
 
 function useStageScale() {
 	const frameRef = useRef<HTMLDivElement>(null);
@@ -794,7 +815,64 @@ export function HeroWorkflowLoop() {
 			{/* Static, in-repo CSS injected as a text child (no user input, no XSS surface). */}
 			<style>{ISLAND_CSS}</style>
 
-			<div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+			<div className="relative">
+				{/* The island is OUTSIDE the window — it sits on the hero's background
+				    image, which is standing in for the desktop wallpaper. It is scaled
+				    with the window (it lives outside the stage's own transform, so it
+				    would otherwise render 1:1 and dwarf a shrunken app on narrow
+				    viewports) and centred, the way an always-on-top pill parks. */}
+				<div
+					className="relative"
+					style={{ height: (ISLAND_BAND + ISLAND_BAND_GAP) * scale }}
+				>
+					{takeover ? null : (
+						<div
+							className="absolute top-0 left-1/2 z-30"
+							style={{
+								transform: `translateX(-50%) scale(${scale})`,
+								transformOrigin: "top center",
+							}}
+						>
+							<DemoIsland beat={beat} jumpTo={setIndex} />
+						</div>
+					)}
+				</div>
+
+				<div
+					className={cn(
+						"overflow-hidden rounded-2xl shadow-2xl ring-1 transition-[box-shadow,--tw-ring-color] duration-500",
+						beat.focus === "desktop" && !takeover
+							? "ring-foreground/25"
+							: "ring-border"
+					)}
+					ref={frameRef}
+					style={{ height: STAGE_HEIGHT * scale }}
+				>
+					<div
+						className="relative origin-top-left bg-background"
+						ref={stageRef}
+						style={{
+							width: STAGE_WIDTH,
+							height: STAGE_HEIGHT,
+							transform: `scale(${scale})`,
+						}}
+					>
+						<DesktopShell>
+							<ChatTopBar thread={takeover ? "task" : beat.thread} />
+							<AgentChat
+								messages={messages}
+								onSend={onSend}
+								onStop={() => setTakeoverStatus("ready")}
+								status={status}
+							/>
+						</DesktopShell>
+					</div>
+				</div>
+
+				<HandoffTrail shown={Boolean(beat.trail) && !takeover} />
+			</div>
+
+			<div className="mt-4 flex flex-wrap items-center justify-between gap-3">
 				<PhaseStrip phase={beat.phase} />
 				<div className="flex flex-wrap items-center gap-2">
 					<SurfaceLegend focus={takeover ? "desktop" : beat.focus} />
@@ -806,46 +884,7 @@ export function HeroWorkflowLoop() {
 				</div>
 			</div>
 
-			<div
-				className={cn(
-					"overflow-hidden rounded-2xl shadow-2xl ring-1 transition-[box-shadow,--tw-ring-color] duration-500",
-					beat.focus === "desktop" && !takeover
-						? "ring-foreground/25"
-						: "ring-border"
-				)}
-				ref={frameRef}
-				style={{ height: STAGE_HEIGHT * scale }}
-			>
-				<div
-					className="relative origin-top-left bg-background"
-					ref={stageRef}
-					style={{
-						width: STAGE_WIDTH,
-						height: STAGE_HEIGHT,
-						transform: `scale(${scale})`,
-					}}
-				>
-					<DesktopShell>
-						<ChatTopBar thread={takeover ? "task" : beat.thread} />
-						<AgentChat
-							messages={messages}
-							onSend={onSend}
-							onStop={() => setTakeoverStatus("ready")}
-							status={status}
-						/>
-					</DesktopShell>
-
-					<HandoffTrail shown={Boolean(beat.trail) && !takeover} />
-
-					{/* The island floats over the window, exactly as it does on a real
-					    desktop — over the transcript, clear of the app's own sidebar. */}
-					<div className="absolute top-[26rem] left-[30%] z-30">
-						{takeover ? null : <DemoIsland beat={beat} jumpTo={setIndex} />}
-					</div>
-				</div>
-			</div>
-
-			<div className="mt-4 min-h-[3.5rem] md:min-h-[3rem]">
+			<div className="mt-3 min-h-[3.5rem] md:min-h-[3rem]">
 				<AnimatePresence initial={false} mode="wait">
 					<motion.p
 						animate={{ opacity: 1, y: 0 }}

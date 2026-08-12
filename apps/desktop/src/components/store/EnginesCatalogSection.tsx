@@ -29,6 +29,7 @@ import StoreCatalogLayout, {
 import StoreItemAction, {
 	StoreItemOverflowMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import {
 	ListingAsideCard,
 	ListingDetailShell,
@@ -364,9 +365,7 @@ function EngineList({
 		<div className="flex flex-col gap-6 pt-2">
 			{groups.map((group) => (
 				<section key={group.kind}>
-					<h3 className="mb-2 px-1 font-medium text-muted-foreground text-xs uppercase tracking-widest">
-						{GROUP_LABELS[group.kind]}
-					</h3>
+					<StoreShelfHeading>{GROUP_LABELS[group.kind]}</StoreShelfHeading>
 					<StoreCardGrid>
 						{group.items.map((item) => (
 							<StoreCatalogCard

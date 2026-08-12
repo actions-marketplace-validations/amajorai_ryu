@@ -341,14 +341,21 @@ pub async fn enable_app(
 
     // Check that the app is installed.
     let _record = store
-        .get(&manifest.id)
+        .get_record(&manifest.id)
         .await
         .map_err(EnableError::Other)?
         .ok_or_else(|| {
             EnableError::Other(anyhow::anyhow!("app '{}' is not installed", manifest.id))
         })?;
 
-    let records = store.list().await.map_err(EnableError::Other)?;
+    // RAW records: the lifecycle edits the user's real choices, so it must see
+    // them even while Safe Mode is masking them off for the runtime. Resolving a
+    // dependency graph against the mask would read every dep as disabled and
+    // cascade-enable the world.
+    let records = store
+        .list_all_records()
+        .await
+        .map_err(EnableError::Other)?;
 
     // The graph resolves over the INSTALLED manifests (see `graph`'s module
     // contract): a declared dependency that is not installed must surface as
@@ -552,7 +559,7 @@ pub async fn set_app_grants(
     http_client: &reqwest::Client,
 ) -> Result<PluginRecord, EnableError> {
     let record = store
-        .get(&manifest.id)
+        .get_record(&manifest.id)
         .await
         .map_err(EnableError::Other)?
         .ok_or_else(|| {
@@ -650,7 +657,12 @@ pub async fn disable_app(
     cascade: bool,
     force: bool,
 ) -> Result<DisableOutcome, DisableError> {
-    let records = store.list().await.map_err(DisableError::Other)?;
+    // RAW: same reason as `enable_app` — a disable must resolve dependents against
+    // what the user actually has enabled, not against the Safe Mode mask.
+    let records = store
+        .list_all_records()
+        .await
+        .map_err(DisableError::Other)?;
     if !records.iter().any(|r| r.id == id) {
         return Err(DisableError::NotInstalled { id: id.to_owned() });
     }
@@ -856,7 +868,10 @@ pub async fn uninstall_app(
     crate::acl::invalidate_vocabulary();
 
     // 1. Installed?
-    let records = store.list().await.map_err(UninstallError::Other)?;
+    let records = store
+        .list_all_records()
+        .await
+        .map_err(UninstallError::Other)?;
     if !records.iter().any(|r| r.id == id) {
         return Err(UninstallError::NotInstalled { id: id.to_owned() });
     }
@@ -1010,7 +1025,7 @@ pub async fn update_app(
     force: bool,
 ) -> Result<PluginRecord, UpdateError> {
     let record = store
-        .get(&manifest.id)
+        .get_record(&manifest.id)
         .await
         .map_err(UpdateError::Other)?
         .ok_or_else(|| {

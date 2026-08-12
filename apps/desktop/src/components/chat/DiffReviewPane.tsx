@@ -24,6 +24,10 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
 import { useEffect, useRef, useState } from "react";
+import {
+	invalidateGitStatus,
+	invalidateWorktreeStatus,
+} from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type {
 	ApplyResult,
@@ -171,6 +175,10 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 				message: `Applied run ${runId}`,
 			});
 			if (result.success) {
+				// Applying a worktree changes both the worktree and the repo it
+				// merges into, so refresh every git surface rather than this pane.
+				invalidateGitStatus();
+				invalidateWorktreeStatus(runId);
 				if (result.pr_url) {
 					setApplyState({ status: "pr", prUrl: result.pr_url });
 				} else {

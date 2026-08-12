@@ -1,4 +1,5 @@
-﻿import { memo } from "react";
+﻿import { AgentCode } from "@ryu/ui/components/agents/agent-code";
+import { memo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";
 import { TextShimmer } from "../text-shimmer.tsx";
 import type { StepState, TimelineStep } from "../types/timeline.ts";
@@ -79,11 +80,21 @@ export function BashToolTerminalCard({
 				)}
 			</div>
 			<div className="overflow-hidden bg-background/60 px-2.5 py-1.5 font-mono text-[12px] leading-[16px]">
-				<div className="break-all">
-					<span className="select-none text-amber-600 dark:text-amber-400">
-						${" "}
+				<div className="flex gap-1.5">
+					<span
+						aria-hidden="true"
+						className="select-none text-amber-600 leading-[16px] dark:text-amber-400"
+					>
+						$
 					</span>
-					<span className="text-foreground">{command}</span>
+					{/* Shiki-tokenised so a pipeline reads as a pipeline. The hook keeps
+					    the previous tokens while a command is still streaming, so the
+					    line never flashes back to plain text between chunks. */}
+					<AgentCode
+						className="min-w-0 flex-1 whitespace-pre-wrap break-all text-[12px] text-foreground leading-[16px]"
+						code={command}
+						language="bash"
+					/>
 				</div>
 				{!isPending && step.bashOutput && (
 					<div

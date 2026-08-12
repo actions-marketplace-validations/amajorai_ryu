@@ -79,6 +79,67 @@ const ENV_HOSTNAME: &str = "RYU_MESH_HOSTNAME";
 const ENV_TAILSCALED_BIN: &str = "RYU_TAILSCALED_BIN";
 /// Env overriding the `tailscale` CLI binary (otherwise resolved on PATH).
 const ENV_TAILSCALE_BIN: &str = "RYU_TAILSCALE_BIN";
+/// Env overriding the tunnel backend (`headscale` | `tailscale`), outranking the
+/// `mesh-backend` pref exactly as the other mesh envs outrank their prefs.
+const ENV_BACKEND: &str = "RYU_MESH_BACKEND";
+
+/// Which control plane this node enrolls against. Self-hosted by default: Ryu's
+/// whole point is that the hard, private thing is the normal thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshBackend {
+    /// Self-hosted Headscale — `tailscale up --login-server=<url>`.
+    Headscale,
+    /// Tailscale's SaaS coordination server — no `--login-server` at all.
+    Tailscale,
+}
+
+impl MeshBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Headscale => "headscale",
+            Self::Tailscale => "tailscale",
+        }
+    }
+}
+
+/// The default when nothing has ever been chosen: self-hosted.
+pub const DEFAULT_MESH_BACKEND: MeshBackend = MeshBackend::Headscale;
+
+/// Resolve the tunnel backend from the env override and the stored pref.
+///
+/// Precedence: [`ENV_BACKEND`] → the `mesh-backend` pref → [`DEFAULT_MESH_BACKEND`].
+/// An unrecognized value falls through to the default rather than failing the
+/// start — a typo in a pref must not strand a node off its tailnet.
+pub fn parse_backend(raw: Option<&str>) -> MeshBackend {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("tailscale") => MeshBackend::Tailscale,
+        Some("headscale") => MeshBackend::Headscale,
+        _ => DEFAULT_MESH_BACKEND,
+    }
+}
+
+/// The configured backend, reading the env first and the pref store second, plus
+/// whether the choice was made EXPLICITLY (env or a stored pref) rather than
+/// inherited from [`DEFAULT_MESH_BACKEND`].
+///
+/// The second half of that pair is not bookkeeping — it is what keeps the new
+/// default from breaking an existing node. See the enrollment branch in
+/// [`TailscaleManager::start`].
+pub async fn mesh_backend() -> (MeshBackend, bool) {
+    if let Some(raw) = env_bin(ENV_BACKEND) {
+        return (parse_backend(Some(&raw)), true);
+    }
+    let pref = match crate::server::preferences::PreferencesStore::open_default() {
+        Ok(store) => store
+            .get(crate::mesh_host::MESH_BACKEND_PREF_KEY)
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty()),
+        Err(_) => None,
+    };
+    (parse_backend(pref.as_deref()), pref.is_some())
+}
 
 /// The SOCKS5 listen address for the userspace proxy (env override → default).
 pub fn socks5_addr() -> String {
@@ -706,8 +767,45 @@ impl Sidecar for TailscaleManager {
                         Err(_) => None,
                     }
                 };
-                if let Some(login) = login_server {
-                    up_args.push(format!("--login-server={login}"));
+                // The Tunnel selection decides whether `--login-server` is passed
+                // AT ALL, so the picker and the enrollment can never disagree.
+                //
+                // Before this existed the URL alone decided: empty meant SaaS. That
+                // is a fine derivation but a terrible contract for a UI, because a
+                // node showing "Headscale" with an empty URL would silently enroll
+                // into Tailscale's SaaS instead. So Headscale + no URL is refused
+                // with the sentence that fixes it, rather than quietly becoming the
+                // other backend.
+                //
+                // The one exception is the migration case, and it is deliberate: a
+                // node that has NEVER chosen a backend and has no URL is exactly the
+                // pre-existing SaaS-with-authkey setup, which
+                // [`DEFAULT_MESH_BACKEND`] would otherwise break on upgrade. It
+                // keeps working, loudly.
+                let (backend, explicit) = mesh_backend().await;
+                match (backend, login_server) {
+                    (MeshBackend::Headscale, Some(login)) => {
+                        up_args.push(format!("--login-server={login}"));
+                    }
+                    (MeshBackend::Headscale, None) if explicit => {
+                        anyhow::bail!(
+                            "the tunnel is set to Headscale but no control server URL is \
+                             configured. Set one (Gateway → Network → Control server URL, or \
+                             {ENV_LOGIN_SERVER}), or switch the tunnel to Tailscale in the node \
+                             menu."
+                        );
+                    }
+                    (MeshBackend::Headscale, None) => {
+                        tracing::warn!(
+                            "tailscale: no tunnel backend chosen and no control server URL — \
+                             enrolling against Tailscale SaaS, as this node did before. Pick a \
+                             tunnel in the node menu to make the choice explicit."
+                        );
+                    }
+                    // SaaS coordinates through Tailscale's own servers; passing a
+                    // stale Headscale URL here would send the node to the wrong
+                    // control plane, so the URL is ignored on purpose.
+                    (MeshBackend::Tailscale, _) => {}
                 }
                 // Register under a sanitized whole-hostname label rather than
                 // letting Tailscale take the first one (see `mesh_hostname`).
@@ -1095,5 +1193,31 @@ mod tests {
         assert_eq!(state_path().parent().unwrap(), dir);
         assert_eq!(authkey_path().parent().unwrap(), dir);
         assert!(authkey_path().ends_with("authkey"));
+    }
+
+    #[test]
+    fn unset_and_junk_backends_default_to_headscale() {
+        // The DEFAULT is the claim worth pinning: self-hosted unless someone says
+        // otherwise. The desktop's `parseMeshBackend` mirrors this exactly, so a
+        // change here without one there makes the picker disagree with the daemon
+        // about what an unconfigured node will do.
+        assert_eq!(parse_backend(None), MeshBackend::Headscale);
+        assert_eq!(parse_backend(Some("")), MeshBackend::Headscale);
+        assert_eq!(parse_backend(Some("   ")), MeshBackend::Headscale);
+        // A typo must not strand a node off its tailnet — it falls back, it does
+        // not error.
+        assert_eq!(parse_backend(Some("headscaleee")), MeshBackend::Headscale);
+        // Both real values round-trip, case- and whitespace-insensitively.
+        assert_eq!(parse_backend(Some(" Headscale ")), MeshBackend::Headscale);
+        assert_eq!(parse_backend(Some("TAILSCALE")), MeshBackend::Tailscale);
+        assert_eq!(
+            parse_backend(Some(MeshBackend::Tailscale.as_str())),
+            MeshBackend::Tailscale
+        );
+        assert_eq!(
+            parse_backend(Some(MeshBackend::Headscale.as_str())),
+            MeshBackend::Headscale
+        );
+        assert_eq!(DEFAULT_MESH_BACKEND, MeshBackend::Headscale);
     }
 }

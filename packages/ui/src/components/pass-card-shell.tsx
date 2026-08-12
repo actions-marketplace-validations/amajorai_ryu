@@ -113,8 +113,9 @@ export const FACE_RADIUS_PX = CARD_RADIUS_PX - METAL_EDGE_RING_PX;
  * paper, not a card — so the pass is built as a solid: the faces sit half a
  * thickness apart along Z, and the gap between them is filled.
  *
- * The fill is a stack of copies of the card's own rounded silhouette, one per
- * pixel of depth, rather than four rotated slabs along the straight edges. Four
+ * The fill is a stack of copies of the card's own rounded silhouette, one every
+ * half pixel of depth, rather than four rotated slabs along the straight edges.
+ * Four
  * slabs cannot follow a 28px corner radius, so the corners came out hollow —
  * you could see through the card where it was rounded. A stack has no such
  * problem: every slice is the exact outline, so the extrusion is solid the whole
@@ -127,19 +128,39 @@ export const FACE_RADIUS_PX = CARD_RADIUS_PX - METAL_EDGE_RING_PX;
  */
 export const CARD_THICKNESS_PX = 6;
 const CARD_HALF_THICKNESS_PX = CARD_THICKNESS_PX / 2;
-/** One slice per pixel — any coarser and the stack reads as separate planes. */
-const CARD_SLICES = CARD_THICKNESS_PX;
+/**
+ * Spacing between slices, in px of depth.
+ *
+ * HALF a pixel, not one. At one-per-pixel the stack spanned z ∈ {2,1,0,−1,−2}
+ * against faces sitting at ±3, so a full pixel of the card's thickness was
+ * EMPTY on each side — edge-on you saw the page through a hairline gap between
+ * the material and each face, which is the first half of "it looks like two
+ * cards back to back". Half-pixel steps let the stack run to ±2.5 and leave a
+ * sub-pixel gap the compositor blends away, without putting a slice in the
+ * exact plane of a face (see the coplanar note in {@link CardExtrusion}).
+ */
+const CARD_SLICE_STEP_PX = 0.5;
+/** Depth of the outermost slice: as close to a face as it can get without touching. */
+const CARD_OUTER_SLICE_PX = CARD_HALF_THICKNESS_PX - CARD_SLICE_STEP_PX;
+const CARD_SLICES =
+	Math.round(CARD_OUTER_SLICE_PX / CARD_SLICE_STEP_PX) * 2 + 1;
 
 /**
- * The material the card is milled from, as seen edge-on. A flat token fill read
- * as cardboard — the ring says the card is metal and the edge said it was not —
- * so the slices carry a brushed-metal ramp instead: dark at the shoulders,
- * bright across the middle, which is how a rolled edge catches light. Fixed
- * greys rather than theme tokens, because metal is metal in both schemes; the
- * same reason the ring's own presets are not token-derived.
+ * The material the card is milled from, as seen edge-on — the sheen ALONG the
+ * card's length. A flat token fill read as cardboard, so the slices carry a
+ * brushed-metal ramp instead. Fixed greys rather than theme tokens, because
+ * metal is metal in both schemes; the same reason the ring's own presets are not
+ * token-derived.
+ *
+ * ONE specular sweep, deliberately: bright in the upper third and falling away
+ * from there. The ramp this replaced was symmetric — bright at 34%, DARK at 52%,
+ * bright again at 70% — which put a grey band across the exact middle of the
+ * edge and made one card read as two stacked and joined at the waist. A rolled
+ * edge is lit by one light; it does not have two highlights with a shadow
+ * between them.
  */
 const EDGE_METAL =
-	"linear-gradient(180deg, #6e6e78 0%, #babac4 18%, #f4f4f8 34%, #9a9aa6 52%, #d8d8e0 70%, #7c7c86 100%)";
+	"linear-gradient(180deg, #55555f 0%, #9a9aa6 9%, #d6d6df 24%, #f6f6fa 39%, #dededf 58%, #b4b4c0 76%, #8a8a96 90%, #5b5b65 100%)";
 
 /**
  * How the card's thickness is finished. `"brushed"` is the static ramp above —
@@ -159,14 +180,36 @@ const EDGE_METAL =
 export type PassEdge = "brushed" | "live";
 
 /**
+ * A slice's own radius, and the reason it is not `FACE_RADIUS_PX`.
+ *
+ * A slice spans the WHOLE card box (`inset-0`), not the box inside the ring's
+ * gutter, so its silhouette is the card's own outline and its radius has to be
+ * the card's own. Rounded at the face's radius instead, every slice cut its
+ * corners two pixels tighter than the card is rounded — which pushes the corner
+ * of the slice OUTSIDE the arc the ring traces, and the brushed ramp showed as
+ * four bright angular nubs sitting proud of the chrome at exactly the four
+ * corners. The straight edges never showed it, which is what made it read as
+ * "the metal has sharp corners" rather than as a radius that was simply wrong.
+ *
+ * The live mid-plane ring is the one case where the slice IS inside a gutter —
+ * `MetalEdge`'s own, one pixel of it — so there it rounds by one less.
+ */
+const SLICE_RADIUS_PX = CARD_RADIUS_PX;
+/** The `ringPx` of the live mid-plane ring the depth-0 slice sits inside. */
+const LIVE_EDGE_RING_PX = 1;
+const LIVE_SLICE_RADIUS_PX = CARD_RADIUS_PX - LIVE_EDGE_RING_PX;
+
+/**
  * The card's thickness, as a stack of its own silhouette. Each slice sits a
  * pixel further back than the last, spanning front face to back face, so any
- * edge-on view shows a continuous band of material instead of a hairline.
+ * edge-on view shows a continuous band of material instead of a hairline — and
+ * because each slice is tinted for its own depth, that band is a specular ramp
+ * across the thickness rather than one flat colour repeated.
  */
 function CardExtrusion({ edge, ringed }: { edge: PassEdge; ringed: boolean }) {
 	return (
 		<>
-			{Array.from({ length: CARD_SLICES - 1 }, (_, index) => {
+			{Array.from({ length: CARD_SLICES }, (_, index) => {
 				// STRICTLY BETWEEN the faces: the outermost slices used to sit at
 				// ±CARD_HALF_THICKNESS_PX, i.e. in the exact plane of each face, and
 				// they are opaque across the whole box — including the transparent
@@ -175,28 +218,30 @@ function CardExtrusion({ edge, ringed }: { edge: PassEdge; ringed: boolean }) {
 				// depended on the turn angle: the FRONT ring lost and only the back
 				// one showed, and a back-facing metal-fx instance is not repainted, so
 				// the ring that did show was a frozen frame. Hence "the border is only
-				// on the back, and it does not animate". Starting a pixel in on each
-				// side leaves both faces alone.
-				const depth = CARD_HALF_THICKNESS_PX - 1 - index;
-				// The material of the slice. A RINGED card is milled metal, so the
-				// depth carries the brushed ramp and, under `"live"`, a metal-fx ring
-				// of its own at each plane — the whole edge is then the same animated
-				// shader as the faces rather than a painted-on lookalike. One ring per
-				// plane, aligned to the same box, so edge-on they stack into a single
-				// moving band; a single wider ring at mid-depth was the first attempt
-				// and read as two cards with a gap between them.
+				// on the back, and it does not animate". Stopping HALF a pixel short
+				// on each side leaves both faces alone while still filling the
+				// thickness — see {@link CARD_SLICE_STEP_PX}.
+				const depth = CARD_OUTER_SLICE_PX - index * CARD_SLICE_STEP_PX;
+				// The material of the slice: the lengthwise brushed ramp, shaded for
+				// this slice's own depth so the stack reads as a rolled edge lit from
+				// one side. Under `"live"` the middle plane additionally carries a
+				// metal-fx ring, so the thickness catches the same animated shader as
+				// the faces rather than only a painted lookalike.
 				//
 				// The brushed ramp stays on an UNRINGED card too. The thing an
 				// unclaimed pass withholds is the animated chrome BORDER, not the
 				// material it is milled from — a card whose edge went flat read as
 				// cardboard rather than as metal waiting to be finished.
+				const live = edge === "live" && ringed && depth === 0;
 				const slice = (
 					<div
 						aria-hidden="true"
 						className="absolute inset-0"
 						style={{
 							backgroundImage: EDGE_METAL,
-							borderRadius: `${FACE_RADIUS_PX}px`,
+							// See `SLICE_RADIUS_PX`: the card's own radius, less the live
+							// ring's gutter on the one plane that has one.
+							borderRadius: `${live ? LIVE_SLICE_RADIUS_PX : SLICE_RADIUS_PX}px`,
 						}}
 					/>
 				);
@@ -207,7 +252,7 @@ function CardExtrusion({ edge, ringed }: { edge: PassEdge; ringed: boolean }) {
 						key={depth}
 						style={{ transform: `translateZ(${depth}px)` }}
 					>
-						{edge === "live" && ringed && depth === 0 ? (
+						{live ? (
 							// ONE hairline ring, on the middle plane only. Ringing every
 							// plane stacked five arcs that each project from a slightly
 							// different depth, and at the corners they piled into a band far
@@ -219,7 +264,7 @@ function CardExtrusion({ edge, ringed }: { edge: PassEdge; ringed: boolean }) {
 							<MetalEdge
 								borderRadius={CARD_RADIUS_PX}
 								className="h-full"
-								ringPx={1}
+								ringPx={LIVE_EDGE_RING_PX}
 							>
 								<div className="relative h-full w-full">{slice}</div>
 							</MetalEdge>
@@ -400,6 +445,7 @@ function PassFace({
 	ringed,
 	seed,
 	warpColors,
+	warpOpacity,
 }: {
 	/** Which generative texture the card face is printed on. */
 	backdrop: PassBackdrop;
@@ -419,6 +465,8 @@ function PassFace({
 	seed: string;
 	/** {@link PassCardShellProps.warpColors}. */
 	warpColors?: readonly string[];
+	/** {@link PassCardShellProps.warpOpacity}. */
+	warpOpacity?: { dark: number; light: number };
 }) {
 	const isDark = useIsDarkFace(metalTheme);
 	const isWarp = backdrop === "warp";
@@ -498,8 +546,8 @@ function PassFace({
 						...(isWarp
 							? ({
 									"--pass-warp-opacity": isDark
-										? WARP_OPACITY_DARK
-										: WARP_OPACITY_LIGHT,
+										? (warpOpacity?.dark ?? WARP_OPACITY_DARK)
+										: (warpOpacity?.light ?? WARP_OPACITY_LIGHT),
 								} as React.CSSProperties)
 							: {}),
 					}}
@@ -600,6 +648,22 @@ export interface PassCardShellProps {
 	 * silently exports without a clock if it does not find one.
 	 */
 	warpColors?: readonly string[];
+	/**
+	 * Override how strongly the warp backdrop is laid over the card face, per
+	 * scheme. Ignored unless `backdrop === "warp"`; defaults to
+	 * {@link WARP_OPACITY_DARK} / {@link WARP_OPACITY_LIGHT}.
+	 *
+	 * A prop rather than a retune of those constants, because the two warp cards
+	 * are not the same kind of surface. The waitlist pass's field is a texture
+	 * derived from a seed — it says "this card is yours", and nobody can tell it
+	 * is wrong, so it is tuned purely for the type sitting on it. A TIER card's
+	 * field has to be RECOGNISED: it is the plan badge the reader already knows
+	 * from the sidebar, and at the waitlist card's weighting every tier washed
+	 * out to the same pale iridescence, which is a different claim about the
+	 * product than the badge makes. Moving the shared constant would have
+	 * restyled the waitlist pass to fix a problem it does not have.
+	 */
+	warpOpacity?: { dark: number; light: number };
 }
 
 /** The Ryu mark, the default back face. */
@@ -622,6 +686,7 @@ export function PassCardShell({
 	metalTheme = "auto",
 	still = false,
 	warpColors,
+	warpOpacity,
 }: PassCardShellProps) {
 	const reduceMotion = useReducedMotion();
 	// The card is held STILL for its first moment on screen, and that is a
@@ -873,6 +938,7 @@ export function PassCardShell({
 							ringed={ringed}
 							seed={ditherSeed}
 							warpColors={warpColors}
+							warpOpacity={warpOpacity}
 						>
 							{children}
 							{/* Specular glare, tracked to the pointer. Fades out on leave rather
@@ -905,6 +971,7 @@ export function PassCardShell({
 							ringed={ringed}
 							seed={ditherSeed}
 							warpColors={warpColors}
+							warpOpacity={warpOpacity}
 						>
 							{back ?? <PassGhost />}
 						</PassFace>

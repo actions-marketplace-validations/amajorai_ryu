@@ -6,6 +6,13 @@ import { useRef } from "react";
 import { cn } from "../lib/utils.ts";
 
 interface PageHeaderProps {
+	/**
+	 * The heading element to render the title as. Defaults to `h1` — the routed
+	 * page's own header. A page that already has its `h1` and wants this same
+	 * title/subtitle pair for a SECTION further down must pass `h2`, otherwise
+	 * the page ships two `h1`s and its heading outline stops describing it.
+	 */
+	as?: "h1" | "h2" | "h3";
 	className?: string;
 	/**
 	 * Set to `false` where the header is already inside a `StaggerReveal`. That
@@ -35,6 +42,7 @@ interface PageHeaderProps {
  * box, which would delay a header sitting inside a short modal.
  */
 export function PageHeader({
+	as: Heading = "h1",
 	title,
 	subtitle,
 	className,
@@ -57,7 +65,7 @@ export function PageHeader({
 			ref={ref}
 			style={style}
 		>
-			<h1
+			<Heading
 				className={cn(
 					"font-medium text-xl",
 					stagger && "t-stagger-line t-stagger-line--1",
@@ -65,7 +73,7 @@ export function PageHeader({
 				)}
 			>
 				{title}
-			</h1>
+			</Heading>
 			{subtitle ? (
 				<p
 					className={cn(

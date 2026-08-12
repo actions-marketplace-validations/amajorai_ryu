@@ -1,19 +1,20 @@
 "use client";
 
-import { Badge } from "@ryu/ui/components/badge";
-import { Button } from "@ryu/ui/components/button";
-import { Card, CardContent } from "@ryu/ui/components/card";
-import { Checkbox } from "@ryu/ui/components/checkbox";
-import { Input } from "@ryu/ui/components/input";
-import { Label } from "@ryu/ui/components/label";
+import { Badge } from "@ryu/ui/components/badge.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
+import { Card, CardContent } from "@ryu/ui/components/card.tsx";
+import { Checkbox } from "@ryu/ui/components/checkbox.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Label } from "@ryu/ui/components/label.tsx";
+import { ReferralPass } from "@ryu/ui/components/referral-pass.tsx";
 import {
 	Select,
 	SelectContent,
 	SelectItem,
 	SelectTrigger,
 	SelectValue,
-} from "@ryu/ui/components/select";
-import { Spinner } from "@ryu/ui/components/spinner";
+} from "@ryu/ui/components/select.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Copy, Gift, Wallet } from "lucide-react";
 import { useState } from "react";
@@ -23,10 +24,50 @@ import { settingsApi } from "../utils/api-client.ts";
 import { ReferralCreditsSection } from "./shared/referral-credits-section.tsx";
 
 export interface ReferralsTabProps {
+	/**
+	 * Name printed on the invite pass. Optional because neither surface's tab
+	 * owns a session — the desktop dialog and the web profile page each already
+	 * have the signed-in user on hand and pass it down. Absent, the card renders
+	 * unpersonalised rather than guessing.
+	 */
+	holderName?: string | null;
+	/**
+	 * The pass's metal ring follows the app's RESOLVED theme, not the OS. Both
+	 * shells have a manual toggle that can disagree with `prefers-color-scheme`,
+	 * and the ring is the one part of the card that cannot read the difference on
+	 * its own — see `PassCardShell.metalTheme`.
+	 */
+	metalTheme?: "auto" | "dark" | "light";
 	onOpenExternal?: (url: string) => Promise<void> | void;
 }
 
 const DASHBOARD_KEY = ["affiliate", "dashboard"] as const;
+/**
+ * The SAME key `ReferralCreditsSection` reads under. React Query dedupes on it,
+ * so the pass's two footer numbers cost no second request — and can never
+ * disagree with the list of referees rendered a few hundred pixels below them.
+ */
+const CREDITS_KEY = ["referrals", "credits"] as const;
+const MICRO_USD_PER_USD = 1_000_000;
+
+/**
+ * MICRO-USD, not the minor units `formatMoney` takes. Kept apart for the reason
+ * `referral-credits-section.tsx` states: a $15 reward through the cents
+ * formatter reads as $0.15, which looks like a much worse reward rather than a
+ * bug.
+ */
+function formatCreditsUsd(microUsd: number): string {
+	const dollars = microUsd / MICRO_USD_PER_USD;
+	try {
+		return new Intl.NumberFormat(undefined, {
+			style: "currency",
+			currency: "USD",
+			maximumFractionDigits: dollars % 1 === 0 ? 0 : 2,
+		}).format(dollars);
+	} catch {
+		return `$${dollars.toFixed(2)}`;
+	}
+}
 
 function formatMoney(minor: number, currency: string): string {
 	const code = (currency || "usd").toUpperCase();
@@ -103,7 +144,11 @@ function EnableAffiliateCard({
 	);
 }
 
-export function ReferralsTab({ onOpenExternal }: ReferralsTabProps) {
+export function ReferralsTab({
+	holderName,
+	metalTheme = "auto",
+	onOpenExternal,
+}: ReferralsTabProps) {
 	const queryClient = useQueryClient();
 	const [copied, setCopied] = useState(false);
 	const [editorOpen, setEditorOpen] = useState(false);
@@ -112,6 +157,14 @@ export function ReferralsTab({ onOpenExternal }: ReferralsTabProps) {
 	const { data, isError, isLoading } = useQuery({
 		queryKey: DASHBOARD_KEY,
 		queryFn: settingsApi.affiliate.get,
+	});
+	// The pass's footer facts. Deliberately NOT gated on the affiliate opt-in:
+	// credit attribution runs from sign-up whether or not the cash program is on,
+	// so a card that showed nothing until someone enabled commissions would be
+	// hiding referrals they already have.
+	const { data: credits } = useQuery({
+		queryKey: CREDITS_KEY,
+		queryFn: settingsApi.referrals.credits,
 	});
 
 	const invalidate = () =>
@@ -217,38 +270,67 @@ export function ReferralsTab({ onOpenExternal }: ReferralsTabProps) {
 
 	return (
 		<div className="space-y-4">
+			{/* THE INVITE IS AN OBJECT, NOT A FORM FIELD. This was a read-only input
+			    with a Copy button — the same control the app uses for an API key,
+			    which is a thing you hide, where a referral is the one artefact whose
+			    whole job is to be shown to another person. It is now the same
+			    laminated, turning pass the waitlist queue hands out, printed with the
+			    member's own code. The full LINK is still what Copy puts on the
+			    clipboard; the card carries the code, which is the part a person
+			    repeats out loud. */}
 			<Card className="overflow-hidden">
-				<CardContent className="space-y-5">
-					<div className="flex items-start gap-3">
-						<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-							<Gift className="size-5" />
-						</div>
-						<div className="min-w-0 space-y-1">
-							<h3 className="font-semibold text-base">Your referral link</h3>
-							<p className="text-muted-foreground text-sm">
-								One link, two rewards. You earn Ryu credits when a friend who
-								signed up through it becomes a paying customer
-								{data.enabled
-									? ", plus a cash commission on what they subscribe to."
-									: "."}
-							</p>
-						</div>
-					</div>
+				<CardContent className="grid gap-6 md:grid-cols-[minmax(0,20rem)_minmax(0,1fr)] md:items-center">
+					<ReferralPass
+						className="mx-auto w-full max-w-[20rem]"
+						code={data.referralCode}
+						earned={
+							credits ? formatCreditsUsd(credits.cap.earnedMicroUsd) : null
+						}
+						holder={holderName}
+						joined={credits?.referrals.length ?? null}
+						metalTheme={metalTheme}
+					/>
 
-					<div className="flex flex-col gap-2 sm:flex-row">
-						<Input
-							readOnly
-							value={data.referralLink ?? "Generating your link…"}
-						/>
-						<Button
-							disabled={!data.referralLink}
-							onClick={handleCopy}
-							type="button"
-							variant="outline"
-						>
-							<Copy className="size-4" />
-							{copied ? "Copied" : "Copy"}
-						</Button>
+					<div className="min-w-0 space-y-5">
+						<div className="flex items-start gap-3">
+							<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+								<Gift className="size-5" />
+							</div>
+							<div className="min-w-0 space-y-1">
+								<h3 className="font-semibold text-base">Your invite pass</h3>
+								<p className="text-muted-foreground text-sm">
+									One link, two rewards. You earn Ryu credits when a friend who
+									signed up through it becomes a paying customer
+									{data.enabled
+										? ", plus a cash commission on what they subscribe to."
+										: "."}
+								</p>
+							</div>
+						</div>
+
+						<div className="flex flex-col gap-2 sm:flex-row">
+							<Input
+								readOnly
+								value={data.referralLink ?? "Generating your link…"}
+							/>
+							<Button
+								disabled={!data.referralLink}
+								onClick={handleCopy}
+								type="button"
+								variant="outline"
+							>
+								<Copy className="size-4" />
+								{copied ? "Copied" : "Copy"}
+							</Button>
+						</div>
+						{/* Credit rewards land in the earner's PERSONAL org, always — never
+						    in whichever org is active when the payout fires, which may be a
+						    client's. Said here because it is surprising the first time and
+						    because the Credits tab is where the money can then be moved. */}
+						<p className="text-muted-foreground text-xs">
+							Referral credits are always paid into your personal workspace.
+							Move them to a company workspace any time from Credits.
+						</p>
 					</div>
 				</CardContent>
 			</Card>

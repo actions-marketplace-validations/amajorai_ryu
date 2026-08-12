@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Search everything Shadow has captured (screen text, audio transcripts, input) and summarize recent activity. Exposed as declarative HTTP tools that reach the device-local Shadow sidecar through Core's authenticated `/api/shadow/*` proxy (which injects Shadow's bearer token).",
   "icon": "record",
-  "iconDither": { "from": 296, "to": 330, "direction": "left" },
+  "iconDither": { "from": 296, "to": "transparent", "direction": "down" },
   "tagline": "Recall what you have seen and done",
   "keywords": ["capture", "memory"],
   "category": "Knowledge & Memory",

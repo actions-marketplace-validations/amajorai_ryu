@@ -78,12 +78,14 @@ pub struct SeedSpec {
 /// same table, so a row is all it takes for a companion — default-on or opt-in — to
 /// receive its bundle. Adding a 16th companion to a second list is what caused the
 /// bug that function's docs describe; there is no second list.
-fn seed_overrides() -> [SeedSpec; 17] {
+fn seed_overrides() -> [SeedSpec; 22] {
     use crate::plugin_manifest::{
-        ACTIVITY_UI_HTML, APPROVALS_UI_HTML, CALENDAR_UI_HTML, CANVAS_PLUGIN_ID, CANVAS_UI_HTML,
-        FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, LEARNING_UI_HTML, MAIL_UI_HTML, MEETINGS_UI_HTML,
-        MONITORS_UI_HTML, QUESTS_UI_HTML, SKILL_EDITOR_UI_HTML, TIMELINE_UI_HTML, WARMUP_UI_HTML,
-        WEBHOOKS_UI_HTML, WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
+        ACTIVITY_UI_HTML, APPROVALS_UI_HTML, BLUEPRINT_UI_HTML, CALENDAR_UI_HTML, CANVAS_PLUGIN_ID,
+        CANVAS_UI_HTML, FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, LEARNING_UI_HTML, MAIL_UI_HTML,
+        MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, QUESTS_UI_HTML, REASONING_PLUGIN_ID,
+        REASONING_UI_HTML, TUITION_UI_HTML,
+        SKILL_EDITOR_UI_HTML, SOCIAL_UI_HTML, TIMELINE_UI_HTML, WARMUP_UI_HTML, WEBHOOKS_UI_HTML,
+        WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
     };
     [
         SeedSpec {
@@ -128,6 +130,29 @@ fn seed_overrides() -> [SeedSpec; 17] {
             // grant at enable).
             grants: &["spaces:docs", "meetings:crud"],
             ui_code: Some(MEETINGS_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::SOCIAL_PLUGIN_ID,
+            // Outpost's sandboxed frame drives its own `ryu-social` sidecar through the
+            // `social:crud` bridge forwarder (`social.request` → the host re-issues onto
+            // Core's `/api/social` public mount, host-direct, the monitors pattern). The
+            // frame has NO network of its own — its CSP is `connect-src 'none'` and the
+            // manifest declares no `csp` widening — so without this grant the app mounts,
+            // renders, and every single fetch rejects.
+            //
+            // `hook:side-model` is the AI copy assist (`model.complete`) and
+            // `shell:integrate` is what `shell.openTab` + `shell.themeSubscribe` need:
+            // the companion re-themes live on a light/dark toggle and opens a chat tab
+            // from a post. Both degrade to a silent no-op rather than throwing, so an
+            // install missing either still schedules posts — but a seeded row missing
+            // `shell:integrate` is a companion that never re-themes without a remount,
+            // which reads as a rendering bug rather than a missing grant.
+            //
+            // Core-tier, so it must NOT declare `sidecar:process` (the Gateway validates
+            // and denies that grant at enable — same fix as mail/finetune). The sidecar
+            // spawns on the Core auto-run path instead.
+            grants: &["social:crud", "hook:side-model", "shell:integrate"],
+            ui_code: Some(SOCIAL_UI_HTML),
         },
         SeedSpec {
             id: crate::plugins::builtins::MONITORS_PLUGIN_ID,
@@ -277,6 +302,89 @@ fn seed_overrides() -> [SeedSpec; 17] {
             // NOT declare `sidecar:process` (the Gateway denies that grant at enable).
             grants: &["skills:crud", "shell:integrate"],
             ui_code: Some(SKILL_EDITOR_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::TUITION_PLUGIN_ID,
+            // Its sandboxed frame runs the study session, the skills graph and the
+            // review queue, driving the `ryu-tuition` sidecar through ONE generic
+            // `tuition.request` forwarder — so twenty-four sidecar routes cost one
+            // bridge verb and a route added later costs none. Ships a prebuilt
+            // companion UI. Core-tier, so it must NOT declare `sidecar:process` (the
+            // Gateway denies that grant at enable); the sidecar is spawned by the
+            // manifest loader.
+            //
+            // `hook:side-model` is what lets the SIDECAR call back for a completion —
+            // item generation and rubric marking, the app's only two model edges — and
+            // must be approved here as well as in `host_api.grants` or both 403 at
+            // runtime. `storage:kv` is the Study-mode handoff: the turn hook has no
+            // HTTP and cannot reach the sidecar, so it queues candidates in Core's KV
+            // and the sidecar drains them. `mcp:tuition` registers the app's own MCP
+            // server so `tuition__quiz` and friends exist for agents and workflows.
+            grants: &["tuition:crud", "hook:side-model", "storage:kv", "mcp:tuition"],
+            ui_code: Some(TUITION_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::NEWS_PLUGIN_ID,
+            // Same shape as Tuition above, with the KV handoff running the other way:
+            // the sidecar publishes a ranked headline snapshot and the `pre_user_turn`
+            // hook reads it, so "ground this message in the news" costs no HTTP from a
+            // sandbox that has none. `hook:side-model` covers the brief prose and the
+            // neutral cluster titles — the only two places a model touches this app.
+            grants: &["news:crud", "hook:side-model", "storage:kv", "mcp:news"],
+            ui_code: Some(NEWS_UI_HTML),
+        },
+        SeedSpec {
+            id: REASONING_PLUGIN_ID,
+            // Its sandboxed frame authors formal policies and runs the solver
+            // playground, driving the `ryu-reasoning` sidecar through ONE generic
+            // `reasoning.request` forwarder (the Outpost shape) — so the seven sidecar
+            // routes cost one bridge verb and a route added later costs none. Ships a
+            // prebuilt companion UI. Core-tier, so it must NOT declare `sidecar:process`
+            // (the Gateway denies that grant at enable); the sidecar is spawned by the
+            // manifest loader, not by a grant.
+            //
+            // The other three are not the frame's: `hook:side-model` is what lets the
+            // SIDECAR call back for a completion (declared ∩ approved, so it must be
+            // approved here as well as in `host_api.grants` or every draft/check 403s),
+            // `hook:run-agent` is the turn hook's only route to the solver (the plugin
+            // sandbox has no HTTP), and `mcp:reasoning` registers the app's own MCP
+            // server so `reasoning__solve` exists for agents and workflow `mcp` nodes.
+            grants: &[
+                "reasoning:check",
+                "hook:side-model",
+                "hook:run-agent",
+                "mcp:reasoning",
+            ],
+            ui_code: Some(REASONING_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::BLUEPRINT_PLUGIN_ID,
+            // Its sandboxed frame renders a published plan — markdown blocks, the
+            // `@xyflow/react` dependency graph derived from `steps[].depends_on`, the
+            // annotation rail — and drives the `ryu-blueprint` sidecar through ONE
+            // generic `blueprint.request` forwarder (the Outpost/Reasoning shape), so
+            // the eleven sidecar routes cost one bridge verb and a route added later
+            // costs none. Ships a prebuilt companion UI. Core-tier, so it must NOT
+            // declare `sidecar:process` (the Gateway denies that grant at enable); the
+            // sidecar is spawned by the manifest loader, not by a grant.
+            //
+            // Only two grants, and the short list is the point. `mcp:blueprint`
+            // registers the app's own MCP server so `blueprint__plan_publish` /
+            // `plan_status` / `plan_get` / `step_update` exist for agents and workflow
+            // `mcp` nodes — the ONLY way a plan ever gets published, since the app
+            // ships no turn hooks (the plugin sandbox has no HTTP, so a hook could not
+            // reach the sidecar that owns the plans). No `hook:side-model`: nothing
+            // here asks a model anything — block and step extraction is deterministic
+            // markdown parsing in Rust, which is also why the ids are stable across
+            // revisions and why annotations can anchor to them at all.
+            //
+            // Inert today for the same reason mail's and warmup's rows below are:
+            // Blueprint is outside `CORE_DEFAULT_ON`, so `default_on_specs` never looks
+            // it up and the opt-in pass writes only `ui_code`, leaving `enable_app` to
+            // persist the Gateway-approved set. Recorded anyway, and set-equal to the
+            // manifest's `permission_grants`, so a promotion is correct by construction.
+            grants: &["blueprint:review", "mcp:blueprint"],
+            ui_code: Some(BLUEPRINT_UI_HTML),
         },
         SeedSpec {
             id: crate::plugins::builtins::RECIPES_PLUGIN_ID,
@@ -630,6 +738,41 @@ pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
     crate::plugins::builtins::SKILL_EDITOR_PLUGIN_ID,
     crate::plugins::builtins::MAIL_PLUGIN_ID,
     crate::plugins::builtins::WARMUP_PLUGIN_ID,
+    // Automated Reasoning. An opt-in companion that DOES carry a compiled-in bundle,
+    // so `install_app` sources it via `compiled_in_ui_code` and Install → Enable from
+    // the Store mounts a real UI with no seeded record. It belongs here for the
+    // ordinary reason — a fresh machine should not list an app nobody asked for as
+    // *Installed* — plus one of its own: the app is inert until someone writes a
+    // policy, so a pre-installed record would advertise a feature that could not do
+    // anything yet.
+    crate::plugin_manifest::REASONING_PLUGIN_ID,
+    // Tuition and Wire. Both carry a compiled-in companion bundle, so `install_app`
+    // sources it via `compiled_in_ui_code` and Install → Enable from the Store mounts
+    // a real UI with no seeded record. They belong here for the ordinary reason — a
+    // fresh machine should not list an app nobody asked for as *Installed* — plus one
+    // of their own: each is empty until the user adds a subject or a feed, so a
+    // pre-installed record would advertise a surface with nothing behind it.
+    crate::plugins::builtins::TUITION_PLUGIN_ID,
+    crate::plugins::builtins::NEWS_PLUGIN_ID,
+    // Outpost. Same posture as mail — an opt-in companion that DOES carry a
+    // compiled-in bundle, so `install_app` sources it via `compiled_in_ui_code` and
+    // Install → Enable from the Store mounts a real UI with no seeded record. It
+    // belongs here for the ordinary reason (a fresh machine should not list an app
+    // nobody asked for as *Installed*) and one specific to it: enabling the app is
+    // what spawns `ryu-social`, and that sidecar starts a scheduler that publishes
+    // publicly under the user's connected accounts. Arriving pre-installed would put
+    // a publishing daemon one accidental toggle away on every fresh store.
+    crate::plugins::builtins::SOCIAL_PLUGIN_ID,
+    // Blueprint. Same posture as Automated Reasoning above, and for a sharper version
+    // of its second reason: the app is not merely inert until someone uses it, it is
+    // inert until an *agent* publishes a plan into it. Every plan arrives over
+    // `blueprint__plan_publish`, so a fresh store has literally nothing to show — a
+    // pre-installed record would list a plan-review surface with no plans and no way
+    // for the user to make one by hand. It carries a compiled-in bundle
+    // (`BLUEPRINT_UI_HTML`), which is what keeps this side of the either/or safe:
+    // `install_app` sources the frame via `compiled_in_ui_code`, so Install → Enable
+    // from the Store still mounts a real UI with no seeded record.
+    crate::plugins::builtins::BLUEPRINT_PLUGIN_ID,
     // The five demoted leaf-feature sidecar apps. Unlike every id above these were
     // DEFAULT-ON until now, so they arrive here from the other direction: not
     // "default-off but still pre-installed", but "auto-installed and enabled on

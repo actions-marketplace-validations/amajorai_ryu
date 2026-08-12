@@ -7,7 +7,7 @@
   "keywords": ["review", "verification", "quality", "accuracy"],
   "category": "Security",
   "icon": "tick-double-01",
-  "iconDither": { "from": 276, "to": 310, "direction": "right" },
+  "iconDither": { "from": 276, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

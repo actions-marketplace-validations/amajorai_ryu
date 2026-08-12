@@ -26,6 +26,7 @@ import {
 	ColorPickerTrigger,
 } from "@ryu/ui/components/color-picker";
 import { Input } from "@ryu/ui/components/input";
+import { RangeSlider } from "@ryu/ui/components/motion/range-slider";
 import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
 import {
 	Select,
@@ -39,7 +40,6 @@ import {
 } from "@ryu/ui/components/select";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Switch } from "@ryu/ui/components/switch";
-import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
 import { cn } from "@ryu/ui/lib/utils";
 import { useTheme } from "next-themes";
 import type { CSSProperties } from "react";
@@ -763,20 +763,35 @@ function ThemePanel({
 	);
 }
 
-// The "Tool detail" knob is a Fortnite-style preset over the three tool-display
-// toggles (group / expand file edits / expand commands): one simple choice that
-// most users never outgrow, with the individual toggles tucked into "Advanced"
-// for anyone who wants to fine-grain. The preset is DERIVED from the toggles
-// (no separate storage), so editing an individual toggle in Advanced simply
-// lands on whichever preset matches — or "custom" when none does. Ordered by
-// how much each surfaces: compact (all collapsed) → minimal (diffs open) →
-// detailed (everything open, calls listed individually). `pinUserMessage` is
-// intentionally NOT part of this — it is scroll behaviour, not tool detail.
+// The "Tool detail" knob is a stepped preset over the four transcript-density
+// toggles (group / expand file edits / expand commands / expand code blocks):
+// one simple choice that most users never outgrow, with the individual toggles
+// tucked into "Advanced" for anyone who wants to fine-grain. The preset is
+// DERIVED from the toggles (no separate storage), so editing an individual
+// toggle in Advanced simply lands on whichever preset matches — or "custom" when
+// none does. Ordered by how much each surfaces: compact (all collapsed) →
+// minimal (diffs open) → detailed (everything open, calls listed individually).
+// `pinUserMessage` is intentionally NOT part of this — it is scroll behaviour,
+// not detail.
+//
+// `code` was added after the fact and only Detailed turns it on, so the two
+// levels a user is most likely to be sitting on (Compact is the default, Minimal
+// the common step up) keep matching their preset across the upgrade. Someone
+// already on Detailed lands on "custom" once — the slider still shows where they
+// are and one nudge puts them back on a named level, which is why nothing
+// silently rewrites their toggles to make the label tidy.
 const TOOL_DETAIL_PRESETS = {
-	compact: { group: true, edits: false, commands: false },
-	minimal: { group: true, edits: true, commands: false },
-	detailed: { group: false, edits: true, commands: true },
+	compact: { group: true, edits: false, commands: false, code: false },
+	minimal: { group: true, edits: true, commands: false, code: false },
+	detailed: { group: false, edits: true, commands: true, code: true },
 } as const;
+
+/** The slider's detents, in the order they are rendered (least → most detail). */
+const TOOL_DETAIL_STEPS = [
+	{ id: "compact", label: "Compact" },
+	{ id: "minimal", label: "Minimal" },
+	{ id: "detailed", label: "Detailed" },
+] as const;
 
 type ToolDetailPresetId = keyof typeof TOOL_DETAIL_PRESETS;
 type ToolDetailValue = ToolDetailPresetId | "custom";
@@ -784,18 +799,106 @@ type ToolDetailValue = ToolDetailPresetId | "custom";
 function deriveToolDetailPreset(
 	group: boolean,
 	edits: boolean,
-	commands: boolean
+	commands: boolean,
+	code: boolean
 ): ToolDetailValue {
 	for (const [id, preset] of Object.entries(TOOL_DETAIL_PRESETS)) {
 		if (
 			preset.group === group &&
 			preset.edits === edits &&
-			preset.commands === commands
+			preset.commands === commands &&
+			preset.code === code
 		) {
 			return id as ToolDetailPresetId;
 		}
 	}
 	return "custom";
+}
+
+/**
+ * Where the slider thumb sits for a given value. "custom" has no detent of its
+ * own — it parks on the nearest level BY COUNT of what is expanded, so a
+ * hand-tuned combo reads as roughly-this-much-detail instead of snapping the
+ * user's toggles to a preset just to have somewhere to point.
+ */
+function toolDetailStepIndex(
+	value: ToolDetailValue,
+	group: boolean,
+	edits: boolean,
+	commands: boolean,
+	code: boolean
+): number {
+	if (value !== "custom") {
+		return TOOL_DETAIL_STEPS.findIndex((s) => s.id === value);
+	}
+	const expanded = [!group, edits, commands, code].filter(Boolean).length;
+	return Math.min(
+		TOOL_DETAIL_STEPS.length - 1,
+		Math.round((expanded / 4) * (TOOL_DETAIL_STEPS.length - 1))
+	);
+}
+
+/**
+ * The stepped Detail level control — the same `RangeSlider` the composer's
+ * reasoning-effort picker uses (`EffortSliderRow`), so a level ladder reads the
+ * same everywhere in the app: one detent per level, the active level named above
+ * the track, every level captioned below it.
+ *
+ * "Custom" is shown as the value label with the thumb parked on the nearest
+ * level; the slider stays live, so moving it commits that level and clears the
+ * custom state.
+ */
+function ToolDetailSlider({
+	preset,
+	step,
+	onStepChange,
+}: {
+	onStepChange: (next: number) => void;
+	preset: ToolDetailValue;
+	step: number;
+}) {
+	const activeLabel =
+		preset === "custom"
+			? "Custom"
+			: (TOOL_DETAIL_STEPS.find((s) => s.id === preset)?.label ?? "");
+
+	return (
+		<div className="flex w-[220px] flex-col gap-1.5">
+			<div className="flex items-center justify-end">
+				<span className="truncate text-foreground text-xs">{activeLabel}</span>
+			</div>
+			<RangeSlider
+				aria-label="Detail level"
+				className="h-8"
+				formatValueText={(v) =>
+					TOOL_DETAIL_STEPS[Math.round(v)]?.label ?? String(v)
+				}
+				max={TOOL_DETAIL_STEPS.length - 1}
+				min={0}
+				onValueChange={onStepChange}
+				step={1}
+				value={step}
+			/>
+			<div className="flex items-center justify-between gap-1">
+				{TOOL_DETAIL_STEPS.map((s, i) => (
+					<span
+						className={cn(
+							"flex-1 truncate text-[10px] leading-none",
+							i === 0 && "text-left",
+							i === TOOL_DETAIL_STEPS.length - 1 && "text-right",
+							i > 0 && i < TOOL_DETAIL_STEPS.length - 1 && "text-center",
+							preset !== "custom" && i === step
+								? "text-foreground"
+								: "text-muted-foreground/70"
+						)}
+						key={s.id}
+					>
+						{s.label}
+					</span>
+				))}
+			</div>
+		</div>
+	);
 }
 
 // Diff viewer (`@pierre/diffs`) option lists for the Appearance selects.
@@ -923,9 +1026,17 @@ export function AppearanceTab() {
 		APPEARANCE_KEYS.expandCommands,
 		APPEARANCE_DEFAULTS.expandCommands
 	);
+	const [expandCodeBlocks, setExpandCodeBlocks] = usePersistedToggle(
+		APPEARANCE_KEYS.expandCodeBlocks,
+		APPEARANCE_DEFAULTS.expandCodeBlocks
+	);
 	const [pinUserMessage, setPinUserMessage] = usePersistedToggle(
 		APPEARANCE_KEYS.pinUserMessage,
 		APPEARANCE_DEFAULTS.pinUserMessage
+	);
+	const [openChatAtBottom, setOpenChatAtBottom] = usePersistedToggle(
+		APPEARANCE_KEYS.openChatAtBottom,
+		APPEARANCE_DEFAULTS.openChatAtBottom
 	);
 	const [animationsEnabled, setAnimationsEnabled] = usePersistedToggle(
 		APPEARANCE_KEYS.animationsEnabled,
@@ -942,7 +1053,8 @@ export function AppearanceTab() {
 	const toolDetailPreset = deriveToolDetailPreset(
 		groupToolUses,
 		expandFileEdits,
-		expandCommands
+		expandCommands,
+		expandCodeBlocks
 	);
 	const applyToolDetailPreset = useCallback(
 		(id: ToolDetailPresetId) => {
@@ -950,8 +1062,30 @@ export function AppearanceTab() {
 			setGroupToolUses(preset.group);
 			setExpandFileEdits(preset.edits);
 			setExpandCommands(preset.commands);
+			setExpandCodeBlocks(preset.code);
 		},
-		[setGroupToolUses, setExpandFileEdits, setExpandCommands]
+		[
+			setGroupToolUses,
+			setExpandFileEdits,
+			setExpandCommands,
+			setExpandCodeBlocks,
+		]
+	);
+	const toolDetailStep = toolDetailStepIndex(
+		toolDetailPreset,
+		groupToolUses,
+		expandFileEdits,
+		expandCommands,
+		expandCodeBlocks
+	);
+	const handleToolDetailStep = useCallback(
+		(next: number) => {
+			const picked = TOOL_DETAIL_STEPS[Math.round(next)];
+			if (picked) {
+				applyToolDetailPreset(picked.id);
+			}
+		},
+		[applyToolDetailPreset]
 	);
 	// Auto-reveal Advanced when the current combo matches no preset, so a "custom"
 	// state is never hidden behind a collapsed section.
@@ -1686,45 +1820,14 @@ export function AppearanceTab() {
 				<SettingsGroup>
 					<SettingsItem
 						actions={
-							<ToggleGroup
-								className="rounded-lg bg-muted/60 p-0.5"
-								id="tool-detail-preset"
-								onValueChange={(v: string) => {
-									// Ignore deselect (empty) and the non-applyable "custom"
-									// pseudo-value; only real presets drive the toggles.
-									if (v in TOOL_DETAIL_PRESETS) {
-										applyToolDetailPreset(v as ToolDetailPresetId);
-									}
-								}}
-								spacing={0}
-								value={toolDetailPreset}
-								variant="default"
-							>
-								<ToggleGroupItem className="h-7 px-2.5 text-xs" value="compact">
-									Compact
-								</ToggleGroupItem>
-								<ToggleGroupItem className="h-7 px-2.5 text-xs" value="minimal">
-									Minimal
-								</ToggleGroupItem>
-								<ToggleGroupItem
-									className="h-7 px-2.5 text-xs"
-									value="detailed"
-								>
-									Detailed
-								</ToggleGroupItem>
-								{toolDetailPreset === "custom" ? (
-									<ToggleGroupItem
-										className="h-7 px-2.5 text-xs"
-										disabled
-										value="custom"
-									>
-										Custom
-									</ToggleGroupItem>
-								) : null}
-							</ToggleGroup>
+							<ToolDetailSlider
+								onStepChange={handleToolDetailStep}
+								preset={toolDetailPreset}
+								step={toolDetailStep}
+							/>
 						}
-						description="How much of each tool call the chat shows. Compact keeps every call collapsed to a row; Minimal opens file diffs but keeps command output capped; Detailed expands diffs and output and lists every call individually. Fine-tune the pieces under Advanced."
-						title="Tool detail"
+						description="How much of each reply the chat shows. Compact keeps every tool call collapsed to a row and caps long code blocks; Minimal opens file diffs but keeps command output and code capped; Detailed expands diffs, output and code blocks and lists every call individually. Fine-tune the pieces under Advanced."
+						title="Detail level"
 					/>
 				</SettingsGroup>
 
@@ -1733,7 +1836,7 @@ export function AppearanceTab() {
 					open={toolDetailAdvancedOpen}
 				>
 					<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-[10px] px-3.5 py-2 text-left text-muted-foreground text-xs hover:bg-muted/40">
-						<span>Advanced tool detail</span>
+						<span>Advanced detail</span>
 						<HugeiconsIcon
 							className={cn(
 								"size-4 shrink-0 transition-transform",
@@ -1777,6 +1880,17 @@ export function AppearanceTab() {
 								description="Show command output expanded by default. When off, output is capped at a few lines."
 								title="Auto-expand commands"
 							/>
+							<SettingsItem
+								actions={
+									<Switch
+										checked={expandCodeBlocks}
+										id="expand-code-blocks-toggle"
+										onCheckedChange={setExpandCodeBlocks}
+									/>
+								}
+								description="Show code blocks in replies at full height. When off, a long block is capped and scrolls inside its own box so it cannot bury the rest of the answer."
+								title="Expand code blocks"
+							/>
 						</SettingsGroup>
 					</CollapsibleContent>
 				</Collapsible>
@@ -1792,6 +1906,17 @@ export function AppearanceTab() {
 						}
 						description="Keep your latest prompt pinned at the top while you scroll through a long reply, like Cursor. Updates automatically when you send a new message."
 						title="Pin user message while scrolling"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={openChatAtBottom}
+								id="open-chat-at-bottom-toggle"
+								onCheckedChange={setOpenChatAtBottom}
+							/>
+						}
+						description="Jump to the newest message when you open a chat. When off, the transcript stays wherever it loaded, near the start of the conversation."
+						title="Open chats at the latest message"
 					/>
 				</SettingsGroup>
 			</SettingsSection>

@@ -284,6 +284,47 @@ function SeatSelector({
 	);
 }
 
+/**
+ * Who the plans on screen are for. The pricing page splits on this BEFORE the
+ * billing period, because the two audiences do not shop the same shelf: an
+ * individual comparing Lifetime against Pro should never have to read past two
+ * seat-priced business plans to find them.
+ */
+export type PricingAudience = "business" | "individual";
+
+/** Which plans each audience sees, and in which order. */
+export const PRICING_AUDIENCE_PLANS = {
+	business: ["teams", "max", "enterprise"],
+	individual: ["lifetime", "pro"],
+} as const;
+
+/**
+ * The individual / business audience switch. Sits ABOVE the monthly/yearly
+ * toggle: it changes WHICH plans exist, where the billing toggle only changes
+ * how the visible ones are billed, so the wider choice is the outer one.
+ */
+export function PricingAudienceToggle({
+	audience = "individual",
+	onAudienceChange = noop,
+}: {
+	audience?: PricingAudience;
+	onAudienceChange?: (audience: PricingAudience) => void;
+}) {
+	return (
+		<div className="mb-4 flex justify-center">
+			<Tabs
+				onValueChange={(val) => onAudienceChange(val as PricingAudience)}
+				value={audience}
+			>
+				<TabsList variant="pills">
+					<TabsTrigger value="individual">Individual</TabsTrigger>
+					<TabsTrigger value="business">Business &amp; Enterprise</TabsTrigger>
+				</TabsList>
+			</Tabs>
+		</div>
+	);
+}
+
 /** The monthly/yearly billing period toggle. */
 export function PricingBillingToggle({
 	isYearly = false,
@@ -915,11 +956,18 @@ export function EnterprisePlanCard() {
 }
 
 /**
- * The pricing plans, presentational: the four self-serve plans in a grid, with
- * the Enterprise "contact sales" tier as a full-width band spanning all columns
- * below. Cloud hosting is NOT here — it lives in the org dashboard (post-auth).
+ * The pricing plans, presentational: the self-serve plans for one AUDIENCE in a
+ * grid, with the Enterprise "contact sales" tier as a full-width band below on
+ * the business shelf. Cloud hosting is NOT here — it lives in the org dashboard
+ * (post-auth).
+ *
+ * The grid is two columns on both shelves, not four. Column count has to track
+ * the card count: a `lg:grid-cols-4` holding two cards renders them at quarter
+ * width with half the row empty, which reads as a page that failed to load
+ * rather than as a deliberate two-plan shelf.
  */
 export function PricingPlanGrid({
+	audience = "individual",
 	isYearly = false,
 	loadingPlan = null,
 	onCheckout = noop,
@@ -931,6 +979,8 @@ export function PricingPlanGrid({
 	teamsMinSeats = TEAMS_MIN_SEATS,
 	maxMinSeats = MAX_MIN_SEATS,
 }: {
+	/** Which shelf to render — see {@link PRICING_AUDIENCE_PLANS}. */
+	audience?: PricingAudience;
 	isYearly?: boolean;
 	loadingPlan?: PricingPlanSlug | null;
 	/** Seat minimum for Max, from `PLANS.max.seatModel`. */
@@ -952,9 +1002,9 @@ export function PricingPlanGrid({
 	/** Seat minimum for Teams, from `PLANS.teams.seatModel`. */
 	teamsMinSeats?: number;
 }) {
-	return (
-		<>
-			<div className="mx-auto mb-12 grid max-w-7xl grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-4">
+	if (audience === "individual") {
+		return (
+			<div className="mx-auto mb-12 grid max-w-4xl grid-cols-1 gap-8 md:grid-cols-2">
 				<LifetimePlanCard
 					currentPlan={currentPlan}
 					isYearly={isYearly}
@@ -967,6 +1017,13 @@ export function PricingPlanGrid({
 					loadingPlan={loadingPlan}
 					onCheckout={onCheckout}
 				/>
+			</div>
+		);
+	}
+
+	return (
+		<>
+			<div className="mx-auto mb-12 grid max-w-4xl grid-cols-1 gap-8 md:grid-cols-2">
 				<TeamsPlanCard
 					currentPlan={currentPlan}
 					isYearly={isYearly}
@@ -986,6 +1043,10 @@ export function PricingPlanGrid({
 					seats={maxSeats ?? maxMinSeats}
 				/>
 			</div>
+			{/* Enterprise lives ONLY on the business shelf. It is a full-width band
+			    rendered after the grid rather than a fifth card, so it must move with
+			    the branch — left outside, it would advertise "contact sales" under a
+			    two-card individual shelf. */}
 			<EnterprisePlanCard />
 		</>
 	);

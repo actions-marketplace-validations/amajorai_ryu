@@ -4,6 +4,7 @@ import { cn } from "@ryu/ui/lib/utils";
 import { createCodePlugin } from "@streamdown/code";
 import { type Components, Streamdown } from "streamdown";
 import "streamdown/styles.css";
+import { useChatDisplayPrefs } from "./chat-display-prefs.tsx";
 import { type Citation, CitationMarkLink } from "./inline-citation.tsx";
 import { linkifyCitationMarkers } from "./utils/citations.ts";
 
@@ -142,6 +143,12 @@ export function Markdown({
 	isAnimating = false,
 	onOpenFile,
 }: MarkdownProps) {
+	// Code blocks obey the same "Tool detail" level as tool calls: at anything
+	// below Detailed a long block is capped and scrolls in place. The switch is a
+	// data attribute rather than a prop on the code plugin because the fenced
+	// block is rendered by `@streamdown/code`, not by a component we own — the
+	// cap lands in CSS against its stable `data-streamdown` parts (agent-ui.css).
+	const { expandCodeBlocks } = useChatDisplayPrefs();
 	const safeContent = normalizeCodeFenceLanguages(
 		fixNumberedListBreaks(
 			linkifyCitationMarkers(
@@ -298,6 +305,7 @@ export function Markdown({
 				"[&_li>p]:mb-0 [&_li>p]:inline",
 				className
 			)}
+			data-code-detail={expandCodeBlocks ? "full" : "capped"}
 		>
 			<Streamdown
 				animated={isAnimating ? STREAM_ANIMATION : false}

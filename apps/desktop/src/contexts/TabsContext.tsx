@@ -11,6 +11,10 @@ import {
 } from "react";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
+import {
+	bindConversation,
+	findChatTab,
+} from "@/src/contexts/tab-conversation.ts";
 import { readPersistedNumber } from "@/src/hooks/usePersistedNumber.ts";
 import { readStartupBehavior } from "@/src/hooks/useStartupBehavior.ts";
 import { readTabOpenBehavior } from "@/src/hooks/useTabOpenBehavior.ts";
@@ -221,6 +225,18 @@ interface TabsContextValue {
 	/** Join `tabId` to an existing split as a new pane at the end of its root
 	    run (drag a tab onto a split bracket, or the "Add … to split" menu). */
 	addTabToSplit: (splitId: string, tabId: string) => void;
+	/** Bind (or unbind, with `undefined`) the conversation a chat tab is showing.
+	    A tab opened as a blank "New chat" only learns its conversation id on the
+	    first send, so ChatPage writes it back here. Without the write-back the tab
+	    stays unbound forever: session restore reopens it EMPTY, `openTab`'s
+	    conversation dedup can never match it (so a sidebar click stacks a second
+	    tab on the same thread), and `requestScrollToMessage` can't find it.
+	    Unbinding matters just as much — a tab that starts a fresh/ghost thread must
+	    drop its old id or a later click on the OLD thread would land on it. */
+	bindTabConversation: (
+		tabId: string,
+		conversationId: string | undefined
+	) => void;
 	canGoBack: boolean;
 	canGoForward: boolean;
 	/** Clear a tab's pending scroll-to-message after ChatPage consumes it. */
@@ -977,9 +993,7 @@ export function TabsProvider({
 			}
 
 			if (!opts?.forceNew && opts?.conversationId) {
-				const existing = current.find(
-					(t) => t.path === "/chat" && t.conversationId === opts.conversationId
-				);
+				const existing = findChatTab(current, opts.conversationId);
 				if (existing) {
 					if (
 						opts.icon !== undefined ||
@@ -1243,6 +1257,23 @@ export function TabsProvider({
 		setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, title } : t)));
 	}, []);
 
+	// See the interface doc: this is the write-back that makes a chat tab's thread
+	// durable. `bindConversation` returns the array unchanged when nothing moves,
+	// so a repeat call from ChatPage's effect never re-snapshots the session.
+	const bindTabConversation = useCallback(
+		(tabId: string, conversationId: string | undefined) => {
+			setTabs((prev) => {
+				const next = bindConversation(prev, tabId, conversationId);
+				if (next === prev) {
+					return prev;
+				}
+				tabsRef.current = next;
+				return next;
+			});
+		},
+		[]
+	);
+
 	const updateTabIcon = useCallback((id: string, icon: GlyphValue) => {
 		setTabs((prev) => {
 			const next = prev.map((t) => (t.id === id ? { ...t, icon } : t));
@@ -1285,9 +1316,7 @@ export function TabsProvider({
 	const requestScrollToMessage = useCallback(
 		(conversationId: string, messageId: string) => {
 			setTabs((prev) => {
-				const target = prev.find(
-					(t) => t.path === "/chat" && t.conversationId === conversationId
-				);
+				const target = findChatTab(prev, conversationId);
 				if (!target) {
 					return prev;
 				}
@@ -1894,6 +1923,7 @@ export function TabsProvider({
 				updateTabIcon,
 				updateTabsIconWhere,
 				updateTabBusy,
+				bindTabConversation,
 				requestScrollToMessage,
 				clearScrollToMessage,
 				restoreTab,

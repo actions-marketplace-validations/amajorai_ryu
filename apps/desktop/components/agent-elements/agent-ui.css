@@ -171,3 +171,16 @@
 	font-size: 12px;
 	background: transparent;
 }
+
+/*
+ * Tool detail, applied to code blocks (see `expandCodeBlocks` in
+ * chat-display-prefs). Below the Detailed level a long fenced block is capped so
+ * one big paste cannot bury the rest of the reply. It scrolls rather than clips:
+ * the code the model wrote must stay readable and selectable at every level, and
+ * the sticky header keeps the language + copy button reachable while scrolled.
+ */
+.an-markdown[data-code-detail="capped"] [data-streamdown="code-block-body"] {
+	max-height: 240px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}

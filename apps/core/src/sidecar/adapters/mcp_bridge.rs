@@ -393,6 +393,15 @@ impl RyuMcpHandler {
         tools.push(tool_from_def(&describe_tool_def()));
 
         // Programmatic tool calling — only when a JS backend is built + runnable.
+        //
+        // "Runnable" means a `deno` actually exists, which on a stock install it
+        // did not until `deno_runtime` gave it a distribution path. This is the
+        // lazy trigger: once per process, adopt an existing Deno inline (cheap)
+        // or detach a download (never blocks this listing). A node that already
+        // has Deno is not touched, and a failed install just leaves code mode
+        // off — the state it was already in — so `is_available()` below stays
+        // the single gate either way.
+        crate::sidecar::deno_runtime::ensure_deno_in_background();
         if tool_exec::is_available() {
             tools.push(tool_from_def(&tool_exec::schema::execute_tool_def()));
             tools.push(tool_from_def(&tool_exec::schema::resume_tool_def()));

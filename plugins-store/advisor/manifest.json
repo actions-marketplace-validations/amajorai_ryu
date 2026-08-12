@@ -7,7 +7,7 @@
   "tagline": "A stronger second model reviews your answers",
   "keywords": ["review", "second-opinion", "quality"],
   "icon": "bulb",
-  "iconDither": { "from": 261, "to": 295, "direction": "up" },
+  "iconDither": { "from": 261, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

@@ -1074,6 +1074,37 @@ const KERNEL_CAPABILITIES: &[KernelCapability] = &[
         cap: "spaces.fileNotes",
         grant: Some("spaces:docs"),
     },
+    // Post a turn on the user's behalf into a REAL conversation. Core owns the chat
+    // path + the conversation store, and a sidecar holds no node token, so this is
+    // the only way an out-of-process app can send at all. Body
+    // `{ text, agent_id?, conversation_id?, model? }` → `{ status, conversation_id }`
+    // or `202 { status: "pending_approval", approval_id }`.
+    //
+    // `chat.sendFollowUp` is the EXISTING reserved sigil for exactly this power (the
+    // Gateway's governance defines it as "post a chat turn on the user's behalf"),
+    // so it is reused rather than duplicated under a second name. Being reserved is
+    // what stops `com.evil.chat` from owner-scoping its way in.
+    //
+    // The grant is NOT the whole gate: `server::host_chat` additionally scans the
+    // prompt through the exec firewall and, by default, routes the send through the
+    // Approvals inbox. Spending a subscription unattended should cost more than one
+    // approved grant.
+    KernelCapability {
+        cap: "chat.startTurn",
+        grant: Some(crate::server::host_chat::GRANT_SEND_FOLLOW_UP),
+    },
+    // The live facts an app needs to decide whether now is a good time to send: the
+    // COUNT of active agent runs, and how full each named agent's usage windows
+    // are. Core owns both (the conversation store; the vendor usage readers), and a
+    // sidecar can reach neither on its own. Body `{ agent_ids: [] }` →
+    // `{ running, usage: [{ agent_id, used_percent }] }`.
+    //
+    // Counts, never contents — see the handler for why that distinction is what
+    // makes this safe without a per-user caller identity to ACL-filter by.
+    KernelCapability {
+        cap: "node.readings",
+        grant: Some(crate::server::host_chat::GRANT_NODE_READINGS),
+    },
     // Ghost capture/replay — the live native-desktop engine. Replay needs the shared
     // MCP registry; the recording session holds a dedicated recorder subprocess
     // (`McpSession`) in Core's process-global slot ACROSS separate HTTP calls, which
@@ -1301,6 +1332,22 @@ async fn dispatch_kernel_capability(
                 State(state),
                 headers,
                 body!(serde_json::Value),
+            )
+            .await
+        }
+        "chat.startTurn" => {
+            crate::server::host_chat::host_chat_start_turn(
+                State(state),
+                headers,
+                body!(crate::server::host_chat::StartTurnBody),
+            )
+            .await
+        }
+        "node.readings" => {
+            crate::server::host_chat::host_node_readings(
+                State(state),
+                headers,
+                body!(crate::server::host_chat::ReadingsBody),
             )
             .await
         }
@@ -2463,6 +2510,12 @@ mod tests {
     /// `/api/host/<app>/*` routes. `events.emit` is the first row that is NOT a
     /// retired callback but a new host primitive — the app-event emit seam. That it
     /// arrived as a table row rather than a route is the point of the table.
+    ///
+    /// `chat.startTurn` + `node.readings` are the app-send pair: post a turn on the
+    /// user's behalf, and read the live node facts needed to decide whether to. They
+    /// are the first rows that let an out-of-process app ACT on the user's account
+    /// rather than only fetch or record, which is why `chat.startTurn` carries a
+    /// firewall scan and a default-on approval gate on top of its grant.
     #[test]
     fn kernel_capability_table_is_pinned() {
         let names: Vec<&str> = KERNEL_CAPABILITIES.iter().map(|k| k.cap).collect();
@@ -2472,6 +2525,8 @@ mod tests {
                 "mcp.callTool",
                 "notify.fanout",
                 "spaces.fileNotes",
+                "chat.startTurn",
+                "node.readings",
                 "ghost.replay",
                 "ghost.recordStart",
                 "ghost.recordStatus",

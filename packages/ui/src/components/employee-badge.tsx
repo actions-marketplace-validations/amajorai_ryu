@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@ryu/ui/lib/utils.ts";
+import type { ReactNode } from "react";
 import { Logo } from "./logo.tsx";
 import { PassCardShell } from "./pass-card-shell.tsx";
 
@@ -27,9 +28,10 @@ export interface EmployeeStat {
 
 export interface EmployeeBadgeProps {
 	/**
-	 * Accepted but unused: the card leads with the agent's NAME, and a portrait
-	 * competed with it — the same call the waitlist pass made. Kept on the
-	 * interface so existing call sites keep type-checking.
+	 * Accepted but unused: the card leads with the agent's NAME, and a *portrait*
+	 * competed with it — the same call the waitlist pass made. A brand mark is a
+	 * different object and does have a home here; that is {@link logo}. Kept on
+	 * the interface so existing call sites keep type-checking.
 	 */
 	avatarUrl?: string;
 	className?: string;
@@ -41,6 +43,14 @@ export interface EmployeeBadgeProps {
 	 * for — the badge id alone is the right header there.
 	 */
 	level?: number;
+	/**
+	 * The agent's own brand mark (Claude, Codex, Cursor …), drawn large directly
+	 * above the name. It belongs on the card face rather than in a caller's footer
+	 * strip: these marks are how the agent is recognised, long before the name is
+	 * read, and a 20px glyph under the card read as a stray annotation. Sized by
+	 * the caller — the block reserves the room and does not scale it.
+	 */
+	logo?: ReactNode;
 	/** Which tuning of the metal ring to paint; pass the app's resolved theme. */
 	metalTheme?: "auto" | "dark" | "light";
 	name: string;
@@ -96,6 +106,7 @@ export function EmployeeBadge({
 	employeeId,
 	hiredAt,
 	level,
+	logo,
 	metalTheme = "auto",
 	name,
 	onClick,
@@ -141,6 +152,14 @@ export function EmployeeBadge({
 				</div>
 
 				<div className="flex min-w-0 flex-1 flex-col justify-end gap-1.5">
+					{/* Bottom-anchored with the name (`justify-end` above), so the mark
+					    sits directly on top of it and a long name pushes the pair up
+					    rather than clipping the logo. */}
+					{logo ? (
+						<span className="mb-3 flex items-center [&_img]:object-contain">
+							{logo}
+						</span>
+					) : null}
 					<span className="break-words font-semibold text-5xl leading-[1.02] tracking-tight">
 						{name}
 					</span>

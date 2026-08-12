@@ -1337,6 +1337,45 @@ export const auth = betterAuth({
 				maximumTeams: 50,
 				allowRemovingAllTeams: true,
 			},
+			// Organization identity verification — the blue check on the PUBLISHING
+			// ORG. Declared here purely so the values come back OUT of Better Auth:
+			// its adapter's `transformOutput` iterates the DECLARED schema fields
+			// and copies only those, so an undeclared column exists on disk and is
+			// silently absent from `getFullOrganization` / `listOrganizations` /
+			// `useActiveOrganization` — which is how apps/web reads an org. The
+			// WRITE half is Mongoose's `organizationSchema` in
+			// `@ryu/db/models/control-plane.model`; neither declaration substitutes
+			// for the other and they must stay in step.
+			//
+			// Every field is `input: false`, matching the `user.additionalFields`
+			// posture above: a verified badge is precisely the privilege a caller
+			// would assert about itself, so `POST /organization/update` must not be
+			// able to carry one. With `input: false` the field is excluded from the
+			// client-side body schema outright and stripped by `parseInputData` even
+			// if it arrives anyway; only the admin decision path (control plane,
+			// Mongoose) can set it. `verificationTier` deliberately stays a plain
+			// string here — `ORG_VERIFICATION_TIERS` is enforced at the Mongoose
+			// write, and a second copy of the enum in the auth config is how the two
+			// vocabularies drift apart.
+			schema: {
+				organization: {
+					additionalFields: {
+						verified: {
+							type: "boolean",
+							input: false,
+							required: false,
+							defaultValue: false,
+						},
+						verifiedAt: { type: "date", input: false, required: false },
+						verifiedBy: { type: "string", input: false, required: false },
+						verificationTier: {
+							type: "string",
+							input: false,
+							required: false,
+						},
+					},
+				},
+			},
 			// Providing this implementation enables member invitations. The invite
 			// link lands on the web org shell where the invitee accepts.
 			sendInvitationEmail: async (data) => {

@@ -1,25 +1,30 @@
-//! Auto-rename helpers for chats and meetings.
+//! Title generation for meetings, plus the title sanitizer every titler shares.
 //!
-//! Chat LLM auto-rename now lives in the `chat-title` turn-hook plugin
-//! (`post_assistant_turn`): it re-titles after every N completed assistant
-//! turns via `host.setConversationTitle`. This module still owns:
+//! Chat titles are NOT generated here. A chat gets its default title from its
+//! first user message when the store persists the turn (`derive_title`), and the
+//! LLM rename on top of that lives in the `chat-title` turn-hook plugin
+//! (`post_assistant_turn`), which re-titles after the first completed reply and
+//! then every N turns via `host.setConversationTitle`. This module owns:
 //! - [`sanitize_title`] (shared by the plugin bridge + meetings)
 //! - [`generate_meeting_title`] (meetings host)
-//! - [`run_auto_title_loop`] (legacy channel consumer; chat triggers no longer
-//!   enqueue — kept so older wiring / tests remain compiling)
 //!
-//! Placement / privacy: title *generation* for meetings still prefers the
-//! resident local engine directly (see [`generate`]). The chat-title plugin
-//! uses `host.sideModel`, which resolves `auto-title-model` → node default →
-//! local engine through the same preference chain.
+//! Core used to ALSO run a background chat titler from this module, fed by a
+//! channel the conversation store wrote on the first user turn. It was removed
+//! because its model resolution ended at "an active *local* engine" — on a
+//! cloud-only node it silently produced nothing, so chats sat on their derived
+//! placeholder until the plugin's every-N pass finally ran. The plugin resolves
+//! through `host.sideModel` (`auto-title-model` → node default → local engine),
+//! which is why it is now the single chat titler.
+//!
+//! Placement / privacy: meeting titles still prefer the resident local engine
+//! directly (see [`generate`]), so the notes never leave the machine unless the
+//! user configured an explicit override model.
 //!
 //! [`sanitize_title`]: sanitize_title
 //! [`generate_meeting_title`]: generate_meeting_title
-//! [`run_auto_title_loop`]: run_auto_title_loop
 
 use serde_json::json;
 
-use super::ServerState;
 use crate::sidecar::active_engine::{is_local_engine, local_engine_url, ActiveEngineStore};
 
 /// Preference: override the model used to auto-name chats. When set (non-empty),
@@ -29,94 +34,12 @@ const AUTO_TITLE_MODEL_PREF: &str = "auto-title-model";
 /// Preference: reasoning/thinking effort for the override title model. Only
 /// forwarded on the Gateway (override) path; empty = the provider default.
 const AUTO_TITLE_EFFORT_PREF: &str = "auto-title-effort";
-/// Preference: master toggle for chat auto-rename. Defaults on.
-const AUTO_TITLE_ENABLED_PREF: &str = "auto-title-enabled";
-
-/// System prompt for titling a chat from its first user message.
-const CHAT_SYSTEM_PROMPT: &str = "You write a short, specific title for a chat conversation based on the user's first message. Reply with ONLY the title: 3 to 6 words, in the same language as the message, no surrounding quotes, no trailing punctuation, no markdown. Do not answer or address the message — only title it.";
-
 /// System prompt for titling a meeting from its notes/transcript summary.
 const MEETING_SYSTEM_PROMPT: &str = "You write a short, specific title for a meeting based on its summary. Reply with ONLY the title: 3 to 6 words, in the same language as the summary, no surrounding quotes, no trailing punctuation, no markdown.";
 
 /// Largest first-message slice (chars) we feed the titler — a giant paste must
 /// not blow the local engine's context just to produce a 5-word title.
 const MAX_INPUT_CHARS: usize = 2000;
-
-/// Consume conversation ids that just received their first user message and
-/// auto-name them. Runs as a single background task owned by the server.
-pub async fn run_auto_title_loop(
-    state: ServerState,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-) {
-    while let Some(conversation_id) = rx.recv().await {
-        // Let the interactive turn grab the engine slot first: a short delay
-        // keeps a single-slot local engine from serving the title before the
-        // user's actual reply. Continuous-batching engines don't need it, but
-        // it is cheap insurance and the title isn't time-critical.
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-        auto_title_conversation(&state, &conversation_id).await;
-    }
-}
-
-/// Generate and apply a title for one conversation. Best-effort throughout: any
-/// failure (no local model, gateway down, empty reply) just leaves the
-/// first-message-derived title in place.
-async fn auto_title_conversation(state: &ServerState, conversation_id: &str) {
-    // Master toggle (default on).
-    if let Ok(Some(v)) = state.preferences.get(AUTO_TITLE_ENABLED_PREF).await {
-        if v.trim() == "false" {
-            return;
-        }
-    }
-    // Skip if the user already locked a title (raced a manual rename).
-    if state
-        .conversations
-        .title_is_custom(conversation_id)
-        .await
-        .unwrap_or(false)
-    {
-        return;
-    }
-    let Some(first) = state
-        .conversations
-        .get_first_user_message(conversation_id)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return;
-    };
-    let first = first.trim();
-    // Too little to title — keep the derived first-message title.
-    if first.chars().count() < 3 {
-        return;
-    }
-    let user_input: String = first.chars().take(MAX_INPUT_CHARS).collect();
-
-    let Some(raw) = generate(
-        &state.preferences,
-        &state.client,
-        CHAT_SYSTEM_PROMPT,
-        &user_input,
-    )
-    .await
-    else {
-        return; // no local model + no override → keep the derived title
-    };
-    let title = sanitize_title(&raw);
-    if title.is_empty() {
-        return;
-    }
-    match state
-        .conversations
-        .auto_set_title(conversation_id, &title)
-        .await
-    {
-        Ok(true) => tracing::info!("auto-titled conversation {conversation_id}: {title}"),
-        Ok(false) => {} // user renamed in the meantime — leave it
-        Err(e) => tracing::warn!("auto-title write failed for {conversation_id}: {e:#}"),
-    }
-}
 
 /// Generate a concise meeting title from its summary (generate + sanitize only;
 /// no store write — the extracted `ryu_meetings` crate owns the write, leaving a

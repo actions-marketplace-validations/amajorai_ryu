@@ -47,6 +47,7 @@ import {
 } from "@/src/hooks/useTabSwitchBehavior.ts";
 import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
+import { SafeModeSettings } from "./SafeModeSettings.tsx";
 import {
 	SettingsGroup,
 	SettingsItem,
@@ -497,6 +498,11 @@ export function GeneralTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+
+			{/* Last, and node-scoped rather than app-scoped: everything above is a
+			    preference about this window, while Safe Mode changes what the node
+			    itself loads on its next boot. */}
+			<SafeModeSettings />
 		</div>
 	);
 }

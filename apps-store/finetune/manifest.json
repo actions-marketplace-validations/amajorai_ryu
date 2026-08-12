@@ -7,7 +7,7 @@
   "keywords": ["finetune", "lora", "training", "gpu", "models"],
   "category": "Developer Tools",
   "icon": "ai-brain-01",
-  "iconDither": { "from": 240, "to": 274, "direction": "down" },
+  "iconDither": { "from": 240, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

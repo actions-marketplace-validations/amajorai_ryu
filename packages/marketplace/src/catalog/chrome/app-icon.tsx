@@ -30,16 +30,22 @@
 
 import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { DitherGradient } from "@ryu/ui/components/dither-kit/gradient.tsx";
-import { Icon } from "@ryu/ui/components/icon.tsx";
+import { Icon, iconToUrl } from "@ryu/ui/components/icon.tsx";
 import { useSvglIndex } from "@ryu/ui/components/svgl.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
+import { useCachedIconUrl } from "../icon-cache.ts";
 import { resolveCardIcon } from "../icon-url.ts";
 import type { CardDither } from "../types.ts";
 import BrandOrCoverImage from "./brand-image.tsx";
 import { ditherDissolves, normalizeDither } from "./dither.ts";
 
 export interface AppIconProps {
+	/** Persist this icon's bytes under `<id>@<version>` (see
+	 *  {@link iconCacheKey}), so it paints offline and is re-fetched only when the
+	 *  app updates. Set it for anything INSTALLED; leave it unset while browsing a
+	 *  catalog, where there is no installed version to key on. */
+	cacheKey?: string | null;
 	/** Extra classes for the square (sizing lives here: `size-10`, `size-5`, …). */
 	className?: string;
 	/** Validated before use; an unpaintable spec falls through to `iconBackground`. */
@@ -73,6 +79,7 @@ export interface AppIconProps {
  * `seedId`.
  */
 export default function AppIcon({
+	cacheKey,
 	className,
 	dither,
 	fallback,
@@ -92,6 +99,38 @@ export default function AppIcon({
 		brand: isBrandMark,
 	} = resolveCardIcon({ icon: iconId, iconUrl, svglIndex });
 
+	// Both icon lanes are cached: an Icon-primitive id resolves to a hosted SVG on
+	// api.iconify.design just as surely as a raster logo resolves to a CDN URL, so
+	// caching only the raster half would still leave most installed apps painting
+	// blank while offline. The glyph is re-rendered through the SAME `Icon`
+	// primitive either way (`iconToUrl` passes a `data:` URI through unchanged), so
+	// the CSS-mask treatment — and with it `currentColor` — is preserved.
+	//
+	// Each lane gets its OWN key suffix. One app can carry a glyph and a light and a
+	// dark mark at once, and a single shared key would have the three lanes
+	// overwrite each other's bytes on every render — a cache that thrashes forever
+	// instead of one that hits.
+	const glyphSource = resolvedIconId
+		? iconToUrl(resolvedIconId, { size })
+		: null;
+	const cachedGlyph = useCachedIconUrl(
+		glyphSource,
+		// The size is part of the key because it is part of the URL: `iconToUrl`
+		// asks Iconify for a glyph at an explicit width/height, so the 12px sidebar
+		// row, the 20px card and the 28px hero request three different assets for
+		// one app. Keyed without it they would each overwrite the other two on every
+		// render and no surface would ever get a hit.
+		cacheKey ? `${cacheKey}|glyph@${size}` : null
+	);
+	const cachedLight = useCachedIconUrl(
+		resolvedIconUrl ?? null,
+		cacheKey ? `${cacheKey}|light` : null
+	);
+	const cachedDark = useCachedIconUrl(
+		resolvedIconUrlDark ?? null,
+		cacheKey ? `${cacheKey}|dark` : null
+	);
+
 	// No art of its own → the generative tile, which paints the whole square (so it
 	// takes neither the dither nor the flat background beneath it).
 	const seed = seedId || name || "";
@@ -100,13 +139,13 @@ export default function AppIcon({
 
 	let content: ReactNode;
 	if (resolvedIconId) {
-		content = <Icon icon={resolvedIconId} size={size} />;
+		content = <Icon icon={cachedGlyph ?? resolvedIconId} size={size} />;
 	} else if (resolvedIconUrl) {
 		content = (
 			<BrandOrCoverImage
 				brand={isBrandMark === true}
-				dark={resolvedIconUrlDark ?? null}
-				light={resolvedIconUrl}
+				dark={cachedDark ?? resolvedIconUrlDark ?? null}
+				light={cachedLight ?? resolvedIconUrl}
 			/>
 		);
 	} else {

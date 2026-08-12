@@ -252,6 +252,28 @@ function serverErrorFromBody(text: string): string | undefined {
 }
 
 /**
+ * The complete header set {@link request} sends: node token, client attribution,
+ * and the verified-user JWT.
+ *
+ * Exported for the one caller that cannot go through {@link request} — a
+ * progress-reporting upload needs `XMLHttpRequest.upload.onprogress`, which
+ * `fetch` has no equivalent for. Composing the headers here rather than
+ * re-listing them at that call site is what stops the two paths from drifting on
+ * auth the next time a header is added.
+ */
+export async function requestHeaders(
+	target: ApiTarget,
+	extra?: Record<string, string>
+): Promise<Record<string, string>> {
+	return {
+		...makeHeaders(target.token),
+		...identityHeaders(),
+		...(await verifiedUserHeader()),
+		...extra,
+	};
+}
+
+/**
  * Perform a JSON request against a node and parse the response.
  *
  * Throws an {@link ApiError} with the status code on a non-2xx response so callers
@@ -264,15 +286,9 @@ export async function request<T>(
 	path: string,
 	options: RequestOptions = {}
 ): Promise<T> {
-	const userHeader = await verifiedUserHeader();
 	const resp = await fetch(apiUrl(target, path), {
 		method: options.method ?? "GET",
-		headers: {
-			...makeHeaders(target.token),
-			...identityHeaders(),
-			...userHeader,
-			...options.headers,
-		},
+		headers: await requestHeaders(target, options.headers),
 		body: options.body === undefined ? undefined : JSON.stringify(options.body),
 		signal: options.signal,
 	});

@@ -365,3 +365,112 @@ describe("AppsCatalogSection — community shelf", () => {
 		expect(html).not.toContain("Community Plugin");
 	});
 });
+
+// The blue check on the card. Three axes live on the same row and merging any
+// two of them is the failure this block exists to catch: `reviewed` is "did Ryu
+// vet this LISTING's code" and drives the amber community notice,
+// `verification` is "did the manifest SIGNATURE verify" (install trust, and the
+// axis that owns the bare word `verified` on the web marketplace's wire), and
+// `org_verified` is "is the PUBLISHING ORGANIZATION identity-checked" and drives
+// this badge. They are independent, so a verified org's unreviewed community
+// listing must carry BOTH of the signals this file can see.
+//
+// Assertions read the badge's `aria-label`, not its tooltip: `TooltipContent`
+// goes through a Base UI Portal and so is not emitted by `renderToStaticMarkup`
+// at all — which is also why the accessible name is on the trigger span in the
+// first place.
+describe("AppsCatalogSection — verified organizations", () => {
+	test("a verified publisher's listing carries the tier-qualified check", () => {
+		const html = render(
+			makeAppsState({
+				items: [
+					makeItem({
+						entry: makeEntry({
+							name: "Verified Thing",
+							org_verified: true,
+							org_verified_tier: "official",
+						}),
+					}),
+				],
+			})
+		);
+		expect(html).toContain("Verified Thing");
+		expect(html).toContain("Verified organization — Official");
+	});
+
+	test("an unknown tier still renders the check, unqualified", () => {
+		const html = render(
+			makeAppsState({
+				items: [
+					makeItem({
+						entry: makeEntry({
+							org_verified: true,
+							org_verified_tier: "enterprise-2027",
+						}),
+					}),
+				],
+			})
+		);
+		expect(html).toContain("Verified organization");
+		// The raw token is never printed — a tier this build does not know is a
+		// missing qualifier, not a label.
+		expect(html).not.toContain("enterprise-2027");
+	});
+
+	test("no badge when the flag is false, absent, or only a tier is present", () => {
+		const off = render(
+			makeAppsState({
+				items: [makeItem({ entry: makeEntry({ org_verified: false }) })],
+			})
+		);
+		expect(off).not.toContain("Verified organization");
+
+		const absent = render(
+			makeAppsState({ items: [makeItem({ entry: makeEntry() })] })
+		);
+		expect(absent).not.toContain("Verified organization");
+
+		// A tier without the flag is a privilege the server never granted — the
+		// same posture `mandatory` takes. It must render nothing.
+		const tierOnly = render(
+			makeAppsState({
+				items: [
+					makeItem({ entry: makeEntry({ org_verified_tier: "official" }) }),
+				],
+			})
+		);
+		expect(tierOnly).not.toContain("Verified organization");
+	});
+
+	test("a verified org's COMMUNITY listing shows both signals at once", () => {
+		const html = render(makeAppsState({ items: [] }), {
+			community: makeAppsState({
+				items: [
+					makeCommunityItem("plugin", {
+						org_verified: true,
+						org_verified_tier: "community",
+					}),
+				],
+			}),
+			variant: "plugins",
+		});
+		expect(html).toContain("Community Plugin");
+		// The listing is unreviewed …
+		expect(html).toContain("Not reviewed by Ryu");
+		// … and its publisher is nonetheless identity-checked. Collapsing the two
+		// into one "trusted" flag would drop one of these.
+		expect(html).toContain("Verified organization — Community");
+	});
+
+	test("a camelCase `orgVerifiedTier` on the CARD does not qualify the badge", () => {
+		// The card payload is snake_case (see the casing contract on CatalogEntry).
+		// If the producer ever emitted the detail's spelling here, this must lose
+		// the qualifier — a visible test failure — rather than silently render an
+		// unqualified check that nobody notices.
+		const entry = makeEntry({ org_verified: true });
+		(entry as unknown as Record<string, unknown>).orgVerifiedTier = "official";
+		const html = render(makeAppsState({ items: [makeItem({ entry })] }));
+		expect(html).toContain("Verified organization");
+		expect(html).not.toContain("Verified organization — Official");
+	});
+});

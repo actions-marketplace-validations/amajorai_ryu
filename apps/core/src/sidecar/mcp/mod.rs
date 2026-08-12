@@ -1593,6 +1593,20 @@ impl McpRegistry {
         crate::paths::ryu_dir().join("mcp.json")
     }
 
+    /// How many servers the user's `mcp.json` declares, read straight from disk.
+    ///
+    /// Deliberately independent of the live `servers` map: under Safe Mode that map
+    /// holds built-ins only, so counting it would report zero and the safe-mode
+    /// diagnostic would claim it is suppressing nothing. This answers "how many
+    /// external MCP processes would a normal boot spawn?", which is the number the
+    /// user is weighing. A missing or invalid file is zero, not an error.
+    pub fn user_configured_server_count() -> usize {
+        std::fs::read_to_string(Self::config_path())
+            .ok()
+            .and_then(|contents| serde_json::from_str::<McpConfigFile>(&contents).ok())
+            .map_or(0, |file| file.mcp_servers.len())
+    }
+
     /// Built-in MCP servers Core always registers — no config file required.
     ///
     /// **Empty by design.** The two former hardcoded built-ins — **Ghost** (U14,
@@ -1651,6 +1665,23 @@ impl McpRegistry {
         plugin_servers: &BTreeMap<String, (String, McpServerConfig)>,
     ) -> BTreeMap<String, McpServerConfig> {
         let mut servers = Self::builtin_servers();
+
+        // ── Safe Mode: built-ins only ────────────────────────────────────────
+        //
+        // The built-ins are in-process Core tools — they spawn nothing and chat
+        // itself uses them, so removing them would break the session the user is
+        // troubleshooting in. Everything below this line spawns an EXTERNAL
+        // process (`npx …`, a host binary), which is exactly the class of cost
+        // safe mode exists to take off the table. The plugin overlay would already
+        // be empty (nothing registers while the plugin mask holds), but it is
+        // skipped explicitly so a stale registration can't sneak through a reload.
+        if crate::safe_mode::is_active() {
+            tracing::info!(
+                "safe mode: skipping plugin + user MCP servers; {} built-in server(s) only",
+                servers.len()
+            );
+            return servers;
+        }
 
         // Plugin-declared servers overlay built-ins (user config below still wins).
         // The owner id is dropped here: `servers` is the flat spawn map, and

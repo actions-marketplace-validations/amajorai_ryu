@@ -226,6 +226,46 @@ export interface CatalogEntry {
 	 *  on a built-in (`source: "built-in"`) entry. */
 	mandatory?: boolean;
 	name: string;
+	/** The PUBLISHING ORGANIZATION's identity has been verified by Ryu — the
+	 *  X/Meta-style blue check.
+	 *
+	 *  THREE DISTINCT TRUST AXES ride on a listing and merging any two of them
+	 *  mislabels honest software. Keep them apart:
+	 *    1. `reviewed`     — did Ryu vet this LISTING's code? (drives the amber
+	 *                        "Not reviewed by Ryu" notice)
+	 *    2. `verification` — did this listing's manifest SIGNATURE verify? That is
+	 *                        INSTALL TRUST, it lives on the web marketplace card
+	 *                        (`apps/web/src/lib/marketplace-api.ts`, which owns the
+	 *                        wire word `verified` on that payload) and a false there
+	 *                        renders a destructive "Signature invalid" chip.
+	 *    3. `org_verified` — is the PUBLISHING ORGANIZATION identity-verified? THIS
+	 *                        field, and only this one.
+	 *  The `org_` prefix is not decoration: it is what keeps axis 3 off axis 2's
+	 *  wire word, where an org-identity `false` would have branded every listing
+	 *  from an unverified publisher as cryptographically tampered.
+	 *
+	 *  All three combine freely. A verified org can publish an unreviewed community
+	 *  listing, and an unverified individual can publish a reviewed one — both are
+	 *  normal and both are rendered.
+	 *
+	 *  Derived SERVER-side from the org record (or the first-party/built-in signal
+	 *  for Ryu's own listings). Never read a manifest's or a client's claim of it,
+	 *  for the same reason `mandatory` is stamped from Core's own constant: "I am
+	 *  who I say I am" is exactly the property a hostile listing asserts about
+	 *  itself. The UI renders what it is handed and infers nothing. */
+	org_verified?: boolean;
+	/** Which verification tier the publishing org holds ("official", "partner",
+	 *  "community"). Only meaningful when `org_verified` is true — a tier without
+	 *  the flag renders nothing.
+	 *
+	 *  Typed as a plain string, not a union, for the same reason `stability` is: a
+	 *  newer control plane may mint a tier this build has never heard of, and the
+	 *  badge must still render (unqualified) rather than vanish.
+	 *
+	 *  CAUTION: the tier vocabulary includes "community", which is NOT the same
+	 *  thing as `origin === "community"` — that is a listing-discovery fact, this
+	 *  is an org-identity fact. Never render the bare tier word. */
+	org_verified_tier?: string | null;
 	/** Who listed this and how much vetting it had. `"community"` = discovered
 	 *  automatically from a public GitHub topic and NOT reviewed by Ryu; absent or
 	 *  null = first-party. Deliberately snake_case (it rides on the card, not the
@@ -358,6 +398,21 @@ export interface PluginCatalogDetail {
 	manifestUrl?: string | null;
 	/** Count of open issues upstream. */
 	openIssues?: number | null;
+	/** The PUBLISHING ORGANIZATION's identity is verified. camelCase because it
+	 *  rides on the DETAIL payload (the card spells it
+	 *  `org_verified`/`org_verified_tier` — see the casing note on
+	 *  `discoveredFrom`).
+	 *
+	 *  Same three-axis warning as on the card: this is neither `reviewed` (did Ryu
+	 *  vet this listing's CODE) nor the web marketplace's `verification` (did the
+	 *  manifest SIGNATURE verify — install trust, and the field that already owns
+	 *  the bare word `verified` on that wire). This one is only "do we know who the
+	 *  publisher is". Server-derived, never self-asserted. */
+	orgVerified?: boolean;
+	/** The publishing org's verification tier ("official" | "partner" |
+	 *  "community"). Plain string on purpose — an unknown tier renders the badge
+	 *  unqualified rather than dropping it. */
+	orgVerifiedTier?: string | null;
 	/** Who listed this. `"community"` = automatic discovery, nobody vetted it. */
 	origin?: string | null;
 	/** Opaque permission-grant ids the plugin asks the Gateway to approve. */

@@ -251,7 +251,9 @@ export const ModeSelector = memo(function ModeSelector({
 			</PopoverTrigger>
 			<PopoverContent
 				align="start"
-				className={COMPOSER_SELECT_POPOVER}
+				// `ModeMenuContent` owns its own capped scroller, so the popup must not
+				// add a second one (see `COMPOSER_SELECT_POPOVER`).
+				className={cn(COMPOSER_SELECT_POPOVER, "overflow-hidden")}
 				side="top"
 				sideOffset={6}
 			>

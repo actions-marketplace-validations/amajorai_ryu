@@ -1058,6 +1058,55 @@
       "tsHost": true
     },
     {
+      "capability": "social.crud",
+      "grant": "social:crud",
+      "method": "social.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "social.crud",
+      "grant": "social:crud",
+      "method": "social.open",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "social.crud",
+      "grant": "social:crud",
+      "method": "social.openList",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "reasoning.check",
+      "grant": "reasoning:check",
+      "method": "reasoning.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "tuition.crud",
+      "grant": "tuition:crud",
+      "method": "tuition.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "news.crud",
+      "grant": "news:crud",
+      "method": "news.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "blueprint.review",
+      "grant": "blueprint:review",
+      "method": "blueprint.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "skills.crud",
       "grant": "skills:crud",
       "method": "skills.getSource",

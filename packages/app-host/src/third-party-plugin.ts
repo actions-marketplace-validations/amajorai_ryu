@@ -387,6 +387,39 @@ export function thirdPartyPluginSrcdoc(
           recordStatus: function () { return call("ghost.recordStatus", []); },
           recordStop: function () { return call("ghost.recordStop", []); }
         },
+        // Outpost (needs grant social:crud). ONE generic forwarder plus two navigation
+        // verbs — see the sibling bridge below for why the app's 33 sidecar routes do
+        // not each get a verb here. Kept in step with that builder deliberately: the two
+        // serve the two companion mount paths (Path A ESM module, Path B self-contained
+        // HTML bundle), and a verb present in only one is a verb whose availability
+        // depends on how the app happened to be built.
+        social: {
+          request: function (a) { return call("social.request", [a || {}]); },
+          open: function (a) { return call("social.open", [a || {}]); },
+          openList: function () { return call("social.openList", []); }
+        },
+        // Automated Reasoning (needs grant reasoning:check). ONE forwarder and no
+        // navigation verb — the companion IS the whole surface, so it never opens a
+        // shell tab. Kept in step with the sibling bridge below for the same reason
+        // Outpost is: the two serve the two companion mount paths, and a verb present
+        // in only one is a verb whose availability depends on how the app was built.
+        reasoning: {
+          request: function (a) { return call("reasoning.request", [a || {}]); }
+        },
+        // Tuition (needs grant tuition:crud) and Wire (needs grant news:crud). Same
+        // ONE-forwarder shape as reasoning directly above.
+        tuition: {
+          request: function (a) { return call("tuition.request", [a || {}]); }
+        },
+        news: {
+          request: function (a) { return call("news.request", [a || {}]); }
+        },
+        // Visual plan review (needs grant blueprint:review). Same ONE-forwarder,
+        // no-navigation-verb shape as Reasoning directly above, and kept in step with
+        // the sibling bridge below for the same reason.
+        blueprint: {
+          request: function (a) { return call("blueprint.request", [a || {}]); }
+        },
         // Shell primitives (needs grant shell:integrate). The generic shell-integration
         // lane a DECOUPLED companion uses: open an allowlisted shell tab, and subscribe
         // to the live theme / palette commands / node event stream. openTab is unary; the
@@ -935,6 +968,58 @@ function htmlCompanionHeadFragment(
         open: function (a) { return call("meetings.open", [a || {}]); },
         openNotes: function (a) { return call("meetings.openNotes", [a || {}]); },
         openList: function () { return call("meetings.openList", []); }
+      },
+      // Outpost (needs grant social:crud). The @ryu/social companion renders the
+      // compose, calendar, queue and inbox surface. ONE generic request forwarder
+      // rather than a verb per endpoint: the host re-issues { method, path, body }
+      // against Core's /api/social public mount, which already answers any client
+      // holding the node token — so the forwarder widens nothing, and the gates stay the
+      // social:crud grant plus Core's ext-proxy route allowlist. The host validates the
+      // path (leading slash, no dot-dot segment, no host) before building the URL.
+      // open/openList stay named because opening a shell tab is the one thing the frame
+      // cannot do for itself.
+      social: {
+        request: function (a) { return call("social.request", [a || {}]); },
+        open: function (a) { return call("social.open", [a || {}]); },
+        openList: function () { return call("social.openList", []); }
+      },
+      // Automated Reasoning (needs grant reasoning:check). The @ryu/reasoning companion
+      // authors formal policies and runs the solver playground. ONE generic request
+      // forwarder rather than a verb per endpoint: the host re-issues { method, path,
+      // body } against Core's /api/reasoning public mount, which already answers any
+      // client holding the node token — so the forwarder widens nothing, and the gates
+      // stay the reasoning:check grant plus Core's ext-proxy route allowlist. The host
+      // validates the path (leading slash, resolving under the mount, no host) before
+      // building the URL. No navigation verb: the companion never opens a shell tab.
+      reasoning: {
+        request: function (a) { return call("reasoning.request", [a || {}]); }
+      },
+      // Tuition (needs grant tuition:crud) and Wire (needs grant news:crud). The same
+      // ONE-forwarder shape as reasoning directly above: the frame supplies
+      // { method, path, body } and the host re-issues it against that app's public
+      // mount, which already answers any client holding the node token. The gates stay
+      // the app's own grant plus Core's ext-proxy route allowlist. Kept in step with
+      // the sibling bridge above BY HAND — nothing tests that the two agree, so a verb
+      // added to only one gives a companion whose bridge depends on how it was
+      // packaged.
+      tuition: {
+        request: function (a) { return call("tuition.request", [a || {}]); }
+      },
+      news: {
+        request: function (a) { return call("news.request", [a || {}]); }
+      },
+      // Visual plan review (needs grant blueprint:review). The @ryu/blueprint companion
+      // renders a plan an agent published and records the reviewer's annotations and
+      // verdict. ONE generic request forwarder rather than a verb per endpoint: the host
+      // re-issues { method, path, body } against Core's /api/blueprint public mount,
+      // which already answers any client holding the node token — so the forwarder widens
+      // nothing, and the gates stay the blueprint:review grant plus Core's ext-proxy
+      // route allowlist. The host validates the path (leading slash, resolving under the
+      // mount, no host) before building the URL, which is what keeps an agent-supplied
+      // plan id from steering the request off the mount. No navigation verb: the review
+      // surface IS the companion.
+      blueprint: {
+        request: function (a) { return call("blueprint.request", [a || {}]); }
       },
       // Skill authoring (needs grant skills:crud). The @ryu/skill-editor companion
       // authors a user-owned Agent Skill (SKILL.md); the host calls Core's /api/skills

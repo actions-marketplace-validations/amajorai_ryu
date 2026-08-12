@@ -126,7 +126,14 @@ export const ModelPicker = memo(function ModelPicker({
 			</PopoverTrigger>
 			<PopoverContent
 				align="start"
-				className={cn(COMPOSER_SELECT_POPOVER, "flex max-h-80 flex-col")}
+				// `overflow-hidden` cancels the shared popover's scroller: the search
+				// field below is sticky and the rows scroll in their own container, so
+				// the popup itself must not scroll too (two nested scrollers read as a
+				// list that will not move).
+				className={cn(
+					COMPOSER_SELECT_POPOVER,
+					"flex max-h-80 flex-col overflow-hidden"
+				)}
 				side="top"
 				sideOffset={6}
 			>

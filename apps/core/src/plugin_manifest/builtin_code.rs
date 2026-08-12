@@ -26,8 +26,8 @@
 //!
 //! # Keeping it honest
 //!
-//! Every `code_file` in every `plugins-store/*/manifest.json` has a row here and
-//! every row is referenced by some manifest — a bijection asserted by
+//! Every `code_file` in every `{plugins,apps}-store/*/manifest.json` has a row here
+//! and every row is referenced by some manifest — a bijection asserted by
 //! `builtin_code_table_matches_package_manifests` in [`super`]. Unregistered-by-design
 //! plugins are included too: they are loaded from disk today, but the total invariant
 //! is what makes promoting one to a built-in a one-line change instead of a silent
@@ -38,9 +38,32 @@
 //! `pi_extension_refs`, `output_style_refs`) are disjoint by construction, so one
 //! merged assertion would be satisfiable by a row of the wrong kind.
 
-/// `(plugin id, plugin-root-relative path, file contents)` for every `code_file` a
-/// `plugins-store` manifest references. Sorted by plugin dir then path.
+/// `(plugin id, package-root-relative path, file contents)` for every `code_file` a
+/// package manifest references — from EITHER store root, since an apps-store app can
+/// contribute a turn hook exactly like a plugin can (`packaged_code_file_refs` walks
+/// both, and `tools/mirror-public.sh` step 1c vendors `apps-store/*/hooks/*.js`
+/// alongside the plugins-store ones). Sorted by root, then package dir, then path.
 pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
+    // ── apps-store ───────────────────────────────────────────────────────────
+    // reasoning
+    (
+        "@ryu/reasoning",
+        "hooks/check.js",
+        include_str!("../../../../apps-store/reasoning/hooks/check.js"),
+    ),
+    // tuition
+    (
+        "@ryu/tuition",
+        "hooks/study.js",
+        include_str!("../../../../apps-store/tuition/hooks/study.js"),
+    ),
+    // news
+    (
+        "@ryu/news",
+        "hooks/ground.js",
+        include_str!("../../../../apps-store/news/hooks/ground.js"),
+    ),
+    // ── plugins-store ────────────────────────────────────────────────────────
     // advisor
     (
         "@ryu/advisor",
@@ -141,6 +164,12 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "hooks/start.js",
         include_str!("../../../../plugins-store/hook-session-context/hooks/start.js"),
     ),
+    // no-ai-slop
+    (
+        "@ryu/no-ai-slop",
+        "hooks/review.js",
+        include_str!("../../../../plugins-store/no-ai-slop/hooks/review.js"),
+    ),
     // parallel
     (
         "@ryu/parallel",
@@ -158,6 +187,23 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "@ryu/proof",
         "hooks/loop.js",
         include_str!("../../../../plugins-store/proof/hooks/loop.js"),
+    ),
+    // recap
+    (
+        "@ryu/recap",
+        "hooks/command.js",
+        include_str!("../../../../plugins-store/recap/hooks/command.js"),
+    ),
+    (
+        "@ryu/recap",
+        "hooks/turn.js",
+        include_str!("../../../../plugins-store/recap/hooks/turn.js"),
+    ),
+    // receipts
+    (
+        "@ryu/receipts",
+        "hooks/loop.js",
+        include_str!("../../../../plugins-store/receipts/hooks/loop.js"),
     ),
     // scrapling
     (
@@ -244,7 +290,11 @@ pub(crate) fn lookup_pi_extension(plugin_id: &str, rel: &str) -> Option<&'static
 }
 
 /// `(plugin id, plugin-root-relative path, file contents)` for every
-/// `contributes.output_styles[].file` a `plugins-store` manifest references.
+/// `contributes.output_styles[].file` a packaged manifest references — **both**
+/// roots, `apps-store` as well as `plugins-store`. An App contributes a style by
+/// exactly the same three-field row as a plugin (`packaged_output_style_refs`
+/// walks both roots), and the first one to do so is `@ryu/blueprint`, whose style
+/// is the only thing that makes an agent publish a plan for review at all.
 ///
 /// # Why a THIRD table
 ///
@@ -270,6 +320,22 @@ pub(crate) fn lookup_pi_extension(plugin_id: &str, rel: &str) -> Option<&'static
 ///
 /// Rows are sorted by path within the plugin, matching [`BUILTIN_CODE_FILES`].
 pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
+    // ── apps-store ───────────────────────────────────────────────────────────
+    // blueprint — the "Visual planning" style. This row is what makes the app
+    // work rather than merely load: Blueprint ships no turn hooks, so nothing in
+    // the runtime ever forces a plan to be published. The style is the whole
+    // mechanism — it tells the agent to publish before it edits and to wait for a
+    // verdict. Without this embedded body a built-in install resolves the
+    // manifest's `output-styles/visual-planning.md` against a package directory
+    // that is not on the user's machine, which `hydrate_output_style_files` treats
+    // as a HARD load error (deliberately — an empty style is indistinguishable
+    // from the user choosing none).
+    (
+        "@ryu/blueprint",
+        "output-styles/visual-planning.md",
+        include_str!("../../../../apps-store/blueprint/output-styles/visual-planning.md"),
+    ),
+    // ── plugins-store ────────────────────────────────────────────────────────
     // output-styles
     (
         "@ryu/output-styles",

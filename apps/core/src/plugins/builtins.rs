@@ -111,6 +111,56 @@ pub const SPACES_PLUGIN_ID: &str = "@ryu/spaces";
 /// `state.spaces.{list_spaces, create_space}`.
 pub const MEETINGS_PLUGIN_ID: &str = "@ryu/meetings";
 
+/// The Outpost app's plugin id — social scheduling + publishing over the `ryu-social`
+/// sidecar (`apps-store/social/`).
+///
+/// A governance-shell leaf with a companion: no `requires` edge (it owns its own
+/// sidecar and its own SQLite database), Core-tier so its sidecar spawns on the
+/// auto-run path, and therefore deliberately NOT declaring `sidecar:process` — the
+/// Gateway denies that grant at enable. Core links zero social code; everything it
+/// serves arrives through the generic ext-proxy `public_mount`.
+pub const SOCIAL_PLUGIN_ID: &str = "@ryu/social";
+
+/// The Tuition app's plugin id — a single-learner tutor over the `ryu-tuition` sidecar
+/// (`apps-store/tuition/`).
+///
+/// A governance-shell leaf with a companion: no `requires` edge (it owns its sidecar
+/// and its own SQLite database), Core-tier so that sidecar spawns on the auto-run path
+/// and its `mcp_servers` entry registers, and therefore deliberately NOT declaring
+/// `sidecar:process` — the Gateway denies that grant at enable. Core links zero
+/// tuition code; everything it serves arrives through the generic ext-proxy.
+pub const TUITION_PLUGIN_ID: &str = "@ryu/tuition";
+
+/// The Wire app's plugin id — a personal newsroom over the `ryu-news` sidecar
+/// (`apps-store/news/`). Same posture as [`TUITION_PLUGIN_ID`].
+pub const NEWS_PLUGIN_ID: &str = "@ryu/news";
+
+/// Harbor's plugin id — an object-first CRM over the `ryu-crm` sidecar
+/// (`apps-store/crm/`). Core-tier for the same reason as Outpost (its sidecar must
+/// spawn on the auto-run path, and a Community-tier sidecar would need the
+/// `sidecar:process` grant the Gateway denies at enable), and Core links zero CRM
+/// code. Its desktop surface is a native dock panel over the generic ext-proxy, so
+/// unlike Outpost it ships no UI bundle and needs NO `plugins::seed` row.
+pub const CRM_PLUGIN_ID: &str = "@ryu/crm";
+
+/// The Blueprint app's plugin id — visual plan review over the `ryu-blueprint`
+/// sidecar (`apps-store/blueprint/`). Shared by the [`CORE_PLUGINS`] row below and
+/// the `plugins::seed` companion-bundle table.
+///
+/// Deliberately NOT added to `seed::NOT_PRE_INSTALLED`, unlike its nearest neighbour
+/// `@ryu/reasoning`. That list is a hand-maintained PRODUCT decision ("should a fresh
+/// install list this app as Installed?"), not a mechanical consequence of being
+/// opt-in — so if the answer here should be "no", the row goes there and this
+/// paragraph goes away.
+///
+/// Declared HERE rather than in `plugin_manifest` (where `REASONING_PLUGIN_ID` and
+/// the older companion ids ended up) because the only thing this id decides is
+/// plugin *policy* — tier membership, seeding, pre-install — and all three of those
+/// tables live in `plugins::`. `plugin_manifest` owns the compiled-in bytes
+/// (`BLUEPRINT_UI_HTML`), which is a different question. Same shape as
+/// [`SOCIAL_PLUGIN_ID`] directly above.
+pub const BLUEPRINT_PLUGIN_ID: &str = "@ryu/blueprint";
+
 /// The Research app's plugin id — the `/api/research/*` proxy over the autoresearch
 /// sidecar. A governance-shell leaf: default-on, no `requires` (it owns its own
 /// sidecar), compile-out-able behind the `research` cargo feature.
@@ -393,6 +443,48 @@ pub const SKILL_EDITOR_PLUGIN_ID: &str = "@ryu/skill-editor";
 /// [`CORE_PLUGINS`] for why that is forced by the enabled-filter rather than chosen.
 pub const OUTPUT_STYLES_PLUGIN_ID: &str = "@ryu/output-styles";
 
+/// The UGC app's plugin id — the `/api/ugc/*` creator-marketing campaign tracker
+/// (campaigns, creator roster, post submissions + review, Composio-refreshed post
+/// metrics, accrued/approved/paid payouts), served OUT-OF-PROCESS by the `ryu-ugc`
+/// sidecar (`public_mount`, App-gated via the ext proxy). Core-tier so it is
+/// installable and its managed sidecar may spawn, but **opt-in** — absent from
+/// [`CORE_DEFAULT_ON`] — because a default-on sidecar app spawns a binary a normal
+/// install does not have. No `requires` edge. Its surface is a desktop dock panel
+/// (`contributes.dock_panels`, `panel: "native"`), not a companion, so it ships no
+/// `ui_code` and needs no `plugins::seed` row.
+pub const UGC_PLUGIN_ID: &str = "@ryu/ugc";
+
+/// The Mission Control app's plugin id — the `/api/mission-control/*` cross-chat
+/// work dashboard (per-conversation digests, per-day activity, hot files, and the
+/// to-dos left outstanding across threads), served OUT-OF-PROCESS by the
+/// `ryu-mission-control` sidecar (`public_mount`, App-gated via the ext proxy).
+/// Core-tier so it is installable and its managed sidecar may spawn, but **opt-in**
+/// — absent from [`CORE_DEFAULT_ON`] — because a default-on sidecar app spawns a
+/// binary a normal install does not have. No `requires` edge.
+///
+/// Its desktop surface is an APP-SHELL PAGE (`contributes.sidebar_buttons` naming
+/// `/mission-control`, resolved by `contributions/app-shell-routes.ts`), not a
+/// companion, so it ships no `ui_code` and needs no `plugins::seed` row. The
+/// related in-chat panel is NOT part of this app: it is a shell-owned dock kind
+/// that derives from the live message stream and works whether or not this app is
+/// installed.
+pub const MISSION_CONTROL_PLUGIN_ID: &str = "@ryu/mission-control";
+
+/// The Drafts app's plugin id — the `/api/drafts/*` outbox (unsent composer text,
+/// armed queue entries and their send history), served OUT-OF-PROCESS by the
+/// `ryu-drafts` sidecar (`public_mount`, App-gated via the ext proxy). Core-tier so
+/// it is installable and its managed sidecar may spawn, but **opt-in** — absent from
+/// [`CORE_DEFAULT_ON`] — because a default-on sidecar app spawns a binary a normal
+/// install does not have. No `requires` edge.
+///
+/// Its desktop surface is an APP-SHELL PAGE (`contributes.sidebar_buttons` naming
+/// `/drafts`, resolved by `contributions/app-shell-routes.ts`) plus one
+/// `sidebar_sections` entry, so it ships no `ui_code` and needs no `plugins::seed`
+/// row. The SENDING half is deliberately not here and not in the sidecar: a manifest
+/// sidecar is spawned without `RYU_TOKEN`, so the desktop dispatcher — which holds
+/// the node credential — claims a ready draft and posts the turn.
+pub const DRAFTS_PLUGIN_ID: &str = "@ryu/drafts";
+
 /// The set of **Core-tier** built-in plugin ids (#444).
 ///
 /// Core-tier plugins are first-party and shipped with Ryu; they are seeded
@@ -501,8 +593,20 @@ pub const CORE_PLUGINS: &[&str] = &[
     "@ryu/durable",
     "@ryu/goal",
     "@ryu/proof",
+    "@ryu/receipts",
     "@ryu/double-check",
     "@ryu/chat-title",
+    // End-of-turn recap + `/recap`. Installable and governed like the turn-hook
+    // plugins above it, but deliberately absent from `CORE_DEFAULT_ON`: each recap is
+    // a real side-model call on the user's budget, so it ships off and is enabled from
+    // the Store.
+    "@ryu/recap",
+    // End-of-turn AI-slop editor: bundles the `no-ai-slop` skill and has a
+    // fresh-context reviewer edit the answer that just finished. Absent from
+    // `CORE_DEFAULT_ON` for recap's reason and then some — its hook carries no
+    // `match` gate (every completed turn is the point), so it costs a sandbox spawn
+    // per turn plus a sub-agent per answer that clears its prose floor.
+    "@ryu/no-ai-slop",
     // Pre-turn prompt-improver: rewrites the outgoing message via a configurable
     // model before it is sent. Reverse-DNS id (matches its manifest + composer flag).
     "@ryu/auto-expand",
@@ -562,6 +666,19 @@ pub const CORE_PLUGINS: &[&str] = &[
     TEAMS_PLUGIN_ID,
     CLIPS_PLUGIN_ID,
     RECIPES_PLUGIN_ID,
+    // Outpost — the same posture as those five, for the same reason: Core-tier and
+    // installable, but neither default-on nor pre-installed (see
+    // `seed::NOT_PRE_INSTALLED`), because its `ryu-social` sidecar binary is not on a
+    // normal install and an app that publishes publicly under the user's accounts is
+    // the last thing that should arrive switched on. No `requires` edge — it owns its
+    // sidecar and its own database.
+    SOCIAL_PLUGIN_ID,
+    // Harbor — same posture again: Core-tier and installable, neither default-on nor
+    // pre-installed, because the `ryu-crm` binary is not on a normal install. No
+    // `requires` edge; it owns its sidecar and its own SQLite database. Absent from
+    // `seed::NOT_PRE_INSTALLED` on purpose — that list is for apps whose companion
+    // bundle was seeded and must be un-seeded, and a dock-panel app never had one.
+    CRM_PLUGIN_ID,
     // Wave-2 leaf-feature governance shells (quests/approvals/skills/learning/
     // healing). All Core-tier; `skills` and `learning` are ALSO default-on (see
     // CORE_DEFAULT_ON), quests/approvals/healing ship opt-in. `learning`→`skills` and
@@ -637,6 +754,72 @@ pub const CORE_PLUGINS: &[&str] = &[
     // block down (seed a provider so the capability is non-empty), minus the caveat
     // that sank `@ryu/browser` — there is no binary to fail to spawn.
     OUTPUT_STYLES_PLUGIN_ID,
+    // The UGC campaign tracker. Core-tier is a REQUIREMENT here, not a promotion —
+    // the same argument `pxpipe` and the four document-parsing apps make above: it
+    // declares a managed sidecar, and `may_run_sidecar` permits one at Community tier
+    // only against the Gateway-approved `sidecar:process` grant, which the Gateway
+    // DENIES at enable. A Community-tier `@ryu/ugc` would install and then never spawn
+    // `ryu-ugc`. Deliberately NOT in `CORE_DEFAULT_ON`, for exactly the reason the five
+    // leaf apps (research/dashboards/teams/clips/recipes) were demoted: it owns an
+    // out-of-process sidecar binary a normal install does not have, so seeding it
+    // enabled would ship an app nobody asked for AND fail on first use. No `requires`
+    // edge — nothing in Core reads its state, and its desktop dock panel talks to the
+    // sidecar through the ext-proxy `public_mount`.
+    UGC_PLUGIN_ID,
+    // Mission Control. Same posture and same REQUIREMENT as `@ryu/ugc` directly
+    // above: it declares a managed `ryu-mission-control` sidecar, and
+    // `may_run_sidecar` permits one at Community tier only against a Gateway-approved
+    // `sidecar:process` grant the Gateway DENIES at enable — so tier here is what
+    // decides whether the binary ever spawns. Deliberately NOT in `CORE_DEFAULT_ON`
+    // for the same reason: the binary is not on a normal install.
+    //
+    // Nothing in Core reads its state, so no `requires` edge. Note the asymmetry with
+    // the shell's `mission` dock panel, which shares this app's name and none of its
+    // machinery — that panel derives from the live message stream client-side and is
+    // unaffected by this row.
+    MISSION_CONTROL_PLUGIN_ID,
+    // Drafts. Same posture and same REQUIREMENT as `@ryu/mission-control` directly
+    // above: it declares a managed `ryu-drafts` sidecar, and `may_run_sidecar`
+    // permits one at Community tier only against a Gateway-approved
+    // `sidecar:process` grant the Gateway DENIES at enable — so tier here is what
+    // decides whether the binary ever spawns. Deliberately NOT in `CORE_DEFAULT_ON`
+    // for the same reason: the binary is not on a normal install.
+    //
+    // Nothing in Core reads the outbox, so no `requires` edge — the shell fetches
+    // `/api/drafts/*` through the ext proxy for both the sidebar section and the
+    // dispatcher.
+    DRAFTS_PLUGIN_ID,
+    // Automated Reasoning. Same posture and same REQUIREMENT as `@ryu/ugc` directly
+    // above: it declares a managed `ryu-reasoning` sidecar, and `may_run_sidecar`
+    // permits one at Community tier only against a Gateway-approved
+    // `sidecar:process` grant the Gateway denies at enable — so tier here is what
+    // decides whether the binary ever spawns. Its manifest `mcp_servers` entry
+    // (`reasoning__solve`, the id a workflow `mcp` node takes) needs the same tier
+    // via `may_register_mcp_servers`.
+    //
+    // This row was MISSING while the app's own comments (seed.rs, plugin_manifest)
+    // asserted it was Core-tier, and nothing caught it:
+    // `every_core_plugin_id_resolves_to_a_loaded_builtin_manifest` only checks the
+    // forward direction (a CORE_PLUGINS id must have a manifest), never
+    // manifest-declares-a-sidecar → CORE_PLUGINS. The app installed, enabled, and
+    // then silently never spawned.
+    //
+    // Deliberately NOT in `CORE_DEFAULT_ON`, for the reason the leaf apps were
+    // demoted: it owns an out-of-process binary a normal install does not have.
+    crate::plugin_manifest::REASONING_PLUGIN_ID,
+    // Blueprint. Core tier for the same two mechanical reasons as Reasoning directly
+    // above, and worth restating because NOTHING TESTS THIS ROW: it declares a
+    // managed `ryu-blueprint` sidecar, and `may_run_sidecar` permits one at Community
+    // tier only against a Gateway-approved `sidecar:process` grant the Gateway denies
+    // at enable; its manifest `mcp_servers` entry (`blueprint__plan_publish` /
+    // `blueprint__plan_status`, the ids an agent and a workflow `mcp` node take) is
+    // gated the same way by `may_register_mcp_servers`. Omit this line and the app
+    // installs, enables, reports itself healthy — and the binary never spawns while
+    // its four MCP tools never appear, with no error anywhere to say why.
+    //
+    // Deliberately NOT in `CORE_DEFAULT_ON`, for the reason the leaf apps were
+    // demoted: it owns an out-of-process binary a normal install does not have.
+    BLUEPRINT_PLUGIN_ID,
 ];
 
 /// The subset of [`CORE_PLUGINS`] that should be **enabled by default** on a
@@ -659,6 +842,7 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     "@ryu/durable",
     "@ryu/goal",
     "@ryu/proof",
+    "@ryu/receipts",
     "@ryu/double-check",
     "@ryu/chat-title",
     // Background bash + sub-agents for the managed Pi agent. Default-on because

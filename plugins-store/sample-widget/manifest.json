@@ -8,7 +8,7 @@
   "tagline": "Reference plugin: an inline chat widget",
   "keywords": ["example", "reference", "developer", "widget", "mcp"],
   "icon": "puzzle",
-  "iconDither": { "from": 282, "to": 316, "direction": "down" },
+  "iconDither": { "from": 282, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

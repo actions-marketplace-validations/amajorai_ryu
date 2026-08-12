@@ -10,8 +10,8 @@ import {
 } from "@ryu/ui/components/card";
 import { Checkbox } from "@ryu/ui/components/checkbox";
 import { NumberTicker } from "@ryu/ui/components/number-ticker";
+import PageHeader from "@ryu/ui/components/page-header.tsx";
 import { Slider } from "@ryu/ui/components/slider";
-import { Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
 	annualTotalPrice,
@@ -338,6 +338,7 @@ export function PricingSavingsCalculator({
 	minSeats = TEAMS_MIN_SEATS,
 	planName = "Teams",
 	plansHref = "#plans",
+	seatControl = true,
 	seats: controlledSeats,
 	onSeatsChange,
 }: {
@@ -354,6 +355,13 @@ export function PricingSavingsCalculator({
 	planName?: string;
 	/** Where "Compare plans" points; the default assumes the pricing page. */
 	plansHref?: string;
+	/**
+	 * Whether the seat slider is offered. Set `false` on a SOLO plan (Lifetime,
+	 * Pro): those are bought one seat at a time, so a slider offering fifty of
+	 * them prices a purchase the plan cannot be made at, and the per-seat wording
+	 * throughout would be describing a team the reader does not have.
+	 */
+	seatControl?: boolean;
 	seats?: number;
 }) {
 	const [localSeats, setLocalSeats] = useState(() =>
@@ -363,7 +371,11 @@ export function PricingSavingsCalculator({
 		() => new Set(DEFAULT_SELECTION)
 	);
 
-	const seats = Math.max(controlledSeats ?? localSeats, minSeats);
+	// A solo plan is priced at exactly one seat regardless of what the page (or a
+	// stale local value) is holding, so the totals can never quote a team price.
+	const seats = seatControl
+		? Math.max(controlledSeats ?? localSeats, minSeats)
+		: 1;
 	const setSeats = (next: number) => {
 		const clamped = Math.max(next, minSeats);
 		if (onSeatsChange) {
@@ -415,16 +427,15 @@ export function PricingSavingsCalculator({
 
 	return (
 		<section className="mx-auto mb-16 max-w-7xl">
-			<div className="mb-8 text-center">
-				<h2 className="flex items-center justify-center gap-2 font-semibold text-2xl">
-					<Sparkles className="size-5" />
-					What are you paying for today?
-				</h2>
-				<p className="mt-1 text-muted-foreground">
-					Tick the subscriptions Ryu would replace and we&apos;ll do the
-					arithmetic. Prices are each vendor&apos;s public monthly list rate.
-				</p>
-			</div>
+			{/* The same title/subtitle pair the page opens with, so this section reads
+			    as part of the page rather than as a differently-styled island. `as="h2"`
+			    is load-bearing: the routed page already owns the `h1`. */}
+			<PageHeader
+				as="h2"
+				className="mb-8 text-center"
+				subtitle="Tick the subscriptions Ryu would replace and we'll do the arithmetic. Prices are each vendor's public monthly list rate."
+				title="What are you paying for today?"
+			/>
 
 			<div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_360px]">
 				<Card>
@@ -461,26 +472,37 @@ export function PricingSavingsCalculator({
 							<CardTitle className="text-lg">Your savings</CardTitle>
 							<CardDescription>
 								Against Ryu {planName} at {usd.format(ryuMonthlyPerSeat)}
-								/seat/mo
+								{seatControl ? "/seat" : ""}/mo
 								{isYearly ? ", billed yearly" : ""}.
 							</CardDescription>
 						</CardHeader>
 						<CardContent>
-							<p className="mb-2 font-medium text-muted-foreground text-xs">
-								Seats: <span className="text-foreground">{seats}</span>
-							</p>
-							<Slider
-								aria-label="Number of seats"
-								max={SEAT_SLIDER_MAX}
-								min={minSeats}
-								onValueChange={(value: number | readonly number[]) =>
-									setSeats(Array.isArray(value) ? value[0] : (value as number))
-								}
-								value={[seats]}
-							/>
-							<p className="mt-1 text-muted-foreground text-xs">
-								Over {SEAT_SLIDER_MAX} seats? Talk to us about Enterprise.
-							</p>
+							{seatControl ? (
+								<>
+									<p className="mb-2 font-medium text-muted-foreground text-xs">
+										Seats: <span className="text-foreground">{seats}</span>
+									</p>
+									<Slider
+										aria-label="Number of seats"
+										max={SEAT_SLIDER_MAX}
+										min={minSeats}
+										onValueChange={(value: number | readonly number[]) =>
+											setSeats(
+												Array.isArray(value) ? value[0] : (value as number)
+											)
+										}
+										value={[seats]}
+									/>
+									<p className="mt-1 text-muted-foreground text-xs">
+										Over {SEAT_SLIDER_MAX} seats? Talk to us about Enterprise.
+									</p>
+								</>
+							) : (
+								<p className="text-muted-foreground text-xs">
+									Priced for one person. Buying for a team? Switch to Business
+									&amp; Enterprise above.
+								</p>
+							)}
 
 							{nothingSelected ? (
 								<p className="mt-6 text-muted-foreground text-sm">
@@ -516,8 +538,8 @@ export function PricingSavingsCalculator({
 								{usdWithCents.format(
 									monthlyPerSeatUsd * INCLUDED_CREDIT_FRACTION
 								)}
-								/seat/mo of AI usage, so the model bills the tools above charge
-								you for are already in the number.
+								{seatControl ? "/seat" : ""}/mo of AI usage, so the model bills
+								the tools above charge you for are already in the number.
 							</p>
 						</CardContent>
 					</Card>

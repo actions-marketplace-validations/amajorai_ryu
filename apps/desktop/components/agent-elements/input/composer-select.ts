@@ -33,8 +33,20 @@ export const WORKSPACE_SELECT_ITEM =
 export const WORKSPACE_SELECT_LABEL =
 	"px-2 py-1 font-medium text-[11px] text-foreground/40";
 
+// The cap + scroller is part of the shared look ON PURPOSE, because the lists
+// these popovers hold are not ours to bound: an ACP agent advertises its own
+// permission modes, reasoning levels and config options (`acp-pickers.tsx`), a
+// plugin advertises its own composer control options, and one of those lists can
+// be a 36-entry model roster. `PopoverContent` sets no max-height of its own, so
+// every one of those rendered at full height and simply ran off the top of the
+// screen with nothing to scroll — the rows past the viewport edge were
+// unreachable, not merely awkward.
+//
+// A popover that brings its OWN scroller (the model picker, whose search field
+// has to stay pinned while the rows move) overrides this with `overflow-hidden`;
+// nesting two scrollers is what makes a list feel stuck.
 export const COMPOSER_SELECT_POPOVER =
-	"w-auto min-w-[200px] max-w-[280px] rounded-3xl p-1 gap-0";
+	"w-auto min-w-[200px] max-w-[280px] max-h-80 overflow-y-auto rounded-3xl p-1 gap-0";
 
 // Matches the standard dropdown menu item padding (px-1.5 py-1 / gap-1.5) so the
 // composer pickers read identical to every other dropdown in the app.

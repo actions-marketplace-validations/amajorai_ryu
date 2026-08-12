@@ -1,6 +1,6 @@
-﻿import { createCodePlugin } from "@streamdown/code";
+﻿import { ToolResultOutput } from "@ryu/ui/components/agents/tool-result";
 import { memo, useMemo } from "react";
-import { Streamdown } from "streamdown";
+import { useChatDisplayPrefs } from "../chat-display-prefs.tsx";
 import { areToolPropsEqual, getToolStatus } from "../utils/format-tool.ts";
 import { unwrapMcpOutput } from "../utils/unwrap-mcp-output.ts";
 import {
@@ -149,10 +149,6 @@ function formatOutputForDisplay(output: any): string {
 	return text.length > 3000 ? `${text.slice(0, 3000)}\n...` : text;
 }
 
-const code = createCodePlugin({
-	themes: ["github-light", "github-dark"],
-});
-
 export const McpTool = memo(function McpTool({
 	part,
 	mcpInfo,
@@ -160,6 +156,7 @@ export const McpTool = memo(function McpTool({
 	defaultOpen,
 }: McpToolProps) {
 	const { isPending, isInterrupted } = getToolStatus(part, chatStatus);
+	const { expandCodeBlocks } = useChatDisplayPrefs();
 
 	const title = useMemo(() => {
 		if (part.state === "input-streaming") {
@@ -185,20 +182,21 @@ export const McpTool = memo(function McpTool({
 		return formatOutputForDisplay(part.output);
 	}, [part.output]);
 
-	const codeBlock = useMemo(() => {
-		if (!displayOutput) {
-			return null;
-		}
-		const trimmed = displayOutput.trim();
+	// An MCP result is a JSON payload or a plain string — never markdown. It used
+	// to be wrapped in a fence and sent through the markdown renderer purely to
+	// reach a highlighter; `ToolResultOutput` highlights it directly, so the
+	// payload can no longer be reinterpreted as markup on the way to the screen.
+	const outputBlock = useMemo(() => {
+		const trimmed = displayOutput?.trim();
 		if (!trimmed) {
 			return null;
 		}
 		const language =
 			trimmed.startsWith("{") || trimmed.startsWith("[") ? "json" : "text";
-		return `\`\`\`${language}\n${displayOutput}\n\`\`\``;
+		return { code: displayOutput as string, language } as const;
 	}, [displayOutput]);
 
-	const hasExpandableContent = !!codeBlock && !isPending;
+	const hasExpandableContent = !!outputBlock && !isPending;
 
 	// The chat tool loop (DA7) attaches an `approval` object to the part input
 	// when a requested tool needs the user's go-ahead. When present, render the
@@ -226,11 +224,22 @@ export const McpTool = memo(function McpTool({
 				shimmerLabel={title}
 				trailingContent={undefined}
 			>
-				{codeBlock && (
-					<div className="an-markdown text-[12px]">
-						<Streamdown controls={{ code: false }} plugins={{ code }}>
-							{codeBlock}
-						</Streamdown>
+				{outputBlock && (
+					// The height cap is this wrapper's job, not the renderer's. It used
+					// to come free from the markdown path's own scroll container
+					// (`agent-ui.css`, `[data-code-detail="capped"]`), so dropping that
+					// path without replacing the cap let a 3000-character payload
+					// stretch the row to whatever height it wanted.
+					<div
+						className={
+							expandCodeBlocks
+								? "text-[12px]"
+								: "max-h-[240px] overflow-y-auto overscroll-contain text-[12px]"
+						}
+					>
+						<ToolResultOutput language={outputBlock.language}>
+							{outputBlock.code}
+						</ToolResultOutput>
 					</div>
 				)}
 			</ToolRowBase>

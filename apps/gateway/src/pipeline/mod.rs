@@ -732,6 +732,55 @@ fn per_request_smart_router(
     Some(router)
 }
 
+// ─── Anthropic betas (the private `ryu_anthropic_beta` body field) ────────────
+
+/// The private body field carrying the caller's `anthropic-beta` opt-ins as one
+/// comma-separated string, from the chat-completions intake to the Anthropic
+/// provider. Same convention as `ryu_smart_route` above.
+///
+/// Named once, here, because two modules must agree on the string: `api::chat`
+/// WRITES it from the request header and [`strip_anthropic_beta_for`] REMOVES it
+/// before any other provider sees it. A literal in each place could drift, and
+/// the failure mode of drift is a 400 from a strict OpenAI endpoint.
+pub(crate) const ANTHROPIC_BETA_FIELD: &str = "ryu_anthropic_beta";
+
+/// Whether `provider` speaks the Anthropic Messages dialect, and is therefore an
+/// intended reader of [`ANTHROPIC_BETA_FIELD`] — and, either way, one that builds
+/// its own whitelist payload rather than forwarding the body verbatim.
+///
+/// `bedrock` is neither a typo nor optional: it is `AnthropicProvider` re-exposed
+/// under its own registry id (see [`crate::providers::ProviderRegistry::new`]), so
+/// `Provider::name` reports `"bedrock"` while the wire format is still Anthropic
+/// Messages. Anchored to the shared const so renaming that id cannot silently
+/// start stripping the betas off the Bedrock path.
+fn speaks_anthropic_dialect(provider: &str) -> bool {
+    // `AnthropicProvider::name()` is the hardcoded "anthropic" (no id const for
+    // the built-in slots); the credit-pool alias does have one.
+    provider == "anthropic" || provider == crate::config::BEDROCK_PROVIDER_ID
+}
+
+/// Strip [`ANTHROPIC_BETA_FIELD`] from the outgoing body unless `provider` is the
+/// one that reads it.
+///
+/// Allowlist direction on purpose: every non-Anthropic provider clones the request
+/// body VERBATIM into its payload (`openai.rs`, `openrouter.rs`, `local.rs`, …)
+/// and an unknown top-level field 400s a strict OpenAI endpoint, so a provider id
+/// nobody has thought about yet is safe by default.
+///
+/// Called per fallback ATTEMPT, not hoisted next to [`apply_prompt_cache`]:
+/// `AnthropicProvider` takes the body by reference and builds its own whitelist
+/// payload, so the field is still in *ours* after an Anthropic attempt — a
+/// fallback onto `openai` for attempt 2 has to re-decide. Do not lift it out of
+/// the loop.
+fn strip_anthropic_beta_for(body: &mut Value, provider: &str) {
+    if speaks_anthropic_dialect(provider) {
+        return;
+    }
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove(ANTHROPIC_BETA_FIELD);
+    }
+}
+
 // ─── Pre-process (shared by run + run_stream) ─────────────────────────────────
 
 /// Shared pre-processing: rate-limit + burst check + inbound-firewall + routing.
@@ -1846,6 +1895,11 @@ pub async fn run(
 
         state.metrics.inc_provider_request(provider.name());
 
+        // Only an Anthropic-dialect provider reads the caller's betas; for anyone
+        // else the private field is an unknown top-level key that would 400 a
+        // strict endpoint. Per attempt, because fallback swaps the provider.
+        strip_anthropic_beta_for(&mut body, provider.name());
+
         // 7b. Admission: gate concurrent access to the resident local engine so
         // interactive chat is served ahead of background fan-out (the engine has
         // a fixed batch-slot count). Held across the whole completion. Remote
@@ -2519,6 +2573,9 @@ pub async fn run_stream(
         };
 
         state.metrics.inc_provider_request(provider.name());
+
+        // Anthropic betas: same per-attempt strip as the non-streaming path.
+        strip_anthropic_beta_for(&mut body, provider.name());
 
         // Admission gate (streaming): same priority queue as the non-stream path.
         // The permit must outlive `run_stream` — a generation occupies an engine
@@ -5499,6 +5556,71 @@ mod tests {
             select_tool_loop(&signal_ctx(None, true, false), false, false, &cfg),
             ToolLoopKind::Plain
         );
+    }
+
+    // ─── Anthropic betas (private `ryu_anthropic_beta` field) ────────────────
+
+    /// A minimal chat body carrying the private betas field, as `api::chat`
+    /// leaves it after folding in the caller's `anthropic-beta` header.
+    fn body_with_betas() -> Value {
+        let mut body = json!({ "model": "m" });
+        body[ANTHROPIC_BETA_FIELD] = json!("code-execution-2025-05-22");
+        body
+    }
+
+    #[test]
+    fn anthropic_beta_survives_only_for_the_anthropic_dialect_providers() {
+        // `bedrock` is the non-obvious half: it is `AnthropicProvider` under a
+        // different registry id, so stripping there would silently drop the betas
+        // on a wire format that accepts them.
+        for provider in ["anthropic", crate::config::BEDROCK_PROVIDER_ID] {
+            let mut body = body_with_betas();
+            strip_anthropic_beta_for(&mut body, provider);
+            assert_eq!(
+                body[ANTHROPIC_BETA_FIELD],
+                json!("code-execution-2025-05-22"),
+                "{provider} reads the field and must keep it"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_beta_is_stripped_for_every_other_provider() {
+        // Each of these clones the request body verbatim into its payload, where an
+        // unknown top-level key 400s a strict endpoint.
+        for provider in [
+            "openai",
+            "openrouter",
+            "local",
+            "core",
+            "genai",
+            "modal",
+            crate::config::CLASSIFY_PROVIDER_ID,
+            crate::config::CLOUDFLARE_PROVIDER_ID,
+            crate::config::VERTEX_PROVIDER_ID,
+            crate::config::OPENAI_CREDITS_PROVIDER_ID,
+            // A provider id nobody has thought about yet: the allowlist direction
+            // means it is safe by default.
+            "some-future-provider",
+        ] {
+            let mut body = body_with_betas();
+            strip_anthropic_beta_for(&mut body, provider);
+            assert_eq!(
+                body.get(ANTHROPIC_BETA_FIELD),
+                None,
+                "{provider} would forward the private field upstream"
+            );
+            // Only that key goes; the rest of the payload is untouched.
+            assert_eq!(body, json!({ "model": "m" }));
+        }
+    }
+
+    #[test]
+    fn anthropic_beta_strip_is_a_no_op_when_the_field_was_never_set() {
+        let original = json!({ "model": "gpt-4o", "messages": [] });
+        let mut body = original.clone();
+        strip_anthropic_beta_for(&mut body, "openai");
+        assert_eq!(body, original);
     }
 
     // ─── Tool-policy profile resolution (#473 profiles) ──────────────────────

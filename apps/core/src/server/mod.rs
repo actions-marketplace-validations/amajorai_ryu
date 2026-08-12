@@ -29,6 +29,10 @@ pub mod git;
 // link stay Core-side (kernel ingress that forwards to the crate).
 pub mod hardware_public;
 pub mod hardware_ws;
+// The `chat.startTurn` kernel capability: the ONE way an out-of-process app posts a
+// turn on the user's behalf. Names no app — it is a host primitive, reached through
+// the generic capability broker.
+pub mod host_chat;
 // Healing is now OUT-OF-PROCESS: the `ryu-healing` sidecar (`crates/ryu-healing`
 // `[[bin]]`) owns the diagnose→propose engine, the per-source attempt cap, the
 // `healing.*` prefs, the Gateway diagnosis, and the `/api/healing/*` surface (served
@@ -2624,6 +2628,12 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             "/api/conversations/:id/feedback",
             get(get_conversation_feedback_handler),
         )
+        // What is filling this conversation's context window, by category. Read
+        // model for the desktop Context panel; see `sidecar::adapters::context_breakdown`.
+        .route(
+            "/api/conversations/:id/context",
+            get(get_conversation_context_handler),
+        )
         // Pin / archive a conversation. Server-backed so coordinator-thread
         // pins/archives and desktop pins share one source of truth and sync
         // across clients (the same columns the `threads` tool writes).
@@ -2960,6 +2970,14 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             "/api/preferences/:key",
             get(get_preference).put(set_preference),
         )
+        // ── Safe Mode (the OS-style "boot with extensions off" switch) ──────
+        // Its own routes rather than a bare preference read, because the GET has
+        // to report which of the three tiers turned it on (an env-forced node
+        // cannot be switched off from the UI) plus the suppressed counts that make
+        // it a diagnostic, and the PUT has to write the sentinel file alongside
+        // the preference so the next boot is safe even if this process never
+        // comes back up.
+        .route("/api/safe-mode", get(get_safe_mode).put(set_safe_mode))
         // Capability binding overrides (which provider serves a capability when 2+ apps provide it).
         .route(
             "/api/capabilities/bindings",
@@ -4056,7 +4074,7 @@ async fn update_apply(
     State(state): State<ServerState>,
     Json(asset): Json<crate::update::ReleaseAsset>,
 ) -> axum::response::Response {
-    match crate::update::apply::apply_update(&state.client, &asset).await {
+    match crate::update::apply::apply_update(&state.downloads, &asset).await {
         Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4264,6 +4282,146 @@ async fn set_preference(
         )
             .into_response(),
     }
+}
+
+// ── Safe Mode ────────────────────────────────────────────────────────────────
+
+/// Read the node's Safe Mode state, why it is in that state, and what it is
+/// holding back.
+///
+/// The counts are the point. A bare on/off switch tells a user nothing about
+/// whether it did anything; "34 plugins, 12 skills and 5 MCP servers suppressed"
+/// is a measurement they can act on. They are computed against the RAW records —
+/// the masked read would report zero enabled plugins and the payload would say
+/// safe mode is suppressing nothing, which is precisely backwards.
+#[utoipa::path(
+    get,
+    path = "/api/safe-mode",
+    tag = "Safe Mode",
+    summary = "Safe Mode state and what it suppresses",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_safe_mode(State(state): State<ServerState>) -> axum::response::Response {
+    let source = crate::safe_mode::source();
+    let records = state.app_store.list_all_records().await.unwrap_or_default();
+    let (kernel, suppressible): (Vec<_>, Vec<_>) = records
+        .iter()
+        .filter(|r| r.enabled)
+        .partition(|r| crate::safe_mode::keeps_plugin_enabled(&r.id));
+    let counts = crate::safe_mode::SuppressedCounts {
+        plugins: suppressible.len(),
+        kernel_plugins: kernel.len(),
+        skills: state.skills.enabled().len(),
+        mcp_servers: crate::sidecar::mcp::McpRegistry::user_configured_server_count(),
+    };
+    // The stored preference is reported separately from the effective state: an
+    // env-forced node has `enabled = true` with the pref still false, and a UI
+    // that bound its switch to the effective flag alone would show a control the
+    // user cannot move.
+    let pref = state
+        .preferences
+        .get(crate::safe_mode::SAFE_MODE_PREF_KEY)
+        .await
+        .ok()
+        .flatten();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "enabled": crate::safe_mode::is_active(),
+            "source": source.as_str(),
+            "user_clearable": source.is_user_clearable(),
+            "preference_enabled": crate::safe_mode::parse_enabled(pref.as_deref()),
+            "suppressed": counts,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SetSafeModeBody {
+    enabled: bool,
+}
+
+/// Turn Safe Mode on or off for the NEXT boot.
+///
+/// Writes both persistence tiers — the preference (so every surface sees the flip
+/// over the existing preferences stream) and the `~/.ryu/safe-mode` sentinel (so
+/// the next boot is safe even if this process dies before it restarts, and so a
+/// Core that cannot serve HTTP can still be brought up safe). Never touches the
+/// plugin lifecycle table: safe mode is a read mask, and leaving it must restore
+/// the user's apps exactly, with no bookkeeping to replay.
+///
+/// Returns `restart_required: true` always, and that is not a cop-out. Applying
+/// live would leave every sidecar, MCP child and scheduler loop that already
+/// spawned still running — the switch would report success while the CPU cost it
+/// exists to remove kept being paid.
+#[utoipa::path(
+    put,
+    path = "/api/safe-mode",
+    tag = "Safe Mode",
+    summary = "Enable or disable Safe Mode (applies on restart)",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 409, description = "Forced on by RYU_SAFE_MODE"),
+    )
+)]
+async fn set_safe_mode(
+    State(state): State<ServerState>,
+    Json(body): Json<SetSafeModeBody>,
+) -> axum::response::Response {
+    // An env-forced node cannot be talked out of safe mode by a preference write:
+    // the env tier outranks both persisted tiers, so honouring this would produce
+    // a switch that flips in the UI and changes nothing on reboot.
+    if !body.enabled && crate::safe_mode::source() == crate::safe_mode::SafeModeSource::Env {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "safe mode is forced on by {}; unset it and restart to leave safe mode",
+                    crate::safe_mode::SAFE_MODE_ENV
+                ),
+                "source": "env",
+            })),
+        )
+            .into_response();
+    }
+    if let Err(e) = crate::safe_mode::write_sentinel(body.enabled) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("could not write the safe-mode sentinel: {e}") })),
+        )
+            .into_response();
+    }
+    let value = if body.enabled { "true" } else { "false" };
+    if let Err(e) = state
+        .preferences
+        .set(crate::safe_mode::SAFE_MODE_PREF_KEY, value)
+        .await
+    {
+        // The sentinel already landed, so the next boot is correct either way;
+        // report the failure rather than pretending the fan-out happened.
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("could not persist the safe-mode preference: {e}") })),
+        )
+            .into_response();
+    }
+    tracing::warn!(
+        enabled = body.enabled,
+        "safe mode {} for the next boot",
+        if body.enabled { "ARMED" } else { "cleared" }
+    );
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "enabled": body.enabled,
+            "active_now": crate::safe_mode::is_active(),
+            "restart_required": true,
+        })),
+    )
+        .into_response()
 }
 
 // -- Capability bindings (the override-mutation API — Track A/B) ------------------
@@ -6772,7 +6930,18 @@ async fn agent_update(
     Path(agent_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if agent_id == "ryu" {
-        return match crate::sidecar::adapters::acp::update_managed_pi().await {
+        // Tracked like every other agent runtime fetch — this pulls the managed Pi
+        // through npm and is otherwise silent to the Downloads surfaces.
+        let managed = state
+            .downloads
+            .register_indeterminate(
+                "agent:ryu".to_string(),
+                crate::downloads::DownloadKind::Agent,
+                "Ryu agent runtime".to_string(),
+                crate::sidecar::adapters::acp::update_managed_pi(),
+            )
+            .await;
+        return match managed {
             Ok(()) => {
                 let version = crate::sidecar::adapters::acp::read_managed_pi_version();
                 (
@@ -6819,8 +6988,12 @@ async fn agent_update(
     let before = probe_installed().await;
 
     // The bridge is always npx-fetched, so warming it at `@latest` is its update.
+    // Tracked for the same reason the install path is: an update is a fetch of the
+    // same size, and it was equally invisible on the Downloads surfaces.
     if let Some(bridge) = bridge_pkg.as_deref() {
-        warm_npx_package(&format!("{}@latest", npm_package_name(bridge))).await;
+        let tagged = format!("{}@latest", npm_package_name(bridge));
+        let label = format!("{} (bridge)", npx_row_label(&tagged));
+        warm_npx_package_tracked(&state.downloads, &tagged, &label).await;
     }
 
     // The underlying CLI, through whichever channel owns it.
@@ -6828,13 +7001,33 @@ async fn agent_update(
     if let Some(pkg) = cli_pkg.as_deref() {
         let pkg = npm_package_name(pkg);
         let channel = binary.and_then(agent_install_channel);
+        // `npm install` reports no byte progress either, so the CLI leg tracks as
+        // one indeterminate row named after the package.
+        let npm_row_id = format!("npm:{pkg}");
+        let npm_row_label = npx_row_label(&pkg);
         let install = match &channel {
-            Some(AgentInstallChannel::RyuPrefix) => {
-                Some(npm_install_agent_package(&pkg, Some(crate::paths::ryu_dir())).await)
-            }
-            Some(AgentInstallChannel::NpmGlobal) => {
-                Some(npm_install_agent_package(&pkg, None).await)
-            }
+            Some(AgentInstallChannel::RyuPrefix) => Some(
+                state
+                    .downloads
+                    .register_indeterminate(
+                        npm_row_id,
+                        crate::downloads::DownloadKind::Agent,
+                        npm_row_label,
+                        npm_install_agent_package(&pkg, Some(crate::paths::ryu_dir())),
+                    )
+                    .await,
+            ),
+            Some(AgentInstallChannel::NpmGlobal) => Some(
+                state
+                    .downloads
+                    .register_indeterminate(
+                        npm_row_id,
+                        crate::downloads::DownloadKind::Agent,
+                        npm_row_label,
+                        npm_install_agent_package(&pkg, None),
+                    )
+                    .await,
+            ),
             Some(AgentInstallChannel::External(path)) => {
                 hint = Some(format!(
                     "{} is installed at {} — outside Ryu, so Ryu cannot upgrade it. \
@@ -6848,7 +7041,8 @@ async fn agent_update(
             // Not on PATH at all: this agent is npx-fetched, and the warm above
             // (or this one, when the CLI ships separately) is the whole install.
             None => {
-                warm_npx_package(&format!("{pkg}@latest")).await;
+                let tagged = format!("{pkg}@latest");
+                warm_npx_package_tracked(&state.downloads, &tagged, &npx_row_label(&tagged)).await;
                 None
             }
         };
@@ -7531,9 +7725,12 @@ async fn worktree_status_handler(
     if let Err(resp) = require_conversation_access_if_known(&state, &caller, &run_id, false).await {
         return resp;
     }
-    let store = state.worktree_diffs.lock().await;
-    match store.get(&run_id) {
-        Some(run) => {
+    // Snapshot everything we need, then release the lock — the live git read
+    // below shells out, and holding `worktree_diffs` across it would stall every
+    // other run's worktree bookkeeping.
+    let snapshot = {
+        let store = state.worktree_diffs.lock().await;
+        store.get(&run_id).map(|run| {
             let (branch, path) = run
                 .guard
                 .as_ref()
@@ -7544,19 +7741,47 @@ async fn worktree_status_handler(
                     )
                 })
                 .unwrap_or((None, None));
-            Json(json!({
-                // `active` ⇒ a live worktree is held for this conversation (the
-                // session can iterate in it); false once it has been applied.
-                "active": run.guard.is_some(),
-                "branch": branch,
-                "path": path,
-                "has_changes": run.diff.has_changes,
-                "changed_files": run.diff.files.len(),
-            }))
-            .into_response()
-        }
-        None => Json(json!({ "active": false })).into_response(),
-    }
+            (
+                run.guard.is_some(),
+                branch,
+                path,
+                run.diff.has_changes,
+                run.diff.files.len(),
+            )
+        })
+    };
+
+    let Some((active, branch, path, snap_has_changes, snap_changed_files)) = snapshot else {
+        return Json(json!({ "active": false })).into_response();
+    };
+
+    // `run.diff` is a snapshot taken when the run last computed a diff, so it
+    // goes stale the moment anything touches the worktree. While a worktree is
+    // still live, re-read it with the same `query_git_state` that backs
+    // `GET /api/git/status`, so both surfaces report one number instead of two
+    // that drift apart. Fall back to the snapshot once the worktree is gone.
+    let live = match path.clone() {
+        Some(p) => tokio::task::spawn_blocking(move || ryu_workspace::git::query_git_state(&p))
+            .await
+            .ok()
+            .filter(|s| s.is_repo),
+        None => None,
+    };
+    let (has_changes, changed_files) = match live {
+        Some(git) => (git.dirty, git.changed_files_count),
+        None => (snap_has_changes, snap_changed_files),
+    };
+
+    Json(json!({
+        // `active` ⇒ a live worktree is held for this conversation (the session
+        // can iterate in it); false once it has been applied.
+        "active": active,
+        "branch": branch,
+        "path": path,
+        "has_changes": has_changes,
+        "changed_files": changed_files,
+    }))
+    .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -8142,8 +8367,14 @@ async fn list_apps(
 ) -> Json<serde_json::Value> {
     // Attach lifecycle state to each manifest so the client knows install/enable
     // status without a separate round-trip.
+    // RAW records. This is the management surface: while Safe Mode is active it
+    // must still report the user's real enable state, marked `suppressed_by_safe_mode`,
+    // so the Store draws a "disabled by Safe Mode" badge. Rendering the mask here
+    // would show every app as off and invite the user to re-enable them one by one —
+    // writing real state to undo something that was only ever a read mask.
     let lifecycle: Vec<crate::plugins::PluginRecord> =
-        state.app_store.list().await.unwrap_or_default();
+        state.app_store.list_all_records().await.unwrap_or_default();
+    let safe_mode = crate::safe_mode::is_active();
 
     // Surface filter (`targets`). Applied HERE, at the read boundary — never in
     // the store — so a plugin that doesn't target this surface stays installed and
@@ -8174,6 +8405,31 @@ async fn list_apps(
                     "installed_version".to_owned(),
                     lc.map_or(serde_json::Value::Null, |r| {
                         serde_json::Value::String(r.version.clone())
+                    }),
+                );
+                // Safe Mode is a READ mask, so `enabled` above stays the user's own
+                // choice. This is the second half of that truth: enabled, but not
+                // running this boot. Only ever true for a record safe mode actually
+                // holds back — the kernel tiers keep running and are not flagged.
+                obj.insert(
+                    "suppressed_by_safe_mode".to_owned(),
+                    serde_json::Value::Bool(
+                        safe_mode
+                            && lc.is_some_and(|r| r.enabled)
+                            && !crate::safe_mode::keeps_plugin_enabled(&m.id),
+                    ),
+                );
+                // The grants actually APPROVED on the last successful enable — the
+                // subset of the manifest's `permission_grants` that is really in
+                // force. Without it the installed-plugin permissions editor had
+                // nothing to check its switches against and drew every grant as
+                // revoked, no matter what the record held. From the RECORD, never
+                // the manifest's claim: the manifest states what the app ASKED for.
+                obj.insert(
+                    "approved_grants".to_owned(),
+                    lc.map_or(serde_json::Value::Array(vec![]), |r| {
+                        serde_json::to_value(&r.approved_grants)
+                            .unwrap_or(serde_json::Value::Array(vec![]))
                     }),
                 );
                 // Deduplicated list of Runnable kinds bundled by this app.
@@ -10332,7 +10588,62 @@ async fn install_plugin_from_catalog(
 /// that runs the ed25519 signature verification and the fail-closed ui_code
 /// integrity gate. Returns the ACTIVE source's failure (status + message) when no
 /// source can serve the id.
+///
+/// Tracked in the global download center. This resolve is the whole network cost
+/// of installing or updating an app/plugin — it fans out across catalog sources
+/// and pulls the manifest plus the (potentially large) `ui_code` bundle — and it
+/// was previously invisible: the Store button spun, the Downloads page stayed
+/// empty. Wrapping it HERE rather than in each handler means the dependency
+/// closure gets a row per plugin too, so a plugin that pulls three dependencies
+/// shows four rows instead of one opaque stall.
+///
+/// One row per plugin id (`plugin:<id>`), so a retry dedups onto the same row.
 async fn resolve_plugin_from_catalog(
+    state: &ServerState,
+    id: &str,
+    buyer_token: Option<String>,
+) -> Result<(crate::plugin_manifest::PluginManifest, Option<String>), (StatusCode, String)> {
+    let tracked = state
+        .downloads
+        .register_indeterminate_as(
+            format!("plugin:{id}"),
+            crate::downloads::DownloadKind::Other,
+            crate::downloads::DownloadRole::Plugin,
+            id.to_string(),
+            async {
+                resolve_plugin_from_catalog_inner(state, id, buyer_token)
+                    .await
+                    .map_err(|(status, message)| {
+                        anyhow::Error::new(CatalogResolveFailed { status, message })
+                    })
+            },
+        )
+        .await;
+    tracked.map_err(|e| match e.downcast::<CatalogResolveFailed>() {
+        Ok(failed) => (failed.status, failed.message),
+        // The only other way out is a user Cancel from the download center.
+        Err(other) => (StatusCode::CONFLICT, other.to_string()),
+    })
+}
+
+/// A catalog resolve failure carried through `anyhow` so the download center can
+/// mark the row Failed with the real message while the handler still returns the
+/// exact status code it did before.
+#[derive(Debug)]
+struct CatalogResolveFailed {
+    status: StatusCode,
+    message: String,
+}
+
+impl std::fmt::Display for CatalogResolveFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CatalogResolveFailed {}
+
+async fn resolve_plugin_from_catalog_inner(
     state: &ServerState,
     id: &str,
     buyer_token: Option<String>,
@@ -13875,17 +14186,57 @@ async fn list_agents(
 ///     detectable binary — managed sidecars like OpenClaw, and `ryu` itself).
 ///   - `added`: the agent is in the installed set (shows in the picker). `ryu`
 ///     is always `true`.
+/// Query for `GET /api/agents/catalog`.
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+struct AgentCatalogQuery {
+    /// Include the installed/latest version columns. Defaults to `true`.
+    ///
+    /// Those columns are the ONLY expensive part of this handler: filling them
+    /// runs an npm-registry lookup per agent plus a `--version` subprocess per
+    /// installed one, which is why the full catalog takes ~30s on a warm cache
+    /// and is bounded only by the client's timeout. Detection (`detected`) and
+    /// membership (`added`) are local filesystem reads and cost nothing.
+    ///
+    /// A caller that only needs "what does this machine have" — onboarding's
+    /// agent step, which was silently skipping itself whenever the versioned
+    /// call timed out — passes `?versions=0` and gets the same rows in
+    /// milliseconds, with the version fields null. The Store, which exists to
+    /// show update state, keeps the default.
+    ///
+    /// Typed as a string and parsed leniently on purpose: a strict `bool` field
+    /// rejects `?versions=0` with a 400 for the WHOLE catalog, so the most
+    /// natural spelling of the flag would break the endpoint outright rather
+    /// than being understood. Anything unrecognised falls back to the default.
+    versions: Option<String>,
+}
+
+impl AgentCatalogQuery {
+    /// Whether to fill the version columns. `0`/`false`/`no`/`off` opt out; every
+    /// other value (including an absent param) keeps the versioned default.
+    fn with_versions(&self) -> bool {
+        !matches!(
+            self.versions.as_deref().map(str::trim),
+            Some("0" | "false" | "no" | "off")
+        )
+    }
+}
+
 /// Mirrors the model/skills catalog shape (`GET /api/{models,skills}/catalog`).
 #[utoipa::path(
     get,
     path = "/api/agents/catalog",
+    params(AgentCatalogQuery),
     tag = "Agents",
     summary = "List the agent catalog (detected CLIs)",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn list_agent_catalog(State(state): State<ServerState>) -> Json<serde_json::Value> {
+async fn list_agent_catalog(
+    State(state): State<ServerState>,
+    Query(params): Query<AgentCatalogQuery>,
+) -> Json<serde_json::Value> {
     let registry = crate::registry::ProviderRegistry::load();
     let installed_set = state.agent_store.installed_ids().await.unwrap_or_default();
+    let with_versions = params.with_versions();
     let tasks = state
         .agents
         .list_infos_with_default(&registry.default_agent_id)
@@ -13894,7 +14245,13 @@ async fn list_agent_catalog(State(state): State<ServerState>) -> Json<serde_json
             let added = i.id == "ryu" || installed_set.contains(&i.id);
             let entry = state.agents.find_by_prefix(&i.id).cloned();
             tokio::spawn(async move {
-                let version_probe = entry.as_ref().and_then(|e| e.version_probe.clone());
+                // `?versions=0` drops the version columns and, with them, every
+                // network call this handler makes. See `AgentCatalogQuery`.
+                let version_probe = if with_versions {
+                    entry.as_ref().and_then(|e| e.version_probe.clone())
+                } else {
+                    None
+                };
                 let registry_id = entry.as_ref().and_then(|e| e.registry_id.clone());
                 let registry_bridge_version = entry.as_ref().and_then(|e| e.bridge_version.clone());
                 let icon_url = entry.as_ref().and_then(|e| e.icon_url.clone());
@@ -14047,6 +14404,25 @@ fn npx_package_of(spawn_cmd: &str) -> Option<String> {
     Some(crate::sidecar::agents::acp_registry::npm_package_name(&raw))
 }
 
+/// The npm package an already-split `(command, args)` pair would fetch through
+/// npx, or `None` when the command is not npx (a PATH binary, `uvx`, docker …).
+///
+/// The spec is returned VERBATIM — including any `@version` — because this is used
+/// to prefetch exactly what the recorded command will later spawn, not to
+/// normalize an id. [`npx_package_of`] parses a single command *string* and
+/// deliberately strips the version, so the two are not interchangeable.
+fn npx_package_of_command(command: &str, args: &[String]) -> Option<String> {
+    if command != "npx" && command != "npm" {
+        return None;
+    }
+    args.iter()
+        .find(|t| {
+            let t = t.as_str();
+            t != "-y" && t != "--yes" && t != "--" && t != "exec" && !t.starts_with('-')
+        })
+        .cloned()
+}
+
 async fn probe_npx_package_version(pkg: &str) -> Option<String> {
     let base = crate::sidecar::agents::acp_registry::npm_package_name(pkg);
     let spec = format!("{base}@latest");
@@ -14094,6 +14470,54 @@ async fn warm_npx_package(pkg: &str) {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(180), cmd.status()).await;
 }
 
+/// [`warm_npx_package`], tracked as a row in the global download center.
+///
+/// The npx cache warm IS the install for every self-fetching agent (Claude Code,
+/// Codex, Gemini, Pi and every ACP bridge), and it is the slow part — up to the
+/// 180 s bound above, pulling tens of MB. Untracked, clicking Install in the store
+/// or the composer's agent picker produced no row anywhere: the Downloads page and
+/// the tray popover both stayed empty while npm downloaded, which is exactly the
+/// "can't track it" report. Only the archive/binary legs (`ensure_direct_archive`,
+/// `archive_agent`, ZeroClaw) ever showed up, because those fetch through
+/// `download_blocking`.
+///
+/// One row PER PACKAGE, not per agent: an ACP agent is usually a CLI plus a
+/// separate bridge package, and the user sees both being fetched. The id is the
+/// package name so a re-install dedups onto the same row rather than stacking.
+///
+/// A subprocess reports no byte counts, so this is an INDETERMINATE task: it shows
+/// active → done/failed and is cancelable (cancel drops the future, which kills the
+/// child), without a progress bar.
+async fn warm_npx_package_tracked(
+    downloads: &crate::downloads::DownloadCenter,
+    pkg: &str,
+    label: &str,
+) {
+    let _ = downloads
+        .register_indeterminate(
+            format!("npx:{pkg}"),
+            crate::downloads::DownloadKind::Agent,
+            label.to_string(),
+            async {
+                warm_npx_package(pkg).await;
+                Ok(())
+            },
+        )
+        .await;
+}
+
+/// The display name for an npx package row — the bare package name, without the
+/// `@latest` the warm appends or the npm scope, which reads as noise in a list of
+/// downloads ("`@zed-industries/claude-code-acp`" → "claude-code-acp").
+fn npx_row_label(pkg_with_tag: &str) -> String {
+    let base = pkg_with_tag
+        .rsplit_once('@')
+        .map(|(name, _tag)| name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(pkg_with_tag);
+    base.rsplit('/').next().unwrap_or(base).to_string()
+}
+
 /// Actually fetch an agent's runtime (Zed-style), dispatched by how the agent is
 /// distributed. Best-effort and non-fatal: every npx/uvx agent also self-fetches
 /// on first spawn, so a failure here only costs a one-time first-run delay.
@@ -14128,8 +14552,24 @@ async fn install_agent_runtime(
         // install shows real progress in the Agents tab (kind `agent`/name),
         // instead of only being added to the picker.
         match id.as_str() {
+            // A subprocess installer (npm), so it registers as an indeterminate row
+            // — the same id `/api/setup/openclaw/install` uses, so triggering the
+            // install from the Agents tab and from the Engines tab shows ONE row
+            // rather than two competing ones.
+            //
+            // Sharing the id shares the ROW, not the WORK: `register_indeterminate`
+            // cannot hand a second caller the first one's result, so both futures
+            // still run. `openclaw::installer::ensure_installed` therefore holds its
+            // own install lock and re-checks the fast path under it.
             "openclaw" => {
-                agents::openclaw::installer::ensure_installed().await?;
+                downloads
+                    .register_indeterminate(
+                        "agent:openclaw".to_string(),
+                        crate::downloads::DownloadKind::Agent,
+                        "OpenClaw".to_string(),
+                        agents::openclaw::installer::ensure_installed(),
+                    )
+                    .await?;
                 return Ok(());
             }
             "zeroclaw" => {
@@ -14142,25 +14582,34 @@ async fn install_agent_runtime(
         }
         // npx self-fetching agents (claude/codex/gemini/pi, …): warm the cache.
         // uvx agents and OpenAI-compat servers self-fetch on first use.
+        //
+        // Tracked, one row per package: this leg is what the *majority* of catalog
+        // agents install through, and it used to be completely invisible — the CLI
+        // and its ACP bridge could be pulling ~100 MB through npm with an empty
+        // Downloads page in front of the user.
         if let AgentTransport::Acp { spawn_cmd } = &entry.transport {
             if let Some(pkg) = npx_package_of(spawn_cmd) {
-                warm_npx_package(&format!("{pkg}@latest")).await;
+                let tagged = format!("{pkg}@latest");
+                warm_npx_package_tracked(&downloads, &tagged, &npx_row_label(&tagged)).await;
             }
         }
         if let Some(probe) = entry.version_probe.as_ref() {
             if let Some(pkg) = probe.npm_package.as_deref() {
-                warm_npx_package(&format!(
+                let tagged = format!(
                     "{}@latest",
                     crate::sidecar::agents::acp_registry::npm_package_name(pkg)
-                ))
-                .await;
+                );
+                warm_npx_package_tracked(&downloads, &tagged, &npx_row_label(&tagged)).await;
             }
             if let Some(bridge) = probe.bridge_npm_package.as_deref() {
-                warm_npx_package(&format!(
+                let tagged = format!(
                     "{}@latest",
                     crate::sidecar::agents::acp_registry::npm_package_name(bridge)
-                ))
-                .await;
+                );
+                // Named as the bridge so the two rows are tellable apart — this is
+                // the "downloading bridge AND agent" the user could not follow.
+                let label = format!("{} (bridge)", npx_row_label(&tagged));
+                warm_npx_package_tracked(&downloads, &tagged, &label).await;
             }
         }
         Ok(())
@@ -15626,6 +16075,39 @@ async fn get_conversation_feedback_handler(
     }
 }
 
+/// `GET /api/conversations/:id/context` — the per-category token attribution for
+/// the last turn Core assembled on this conversation (skills, tool definitions,
+/// memory, conversation history, …).
+///
+/// Served from an in-memory cache rather than the transcript: a breakdown
+/// describes the prompt Core built for one turn, so it is meaningless after a
+/// restart and is regenerated on the next turn. `{ "breakdown": null }` is the
+/// normal answer for a conversation that has not run a turn in this process —
+/// the panel renders an empty state, not an error.
+#[utoipa::path(
+    get,
+    path = "/api/conversations/{id}/context",
+    tag = "Conversations",
+    summary = "Get the context-window breakdown for a conversation",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_conversation_context_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if let Err(resp) = require_resource_read(
+        state.conversations.get_access_meta(&id).await,
+        caller.as_ref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return resp;
+    }
+    let breakdown = crate::sidecar::adapters::context_breakdown::remembered(&id);
+    Json(json!({ "breakdown": breakdown })).into_response()
+}
+
 #[derive(serde::Deserialize)]
 struct SetFlagBody {
     value: bool,
@@ -15766,7 +16248,10 @@ async fn get_conversation_title_history_handler(
     }
 }
 
-/// `POST /api/conversations/:id/icon` — set or clear a conversation glyph.
+/// `GET /api/conversations/:id/context` — what currently occupies this
+/// conversation's context window, itemized.
+///
+//// `POST /api/conversations/:id/icon` — set or clear a conversation glyph.
 #[utoipa::path(
     post,
     path = "/api/conversations/{id}/icon",
@@ -17659,6 +18144,42 @@ async fn mcp_catalog_install(
             // executor (delegate); the record is additive governance metadata.
             // Best-effort: a failure here never fails the MCP install itself.
             persist_mcp_plugin_record(&state, &plan).await;
+            // Prefetch the package the server's command spawns, tracked as a row in
+            // the global download center.
+            //
+            // Behaviour change, deliberately: installing an MCP server used to write
+            // `mcp.json` and stop, leaving the actual multi-MB npm fetch to happen
+            // silently on first enable — so "install" finished instantly and the
+            // Downloads page never mentioned MCP servers at all. Warming it here
+            // makes install mean the same thing it means for an agent, and gives the
+            // user something to watch and cancel.
+            //
+            // Backgrounded: the warm is bounded at 180 s, far past any client
+            // timeout, and the entry is already written — nothing below depends on it.
+            //
+            // Keyed on the CATALOG ID, not the package: a remote server is bridged
+            // through `npx -y mcp-remote <url>`, so every hosted entry (most of
+            // Smithery) shares one package name. Keying on the package would make
+            // each new hosted install overwrite the previous server's row and rename
+            // it. The row is about the server the user clicked, so its id is too.
+            if let Some(pkg) = npx_package_of_command(&command, &args) {
+                let downloads = state.downloads.clone();
+                let label = plan.server_name.clone();
+                let row_id = format!("mcp:{}", plan.catalog_id);
+                tokio::spawn(async move {
+                    let _ = downloads
+                        .register_indeterminate(
+                            row_id,
+                            crate::downloads::DownloadKind::Mcp,
+                            label,
+                            async {
+                                warm_npx_package(&pkg).await;
+                                Ok(())
+                            },
+                        )
+                        .await;
+                });
+            }
             (
                 StatusCode::OK,
                 Json(json!({
@@ -19343,11 +19864,21 @@ async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value>
 ///   archive, macOS Homebrew, or `RYU_TAILSCALE_RELEASE_URL`). True ⇒ the client
 ///   should offer the install; false ⇒ tell the user how to install it themselves.
 ///
-/// This handler deliberately does NOT install inline. `POST /api/setup/tailscale/install`
-/// is the install route and it backgrounds the work (`tokio::spawn`) precisely
-/// because these are minute-long transfers; running one inside the toggle handler
-/// would hang the request past any client timeout. The client drives:
-/// enable → `can_install` → install → re-POST enable.
+/// **Enabling the mesh INSTALLS the client** when one is missing and this node has
+/// an install route — the same way picking an engine installs it. The user asked
+/// for a tailnet, not for a shopping list; making them find
+/// `POST /api/setup/tailscale/install` themselves was the whole reason enabling
+/// the mesh felt broken. So a third non-contract field rides along:
+///
+/// - `installing: bool` — an install was started for this enable; the client
+///   should show progress (it also lands in the download overlay) and re-read
+///   `/api/mesh/status` rather than treat `start_error` as final.
+///
+/// The install is still NOT inline. It is `tokio::spawn`ed via
+/// [`spawn_mesh_client_install`] precisely because these are minute-long
+/// transfers; awaiting one inside the toggle handler would hang the request past
+/// any client timeout. The daemon is started by that task once the binaries land,
+/// so the client does not need to re-POST this route.
 ///
 /// Security: enabling mesh makes this Core reachable over the tailnet, so the
 /// fail-closed token gate (`enforce_remote_auth`) requires a strong
@@ -19387,6 +19918,7 @@ async fn mesh_config(
     ryu_mesh::set_pref_enabled(body.enabled);
 
     let mut start_error: Option<String> = None;
+    let mut installing = false;
     let mut missing = crate::sidecar::tailscale::MissingMesh {
         missing: Vec::new(),
         can_install: false,
@@ -19396,6 +19928,25 @@ async fn mesh_config(
         // rather than scraped back out of the start error's prose.
         if let Err(m) = crate::sidecar::tailscale::ensure_mesh_binaries() {
             tracing::warn!("mesh: {m}");
+            // Install it FOR them when this node has a route, instead of handing
+            // back a sentence about `brew`. The task starts the daemon itself once
+            // the binaries land (mesh stays enabled throughout), so the client's
+            // only job is to show progress and re-read the status.
+            if m.can_install {
+                tracing::info!(
+                    "mesh: no Tailscale client on this node — installing one in the background"
+                );
+                spawn_mesh_client_install(
+                    state.downloads.clone(),
+                    Arc::clone(&state.manager),
+                    Arc::clone(&state.install_status),
+                );
+                // True even when an install was ALREADY running (the helper's
+                // `false`): the user's enable is being served by that run, and
+                // reporting "not installing" would send the client back to the
+                // dead-end error text.
+                installing = true;
+            }
             start_error = Some(m.to_string());
             missing = m;
         } else {
@@ -19426,8 +19977,70 @@ async fn mesh_config(
         value["start_error"] = serde_json::Value::String(err);
         value["missing_binaries"] = serde_json::json!(missing.missing);
         value["can_install"] = serde_json::Value::Bool(missing.can_install);
+        // Inside this block on purpose, not by accident: `installing` is only ever
+        // true because the client was MISSING, which always sets `start_error`. The
+        // desktop branches on the field's presence, so an "improvement" that emits
+        // it on a clean enable would move it out of a block the client never reads
+        // and silently lose the progress state.
+        value["installing"] = serde_json::Value::Bool(installing);
     }
     Json(value).into_response()
+}
+
+/// Whether a mesh-client install is already in flight, so a user tapping the mesh
+/// toggle twice does not queue a second 38 MB transfer (or a second
+/// `brew install`). Cleared by the task itself, in both the success and the
+/// failure arm — a stuck flag would make the mesh permanently uninstallable.
+static MESH_INSTALL_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Install the mesh client in the background and, if the mesh is (still) enabled
+/// when it lands, start the daemon.
+///
+/// Returns whether THIS call started the work: `false` means an install was
+/// already running, which the caller reports as "installing" all the same — the
+/// user's request is being served either way.
+///
+/// Shared by `POST /api/mesh/config` and Core's boot self-heal so a node that
+/// wants the mesh converges on having it from either entry point. The
+/// enabled-check is re-read AFTER the download rather than captured before it,
+/// because a minute-long install gives the user ample time to switch the mesh
+/// back off — starting a daemon they just disabled would be a surprise.
+pub(crate) fn spawn_mesh_client_install(
+    downloads: crate::downloads::DownloadCenter,
+    manager: Arc<SidecarManager>,
+    install_status: Arc<InstallStatusStore>,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    if MESH_INSTALL_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        tracing::info!("mesh: a Tailscale client install is already running — not starting another");
+        return false;
+    }
+    tokio::spawn(async move {
+        install_status.set_installing("tailscale").await;
+        let result = crate::sidecar::tailscale::downloader::install_mesh_client(&downloads).await;
+        MESH_INSTALL_IN_FLIGHT.store(false, Ordering::SeqCst);
+        match result {
+            Ok(version) => {
+                install_status.set_installed("tailscale", version).await;
+                if ryu_mesh::is_enabled() {
+                    manager.mark_installed("tailscale").await;
+                    if let Err(e) = manager.start_sidecar("tailscale").await {
+                        tracing::warn!("mesh: daemon failed to start after auto-install: {e}");
+                    } else {
+                        tracing::info!("mesh: client installed and daemon started");
+                    }
+                } else {
+                    tracing::info!("mesh: client installed, but the mesh was turned off meanwhile");
+                }
+            }
+            Err(e) => {
+                tracing::error!("mesh: automatic Tailscale client install failed: {e:#}");
+                install_status.set_failed("tailscale", format!("{e:#}")).await;
+            }
+        }
+    });
+    true
 }
 
 // ── Webhook ingress seam (#479, P6a) ──────────────────────────────────────────
@@ -24673,24 +25286,12 @@ async fn install_sidecar(
             // `tailscaled`. The brew leg reports no byte progress, so it registers
             // as an indeterminate task exactly like `apfel`.
             //
-            // Note this is the USER-INITIATED install path. `POST /api/mesh/config`
-            // deliberately does NOT download inline (see its doc): a 38 MB transfer
-            // inside the toggle handler would hang past any client timeout.
+            // This is the EXPLICIT install path. `POST /api/mesh/config` still does
+            // not download inline (a 38 MB transfer inside the toggle handler would
+            // hang past any client timeout) — it backgrounds the same helper, so
+            // both routes install identically.
             "tailscale" => {
-                use crate::sidecar::tailscale::downloader::TailscaleDownloader;
-                let dl = TailscaleDownloader::new();
-                if crate::sidecar::tailscale::downloader::is_brew_leg() {
-                    downloads
-                        .register_indeterminate(
-                            "tool:tailscale".to_string(),
-                            crate::downloads::DownloadKind::Tool,
-                            "Tailscale".to_string(),
-                            dl.ensure_installed(&downloads),
-                        )
-                        .await
-                } else {
-                    dl.ensure_installed(&downloads).await
-                }
+                crate::sidecar::tailscale::downloader::install_mesh_client(&downloads).await
             }
             // Docker Model Runner is adopt-only: there is nothing to download.
             // "Installing" means verifying DMR is enabled + reachable on :12434,
@@ -28238,60 +28839,104 @@ async fn check_dependencies() -> Json<serde_json::Value> {
     summary = "Best-effort install of missing deps",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn install_dependencies() -> Json<serde_json::Value> {
+async fn install_dependencies(State(state): State<ServerState>) -> Json<serde_json::Value> {
     use std::time::Duration;
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(300), // 5 minute timeout
-        tokio::task::spawn_blocking(|| {
-            let mut results = serde_json::Map::new();
+    // One tracked row PER TOOLCHAIN, not one for the batch. These are the longest
+    // installs in the product — rustup, a Node runtime and a Python are each a
+    // multi-minute, multi-hundred-MB fetch — and until now the whole 5-minute call
+    // was a single silent await with nothing on the Downloads page. Collapsing four
+    // artifacts into one row would hide which one is actually running (and which one
+    // is the slow one), so each gets its own.
+    //
+    // Each installer is blocking, so it runs on its own `spawn_blocking` awaited
+    // inside its own registration; a cancel from the download center drops the join
+    // handle (the already-spawned installer runs to completion, as ever — killing a
+    // half-written toolchain install is worse than letting it finish).
+    let steps: [(&str, &str, fn() -> bool, fn() -> Result<(), String>); 4] = [
+        ("git", "Git", || command_exists("git"), install_git),
+        ("rust", "Rust toolchain", || command_exists("rustc"), install_rust),
+        (
+            "npm",
+            "Node runtime",
+            || command_exists("npm") || command_exists("bun"),
+            install_node_runtime,
+        ),
+        (
+            "python",
+            "Python",
+            || command_exists("python3") || command_exists("python"),
+            install_python,
+        ),
+    ];
 
+    let mut results = serde_json::Map::new();
+    for (key, label, is_installed, install) in steps {
+        if is_installed() {
+            // Nothing to fetch — do not create a row that would instantly complete.
             results.insert(
-                "git".to_string(),
-                install_dependency(|| command_exists("git"), install_git),
+                key.to_string(),
+                json!({ "status": "already_installed", "success": true }),
             );
-            results.insert(
-                "rust".to_string(),
-                install_dependency(|| command_exists("rustc"), install_rust),
-            );
-            results.insert(
-                "npm".to_string(),
-                install_dependency(
-                    || command_exists("npm") || command_exists("bun"),
-                    install_node_runtime,
-                ),
-            );
-            results.insert(
-                "python".to_string(),
-                install_dependency(
-                    || command_exists("python3") || command_exists("python"),
-                    install_python,
-                ),
-            );
-
-            let (dependencies, all_installed) = dependency_status();
-            let install_steps_succeeded = results.values().all(|result| {
-                result
-                    .get("success")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false)
-            });
-
-            json!({
-                "success": install_steps_succeeded && all_installed,
-                "results": results,
-                "dependencies": dependencies,
-                "all_installed": all_installed
-            })
-        }),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(json)) => Json(json),
-        Ok(Err(e)) => Json(json!({ "success": false, "error": e.to_string() })),
-        Err(_) => Json(json!({ "success": false, "error": "timeout" })),
+            continue;
+        }
+        let outcome = state
+            .downloads
+            .register_indeterminate(
+                format!("dependency:{key}"),
+                crate::downloads::DownloadKind::Tool,
+                label.to_string(),
+                async move {
+                    let value = tokio::time::timeout(
+                        Duration::from_secs(300), // 5 minute timeout, per dependency
+                        tokio::task::spawn_blocking(move || {
+                            install_dependency(is_installed, install)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| anyhow::anyhow!("timeout"))?
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    // A failed installer must fail the ROW too, or the overlay would
+                    // report a green "installed" for a toolchain that is still missing.
+                    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+                        let msg = value
+                            .get("error")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("install failed")
+                            .to_string();
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    Ok(value)
+                },
+            )
+            .await;
+        results.insert(
+            key.to_string(),
+            match outcome {
+                Ok(value) => value,
+                Err(e) => json!({
+                    "status": "failed",
+                    "success": false,
+                    "error": format!("{e}"),
+                }),
+            },
+        );
     }
+
+    let (dependencies, all_installed) = dependency_status();
+    let install_steps_succeeded = results.values().all(|result| {
+        result
+            .get("success")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    });
+
+    Json(json!({
+        "success": install_steps_succeeded && all_installed,
+        "results": results,
+        "dependencies": dependencies,
+        "all_installed": all_installed
+    }))
 }
 
 // NOTE: the former `double_check_tests` module was removed — it tested
@@ -30337,6 +30982,52 @@ mod pure_helper_tests {
         assert_eq!(npx_package_of("uvx some-tool"), None);
         // npx with only flags and no package ⇒ None.
         assert_eq!(npx_package_of("npx -y"), None);
+    }
+
+    // ── npx_package_of_command ───────────────────────────────────────────────
+    // The MCP install prefetch reads an already-split `(command, args)` pair off
+    // the resolved plan, and must keep the version the plan pinned — the point is
+    // to warm exactly what `mcp.json` will later spawn.
+    #[test]
+    fn npx_package_of_command_reads_the_plan_verbatim() {
+        let args = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            npx_package_of_command("npx", &args(&["-y", "@scope/server", "--port", "1"])).as_deref(),
+            Some("@scope/server")
+        );
+        // A remote plan is bridged through `mcp-remote`, which is the package to warm.
+        assert_eq!(
+            npx_package_of_command("npx", &args(&["-y", "mcp-remote", "https://example.com/mcp"]))
+                .as_deref(),
+            Some("mcp-remote")
+        );
+        // A pinned version is KEPT (unlike `npx_package_of`, which normalizes an id).
+        assert_eq!(
+            npx_package_of_command("npx", &args(&["-y", "srv@1.2.3"])).as_deref(),
+            Some("srv@1.2.3")
+        );
+        // Not an npm-spawned server ⇒ nothing to prefetch.
+        assert_eq!(npx_package_of_command("uvx", &args(&["some-server"])), None);
+        assert_eq!(npx_package_of_command("docker", &args(&["run", "img"])), None);
+        // npx with only flags ⇒ None.
+        assert_eq!(npx_package_of_command("npx", &args(&["-y"])), None);
+    }
+
+    // ── npx_row_label ────────────────────────────────────────────────────────
+    // The download row for an npx warm is named after the package, without the
+    // `@latest` the warm appends or the npm scope — otherwise every agent row in
+    // the Downloads page reads as "@zed-industries/…@latest".
+    #[test]
+    fn npx_row_label_drops_the_tag_and_the_scope() {
+        assert_eq!(
+            npx_row_label("@zed-industries/claude-code-acp@latest"),
+            "claude-code-acp"
+        );
+        assert_eq!(npx_row_label("codex-acp@latest"), "codex-acp");
+        // No tag at all (the npm-install leg passes a bare package name).
+        assert_eq!(npx_row_label("@openai/codex"), "codex");
+        assert_eq!(npx_row_label("some-pkg"), "some-pkg");
     }
 
     // ── agent_install_channel ────────────────────────────────────────────────

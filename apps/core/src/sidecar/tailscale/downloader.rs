@@ -427,6 +427,35 @@ impl TailscaleDownloader {
     }
 }
 
+/// Install the mesh client through the download overlay, picking the progress
+/// shape the active leg can actually honour.
+///
+/// THE one install entry point. Three callers need identical behaviour and used
+/// to have none: `POST /api/setup/tailscale/install` (the explicit button),
+/// `POST /api/mesh/config` (turning the mesh ON now installs, rather than
+/// reporting a missing client), and Core's boot self-heal for a node whose mesh
+/// pref is already on. Keeping the leg choice here means a new leg is added once.
+///
+/// The brew leg emits no byte counts, so it registers as an INDETERMINATE task
+/// (like `apfel`); the archive leg streams real bytes through `DownloadCenter`
+/// on its own. Collapsing the two would either fake a progress bar or lose the
+/// overlay row entirely.
+pub async fn install_mesh_client(downloads: &crate::downloads::DownloadCenter) -> Result<String> {
+    let dl = TailscaleDownloader::new();
+    if is_brew_leg() {
+        downloads
+            .register_indeterminate(
+                "tool:tailscale".to_string(),
+                crate::downloads::DownloadKind::Tool,
+                "Tailscale".to_string(),
+                dl.ensure_installed(downloads),
+            )
+            .await
+    } else {
+        dl.ensure_installed(downloads).await
+    }
+}
+
 /// macOS leg: adopt an existing pair, else `brew install tailscale`.
 ///
 /// Modelled on `providers/apfel/installer.rs` for the same reason it exists there —

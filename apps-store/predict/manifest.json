@@ -9,7 +9,7 @@
   "icon": "ai-magic",
   "iconDither": {
     "from": 249,
-    "to": 283,
+    "to": "transparent",
     "direction": "down"
   },
   "surfaces": {

@@ -7,7 +7,7 @@
   "tagline": "Everything happening on this node, newest first",
   "keywords": ["activity", "feed", "notifications", "history"],
   "icon": "activity-03",
-  "iconDither": { "from": 210, "to": 244, "direction": "up" },
+  "iconDither": { "from": 210, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

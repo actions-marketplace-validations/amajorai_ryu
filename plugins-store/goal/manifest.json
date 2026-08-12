@@ -7,7 +7,7 @@
   "keywords": ["agent", "autonomy", "goals", "loop"],
   "category": "Productivity",
   "icon": "flag-03",
-  "iconDither": { "from": 291, "to": 325, "direction": "down" },
+  "iconDither": { "from": 291, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

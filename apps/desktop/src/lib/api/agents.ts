@@ -438,14 +438,28 @@ function toCatalogEntry(a: AgentCatalogEntryWire): AgentCatalogEntry {
 	};
 }
 
-/** Browse the installable agent catalog (every built-in, with detect/added flags). */
+/**
+ * Browse the installable agent catalog (every built-in, with detect/added flags).
+ *
+ * `versions: false` asks Core to skip the installed/latest version columns. That
+ * is not a cosmetic trim: filling them costs an npm-registry lookup per agent
+ * plus a `--version` subprocess per installed one — measured at ~30s on a warm
+ * cache — while `detected`/`added` are local reads that return immediately. Any
+ * caller that only asks "what does this machine have" should pass it; only the
+ * surfaces that render update state need the default.
+ */
 export async function fetchAgentCatalog(
 	target: ApiTarget,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	options?: { versions?: boolean }
 ): Promise<AgentCatalogEntry[]> {
+	const path =
+		options?.versions === false
+			? "/api/agents/catalog?versions=0"
+			: "/api/agents/catalog";
 	const json = await request<{ agents?: AgentCatalogEntryWire[] }>(
 		target,
-		"/api/agents/catalog",
+		path,
 		signal ? { signal } : undefined
 	);
 	return (json.agents ?? []).map(toCatalogEntry);

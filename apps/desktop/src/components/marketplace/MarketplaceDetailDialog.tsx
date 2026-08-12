@@ -117,9 +117,15 @@ export default function MarketplaceDetailDialog({
 			{/* Same width and the same `p-0` full-bleed contract as the Store's
 			    catalog preview (`StoreCatalogLayout`), because it is the same THING —
 			    a listing page. It was `max-w-3xl` (48rem) while the catalog preview was
-			    already 64rem, so the paid listings opened in a noticeably narrower box
-			    than the free ones and every section inside wrapped early. */}
-			<DialogContent className="max-h-[88vh] w-[min(80rem,94vw)] max-w-[min(80rem,94vw)] overflow-hidden p-0">
+			    already wider, so the paid listings opened in a noticeably narrower box
+			    than the free ones and every section inside wrapped early.
+
+			    The `sm:` copy is load-bearing: `DialogContent`'s base classes carry
+			    `sm:max-w-md`, and `twMerge` only drops a class whose modifier AND group
+			    match, so an unprefixed `max-w-[…]` left it in the markup where it won on
+			    source order and clamped this dialog to 28rem above 640px. Same trap and
+			    same fix as `store-catalog-layout.tsx`, which documents it in full. */}
+			<DialogContent className="max-h-[88vh] w-[min(80rem,94vw)] max-w-[min(80rem,94vw)] overflow-hidden p-0 sm:max-w-[min(80rem,94vw)]">
 				<DialogHeader className="sr-only">
 					<DialogTitle>{initialName ?? "Listing"}</DialogTitle>
 				</DialogHeader>

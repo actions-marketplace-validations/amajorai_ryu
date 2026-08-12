@@ -6,7 +6,7 @@
   "description": "Desktop automation: 29 screen perception and input control tools. Windows-first.",
   "tagline": "Let agents see and drive your desktop",
   "icon": "cursor-01",
-  "iconDither": { "from": 354, "to": 320, "direction": "right" },
+  "iconDither": { "from": 354, "to": "transparent", "direction": "down" },
   "keywords": ["automation", "desktop"],
   "surfaces": {
     "gateway": { "support": "none" },

@@ -15,6 +15,7 @@
 // same pattern as ChatPage's `councilInputBar`.
 
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts";
+import { toast } from "@ryu/ui/components/sileo.tsx";
 import type { ReactNode } from "react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useComposerAgentControls } from "@/components/agent-elements/input/composer-agent-controls.tsx";
@@ -36,6 +37,7 @@ import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
 import { stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { transcribeAudio } from "@/src/lib/api/voice.ts";
+import { recordRecent } from "@/src/lib/picker-favorites.ts";
 
 /** An AI-SDK file part, ready for `sendMessage({ text, files })`. */
 export interface ComposerSendFile {
@@ -188,15 +190,43 @@ export function useComposerSlot(
 	// The agent's ACP-advertised Model + Thinking/approval selectors, derived the
 	// same way ChatPage and the launchpad derive them (shared hook), so this
 	// surface's dropdown reads identically. Picks persist per-agent.
+	// Changing Approval / Model / Thinking here is silent by design: the pick is
+	// sticky and rides the NEXT turn's request body, which Core re-applies to the
+	// live ACP session before that turn's prompt. Nothing on screen moves, so say
+	// when it lands. One fixed toast slot, so dragging the thinking slider across
+	// detents replaces in place instead of stacking a toast per detent.
+	const handleAcpSelectionApplied = useCallback(
+		(setting: string, value: string) => {
+			toast.info({
+				id: "ryu-acp-selection-applied",
+				title: `${setting}: ${value}`,
+				description: "Applies from your next message.",
+			});
+		},
+		[]
+	);
+
 	const acp = useComposerAcpSections({
 		agentId: runtime.agentId,
 		agents,
 		modelOptions: runtime.modelOptions,
 		engineModel: runtime.effectiveModel,
 		onEngineModelChange: runtime.setModel,
+		onSelectionApplied: handleAcpSelectionApplied,
 	});
 
 	// The shared composer controls, driven by this surface's runtime selection.
+	// Record every pick so the picker can offer "Recents" (see
+	// `lib/picker-favorites.ts`). Purely local UI state — it never gates or
+	// changes the selection, so a storage failure cannot break picking an agent.
+	const handleSelectAgent = useCallback(
+		(nextAgentId: string) => {
+			recordRecent({ kind: "agent", agentId: nextAgentId });
+			runtime.setAgentId(nextAgentId);
+		},
+		[runtime.setAgentId]
+	);
+
 	const { infoBar, leftActions, rightActions, sections, renderBody } =
 		useComposerAgentControls({
 			agents,
@@ -206,7 +236,7 @@ export function useComposerSlot(
 			// cross-agent rule fire on a turn whose own composer said it wouldn't.
 			atConversationStart: !conversationId,
 			agentId: runtime.agentId,
-			onSelectAgent: runtime.setAgentId,
+			onSelectAgent: handleSelectAgent,
 			teams,
 			teamId,
 			onSelectTeam,

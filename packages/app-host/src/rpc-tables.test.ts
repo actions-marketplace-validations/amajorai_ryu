@@ -168,6 +168,26 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"meetings.open": "meetings.crud",
 	"meetings.openNotes": "meetings.crud",
 	"meetings.openList": "meetings.crud",
+	// Outpost is THREE rows, not one per sidecar endpoint: `social.request` is a
+	// generic forwarder onto the app's `/api/social` public mount, and the two
+	// navigation verbs cannot be forwarded.
+	"social.request": "social.crud",
+	"social.open": "social.crud",
+	"social.openList": "social.crud",
+	// Automated Reasoning is ONE row for the same reason Outpost's forwarder is:
+	// `reasoning.request` fronts the whole `/api/reasoning` public mount, and the
+	// companion has no navigation verb to add — it never opens a shell tab.
+	"reasoning.request": "reasoning.check",
+	// `tuition.request` and `news.request` front the whole `/api/tuition` and
+	// `/api/news` public mounts, for the same reason: one forwarder rather than a verb
+	// per route, so a route added to either manifest costs no host change.
+	"tuition.request": "tuition.crud",
+	"news.request": "news.crud",
+	// Blueprint is ONE row for the same reason again: `blueprint.request` fronts the
+	// whole `/api/blueprint` public mount — plans, revisions, annotations, the verdict
+	// — and the review companion has no navigation verb, because the review surface IS
+	// the companion.
+	"blueprint.request": "blueprint.review",
 	"skills.getSource": "skills.crud",
 	"skills.create": "skills.crud",
 	"skills.update": "skills.crud",
@@ -224,6 +244,11 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 	"learning:crud": "learning.crud",
 	"approvals:crud": "approvals.crud",
 	"meetings:crud": "meetings.crud",
+	"social:crud": "social.crud",
+	"reasoning:check": "reasoning.check",
+	"tuition:crud": "tuition.crud",
+	"news:crud": "news.crud",
+	"blueprint:review": "blueprint.review",
 	"skills:crud": "skills.crud",
 	"shell:integrate": "shell.integrate",
 	"assistant:context": "assistant.context",

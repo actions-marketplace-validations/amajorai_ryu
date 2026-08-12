@@ -18,6 +18,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use super::ReleaseAsset;
+use crate::downloads::{DownloadCenter, DownloadKind, DownloadRole, DownloadSpec};
 use crate::sidecar::download_manager::ryu_dir;
 
 /// Where downloaded update artifacts are staged before install.
@@ -40,29 +41,33 @@ pub struct ApplyResult {
 }
 
 /// Download `asset` into the staging dir. Returns the staged file path.
-async fn download_asset(client: &reqwest::Client, asset: &ReleaseAsset) -> Result<PathBuf> {
+///
+/// Goes through the global [`crate::downloads::DownloadCenter`] rather than a bare
+/// `reqwest` GET. This is the largest single transfer Core ever performs — a whole
+/// release binary or installer — and it used to buffer the entire body in memory
+/// with no row anywhere, so a headless `POST /api/update/apply` looked hung for
+/// minutes. The center streams it to `<dest>.part`, publishes byte progress to the
+/// Downloads page and tray, and makes it pausable/resumable/cancelable like every
+/// other artifact.
+async fn download_asset(downloads: &DownloadCenter, asset: &ReleaseAsset) -> Result<PathBuf> {
     let dir = staging_dir();
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating staging dir {}", dir.display()))?;
-    let dest = dir.join(&asset.name);
 
-    let bytes = client
-        .get(&asset.url)
-        .header("User-Agent", "ryu-core/1.0")
-        .send()
+    downloads
+        .download_blocking(DownloadSpec {
+            kind: DownloadKind::Other,
+            role: DownloadRole::Other,
+            label: format!("Ryu update ({})", asset.name),
+            url: asset.url.clone(),
+            dest: dir.join(&asset.name),
+            // The release feed carries no per-asset digest here; the transfer is
+            // still length- and resume-checked by the center.
+            sha256: None,
+            version_record: None,
+        })
         .await
-        .context("downloading update asset")?
-        .error_for_status()
-        .context("update asset http error")?
-        .bytes()
-        .await
-        .context("reading update asset body")?;
-
-    // Atomic-ish write: stage to a temp file then rename into place.
-    let tmp = dir.join(format!("{}.part", asset.name));
-    std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &dest).with_context(|| format!("finalising {}", dest.display()))?;
-    Ok(dest)
+        .context("downloading update asset")
 }
 
 /// Windows-safe in-place replace of the currently running executable.
@@ -111,8 +116,8 @@ pub fn cleanup_stale_backup() {
 /// - For OS installers (`msi`/`dmg`/`deb`/`appimage`) we stage the file and hand
 ///   the path back; the client runs the platform installer (Core does not launch
 ///   GUI installers itself).
-pub async fn apply_update(client: &reqwest::Client, asset: &ReleaseAsset) -> Result<ApplyResult> {
-    let staged = download_asset(client, asset).await?;
+pub async fn apply_update(downloads: &DownloadCenter, asset: &ReleaseAsset) -> Result<ApplyResult> {
+    let staged = download_asset(downloads, asset).await?;
     let staged_str = staged.display().to_string();
 
     match asset.kind.as_str() {

@@ -8,7 +8,7 @@
   "hidden": true,
   "category": "Developer Tools",
   "icon": "book-search",
-  "iconDither": { "from": 243, "to": 277, "direction": "up" },
+  "iconDither": { "from": 243, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

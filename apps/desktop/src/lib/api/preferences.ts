@@ -1586,12 +1586,21 @@ export function setDoubleCheckConfig(
 
 // --- Chat auto-rename (title) -----------------------------------------------
 // Owned by the `chat-title` plugin (Gateway settings → Plugins → Chat titles).
-// Re-titles after every N completed assistant turns (default 5). Prefs:
-// `auto-title-enabled` (default ON), `auto-title-every-n`, `auto-title-model`.
+// Re-titles once the first reply lands, then after every N completed assistant
+// turns (default 5). Prefs: `auto-title-enabled` (default ON),
+// `auto-title-on-first-turn` (default ON), `auto-title-every-n`,
+// `auto-title-model`.
+//
+// This is the LLM rename only. The default title — the user's first message,
+// capped at 60 chars — is Core's (`derive_title`) and applies with the plugin
+// disabled; the desktop mirrors that rule locally so the sidebar shows it the
+// instant the turn is sent (`seedTitleFromFirstMessage`).
 
 export const AUTO_TITLE_MODEL_PREF_KEY = "auto-title-model";
 export const AUTO_TITLE_EFFORT_PREF_KEY = "auto-title-effort";
 export const AUTO_TITLE_ENABLED_PREF_KEY = "auto-title-enabled";
+/** Whether the `chat-title` plugin also renames after the first reply. Default ON. */
+export const AUTO_TITLE_ON_FIRST_TURN_PREF_KEY = "auto-title-on-first-turn";
 /** How often the `chat-title` plugin re-titles (completed assistant turns). Default 5. */
 export const AUTO_TITLE_EVERY_N_PREF_KEY = "auto-title-every-n";
 

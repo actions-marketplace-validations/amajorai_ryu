@@ -48,6 +48,11 @@ interface ChatHistoryContextValue {
 	/** Rename a conversation: updates the local title immediately (optimistic) and
 	 * writes through to Core so the new title is server-backed and shared. */
 	renameConversation: (id: string, title: string) => void;
+	/** Name a still-unnamed conversation after the message being sent, using the
+	 * same rule Core applies when it persists the turn. Local state only — this is
+	 * NOT a rename, so it never marks the title user-chosen and never blocks the
+	 * chat-title plugin from replacing it. A no-op once the row has a real title. */
+	seedTitleFromFirstMessage: (id: string, content: string) => void;
 	/** Switch the active version at a branch point to `versionId`; the caller then
 	 * reloads the active path to re-render the selected branch. */
 	selectVersion: (id: string, versionId: string) => Promise<boolean>;
@@ -110,10 +115,38 @@ function authHeaders(token: string | null): Record<string, string> {
 	return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** The title a conversation carries until it has been named — the only string
+ * `seedTitleFromFirstMessage` is allowed to overwrite. */
+const UNTITLED = "New Chat";
+/** Longest derived title, in characters. Matches Core's `derive_title` cap. */
+const DERIVED_TITLE_MAX = 60;
+
+/**
+ * Mirror of Core's `derive_title` (apps/core/src/server/conversations.rs): the
+ * first line of the message, capped at 60 characters with an ellipsis. Core runs
+ * the same rule when it persists the turn; doing it client-side too is what makes
+ * the sidebar row read as the message *immediately* instead of after the reply
+ * lands. The two must stay byte-identical or the title visibly changes under the
+ * user when the list refreshes.
+ *
+ * Returns null for a text-less message (an image- or file-only opener), matching
+ * Core's `None` — better an honest placeholder than a title of "".
+ */
+function deriveDraftTitle(content: string): string | null {
+	const firstLine = content.trim().split("\n")[0]?.trim() ?? "";
+	if (!firstLine) {
+		return null;
+	}
+	const chars = [...firstLine];
+	return chars.length <= DERIVED_TITLE_MAX
+		? firstLine
+		: `${chars.slice(0, DERIVED_TITLE_MAX).join("")}…`;
+}
+
 function summaryToConversation(summary: CoreConversationSummary): Conversation {
 	return {
 		id: summary.id,
-		title: summary.title ?? "New Chat",
+		title: summary.title ?? UNTITLED,
 		agentId: summary.agent_id ?? undefined,
 		participants: summary.participants?.length
 			? summary.participants
@@ -152,7 +185,23 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 					const drafts = prev.filter(
 						(c) => !coreIds.has(c.id) && c.messages.length === 0
 					);
-					return [...drafts, ...fromCore];
+					// A Core row replaces its local copy wholesale, so a row Core has
+					// not titled yet would drag a locally seeded title back to the
+					// placeholder — the sidebar would show the user's message on send
+					// and then revert. Core normally derives the same title from the
+					// first user message, but any route that persists a turn without
+					// text (or without reaching that path) leaves the column NULL, and
+					// a title must never travel backwards. So: an untitled row inherits
+					// whatever name it already had on screen.
+					const localTitles = new Map(
+						prev.filter((c) => c.title !== UNTITLED).map((c) => [c.id, c.title])
+					);
+					const merged = fromCore.map((c) =>
+						c.title === UNTITLED && localTitles.has(c.id)
+							? { ...c, title: localTitles.get(c.id) as string }
+							: c
+					);
+					return [...drafts, ...merged];
 				});
 			})
 			.catch(() => {
@@ -178,13 +227,33 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 				const draft: Conversation = {
 					id,
 					agentId,
-					title: title ?? "New Chat",
+					title: title ?? UNTITLED,
 					messages: [],
 					createdAt: now,
 					updatedAt: now,
 				};
 				return [draft, ...prev];
 			});
+		},
+		[]
+	);
+
+	// Default chat naming, independent of any plugin: the moment the user sends,
+	// the thread is called what they asked. Core derives the identical title when
+	// it persists the turn, so this only removes the round trip — nothing here is
+	// written back, and the guard on `UNTITLED` keeps a later send (or a title the
+	// chat-title plugin already produced) from being overwritten.
+	const seedTitleFromFirstMessage = useCallback(
+		(id: string, content: string) => {
+			const derived = deriveDraftTitle(content);
+			if (!derived) {
+				return;
+			}
+			setConversations((prev) =>
+				prev.map((c) =>
+					c.id === id && c.title === UNTITLED ? { ...c, title: derived } : c
+				)
+			);
 		},
 		[]
 	);
@@ -401,6 +470,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			editMessage,
 			regenerateMessage,
 			selectVersion,
+			seedTitleFromFirstMessage,
 			refresh,
 		}),
 		[
@@ -417,6 +487,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			editMessage,
 			regenerateMessage,
 			selectVersion,
+			seedTitleFromFirstMessage,
 			refresh,
 		]
 	);

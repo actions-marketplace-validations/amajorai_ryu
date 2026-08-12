@@ -58,6 +58,34 @@ export function groupModelItems(
 	}));
 }
 
+/**
+ * Weights on disk that are NOT chat models, matched on the local stem.
+ *
+ * `/api/models/installed` is the flat inventory of everything the node
+ * downloaded, which includes the support models Core installs on its own:
+ * the nomic embedder (RAG), the bge reranker, and the STT/TTS weights. None of
+ * them can serve a turn — offering one as a chat model produces a model the
+ * engine will refuse to load, so they are filtered wherever the composer offers
+ * a local model to CHAT with. Everything else is offered; whether the engine can
+ * actually run it stays Core's call (`setActiveModel` rejects and toasts), since
+ * only Core knows which runtimes exist on this machine.
+ *
+ * Deliberately a name rule rather than a Core field: the inventory carries no
+ * role, and every one of these families names itself in the file it ships as.
+ *
+ * Every token here is a distinctive family name, because these are substring
+ * matches and the cost of a false positive is silent: the model simply is not in
+ * the list and nothing says why. `clip` and `vae` were tried and removed for
+ * exactly that reason — they swallow `Eclipse-13B` and `Vaelora-7B` — and the
+ * image models they were meant to catch are not served through this path at all.
+ */
+const NON_CHAT_STEM = /embed|rerank|whisper|parakeet|kokoro|silero/i;
+
+/** True when an installed weight can plausibly serve a chat turn. */
+export function isChatModelStem(stem: string): boolean {
+	return stem !== "" && !NON_CHAT_STEM.test(stem);
+}
+
 /** Merge installed local model stems into a model list (ryu / gateway picks). */
 export function mergeInstalledModels(
 	items: ComposerSettingItem[],
@@ -74,10 +102,12 @@ export function mergeInstalledModels(
 		out.unshift({ id, name });
 	};
 
+	// The active stem is pushed unfiltered: whatever the node is actually serving
+	// must stay visible, or the picker renders a selection it cannot show.
 	if (activeStem) {
 		push(activeStem, activeStem);
 	}
-	for (const stem of installedStems) {
+	for (const stem of installedStems.filter(isChatModelStem)) {
 		push(stem, stem);
 	}
 	return out;

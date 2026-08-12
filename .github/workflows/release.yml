@@ -129,7 +129,15 @@ jobs:
             exit 0
           fi
           node scripts/release-notes.mjs --tag "$TAG" --channel release --repo "$GITHUB_REPOSITORY" --no-changelog > notes.md
-          gh release create "$TAG" --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md
+          # Created as a PRERELEASE on purpose. The release exists from the very
+          # first job so the binaries have somewhere to attach, but at that point
+          # nothing is built yet — and a non-prerelease immediately becomes
+          # `releases/latest`, which is what install.sh, the desktop updater and
+          # every "download the latest build" link resolve. Publishing it stable
+          # up front therefore hands users a half-empty release for the ~40
+          # minutes the matrix is still building. The `promote` job at the bottom
+          # flips it to stable once every build job has actually succeeded.
+          gh release create "$TAG" --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md --prerelease
 
   # apps/tui is the RECOMMENDED terminal client (apps/cli is deprecated), but it
   # is Bun/TypeScript, not Rust, so it cannot ride the cargo matrix below.
@@ -616,3 +624,31 @@ jobs:
           version="${TAG#v}"
           bash scripts/release/assemble-channel-feed.sh \
             stable "$version" "${{ github.repository }}" "$TAG"
+
+  # Flip the release from prerelease to stable — the LAST thing that happens.
+  #
+  # `notes` creates the release as a prerelease so it never answers
+  # `releases/latest` while the matrix is still building (see the comment on
+  # `gh release create`). This job undoes that, and only once every build job has
+  # genuinely succeeded: `needs` without `if:` means a single failed or cancelled
+  # build leaves the release sitting as a prerelease, which is the safe state —
+  # visible and downloadable for anyone who wants it, but not served to
+  # install.sh or the desktop updater as the current stable build.
+  #
+  # It lists the build jobs explicitly rather than relying on `updater-feed`,
+  # which runs `if: always()` and therefore succeeds even when `desktop` failed.
+  promote:
+    needs: [notes, tui, desktop, island, build, updater-feed]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote prerelease to stable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "All build jobs green — promoting $TAG to stable."
+          gh release edit "$TAG" --prerelease=false --latest
+          gh release view "$TAG" --json tagName,isPrerelease,isDraft \
+            --jq '"promoted: \(.tagName) prerelease=\(.isPrerelease) draft=\(.isDraft)"'

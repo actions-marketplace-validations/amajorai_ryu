@@ -315,6 +315,25 @@ fn default_grant_allowlist() -> Vec<String> {
         "tool:http-egress:127.0.0.1",
         "mcp:ghost",
         "mcp:shadow",
+        // The Blueprint app's own MCP server (`blueprint__plan_publish` /
+        // `plan_status` / `plan_get` / `step_update`), declared in
+        // `apps-store/blueprint/manifest.json`. This is NOT the per-app-string
+        // anti-pattern the doc above warns about, and the distinction is the reserved
+        // `mcp` namespace: an app's OWN capability (`blueprint:review`) is approved by
+        // the owner-scoped rule on a name match, but `mcp:<name>` names a SERVER, and
+        // the rule refuses reserved namespaces "even for a plugin whose id IS the
+        // server name" — which is exactly the case here. So without this line
+        // `enable_app` fails the whole app with GrantsDenied (it requires
+        // `all_approved`, not a filtered subset), and the four MCP tools an agent
+        // needs to publish a plan at all never exist. Swappable via the
+        // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override, like its neighbours.
+        "mcp:blueprint",
+        // Same rule, same reason: `@ryu/reasoning` declares `mcp:reasoning` and shipped
+        // without this row, so `every_builtin_fixture_grant_is_allowlisted` has been red
+        // and a disable→re-enable of that app fails with GrantsDenied. Every sidecar app
+        // with an `mcp_servers` block needs a line here — the owner-scoped rule will
+        // never approve a reserved namespace, however well the names match.
+        "mcp:reasoning",
         // data scopes
         "memory.read",
         "memory.write",
@@ -370,6 +389,25 @@ fn default_grant_allowlist() -> Vec<String> {
         // caller is already in, so neither widens reach beyond the app's own chat.
         "conversation:set-title",
         "preferences:read",
+        // Read-only node activity + subscription usage for the `node.readings` kernel
+        // capability. Counts and percentages only — no run titles, ids or folder
+        // paths cross it, which is what lets it answer without a per-user caller.
+        "core:readings",
+        // Post a turn on the user's behalf, into a real conversation. Gates the
+        // `chat.startTurn` kernel capability (`apps/core/src/server/host_chat.rs`)
+        // — the only way an out-of-process app can send at all, since a manifest
+        // sidecar holds no node token.
+        //
+        // This is the widest grant on this list, and it is here for one reason: the
+        // grant is NOT the gate. Core additionally scans the prompt through the exec
+        // firewall and, by default (`apps-ask-before-send`), queues the send in the
+        // Approvals inbox so the user confirms before a single token is spent. An
+        // app that holds this and nothing else can still only ASK to send.
+        //
+        // `chat` stays a RESERVED namespace, so this exact entry — not an
+        // owner-scoped name match — is what allows it; `com.evil.chat` gets nothing
+        // from being called that.
+        "chat.sendFollowUp",
         "hook:run-agent",
         "hook:side-model",
         // Ghost record→replay: the `@ryu/workflows` RecordToWorkflow flow captures
@@ -767,6 +805,33 @@ mod tests {
         );
         assert!(d.all_approved(), "denied: {:?}", d.denied);
         assert_eq!(d.approved.len(), 4);
+    }
+
+    #[test]
+    fn blueprint_app_grants_are_approved() {
+        // The two halves of `@ryu/blueprint`'s declared set travel through DIFFERENT
+        // rules, and asserting them together is the point: `blueprint:review` is
+        // owner-scoped (id `@ryu/blueprint` ⇒ namespace `blueprint`, not reserved) and
+        // must NOT gain an allowlist entry, while `mcp:blueprint` is in the reserved
+        // `mcp` namespace and can only ever be approved by its explicit entry. A change
+        // that "cleans up" either one breaks enable, because `enable_app` demands
+        // `all_approved` and fails the whole app on a single denial — the app installs,
+        // and then has no sidecar and no MCP tools.
+        let d = validate_grants_for(
+            Some("@ryu/blueprint"),
+            &scopes(&["blueprint:review", "mcp:blueprint"]),
+        );
+        assert!(d.all_approved(), "denied: {:?}", d.denied);
+        assert_eq!(d.approved.len(), 2);
+
+        // The other direction: the owner-scoped rule is a NAME match, not a free pass.
+        // Someone else's `mcp:blueprint` is approved (the allowlist is not scoped to a
+        // holder) but an impostor cannot reach the app's own capability.
+        let impostor = validate_grants_for(
+            Some("com.evil.notblueprint"),
+            &scopes(&["blueprint:review"]),
+        );
+        assert_eq!(impostor.denied, vec!["blueprint:review".to_string()]);
     }
 
     // ── capability grammar, against the REAL gateway policy ──────────────────

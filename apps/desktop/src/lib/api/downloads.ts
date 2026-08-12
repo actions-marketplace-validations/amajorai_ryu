@@ -34,6 +34,7 @@ export type DownloadKind =
 	| "embedding"
 	| "voice"
 	| "media"
+	| "mcp"
 	| "other";
 
 /**
@@ -58,6 +59,7 @@ export type DownloadRole =
 	| "tool"
 	| "skill"
 	| "plugin"
+	| "mcp_server"
 	| "extract"
 	| "other";
 

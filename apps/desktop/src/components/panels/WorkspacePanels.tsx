@@ -9,15 +9,19 @@ import {
 	FileCodeIcon,
 	FolderOpenIcon,
 	Globe02Icon,
+	Megaphone01Icon,
+	PieChartIcon,
 	PinIcon,
 	PinOffIcon,
 	PlusSignIcon,
 	PuzzleIcon,
+	Radar01Icon,
 	RefreshIcon,
 	Robot01Icon,
 	Search01Icon,
 	SmartPhone01Icon,
 	SourceCodeIcon,
+	UserGroupIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { PatchDiff } from "@pierre/diffs/react";
@@ -28,7 +32,7 @@ import {
 	ContextMenuItem,
 	ContextMenuSeparator,
 	ContextMenuTrigger,
-} from "@ryu/ui/components/context-menu";
+} from "@ryu/ui/components/context-menu.tsx";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -37,15 +41,15 @@ import {
 	DropdownMenuSubContent,
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
-} from "@ryu/ui/components/dropdown-menu";
-import { Icon } from "@ryu/ui/components/icon";
+} from "@ryu/ui/components/dropdown-menu.tsx";
+import { Icon } from "@ryu/ui/components/icon.tsx";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
+} from "@ryu/ui/components/tooltip.tsx";
 import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
-import { cn } from "@ryu/ui/lib/utils";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "next-themes";
 import type {
@@ -62,11 +66,14 @@ import {
 	PartInspector,
 } from "@/src/components/chat/PartInspector.tsx";
 import { OverflowTooltip } from "@/src/components/layout/overflow-tooltip.tsx";
+import type { ContextPanelView } from "@/src/components/panels/ContextPanel.tsx";
+import { ContextPanel } from "@/src/components/panels/ContextPanel.tsx";
 import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkContextPanel.tsx";
 import {
 	CoworkContextPanel,
 	extractSubagents,
 } from "@/src/components/panels/CoworkContextPanel.tsx";
+import { CrmPanel } from "@/src/components/panels/crm/CrmPanel.tsx";
 import {
 	type BuiltinTabKind,
 	type DockSide,
@@ -78,8 +85,10 @@ import {
 	isPluginTabKind,
 	nativeDockPanelKey,
 } from "@/src/components/panels/dock-panels.ts";
+import { MissionControlPanel } from "@/src/components/panels/MissionControlPanel.tsx";
 import { useProjectDockSlots } from "@/src/components/panels/project-dock-context.tsx";
 import { SubagentAvatar } from "@/src/components/panels/subagent-identity.tsx";
+import { UgcPanel } from "@/src/components/panels/UgcPanel.tsx";
 import {
 	useCurrentTabId,
 	useIsActiveTab,
@@ -556,6 +565,15 @@ const BOTTOM_TAB_TYPES: TabTypeDef[] = [
 const RIGHT_TAB_TYPES: TabTypeDef[] = [
 	{ kind: "files", label: "Files", icon: FolderOpenIcon },
 	{ kind: "codereview", label: "Changes", icon: FileCodeIcon },
+	// Offered in the menu as well as by clicking the composer ring, because the
+	// ring is hidden until a turn reports usage — and usage is live-only, so a
+	// RELOADED chat has no ring even when Core still holds a breakdown. Menu-only
+	// reachability is what keeps the panel usable in that (common) case.
+	{ kind: "context", label: "Context", icon: PieChartIcon },
+	// What this chat DID, grouped per turn with the agent's own rationale. Menu-
+	// only: unlike the panels below it is not raised by a click anywhere in the
+	// chat, so the "+" menu is its single entry point.
+	{ kind: "mission", label: "Mission Control", icon: Radar01Icon },
 ];
 
 /** The glyph of each shell-owned tab kind. The programmatic panels
@@ -570,6 +588,8 @@ const BUILTIN_TAB_ICONS: Record<BuiltinTabKind, typeof ComputerTerminal01Icon> =
 		subagent: Robot01Icon,
 		artifact: BrowserIcon,
 		inspector: SourceCodeIcon,
+		context: PieChartIcon,
+		mission: Radar01Icon,
 	};
 
 /** A contributed panel as a dock tab type. A `native` panel takes the glyph of
@@ -2399,6 +2419,14 @@ const NATIVE_DOCK_PANELS: Record<string, NativeDockPanelDef> = {
 		icon: SmartPhone01Icon,
 		render: () => <SimulatorTabPanel />,
 	},
+	"@ryu/ugc/ugc": {
+		icon: Megaphone01Icon,
+		render: () => <UgcPanel />,
+	},
+	"@ryu/crm/crm": {
+		icon: UserGroupIcon,
+		render: () => <CrmPanel />,
+	},
 };
 
 function DockPanelPlaceholder({ text }: { text: string }) {
@@ -2471,6 +2499,7 @@ function PluginDockTabContent({
 function TabContent({
 	tab,
 	folder,
+	contextView,
 	cowork,
 	dockPanels,
 	subagentView,
@@ -2478,6 +2507,8 @@ function TabContent({
 	inspectorView,
 }: {
 	artifactView?: Artifact | null;
+	/** Live (not snapshotted) inputs for the context-breakdown tab. */
+	contextView?: ContextPanelView | null;
 	cowork?: CoworkData;
 	/** The enabled apps' contributed panels, for resolving a `plugin:` tab. */
 	dockPanels: PluginDockPanel[];
@@ -2497,6 +2528,9 @@ function TabContent({
 	}
 	if (tab.kind === "terminal") {
 		return <SimpleTerminal cwd={folder} />;
+	}
+	if (tab.kind === "context") {
+		return <ContextPanel view={contextView} />;
 	}
 	if (tab.kind === "inspector") {
 		if (inspectorView == null) {
@@ -2528,6 +2562,19 @@ function TabContent({
 	}
 	if (tab.kind === "files") {
 		return <FileTreePanel folder={folder} key={`${tab.uid}-${folder}`} />;
+	}
+	if (tab.kind === "mission") {
+		// Reuses the chat's `cowork` payload rather than taking a prop of its own:
+		// the digest is derived entirely from `messages[].parts`, which that payload
+		// already carries for the Context tab and the pinned summary.
+		if (!cowork) {
+			return (
+				<div className="flex h-full items-center justify-center p-4 text-center text-muted-foreground text-xs">
+					Open a chat to see what it did here.
+				</div>
+			);
+		}
+		return <MissionControlPanel messages={cowork.messages} />;
 	}
 	if (tab.kind === "cowork") {
 		// Outside a chat (no cowork data) there is nothing to summarise.
@@ -2756,6 +2803,14 @@ export interface WorkspacePanelsProps {
 	artifactRequest?: { artifact: Artifact; nonce: number } | null;
 	bottomOpen: boolean;
 	children: ReactNode;
+	/**
+	 * A request to open the context-window breakdown in the right panel. Carries
+	 * only a `nonce` — the DATA is `contextView`, passed live, so the panel keeps
+	 * tracking the conversation instead of freezing at the moment it was opened.
+	 */
+	contextRequest?: { nonce: number } | null;
+	/** Live inputs for the context breakdown tab (conversation, target, usage). */
+	contextView?: ContextPanelView | null;
 	/** Chat-specific data for the Context (cowork) right-panel tab. */
 	cowork?: CoworkData;
 	folder?: string | null;
@@ -2809,6 +2864,8 @@ export function WorkspacePanels({
 	subagentRequest,
 	artifactRequest,
 	inspectorRequest,
+	contextRequest,
+	contextView,
 	renderPinnedSummary,
 }: WorkspacePanelsProps) {
 	// Chat-local tabs (cowork / subagent / artifact / inspector, and shareable
@@ -2991,6 +3048,16 @@ export function WorkspacePanels({
 		setInspectorView(inspectorRequest.part);
 		openRightTabRef.current("inspector", "Inspector");
 	}, [inspectorRequest]);
+
+	// Same one-tab-reuse + nonce-refocus flow for the context breakdown. No local
+	// view state to set: the tab reads `contextView` live, so clicking the ring
+	// only has to open (or re-focus) the tab.
+	useEffect(() => {
+		if (!contextRequest) {
+			return;
+		}
+		openRightTabRef.current("context", "Context");
+	}, [contextRequest]);
 	const [bottomHeight, setBottomHeight] = useState(260);
 	const [rightWidth, setRightWidth] = useState(340);
 
@@ -3254,6 +3321,7 @@ export function WorkspacePanels({
 					<ProjectDockContentSlot active uid={activeBottomTab.uid} />
 				) : activeBottomTab ? (
 					<TabContent
+						contextView={contextView}
 						dockPanels={dockPanels}
 						folder={folder}
 						tab={activeBottomTab}
@@ -3296,6 +3364,7 @@ export function WorkspacePanels({
 				) : activeRightTab ? (
 					<TabContent
 						artifactView={artifactView}
+						contextView={contextView}
 						cowork={cowork}
 						dockPanels={dockPanels}
 						folder={folder}

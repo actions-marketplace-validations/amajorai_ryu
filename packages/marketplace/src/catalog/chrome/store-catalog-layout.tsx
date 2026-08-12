@@ -192,11 +192,25 @@ export default function StoreCatalogLayout({
 					open
 				>
 					{/* Wider than the default dialog: the preview carries a hero, a meta
-					    strip, a tab bar and long-form README/API panels, and at `max-w-2xl`
-					    every one of them wrapped early. `min(64rem,92vw)` tracks the card
-					    column's own `max-w-4xl` on a roomy window and still leaves a margin
-					    on a small one, where the dialog is the ONLY presentation. */}
-					<DialogContent className="max-h-[85vh] w-[min(64rem,92vw)] max-w-[min(64rem,92vw)] overflow-hidden p-0">
+					    strip, a tab bar and long-form README/API panels, and at the
+					    primitive's default width every one of them wrapped early.
+					    `min(80rem,94vw)` is the same figure `ListingDetailShell` documents
+					    as its premise, so the shell's `lg:`-keyed two-column split and the
+					    box it lives in agree; a small window still keeps a margin, and
+					    there the dialog is the ONLY presentation.
+
+					    THE `sm:` COPY IS LOAD-BEARING — do not drop it as a duplicate.
+					    `DialogContent` ships `sm:max-w-md` in its base classes, and
+					    `twMerge` only drops a class when the override shares its modifier
+					    AND its group. An unprefixed `max-w-[…]` is a DIFFERENT group, so
+					    `sm:max-w-md` survived into the markup, sorted after the
+					    unprefixed utility, and won at equal specificity: every catalog
+					    preview on this layout was clamped to 28rem on any window ≥640px
+					    while `w-[…]` promised 64rem. Inside that 448px box the shell still
+					    matched `lg:` (a VIEWPORT breakpoint) and handed the aside
+					    `lg:w-72`, leaving the main column ~130px — the squashed preview.
+					    Matching `sm:` here removes `sm:max-w-md` from the output entirely. */}
+					<DialogContent className="max-h-[85vh] w-[min(80rem,94vw)] max-w-[min(80rem,94vw)] overflow-hidden p-0 sm:max-w-[min(80rem,94vw)]">
 						<DialogTitle className="sr-only">{detailTitle}</DialogTitle>
 						<div className="scroll-fade-effect-y max-h-[85vh] overflow-auto">
 							{detail}

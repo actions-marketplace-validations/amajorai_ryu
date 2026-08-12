@@ -1736,7 +1736,7 @@ function oklchToHex(lRaw: string, cRaw: string, hRaw: string): string {
 	return `#${channelToHex(linearToSrgb(r))}${channelToHex(linearToSrgb(g))}${channelToHex(linearToSrgb(bb))}`;
 }
 
-function colorToHex(color: string): string | null {
+export function colorToHex(color: string): string | null {
 	if (HEX_6_RE.test(color)) {
 		return color;
 	}
@@ -1758,7 +1758,7 @@ function colorToHex(color: string): string | null {
 	return null;
 }
 
-function relativeLuminance(hex: string): number {
+export function relativeLuminance(hex: string): number {
 	const r = Number.parseInt(hex.slice(1, 3), 16) / 255;
 	const g = Number.parseInt(hex.slice(3, 5), 16) / 255;
 	const b = Number.parseInt(hex.slice(5, 7), 16) / 255;

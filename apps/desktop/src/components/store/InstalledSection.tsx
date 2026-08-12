@@ -27,6 +27,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Markdown } from "@ryu/blocks/desktop/agent-elements/markdown";
+import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
 import StoreCatalogLayout, {
 	StoreCardGrid,
@@ -34,6 +35,7 @@ import StoreCatalogLayout, {
 import StoreItemAction, {
 	StoreItemOverflowMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import { RequiredPluginsSection } from "@ryu/marketplace/catalog/detail/dependency-graph";
 import {
 	ListingAsideCard,
@@ -44,6 +46,7 @@ import {
 	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { ListingDetailTabs } from "@ryu/marketplace/catalog/detail/listing-detail-tabs";
+import { iconCacheKey } from "@ryu/marketplace/catalog/icon-cache";
 import type { CatalogEntry } from "@ryu/marketplace/catalog/types";
 import {
 	AlertDialog,
@@ -109,6 +112,32 @@ const KIND_LABELS: Record<string, string> = {
 function primaryAgentId(app: AppInfo): string | null {
 	const entry = app.runnables.find((r) => r.kind === AGENT_KIND);
 	return entry?.id ?? null;
+}
+
+/** The version that is ACTUALLY ON THIS MACHINE.
+ *
+ *  `app.version` is the MANIFEST's version — for an install that has fallen behind
+ *  its manifest that is the newer number, so a card rendering it claims a version
+ *  the user does not have. The lifecycle record's `installedVersion` is the truth,
+ *  and it is null for a built-in (which has no record) and for anything not yet
+ *  installed — hence coalesce, never swap. */
+function installedVersionOf(app: AppInfo): string {
+	return app.installedVersion ?? app.version;
+}
+
+/** The one-line card description.
+ *
+ *  `tagline` is the manifest's short pitch and `description` its long
+ *  plaintext/markdown body; the card slot truncates to a single line, so the
+ *  tagline wins and the description is only a fallback. Before this the slot
+ *  carried the version string — which the stat strip already states twice — so
+ *  every installed row read "v1.0.0" and said nothing about what the app does. */
+function cardDescription(app: AppInfo): string | null {
+	const text = app.tagline?.trim() || app.description?.trim();
+	if (text) {
+		return text;
+	}
+	return app.builtIn ? "Built-in system app." : null;
 }
 
 /** The installed-tab category an app belongs to, derived from what it bundles.
@@ -493,24 +522,30 @@ export default function InstalledSection() {
 					{hasInstalled ? (
 						groupedApps.map((group) => (
 							<section className="flex flex-col gap-2" key={group.category}>
-								<h3 className="px-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
+								{/* `mb-0`: the section is already a `gap-2` column, so the
+								    heading's own bottom margin would stack on top of it. */}
+								<StoreShelfHeading className="mb-0">
 									{CATEGORY_LABELS[group.category]}
-								</h3>
+								</StoreShelfHeading>
 								<StoreCardGrid>
 									{group.items.map((app) => (
 										<StoreCatalogCard
 											action={renderAppAction(app)}
-											description={
-												app.builtIn ? "Built-in system app." : `v${app.version}`
-											}
+											cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
+											description={cardDescription(app)}
+											dither={app.iconDither}
 											icon={
 												<HugeiconsIcon className="size-5" icon={ComputerIcon} />
 											}
+											iconBackground={app.iconBackground ?? undefined}
+											iconId={app.icon}
+											iconUrl={app.iconUrl}
 											key={app.id}
 											name={app.name}
 											onClick={() => setSelectedId(app.id)}
 											seedId={app.id}
 											selected={app.id === selectedId}
+											stability={app.stability}
 										/>
 									))}
 								</StoreCardGrid>
@@ -691,10 +726,15 @@ interface InstalledAppDetailProps {
  *  tabs actually read (README, versions, permissions, licence…) comes from the
  *  DETAIL fetch, not from here. Kept deliberately thin rather than fabricating
  *  plausible-looking values — a made-up description or tag would be graded by the
- *  scorecard as if the listing had declared it. */
+ *  scorecard as if the listing had declared it.
+ *
+ *  `description` is the one field that stopped being a synthesis: the manifest
+ *  declares it and Core has always serialised it, so passing it through grades the
+ *  listing on what it actually says. `tags` stays empty — no manifest field backs
+ *  it, so anything here would be invented. */
 function installedAppAsEntry(app: AppInfo): CatalogEntry {
 	return {
-		description: "",
+		description: app.description ?? app.tagline ?? "",
 		id: app.id,
 		kinds: [...new Set(app.runnables.map((r) => r.kind))],
 		name: app.name,
@@ -820,7 +860,16 @@ function InstalledAppDetail({
 					    explanation instead. */}
 					{isInstalled && !app.mandatory ? (
 						<label className="ml-auto flex shrink-0 items-center gap-2 text-sm">
-							{app.enabled ? "Enabled" : "Disabled"}
+							{/* Safe Mode is a READ mask — `enabled` is still the user's own
+							    choice, and the switch stays where they left it. What the
+							    label has to say is that the app is not actually loaded this
+							    boot, or the card would read "Enabled" beside a panel that
+							    is missing. */}
+							{app.suppressedBySafeMode
+								? "Off — Safe Mode"
+								: app.enabled
+									? "Enabled"
+									: "Disabled"}
 							<Switch
 								aria-label={
 									app.enabled ? `Disable ${app.name}` : `Enable ${app.name}`
@@ -838,7 +887,7 @@ function InstalledAppDetail({
 					<ListingAsideCard title="Information">
 						<ListingInfoGrid
 							rows={[
-								{ label: "Version", value: `v${app.version}` },
+								{ label: "Version", value: `v${installedVersionOf(app)}` },
 								{
 									label: "State",
 									value: isInstalled
@@ -873,9 +922,22 @@ function InstalledAppDetail({
 						app.mandatory ? "Required" : null,
 						app.runnables.some((r) => r.kind === AGENT_KIND) ? "Agent" : null,
 					].filter((b): b is string => Boolean(b))}
-					icon={<HugeiconsIcon className="size-8" icon={BotIcon} />}
+					icon={
+						<AppIcon
+							cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
+							className="size-12 rounded-xl"
+							dither={app.iconDither}
+							fallback={<HugeiconsIcon className="size-8" icon={BotIcon} />}
+							iconBackground={app.iconBackground}
+							iconId={app.icon}
+							iconUrl={app.iconUrl}
+							name={app.name}
+							seedId={app.id}
+							size={28}
+						/>
+					}
 					name={app.name}
-					tagline={`v${app.version}`}
+					tagline={cardDescription(app) ?? `v${installedVersionOf(app)}`}
 				/>
 			}
 			notice={
@@ -895,7 +957,7 @@ function InstalledAppDetail({
 			stats={
 				<ListingStatStrip
 					items={[
-						{ label: "Version", value: `v${app.version}` },
+						{ label: "Version", value: `v${installedVersionOf(app)}` },
 						{
 							label: "State",
 							value: isInstalled
@@ -1077,7 +1139,7 @@ function BuiltInAppDetail({
 					<ListingAsideCard title="Information">
 						<ListingInfoGrid
 							rows={[
-								{ label: "Version", value: `v${app.version}` },
+								{ label: "Version", value: `v${installedVersionOf(app)}` },
 								{ label: "Lifecycle", value: "Sidecar" },
 								{
 									label: "Sidecar",
@@ -1112,15 +1174,30 @@ function BuiltInAppDetail({
 						app.localOnly ? "Local only" : null,
 						isInstalled ? (isRunning ? "Running" : "Stopped") : "Not installed",
 					].filter((b): b is string => Boolean(b))}
-					icon={<HugeiconsIcon className="size-8" icon={ComputerIcon} />}
+					icon={
+						<AppIcon
+							cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
+							className="size-12 rounded-xl"
+							dither={app.iconDither}
+							fallback={
+								<HugeiconsIcon className="size-8" icon={ComputerIcon} />
+							}
+							iconBackground={app.iconBackground}
+							iconId={app.icon}
+							iconUrl={app.iconUrl}
+							name={app.name}
+							seedId={app.id}
+							size={28}
+						/>
+					}
 					name={app.name}
-					tagline={`v${app.version}`}
+					tagline={cardDescription(app) ?? `v${installedVersionOf(app)}`}
 				/>
 			}
 			stats={
 				<ListingStatStrip
 					items={[
-						{ label: "Version", value: `v${app.version}` },
+						{ label: "Version", value: `v${installedVersionOf(app)}` },
 						{
 							label: "Process",
 							value: isInstalled

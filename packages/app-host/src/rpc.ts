@@ -265,6 +265,17 @@ export type Capability =
 	// cannot POST multipart under the CSP) and the `meetings.open`/`openNotes`/`openList`
 	// shell-navigation verbs (mirroring the desktop page's `openTab`).
 	| "meetings.crud"
+	// Outpost (grant `social:crud`) — the `@ryu/social` app renders the compose →
+	// calendar → queue → inbox surface from its sandboxed companion frame. Host-direct
+	// (the monitors pattern), but with ONE generic forwarder rather than a verb per
+	// endpoint: `social.request` carries `{ method, path, body }` that the host
+	// re-issues against Core's `/api/social<path>` public mount. That mount already
+	// answers any client holding the node token — which is exactly what the host holds
+	// — so the forwarder widens nothing; the gates are this capability and Core's
+	// ext-proxy route allowlist (an undeclared sub-path is a hard 404). The same
+	// capability covers the two `social.open`/`openList` shell-navigation verbs, which
+	// cannot be forwarded because opening a tab is the one thing the frame cannot do.
+	| "social.crud"
 	// Skill authoring (grant `skills:crud`) — the `@ryu/skill-editor` app authors a
 	// user-owned Agent Skill (`SKILL.md`): front-matter form fields + a markdown body +
 	// server-backed version history. Host-direct (the monitors pattern): the host holds
@@ -274,6 +285,36 @@ export type Capability =
 	// shell-navigation verb that renames the owning tab (the desktop page's
 	// `updateTabTitle`).
 	| "skills.crud"
+	// Automated Reasoning (grant `reasoning:check`) — the `@ryu/reasoning` app authors
+	// formal policies and runs the solver playground from its sandboxed companion
+	// frame. Host-direct (the monitors pattern) with ONE generic forwarder (the Outpost
+	// pattern): `reasoning.request` carries `{ method, path, body }` that the host
+	// re-issues against Core's `/api/reasoning<path>` public mount. That mount already
+	// answers any client holding the node token — which is what the host holds — so the
+	// forwarder widens nothing; the gates are this capability and Core's ext-proxy route
+	// allowlist, where an undeclared sub-path is a hard 404. No navigation verb: the
+	// companion is the whole surface and never opens a shell tab.
+	| "reasoning.check"
+	// Tuition (grant `tuition:crud`) and Wire (grant `news:crud`) — the `@ryu/tuition`
+	// and `@ryu/news` companions. Host-direct with ONE generic forwarder each, the same
+	// shape as `reasoning.request` directly above: `<app>.request` carries
+	// `{ method, path, body }` the host re-issues against that app's public mount.
+	// Forty-three sidecar routes between them would otherwise be forty-three verbs.
+	// Neither widens anything — the mount already answers any client holding the node
+	// token, which is what the host holds — and the gates stay the capability plus
+	// Core's ext-proxy route allowlist, where an undeclared sub-path is a hard 404.
+	| "tuition.crud"
+	| "news.crud"
+	// Visual plan review (grant `blueprint:review`) — the `@ryu/blueprint` app renders a
+	// plan an agent published (markdown blocks, the dependency graph derived from the
+	// steps, the annotation rail) and records the human's verdict. Host-direct with ONE
+	// generic forwarder, the same shape as `reasoning.request` directly above:
+	// `blueprint.request` carries `{ method, path, body }` the host re-issues against
+	// Core's `/api/blueprint<path>` public mount, which already answers any client
+	// holding the node token — so the forwarder widens nothing. The gates are this
+	// capability and Core's ext-proxy route allowlist, where an undeclared sub-path is a
+	// hard 404. No navigation verb: the review surface IS the companion.
+	| "blueprint.review"
 	// Shell primitives (grant `shell:integrate`) — the generic `window.ryu.shell.*`
 	// lane giving a DECOUPLED companion the shell-integration privileges a compiled-in
 	// first-party panel has: `shell.openTab` (unary, route-allowlisted navigation with
@@ -553,6 +594,68 @@ export interface MeetingStartPayload {
 	app?: string;
 	source?: string;
 	title?: string;
+}
+
+// --- Outpost payload shapes (grant `social:crud`). Minimal INLINE aliases so rpc.ts
+// stays dependency-free; the host forwards the `ryu-social` sidecar's snake_case
+// shapes verbatim. The app owns the richer typed copies in
+// `@ryu/social-app/types`. ---
+
+/** One forwarded call onto the sidecar's `/api/social` public mount.
+ *
+ *  `path` is RELATIVE to that mount, leading slash included, query string and all
+ *  (`"/posts?status=scheduled,due"`). The host prepends the mount and REFUSES an
+ *  absolute URL, a path not starting with `/`, and any `..` segment — so the frame
+ *  chooses the sub-path and nothing else. It can never name a host, and it can never
+ *  climb out of the mount onto another Core API. */
+export interface SocialRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "PATCH" | "POST";
+	path: string;
+}
+
+/** One forwarded call onto the `ryu-reasoning` sidecar's `/api/reasoning` public
+ *  mount. Same contract as {@link SocialRequestPayload} — `path` is relative to the
+ *  mount and validated by the same resolver — with `PUT` in place of `PATCH`, because
+ *  that is the verb the sidecar's policy route actually serves. */
+export interface ReasoningRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "POST" | "PUT";
+	path: string;
+}
+
+/** One forwarded call onto the `ryu-tuition` sidecar's `/api/tuition` public mount.
+ *  Same contract as {@link SocialRequestPayload} — `path` is relative to the mount and
+ *  validated by the same resolver. The method union carries PATCH as well as PUT: the
+ *  subject, skill and item routes patch in place, while settings are replaced whole. */
+export interface TuitionRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
+	path: string;
+}
+
+/** One forwarded call onto the `ryu-news` sidecar's `/api/news` public mount. Same
+ *  contract and the same method union as {@link TuitionRequestPayload}. */
+export interface NewsRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
+	path: string;
+}
+
+/** One forwarded call onto the `ryu-blueprint` sidecar's `/api/blueprint` public
+ *  mount. Same contract as {@link SocialRequestPayload} — `path` is relative to the
+ *  mount and validated by the same resolver.
+ *
+ *  The method union is deliberately NARROWER than its two siblings: the plan-review
+ *  surface is append-only by design, so its eleven routes are GET, POST and DELETE
+ *  and nothing else. A revision is never edited in place — revising means POSTing a
+ *  new revision, which is what makes an annotation's `(revision, block_id)` anchor
+ *  mean something. Widening this union to match a sibling's would advertise verbs the
+ *  sidecar answers with 405, so leave it at three unless a route really appears. */
+export interface BlueprintRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "POST";
+	path: string;
 }
 
 // --- Skill authoring payload shapes (grant `skills:crud`). Minimal INLINE aliases so
@@ -1120,6 +1223,64 @@ export interface HostServices {
 		versionId: string;
 	}): Promise<string>;
 
+	// --- Outpost (grant `social:crud`). The `@ryu/social` app renders the compose →
+	// calendar → queue → inbox surface. Host-direct (the monitors pattern) through ONE
+	// forwarder: the host holds the node token and re-issues `socialRequest` against
+	// Core's `/api/social<path>` public mount, so the sidecar's 33 routes need no
+	// per-route service. `socialOpen`/`socialOpenList` are shell-navigation verbs. All
+	// optional so a non-Outpost host is unaffected. ---
+
+	/** Open a scheduled post's detail tab (`/social/:postId`), or the Outpost tab when
+	 *  no id is given — shell-navigation. */
+	socialOpen?(input: { postId?: string; title?: string }): void;
+	/** Open the Outpost tab (`/social`) — shell-navigation. */
+	socialOpenList?(): void;
+	/** Forward one call to `/api/social<path>`. Resolves with the parsed JSON body and
+	 *  REJECTS on any non-2xx, so the frame uses try/catch rather than a status check.
+	 *  The host validates `path` (see {@link SocialRequestPayload}) before building the
+	 *  URL; it never accepts a host or an absolute URL from the frame. */
+	socialRequest?(input: SocialRequestPayload): Promise<unknown>;
+
+	// --- Automated Reasoning (grant `reasoning:check`). The `@ryu/reasoning` app
+	// authors formal policies and runs the solver playground. Host-direct through ONE
+	// forwarder, the Outpost shape: the sidecar's seven routes need no per-route
+	// service, and a route added to the manifest later needs no host change at all.
+	// Optional, so a host without the app is unaffected. ---
+
+	/** Forward one call to `/api/reasoning<path>`. Resolves with the parsed JSON body
+	 *  and REJECTS on any non-2xx, so the frame uses try/catch rather than a status
+	 *  check. The host validates `path` (see {@link ReasoningRequestPayload}) before
+	 *  building the URL; it never accepts a host or an absolute URL from the frame. */
+	reasoningRequest?(input: ReasoningRequestPayload): Promise<unknown>;
+
+	// --- Tuition (grant `tuition:crud`) and Wire (grant `news:crud`). Both are
+	// host-direct through ONE forwarder, the same shape as Reasoning above: the
+	// sidecars' twenty-four and nineteen routes need no per-route service, and a route
+	// added to either manifest later needs no host change at all. Optional, so a host
+	// without the app is unaffected. ---
+
+	/** Forward one call to `/api/tuition<path>`. Resolves with the parsed JSON body and
+	 *  REJECTS on any non-2xx, so the frame uses try/catch rather than a status check.
+	 *  The host validates `path` (see {@link TuitionRequestPayload}) before building the
+	 *  URL; it never accepts a host or an absolute URL from the frame. */
+	tuitionRequest?(input: TuitionRequestPayload): Promise<unknown>;
+
+	/** Forward one call to `/api/news<path>`. Same contract as {@link tuitionRequest}. */
+	newsRequest?(input: NewsRequestPayload): Promise<unknown>;
+
+	// --- Visual plan review (grant `blueprint:review`). The `@ryu/blueprint` app
+	// renders a published plan and records the reviewer's annotations and verdict.
+	// Host-direct through ONE forwarder, the same shape as Reasoning above: eleven
+	// sidecar routes need no per-route service, and the round-two routes (revision
+	// diff view, artifact review) will need no host change at all. Optional, so a host
+	// without the app is unaffected. ---
+
+	/** Forward one call to `/api/blueprint<path>`. Resolves with the parsed JSON body
+	 *  and REJECTS on any non-2xx, so the frame uses try/catch rather than a status
+	 *  check. The host validates `path` (see {@link BlueprintRequestPayload}) before
+	 *  building the URL; it never accepts a host or an absolute URL from the frame. */
+	blueprintRequest?(input: BlueprintRequestPayload): Promise<unknown>;
+
 	// --- Spaces documents (grant `spaces:docs`). An app owns documents of kind
 	// `app:<plugin_id>` — persisted in the Space, search-embedded, backlinked. `source`
 	// is a string (JSON.stringify structured content yourself, e.g. a scene). ---
@@ -1458,7 +1619,12 @@ const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 	"learning.crud",
 	"approvals.crud",
 	"meetings.crud",
+	"social.crud",
 	"skills.crud",
+	"reasoning.check",
+	"blueprint.review",
+	"tuition.crud",
+	"news.crud",
 ]);
 
 /**
@@ -3506,6 +3672,100 @@ export async function dispatchRpc(
 			}
 			services.meetingsOpenList();
 			return null;
+		case "social.request": {
+			const input = asSocialRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"social.request requires a { path: string } beginning with '/' and containing no '..' segment"
+				);
+			}
+			if (!services.socialRequest) {
+				throw new CodedRpcError(
+					"server_error",
+					"social.request is not available"
+				);
+			}
+			return await services.socialRequest(input);
+		}
+		case "social.open": {
+			const input = asSocialOpenArg(args[0]);
+			if (!services.socialOpen) {
+				throw new CodedRpcError("server_error", "social.open is not available");
+			}
+			services.socialOpen(input);
+			return null;
+		}
+		case "reasoning.request": {
+			const input = asReasoningRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"reasoning.request requires a { path: string } beginning with '/' and resolving under /api/reasoning"
+				);
+			}
+			if (!services.reasoningRequest) {
+				throw new CodedRpcError(
+					"server_error",
+					"reasoning.request is not available"
+				);
+			}
+			return await services.reasoningRequest(input);
+		}
+		case "tuition.request": {
+			const input = asTuitionRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"tuition.request requires a { path: string } beginning with '/' and resolving under /api/tuition"
+				);
+			}
+			if (!services.tuitionRequest) {
+				throw new CodedRpcError(
+					"server_error",
+					"tuition.request is not available"
+				);
+			}
+			return await services.tuitionRequest(input);
+		}
+		case "news.request": {
+			const input = asNewsRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"news.request requires a { path: string } beginning with '/' and resolving under /api/news"
+				);
+			}
+			if (!services.newsRequest) {
+				throw new CodedRpcError("server_error", "news.request is not available");
+			}
+			return await services.newsRequest(input);
+		}
+		case "blueprint.request": {
+			const input = asBlueprintRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"blueprint.request requires a { path: string } beginning with '/' and resolving under /api/blueprint"
+				);
+			}
+			if (!services.blueprintRequest) {
+				throw new CodedRpcError(
+					"server_error",
+					"blueprint.request is not available"
+				);
+			}
+			return await services.blueprintRequest(input);
+		}
+		case "social.openList":
+			if (!services.socialOpenList) {
+				throw new CodedRpcError(
+					"server_error",
+					"social.openList is not available"
+				);
+			}
+			services.socialOpenList();
+			return null;
 		case "skills.getSource": {
 			const input = asSkillIdArg(args[0]);
 			if (!input) {
@@ -4717,6 +4977,308 @@ export function asMeetingStartArg(data: unknown): MeetingStartPayload {
 	return {
 		...(typeof o.source === "string" ? { source: o.source } : {}),
 		...(typeof o.app === "string" ? { app: o.app } : {}),
+		...(typeof o.title === "string" ? { title: o.title } : {}),
+	};
+}
+
+/** Methods `social.request` will forward. A closed set, so the frame cannot reach the
+ *  sidecar with a verb its router does not serve (PUT, HEAD, or an arbitrary string). */
+const SOCIAL_METHODS = new Set(["GET", "POST", "PATCH", "DELETE"]);
+
+/** The mount Core serves the `ryu-social` sidecar on. Mirrors `SOCIAL_MOUNT` in
+ *  `apps/desktop/src/lib/api/social.ts`, which is the layer that actually builds the
+ *  URL — this one validates the same string one hop earlier. */
+const SOCIAL_MOUNT = "/api/social";
+
+/** A base that exists only to give `new URL()` something to resolve against. Never
+ *  reaches a socket; only `pathname`/`search` are read off the result. */
+const SOCIAL_PARSE_BASE = "http://social.invalid";
+
+/** Resolve a frame-supplied sub-path against the mount with the SAME parser `fetch`
+ *  will use, and return the normalized `pathname + search`, or null when it does not
+ *  land under the mount.
+ *
+ *  This replaces a literal `/(^|\/)\.\.(\/|$)/` blocklist. The blocklist matched the
+ *  raw string, but `fetch` acts on the WHATWG URL parser's output, and that parser
+ *  also collapses `%2e%2e`, `%2E%2E`, `.%2e` and `%2e.` into double-dot segments — so
+ *  `/%2e%2e/settings` passed the check and left the desktop addressed to
+ *  `/api/settings`, with the node bearer attached and Core's own dot-segment guard
+ *  already bypassed. Enumerating encodings is a race the blocklist loses; agreeing
+ *  with the parser is not. */
+function resolveMountedRequestPath(mount: string, path: string): string | null {
+	let url: URL;
+	try {
+		url = new URL(`${mount}${path}`, SOCIAL_PARSE_BASE);
+	} catch {
+		return null;
+	}
+	if (url.pathname !== mount && !url.pathname.startsWith(`${mount}/`)) {
+		return null;
+	}
+	// Hand back the path RELATIVE to the mount, because that is what the payload's
+	// `path` means to every consumer — and normalized, so the host below can never
+	// re-derive a different one from the frame's raw string.
+	const rest = url.pathname.slice(mount.length);
+	return `${rest || "/"}${url.search}`;
+}
+
+function resolveSocialRequestPath(path: string): string | null {
+	return resolveMountedRequestPath(SOCIAL_MOUNT, path);
+}
+
+/**
+ * Narrow an RPC argument to a `social.request` payload, or null.
+ *
+ * This is the security boundary for the generic forwarder, so it is deliberately
+ * strict about `path` — the frame picks a SUB-PATH of `/api/social` and nothing else:
+ *
+ *  - must be a non-empty string starting with `/`, which rejects `"https://evil/x"`,
+ *    `"//evil/x"` (protocol-relative — it would resolve against the node's origin as a
+ *    different HOST), and any bare-relative path;
+ *  - must carry no `\` (a backslash is a path separator to some URL parsers and not to
+ *    others, which is exactly how a traversal slips past a `/`-only check);
+ *  - must RESOLVE to a path under `/api/social` — see
+ *    {@link resolveSocialRequestPath}. The returned `path` is the normalized one, not
+ *    the frame's raw string, so nothing downstream can re-derive a different target.
+ *
+ * `method` falls back to `"GET"`; anything outside {@link SOCIAL_METHODS} is refused
+ * rather than silently downgraded. `body` is passed through untouched — it is JSON the
+ * sidecar validates, not something this layer can meaningfully check.
+ */
+export function asSocialRequestArg(data: unknown): SocialRequestPayload | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	const path = o.path;
+	if (typeof path !== "string" || !path.startsWith("/")) {
+		return null;
+	}
+	if (path.startsWith("//") || path.includes("\\")) {
+		return null;
+	}
+	const resolved = resolveSocialRequestPath(path);
+	if (resolved === null) {
+		return null;
+	}
+	let method: SocialRequestPayload["method"] = "GET";
+	if (o.method !== undefined) {
+		if (typeof o.method !== "string" || !SOCIAL_METHODS.has(o.method)) {
+			return null;
+		}
+		method = o.method as SocialRequestPayload["method"];
+	}
+	return {
+		path: resolved,
+		method,
+		...(o.body === undefined ? {} : { body: o.body }),
+	};
+}
+
+/** Methods `reasoning.request` will forward. `PUT` instead of Outpost's `PATCH`,
+ *  matching the sidecar's policy-update route; a verb outside this set is refused
+ *  rather than downgraded to GET. */
+const REASONING_METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
+
+/** The mount Core serves the `ryu-reasoning` sidecar on. Mirrors `REASONING_MOUNT` in
+ *  `apps/desktop/src/lib/api/reasoning.ts`, which is the layer that actually builds
+ *  the URL — this one validates the same string one hop earlier. */
+const REASONING_MOUNT = "/api/reasoning";
+
+/**
+ * Narrow an RPC argument to a `reasoning.request` payload, or null.
+ *
+ * The same security boundary as {@link asSocialRequestArg}, against the reasoning
+ * mount — and deliberately routed through the SAME {@link resolveMountedRequestPath}
+ * rather than a second copy of it. That resolver exists because a literal `..`
+ * blocklist loses to the WHATWG URL parser's own decoding (`%2e%2e` and friends
+ * collapse into dot segments after the check runs), and a re-implementation is exactly
+ * where that lesson gets lost a second time.
+ */
+export function asReasoningRequestArg(
+	data: unknown
+): ReasoningRequestPayload | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	const path = o.path;
+	if (typeof path !== "string" || !path.startsWith("/")) {
+		return null;
+	}
+	if (path.startsWith("//") || path.includes("\\")) {
+		return null;
+	}
+	const resolved = resolveMountedRequestPath(REASONING_MOUNT, path);
+	if (resolved === null) {
+		return null;
+	}
+	let method: ReasoningRequestPayload["method"] = "GET";
+	if (o.method !== undefined) {
+		if (typeof o.method !== "string" || !REASONING_METHODS.has(o.method)) {
+			return null;
+		}
+		method = o.method as ReasoningRequestPayload["method"];
+	}
+	return {
+		path: resolved,
+		method,
+		...(o.body === undefined ? {} : { body: o.body }),
+	};
+}
+
+/** Methods `tuition.request` and `news.request` will forward. Both surfaces patch in
+ *  place (a skill's name, a source's title) and replace whole documents (settings), so
+ *  both verbs are here. A verb outside the set is refused rather than downgraded to
+ *  GET, so a frame asking for one gets an error instead of silently reading where it
+ *  meant to write. */
+const APP_CRUD_METHODS = new Set(["DELETE", "GET", "PATCH", "POST", "PUT"]);
+
+/** The mount Core serves the `ryu-tuition` sidecar on. Mirrors `TUITION_MOUNT` in
+ *  `apps/desktop/src/lib/api/tuition.ts`, which is the layer that actually builds the
+ *  URL — this one validates the same string one hop earlier. Two copies on purpose:
+ *  either layer alone would be the only thing between a sandboxed frame and the node's
+ *  credentials. */
+const TUITION_MOUNT = "/api/tuition";
+
+/** The mount Core serves the `ryu-news` sidecar on. See {@link TUITION_MOUNT}. */
+const NEWS_MOUNT = "/api/news";
+
+/**
+ * Narrow an RPC argument to a `tuition.request` payload, or null.
+ *
+ * The same security boundary as {@link asReasoningRequestArg}, against the tuition
+ * mount — and deliberately routed through the SAME {@link resolveMountedRequestPath}
+ * rather than a second copy of it. That resolver exists because a literal `..`
+ * blocklist loses to the WHATWG URL parser's own decoding (`%2e%2e` and friends
+ * collapse into dot segments after the check runs), and a re-implementation is exactly
+ * where that lesson gets lost a second time.
+ */
+export function asTuitionRequestArg(data: unknown): TuitionRequestPayload | null {
+	return asMountedCrudArg(data, TUITION_MOUNT) as TuitionRequestPayload | null;
+}
+
+/** Narrow an RPC argument to a `news.request` payload, or null. Same boundary and the
+ *  same shared resolver as {@link asTuitionRequestArg}. */
+export function asNewsRequestArg(data: unknown): NewsRequestPayload | null {
+	return asMountedCrudArg(data, NEWS_MOUNT) as NewsRequestPayload | null;
+}
+
+/** The shared body of the two validators above. Shared between THEM only — not with
+ *  the reasoning or social validators, whose method unions differ — so that widening
+ *  one app's verbs cannot silently widen another's. */
+function asMountedCrudArg(
+	data: unknown,
+	mount: string
+): { body?: unknown; method?: string; path: string } | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	const path = o.path;
+	if (typeof path !== "string" || !path.startsWith("/")) {
+		return null;
+	}
+	if (path.startsWith("//") || path.includes("\\")) {
+		return null;
+	}
+	const resolved = resolveMountedRequestPath(mount, path);
+	if (resolved === null) {
+		return null;
+	}
+	let method = "GET";
+	if (o.method !== undefined) {
+		if (typeof o.method !== "string" || !APP_CRUD_METHODS.has(o.method)) {
+			return null;
+		}
+		method = o.method;
+	}
+	return {
+		path: resolved,
+		method,
+		...(o.body === undefined ? {} : { body: o.body }),
+	};
+}
+
+/** Methods `blueprint.request` will forward — three, not four: the plan-review
+ *  surface never edits in place (see {@link BlueprintRequestPayload}), so there is no
+ *  PUT and no PATCH to accept. A verb outside this set is refused rather than
+ *  downgraded to GET, so a frame asking for one gets an error instead of silently
+ *  reading where it meant to write. */
+const BLUEPRINT_METHODS = new Set(["GET", "POST", "DELETE"]);
+
+/** The mount Core serves the `ryu-blueprint` sidecar on. Mirrors `BLUEPRINT_MOUNT` in
+ *  `apps/desktop/src/lib/api/blueprint.ts`, which is the layer that actually builds
+ *  the URL — this one validates the same string one hop earlier. */
+const BLUEPRINT_MOUNT = "/api/blueprint";
+
+/**
+ * Narrow an RPC argument to a `blueprint.request` payload, or null.
+ *
+ * The same security boundary as {@link asReasoningRequestArg}, against the blueprint
+ * mount, and through the SAME {@link resolveMountedRequestPath} for the same reason:
+ * a literal `..` blocklist loses to the WHATWG URL parser's own decoding (`%2e%2e`
+ * and friends collapse into dot segments after the check runs), and each
+ * re-implementation is a fresh chance to lose that lesson.
+ *
+ * It matters more here than it reads: plan ids are attacker-adjacent. They arrive
+ * from whatever an agent passed to `plan_publish`, they appear in every path this
+ * verb builds (`/plans/:id/annotations`), and the frame is the one assembling the
+ * string. The sidecar validates ids again on its side — this is the outer half of
+ * that pair, not a substitute for it.
+ */
+export function asBlueprintRequestArg(
+	data: unknown
+): BlueprintRequestPayload | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	const path = o.path;
+	if (typeof path !== "string" || !path.startsWith("/")) {
+		return null;
+	}
+	if (path.startsWith("//") || path.includes("\\")) {
+		return null;
+	}
+	const resolved = resolveMountedRequestPath(BLUEPRINT_MOUNT, path);
+	if (resolved === null) {
+		return null;
+	}
+	let method: BlueprintRequestPayload["method"] = "GET";
+	if (o.method !== undefined) {
+		if (typeof o.method !== "string" || !BLUEPRINT_METHODS.has(o.method)) {
+			return null;
+		}
+		method = o.method as BlueprintRequestPayload["method"];
+	}
+	return {
+		path: resolved,
+		method,
+		...(o.body === undefined ? {} : { body: o.body }),
+	};
+}
+
+/** Narrow an RPC argument to a `social.open` payload. Total rather than nullable: both
+ *  fields are optional (no id opens the Outpost tab itself), so there is no shape a
+ *  navigation verb should refuse — a bad field is simply dropped.
+ *
+ *  Deliberately only `postId` and `title`. The frame ALSO reads
+ *  `window.ryu.context.section`, but that arrives through the mount context, not
+ *  through this verb — accepting a `section` here would be an argument the host silently
+ *  drops, which is how a verb becomes decorative. */
+export function asSocialOpenArg(data: unknown): {
+	postId?: string;
+	title?: string;
+} {
+	if (typeof data !== "object" || data === null) {
+		return {};
+	}
+	const o = data as Record<string, unknown>;
+	return {
+		...(typeof o.postId === "string" && o.postId.length > 0
+			? { postId: o.postId }
+			: {}),
 		...(typeof o.title === "string" ? { title: o.title } : {}),
 	};
 }

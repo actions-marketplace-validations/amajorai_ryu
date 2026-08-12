@@ -402,14 +402,43 @@ pub fn spawn_plan_for(agent: &RegistryAgent) -> Option<RegistrySpawnPlan> {
     None
 }
 
-/// Absolute spawn command for a direct-archive agent (runs from `install_dir`).
+/// Absolute spawn command for a direct-archive agent (runs from `install_dir`),
+/// falling back to the user's own copy of the CLI when Ryu never downloaded the
+/// archive.
+///
+/// The fallback is what makes a self-installed binary agent actually usable.
+/// `list_infos` reports a registry agent as **installed** purely from
+/// `detect_binary` being on `PATH` (`opencode`, `goose`, `cursor-agent`, …), so
+/// an agent the user installed themselves shows up as ready and is selectable —
+/// but a binary-distribution agent's spawn command pointed unconditionally at
+/// `~/.ryu/agents/<id>/<cmd>`, a path that only exists once Ryu has downloaded
+/// the archive. Selecting such an agent therefore spawned a file that was not
+/// there: `session/new` never answered, `probe_acp_config` failed, and the
+/// composer's Model / Approval / thinking submenus stayed empty while npx-
+/// distributed agents (Claude, Codex) worked — because npx self-fetches and
+/// needs no install directory. That asymmetry was the whole bug.
+///
+/// So: prefer Ryu's own copy when it is present (it is the version Ryu pins and
+/// updates), otherwise spawn the detected CLI by bare name and let `PATH`
+/// resolve it. The registry's `args` are carried over unchanged in both cases —
+/// `cmd` and the user's binary are the same program, only reached differently.
+/// Falling all the way back to the archive path when neither exists is
+/// deliberate: the failure then names the path the install flow will fill.
 pub fn spawn_cmd_for_direct_archive(dist: &DirectArchiveDist) -> String {
     let cmd_rel = dist
         .cmd
         .trim_start_matches("./")
         .replace('/', std::path::MAIN_SEPARATOR_STR);
     let bin = dist.install_dir.join(&cmd_rel);
-    let mut parts = vec![bin.display().to_string()];
+    let program = if bin.is_file() {
+        bin.display().to_string()
+    } else {
+        underlying_cli_probe(&dist.registry_id)
+            .map(|(binary, _)| binary)
+            .filter(|binary| crate::sidecar::adapters::acp::binary_in_path(binary))
+            .map_or_else(|| bin.display().to_string(), str::to_owned)
+    };
+    let mut parts = vec![program];
     parts.extend(dist.args.clone());
     let joined = parts.join(" ");
     shell_wrap_npx(&joined)
@@ -426,6 +455,29 @@ pub fn underlying_cli_probe(registry_id: &str) -> Option<(&'static str, &'static
         "qwen-code" => Some(("qwen", "@qwen-code/qwen-code")),
         "goose" => Some(("goose", "goose")),
         "cursor" => Some(("cursor-agent", "cursor-agent")),
+        // The long tail. Every row above was a first-class agent; these are the
+        // rest of the registry whose ACP entry wraps a CLI the user installs
+        // separately. Without a row here `detect_binary` is `None`, so the agent
+        // can never be reported as found — onboarding's "Found on your system"
+        // section could only ever name the eight agents above, no matter what was
+        // actually installed. The mapping is registry id → (the binary the USER
+        // has, the npm package that upgrades it); an agent whose underlying CLI
+        // name is not publicly settled is deliberately left out rather than
+        // guessed, since a wrong name detects some unrelated binary.
+        "opencode" => Some(("opencode", "opencode-ai")),
+        "grok-build" => Some(("grok", "@xai-official/grok")),
+        "factory-droid" => Some(("droid", "droid")),
+        "auggie" => Some(("auggie", "@augmentcode/auggie")),
+        "cline" => Some(("cline", "cline")),
+        "kilo" => Some(("kilo", "@kilocode/cli")),
+        "codebuddy-code" => Some(("codebuddy", "@tencent-ai/codebuddy-code")),
+        "qoder" => Some(("qoder", "@qoder-ai/qodercli")),
+        "dimcode" => Some(("dimcode", "dimcode")),
+        "dirac" => Some(("dirac", "dirac-cli")),
+        "nova" => Some(("nova", "@compass-ai/nova")),
+        "sigit" => Some(("sigit", "@smbcloud/sigit")),
+        "stakpak" => Some(("stakpak", "stakpak")),
+        "vtcode" => Some(("vtcode", "vtcode")),
         _ => None,
     }
 }
@@ -697,6 +749,69 @@ mod tests {
         // No binary block at all → no direct archive.
         assert!(
             direct_archive_for_agent(&agent_with("x", RegistryDistribution::default())).is_none()
+        );
+    }
+
+    #[test]
+    fn spawn_falls_back_to_the_users_own_cli_when_the_archive_is_absent() {
+        // A binary-distribution agent Ryu has NOT downloaded. This is the state a
+        // self-installed agent is permanently in: `list_infos` reports it as
+        // installed from `detect_binary` being on PATH, so it is selectable, while
+        // nothing was ever written to `~/.ryu/agents/<id>`. Spawning the archive
+        // path anyway is what left `opencode` with no session and no pickers.
+        let dist = DirectArchiveDist {
+            registry_id: "opencode".to_owned(),
+            archive_url: "https://dl.example.com/opencode.zip".to_owned(),
+            cmd: "./opencode".to_owned(),
+            args: vec!["acp".to_owned()],
+            install_dir: std::path::PathBuf::from("/nonexistent/ryu/agents/opencode"),
+        };
+        let cmd = spawn_cmd_for_direct_archive(&dist);
+        // The registry's args ride along either way — only the program changes.
+        assert!(cmd.ends_with(" acp"), "args must survive: {cmd}");
+        // Which program is correct depends on the host, so assert the INVARIANT
+        // rather than a machine-specific string: the spawn target agrees with the
+        // same PATH probe that decides whether the agent is reported installed.
+        // Those two disagreeing is the entire bug this covers.
+        if crate::sidecar::adapters::acp::binary_in_path("opencode") {
+            assert_eq!(cmd, "opencode acp");
+        } else {
+            assert!(
+                cmd.contains("/nonexistent/ryu/agents/opencode"),
+                "with no CLI on PATH the archive path is still the target: {cmd}"
+            );
+        }
+
+        // An agent with no `underlying_cli_probe` row has no user-installed CLI to
+        // fall back TO, so it keeps naming the archive path — the install flow is
+        // the only way to make it runnable, and the error should say so.
+        let unknown = DirectArchiveDist {
+            registry_id: "no-such-registry-agent".to_owned(),
+            archive_url: "https://dl.example.com/x.zip".to_owned(),
+            cmd: "./x".to_owned(),
+            args: vec!["acp".to_owned()],
+            install_dir: std::path::PathBuf::from("/nonexistent/ryu/agents/x"),
+        };
+        assert!(
+            spawn_cmd_for_direct_archive(&unknown).contains("/nonexistent/ryu/agents/x"),
+            "no probe row ⇒ no fallback"
+        );
+
+        // And an archive Ryu HAS downloaded wins over anything on PATH: it is the
+        // build Ryu pins and updates.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin = tmp.path().join("opencode");
+        std::fs::write(&bin, b"#!/bin/sh\n").expect("write stub");
+        let installed = DirectArchiveDist {
+            registry_id: "opencode".to_owned(),
+            archive_url: "https://dl.example.com/opencode.zip".to_owned(),
+            cmd: "./opencode".to_owned(),
+            args: vec!["acp".to_owned()],
+            install_dir: tmp.path().to_path_buf(),
+        };
+        assert!(
+            spawn_cmd_for_direct_archive(&installed).starts_with(&bin.display().to_string()),
+            "a present archive binary must win over PATH"
         );
     }
 

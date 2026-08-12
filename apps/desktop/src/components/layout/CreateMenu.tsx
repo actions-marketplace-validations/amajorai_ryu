@@ -18,6 +18,7 @@
 import { Add01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type CSSProperties, useEffect, useId, useRef, useState } from "react";
+import { AddToSpaceDialog } from "@/src/components/spaces/AddToSpaceDialog.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
 import {
 	TeamDialog,
@@ -61,6 +62,10 @@ export function CreateMenu() {
 	const { create: createSpace } = useSpacesContext();
 	const [teamOpen, setTeamOpen] = useState(false);
 	const [spaceOpen, setSpaceOpen] = useState(false);
+	// Opened with no target space, so the dialog shows its picker (defaulted to
+	// the Uploads system space) rather than a dead end — there is no row here to
+	// infer a Space from, unlike the sidebar's per-row "+".
+	const [uploadOpen, setUploadOpen] = useState(false);
 	const [open, setOpen] = useState(false);
 	const panelId = useId();
 	const rootRef = useRef<HTMLDivElement | null>(null);
@@ -116,19 +121,36 @@ export function CreateMenu() {
 			onSelect: () => openTab("/workflows/new", { title: "New workflow" }),
 		},
 		{
+			id: "space",
+			label: "New space",
+			onSelect: () => setSpaceOpen(true),
+		},
+		{
+			id: "space-upload",
+			label: "Upload files",
+			onSelect: () => setUploadOpen(true),
+		},
+	];
+
+	/**
+	 * "Build with AI" is pinned to the bottom of the menu, below every app's rows.
+	 *
+	 * It reads as the menu's escape hatch — "none of the above, describe it
+	 * instead" — and an escape hatch in the middle of a list is just another item.
+	 * It sat above "New space" for exactly that reason, so this is a RULE rather
+	 * than a reordered array: an app enabled tomorrow lands above it too, without
+	 * anyone remembering to move it again.
+	 */
+	const pinnedLast: CreateMenuAction[] = [
+		{
 			id: "workflow-build",
 			label: "Build with AI",
 			onSelect: () =>
 				openTab("/workflows/build", { title: "Build a workflow" }),
 		},
-		{
-			id: "space",
-			label: "New space",
-			onSelect: () => setSpaceOpen(true),
-		},
 	];
 
-	const items = [...builtIns, ...contributed];
+	const items = [...builtIns, ...contributed, ...pinnedLast];
 	const morphVars = {
 		"--morph-open-w": `${MORPH_OPEN_W}px`,
 		"--morph-open-h": `${items.length * ROW_H + PANEL_PAD * 2}px`,
@@ -207,6 +229,11 @@ export function CreateMenu() {
 				onClose={() => setSpaceOpen(false)}
 				onCreate={createSpace}
 				open={spaceOpen}
+			/>
+			<AddToSpaceDialog
+				onClose={() => setUploadOpen(false)}
+				open={uploadOpen}
+				spaceId={null}
 			/>
 		</>
 	);

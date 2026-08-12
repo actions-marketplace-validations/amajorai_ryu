@@ -247,8 +247,22 @@ impl PluginStore {
         })
     }
 
-    /// Fetch a single app record by id.
+    /// Fetch a single app record by id, **as it should run right now**.
+    ///
+    /// Masked by Safe Mode exactly like [`Self::list`], and for the same reason:
+    /// this is the read behind the per-plugin runtime gates (the sandboxed plugin
+    /// bridge, the ext-proxy mount, the UI-bundle serve), and every one of them
+    /// keys on `enabled`. See [`Self::get_record`] for the raw read.
     pub async fn get(&self, id: &str) -> Result<Option<PluginRecord>> {
+        let Some(record) = self.get_record(id).await? else {
+            return Ok(None);
+        };
+        Ok(apply_safe_mode_mask(vec![record], crate::safe_mode::is_active()).pop())
+    }
+
+    /// The RAW record for `id`, unmasked by Safe Mode. Lifecycle and management
+    /// callers only — see [`Self::list_all_records`] for the full rule.
+    pub async fn get_record(&self, id: &str) -> Result<Option<PluginRecord>> {
         let conn = self.conn.lock().await;
         let record = conn
             .query_row(
@@ -261,8 +275,35 @@ impl PluginStore {
         Ok(record)
     }
 
-    /// List all app records.
+    /// List all app records, **as they should run right now**.
+    ///
+    /// This is the read every runtime consumer uses, and every one of them filters
+    /// on `enabled` — so this is the single seam Safe Mode masks: while
+    /// [`crate::safe_mode::is_active`], every record outside the kernel tiers is
+    /// reported `enabled = false` with its grants cleared. Hooks, adapters, plugin
+    /// sidecars, plugin MCP servers, contributed panels and ext-proxy routes all
+    /// fall out of that one change.
+    ///
+    /// The masked read is the DEFAULT name deliberately. A caller that should have
+    /// used the raw one and didn't gets a cosmetic bug (a Store row rendering as
+    /// off); the reverse mistake spawns a process safe mode exists to keep from
+    /// spawning. See [`Self::list_all_records`] for the raw read, and note that
+    /// nothing here writes: the persisted `enabled` bit is never touched, which is
+    /// what makes leaving safe mode a no-op.
     pub async fn list(&self) -> Result<Vec<PluginRecord>> {
+        let rows = self.list_all_records().await?;
+        Ok(apply_safe_mode_mask(rows, crate::safe_mode::is_active()))
+    }
+
+    /// The RAW lifecycle rows, unmasked by Safe Mode.
+    ///
+    /// Only two kinds of caller may use this: the **lifecycle** paths
+    /// (enable/disable/uninstall and their dependency resolution), which must see
+    /// and edit the user's real choices even while safe mode is masking them, and
+    /// the **management/Store surface**, which renders "installed, and disabled by
+    /// Safe Mode" rather than pretending the user turned everything off. Nothing
+    /// that spawns, injects, or routes may read this.
+    pub async fn list_all_records(&self) -> Result<Vec<PluginRecord>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, version, enabled, approved_grants, created_at, updated_at
@@ -378,6 +419,34 @@ impl PluginStore {
     }
 }
 
+/// The Safe Mode read mask, as a pure function of the rows and the flag.
+///
+/// Pure and `active`-parameterised on purpose: the flag itself is a process-global
+/// resolved once at boot, so a test that flipped it would leak safe mode into every
+/// other test sharing the binary. This way the masking contract is asserted without
+/// touching the global, and [`PluginStore::list`] / [`PluginStore::get`] are one
+/// line each over it.
+///
+/// Records outside the kernel tiers come back `enabled = false` with their grants
+/// cleared — grants for the same reason [`PluginStore::set_disabled`] clears them:
+/// a masked-off plugin must not still present an approved `sidecar:process` (or
+/// any other) grant to a gate that reads grants without re-checking `enabled`.
+fn apply_safe_mode_mask(records: Vec<PluginRecord>, active: bool) -> Vec<PluginRecord> {
+    if !active {
+        return records;
+    }
+    records
+        .into_iter()
+        .map(|mut record| {
+            if !crate::safe_mode::keeps_plugin_enabled(&record.id) {
+                record.enabled = false;
+                record.approved_grants.clear();
+            }
+            record
+        })
+        .collect()
+}
+
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRecord> {
     let grants_json: String = row.get(3)?;
     let approved_grants = serde_json::from_str(&grants_json).unwrap_or_default();
@@ -397,6 +466,83 @@ mod tests {
 
     fn store() -> PluginStore {
         PluginStore::open_in_memory().unwrap()
+    }
+
+    // ── Safe Mode: a read mask, never a write ────────────────────────────────
+
+    /// The invariant the whole design rests on: safe mode changes what callers
+    /// READ and leaves the `apps` table alone. That is what makes leaving safe mode
+    /// a no-op with no bookkeeping to replay, and what makes a crash mid-toggle
+    /// harmless.
+    ///
+    /// Asserted against the store rather than the pure helper because the claim is
+    /// about persistence: mask the rows, then read the table again and find every
+    /// bit exactly as the user left it.
+    #[tokio::test]
+    async fn safe_mode_masks_reads_without_writing_records() {
+        let s = store();
+        s.insert("com.test.app", "1.0.0").await.unwrap();
+        s.set_enabled("com.test.app", &["sidecar:process".to_owned()])
+            .await
+            .unwrap();
+
+        let masked = apply_safe_mode_mask(s.list_all_records().await.unwrap(), true);
+        let app = masked.iter().find(|r| r.id == "com.test.app").unwrap();
+        assert!(!app.enabled, "an ordinary app must read as disabled");
+        assert!(
+            app.approved_grants.is_empty(),
+            "a masked-off app must not still present approved grants"
+        );
+
+        // The table is untouched.
+        let raw = s.list_all_records().await.unwrap();
+        let app = raw.iter().find(|r| r.id == "com.test.app").unwrap();
+        assert!(app.enabled, "safe mode must NOT write the enabled column");
+        assert_eq!(
+            app.approved_grants,
+            vec!["sidecar:process".to_owned()],
+            "safe mode must NOT clear the persisted grants"
+        );
+    }
+
+    /// The kernel tiers survive the mask. Without this, safe mode would boot a node
+    /// with no Spaces (the root every retrieval path resolves through) and no
+    /// engines — a "diagnostic" mode in which chat itself is broken, which tells the
+    /// user nothing about the problem they came to measure.
+    #[tokio::test]
+    async fn safe_mode_keeps_the_kernel_plugins_running() {
+        let s = store();
+        for id in crate::plugins::builtins::MANDATORY_PLUGINS
+            .iter()
+            .chain(crate::plugins::builtins::LOAD_BEARING_PLUGINS)
+        {
+            s.insert(id, "1.0.0").await.unwrap();
+            s.set_enabled(id, &[]).await.unwrap();
+        }
+        let masked = apply_safe_mode_mask(s.list_all_records().await.unwrap(), true);
+        assert!(
+            masked.iter().all(|r| r.enabled),
+            "every kernel-tier plugin must stay enabled under safe mode"
+        );
+    }
+
+    /// Inactive safe mode is byte-for-byte the identity function — the normal boot
+    /// must not be paying for a mode nobody turned on.
+    #[tokio::test]
+    async fn the_mask_is_the_identity_when_safe_mode_is_off() {
+        let s = store();
+        s.insert("com.test.app", "1.0.0").await.unwrap();
+        s.set_enabled("com.test.app", &["mcp:web_search".to_owned()])
+            .await
+            .unwrap();
+        let raw = s.list_all_records().await.unwrap();
+        let passed_through = apply_safe_mode_mask(raw.clone(), false);
+        assert_eq!(passed_through.len(), raw.len());
+        for (a, b) in passed_through.iter().zip(raw.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.enabled, b.enabled);
+            assert_eq!(a.approved_grants, b.approved_grants);
+        }
     }
 
     #[tokio::test]

@@ -479,6 +479,31 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // judge, each round spawns an INDEPENDENT verifier sub-agent (grant
     // `hook:run-agent`) that gathers real evidence with tools before deciding.
     include_str!("../../../../plugins-store/proof/manifest.json"),
+    // `receipts` is `proof`'s VISUAL sibling: the verifier sub-agent judges a
+    // captured screenshot or screen recording instead of re-reading the workspace,
+    // so a round leaves behind an artifact a human can look at afterwards. The hook
+    // has no capture capability of its own (no HTTP, no callTool in the sandbox),
+    // so the artifact arrives as an absolute path printed in the turn text.
+    include_str!("../../../../plugins-store/receipts/manifest.json"),
+    // `recap` is the read-side counterpart to those three: instead of steering the
+    // turn, it summarizes the one that just finished (`post_assistant_turn` → a
+    // `note`), and owns `/recap` on the `pre_user_turn` phase — returning `handled`,
+    // so the command is answered by the side model without a main-model turn. Not in
+    // `CORE_DEFAULT_ON`: unlike the `match`-gated hooks above, a recap is a real
+    // model call per long turn, so it has to be a thing the user asked for.
+    include_str!("../../../../plugins-store/recap/manifest.json"),
+    // `no-ai-slop` bundles the editing skill of the same name and runs it on the
+    // turn that just finished. It is the one turn hook here with NO `match` gate:
+    // "every completed answer" is the feature, so it cannot pre-gate on a flag or a
+    // command. The composer toggle is a manual override for when the automatic pass
+    // count is 0, not the arming switch. Its `continue` loop is bounded three ways —
+    // a transcript-derived pass counter (the injected turn's own header is the
+    // marker), a clean verdict from the reviewer, and Core's `MAX_CONTINUE_TURNS` —
+    // and the hook clamps its pass setting well under that cap so a large value
+    // degrades to fewer passes instead of a loop that stops mid-rewrite. Not in
+    // `CORE_DEFAULT_ON` for `recap`'s reason, doubled: a sandbox spawn per turn AND
+    // a sub-agent per reviewed answer, on the user's budget.
+    include_str!("../../../../plugins-store/no-ai-slop/manifest.json"),
     // `plan-continue` keeps a plan moving while the composer's plan-mode pill is
     // on, by injecting its own follow-up turn when one finishes. Community and
     // NOT in `CORE_DEFAULT_ON` for the reason the others are on: this one spends
@@ -564,6 +589,40 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // ext-proxy. Availability is a RUNTIME probe (`/capabilities`): iOS shows only on a
     // Mac with Xcode; Android wherever the SDK is present.
     include_str!("../../../../apps-store/simulator/manifest.json"),
+    // UGC: a creator-marketing campaign tracker (campaign briefs + budgets, a creator
+    // roster, post submissions with approve/reject review, per-post metric snapshots
+    // refreshed through a curated Composio action map, and CPM/flat payouts accrued,
+    // approved and marked paid). Fully manifest-driven like Mail: the whole surface is
+    // out-of-process in the `ryu-ugc` sidecar (a `local` sibling binary) and Core reaches
+    // `/api/ugc/*` through the generic ext-proxy `public_mount` — there is no hand-coded
+    // Rust proxy and no Core-side UGC code. OPT-IN like the browser/simulator — NOT in
+    // `CORE_DEFAULT_ON`, so the sidecar binary a normal install does not carry is never
+    // spawned unless a user enables the app. Its client surface is a desktop DOCK PANEL
+    // (`contributes.dock_panels`, `panel: "native"`), not a companion, so it ships no UI
+    // bundle and needs no `plugins::seed` row.
+    include_str!("../../../../apps-store/ugc/manifest.json"),
+    // Outpost — social scheduling + publishing. Manifest-driven exactly like Mail and
+    // UGC: the whole surface (workspaces, accounts, drafts, the durable retrying publish
+    // queue, the reply inbox, engagement history, templates) lives out-of-process in the
+    // `ryu-social` sidecar (a `local` sibling binary on 8005 — 8004 was already claimed
+    // by `@ryu/ugc`), and Core reaches `/api/social/*` through the generic ext-proxy
+    // `public_mount`. There is no hand-coded Rust proxy and no Core-side social code; the
+    // crate does not even path-depend on `apps/core`. Unlike UGC its client surface IS a
+    // full-page Companion (`ui_format:"html"`, Path B) driving the sidecar through the
+    // `social:crud` bridge forwarder, so it ships a UI bundle and DOES need a
+    // `plugins::seed` row. OPT-IN: not in `CORE_DEFAULT_ON`, so a normal install never
+    // spawns the sidecar unless a user enables the app.
+    include_str!("../../../../apps-store/social/manifest.json"),
+    // Harbor — an object-first CRM over the `ryu-crm` sidecar (a `local` sibling binary
+    // on 8009; 8007 was contested by three concurrently built apps and 8008 taken by
+    // `@ryu/news`). Same zero-coupling posture as Outpost above — Core links no CRM code
+    // and the crate does not path-depend on `apps/core` — but its client surface is a
+    // NATIVE DOCK PANEL, not a Companion. That is the whole difference and it removes
+    // work rather than adding it: a dock panel fetches `/api/ext/@ryu/crm/*` over the
+    // generic ext-proxy directly, so there is no `ui_code` bundle, no `plugins::seed`
+    // row, and none of the per-app bridge rows in `rpc.ts`/`host_api.rs` that a
+    // CSP-sandboxed companion would have forced. OPT-IN: not in `CORE_DEFAULT_ON`.
+    include_str!("../../../../apps-store/crm/manifest.json"),
     // The Whiteboard app — a full-page Companion (`ui_format:"html"`, Path B) that
     // OWNS its Space documents via `spaces:docs`. Ships default-on with a UI bundle
     // + host-bridge grants seeded in `main.rs` (the generic CORE_DEFAULT_ON loop
@@ -740,6 +799,16 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // about it exists in Core beyond this registration. It is the reference for
     // "an app that only rearranges what the shell already knows".
     include_str!("../../../../apps-store/agent-status/manifest.json"),
+    // The Drafts app — a durable outbox. Owns one `sidebar_sections` entry over its
+    // own store and one app-shell page, and its state lives OUT-OF-PROCESS in the
+    // `ryu-drafts` sidecar (`public_mount` at `/api/drafts`, App-gated via the ext
+    // proxy), which is why — unlike `agent-status` directly above — it is Core-tier:
+    // a managed sidecar only spawns for a `CORE_PLUGINS` member. Opt-in (absent from
+    // `CORE_DEFAULT_ON`) because a default-on sidecar app spawns a binary a normal
+    // install does not have. Nothing about drafts exists in Core beyond this
+    // registration: the shell's dispatcher does the sending, because a manifest
+    // sidecar is deliberately spawned without `RYU_TOKEN`.
+    include_str!("../../../../apps-store/drafts/manifest.json"),
     // `sample-widget` — the REFERENCE third-party MCP widget plugin (a dev
     // template; source lives at `plugins-store/sample-widget/`). It declares a
     // local Node MCP server (`node server.mjs`) whose `render` tool advertises
@@ -822,6 +891,101 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../apps-store/markitdown/manifest.json"),
     include_str!("../../../../apps-store/docling/manifest.json"),
     include_str!("../../../../apps-store/mineru/manifest.json"),
+    // Automated Reasoning — the app that decides whether an answer FOLLOWS from a
+    // written policy, using a decision procedure rather than a second model's
+    // opinion (`apps-store/reasoning/backend`: exact rational arithmetic, a
+    // finite-domain search over booleans/enums, Fourier–Motzkin over linear
+    // arithmetic, branch-and-bound for integers). Opt-in and NOT pre-installed: it
+    // is a leaf feature that does nothing until someone writes a policy.
+    //
+    // Three seams, all generic, none of them Core knowing this app exists beyond
+    // this line: the `/api/reasoning/*` surface is a `public_mount` sidecar behind
+    // the ext-proxy; the agent/workflow surface is the manifest's own `mcp_servers`
+    // entry (`reasoning__solve` is the id a workflow `mcp` node takes), auto-allowed
+    // because a compiled-in built-in is Core-tier; and the per-turn guardrail is an
+    // ordinary `contributes.turn_hooks` entry whose body is embedded in
+    // `builtin_code::BUILTIN_CODE_FILES` — the first apps-store row in that table,
+    // which the bijection test already covered because it walks BOTH store roots.
+    //
+    // `hook:side-model` appears in BOTH the sidecar's `host_api.grants` and the
+    // top-level `permission_grants`: the host callback authorizes on declared ∩
+    // Gateway-approved, so a manifest carrying only one of the two 403s at runtime
+    // with nothing at parse time to say why.
+    include_str!("../../../../apps-store/reasoning/manifest.json"),
+    // Mission Control: the project-level view over many chats — recent sessions and
+    // what each accomplished, per-day activity, the files several chats keep returning
+    // to, and the to-dos left outstanding in threads nobody reopened. Fully
+    // manifest-driven like UGC: the whole surface is out-of-process in the
+    // `ryu-mission-control` sidecar (a `local` sibling binary) and Core reaches
+    // `/api/mission-control/*` through the generic ext-proxy `public_mount`. OPT-IN —
+    // NOT in `CORE_DEFAULT_ON`, so the sidecar binary a normal install does not carry
+    // is never spawned unless a user enables the app.
+    //
+    // The app stores digests it does not compute, and that inversion is forced rather
+    // than chosen: a manifest sidecar's callbacks into Core are `model/complete`, `rpc`
+    // and `capability/:cap` (`sidecar/ext_proxy.rs`), none of which reads a
+    // conversation, and `messages.parts` is sealed at rest. The desktop derives each
+    // digest from the parts it already holds and PUTs it — the same function that
+    // renders the shell's in-chat `mission` dock panel, so the two surfaces cannot
+    // disagree about a chat.
+    //
+    // `hook:side-model` appears in BOTH the sidecar's `host_api.grants` and the
+    // top-level `permission_grants`, for the reason spelled out on Reasoning above. It
+    // buys only the optional narrative summary: every number the dashboard shows is an
+    // indexed fact, so a node with no model still gets a working page.
+    include_str!("../../../../apps-store/mission-control/manifest.json"),
+    // Blueprint — visual plan review. An agent publishes its plan over the app's own
+    // MCP server (`blueprint__plan_publish`), a human reads it as rendered markdown
+    // blocks plus a dependency graph derived from `steps[].depends_on`, annotates it,
+    // and approves or requests changes; the agent reads the verdict back as
+    // deterministic text (`blueprint__plan_status`). Opt-in — outside `CORE_DEFAULT_ON`,
+    // like Reasoning, because it owns an out-of-process binary a normal install does
+    // not have, and because it is inert until an agent publishes something.
+    //
+    // The seams are the same generic three, and again none of them is Core knowing
+    // this app exists beyond this line: `/api/blueprint/*` is a `public_mount` sidecar
+    // behind the ext-proxy, the agent/workflow surface is the manifest's own
+    // `mcp_servers` entry, and there are deliberately NO `turn_hooks` — the plugin
+    // sandbox has no HTTP, so a hook could not reach the sidecar that owns the plans.
+    // What drives the agent instead is `contributes.output_styles`
+    // (`output-styles/visual-planning.md`, embedded in
+    // `builtin_code::BUILTIN_OUTPUT_STYLES`): without a style telling the agent to
+    // publish before it edits, nothing ever calls the tool and the app is inert.
+    include_str!("../../../../apps-store/blueprint/manifest.json"),
+    // Tuition — a tutor for one learner. Turns the learner's own syllabus and notes
+    // into a prerequisite graph of skills, each carrying a Bayesian Knowledge Tracing
+    // posterior, and drills the weakest thing they are ready for. The interesting
+    // property, and the reason it earns a row here: four of the five item kinds are
+    // graded by ARITHMETIC with no model in the loop at all (`apps-store/tuition/
+    // backend/src/grade.rs`, with a hand-rolled fixed-point decimal so an item
+    // expecting 0.3 does not mark a correct 0.3 wrong), and the one kind a model does
+    // mark shows the rubric it was marked against.
+    //
+    // Every seam is generic: `/api/tuition/*` is a `public_mount` sidecar behind the
+    // ext-proxy, the agent/workflow surface is the manifest's own `mcp_servers` entry,
+    // and the Study-mode capture is an ordinary `contributes.turn_hooks` entry whose
+    // body is embedded in `builtin_code::BUILTIN_CODE_FILES`.
+    //
+    // `storage:kv` appears in BOTH the sidecar's `host_api.grants` and the top-level
+    // `permission_grants`, and it is load-bearing rather than incidental: the turn
+    // hook runs in a sandbox with no HTTP and cannot call the sidecar, so the two hand
+    // work to each other through Core's own KV. One grant without the other 403s at
+    // runtime with nothing at parse time to say why.
+    include_str!("../../../../apps-store/tuition/manifest.json"),
+    // Wire — a personal newsroom. Pulls feeds in on a schedule, collapses the same
+    // story across every outlet covering it, writes a brief from those clusters, and
+    // fires watches on a burst it can explain. Ingest, dedupe (URL canonicalization
+    // plus a banded 64-bit SimHash), clustering, the hour-of-day burst test, the
+    // boolean topic grammar and the ranking are all deterministic and offline; a model
+    // writes only the brief prose and a neutral cluster title.
+    //
+    // Its `news__search` MCP tool is the reason this is more than a reader: it queries
+    // the user's OWN vetted corpus with no web request at all, so an agent can ground
+    // an answer in the sources they chose rather than in whatever a fresh search
+    // returns. Same generic seams as `tuition` above, with the KV handoff running the
+    // other way — the sidecar publishes a ranked snapshot the `pre_user_turn` hook
+    // reads.
+    include_str!("../../../../apps-store/news/manifest.json"),
 ];
 
 /// The Canvas app's plugin id (its Space documents are `kind = app:<this>`). Shared
@@ -868,6 +1032,44 @@ pub const FINETUNE_UI_HTML: &str = include_str!("fixtures/finetune.ui.html");
 /// packages/monitors-app build` and copy `dist/index.html` to
 /// `fixtures/monitors.ui.html` to refresh it.
 pub const MONITORS_UI_HTML: &str = include_str!("fixtures/monitors.ui.html");
+
+/// The Automated Reasoning app's plugin id. Shared by the seed table and the
+/// not-pre-installed list.
+pub const REASONING_PLUGIN_ID: &str = "@ryu/reasoning";
+
+/// The Automated Reasoning app's prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/reasoning/ui`, all JS/CSS inlined).
+/// A built-in ships only its manifest, so this is the ONLY place its frame exists:
+/// `plugins::lifecycle::install_app` sources it at install time via
+/// `compiled_in_ui_code`. Rebuild with `bun run --cwd apps-store/reasoning/ui build`
+/// and copy `dist/index.html` here to refresh it.
+pub const REASONING_UI_HTML: &str = include_str!("fixtures/reasoning.ui.html");
+
+/// The Tuition app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
+/// build of `apps-store/tuition/ui`, all JS/CSS inlined). A built-in ships only its
+/// manifest, so this is the ONLY place its frame exists: `plugins::lifecycle::
+/// install_app` sources it at install time via `compiled_in_ui_code`. Refresh with
+/// `scripts/sync-app-fixtures.sh tuition`.
+pub const TUITION_UI_HTML: &str = include_str!("fixtures/tuition.ui.html");
+
+/// The Wire app's prebuilt, self-contained UI bundle. Same carriage as
+/// [`TUITION_UI_HTML`]; refresh with `scripts/sync-app-fixtures.sh news`.
+pub const NEWS_UI_HTML: &str = include_str!("fixtures/news.ui.html");
+
+/// The Blueprint app's prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/blueprint/ui`, all JS/CSS inlined —
+/// including `@xyflow/react`, which is what makes this bundle bigger than a
+/// text-only companion's). Same rule as Reasoning above: a built-in ships only its
+/// manifest, so this is the ONLY place its frame exists and
+/// `plugins::lifecycle::install_app` sources it at install time via
+/// `compiled_in_ui_code`. Refresh it with `scripts/sync-app-fixtures.sh blueprint`
+/// rather than by hand — that script runs the vite build and copies
+/// `dist/index.html` here, and its `--check` mode is what catches a stale copy.
+///
+/// The plugin id deliberately lives elsewhere (`plugins::builtins::BLUEPRINT_PLUGIN_ID`)
+/// next to the `CORE_PLUGINS` row that actually decides whether the sidecar spawns,
+/// which is where a reader looking for "why is this app Core-tier" will be.
+pub const BLUEPRINT_UI_HTML: &str = include_str!("fixtures/blueprint.ui.html");
 
 /// The Workflows app's plugin id (its sandboxed companion drives Core's DAG
 /// workflow engine + ghost record→replay). Re-exported from `plugins::builtins`
@@ -972,6 +1174,18 @@ pub const LEARNING_UI_HTML: &str = include_str!("fixtures/learning.ui.html");
 /// `scripts/sync-app-fixtures.sh meetings`) and copy `dist/index.html` to
 /// `fixtures/meetings.ui.html` to refresh it.
 pub const MEETINGS_UI_HTML: &str = include_str!("fixtures/meetings.ui.html");
+
+/// The Outpost (social) app's prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/social/ui`, all JS/CSS — incl. the
+/// tree-shaken `@ryu/ui` components — inlined). Seeded as the plugin's `ui_code` onto
+/// a DISABLED record, so enabling the opt-in `@ryu/social` app from the store mounts
+/// the sandboxed companion on `/social` + `/social/:id` (compose → calendar → queue →
+/// inbox). The frame reaches its own `ryu-social` sidecar ONLY through the
+/// `social:crud` bridge forwarder — its CSP is `connect-src 'none'` and it declares no
+/// `csp` widening, so it has no network of its own. Rebuild with
+/// `bun run --cwd apps-store/social/ui build` (or `scripts/sync-app-fixtures.sh
+/// social`) and copy `dist/index.html` to `fixtures/social.ui.html` to refresh it.
+pub const SOCIAL_UI_HTML: &str = include_str!("fixtures/social.ui.html");
 
 /// The Inbox (Approvals) app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `apps-store/approvals/ui`, all JS/CSS — incl. the
@@ -1395,6 +1609,79 @@ mod tests {
     /// doubles as the integration-test input and the in-module round-trip fixture.
     const MULTI_KIND_JSON: &str = include_str!("../../tests/manifest_fixtures/multi_kind.ryu.json");
 
+    /// Core-owned port bases — the ports Core's own substrate binds (llama.cpp and
+    /// friends, whisper, TTS, sd.cpp, restate, the SDK adapter). A manifest sidecar
+    /// landing on one fights a Core process for the socket and whoever starts second
+    /// loses. A literal list rather than imports of each provider's const, so this is a
+    /// second independent record of the map: if a provider const moves, the mismatch
+    /// surfaces here as a review question instead of silently agreeing with itself.
+    const CORE_RESERVED_PORTS: &[u16] = &[
+        3200,  // sidecar::adapters::sdk DEFAULT_SDK_APP_PORT
+        7980,  // tool_exec CORE_BASE_PORT
+        8000,  // vllm / omlx DEFAULT_PORT
+        8080,  // restate http + ingress (and llama.cpp)
+        8081,  // llamacpp embed
+        8082,  // llamacpp rerank
+        8083,  // sd.cpp SD_PORT_BASE + llamacpp CLASSIFY_PORT_BASE
+        8084,  // mlx_vlm
+        8085,  // ryutts TTS_PORT
+        8086,  // mlx DEFAULT_PORT_BASE
+        8087,  // research ENGINE_PORT
+        8090,  // whisper.cpp WHISPER_PORT_BASE
+        9070,  // restate admin
+        30000, // sglang
+    ];
+
+    /// Known, pre-existing overlaps with [`CORE_RESERVED_PORTS`]. Real debt, frozen so
+    /// it cannot grow — a NEW overlap fails the test, these do not. Fixing one means
+    /// moving the app's port and deleting its row.
+    const KNOWN_CORE_OVERLAPS: &[(&str, u16)] = &[
+        // finetune's Unsloth trainer vs mlx's DEFAULT_PORT_BASE. Latent: both are
+        // opt-in and rarely resident at the same time.
+        ("@ryu/finetune", 8086),
+    ];
+
+    /// Two built-in manifests must never declare the same sidecar port, and a built-in
+    /// must never squat a port Core itself binds.
+    ///
+    /// This guard did not exist until 2026-08-11, and by then `simulator` + `teams`
+    /// were both on 7994 and `tuition` had been authored pre-collided with
+    /// `mission-control` on 8007 (that one was resolved the same day by moving
+    /// mission-control). The port map lived in prose — `BUILTIN_MANIFESTS`
+    /// still records that "8007 was contested by three concurrently built apps" —
+    /// which is a comment doing a registry's job. Nothing catches a collision until
+    /// `SidecarManager::claim_port` refuses at runtime, and the symptom there is an app
+    /// that will not start rather than anything naming a port.
+    ///
+    /// A test only works for the set we own; a third-party app cannot be told to pick
+    /// differently. The allocator that fixes that case is designed in
+    /// `docs/port-allocation.md` and is not built.
+    #[test]
+    fn builtin_sidecar_ports_are_unique() {
+        let mut owners: std::collections::HashMap<u16, String> = std::collections::HashMap::new();
+        for manifest in PluginManifestLoader::load_builtins() {
+            for spec in &manifest.sidecars {
+                let owner = format!("{}/{}", manifest.id, spec.name);
+                if let Some(prev) = owners.insert(spec.port, owner.clone()) {
+                    panic!(
+                        "port {} is declared by BOTH '{prev}' and '{owner}' — pick a free \
+                         port (band map: docs/port-allocation.md)",
+                        spec.port
+                    );
+                }
+                if CORE_RESERVED_PORTS.contains(&spec.port)
+                    && !KNOWN_CORE_OVERLAPS.contains(&(manifest.id.as_str(), spec.port))
+                {
+                    panic!(
+                        "'{owner}' declares port {}, which Core's own substrate binds — pick \
+                         a port outside CORE_RESERVED_PORTS",
+                        spec.port
+                    );
+                }
+            }
+        }
+    }
+
     /// Every packaged app/plugin manifest has exactly ONE home — its package
     /// directory (`<root>/<x>/manifest.json`, what the owning team edits) — and Core
     /// compiles it in straight from there via
@@ -1427,7 +1714,12 @@ mod tests {
         // they demonstrate (esp. per-tool-call) stay lookup-free until a user installs
         // a plugin that actually uses them. See the `BUILTIN_MANIFESTS` comment above
         // `hook-session-context`.
-        const UNREGISTERED_BY_DESIGN: &[&str] = &["tool-firewall", "hook-observers"];
+        // `toolsmith-example` joins them for a different reason: it is the worked
+        // example `tools/toolsmith` ships, a real verified `inline_deno` tool that
+        // exists so the scaffold → verify pipeline has an end-to-end regression
+        // test. Registering it would put a demo in every user's catalog.
+        const UNREGISTERED_BY_DESIGN: &[&str] =
+            &["tool-firewall", "hook-observers", "toolsmith-example"];
 
         let sources: String = ["src/plugin_manifest/mod.rs", "src/sidecar/ext_proxy.rs"]
             .iter()
@@ -1511,8 +1803,14 @@ mod tests {
         }
     }
 
-    /// Walk `plugins-store` and `apps-store`, returning `(plugin id, package dir,
-    /// code_file)` for every sandboxed-JS file a package manifest references.
+    /// Walk `plugins-store` and `apps-store`, returning `(plugin id, ROOT-qualified
+    /// package dir, code_file)` for every sandboxed-JS file a package manifest
+    /// references.
+    ///
+    /// The dir is root-qualified (`plugins-store/advisor`, `apps-store/reasoning`)
+    /// because both roots may carry `code_file` refs, and the failure message below
+    /// hands the author an `include_str!` line to paste — one naming the wrong root
+    /// would not resolve.
     ///
     /// Read at runtime (not `include_str!`) and empty when neither root is shipped,
     /// so the OSS Core mirror still builds and tests green — the same posture as
@@ -1538,11 +1836,12 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
                 let manifest: PluginManifest = serde_json::from_str(&raw)
                     .unwrap_or_else(|e| panic!("{} is not a valid manifest: {e}", path.display()));
-                let name = dir
-                    .file_name()
-                    .expect("package dir has a name")
-                    .to_string_lossy()
-                    .into_owned();
+                let name = format!(
+                    "{root}/{}",
+                    dir.file_name()
+                        .expect("package dir has a name")
+                        .to_string_lossy()
+                );
                 for rel in manifest.code_file_refs() {
                     refs.push((manifest.id.clone(), name.clone(), rel));
                 }
@@ -1593,7 +1892,7 @@ mod tests {
                  row for ('{id}', '{rel}'). A built-in ships only its manifest — its package \
                  directory is NOT on the user's machine — so without an include_str! row this \
                  code does not exist at runtime. Add:\n    (\n        \"{id}\",\n        \
-                 \"{rel}\",\n        include_str!(\"../../../../plugins-store/{dir}/{rel}\"),\n    ),"
+                 \"{rel}\",\n        include_str!(\"../../../../{dir}/{rel}\"),\n    ),"
             );
         }
 

@@ -515,13 +515,6 @@ pub struct ConversationStore {
     /// FTS recall pref is enabled (search is the sole writer, via lazy backfill), so
     /// the on-disk term index materializes only for users who opt in.
     message_fts: Option<ryu_search::MessageFtsIndex>,
-    /// Optional sink for conversation ids that just received their *first* user
-    /// message and so are candidates for a background auto-rename. `None` in
-    /// contexts without a server loop to consume them (tests, CLI). The server
-    /// wires a consumer that asks the default local model for a concise title and
-    /// calls [`auto_set_title`]. Best-effort: a closed/absent channel just means
-    /// the conversation keeps its first-message-derived title.
-    auto_title_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Optional room-keyed realtime registry (Phase 1 of the multi-user epic).
     /// When wired, [`append_message`] publishes an `Events` frame keyed by the
     /// conversation id so other live viewers see new turns immediately. `None` in
@@ -591,7 +584,6 @@ impl ConversationStore {
             cipher: ryu_crypto::global_cipher()?,
             message_index: None,
             message_fts: None,
-            auto_title_tx: None,
             realtime: None,
         })
     }
@@ -695,14 +687,6 @@ impl ConversationStore {
         self
     }
 
-    /// Wire the auto-rename sink: each conversation that gets its first user
-    /// message is sent on `tx` so a server-side consumer can generate a concise
-    /// title with the default local model. Must be called after construction.
-    pub fn with_auto_title(mut self, tx: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
-        self.auto_title_tx = Some(tx);
-        self
-    }
-
     /// Wire the room-keyed realtime registry so [`append_message`] publishes a
     /// live `Events` frame (keyed by conversation id) for every persisted turn.
     /// Pass a clone of the same [`ryu_realtime::RoomRegistry`] held by
@@ -724,7 +708,6 @@ impl ConversationStore {
             cipher: ryu_crypto::FieldCipher::new(&[0x11; 32]),
             message_index: None,
             message_fts: None,
-            auto_title_tx: None,
             realtime: None,
         })
     }
@@ -1392,7 +1375,7 @@ impl ConversationStore {
         // Derive a first-pass title from the first user message (sealed at rest).
         // Only applied when the conversation has no title yet (COALESCE in upsert).
         let derived = if role == "user" {
-            Some(derive_title(content))
+            derive_title(content)
         } else {
             None
         };
@@ -1413,23 +1396,6 @@ impl ConversationStore {
             .ok()
             .flatten()
             .unwrap_or(false);
-        // Is this the conversation's FIRST user turn? Drives the auto-rename
-        // signal fired after the lock is released. Counted over `messages` rather
-        // than inferred from `had_title`, because a conversation can be titled
-        // before it holds any message (a rename on an empty chat), which would
-        // otherwise suppress the signal for the real first turn.
-        let is_first_user_message = role == "user"
-            && conn
-                .query_row(
-                    "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND role = 'user'",
-                    params![conversation_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .ok()
-                .flatten()
-                .unwrap_or(0)
-                == 0;
         upsert_conversation_row(
             &conn,
             conversation_id,
@@ -1493,22 +1459,16 @@ impl ConversationStore {
         // to hold the conn lock across it.
         drop(conn);
 
-        // Chat LLM auto-rename (ChatGPT/Claude-style): hand the conversation to
-        // the auto-title loop the FIRST time it receives a user turn. The
-        // derived title written above is only a placeholder cut from the raw
-        // message; the loop replaces it with a model-written one.
-        //
-        // Fired after the lock is released and only on the first user turn, which
-        // together are what make it a once-per-conversation signal rather than a
-        // rename on every message. `send` failing means the receiver is gone
-        // (Core shutting down, or a store built without `with_auto_title`, as in
-        // most tests) — a titled conversation is not worth an error path, so the
-        // result is deliberately discarded.
-        if is_first_user_message {
-            if let Some(tx) = &self.auto_title_tx {
-                let _ = tx.send(conversation_id.to_owned());
-            }
-        }
+        // NOTE: the title written above is only the placeholder cut from the raw
+        // message. The LLM rename is NOT fired from here any more — it belongs to
+        // the `@ryu/chat-title` turn-hook plugin (`post_assistant_turn`), which
+        // owns the cadence (first reply + every N turns), the enable toggle, and
+        // the model choice. Core used to ALSO enqueue a background titler on the
+        // first user turn; that path resolved its model as "the `auto-title-model`
+        // pref, else an active *local* engine", so on a cloud-only node it silently
+        // did nothing while the plugin (which falls back through the node default)
+        // worked — the "chats stay called New Chat until the 5th turn" report. One
+        // titler now, and it is the configurable one.
 
         // Room-keyed realtime fan-out (Phase 1): make this turn appear live for
         // every other viewer of the conversation. We publish the *plaintext*
@@ -3438,19 +3398,35 @@ fn parse_participants_json(json: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Build a short conversation title from the first user message.
-fn derive_title(content: &str) -> String {
+/// Build a short conversation title from the first user message: its first line,
+/// capped at 60 chars. This is the DEFAULT title every chat gets the moment it is
+/// persisted — no plugin involved — so a thread reads as what the user actually
+/// asked instead of a placeholder while the LLM rename is still pending.
+///
+/// `None` for a turn with no text (an image- or file-only opener). Returning a
+/// literal placeholder here would be worse than nothing: the upsert COALESCEs
+/// (`COALESCE(conversations.title, excluded.title)`), so a placeholder written
+/// once wins over every later derivation and only an LLM rename could displace
+/// it. A NULL title lets the next user turn title the thread.
+///
+/// The client mirrors this rule (`deriveDraftTitle` in the desktop's chat history
+/// context) so the sidebar can show the same string immediately on send, without
+/// waiting for the round trip. Change one, change the other.
+fn derive_title(content: &str) -> Option<String> {
     const MAX: usize = 60;
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return "New Chat".to_owned();
+        return None;
     }
     let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+    if first_line.is_empty() {
+        return None;
+    }
     if first_line.chars().count() <= MAX {
-        return first_line.to_owned();
+        return Some(first_line.to_owned());
     }
     let truncated: String = first_line.chars().take(MAX).collect();
-    format!("{truncated}…")
+    Some(format!("{truncated}…"))
 }
 
 /// Test-only conveniences.
@@ -3970,21 +3946,20 @@ mod tests {
         assert_eq!(list[0].title.as_deref(), Some("CSS layout help"));
     }
 
+    /// The DEFAULT title (no plugin, no model): the first user message titles the
+    /// conversation the moment it is persisted, and later turns leave it alone.
     #[tokio::test]
-    async fn first_user_message_fires_auto_title_once() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let store = ConversationStore::open_in_memory()
-            .unwrap()
-            .with_auto_title(tx);
+    async fn first_user_message_titles_the_conversation() {
+        let store = ConversationStore::open_in_memory().unwrap();
 
-        // First user message fires the auto-rename signal.
         store
             .append_message("c1", "user", "first question", None, None, None)
             .await
             .unwrap();
-        assert_eq!(rx.try_recv().ok(), Some("c1".to_owned()));
+        let list = store.list_conversations().await.unwrap();
+        assert_eq!(list[0].title.as_deref(), Some("first question"));
 
-        // Assistant reply + a second user turn must NOT fire again.
+        // Assistant reply + a second user turn must NOT re-derive over it.
         store
             .append_message("c1", "assistant", "an answer", None, None, None)
             .await
@@ -3993,13 +3968,37 @@ mod tests {
             .append_message("c1", "user", "follow-up", None, None, None)
             .await
             .unwrap();
-        assert!(rx.try_recv().is_err(), "auto-title should fire only once");
+        let list = store.list_conversations().await.unwrap();
+        assert_eq!(list[0].title.as_deref(), Some("first question"));
+        // The derived title is not user-chosen, so the chat-title plugin may
+        // still replace it.
+        assert!(!store.title_is_custom("c1").await.unwrap());
 
         // `get_first_user_message` returns the earliest user turn.
         assert_eq!(
             store.get_first_user_message("c1").await.unwrap().as_deref(),
             Some("first question")
         );
+    }
+
+    /// A text-less opener (image/file only) must not pin a placeholder: the title
+    /// stays NULL so the next real user turn can still name the thread.
+    #[tokio::test]
+    async fn empty_first_message_leaves_the_title_unset() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .append_message("c1", "user", "   ", None, None, None)
+            .await
+            .unwrap();
+        let list = store.list_conversations().await.unwrap();
+        assert_eq!(list[0].title, None);
+
+        store
+            .append_message("c1", "user", "now with words", None, None, None)
+            .await
+            .unwrap();
+        let list = store.list_conversations().await.unwrap();
+        assert_eq!(list[0].title.as_deref(), Some("now with words"));
     }
 
     #[tokio::test]
@@ -4272,9 +4271,13 @@ mod tests {
     #[test]
     fn title_truncates_long_first_line() {
         let long = "a".repeat(100);
-        let title = derive_title(&long);
+        let title = derive_title(&long).expect("a non-empty message derives a title");
         assert!(title.chars().count() <= 61); // 60 chars + ellipsis
         assert!(title.ends_with('…'));
+        // A text-less turn derives nothing rather than pinning a placeholder the
+        // upsert's COALESCE would then keep forever.
+        assert_eq!(derive_title("   \n  "), None);
+        assert_eq!(derive_title(""), None);
     }
 
     #[tokio::test]

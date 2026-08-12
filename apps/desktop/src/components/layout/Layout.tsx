@@ -29,6 +29,7 @@ import { DesktopReportHost } from "@/src/components/marketplace/report-host.tsx"
 import { ProjectDockHost } from "@/src/components/panels/ProjectDockHost.tsx";
 import { PrivacyDisclosure } from "@/src/components/settings/privacy-disclosure.tsx";
 import { SupportAccessBanner } from "@/src/components/settings/support-access-banner.tsx";
+import { SafeModeBanner } from "@/src/components/shell/SafeModeBanner.tsx";
 import { AutoUpdater } from "@/src/components/updater/AutoUpdater.tsx";
 import {
 	ChatHistoryProvider,
@@ -89,6 +90,7 @@ import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { DESKTOP_HOTKEYS } from "@/src/lib/hotkeys/actions.ts";
 import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
+import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { AssistantDock } from "../assistant/AssistantDock.tsx";
 import { AssistantPanel } from "../assistant/AssistantPanel.tsx";
@@ -533,6 +535,24 @@ function LayoutContent({
 		}
 	});
 	useHotkey("nav.library", () => openTab("/library"));
+	// Chat-owned shortcuts, bound ONCE here and dispatched to whichever chat tab
+	// is focused. They cannot be registered inside ChatPage: every chat tab stays
+	// mounted, and the registry keeps one handler per id (last-writer-wins), so a
+	// hidden tab would end up owning Stop and abort the wrong stream. The focused
+	// tab publishes its live handlers into `useChatHotkeyTargets`; reading them
+	// through `getState()` inside the handler keeps this component from
+	// re-rendering on every status change.
+	useHotkey("chat.stop", () => {
+		const { isStreaming, stop } = useChatHotkeyTargets.getState();
+		// No-op unless the focused chat actually has a turn in flight, so the key
+		// never interrupts something the user cannot see.
+		if (isStreaming) {
+			stop?.();
+		}
+	});
+	useHotkey("chat.voice-mode", () => {
+		useChatHotkeyTargets.getState().startVoiceMode?.();
+	});
 	// allowInInput: the default binding (F11) is a bare key, which the dispatcher
 	// otherwise suppresses while a field has focus — i.e. most of the time, since
 	// the composer holds focus on the main surfaces.
@@ -562,6 +582,10 @@ function LayoutContent({
 			<DeepLinkController />
 			<PrivacyDisclosure />
 			<SupportAccessBanner />
+			{/* Mounted app-wide, not per-page: Safe Mode changes what the whole node
+			    loads, and a missing app must be explained wherever the user notices
+			    it is missing. */}
+			<SafeModeBanner />
 			<AppSidebar
 				activeConversationId={activeConversationId}
 				onDeleteConversation={handleDeleteConversation}

@@ -2203,6 +2203,33 @@ struct MarketplaceCard {
     /// any trust — trust comes from the signed manifest.
     #[serde(default, rename = "firstParty")]
     first_party: bool,
+    /// The PUBLISHING ORGANIZATION's identity has been verified by Ryu — the
+    /// X/Meta-style blue check. Three distinct trust axes ride this catalog and
+    /// must never be folded together:
+    ///   1. `reviewed`     — did Ryu vet this LISTING's code (stamped `false` on
+    ///                       every community card by `github_topic.rs`);
+    ///   2. `verification` — did this listing's manifest SIGNATURE verify, i.e.
+    ///                       install trust (decided at install, not on the card);
+    ///   3. `org_verified` — is the PUBLISHING ORG identity-verified (this field).
+    /// A verified org can publish an unreviewed listing and an unverified
+    /// individual can publish a reviewed one; both are normal and both render.
+    ///
+    /// `Option<bool>` rather than the plain `bool` its `firstParty` neighbour uses,
+    /// deliberately: that pattern collapses absent and explicit-`false` into the
+    /// same emitted output, and here they mean different things. Absent means the
+    /// server sent NO org-verification signal at all (an older marketplace build),
+    /// which must stay absent downstream — projecting it as `false` would render a
+    /// positive "this publisher is not verified" claim nobody actually made.
+    ///
+    /// Server-derived either way: never a manifest's or a client's self-claim,
+    /// since "I am who I say I am" is exactly what a hostile listing asserts.
+    #[serde(default, rename = "orgVerified")]
+    org_verified: Option<bool>,
+    /// Which tier the publishing org holds ("official" / "partner" / "community").
+    /// Only meaningful alongside a true `org_verified` — a tier without the flag
+    /// renders nothing.
+    #[serde(default, rename = "orgVerifiedTier")]
+    org_verified_tier: Option<String>,
     /// The plugin's declared dependency closure + host surfaces, when the
     /// marketplace server exposes them on the card. Raw JSON, and `Option` so an
     /// older server that omits the columns still parses (the fields survive inside
@@ -2540,6 +2567,21 @@ impl RyuMarketplaceSource {
                     }
                     if card.first_party {
                         obj.insert("first_party".to_owned(), serde_json::json!(true));
+                    }
+                    // Publisher-identity blue check — see the `org_verified` note on
+                    // `MarketplaceCard` for why this is a different axis from the
+                    // listing-level `reviewed` flag, and why an absent signal is
+                    // omitted instead of being flattened to `false`.
+                    if let Some(org_verified) = card.org_verified {
+                        obj.insert("org_verified".to_owned(), serde_json::json!(org_verified));
+                    }
+                    if let Some(tier) = card
+                        .org_verified_tier
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                    {
+                        obj.insert("org_verified_tier".to_owned(), serde_json::json!(tier));
                     }
                 }
                 value
@@ -4470,6 +4512,50 @@ mod tests {
             // No `note` on the success path.
             assert!(value.get("note").is_none());
         }
+    }
+
+    #[test]
+    fn ryu_marketplace_card_projects_org_verification_camel_to_snake() {
+        // The control plane speaks camelCase (`orgVerified`/`orgVerifiedTier`); the
+        // card `CatalogEntry` reads is snake_case. Locks that projection, and — the
+        // reason this test exists at all — locks that an ABSENT signal stays absent:
+        // emitting `false` for a server that never sent the field would render a
+        // positive "this publisher is not verified" claim about an honest listing.
+        const BODY: &str = r#"{ "kind": "plugin", "items": [
+            { "id": "acme/verified", "name": "Verified", "orgVerified": true,
+              "orgVerifiedTier": "partner" },
+            { "id": "acme/unverified", "name": "Unverified", "orgVerified": false },
+            { "id": "acme/silent", "name": "Silent" },
+            { "id": "acme/blank-tier", "name": "Blank Tier", "orgVerified": true,
+              "orgVerifiedTier": "  " }
+        ] }"#;
+        let env: MarketplaceListEnvelope = serde_json::from_str(BODY).expect("parse catalog body");
+        let src = RyuMarketplaceSource::builtin(CatalogKind::Plugin);
+        let cards: Vec<Value> = env.items.iter().map(|c| src.card_to_value(c)).collect();
+        assert_eq!(cards.len(), 4);
+
+        // Verified publisher: both keys land, renamed.
+        assert_eq!(cards[0]["org_verified"], true);
+        assert_eq!(cards[0]["org_verified_tier"], "partner");
+        // The camelCase spellings must NOT leak onto the snake_case card.
+        assert!(cards[0].get("orgVerified").is_none());
+        assert!(cards[0].get("orgVerifiedTier").is_none());
+
+        // An explicit `false` is a real answer and is carried through; a tier the
+        // server did not send stays absent rather than becoming `null`.
+        assert_eq!(cards[1]["org_verified"], false);
+        assert!(cards[1].get("org_verified_tier").is_none());
+
+        // Absent ⇒ absent. Not `false`, not `null`.
+        assert!(
+            cards[2].get("org_verified").is_none(),
+            "a card with no org-verification signal must not claim one either way"
+        );
+        assert!(cards[2].get("org_verified_tier").is_none());
+
+        // A blank tier is no tier — same posture the other optional card fields take.
+        assert_eq!(cards[3]["org_verified"], true);
+        assert!(cards[3].get("org_verified_tier").is_none());
     }
 
     #[test]

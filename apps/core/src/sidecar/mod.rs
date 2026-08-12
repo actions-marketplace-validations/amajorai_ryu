@@ -4,6 +4,7 @@ pub mod agent_runner;
 pub mod agents;
 pub mod cli_shims;
 pub mod control_plane;
+pub mod deno_runtime;
 pub mod download_manager;
 pub mod env_scrub;
 pub mod ext_proxy;

@@ -39,7 +39,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { DitherGradient } from "@ryu/ui/components/dither-kit/gradient.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
-import { normalizeDither } from "../chrome/dither.ts";
+import { normalizeDither, opaqueDither } from "../chrome/dither.ts";
 import DitherBanner, { OPPOSITE_DIRECTION } from "../chrome/dither-banner.tsx";
 import { safeHttpUrl } from "../safe-url.ts";
 import type { CardDither, CatalogBanner } from "../types.ts";
@@ -106,6 +106,7 @@ export function ListingDetailShell({
 
 export function ListingHero({
 	name,
+	nameBadge,
 	tagline,
 	badges,
 	icon,
@@ -115,6 +116,18 @@ export function ListingHero({
 	fallback,
 }: {
 	name: ReactNode;
+	/** A small marker rendered immediately after the title — today the publisher
+	 *  verification check.
+	 *
+	 *  It is a SEPARATE slot rather than something a caller composes into `name`
+	 *  (which is a `ReactNode`, so composing type-checks) because the title span
+	 *  truncates: a badge appended inside it is clipped off the end for exactly the
+	 *  long names nobody tests with, and reads fine for every short one.
+	 *
+	 *  It is also NOT a `badges` entry: those are `string[]` chips describing the
+	 *  LISTING ("Built-in", "Community", "BETA"), and a claim about the publisher
+	 *  rendered among them would be read as a claim about the listing. */
+	nameBadge?: ReactNode;
 	tagline?: ReactNode;
 	/** Status/kind/tag pills. Rendered on the wash, so they get a translucent
 	 *  chip treatment rather than the page's Badge variants, which assume a
@@ -129,7 +142,17 @@ export function ListingHero({
 	/** Flat CSS background when there is neither a banner nor a dither. */
 	fallback?: string | null;
 }) {
-	const tileDither = normalizeDither(dither);
+	// The tile is the one surface here whose foreground CANNOT adapt: it is
+	// `text-white` because it sits on the hero's own wash, above the scrim, and a
+	// theme-aware glyph colour would be unreadable on a dark banner. So the tile
+	// forces its spec opaque instead of branching on it. Every packaged manifest now
+	// declares a wash that dissolves to transparent; painted as-is, the far end of
+	// this 5rem tile would be whatever the banner behind it happens to be, and a
+	// white glyph on the light end of that disappears. `opaqueDither` re-ramps the
+	// listing's OWN hue, so the tile still carries the app's colour — it just covers
+	// its box. (A caller that passes an `<AppIcon>` as `icon` is already safe: that
+	// component sets its own glyph colour. This protects the raw-glyph callers.)
+	const tileDither = opaqueDither(normalizeDither(dither));
 	return (
 		<div className="relative h-40 shrink-0 overflow-hidden sm:h-44">
 			<DitherBanner
@@ -168,8 +191,13 @@ export function ListingHero({
 					</span>
 				</span>
 				<div className="min-w-0 flex-1 pb-0.5">
-					<h2 className="truncate font-semibold text-white text-xl drop-shadow-md sm:text-2xl">
-						{name}
+					{/* `truncate` sits on the INNER span, not the h2: the row has to be a
+					    flex line so `nameBadge` keeps its width while the title alone
+					    gives way. With `truncate` on the h2 the badge was clipped along
+					    with the overflowing name. */}
+					<h2 className="flex min-w-0 items-center gap-2 font-semibold text-white text-xl drop-shadow-md sm:text-2xl">
+						<span className="truncate">{name}</span>
+						{nameBadge}
 					</h2>
 					{tagline ? (
 						<p className="line-clamp-2 text-sm text-white/85 drop-shadow sm:text-[0.9375rem]">

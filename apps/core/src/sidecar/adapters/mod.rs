@@ -1,4 +1,6 @@
 pub mod acp;
+pub mod acp_probe_cache;
+pub mod context_breakdown;
 pub mod context_window;
 pub mod mcp_bridge;
 pub mod openai_compat;
@@ -4521,6 +4523,16 @@ pub async fn route_chat_stream(
         long_term_system
     };
 
+    // Context-breakdown accounting for the desktop Context panel. Purely
+    // observational — nothing below may change what is sent. The system block is
+    // assembled by successive `merge_system_prompt` calls that collapse every
+    // layer into ONE string, so per-layer cost cannot be recovered afterwards;
+    // each layer is measured here, at its merge site, while it is still a
+    // separate value.
+    let mut breakdown = context_breakdown::BreakdownBuilder::new();
+    breakdown.add_text("memory", "Long-term memory", long_term_system.as_deref());
+    breakdown.add_text("persona", "Persona", persona_prefix.as_deref());
+
     // Merge the persona prefix into the system prompt. Both the persona instructions
     // and the long-term memory block are injected as a leading system message.
     // Persona prefix comes first so the model reads the persona before the facts.
@@ -4591,6 +4603,7 @@ pub async fn route_chat_stream(
                 None
             }
         };
+        breakdown.add_text("recall", "Auto-recall", recalled.as_deref());
         match recalled {
             Some(block) => match long_term_system {
                 Some(existing) if !existing.is_empty() => Some(format!("{existing}\n\n{block}")),
@@ -4728,9 +4741,47 @@ pub async fn route_chat_stream(
             if let Some(summary) =
                 context_window::apply_openai(&mut req.messages, system_tokens, cfg).await
             {
+                breakdown.add_text("compact", "Compacted summary", Some(&summary));
                 long_term_system = merge_system_prompt(long_term_system, Some(summary));
             }
         }
+    }
+
+    // The ring's denominator and the reply reservation, when an app-level budget
+    // is configured. Left at 0 (unknown) otherwise — the panel then reports
+    // attribution without a percentage rather than inventing a window.
+    if let Some(cfg) = &ctx_window {
+        breakdown.set_window(cfg.max_tokens);
+        breakdown.set_reserve_output(cfg.reserve_output);
+    }
+
+    // Finish the breakdown for every non-ACP plane here, where `req.messages` is
+    // final (post-trim) and the remaining layers are still separate values. The
+    // ACP arm finishes its own further down, because its skills block and style
+    // are folded in there. `mem::take` rather than a move so the ACP arm still
+    // owns the builder — a conditional move would not compile.
+    //
+    // Tool definitions are NOT charged on this plane: the governed chat tool loop
+    // is permanently off (`chat_tools_enabled = false`), so no tool schema is sent.
+    if !matches!(route, AgentRoute::Acp { .. }) {
+        let mut plane_breakdown = std::mem::take(&mut breakdown);
+        // The same call `inject_into_messages_filtered` makes downstream in
+        // `route_openai_stream`, so this measures the block that is actually sent.
+        if let Some((header, ids)) = skills.skill_block(&skills_allowlist) {
+            plane_breakdown.add_detailed(
+                "skills",
+                "Skills",
+                context_window::estimate_tokens(&header),
+                Some(format!("{} enabled", ids.len())),
+            );
+        }
+        plane_breakdown.add_text("instructions", "Output style", style_prefix.as_deref());
+        plane_breakdown.add_messages("Conversation history", &req.messages);
+        record_context_breakdown(
+            req.conversation_id.as_deref(),
+            plane_breakdown,
+            context_breakdown::ContextPlane::Openai,
+        );
     }
 
     // Resolve the effective working directory for ACP. If the request carries a
@@ -5066,11 +5117,25 @@ pub async fn route_chat_stream(
             // are no progressive skills) we fall back to the full-body block. The
             // no-tool openai-compat path always uses the full block (see
             // `route_openai_stream`), so a weak model is never starved.
-            let skill_block = if ryu_skills::is_progressive_disclosure() {
+            //
+            // Safe Mode suppresses the block entirely on this plane too. A skill is
+            // an instruction the user did not write into this turn, and the point of
+            // safe mode is a baseline with nothing extra in the prompt.
+            let skill_block = if crate::safe_mode::is_active() {
+                None
+            } else if ryu_skills::is_progressive_disclosure() {
                 skills.progressive_block(&skills_allowlist)
             } else {
                 skills.skill_block(&skills_allowlist)
             };
+            if let Some((header, ids)) = skill_block.as_ref() {
+                breakdown.add_detailed(
+                    "skills",
+                    "Skills",
+                    context_window::estimate_tokens(header),
+                    Some(format!("{} enabled", ids.len())),
+                );
+            }
             let long_term_system = match skill_block {
                 Some((header, _ids)) => merge_system_prompt(long_term_system, Some(header)),
                 None => long_term_system,
@@ -5086,6 +5151,40 @@ pub async fn route_chat_stream(
             // reads base instructions (unless the style replaced them) → style body →
             // skills block → persona + memory.
             let long_term_system = merge_system_prompt(long_term_system, style_prefix.clone());
+
+            // Finish the breakdown for this plane. Everything Core hands the
+            // agent is now known: the preamble layers above, the replayed window,
+            // the current turn's attachments, and the tools offered to the bridge.
+            // What Core CANNOT see — the agent's own base prompt, its tool-result
+            // accumulation, and skill bodies it loads mid-turn under progressive
+            // disclosure — is why this is labelled an estimate and reconciled
+            // against the reported prompt tokens in the panel.
+            breakdown.add_text("instructions", "Output style", style_prefix.as_deref());
+            breakdown.add_detailed(
+                "messages",
+                "Conversation history",
+                short_term
+                    .as_deref()
+                    .map(context_window::estimate_tokens)
+                    .unwrap_or(0),
+                Some("replayed turns".to_owned()),
+            );
+            // Only the LAST message: ACP forwards that one turn (the rest arrive
+            // via `short_term`), so charging the whole array would double-count.
+            breakdown.add_messages(
+                "Conversation history",
+                req.messages
+                    .last()
+                    .map(std::slice::from_ref)
+                    .unwrap_or_default(),
+            );
+            breakdown.add_tools(&mcp.tools_for_agent(allowlist.as_deref()).await);
+            record_context_breakdown(
+                req.conversation_id.as_deref(),
+                breakdown,
+                context_breakdown::ContextPlane::Acp,
+            );
+
             route_acp_stream(
                 req,
                 spawn_cmd,
@@ -5161,6 +5260,23 @@ pub async fn route_chat_stream(
 
 /// Assemble a short-term context block from the recent turns of a conversation
 /// (spec unit U11). Returns `None` when there is no prior context to replay.
+/// Finalize a turn's context breakdown and remember it for the desktop Context
+/// panel. A turn with no conversation id (a one-shot / programmatic call) has
+/// nothing to key on and is simply not recorded — the panel is a
+/// per-conversation view.
+fn record_context_breakdown(
+    conversation_id: Option<&str>,
+    breakdown: context_breakdown::BreakdownBuilder,
+    plane: context_breakdown::ContextPlane,
+) {
+    let Some(id) = conversation_id else {
+        return;
+    };
+    if let Some(finished) = breakdown.finish(plane) {
+        context_breakdown::record(id, finished);
+    }
+}
+
 async fn assemble_short_term_context(
     store: &ConversationStore,
     conversation_id: &str,
@@ -5750,8 +5866,14 @@ where
     // we signal active skill ids via `x-ryu-skill-ids` so the Gateway can attribute
     // budget/audit rows to the skill (AC3). Injection is non-blocking and
     // lenient — a missing skill dir is not an error.
-    let active_skill_ids =
-        skills.inject_into_messages_filtered(&mut oai_messages, &skills_allowlist);
+    //
+    // Safe Mode skips the injection outright (and therefore reports no active ids,
+    // so the Gateway attributes nothing to a skill that never ran).
+    let active_skill_ids = if crate::safe_mode::is_active() {
+        Vec::new()
+    } else {
+        skills.inject_into_messages_filtered(&mut oai_messages, &skills_allowlist)
+    };
 
     // Output style (docs/output-styles.md §5), injected right after the skills block
     // and therefore in FRONT of it: a skill's own formatting instructions are
@@ -5805,6 +5927,7 @@ where
     // widget producers.
     let _ = &tool_allowlist;
     let tools_payload: Vec<Value> = Vec::new();
+
     // A loop with no tools to offer is just a plain single-shot chat.
     let tool_loop_active = tools_enabled && !tools_payload.is_empty();
 
@@ -6099,6 +6222,24 @@ where
                 }
                 if let Some(p) = persist.take() {
                     p(std::mem::take(&mut reply_all), "completed").await;
+                }
+                // Hand the provider's OWN prompt-token count to the context panel,
+                // so its "Unaccounted" row shows real estimator drift instead of
+                // being blank. Prefers llama.cpp's `timings.prompt_n` over
+                // `usage.prompt_tokens` for the same reason `build_stats_part` does:
+                // the engine's own count beats the OpenAI-shaped one it synthesizes.
+                if let Some(prompt_tokens) = last_timings
+                    .as_ref()
+                    .and_then(|t| t.get("prompt_n"))
+                    .and_then(Value::as_f64)
+                    .map(|n| n as u64)
+                    .or_else(|| {
+                        last_usage
+                            .as_ref()
+                            .and_then(|u| u.get("prompt_tokens"))
+                            .and_then(Value::as_u64)
+                    })
+                {
                 }
                 if let Some(stats) = build_stats_part(
                     stream_open,
@@ -7687,6 +7828,12 @@ async fn route_acp_stream(
                     stats.insert("durationMs".into(), serde_json::json!(duration_ms));
                     stats.insert("done".into(), serde_json::json!(done));
                     emit!(ui_data("acp-usage", &Value::Object(stats)));
+                    // Same numbers, second consumer: the workspace context panel
+                    // derives its opaque `agent_baseline` row by subtracting what
+                    // Core injected from what the agent says the prompt cost.
+                    // `used` (the agent's own window occupancy) is the better input
+                    // than `promptTokens` here — an ACP agent reports occupancy for
+                    // the whole session, not one request.
                 }
                 acp::AcpEvent::PermissionRequest {
                     request_id,

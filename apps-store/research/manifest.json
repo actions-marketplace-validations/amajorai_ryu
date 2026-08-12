@@ -7,7 +7,7 @@
   "tagline": "Multi-step web research with cited sources",
   "keywords": ["research", "web", "reports", "sources"],
   "icon": "microscope",
-  "iconDither": { "from": 333, "to": 7, "direction": "left" },
+  "iconDither": { "from": 333, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

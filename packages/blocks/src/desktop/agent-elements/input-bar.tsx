@@ -126,6 +126,9 @@ export interface InputBarProps {
 	 * conversation's latest usage stats; omit to hide.
 	 */
 	contextMeter?: ContextUsage;
+	/** Open the full context breakdown when the meter is clicked. Omit to keep
+	 *  the meter a read-only ring. */
+	contextMeterOnOpen?: () => void;
 	disabled?: boolean;
 
 	/**
@@ -314,6 +317,7 @@ export const InputBar = memo(function InputBar({
 	value: controlledValue,
 	onChange: controlledOnChange,
 	contextMeter,
+	contextMeterOnOpen,
 	disabled,
 	compact,
 	ghost,
@@ -474,7 +478,10 @@ export const InputBar = memo(function InputBar({
 		// Re-measure on every value change so the textarea grows/shrinks with its
 		// content (one row by default, expanding up to the 120px cap). Without
 		// `input` in the deps this only ran on mount and the box never resized.
-	}, []);
+		// A repo-wide lint/format sweep (9fed37659) emptied this array once already
+		// and the composer went back to a permanently one-line box — `input` is
+		// load-bearing, not a lint artefact.
+	}, [input]);
 
 	useEffect(() => {
 		if (!autoFocus) {
@@ -884,6 +891,7 @@ export const InputBar = memo(function InputBar({
 			}
 			compact={compact}
 			contextMeter={contextMeter}
+			contextMeterOnOpen={contextMeterOnOpen}
 			disabled={disabled}
 			doubleCheckControls={doubleCheckControls}
 			ghostControls={ghostControls}

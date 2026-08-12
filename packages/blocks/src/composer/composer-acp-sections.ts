@@ -231,6 +231,15 @@ export function formatAcpOptionLabel(
 }
 
 /**
+ * Announce a session-control pick the USER just made, so a surface can tell them
+ * when it takes effect. Called with human labels ("Approval", "Bypass
+ * permissions"), never ids, and ONLY from the picker `onChange` seams — an
+ * agent-initiated write-back (`data-ryu-acp-mode` / `data-ryu-acp-config`) runs
+ * through the same setters but must not be announced as the user's own change.
+ */
+export type AcpSelectionNotify = (setting: string, value: string) => void;
+
+/**
  * A config option that carries the agent's approval/permission presets (Codex
  * exposes them as `category: "mode"` rather than the dedicated ACP `modes` set).
  * These get the same CLI-style icon+colour treatment as the Approval section via
@@ -265,20 +274,33 @@ export function isReasoningOption(opt: AcpConfigOption): boolean {
 export function buildConfigOptionSection(
 	opt: AcpConfigOption,
 	acpOptionValues: Record<string, string>,
-	onChange: (configId: string, valueId: string) => void
+	onChange: (configId: string, valueId: string) => void,
+	/** Announce a USER pick (never a streamed write-back). Optional. */
+	notify?: AcpSelectionNotify
 ): ComposerSettingsSection {
+	const items = flattenConfigOptions(opt).map((o) => ({
+		id: o.value,
+		name: formatAcpOptionLabel(opt.name, o.name),
+		description: o.description,
+	}));
+	const current = acpOptionValues[opt.id] ?? opt.currentValue;
 	return {
 		key: `cfg-${opt.id}`,
 		label: opt.name,
 		ariaLabel: opt.name,
 		decorate: isApprovalConfigOption(opt) ? approvalModeStyle : undefined,
-		items: flattenConfigOptions(opt).map((o) => ({
-			id: o.value,
-			name: formatAcpOptionLabel(opt.name, o.name),
-			description: o.description,
-		})),
-		value: acpOptionValues[opt.id] ?? opt.currentValue,
-		onChange: (valueId: string) => onChange(opt.id, valueId),
+		items,
+		value: current,
+		onChange: (valueId: string) => {
+			onChange(opt.id, valueId);
+			// Re-picking what is already active changes nothing to announce.
+			if (valueId !== current) {
+				notify?.(
+					opt.name,
+					items.find((i) => i.id === valueId)?.name ?? valueId
+				);
+			}
+		},
 		// Reasoning effort is the one ordered scale an agent advertises (off →
 		// low → … → max), so it reads as a slider rather than a checked list. The
 		// detents ARE the agent's own values: Pi ships an `off` level, Codex does
@@ -326,6 +348,14 @@ export interface ModelSectionParams {
 	hasDedicatedAcpModels: boolean;
 	modelDisplayName: ModelDisplayName;
 	modelOptions: ModelOption[];
+	/**
+	 * Announce a user model pick. Wired on BOTH ACP branches: the flagship pi-acp
+	 * has no `session/set_model` and advertises its models as a `category:"model"`
+	 * config option, so the config-option branch — not the dedicated one — is the
+	 * common path. The engine-catalog fallback is deliberately left silent: it is
+	 * the surface's own model setting, not an agent-advertised session control.
+	 */
+	notify?: AcpSelectionNotify;
 	onAcpModelChange: (id: string) => void;
 	onAcpOptionChange: (configId: string, valueId: string) => void;
 	onEngineModelChange: (id: string) => void;
@@ -351,38 +381,57 @@ export function buildModelSection(
 		hasDedicatedAcpModels,
 		modelDisplayName,
 		modelOptions,
+		notify,
 		onAcpModelChange,
 		onAcpOptionChange,
 		onEngineModelChange,
 	} = params;
 
 	if (hasDedicatedAcpModels && acpSessionConfig?.models) {
+		const items = filterModelItems(
+			acpSessionConfig.models.availableModels.map((m) => ({
+				id: m.modelId,
+				name: modelDisplayName(m.name),
+			})),
+			effectiveAcpModel
+		);
 		return {
-			items: filterModelItems(
-				acpSessionConfig.models.availableModels.map((m) => ({
-					id: m.modelId,
-					name: modelDisplayName(m.name),
-				})),
-				effectiveAcpModel
-			),
+			items,
 			value: effectiveAcpModel ?? undefined,
-			onChange: onAcpModelChange,
+			onChange: (modelId: string) => {
+				onAcpModelChange(modelId);
+				if (modelId !== effectiveAcpModel) {
+					notify?.(
+						"Model",
+						items.find((i) => i.id === modelId)?.name ?? modelId
+					);
+				}
+			},
 		};
 	}
 	if (acpModelConfigOption) {
 		const opt = acpModelConfigOption;
 		const current = acpOptionValues[opt.id] ?? opt.currentValue;
+		const items = filterModelItems(
+			flattenConfigOptions(opt).map((o) => ({
+				id: o.value,
+				name: modelDisplayName(o.name),
+				description: o.description,
+			})),
+			current
+		);
 		return {
-			items: filterModelItems(
-				flattenConfigOptions(opt).map((o) => ({
-					id: o.value,
-					name: modelDisplayName(o.name),
-					description: o.description,
-				})),
-				current
-			),
+			items,
 			value: current,
-			onChange: (valueId: string) => onAcpOptionChange(opt.id, valueId),
+			onChange: (valueId: string) => {
+				onAcpOptionChange(opt.id, valueId);
+				if (valueId !== current) {
+					notify?.(
+						"Model",
+						items.find((i) => i.id === valueId)?.name ?? valueId
+					);
+				}
+			},
 		};
 	}
 	if (!activeAgentIsAcp) {
@@ -480,6 +529,17 @@ export interface AcpSectionsParams {
 	/** Persist an engine-catalog model pick (non-ACP fallback). */
 	onEngineModelChange: (modelId: string) => void;
 	/**
+	 * Called with human labels when the USER picks a session control here, so a
+	 * chat surface can say when it takes effect: the picks are sticky and ride the
+	 * NEXT turn's request body (Core re-applies them per turn via
+	 * `set_mode`/`set_config_option`/`set_model`), so nothing about the reply on
+	 * screen changes. Fired from the picker seams only — an agent-initiated
+	 * write-back drives the same state through the streamed-adoption effects and is
+	 * deliberately silent. Surfaces with no turn to apply to (a submenu for a
+	 * non-active agent) simply omit it. Need not be referentially stable.
+	 */
+	onSelectionApplied?: AcpSelectionNotify;
+	/**
 	 * The active agent's reasoning is overridden off — suppress its reasoning
 	 * ("thinking") config option. Defaults to false: an agent that advertises a
 	 * reasoning picker gets one unless the surface knows reasoning is disabled.
@@ -546,6 +606,7 @@ export function useAcpSections({
 	modelDisplayName = IDENTITY_DISPLAY_NAME,
 	modelOptions,
 	onEngineModelChange,
+	onSelectionApplied,
 	reasoningOff = false,
 	store,
 	streamedConfig,
@@ -573,6 +634,13 @@ export function useAcpSections({
 	// The agent the write-back below should be applied to, read through a ref so
 	// `agentId` need not be an effect dep — see that effect for why.
 	const agentIdRef = useRef(agentId);
+	// The pick announcer, held in a ref so a caller passing an inline arrow never
+	// re-identifies the sections memo (which every composer's settings menu reads).
+	const notifyRef = useRef(onSelectionApplied);
+	notifyRef.current = onSelectionApplied;
+	const notify = useCallback<AcpSelectionNotify>((setting, value) => {
+		notifyRef.current?.(setting, value);
+	}, []);
 
 	// Reset selections to the new agent's persisted choices when it changes.
 	useEffect(() => {
@@ -691,30 +759,45 @@ export function useAcpSections({
 			hasDedicatedAcpModels,
 			modelDisplayName,
 			modelOptions,
+			notify,
 			onAcpModelChange: handleAcpModelChange,
 			onAcpOptionChange: handleAcpOptionChange,
 			onEngineModelChange,
 		});
 
+		const modeItems =
+			!hideAcpModesPicker && acpSessionConfig?.modes
+				? acpSessionConfig.modes.availableModes.map((m) => ({
+						id: m.id,
+						name: m.name,
+						description: m.description,
+					}))
+				: [];
 		const extraSections: ComposerSettingsSection[] = [
 			{
 				key: "approval",
 				label: "Approval",
 				ariaLabel: "Permission mode",
 				decorate: approvalModeStyle,
-				items:
-					!hideAcpModesPicker && acpSessionConfig?.modes
-						? acpSessionConfig.modes.availableModes.map((m) => ({
-								id: m.id,
-								name: m.name,
-								description: m.description,
-							}))
-						: [],
+				items: modeItems,
 				value: effectiveAcpMode ?? acpSessionConfig?.modes?.currentModeId,
-				onChange: handleAcpModeChange,
+				onChange: (modeId: string) => {
+					handleAcpModeChange(modeId);
+					if (modeId !== effectiveAcpMode) {
+						notify(
+							"Approval",
+							modeItems.find((m) => m.id === modeId)?.name ?? modeId
+						);
+					}
+				},
 			},
 			...visibleAcpConfigOptions.map((opt) =>
-				buildConfigOptionSection(opt, acpOptionValues, handleAcpOptionChange)
+				buildConfigOptionSection(
+					opt,
+					acpOptionValues,
+					handleAcpOptionChange,
+					notify
+				)
 			),
 		];
 
@@ -739,6 +822,7 @@ export function useAcpSections({
 		filterModelItems,
 		modelDisplayName,
 		modelOptions,
+		notify,
 		onEngineModelChange,
 		reasoningOff,
 		handleAcpModeChange,

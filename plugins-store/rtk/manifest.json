@@ -5,7 +5,7 @@
   "description": "Run a dev command through RTK (Rust Token Killer) and get a token-compressed version of its output (60-90% fewer tokens), exposed as a declarative `command` tool that shells out to the locally-installed `rtk` binary. BYO — no API key.",
   "keywords": ["tokens", "cli", "developer", "compression"],
   "icon": "computer-terminal-01",
-  "iconDither": { "from": 345, "to": 311, "direction": "right" },
+  "iconDither": { "from": 345, "to": "transparent", "direction": "down" },
   "tagline": "Token-compress noisy dev-command output for agents",
   "category": "Developer Tools",
   "surfaces": {

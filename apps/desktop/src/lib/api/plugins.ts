@@ -16,6 +16,7 @@ import type {
 	ViewContribution,
 	ViewSource,
 } from "@ryu/app-host/views";
+import type { CardDither } from "@ryu/marketplace/catalog/types";
 import {
 	type ApiTarget,
 	apiUrl,
@@ -48,14 +49,29 @@ interface RequiresWire {
 }
 
 interface AppManifestWire {
+	/** Grants approved on the last successful enable, injected by `list_apps` from
+	 *  the lifecycle RECORD (absent on a node predating that, hence optional). */
+	approved_grants?: string[];
 	// System app fields injected by list_apps for Ghost/Shadow
 	built_in: boolean;
+	/** Free-text store category (`category`), e.g. "Productivity". */
+	category?: string | null;
 	companion?: {
 		label: string;
 		icon?: string | null;
 		shortcut?: string | null;
 	} | null;
+	/** Long plaintext/markdown description. */
+	description?: string | null;
 	enabled: boolean;
+	/** Icon-primitive id / `svgl:<slug>` (contract key `icon`). */
+	icon?: string | null;
+	/** CSS background for the icon square (contract key `iconBackground`). */
+	iconBackground?: string | null;
+	/** Dithered-gradient background for the icon square (`iconDither`). */
+	iconDither?: CardDither | null;
+	/** Raster logo (contract key `iconUrl`). */
+	iconUrl?: string | null;
 	id: string;
 	// Injected by list_apps handler
 	installed: boolean;
@@ -69,6 +85,15 @@ interface AppManifestWire {
 	requires?: RequiresWire | null;
 	runnables: RunnableEntryWire[];
 	sidecar_name: string | null;
+	/** How finished this listing is ("alpha", "beta", …). Absent/"stable" = no badge. */
+	stability?: string | null;
+	/** True when the user has this ENABLED but Safe Mode is holding it back this
+	 *  boot. `enabled` stays the user's own choice — Safe Mode is a read mask, not
+	 *  a write — so without this the card would show "enabled" beside a panel that
+	 *  is gone. Absent on a node predating Safe Mode. */
+	suppressed_by_safe_mode?: boolean;
+	/** Short one-line pitch shown under the name. */
+	tagline?: string | null;
 	/** Host surfaces the plugin runs on. Absent/empty = EVERY surface. */
 	targets?: Surface[];
 	version: string;
@@ -121,7 +146,41 @@ export interface AppRequires {
 	grants: string[];
 }
 
-export interface AppInfo {
+/** The manifest's PRESENTATIONAL fields — what makes an installed app look like
+ *  itself rather than like a grey glyph.
+ *
+ *  Core's `list_apps` serialises the whole manifest, so every one of these has
+ *  always been on the wire; the client simply dropped them, which is why the
+ *  sidebar and the Installed tab fell back to a placeholder tile while the Store's
+ *  catalog tabs — reading the same fields off `CatalogEntry` — showed real art.
+ *  Same names, same meanings, so `AppIcon`/`StoreCatalogCard` take them unchanged
+ *  and one app looks identical on every surface. */
+export interface AppPresentation {
+	/** Free-text store category ("Productivity", …). */
+	category: string | null;
+	/** Long plaintext/markdown description — the detail body, not the card line. */
+	description: string | null;
+	/** Icon-primitive id, or an `svgl:<slug>` brand mark. */
+	icon: string | null;
+	/** Flat CSS background for the icon square. */
+	iconBackground: string | null;
+	/** Dithered-gradient background for the icon square. */
+	iconDither: CardDither | null;
+	/** Raster logo URL. */
+	iconUrl: string | null;
+	/** "alpha" / "beta" / … — null or "stable" renders no badge. */
+	stability: string | null;
+	/** Short one-line pitch — the CARD line. Prefer this over `description`, which
+	 *  is a paragraph and would be truncated to nothing useful in a one-line slot. */
+	tagline: string | null;
+}
+
+export interface AppInfo extends AppPresentation {
+	/** The grants currently IN FORCE — the subset of {@link permissionGrants} the
+	 *  last successful enable approved. Empty for a plugin that was never enabled.
+	 *  The permissions editor checks its switches against this, never against the
+	 *  manifest's declaration, which is only what the app asked for. */
+	approvedGrants: string[];
 	builtIn: boolean;
 	companion: {
 		label: string;
@@ -131,6 +190,10 @@ export interface AppInfo {
 	enabled: boolean;
 	id: string;
 	installed: boolean;
+	/** The version the lifecycle record actually holds — what is ON THIS MACHINE.
+	 *  `null` for a built-in (no record) and for anything not installed; `version`
+	 *  is the MANIFEST's version, which for an out-of-date install is the newer one.
+	 *  Render `installedVersion ?? version`, never `version` alone. */
 	installedVersion: string | null;
 	localOnly: boolean;
 	/** Required for Core: never render a Disable switch or an Uninstall button.
@@ -144,6 +207,11 @@ export interface AppInfo {
 	requires: AppRequires | null;
 	runnables: RunnableEntry[];
 	sidecarName: string | null;
+	/** Enabled by the user, but not loaded this boot because the node is in Safe
+	 *  Mode. Render it as "Disabled by Safe Mode" rather than letting the card
+	 *  claim the app is running — that mismatch (enabled switch, missing panel) is
+	 *  the confusing state Safe Mode has to explain, not create. */
+	suppressedBySafeMode: boolean;
 	/** Host surfaces this plugin runs on. **Empty = every surface**, never "none". */
 	targets: Surface[];
 	version: string;
@@ -277,7 +345,9 @@ function toDependencyError(value: unknown): DependencyError | null {
 
 function toAppInfo(w: AppManifestWire): AppInfo {
 	return {
+		approvedGrants: w.approved_grants ?? [],
 		builtIn: w.built_in ?? false,
+		category: w.category ?? null,
 		companion: w.companion
 			? {
 					label: w.companion.label,
@@ -285,7 +355,12 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 					shortcut: w.companion.shortcut ?? null,
 				}
 			: null,
+		description: w.description ?? null,
 		enabled: w.enabled,
+		icon: w.icon ?? null,
+		iconBackground: w.iconBackground ?? null,
+		iconDither: w.iconDither ?? null,
+		iconUrl: w.iconUrl ?? null,
 		id: w.id,
 		installed: w.installed,
 		installedVersion: w.installed_version,
@@ -309,6 +384,9 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 			config: r.config ?? null,
 		})),
 		sidecarName: w.sidecar_name ?? null,
+		stability: w.stability ?? null,
+		suppressedBySafeMode: w.suppressed_by_safe_mode ?? false,
+		tagline: w.tagline ?? null,
 		// Absent/empty targets = every surface. Never invent a default surface here:
 		// treating "" as "none" would hide every plugin that predates the field.
 		targets: w.targets ?? [],

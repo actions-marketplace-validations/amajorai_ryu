@@ -7,7 +7,7 @@
   "keywords": ["security", "review", "code", "vulnerabilities"],
   "category": "Security",
   "icon": "shield-key",
-  "iconDither": { "from": 320, "to": 354, "direction": "up" },
+  "iconDither": { "from": 320, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

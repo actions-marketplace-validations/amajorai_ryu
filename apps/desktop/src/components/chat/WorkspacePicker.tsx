@@ -50,16 +50,19 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { WORKSPACE_SELECT_TRIGGER } from "@/components/agent-elements/input/composer-select.ts";
+import {
+	invalidateGitStatus,
+	useGitStatus,
+	useWorktreeStatus,
+} from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	checkoutBranch,
 	createBranch,
 	fetchGitBranches,
-	fetchGitStatus,
 	fetchWorktreeDiff,
-	fetchWorktreeStatus,
 	type WorktreeStatus,
 } from "@/src/lib/api/git.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
@@ -71,16 +74,7 @@ interface WorkspacePickerProps {
 	target: ApiTarget;
 }
 
-const POLL_INTERVAL_MS = 5000;
 const PATH_SEP = /[\\/]/;
-
-const NO_WORKTREE: WorktreeStatus = {
-	active: false,
-	branch: null,
-	path: null,
-	has_changes: false,
-	changed_files: 0,
-};
 
 interface LineStat {
 	deletions: number;
@@ -142,112 +136,67 @@ export function WorkspacePicker({
 		[setFolder]
 	);
 
-	// Branch state.
-	const [branch, setBranch] = useState<string | null>(null);
-	const [folderStat, setFolderStat] = useState<LineStat>(NO_STAT);
-	const [dirty, setDirty] = useState(false);
+	// Branch state. Branch / dirty / line counts all come from the shared git
+	// query, so this picker and the panels around it always show one answer.
+	const { status: gitStatus } = useGitStatus(target, folder);
+	const isRepo = gitStatus.is_repo;
+	const branch = gitStatus.is_repo ? gitStatus.branch : null;
+	const dirty = gitStatus.is_repo && gitStatus.dirty;
+	const folderStat: LineStat = gitStatus.is_repo
+		? { insertions: gitStatus.insertions, deletions: gitStatus.deletions }
+		: NO_STAT;
 	const [branches, setBranches] = useState<string[]>([]);
 	const [loadingBranches, setLoadingBranches] = useState(false);
 	const [switching, setSwitching] = useState<string | null>(null);
 	const [branchError, setBranchError] = useState<string | null>(null);
 	const [creatingBranch, setCreatingBranch] = useState(false);
 
-	// Worktree state.
-	const [isRepo, setIsRepo] = useState(false);
-	const [worktreeStatus, setWorktreeStatus] =
-		useState<WorktreeStatus>(NO_WORKTREE);
+	// Worktree state — the status itself is shared with WorktreePicker; only the
+	// per-file line totals (a second, heavier request) are fetched here.
+	const worktreeStatus = useWorktreeStatus(
+		target,
+		folder ? conversationId : null
+	);
 	const [worktreeStat, setWorktreeStat] = useState<LineStat>(NO_STAT);
-	const worktreeAbortRef = useRef<AbortController | null>(null);
 
 	const folderName = folder ? folder.split(PATH_SEP).at(-1) : null;
 
-	// Poll git status: branch + is_repo + working-tree line counts.
+	// The worktree's own line totals: only fetched when a live worktree actually
+	// has changes, since it is a heavier per-file diff than the status read.
 	useEffect(() => {
-		if (!folder) {
-			setBranch(null);
-			setIsRepo(false);
-			setFolderStat(NO_STAT);
-			setDirty(false);
-			return;
-		}
-		let active = true;
-		const run = async () => {
-			const status = await fetchGitStatus(target, folder);
-			if (!active) {
-				return;
-			}
-			setIsRepo(status.is_repo);
-			if (status.is_repo) {
-				setBranch(status.branch);
-				setFolderStat({
-					insertions: status.insertions,
-					deletions: status.deletions,
-				});
-				setDirty(status.dirty);
-			} else {
-				setBranch(null);
-				setFolderStat(NO_STAT);
-				setDirty(false);
-			}
-		};
-		run();
-		const id = setInterval(run, POLL_INTERVAL_MS);
-		return () => {
-			active = false;
-			clearInterval(id);
-		};
-	}, [folder, target]);
-
-	// Poll this conversation's live worktree status + diff line totals.
-	useEffect(() => {
-		if (!(folder && conversationId)) {
-			setWorktreeStatus(NO_WORKTREE);
+		if (
+			!(worktreeStatus.active && worktreeStatus.has_changes && conversationId)
+		) {
 			setWorktreeStat(NO_STAT);
 			return;
 		}
-		let active = true;
-		const run = async () => {
-			worktreeAbortRef.current?.abort();
-			const controller = new AbortController();
-			worktreeAbortRef.current = controller;
-			const next = await fetchWorktreeStatus(
-				target,
-				conversationId,
-				controller.signal
-			);
-			if (!active) {
-				return;
-			}
-			setWorktreeStatus(next);
-			if (next.active && next.has_changes) {
-				const diff = await fetchWorktreeDiff(
-					target,
-					conversationId,
-					controller.signal
-				);
-				if (active) {
-					setWorktreeStat(
-						diff.files.reduce(
-							(acc, f) => ({
-								insertions: acc.insertions + f.additions,
-								deletions: acc.deletions + f.deletions,
-							}),
-							NO_STAT
-						)
-					);
+		const controller = new AbortController();
+		fetchWorktreeDiff(target, conversationId, controller.signal)
+			.then((diff) => {
+				if (controller.signal.aborted) {
+					return;
 				}
-			} else {
-				setWorktreeStat(NO_STAT);
-			}
-		};
-		run();
-		const id = setInterval(run, POLL_INTERVAL_MS);
-		return () => {
-			active = false;
-			clearInterval(id);
-			worktreeAbortRef.current?.abort();
-		};
-	}, [folder, conversationId, target]);
+				setWorktreeStat(
+					diff.files.reduce(
+						(acc, f) => ({
+							insertions: acc.insertions + f.additions,
+							deletions: acc.deletions + f.deletions,
+						}),
+						NO_STAT
+					)
+				);
+			})
+			.catch(() => {
+				/* leave the previous totals in place */
+			});
+		return () => controller.abort();
+	}, [
+		conversationId,
+		target,
+		worktreeStatus.active,
+		worktreeStatus.has_changes,
+		worktreeStatus.changed_files,
+	]);
 
 	const loadBranches = useCallback(async () => {
 		if (!folder) {
@@ -258,7 +207,9 @@ export function WorkspacePicker({
 		const result = await fetchGitBranches(target, folder);
 		setBranches(result.branches);
 		if (result.current) {
-			setBranch(result.current);
+			// Let the shared query pick the current branch up, so every surface
+			// updates together instead of only this picker.
+			invalidateGitStatus(folder);
 		}
 		setLoadingBranches(false);
 	}, [folder, target]);
@@ -284,7 +235,7 @@ export function WorkspacePicker({
 			const result = await checkoutBranch(target, folder, nextBranch);
 			setSwitching(null);
 			if (result.success) {
-				setBranch(result.branch ?? nextBranch);
+				invalidateGitStatus(folder);
 			} else {
 				setBranchError(result.error ?? "Failed to switch branch");
 			}
@@ -304,7 +255,7 @@ export function WorkspacePicker({
 			const result = await createBranch(target, folder, name);
 			setCreatingBranch(false);
 			if (result.success) {
-				setBranch(result.branch ?? name);
+				invalidateGitStatus(folder);
 				loadBranches().catch(() => undefined);
 				setOpen(false);
 				return null;

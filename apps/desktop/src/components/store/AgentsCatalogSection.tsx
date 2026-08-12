@@ -48,6 +48,7 @@ import StoreCatalogLayout, {
 import StoreItemAction, {
 	StoreItemContextMenuContent,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import {
 	ListingAsideCard,
 	ListingDetailShell,
@@ -244,17 +245,18 @@ function AgentCards({
 						) : undefined
 					}
 					employeeId={entry.id}
-					// The badge face carries the Ryu mark, so the agent's own logo goes
-					// in the footer rather than being dropped: Claude, Codex and Cursor
-					// are recognised by their marks long before their names are read.
-					footer={
+					key={entry.id}
+					// On the card face, above the name — Claude, Codex and Cursor are
+					// recognised by their marks long before their names are read, and a
+					// 20px glyph in the footer strip under the card read as an
+					// annotation rather than as whose card this is.
+					logo={
 						<AgentCatalogLogo
-							className="size-5 opacity-90"
+							className="size-20 opacity-90"
 							entry={entry}
-							size="20px"
+							size="80px"
 						/>
 					}
-					key={entry.id}
 					name={entry.name}
 					onOpen={() => onSelect(entry.id)}
 					role={entry.description}
@@ -332,9 +334,7 @@ function AgentList({
 		<div>
 			{groupAgents(agents).map((group) => (
 				<section className="mb-6" key={group.key}>
-					<h3 className="mb-2 px-1 font-medium text-muted-foreground text-xs uppercase tracking-widest">
-						{group.label}
-					</h3>
+					<StoreShelfHeading>{group.label}</StoreShelfHeading>
 					<AgentCards agents={group.items} {...cardProps} />
 				</section>
 			))}

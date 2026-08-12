@@ -88,6 +88,78 @@ pub struct CatalogEntry {
     /// whose definition remains the only one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<Surface>,
+
+    // ── Presentation, projected from the manifest ─────────────────────────────
+    //
+    // A listing's NAME and ICON are declared by its manifest, never invented by
+    // whoever is serving the feed. `tools/generate-registry.mjs` projects these
+    // out of `plugins-store/*/manifest.json` + `apps-store/*/manifest.json` with
+    // the same mapping Core's own `plugin_manifest_to_entry` uses, so the remote
+    // feed and the local browse surface cannot disagree about one plugin.
+    //
+    // They live on the struct rather than being ignored as unknown keys because
+    // serde silently DROPS what it does not know: without these fields a feed that
+    // correctly carried an icon would still reach the card icon-less, and the bug
+    // would look like a generator bug. Every one is optional and
+    // `skip_serializing_if`, so an entry that declares none round-trips to the
+    // exact bytes it always did.
+    /// Icon-primitive glyph id (`lucide:brain`, a bare Hugeicons name, or
+    /// `svgl:<slug>`) — the manifest's `icon`, else its Companion surface's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// Raster logo URL — the manifest's `iconUrl`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+
+    /// Dithered-gradient wash behind the icon square. Opaque passthrough, exactly
+    /// as on the manifest: an unvalidated value must never fail the parse, the
+    /// render layer falls back before painting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_dither: Option<serde_json::Value>,
+
+    /// CSS background for the icon square.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_background: Option<String>,
+
+    /// Brand accent colour, hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_color: Option<String>,
+
+    /// Detail-page hero banner spec. Opaque passthrough, like `icon_dither`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<serde_json::Value>,
+
+    /// Publisher display string, flattened from the manifest's `author`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer: Option<String>,
+
+    /// One-line tagline shown under the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tagline: Option<String>,
+
+    /// Store shelf this listing groups under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+
+    /// `"app"` (ships a Companion surface) or `"plugin"`. Carried so the store's
+    /// Apps/Plugins split does not have to re-derive it from [`kinds`].
+    ///
+    /// [`kinds`]: CatalogEntry::kinds
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub entry_type: Option<String>,
+
+    /// How finished the listing is (`alpha`, `beta`, `rc`, …). Free-form so a new
+    /// tier needs no client release; absent or `stable` renders no badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability: Option<String>,
+
+    /// Hide from the Store without uninstalling or disabling. A *catalog* control,
+    /// not a lifecycle one — `merged_plugin_catalog_entries` filters on it after
+    /// the id dedup, so a hidden entry suppresses its slot rather than yielding it
+    /// to a lower-priority card for the same plugin.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// Top-level shape of the remote `registry.json`.

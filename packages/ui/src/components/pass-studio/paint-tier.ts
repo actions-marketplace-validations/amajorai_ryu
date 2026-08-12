@@ -31,6 +31,7 @@ import {
 	TIER_LABEL_MIN_PX,
 	TIER_META_PX,
 	TIER_STAT_VALUE_PX,
+	TIER_WARP_OPACITY,
 	tierWarpColors,
 } from "../tier-pass.tsx";
 import {
@@ -196,8 +197,10 @@ function withAlpha(hex: string, alpha: number): string {
  * one the live `TierPass` is printed on. The foil takes the palette's middle
  * stop rather than the brand primary — on a tier card the sheen is the tier's,
  * and the same swept gradient in a foreign blue read as a badge from a different
- * product. Opacity is left at the shell's own per-scheme defaults: the tier
- * field is a texture UNDER `text-card-foreground`, not a plinth over it.
+ * product. Opacity is `TIER_WARP_OPACITY`, the same override the live card hands
+ * the shell, NOT the shell's own defaults: those are the waitlist pass's
+ * weighting, and leaving the painter on them is how an exported card would keep
+ * the pale field the live one no longer has.
  *
  * MEMOISE THE RESULT. Every call returns a fresh object around a fresh array,
  * and the spec is half of the scene's identity in `PassStudio` — built in a
@@ -221,6 +224,7 @@ export function tierBackdropSpec(
 	return {
 		colors: tierWarpColors(plan, isDark),
 		foil: far,
+		opacity: TIER_WARP_OPACITY,
 		wash: [
 			withAlpha(near, BACKDROP_WASH_ALPHA),
 			withAlpha(far, BACKDROP_WASH_ALPHA * 0.45),

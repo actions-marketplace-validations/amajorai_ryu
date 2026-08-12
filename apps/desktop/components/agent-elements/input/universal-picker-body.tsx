@@ -372,7 +372,18 @@ function SettingSub({ section }: { section: ComposerSettingsSection }) {
 					</span>
 				</span>
 			</DropdownMenuSubTrigger>
-			<DropdownMenuSubContent className="max-h-80 min-w-[220px] max-w-[300px] overflow-hidden p-0">
+			{/* `renderContent` bodies (the grouped model menu) own their own scroller,
+			    so the popover must NOT add a second one — nested scrollers are what
+			    made the model list feel stuck. A plain item list has no scroller of
+			    its own, so it scrolls HERE or not at all: with `overflow-hidden` on
+			    both paths, any section taller than `max-h-80` (Output style, with
+			    seven two-line rows) was simply clipped and unreachable. */}
+			<DropdownMenuSubContent
+				className={cn(
+					"max-h-80 min-w-[220px] max-w-[300px] p-0",
+					section.renderContent ? "overflow-hidden" : "overflow-y-auto"
+				)}
+			>
 				{loadingEmpty ? (
 					<LoadingRow text="Detecting available options…" />
 				) : section.renderContent ? (

@@ -7,7 +7,7 @@
   "tagline": "Write and version your own agent skills",
   "keywords": ["skills", "authoring", "editor", "developer"],
   "icon": "sparkles",
-  "iconDither": { "from": 308, "to": 342, "direction": "down" },
+  "iconDither": { "from": 308, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "none" },

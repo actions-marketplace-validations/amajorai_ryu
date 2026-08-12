@@ -1,12 +1,15 @@
 import {
 	Activity01Icon,
 	Add01Icon,
+	AiBrain01Icon,
 	ArrowLeft01Icon,
 	ArrowRight01Icon,
 	ArrowShrink02Icon,
 	ArrowShrinkIcon,
 	ArrowTurnBackwardIcon,
 	AudioWave01Icon,
+	BookOpen01Icon,
+	BubbleChatIcon,
 	Calendar04Icon,
 	Cancel01Icon,
 	CheckmarkBadge02Icon,
@@ -19,6 +22,7 @@ import {
 	FullScreenIcon,
 	GridIcon,
 	InboxIcon,
+	Key01Icon,
 	LibraryIcon,
 	LinkSquare02Icon,
 	Message01Icon,
@@ -37,7 +41,6 @@ import {
 	SidebarLeftIcon,
 	SidebarTopIcon,
 	Square01Icon,
-	Store01Icon,
 	Tag01Icon,
 	Target01Icon,
 	UnfoldMoreIcon,
@@ -220,17 +223,41 @@ const PATH_ICONS: Record<string, IconSvgElement> = {
 	// moved itself.
 	"/chat": Message01Icon,
 	"/agents": Target01Icon,
+	"/channels": BubbleChatIcon,
 	"/engines": CpuIcon,
+	"/identities": Key01Icon,
+	"/identities/new": Key01Icon,
+	// Every `/store/*` section and `/marketplace` are ONE page — the Customize
+	// shell — and `PATH_TITLES` already titles them all "Customize". They must
+	// therefore carry the sidebar's own Customize glyph (the `store` NavTabButton's
+	// `PackageIcon`), or the same page shows up as three different things: three of
+	// these keys were simply missing and fell back to the chat icon, and
+	// `/marketplace` disagreed with the button by rendering a storefront.
 	"/store": PackageIcon,
 	"/store/agents": PackageIcon,
-	"/marketplace": Store01Icon,
+	"/store/apps": PackageIcon,
+	"/store/plugins": PackageIcon,
+	"/store/workflows": PackageIcon,
+	"/marketplace": PackageIcon,
 	"/models": Package01Icon,
 	"/skills": Mortarboard01Icon,
 	"/spaces": DeliverySecure01Icon,
 	"/meetings": AudioWave01Icon,
 	"/tools": Wrench01Icon,
 	"/workflows": WorkflowCircle06Icon,
+	"/workflows/build": WorkflowCircle06Icon,
 	"/library": LibraryIcon,
+	// The Library's section routes take their section's own glyph (LibraryPage's
+	// `SECTIONS`), not the Library book — a Library tab pinned to Agents should
+	// read as Agents.
+	"/library/agent": Target01Icon,
+	"/library/chat": BookOpen01Icon,
+	"/library/channel": BubbleChatIcon,
+	"/library/identity": Key01Icon,
+	"/library/memory": AiBrain01Icon,
+	"/library/space": DeliverySecure01Icon,
+	"/library/tools": Wrench01Icon,
+	"/library/workflow": WorkflowCircle06Icon,
 	"/quests": CheckmarkBadge02Icon,
 	"/timeline": Activity01Icon,
 	"/review": PieChartIcon,

@@ -24,10 +24,22 @@ pub fn binary_path() -> PathBuf {
     bin_path()
 }
 
+/// Serializes concurrent installs. Two surfaces can ask for OpenClaw at once —
+/// the Agents tab (`POST /api/agents/catalog/install`) and the Engines tab
+/// (`POST /api/setup/openclaw/install`) — and both register the SAME download-center
+/// id, which shares the row but does NOT dedup the work: `register_indeterminate`
+/// cannot hand a second caller the first one's result, so both futures run. Two
+/// simultaneous `npm install --prefix ~/.ryu openclaw@latest` into one prefix is a
+/// corrupt `node_modules`, not a wasted download. Holding this lock makes the
+/// second caller wait and then take the fast path below.
+static INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub async fn ensure_installed() -> Result<()> {
+    let _guard = INSTALL_LOCK.lock().await;
     let dest = bin_path();
 
-    // Fast path: binary present and version recorded.
+    // Fast path: binary present and version recorded. Re-checked under the lock, so
+    // a caller that queued behind a completed install does no work.
     let store = VersionStore::load();
     if dest.exists() && store.versions.contains_key("openclaw") {
         tracing::info!(

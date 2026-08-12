@@ -29,11 +29,23 @@ import { createElement, type ReactNode, useEffect, useState } from "react";
 import { AppDisabledNotice } from "@/src/components/AppDisabledNotice.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import {
+	DRAFTS_BUTTON_ID,
+	DRAFTS_DEFAULT_PATH,
+	DRAFTS_PLUGIN_ID,
+} from "@/src/lib/api/drafts.ts";
+import {
+	MISSION_CONTROL_BUTTON_ID,
+	MISSION_CONTROL_DEFAULT_PATH,
+	MISSION_CONTROL_PLUGIN_ID,
+} from "@/src/lib/api/mission-control.ts";
+import {
 	DASHBOARD_DEFAULT_PATH,
 	DASHBOARDS_HOME_BUTTON_ID,
 	DASHBOARDS_PLUGIN_ID,
 } from "@/src/lib/dashboards/app.ts";
+import DraftsPage from "@/src/pages/DraftsPage.tsx";
 import HomePage from "@/src/pages/HomePage.tsx";
+import MissionControlPage from "@/src/pages/MissionControlPage.tsx";
 import { resolveAppShellPath } from "./app-shell-path.ts";
 import { contributionRegistry } from "./registry.ts";
 
@@ -66,6 +78,20 @@ const APP_SHELL_PAGES: readonly AppShellPage[] = [
 		fallbackPath: DASHBOARD_DEFAULT_PATH,
 		label: "Dashboards",
 		render: () => createElement(HomePage),
+	},
+	{
+		plugin: MISSION_CONTROL_PLUGIN_ID,
+		button: MISSION_CONTROL_BUTTON_ID,
+		fallbackPath: MISSION_CONTROL_DEFAULT_PATH,
+		label: "Mission Control",
+		render: () => createElement(MissionControlPage),
+	},
+	{
+		plugin: DRAFTS_PLUGIN_ID,
+		button: DRAFTS_BUTTON_ID,
+		fallbackPath: DRAFTS_DEFAULT_PATH,
+		label: "Drafts",
+		render: () => createElement(DraftsPage),
 	},
 ];
 

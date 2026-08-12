@@ -43,6 +43,54 @@ export interface AvatarResponse {
 	success: boolean;
 }
 
+/**
+ * One reason a merge is refused, from the server's fixed vocabulary.
+ *
+ * Only `subject: "target"` blockers — facts about the signed-in account — ever
+ * reach a client before both sides have confirmed. Refusals about the OTHER
+ * account are mailed to that address instead, so the merge form can't be used to
+ * probe whether a stranger has a subscription. See `docs/account-merge.md` §6.
+ */
+export interface AccountMergeBlocker {
+	code: string;
+	message: string;
+	subject?: "target" | "source";
+}
+
+export interface AccountMergeStatus {
+	hasActive: boolean;
+	merge?: {
+		id: string;
+		/** `target` = the account that survives; `source` = the one being absorbed. */
+		role: "target" | "source";
+		/** The OTHER address in the merge — never both, so this can't be used to read one back. */
+		otherEmail: string;
+		status:
+			| "pending"
+			| "source_confirmed"
+			| "target_confirmed"
+			| "ready"
+			| "failed";
+		sourceConfirmedAt?: Date | null;
+		targetConfirmedAt?: Date | null;
+		createdAt: Date;
+		expiresAt: Date;
+		lastError?: string | null;
+	};
+}
+
+/**
+ * Whether the SIGNED-IN account is in a state where it can absorb another one.
+ * Says nothing about the address being typed — deliberately; see
+ * {@link AccountMergeBlocker}. `summary.workspaces` counts the caller's own
+ * workspaces.
+ */
+export interface AccountMergePreflight {
+	blockers: AccountMergeBlocker[];
+	mergeable: boolean;
+	summary?: { workspaces: number };
+}
+
 export interface EmailChangeStatus {
 	emailChange?: {
 		id: string;
@@ -346,6 +394,44 @@ export const settingsApi = {
 
 		getPasswordStatus(): Promise<PasswordStatus> {
 			return fetchApi("/api/user/password-status");
+		},
+
+		/**
+		 * Account merge (see `docs/account-merge.md`). The signed-in account is
+		 * always the one that SURVIVES; `email` names the account being absorbed.
+		 *
+		 * `initiate` is step-up gated server-side, so a 403 carrying
+		 * `STEP_UP_REQUIRED` here means "prompt for the second factor and retry",
+		 * not "you can't do this".
+		 *
+		 * `checkMerge` answers about the CALLER'S account only. It takes the address
+		 * so the server can reject the "merge yourself into yourself" case, and for
+		 * nothing else — a mergeable address, a blocked one and an unregistered one
+		 * all get the same reply.
+		 */
+		checkMerge(email: string): Promise<AccountMergePreflight> {
+			return fetchApi(
+				`/api/user/merge/preflight?email=${encodeURIComponent(email)}`
+			);
+		},
+
+		async initiateMerge(email: string): Promise<void> {
+			await fetchApi("/api/user/merge/initiate", {
+				method: "POST",
+				body: JSON.stringify({ email }),
+			});
+		},
+
+		async confirmMerge(token: string): Promise<void> {
+			await fetchApi(`/api/user/merge/confirm?token=${token}`);
+		},
+
+		getMergeStatus(): Promise<AccountMergeStatus> {
+			return fetchApi("/api/user/merge/status");
+		},
+
+		async cancelMerge(): Promise<void> {
+			await fetchApi("/api/user/merge/cancel", { method: "POST" });
 		},
 
 		async setPassword(

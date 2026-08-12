@@ -15,6 +15,7 @@
 
 /** Kept in step with STEP_UP_SCOPES in packages/auth/src/lib/step-up.ts. */
 export type StepUpScope =
+	| "account.merge"
 	| "org.credentials"
 	| "org.delete"
 	| "org.members"

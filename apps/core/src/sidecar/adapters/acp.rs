@@ -25,6 +25,7 @@ use agent_client_protocol_tokio::AcpAgent;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
+use crate::sidecar::adapters::acp_probe_cache as probe_cache;
 use crate::sidecar::adapters::{
     AgentAdapter, AgentConfig, AgentInfo, ChatChunk, ChatRequest, ImagePart, MemoryEntry, ToolInfo,
 };
@@ -925,8 +926,13 @@ pub fn resolve_permission(request_id: &str, option_id: Option<String>) -> bool {
 // carries `models` (feature-gated) and `config_options` (e.g. a reasoning-effort
 // selector). To populate the desktop's per-agent pickers *before* the first
 // turn, `probe_acp_config` opens a throwaway session (no prompt) over the
-// low-level connection, reads the full response, and drops it. Results are
-// cached per spawn command (an agent's advertised set is static per binary).
+// low-level connection, reads the full response, and drops it.
+//
+// That spawn is expensive (up to the 30s ceiling below), and every agent picker
+// in the product depends on it, so the result is cached per spawn command by
+// [`probe_cache`] — persisted across restarts, TTL'd, single-flighted, and
+// refreshed in the background. Read that module's header before changing the
+// caching behaviour here; in particular, FAILURES are cached deliberately.
 
 /// Ceiling on a single ACP config probe (`initialize` + `session/new`). Long
 /// enough for a cold `npx` spawn of a large agent binary plus a first backend
@@ -934,13 +940,6 @@ pub fn resolve_permission(request_id: &str, option_id: Option<String>) -> bool {
 /// unreachable provider) fails fast and stays retryable rather than hanging the
 /// desktop's picker request forever.
 const ACP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-type ConfigCache = Mutex<std::collections::HashMap<String, serde_json::Value>>;
-
-fn config_cache() -> &'static ConfigCache {
-    static CACHE: OnceLock<ConfigCache> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
 
 // ── Core-synthesized session config options ──────────────────────────────────
 //
@@ -1062,16 +1061,68 @@ pub async fn probe_acp_config(
     spawn_cmd: String,
     cwd: PathBuf,
 ) -> anyhow::Result<serde_json::Value> {
-    if let Some(v) = config_cache()
-        .lock()
-        .ok()
-        .and_then(|m| m.get(&spawn_cmd).cloned())
-    {
-        return Ok(v);
+    // Cached answer (success OR failure) — see [`probe_cache`] for why failures
+    // count and why a stale entry is served rather than awaited. The only probe
+    // a user can block on is the first one for an agent never opened before.
+    if let Some(hit) = probe_cache::lookup(&spawn_cmd) {
+        if hit.stale {
+            refresh_acp_config_in_background(spawn_cmd.clone(), cwd);
+        }
+        return hit.outcome.map_err(|e| anyhow::anyhow!(e));
     }
+
+    // Single-flight: opening a window mounts several pickers for the same agent
+    // at once, and without this each one spawns its own subprocess. The waiter
+    // re-reads the cache, because the holder ahead of it has just written the
+    // answer it was about to spend up to 30s computing.
+    let lock = probe_cache::probe_lock(&spawn_cmd);
+    let _guard = lock.lock().await;
+    if let Some(hit) = probe_cache::lookup(&spawn_cmd) {
+        return hit.outcome.map_err(|e| anyhow::anyhow!(e));
+    }
+
+    let result = probe_acp_config_uncached(spawn_cmd.clone(), cwd).await;
+    store_probe_result(&spawn_cmd, &result);
+    result
+}
+
+/// Record a probe outcome, flattening `anyhow`'s error into the message the
+/// cache stores (and the desktop eventually shows).
+fn store_probe_result(spawn_cmd: &str, result: &anyhow::Result<serde_json::Value>) {
+    match result {
+        Ok(value) => probe_cache::store(spawn_cmd, Ok(value)),
+        Err(err) => probe_cache::store(spawn_cmd, Err(&err.to_string())),
+    }
+}
+
+/// Re-probe `spawn_cmd` behind the user and refresh its cache entry.
+///
+/// Detached on purpose: this is the "revalidate" half of stale-while-revalidate,
+/// so the read that noticed the staleness has already returned. Deduped through
+/// [`probe_cache::begin_refresh`] so a burst of stale reads (several pickers
+/// mounting at once) schedules one re-probe, not one each.
+fn refresh_acp_config_in_background(spawn_cmd: String, cwd: PathBuf) {
+    let Some(slot) = probe_cache::begin_refresh(&spawn_cmd) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let lock = probe_cache::probe_lock(&spawn_cmd);
+        let _guard = lock.lock().await;
+        let result = probe_acp_config_uncached(spawn_cmd.clone(), cwd).await;
+        store_probe_result(&spawn_cmd, &result);
+        drop(slot);
+    });
+}
+
+/// The probe itself: spawn the agent, `initialize` + `session/new`, read what it
+/// advertises, drop the session. Always hits the subprocess — every caller goes
+/// through [`probe_acp_config`], which is what owns the caching.
+async fn probe_acp_config_uncached(
+    spawn_cmd: String,
+    cwd: PathBuf,
+) -> anyhow::Result<serde_json::Value> {
     let agent =
         AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
-    let probe_cmd = spawn_cmd.clone();
     // Which road Ryu's tools take to this agent, resolved from the spawn command
     // BEFORE the subprocess answers anything. Reported alongside the agent's own
     // capabilities because clients must NOT derive it from `mcpCapabilities`: the
@@ -1135,9 +1186,6 @@ pub async fn probe_acp_config(
         )
     })?
     .map_err(|e| anyhow::anyhow!("ACP probe: {e}"))?;
-    if let Ok(mut m) = config_cache().lock() {
-        m.insert(probe_cmd, value.clone());
-    }
     Ok(value)
 }
 
@@ -1176,10 +1224,11 @@ pub async fn authenticate_acp(spawn_cmd: String, method_id: String) -> anyhow::R
     .await
     .map_err(|_| anyhow::anyhow!("ACP authenticate timed out after 300s"))?
     .map_err(|e| anyhow::anyhow!("ACP authenticate: {e}"))?;
-    // The agent's config may now differ (auth unlocked session/new); drop the cache.
-    if let Ok(mut m) = config_cache().lock() {
-        m.remove(&cache_key);
-    }
+    // The agent's config may now differ (auth unlocked session/new); drop the
+    // cache. This is also what un-sticks a CACHED FAILURE: the probe of a
+    // signed-out agent fails, and logging in is the fix — so it must not wait out
+    // the failure TTL.
+    probe_cache::invalidate(&cache_key);
     Ok(())
 }
 
@@ -1210,9 +1259,7 @@ pub async fn logout_acp(spawn_cmd: String) -> anyhow::Result<()> {
     .map_err(|_| anyhow::anyhow!("ACP logout timed out"))?
     .map_err(|e| anyhow::anyhow!("ACP logout: {e}"))?;
     // Auth state changed; drop the cached probe so the next read reflects it.
-    if let Ok(mut m) = config_cache().lock() {
-        m.remove(&cache_key);
-    }
+    probe_cache::invalidate(&cache_key);
     Ok(())
 }
 
@@ -4405,6 +4452,44 @@ mod tests {
 
     fn pi_acp_cmd_gated() -> String {
         pi_acp_cmd()
+    }
+
+    /// A probe that FAILS must still be cached — the whole bug this path exists
+    /// to fix.
+    ///
+    /// Before the cache stored failures, nothing was recorded on the error path,
+    /// so every read re-spawned the agent and re-waited the 30s ceiling. Measured
+    /// against a live node, three consecutive `GET /api/agents/ryu/acp-config`
+    /// calls took 30.7s each and 502'd every time; the desktop retries twice per
+    /// mount, so opening a chat could burn 90s before showing an empty picker.
+    /// Asserting on the cache entry (rather than on wall-clock) keeps this
+    /// deterministic while still driving the real `probe_acp_config` path.
+    #[tokio::test]
+    async fn a_failed_probe_is_cached_instead_of_respawning_the_agent() {
+        // A binary that cannot exist, so the probe fails fast and spawns nothing
+        // that outlives the test.
+        let spawn_cmd = "ryu-nonexistent-acp-agent-for-tests --stdio".to_owned();
+        let cwd = std::env::temp_dir();
+
+        assert!(
+            probe_cache::lookup(&spawn_cmd).is_none(),
+            "precondition: nothing cached for this command yet"
+        );
+
+        let first = probe_acp_config(spawn_cmd.clone(), cwd.clone()).await;
+        assert!(first.is_err(), "a missing binary cannot be probed");
+
+        let hit = probe_cache::lookup(&spawn_cmd)
+            .expect("the failure must be cached, not silently dropped");
+        assert!(hit.outcome.is_err(), "the cached outcome is the failure");
+        assert!(!hit.stale, "a just-recorded failure is still fresh");
+
+        // The second read is served from that entry rather than re-spawning.
+        assert!(probe_acp_config(spawn_cmd.clone(), cwd).await.is_err());
+
+        // …and an auth transition drops it, so signing in doesn't wait out the TTL.
+        probe_cache::invalidate(&spawn_cmd);
+        assert!(probe_cache::lookup(&spawn_cmd).is_none());
     }
 
     // ── MCP tool bridge gate (split from egress routing) ───────────────────

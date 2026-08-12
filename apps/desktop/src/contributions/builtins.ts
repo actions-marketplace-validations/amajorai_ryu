@@ -111,6 +111,8 @@ const WORKFLOW_DETAIL = /^\/workflows\/[^/]+$/;
 const WORKFLOW_BUILD = /^\/workflows\/build\/[^/]+$/;
 // /meetings/:id — a specific meeting's transcript + notes.
 const MEETING_DETAIL = /^\/meetings\/[^/]+$/;
+// /social/:id — one scheduled post inside Outpost.
+const SOCIAL_DETAIL = /^\/social\/[^/]+$/;
 // A deep-linked "open captured moment" into the Timeline: /timeline/:ts (ts in
 // Unix µs). The command palette's "Search everything" opens this so the scrubber
 // jumps straight to that moment; the ts is baked into the companion mount context
@@ -433,6 +435,17 @@ export function seedBuiltinRoutes(): void {
 	pattern(MEETING_DETAIL, (tab) =>
 		companionAlias(topLevelAlias(tab.path), {
 			meetingId: tab.path.split("/")[2],
+		})
+	);
+	// /social/:id — one scheduled post inside Outpost: mount the app that answers to
+	// `/social` with the post id baked into the frame as `window.ryu.context.postId`.
+	// Same shape as `/meetings/:id`, and needed for the same reason — the bare
+	// `/social` alias resolves through the single-segment catch-all below, but a
+	// two-segment path never reaches it, so without this a deep link into a post would
+	// render blank rather than opening Outpost on that post.
+	pattern(SOCIAL_DETAIL, (tab) =>
+		companionAlias(topLevelAlias(tab.path), {
+			postId: tab.path.split("/")[2],
 		})
 	);
 	// /skills/:id/edit — the SKILL.md editor for an existing skill, with the skill id

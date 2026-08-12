@@ -22,6 +22,82 @@ pub struct GitState {
     pub deletions: u32,
 }
 
+/// Files larger than this are counted as 0 added lines, the same way git treats
+/// a file it decides is binary. Keeps a stray multi-gigabyte artifact in an
+/// untracked folder from stalling a status poll.
+const MAX_UNTRACKED_SCAN_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Added lines contributed by files git does not track yet.
+///
+/// `git diff HEAD --numstat` only sees tracked files, but `git status
+/// --porcelain` counts untracked ones — so without this the two halves of
+/// `GitState` describe different file sets, and a folder of brand-new files
+/// reads as "12 files changed, +0 −0". Every line of a new file is an insertion,
+/// which is what `git add -N` + `diff` would report. Binary and oversized files
+/// contribute 0, matching numstat's "-" rows.
+fn untracked_insertions(cwd: &str, untracked: &[String]) -> u32 {
+    let root = std::path::Path::new(cwd);
+    let mut insertions = 0u32;
+    for rel in untracked {
+        let path = root.join(rel);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > MAX_UNTRACKED_SCAN_BYTES {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if bytes.is_empty() || bytes.contains(&0) {
+            continue;
+        }
+        let newlines = bytes.iter().filter(|b| **b == b'\n').count();
+        // A trailing byte that is not a newline is still a line to git.
+        let lines = if bytes.last() == Some(&b'\n') {
+            newlines
+        } else {
+            newlines + 1
+        };
+        insertions = insertions.saturating_add(lines as u32);
+    }
+    insertions
+}
+
+/// Pull the untracked paths out of `git status --porcelain --untracked-files=all`
+/// output (the `?? <path>` rows), un-quoting the C-style quoting git applies to
+/// paths with unusual bytes.
+fn untracked_paths(porcelain: &str) -> Vec<String> {
+    porcelain
+        .lines()
+        .filter_map(|l| l.strip_prefix("?? "))
+        .map(unquote_git_path)
+        .collect()
+}
+
+/// Undo git's C-style path quoting (`"a\tb"`). Non-quoted paths pass through.
+fn unquote_git_path(raw: &str) -> String {
+    let Some(inner) = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+        return raw.to_string();
+    };
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some(other) => out.push(other),
+            None => break,
+        }
+    }
+    out
+}
+
 /// Total added/removed lines for the working tree vs HEAD (staged + unstaged),
 /// summed from `git diff HEAD --numstat`. Binary files (numstat "-") are skipped.
 fn query_diff_totals(cwd: &str) -> (u32, u32) {
@@ -75,7 +151,11 @@ pub fn query_git_state(cwd: &str) -> GitState {
     }
 
     // Dirty state from porcelain output — one line per changed file.
-    let porcelain = run_git(cwd, &["status", "--porcelain"]).unwrap_or_default();
+    // `--untracked-files=all` lists new files individually rather than collapsing
+    // a new directory into a single row, so `changed_files_count` counts the same
+    // files the insertion total below is summed over.
+    let porcelain = run_git(cwd, &["status", "--porcelain", "--untracked-files=all"])
+        .unwrap_or_default();
     let changed: Vec<&str> = porcelain.lines().filter(|l| !l.is_empty()).collect();
     let dirty = !changed.is_empty();
 
@@ -84,7 +164,9 @@ pub fn query_git_state(cwd: &str) -> GitState {
     let ahead_behind = run_git(cwd, &["rev-list", "--count", "--left-right", "@{u}...HEAD"]);
     let (behind, ahead) = parse_ahead_behind(ahead_behind.as_deref());
 
-    let (insertions, deletions) = query_diff_totals(cwd);
+    let (tracked_insertions, deletions) = query_diff_totals(cwd);
+    let insertions =
+        tracked_insertions.saturating_add(untracked_insertions(cwd, &untracked_paths(&porcelain)));
 
     GitState {
         is_repo: true,
@@ -316,5 +398,41 @@ mod tests {
     #[test]
     fn parse_ahead_behind_no_upstream() {
         assert_eq!(parse_ahead_behind(Some("")), (0, 0));
+    }
+
+    #[test]
+    fn untracked_paths_picks_only_untracked_rows() {
+        let porcelain = " M src/lib.rs\nA  src/new.rs\n?? notes.md\n?? src/scratch.rs\n";
+        assert_eq!(
+            untracked_paths(porcelain),
+            vec!["notes.md".to_string(), "src/scratch.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn untracked_paths_unquotes_git_quoting() {
+        assert_eq!(untracked_paths("?? \"a\\tb.txt\"\n"), vec!["a\tb.txt"]);
+    }
+
+    #[test]
+    fn untracked_insertions_counts_every_line_of_a_new_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "ryu-untracked-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Three lines, no trailing newline — git counts the last one too.
+        std::fs::write(dir.join("new.txt"), b"a\nb\nc").unwrap();
+        // Binary content contributes nothing, exactly like a numstat "-" row.
+        std::fs::write(dir.join("blob.bin"), b"a\0b\n").unwrap();
+
+        let counted = untracked_insertions(
+            dir.to_str().unwrap(),
+            &["new.txt".to_string(), "blob.bin".to_string()],
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(counted, 3);
     }
 }

@@ -119,6 +119,9 @@ pub enum DownloadKind {
     Embedding,
     Voice,
     Media,
+    /// An MCP server install (resolve the catalog plan, then prefetch the package
+    /// its command runs).
+    Mcp,
     Other,
 }
 
@@ -169,6 +172,8 @@ pub enum DownloadRole {
     Skill,
     /// A plugin/app bundle or its sidecar payload.
     Plugin,
+    /// An MCP server — its catalog plan plus the npm package its command spawns.
+    McpServer,
     /// A post-download processing step (unpacking an archive). Byte-less by
     /// nature, so a client must not render it as a 0 B transfer.
     Extract,
@@ -185,6 +190,7 @@ impl DownloadRole {
             DownloadKind::Agent => Self::Agent,
             DownloadKind::Tool => Self::Tool,
             DownloadKind::Skill => Self::Skill,
+            DownloadKind::Mcp => Self::McpServer,
             DownloadKind::Embedding => Self::EmbeddingModel,
             DownloadKind::Voice => Self::VoiceModel,
             DownloadKind::Model | DownloadKind::Media | DownloadKind::Other => Self::Other,

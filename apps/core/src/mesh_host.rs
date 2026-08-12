@@ -25,6 +25,17 @@ use ryu_mesh::MeshHost;
 /// [`ryu_mesh::is_enabled`].
 pub const MESH_ENABLED_PREF_KEY: &str = "mesh-enabled";
 
+/// The Core preference holding which control plane the tunnel enrolls against —
+/// `"headscale"` (self-hosted, the default) or `"tailscale"` (SaaS). Written by
+/// the node selector's **Tunnel** layer; read by
+/// [`crate::sidecar::tailscale::mesh_backend`].
+///
+/// This is a SETTING and must not be confused with `MeshStatus::backend`, which is
+/// *derived* from the control server the daemon reports once it is connected. The
+/// derived field cannot be the writer: before a node has ever enrolled there is
+/// nothing to derive from, so the picker would have no selection to render.
+pub const MESH_BACKEND_PREF_KEY: &str = "mesh-backend";
+
 /// Install [`CoreMeshHost`] as the process-global mesh host. Idempotent (a second
 /// call is a no-op). Called once from `main` at boot.
 pub fn install() {

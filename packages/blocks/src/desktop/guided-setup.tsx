@@ -3,8 +3,8 @@
 // Why this exists: the agent editor exposes ~40 settings across a tab strip.
 // That is the right surface for *editing* an agent you already understand, and
 // the wrong one for *creating* your first. This shell narrows the same settings
-// into a handful of named steps: a line stepper on top (bars fill as you go),
-// one step's fields at a time, and a single primary action.
+// into a handful of named steps: the waitlist screen's step strip on top (a rule
+// above each label), one step's fields at a time, and a single primary action.
 //
 // Content is passed in, never imported here, so this stays a generic shell with
 // no knowledge of agents (and no import cycle with the editor that renders it).
@@ -13,9 +13,9 @@ import { ArrowLeft01Icon, ArrowRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import { Spinner } from "@ryu/ui/components/spinner";
-import { Stepper, type StepperStep } from "@ryu/ui/components/stepper";
+import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
 // biome-ignore lint/correctness/noUnresolvedImports: ReactNode is a valid React export; biome's resolver misreports it
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useState } from "react";
 
 export interface GuidedStep {
 	/**
@@ -86,11 +86,6 @@ export function GuidedSetup({
 	const last = index === steps.length - 1;
 	const blocked = step?.blockedReason ?? null;
 
-	const stepperSteps = useMemo<StepperStep[]>(
-		() => steps.map(({ id, label }) => ({ id, label })),
-		[steps]
-	);
-
 	if (!step) {
 		return null;
 	}
@@ -99,7 +94,32 @@ export function GuidedSetup({
 		<div className="mx-auto flex w-full max-w-3xl flex-col gap-7">
 			{header}
 
-			<Stepper active={step.id} onSelect={setActiveId} steps={stepperSteps} />
+			{/*
+			 * The same step strip the waitlist screen uses (`TabsList
+			 * variant="stepper"` — a rule above each label), so creating an agent
+			 * and joining the waitlist read as one product rather than two.
+			 *
+			 * Steps AFTER the current one are disabled: that variant leaves every
+			 * step selectable by default, which is right for the waitlist but wrong
+			 * here, where a step can refuse to be left (`blockedReason`, e.g. "Give
+			 * your agent a name first"). Disabling them preserves exactly what the
+			 * old `Stepper` primitive allowed — click back to any step you have
+			 * already been through, never skip ahead past a block. `Continue` is
+			 * still the only way forward.
+			 */}
+			<Tabs onValueChange={(next) => setActiveId(String(next))} value={step.id}>
+				<TabsList className="w-full" variant="stepper">
+					{steps.map((entry, entryIndex) => (
+						<TabsTrigger
+							disabled={entryIndex > index}
+							key={entry.id}
+							value={entry.id}
+						>
+							{entry.label}
+						</TabsTrigger>
+					))}
+				</TabsList>
+			</Tabs>
 
 			<div className="flex flex-col gap-5">
 				<div className="flex flex-col gap-1">

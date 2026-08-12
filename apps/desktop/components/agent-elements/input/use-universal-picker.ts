@@ -25,8 +25,11 @@ import {
 	type CreditPool,
 	type CreditPoolId,
 } from "@ryu/auth/lib/credit-pools";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createElement, type ReactNode, useCallback, useMemo } from "react";
+import { sileo } from "sileo";
 import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
+import { isChatModelStem } from "@/components/agent-elements/input/model-groups.ts";
 import {
 	type ProviderEntry,
 	type TeamEntry,
@@ -34,11 +37,17 @@ import {
 	type UniversalPickerData,
 } from "@/components/agent-elements/input/universal-picker-body.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
+import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgentsCatalog } from "@/src/hooks/useAgentsCatalog.ts";
 import { useCreditGrants } from "@/src/hooks/useCreditGrants.ts";
 import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
+import {
+	getActiveModel,
+	listInstalledModels,
+	setActiveModel,
+} from "@/src/lib/api/models.ts";
 import {
 	filterEnabledModels,
 	type PiProvider,
@@ -49,6 +58,22 @@ import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 
 /** The flagship agent id (mirrors Core `DEFAULT_AGENT_ID`). */
 const RYU_AGENT_ID = "ryu";
+
+/**
+ * The synthetic "Local" row's id, and the REAL Pi provider it routes through.
+ *
+ * There is no `local` provider in Core's `PROVIDERS` table and there should not
+ * be: talking to weights on this machine is not a credential-bearing vendor, it
+ * is the governed `gateway` route pointed at whichever model the local engine is
+ * currently serving. So the row is assembled here from the two endpoints that
+ * already own that state — `/api/models/installed` (what is on disk) and
+ * `/api/models/active` (what is loaded) — and a pick writes BOTH halves: the
+ * served model (`setActiveModel`) and the Pi route (`provider: "gateway"`).
+ * Writing only one is the failure mode `RyuPiConfig` already guards against —
+ * a config naming a model the engine never loaded.
+ */
+const LOCAL_PROVIDER_ID = "local";
+const GATEWAY_PROVIDER_ID = "gateway";
 
 /** Map a Pi provider id to the engine key its brand logo is registered under. */
 const PROVIDER_ENGINE_KEY: Record<string, string> = {
@@ -228,6 +253,36 @@ export function useUniversalPicker(
 		];
 	}, [piProviders]);
 
+	// What the local engine can serve, and what it is serving right now. Both keys
+	// are the ones `use-composer-acp-sections` and `RyuPiConfig` already use, so
+	// the three surfaces share one cache entry and cannot disagree about what is
+	// installed. Unlike those callers this is not gated on the active agent: the
+	// Local ROW is a route of the Ryu agent, offered whichever agent is selected.
+	const node = useActiveNode();
+	const queryClient = useQueryClient();
+	const installedQuery = useQuery({
+		queryKey: ["models", "installed", node.url],
+		queryFn: () =>
+			listInstalledModels({ url: node.url, token: node.token ?? null }),
+		staleTime: 60_000,
+	});
+	const activeModelQuery = useQuery({
+		queryKey: ["models", "active", node.url],
+		queryFn: () => getActiveModel({ url: node.url, token: node.token ?? null }),
+		staleTime: 30_000,
+	});
+	// Chat-capable weights only — the inventory also carries the embedder and the
+	// STT/TTS/rerank support models Core installs on its own, none of which can
+	// serve a turn (see `isChatModelStem`).
+	const localStems = useMemo(
+		() =>
+			(installedQuery.data ?? [])
+				.map((m) => m.stem)
+				.filter((stem) => stem !== "" && isChatModelStem(stem)),
+		[installedQuery.data]
+	);
+	const servedStem = activeModelQuery.data?.active ?? null;
+
 	const isRyuActive = agentId === RYU_AGENT_ID;
 	// A provider row is the active target when the Ryu agent's Pi config routes to a
 	// provider we show; otherwise (gateway / local) the Ryu portal route is active.
@@ -237,7 +292,17 @@ export function useUniversalPicker(
 		shownProviders.some((p) => p.id === config.provider)
 			? config.provider
 			: null;
-	const ryuActive = isRyuActive && activeProviderId === null;
+	// The Local row is active when Ryu routes through the gateway AND the model it
+	// names is one of the installed local weights. The gateway also fronts remote
+	// supply, so the route alone does not mean "local" — the model is what decides.
+	const localActive =
+		isRyuActive &&
+		config?.provider === GATEWAY_PROVIDER_ID &&
+		Boolean(config.model) &&
+		localStems.includes(config.model ?? "");
+	// The bare Ryu-portal row keeps the route only when no more specific row owns
+	// it, so Local and the portal never both read as the active target.
+	const ryuActive = isRyuActive && activeProviderId === null && !localActive;
 
 	const saveProvider = useCallback(
 		(
@@ -256,6 +321,32 @@ export function useUniversalPicker(
 			});
 		},
 		[onSelectAgent, save, config]
+	);
+
+	/**
+	 * Point the local engine at `stem` and route Ryu's gateway at it. Both writes
+	 * are needed and the order matters: making the weights resident first means a
+	 * refusal (an engine this node cannot run, a stem that vanished off disk)
+	 * leaves the Pi config untouched rather than naming a model nothing serves.
+	 * Core owns that verdict — the client does not pre-judge runnability — so the
+	 * rejection is surfaced as its own message.
+	 */
+	const switchToLocalModel = useCallback(
+		(stem: string, thinkingLevel: string | null) => {
+			setActiveModel({ url: node.url, token: node.token ?? null }, stem)
+				.then((res) => {
+					queryClient
+						.invalidateQueries({ queryKey: ["models", "active", node.url] })
+						.catch(() => undefined);
+					saveProvider(GATEWAY_PROVIDER_ID, res.active || stem, thinkingLevel);
+				})
+				.catch((e: unknown) => {
+					sileo.error({
+						title: e instanceof Error ? e.message : "Could not switch model",
+					});
+				});
+		},
+		[node.url, node.token, queryClient, saveProvider]
 	);
 
 	const renderBody = useCallback(
@@ -335,6 +426,36 @@ export function useUniversalPicker(
 				};
 			});
 
+			// The Local route, offered as its own provider row so "run this on my
+			// machine" is a first-class choice next to the vendors rather than a few
+			// bare stems buried in Ryu's flat model list. Hidden entirely when no
+			// chat-capable weights are installed — an empty row would be a dead end
+			// with no in-place way to fill it (models are installed from the Store).
+			// It leads the list: it is the one route that needs no account at all.
+			if (localStems.length > 0) {
+				providers.unshift({
+					id: LOCAL_PROVIDER_ID,
+					label: "Local",
+					engineKey: LOCAL_PROVIDER_ID,
+					// No credential exists to hold for weights on this disk, so the row is
+					// configured by definition and never upsells.
+					authKind: "none",
+					managed: false,
+					supportsDiscovery: false,
+					configured: true,
+					upsell: false,
+					isActive: localActive,
+					currentModel: localActive ? (config?.model ?? null) : null,
+					currentThinking: localActive ? (config?.thinkingLevel ?? null) : null,
+					// The served model is listed even when it is not a chat stem by name,
+					// so a picker can always show what the engine actually has loaded.
+					models: (servedStem && !localStems.includes(servedStem)
+						? [servedStem, ...localStems]
+						: localStems
+					).map((stem) => ({ id: stem, name: stem })),
+				});
+			}
+
 			const teamEntries: TeamEntry[] = teams.map((t) => ({
 				id: t.id,
 				name: t.name,
@@ -369,23 +490,38 @@ export function useUniversalPicker(
 				onConfigureAuto: () => openAgentAutoConfig(),
 				onConfigureCredentials: () => openGateway("providers"),
 				onUpgrade: () => requestUpgrade(),
+				// The Local row is not a Pi provider (see `LOCAL_PROVIDER_ID`): every
+				// pick on it has to make the weights resident before writing the
+				// route, so all three handlers fork to `switchToLocalModel` rather than
+				// saving `provider: "local"`, which Core would reject.
 				onUseProvider: (providerId) => {
 					const p = providers.find((x) => x.id === providerId);
-					saveProvider(
-						providerId,
-						p?.currentModel ?? p?.models[0]?.id ?? null,
-						null
-					);
+					const model = p?.currentModel ?? p?.models[0]?.id ?? null;
+					if (providerId === LOCAL_PROVIDER_ID) {
+						if (model) {
+							switchToLocalModel(model, null);
+						}
+						return;
+					}
+					saveProvider(providerId, model, null);
 				},
-				onSelectProviderModel: (providerId, modelId) =>
-					saveProvider(providerId, modelId, null),
+				onSelectProviderModel: (providerId, modelId) => {
+					if (providerId === LOCAL_PROVIDER_ID) {
+						switchToLocalModel(modelId, null);
+						return;
+					}
+					saveProvider(providerId, modelId, null);
+				},
 				onSelectProviderThinking: (providerId, level) => {
 					const p = providers.find((x) => x.id === providerId);
-					saveProvider(
-						providerId,
-						p?.currentModel ?? p?.models[0]?.id ?? null,
-						level
-					);
+					const model = p?.currentModel ?? p?.models[0]?.id ?? null;
+					if (providerId === LOCAL_PROVIDER_ID) {
+						if (model) {
+							switchToLocalModel(model, level);
+						}
+						return;
+					}
+					saveProvider(providerId, model, level);
 				},
 			};
 
@@ -398,6 +534,10 @@ export function useUniversalPicker(
 			activeExtraSections,
 			ryuActive,
 			activeProviderId,
+			localActive,
+			localStems,
+			servedStem,
+			switchToLocalModel,
 			shownProviders,
 			hasManagedPlan,
 			grantedPoolIds,

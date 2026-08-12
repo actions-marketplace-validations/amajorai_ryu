@@ -57,21 +57,64 @@ export const TIER_META_PX = 12;
 export const TIER_FIT_STEP_PX = FIT_STEP_PX;
 
 /**
- * The warp stops for a tier: the badge palette laid against the scheme's own
- * base tone at both ends.
+ * How strongly a TIER card's field is laid over the card face. Light is raised
+ * well above the shell's own `WARP_OPACITY_LIGHT`; dark lands on the same
+ * number as `WARP_OPACITY_DARK`. Both shell constants stay where they are —
+ * they are the waitlist pass's tuning, and it has neither of these problems.
  *
- * The base is interleaved rather than the palette being used raw because a
- * fully saturated field eats the type printed on it — the shader is a texture
- * UNDER the card's content, which is the same reason `WARP_OPACITY_*` exist.
- * Bracketing keeps the darkest (or lightest) point of the flow at the seam
- * where the gradient wraps, so the field breathes instead of strobing.
+ * The two schemes are asymmetric because the failure is. In light the palette
+ * was laid at 30% over a WHITE card, and 30% of a pastel over white is white:
+ * `pro`, `teams` and `enterprise` all came out the same pale iridescent sheet,
+ * so the card did not name its tier — the badge next to it is an opaque
+ * gradient plinth, and the card is supposed to be recognised as that badge. In
+ * dark the same stops sit over a near-black face, where they already read as
+ * colour rather than as tint, and the constraint runs the OTHER way: `pro`'s
+ * near-white pastels are the brightest thing on the card, so pushing them
+ * further is what starts erasing `text-card-foreground`. Dark was already at
+ * its ceiling; only light had headroom.
+ */
+/**
+ * The same number the shell defaults to today, written out rather than aliased
+ * to `WARP_OPACITY_DARK`. Agreeing now is a coincidence, not a contract:
+ * aliasing would hand the waitlist pass's next retune straight to the tier card,
+ * which is exactly the coupling `warpOpacity` was added to break.
+ */
+export const TIER_WARP_OPACITY_DARK = 0.55;
+export const TIER_WARP_OPACITY_LIGHT = 0.62;
+
+/** Both tier weightings as the shape `PassCardShell.warpOpacity` expects. */
+export const TIER_WARP_OPACITY = {
+	dark: TIER_WARP_OPACITY_DARK,
+	light: TIER_WARP_OPACITY_LIGHT,
+} as const;
+
+/**
+ * The warp stops for a tier: the badge palette against the scheme's own base
+ * tone, bracketed in dark and closed into a ring in light.
  *
- * Nine stops at the widest (`pro`), against the shader's ceiling of ten, so
- * every tier passes through unreduced.
+ * The base is there so the flow has a settled point where the gradient wraps,
+ * rather than strobing across the seam — but in DARK it does a second job the
+ * light one cannot: it is the near-black the card's own white type is legible
+ * against, so `pro`'s seven near-white pastels still have somewhere dark to
+ * cross. Both ends earn their place there.
+ *
+ * In light the base is `#f2f2f4` — the same near-white as the card face under
+ * it. A second one buys no contrast for the dark type, and the two together
+ * made the WIDEST stretch of the flow the tone that isn't a tier colour at all:
+ * two stops of `pro`'s nine, a third of `desktop-license`'s. So light keeps one
+ * and repeats the first colour after it, closing the ring the way
+ * `planTierConicGradient` does, and gives the rest of the card back to the
+ * badge.
+ *
+ * Nine stops at the widest (`pro`) either way, against the shader's ceiling of
+ * ten, so every tier passes through unreduced.
  */
 export function tierWarpColors(plan: PlanTier, isDark: boolean): string[] {
-	const base = isDark ? WARP_BASE_DARK : WARP_BASE_LIGHT;
-	return [base, ...planTierColors(plan), base];
+	const colors = planTierColors(plan);
+	if (isDark) {
+		return [WARP_BASE_DARK, ...colors, WARP_BASE_DARK];
+	}
+	return [...colors, WARP_BASE_LIGHT, colors[0] ?? WARP_BASE_LIGHT];
 }
 
 /**
@@ -168,6 +211,7 @@ export function TierPass({
 			// arrives as a finished object.
 			still={still}
 			warpColors={tierWarpColors(plan, isDark)}
+			warpOpacity={TIER_WARP_OPACITY}
 		>
 			<div className="relative flex min-h-[27rem] w-full flex-1 flex-col gap-6 p-7">
 				{/* Wordmark alone. The waitlist card puts its join date opposite the

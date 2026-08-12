@@ -37,6 +37,8 @@
       "!crates/core/kernel-contracts/schemas",
       "!plugins-store/*/hooks",
       "!plugins-store/*/adapters",
+      "!plugins-store/*/tools",
+      "!apps-store/*/tools",
       "!registry/registry.json",
       "!apps/core/Python",
       "!apps/fumadocs",
@@ -221,6 +223,16 @@
       "includes": ["crates/sdk/napi/index.js"],
       "linter": {
         "enabled": false
+      }
+    },
+    {
+      "includes": ["tools/toolsmith/harness.mjs"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noMisplacedAssertion": "off"
+          }
+        }
       }
     },
     {

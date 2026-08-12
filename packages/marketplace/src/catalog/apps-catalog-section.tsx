@@ -76,6 +76,7 @@ import StoreItemAction, {
 	StoreItemContextMenuContent,
 	StoreItemOverflowMenu,
 } from "./chrome/store-item-action.tsx";
+import VerifiedBadge from "./chrome/verified-badge.tsx";
 import { formatCount, formatDate } from "./detail/detail-panels.tsx";
 import {
 	ListingAsideCard,
@@ -694,6 +695,8 @@ function AppList({
 			key={it.entry.id}
 			name={it.entry.name}
 			onClick={() => onSelect(it.entry.id)}
+			orgVerified={it.entry.org_verified}
+			orgVerifiedTier={it.entry.org_verified_tier}
 			seedId={it.entry.id}
 			selected={it.entry.id === selectedId}
 			stability={it.entry.stability}
@@ -875,6 +878,15 @@ function CommunityShelf({
 						key={it.entry.id}
 						name={it.entry.name}
 						onClick={() => onSelect(it.entry.id)}
+						// The check rides on the COMMUNITY shelf too, and that is exactly
+						// why publisher identity and listing review are kept as separate
+						// axes rather than one "trusted" flag: these rows sit under a "Not
+						// reviewed by Ryu" alert (nobody read the code) and a verified
+						// publisher among them is still a verified publisher (we know who
+						// to hold responsible). Wiring only the first-party grid would
+						// leave the one case the split exists to express unmarked.
+						orgVerified={it.entry.org_verified}
+						orgVerifiedTier={it.entry.org_verified_tier}
 						seedId={it.entry.id}
 						selected={it.entry.id === selectedId}
 						stability={it.entry.stability}
@@ -1471,7 +1483,14 @@ function AppDetailPanel({
 					screenshots={detail?.screenshots}
 				/>
 			}
-			hero={<AppHero badges={heroBadges} entry={entry} showArt={showHero} />}
+			hero={
+				<AppHero
+					badges={heroBadges}
+					detail={detail}
+					entry={entry}
+					showArt={showHero}
+				/>
+			}
 			notice={
 				/* Load-bearing placement: unavoidable in the reading path BEFORE the
 				   action bar, so it cannot be scrolled past on the way to Install. */
@@ -1826,11 +1845,16 @@ function AppInformationSection({
  *  bare `<h2>` mid-air. */
 function AppHero({
 	badges,
+	detail,
 	entry,
 	showArt,
 	tagline,
 }: {
 	badges: string[];
+	/** The loaded detail payload, when there is one. Only its verification fields
+	 *  are read here: the detail is the fuller, fresher record, so it wins over the
+	 *  card's copy the same way the health scorecard resolves `reviewed`. */
+	detail?: PluginCatalogDetail | null;
 	entry: CatalogEntry;
 	/** Resolved by the caller so the detail payload's tagline can win when the
 	 *  card carries none. */
@@ -1854,6 +1878,22 @@ function AppHero({
 		iconUrl: entry.icon_url,
 		svglIndex,
 	});
+	// ORG verification (who published this — NOT the manifest-signature axis the web
+	// marketplace calls `verified`) is read off ONE source, never mixed. The detail
+	// payload is the fresher record so it wins whole once it carries the flag —
+	// including a `false`, which is how a revoked check reaches an already-rendered
+	// card. Pairing the detail's flag with the card's tier would let a stale
+	// qualifier survive a re-tiering the newer record already reflects. An absent
+	// flag (older control plane, or an enrichment failure — see `enrichmentError`)
+	// falls back to the card wholesale, the same precedence the health scorecard
+	// uses for `reviewed`.
+	const detailKnowsOrgVerification = detail?.orgVerified !== undefined;
+	const orgVerified = detailKnowsOrgVerification
+		? detail?.orgVerified
+		: entry.org_verified;
+	const orgVerifiedTier = detailKnowsOrgVerification
+		? detail?.orgVerifiedTier
+		: entry.org_verified_tier;
 	return (
 		<ListingHero
 			badges={badges}
@@ -1875,6 +1915,16 @@ function AppHero({
 			}
 			iconBackground={entry.icon_background ?? null}
 			name={entry.name}
+			nameBadge={
+				// `tone="hero"` because every foreground in this band is fixed white over
+				// an author-supplied wash under a black scrim — the card's themed
+				// blue-on-tint chip would be unreadable here.
+				<VerifiedBadge
+					orgVerified={orgVerified}
+					tier={orgVerifiedTier}
+					tone="hero"
+				/>
+			}
 			tagline={tagline}
 		/>
 	);

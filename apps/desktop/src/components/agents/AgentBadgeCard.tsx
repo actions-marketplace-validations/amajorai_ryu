@@ -37,12 +37,14 @@ export interface AgentBadgeCardProps {
 	contextMenu?: ReactNode;
 	/** Seeds the badge id and the generative backdrop — the agent's own id. */
 	employeeId: string;
-	/** The footer's left-hand content: a brand mark, a "Built-in" chip. The badge
-	 *  face carries the Ryu mark, so an agent's own logo would otherwise be lost
-	 *  on the way from `StoreCatalogCard`. */
+	/** The footer's left-hand content: a "Built-in" chip, a source label. An
+	 *  agent's own brand mark does NOT belong here — it goes on the card face via
+	 *  {@link AgentBadgeCardProps.logo}, where it is actually legible. */
 	footer?: ReactNode;
 	/** ISO timestamp the agent was created, printed as "Hired …". */
 	hiredAt?: string;
+	/** The agent's brand mark, drawn large on the badge face above the name. */
+	logo?: ReactNode;
 	name: string;
 	onOpen: () => void;
 	/** The line under the name — the agent's description or engine. */
@@ -64,6 +66,7 @@ export function AgentBadgeCard({
 	employeeId,
 	footer,
 	hiredAt,
+	logo,
 	name,
 	onOpen,
 	role,
@@ -93,6 +96,7 @@ export function AgentBadgeCard({
 			<EmployeeBadge
 				employeeId={employeeId}
 				hiredAt={hiredAt}
+				logo={logo}
 				metalTheme={resolvedTheme === "light" ? "light" : "dark"}
 				name={name}
 				role={role ?? undefined}

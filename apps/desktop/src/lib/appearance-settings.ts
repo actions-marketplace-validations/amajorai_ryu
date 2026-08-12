@@ -64,7 +64,9 @@ export const APPEARANCE_KEYS = {
 	groupToolUses: "ryu:group-tool-uses",
 	expandFileEdits: "ryu:expand-file-edits",
 	expandCommands: "ryu:expand-commands",
+	expandCodeBlocks: "ryu:expand-code-blocks",
 	pinUserMessage: "ryu:pin-user-message",
+	openChatAtBottom: "ryu:open-chat-at-bottom",
 	animationsEnabled: "ryu:animations-enabled",
 	streamAnimation: "ryu:stream-animation",
 } as const;
@@ -98,7 +100,9 @@ export const APPEARANCE_DEFAULTS = {
 	groupToolUses: true,
 	expandFileEdits: false,
 	expandCommands: false,
+	expandCodeBlocks: false,
 	pinUserMessage: true,
+	openChatAtBottom: true,
 	animationsEnabled: true,
 	streamAnimation: true,
 } as const;
@@ -316,6 +320,17 @@ function registerAppearanceSettings(): void {
 	});
 
 	registerSetting({
+		id: "appearance.expand-code-blocks",
+		category: "appearance",
+		label: "Expand code blocks",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.expandCodeBlocks,
+				APPEARANCE_DEFAULTS.expandCodeBlocks
+			),
+	});
+
+	registerSetting({
 		id: "appearance.pin-user-message",
 		category: "appearance",
 		label: "Pin user message",
@@ -323,6 +338,17 @@ function registerAppearanceSettings(): void {
 			setPersistedToggle(
 				APPEARANCE_KEYS.pinUserMessage,
 				APPEARANCE_DEFAULTS.pinUserMessage
+			),
+	});
+
+	registerSetting({
+		id: "appearance.open-chat-at-bottom",
+		category: "appearance",
+		label: "Open chats at the latest message",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.openChatAtBottom,
+				APPEARANCE_DEFAULTS.openChatAtBottom
 			),
 	});
 

@@ -476,10 +476,11 @@ function nodeNameForUrl(url: string, taken: readonly string[]): string {
 // (e.g. a future Cursor agent) simply don't render until Core ships them.
 const SUGGESTED_AGENT_IDS: readonly string[] = [
 	"acp:claude",
-	"cursor",
-	"acp:cursor",
 	"acp:codex",
+	"acp:cursor",
 	"acp:gemini",
+	"acp:opencode",
+	"acp:copilot",
 	"hermes",
 	"openclaw",
 ];
@@ -501,13 +502,17 @@ async function loadOnboardingAgents(
 	target: ApiTarget
 ): Promise<OnboardingAgents> {
 	try {
-		// Core probes every agent's CLI and its npm registry entry to build this,
-		// so it is the slowest call onboarding makes — and with no timeout it was
-		// able to pin the `installing` phase indefinitely. A miss is harmless: the
-		// catch below drops through to "no agents to offer" and onboarding moves on.
+		// `versions: false` is what makes this step reliable rather than merely
+		// bounded. The versioned catalog does an npm-registry lookup per agent
+		// (~30s warm, unbounded cold), so the timeout below was routinely the thing
+		// that decided whether the step appeared: one slow network and BOTH buckets
+		// came back empty, the caller skipped straight to the next phase, and the
+		// agent step looked deleted. Detection needs none of that work — it is a
+		// PATH check — so onboarding asks for exactly the two flags it reads.
 		const agents = await fetchAgentCatalog(
 			target,
-			AbortSignal.timeout(AGENT_CATALOG_TIMEOUT_MS)
+			AbortSignal.timeout(AGENT_CATALOG_TIMEOUT_MS),
+			{ versions: false }
 		);
 		const installable = agents.filter((a) => a.id !== "ryu" && !a.added);
 		const found = installable.filter((a) => a.detected === true);
