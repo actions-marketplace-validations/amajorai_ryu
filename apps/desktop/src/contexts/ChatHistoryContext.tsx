@@ -8,6 +8,7 @@ import {
 	useMemo,
 	useState,
 } from "react";
+import { useMessagingRows } from "@/src/hooks/useAgentRowStyle.ts";
 import {
 	setConversationIcon,
 	setConversationTitle,
@@ -82,6 +83,10 @@ interface CoreConversationSummary {
 	folder_path: string | null;
 	icon?: GlyphValue;
 	id: string;
+	/** Only present when the list was fetched with `?preview=1`. */
+	last_message?: string;
+	last_message_at?: number;
+	last_message_role?: string;
 	message_count: number;
 	participants?: string[];
 	pinned?: boolean;
@@ -161,6 +166,9 @@ function summaryToConversation(summary: CoreConversationSummary): Conversation {
 		pinned: summary.pinned ?? false,
 		archived: summary.archived ?? false,
 		icon: summary.icon ?? null,
+		lastMessage: summary.last_message,
+		lastMessageRole: summary.last_message_role,
+		lastMessageAt: summary.last_message_at,
 	};
 }
 
@@ -171,9 +179,16 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		string | null
 	>(null);
 
+	// Message previews are the second line of the messaging-style sidebar rows.
+	// They cost Core a subquery + a decrypt per conversation, so the list is only
+	// asked for them while that row style is switched on — flipping the pref
+	// re-runs this effect and the previews arrive (or stop) on the next tick.
+	const wantPreview = useMessagingRows();
+
 	const refresh = useCallback(() => {
 		const { url, token } = activeNode;
-		fetch(`${url}/api/conversations`, { headers: authHeaders(token) })
+		const query = wantPreview ? "?preview=1" : "";
+		fetch(`${url}/api/conversations${query}`, { headers: authHeaders(token) })
 			.then((res) =>
 				res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))
 			)
@@ -207,7 +222,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			.catch(() => {
 				// Core may be offline; keep whatever is in memory.
 			});
-	}, [activeNode]);
+	}, [activeNode, wantPreview]);
 
 	useEffect(() => {
 		refresh();

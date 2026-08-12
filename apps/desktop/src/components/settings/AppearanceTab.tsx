@@ -44,6 +44,10 @@ import { cn } from "@ryu/ui/lib/utils";
 import { useTheme } from "next-themes";
 import type { CSSProperties } from "react";
 import { Fragment, useCallback, useEffect, useState } from "react";
+import {
+	setAgentRowStyle,
+	useAgentRowStyle,
+} from "@/src/hooks/useAgentRowStyle.ts";
 import { useChatDateGrouping } from "@/src/hooks/useChatDateGrouping.ts";
 import {
 	setChromeShadows,
@@ -1006,6 +1010,7 @@ export function AppearanceTab() {
 	const invertedBackgroundsEnabled = useInvertedBackgrounds();
 	const [friendlyNames, setFriendlyNames] = useFriendlyMode();
 	const [groupChatsByDate, setGroupChatsByDate] = useChatDateGrouping();
+	const agentRowStyle = useAgentRowStyle();
 	const [sidebarMode, setSidebarMode] = useSidebarMode();
 	const [sidebarVariant, setSidebarVariant] = useSidebarVariant();
 	const [sidebarOverflowPopover, setSidebarOverflowPopover] =
@@ -1801,6 +1806,19 @@ export function AppearanceTab() {
 						}
 						description="Sit the sidebar flush against the window edge and pull the main content in as its own rounded card. Turn off to float the sidebar as a rounded card over a flush canvas."
 						title="Inset sidebar"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={agentRowStyle === "messaging"}
+								id="agent-row-messaging-toggle"
+								onCheckedChange={(checked) =>
+									setAgentRowStyle(checked ? "messaging" : "compact")
+								}
+							/>
+						}
+						description="Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Turn off for the compact single-line row."
+						title="Messaging-style agent rows"
 					/>
 					<SettingsItem
 						actions={

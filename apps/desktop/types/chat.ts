@@ -47,6 +47,15 @@ export interface Conversation {
 	/** Notion-style glyph from the shared GlyphPicker; null/undefined = title only. */
 	icon?: GlyphValue;
 	id: string;
+	/** One flattened line of the newest message, for messaging-style rows. Only
+	 * populated while the sidebar asks Core for previews (`?preview=1`); every
+	 * other load leaves it undefined. */
+	lastMessage?: string;
+	/** Unix ms of that message — distinct from `updatedAt`, which also moves on
+	 * renames, pins and run-status writes. */
+	lastMessageAt?: number;
+	/** Role that wrote it, so a row can prefix "You: ". */
+	lastMessageRole?: string;
 	messages: Message[];
 	/** Agent ids participating in this conversation (council / multi-agent). */
 	participants?: string[];

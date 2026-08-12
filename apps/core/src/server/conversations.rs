@@ -380,6 +380,20 @@ pub struct ConversationSummary {
     /// title-only row (no leading custom icon).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<serde_json::Value>,
+    /// First line of the newest message, capped at [`PREVIEW_MAX_CHARS`]. Only
+    /// populated when the caller asked for previews (`?preview=1`) — the
+    /// messaging-style sidebar rows need it, every other lister does not, and
+    /// filling it costs a correlated subquery plus one decrypt per row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message: Option<String>,
+    /// Role of the message [`Self::last_message`] came from (`"user"` /
+    /// `"assistant"` / a tool role). Lets the row prefix a "You: " marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_role: Option<String>,
+    /// Unix milliseconds of that message. Distinct from `updated_at`, which also
+    /// moves on renames, pins and run-status writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_at: Option<i64>,
 }
 
 /// Detail view of a conversation, including messages and participants.
@@ -1123,6 +1137,9 @@ impl ConversationStore {
                     pinned: row.get::<_, i64>(11)? != 0,
                     archived: row.get::<_, i64>(12)? != 0,
                     icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
+                    last_message: None,
+                    last_message_role: None,
+                    last_message_at: None,
                 })
             })
             .optional()?
@@ -1572,6 +1589,28 @@ impl ConversationStore {
         .await
     }
 
+    /// [`Self::list_conversations_visible`] with the newest message of each row
+    /// attached (`last_message` / `last_message_role` / `last_message_at`). Serves
+    /// `GET /api/conversations?preview=1`, which the desktop calls only while the
+    /// messaging-style sidebar is switched on.
+    pub async fn list_conversations_visible_with_preview(
+        &self,
+        owner_user_id: Option<&str>,
+        org_id: Option<&str>,
+        node_bound: bool,
+    ) -> Result<Vec<ConversationSummary>> {
+        self.list_summaries_inner(
+            "",
+            TenancyFilter {
+                node_bound,
+                owner_user_id,
+                org_id,
+            },
+            true,
+        )
+        .await
+    }
+
     /// List conversations that have an active or recently-finished run (i.e.
     /// run_status is not NULL), ordered most-recently-updated first.  Used by
     /// the background-runs view (issue #128) and the sidebar runs section.
@@ -1644,11 +1683,44 @@ impl ConversationStore {
         extra: &str,
         filter: TenancyFilter<'_>,
     ) -> Result<Vec<ConversationSummary>> {
+        self.list_summaries_inner(extra, filter, false).await
+    }
+
+    /// [`Self::list_summaries`] plus the newest message of each row. Separate
+    /// entry point rather than a default argument because the preview costs two
+    /// correlated subqueries and one decrypt per row, and only the messaging-style
+    /// sidebar wants it — `list_runs`, sync replay and the learning pass must not
+    /// start paying for it.
+    async fn list_summaries_inner(
+        &self,
+        extra: &str,
+        filter: TenancyFilter<'_>,
+        with_preview: bool,
+    ) -> Result<Vec<ConversationSummary>> {
+        // Both subqueries ride `idx_messages_conversation (conversation_id,
+        // created_at)`, so each is an index seek to the tail of one conversation.
+        // Only conversational turns preview. In-process writes are user/assistant
+        // only, but sync replay and thread import copy a peer's `role` verbatim, and
+        // a tool/system row surfacing as an agent's "last message" reads as a bug.
+        let preview_cols = if with_preview {
+            ",
+                    (SELECT m.content FROM messages m WHERE m.conversation_id = c.id
+                      AND m.role IN ('user', 'assistant')
+                      ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1),
+                    (SELECT m.role FROM messages m WHERE m.conversation_id = c.id
+                      AND m.role IN ('user', 'assistant')
+                      ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1),
+                    (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id
+                      AND m.role IN ('user', 'assistant')
+                      ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1)"
+        } else {
+            ""
+        };
         let sql = format!(
             "SELECT c.id, c.title, c.agent_id, c.created_at, c.updated_at,
                     (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
                     c.folder_path, c.branch, c.worktree_path, c.run_status,
-                    c.participants, c.pinned, c.archived, c.icon
+                    c.participants, c.pinned, c.archived, c.icon{preview_cols}
              FROM conversations c
              WHERE {TENANCY_VISIBLE_PREDICATE} {extra}
              ORDER BY c.updated_at DESC"
@@ -1665,6 +1737,13 @@ impl ConversationStore {
                 let participants_json: Option<String> = row.get(10)?;
                 let participants = parse_participants_json(participants_json.as_deref());
                 let icon_raw: Option<String> = row.get(13)?;
+                // Still sealed here — decrypted below, once the db lock is out of
+                // the way, exactly like `title`.
+                let (last_message, last_message_role, last_message_at) = if with_preview {
+                    (row.get(14)?, row.get(15)?, row.get(16)?)
+                } else {
+                    (None, None, None)
+                };
                 Ok(ConversationSummary {
                     id: row.get(0)?,
                     title: row.get(1)?,
@@ -1680,6 +1759,9 @@ impl ConversationStore {
                     pinned: row.get::<_, i64>(11)? != 0,
                     archived: row.get::<_, i64>(12)? != 0,
                     icon: icon_raw.and_then(|s| serde_json::from_str(&s).ok()),
+                    last_message,
+                    last_message_role,
+                    last_message_at,
                 })
             },
         )?;
@@ -1687,6 +1769,9 @@ impl ConversationStore {
         for row in rows {
             let mut summary = row?;
             summary.title = self.open_opt(summary.title);
+            summary.last_message = summary
+                .last_message
+                .map(|sealed| preview_line(&self.open_content(sealed)));
             out.push(summary);
         }
         Ok(out)
@@ -2419,6 +2504,9 @@ impl ConversationStore {
             pinned: false,
             archived: false,
             icon: None,
+            last_message: None,
+            last_message_role: None,
+            last_message_at: None,
         }))
     }
 
@@ -3429,6 +3517,26 @@ fn derive_title(content: &str) -> Option<String> {
     Some(format!("{truncated}…"))
 }
 
+/// Longest message preview served on a conversation summary, in characters.
+const PREVIEW_MAX_CHARS: usize = 140;
+
+/// Flatten a message body into the single line a messaging-style row shows.
+/// Newlines collapse to spaces (a two-line row must not grow), runs of
+/// whitespace collapse with them, and the result is capped at
+/// [`PREVIEW_MAX_CHARS`] so a 40 KB tool dump does not travel to the sidebar.
+///
+/// Unlike [`derive_title`] this keeps the *whole* message flattened rather than
+/// only its first line: an assistant reply whose first line is a bare "```rust"
+/// would otherwise preview as nothing readable.
+fn preview_line(content: &str) -> String {
+    let flattened = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= PREVIEW_MAX_CHARS {
+        return flattened;
+    }
+    let truncated: String = flattened.chars().take(PREVIEW_MAX_CHARS).collect();
+    format!("{truncated}…")
+}
+
 /// Test-only conveniences.
 ///
 /// `append_message` has ~55 call sites, nearly all of them tests that model an
@@ -4129,6 +4237,87 @@ mod tests {
         assert_eq!(list[0].id, "conv-a");
         assert_eq!(list[0].message_count, 2);
         assert_eq!(list[0].title.as_deref(), Some("first"));
+        // The default listing stays preview-free — every other lister (runs, sync
+        // replay, the learning pass) rides this path and must not pay for it.
+        assert_eq!(list[0].last_message, None);
+        assert_eq!(list[0].last_message_at, None);
+    }
+
+    #[tokio::test]
+    async fn preview_listing_returns_the_newest_message_decrypted_and_flattened() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .append_message("conv-a", "user", "first", None, None, None)
+            .await
+            .unwrap();
+        store
+            .append_message(
+                "conv-a",
+                "assistant",
+                "line one\n\n   line two",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .append_message("conv-b", "user", "only message", None, None, None)
+            .await
+            .unwrap();
+
+        let list = store
+            .list_conversations_visible_with_preview(None, None, false)
+            .await
+            .unwrap();
+        let a = list.iter().find(|c| c.id == "conv-a").expect("conv-a listed");
+        // Newest wins, it comes back decrypted, and the newlines are flattened so
+        // the two-line sidebar row cannot grow a third line.
+        assert_eq!(a.last_message.as_deref(), Some("line one line two"));
+        assert_eq!(a.last_message_role.as_deref(), Some("assistant"));
+        assert!(a.last_message_at.unwrap_or(0) > 0);
+
+        let b = list.iter().find(|c| c.id == "conv-b").expect("conv-b listed");
+        assert_eq!(b.last_message.as_deref(), Some("only message"));
+        assert_eq!(b.last_message_role.as_deref(), Some("user"));
+    }
+
+    #[tokio::test]
+    async fn preview_skips_non_conversational_roles() {
+        // Sync replay and thread import copy a peer's role verbatim, so a `tool`
+        // row can be the newest message. Previewing it would put a raw tool
+        // payload where the sidebar promises the last thing that was said.
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .append_message("conv-t", "user", "run the build", None, None, None)
+            .await
+            .unwrap();
+        store
+            .append_message("conv-t", "assistant", "building now", None, None, None)
+            .await
+            .unwrap();
+        store
+            .append_message("conv-t", "tool", "{\"exit\":0}", None, None, None)
+            .await
+            .unwrap();
+
+        let list = store
+            .list_conversations_visible_with_preview(None, None, false)
+            .await
+            .unwrap();
+        let conv = list.iter().find(|c| c.id == "conv-t").expect("listed");
+        assert_eq!(conv.last_message.as_deref(), Some("building now"));
+        assert_eq!(conv.last_message_role.as_deref(), Some("assistant"));
+    }
+
+    #[test]
+    fn preview_line_caps_a_long_body() {
+        let long = "x".repeat(PREVIEW_MAX_CHARS * 3);
+        let preview = preview_line(&long);
+        // Capped at the limit plus the ellipsis — a 40 KB tool dump never reaches
+        // the sidebar.
+        assert_eq!(preview.chars().count(), PREVIEW_MAX_CHARS + 1);
+        assert!(preview.ends_with('…'));
     }
 
     #[tokio::test]

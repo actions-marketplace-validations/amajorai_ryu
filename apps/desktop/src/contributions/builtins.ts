@@ -100,6 +100,9 @@ const SPACE_APP = /^\/spaces\/[^/]+\/app\/[^/]+\/[^/]+$/;
 const SPACE_DETAIL = /^\/spaces\/[^/]+$/;
 // /library/<section> — opens the unified Library on a specific collection tab.
 const LIBRARY_SECTION = /^\/library\/([^/]+)$/;
+/** `/chat/agent/<agentId>` — the messaging-style merged view: every thread with
+ *  that agent in one scroll, with the composer choosing which one a send joins. */
+const CHAT_MERGED_AGENT = /^\/chat\/agent\/([^/]+)$/;
 // /workflows/:id (":id" is a workflow id, or "new" for an empty canvas). Single
 // segment ([^/]+, not .+) so it does NOT swallow the two-segment builder path
 // `/workflows/build/:id`.
@@ -323,6 +326,17 @@ export function seedBuiltinRoutes(): void {
 		return createElement(StorePage, {
 			initialSection: "mcp",
 			initialQuery: query,
+		});
+	});
+	// /chat/agent/<agentId> — the merged agent view. Same ChatPage, seeded with
+	// the agent whose threads it stitches; `mergedAgentId` also pins the composer
+	// target so a send can never land on the global default agent.
+	pattern(CHAT_MERGED_AGENT, (tab) => {
+		const agentId = tab.path.match(CHAT_MERGED_AGENT)?.[1];
+		return createElement(ChatPage, {
+			initialProject: tab.initialProject,
+			mergedAgentId: agentId ? decodeURIComponent(agentId) : undefined,
+			tabConversationId: tab.conversationId,
 		});
 	});
 	// /library/<section> — open the Library on a specific collection tab.

@@ -504,6 +504,28 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `CORE_DEFAULT_ON` for `recap`'s reason, doubled: a sandbox spawn per turn AND
     // a sub-agent per reviewed answer, on the user's budget.
     include_str!("../../../../plugins-store/no-ai-slop/manifest.json"),
+    // `agent-comms` is the agent-to-agent mailbox: `agents__directory` /
+    // `agents__send` / `agents__ask` / `agents__thread`, shipped as ordinary
+    // registry tools so EVERY agent gets them (Pi through its MCP extension, an
+    // ACP agent through the in-process `mcp_bridge`, the gateway plane through
+    // the tool loop) rather than one runtime's private feature.
+    //
+    // Reads and writes are deliberately split across the two seams. A tool WRITES
+    // (`caller.agent_id`, host-derived, is the sender — a model naming someone
+    // else in its arguments cannot forge it), and the `pre_user_turn` hook is the
+    // only READER of an inbox, because `ctx.agent_id` is the one place "whose mail
+    // is this" is answered by Core. A tool that took a `for_agent` argument would
+    // be a spoofable read of another agent's mailbox.
+    //
+    // Three independent stops keep a chain finite: a hop counter carried on the
+    // message and re-read from the conversation (or, inside a delegated run, the
+    // agent) that received it; a `busy` marker on BOTH ends of an `ask` so A→B→A
+    // is refused rather than deadlocked; and the refusal that an agent cannot
+    // address itself. Not in `CORE_DEFAULT_ON` for `no-ai-slop`'s reason: the
+    // delivery hook has no `match` gate (the inbox is keyed by agent, and
+    // `stateful` matches on the conversation), so it costs a sandbox spawn per
+    // turn, and `agents__ask` spends a whole agent run per call.
+    include_str!("../../../../plugins-store/agent-comms/manifest.json"),
     // `plan-continue` keeps a plan moving while the composer's plan-mode pill is
     // on, by injecting its own follow-up turn when one finishes. Community and
     // NOT in `CORE_DEFAULT_ON` for the reason the others are on: this one spends

@@ -15554,15 +15554,26 @@ fn binary_installed_on_disk(name: &str) -> bool {
 
 // ── Conversation history handlers (spec unit U10) ─────────────────────────────
 
+#[derive(serde::Deserialize)]
+struct ListConversationsQuery {
+    /// `1`/`true` also returns the newest message of each conversation
+    /// (`last_message`, `last_message_role`, `last_message_at`). Off by default:
+    /// it costs a correlated subquery plus a decrypt per row, and only the
+    /// messaging-style sidebar rows read it.
+    preview: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/conversations",
     tag = "Conversations",
     summary = "List conversations",
+    params(("preview" = Option<String>, Query, description = "Set to 1/true to include the newest message of each conversation")),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn list_conversations(
     State(state): State<ServerState>,
+    axum::extract::Query(query): axum::extract::Query<ListConversationsQuery>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> axum::response::Response {
     // Per-resource ACL, pushed into the SQL `WHERE` (it used to be an N+1 in this
@@ -15570,11 +15581,23 @@ async fn list_conversations(
     // store's predicate mirrors `resource_access` exactly, so the list gate and the
     // row gate cannot drift.
     let (user_id, org_id, node_bound) = tenancy_filter_args(&caller);
-    match state
-        .conversations
-        .list_conversations_visible(user_id.as_deref(), org_id.as_deref(), node_bound)
-        .await
-    {
+    let want_preview = matches!(query.preview.as_deref(), Some("1" | "true"));
+    let listed = if want_preview {
+        state
+            .conversations
+            .list_conversations_visible_with_preview(
+                user_id.as_deref(),
+                org_id.as_deref(),
+                node_bound,
+            )
+            .await
+    } else {
+        state
+            .conversations
+            .list_conversations_visible(user_id.as_deref(), org_id.as_deref(), node_bound)
+            .await
+    };
+    match listed {
         Ok(items) => Json(json!({ "conversations": items })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }

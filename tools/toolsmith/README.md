@@ -31,7 +31,7 @@ toolsmith is the shared piece: one splice, one stub protocol, one gate.
 
 | `cases.json` `kind` | Injected bindings | Core builder |
 | --- | --- | --- |
-| `inline_tool` (default) | `input`, `host` | `build_inline_tool_program` |
+| `inline_tool` (default) | `input`, `caller`, `host` | `build_inline_tool_program` |
 | `adapter` | `input`, `defaults`, `callTool`, `callNamed` | `build_capability_adapter_program` |
 | `turn_hook` | `ctx`, `host` | `plugin_host::build_hook_program` |
 
@@ -88,6 +88,8 @@ the real runtime would refuse.
     {
       "name": "maps a provider hit onto the canonical shape",
       "input":    { "url": "https://example.com" },
+      "caller":   { "agent_id": "ryu", "conversation_id": "c1" }, // inline_tool only;
+                                             //   host-derived, defaults to nulls
       "defaults": { },                       // adapter only
       "provider": {                          // adapter only
         "call":  [ { "structuredContent": { "content": ["a", "b"] } } ],

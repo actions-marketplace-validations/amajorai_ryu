@@ -166,6 +166,7 @@ import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { parseContributedTarget } from "@/src/contributions/contributed-target.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useAgentRowStyle } from "@/src/hooks/useAgentRowStyle.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useAutoThreadImport } from "@/src/hooks/useAutoThreadImport.ts";
@@ -226,7 +227,13 @@ import {
 	persistHiddenSections,
 } from "@/src/lib/features.ts";
 import { useReleaseChannel } from "@/src/lib/release-channel.ts";
+import { useTimezoneRevision } from "@/src/hooks/useTimezone.ts";
 import { compactAge } from "@/src/lib/time.ts";
+import {
+	formatDate,
+	formatTime,
+	startOfTodayMs,
+} from "@/src/lib/timezone.ts";
 import {
 	scheduleJobFor,
 	WorkflowTriggerIcons,
@@ -2365,6 +2372,145 @@ function TabsSection({
 	);
 }
 
+/** The newest conversation each agent appears in, keyed by agent id.
+ *
+ *  Membership uses the same rule the chat rows' agent chips use — `participants`
+ *  when present, falling back to `agentId` — so an agent that only ever joined a
+ *  council thread still gets a preview line instead of a blank one. Archived
+ *  threads are skipped: they are hidden from the Chats list, so surfacing one as
+ *  an agent's "latest message" would resurrect it in a second place.
+ */
+function latestConversationByAgent(
+	convs: Conversation[]
+): Map<string, Conversation> {
+	const out = new Map<string, Conversation>();
+	const stampOf = (c: Conversation) => toEpoch(c.lastMessageAt ?? c.updatedAt);
+	for (const conv of convs) {
+		if (conv.archived) {
+			continue;
+		}
+		const ids = conv.participants ?? (conv.agentId ? [conv.agentId] : []);
+		for (const id of ids) {
+			const existing = out.get(id);
+			if (!existing || stampOf(existing) < stampOf(conv)) {
+				out.set(id, conv);
+			}
+		}
+	}
+	return out;
+}
+
+/** The right-aligned stamp on a messaging-style row: a clock time today, a
+ *  weekday inside the last week, a short date beyond that — the shape every
+ *  messaging app uses. Buckets come from `dateBucketKey` so this and the Chats
+ *  section can never disagree about where "yesterday" ends. */
+function messagingRowStamp(ts: number): string {
+	switch (dateBucketKey(ts, startOfTodayMs())) {
+		case "today":
+			return formatTime(ts, {
+				hour: "numeric",
+				minute: "2-digit",
+			});
+		case "yesterday":
+			return "Yesterday";
+		case "last-week":
+			return formatDate(ts, { weekday: "short" });
+		default:
+			return formatDate(ts, {
+				day: "2-digit",
+				month: "2-digit",
+				year: "2-digit",
+			});
+	}
+}
+
+/** The inside of a messaging-style agent row: a two-line-tall avatar, the name
+ *  and last-activity stamp on the first line, and a one-line preview of the
+ *  newest message below — the WhatsApp/Telegram shape.
+ *
+ *  The preview is whatever Core returned on the conversation summary; a fresh
+ *  agent with no threads yet shows a muted placeholder rather than an empty
+ *  second line, so every row keeps the same height. */
+function MessagingAgentRowBody({
+	agent,
+	conversation,
+	onEdit,
+	usageBarVisible,
+}: {
+	agent: AgentSummary;
+	conversation: Conversation | undefined;
+	onEdit: () => void;
+	usageBarVisible: boolean;
+}) {
+	// Subscribes to the display time zone so the stamp repaints the moment it
+	// changes; `messagingRowStamp` reads the zone at call time.
+	useTimezoneRevision();
+	const stampAt = conversation?.lastMessageAt ?? conversation?.updatedAt;
+	const stamp = stampAt ? messagingRowStamp(toEpoch(stampAt)) : null;
+	// "You: " mirrors every messaging client — it disambiguates a preview of the
+	// user's own last line from the agent's reply.
+	const preview = conversation?.lastMessage
+		? `${conversation.lastMessageRole === "user" ? "You: " : ""}${conversation.lastMessage}`
+		: "No messages yet";
+
+	return (
+		<>
+			<AgentAvatar
+				avatarUrl={agent.avatarUrl}
+				className="size-9 shrink-0 rounded-full object-cover"
+				engine={engineForAgent(agent)}
+				size="36px"
+			/>
+			<div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
+				<div className="flex min-w-0 items-center gap-2">
+					<OverflowTooltip
+						className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm"
+						fade
+						text={agent.name}
+					/>
+					{usageBarVisible ? (
+						<UsageBar
+							agentId={agent.id}
+							className="shrink-0"
+							visible={usageBarVisible}
+						/>
+					) : null}
+					{stamp ? (
+						<span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+							{stamp}
+						</span>
+					) : null}
+				</div>
+				<div className="flex min-w-0 items-center gap-2">
+					<span
+						className={`min-w-0 flex-1 truncate text-xs ${conversation?.lastMessage ? "text-muted-foreground" : "text-muted-foreground/60 italic"}`}
+					>
+						{preview}
+					</span>
+					<Tooltip>
+						<TooltipTrigger
+							render={
+								<button
+									aria-label={`Edit ${agent.name}`}
+									className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+									onClick={(e) => {
+										e.stopPropagation();
+										onEdit();
+									}}
+									type="button"
+								>
+									<HugeiconsIcon icon={PencilEdit01Icon} size={14} />
+								</button>
+							}
+						/>
+						<TooltipContent>Edit agent</TooltipContent>
+					</Tooltip>
+				</div>
+			</div>
+		</>
+	);
+}
+
 /** Agents list in the sidebar — single-line rows, each with the Ryu logo. */
 function AgentsSection({
 	collapsed,
@@ -2378,6 +2524,18 @@ function AgentsSection({
 	const { openTab } = useTabsContext();
 	const { agents, loading } = useAgents();
 	const usageBarPrefs = useUsageBarPrefs();
+	const rowStyle = useAgentRowStyle();
+	const messaging = rowStyle === "messaging";
+	const { conversations } = useChatHistoryContext();
+	// Only the messaging rows read this, and it walks every conversation — skip
+	// the work entirely while the compact rows are on.
+	const latestByAgent = useMemo(
+		() =>
+			messaging
+				? latestConversationByAgent(conversations)
+				: new Map<string, Conversation>(),
+		[messaging, conversations]
+	);
 	const paged = usePaged(
 		sortItems(agents, sort, NAMED_SORT_ACCESSORS),
 		pageSize
@@ -2393,12 +2551,25 @@ function AgentsSection({
 	};
 
 	// Start a fresh chat with this agent pre-selected (ChatPage reads initialAgent).
+	//
+	// Messaging rows open the merged view instead: one scroll holding every thread
+	// with this agent, the way tapping a contact does. That path is a singleton per
+	// agent, so tapping the same agent twice returns to the same tab rather than
+	// piling up empty chats.
 	const startChatWithAgent = (id: string) => {
 		const agent = agents.find((a) => a.id === id);
+		const icon = personaToGlyph({ avatarUrl: agent?.avatarUrl });
+		if (messaging) {
+			openTab(`/chat/agent/${encodeURIComponent(id)}`, {
+				title: agent?.name,
+				icon,
+			});
+			return;
+		}
 		openTab("/chat", {
 			forceNew: true,
 			initialAgent: id,
-			icon: personaToGlyph({ avatarUrl: agent?.avatarUrl }),
+			icon,
 		});
 	};
 
@@ -2411,7 +2582,11 @@ function AgentsSection({
 					<ContextMenuTrigger>
 						{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
 						<div
-							className="group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							className={
+								messaging
+									? "group/row flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-muted"
+									: "group/row flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted"
+							}
 							draggable
 							onAuxClick={(e) => {
 								if (e.button === 1) {
@@ -2435,43 +2610,54 @@ function AgentsSection({
 							role="button"
 							tabIndex={0}
 						>
-							<AgentAvatar
-								avatarUrl={agent.avatarUrl}
-								className="size-4 shrink-0 rounded-[3px] object-contain"
-								engine={engineForAgent(agent)}
-								size="16px"
-							/>
-							<OverflowTooltip
-								className="min-w-0 shrink overflow-hidden whitespace-nowrap text-sm"
-								fade
-								text={agent.name}
-							/>
-							{usageBarPrefs.sidebar ? (
-								<UsageBar
-									agentId={agent.id}
-									className="shrink-0"
-									visible={usageBarPrefs.sidebar}
+							{messaging ? (
+								<MessagingAgentRowBody
+									agent={agent}
+									conversation={latestByAgent.get(agent.id)}
+									onEdit={() => openAgent(agent.id, agent.name)}
+									usageBarVisible={usageBarPrefs.sidebar}
 								/>
-							) : null}
-							<div aria-hidden="true" className="flex-1" />
-							<Tooltip>
-								<TooltipTrigger
-									render={
-										<button
-											aria-label={`Edit ${agent.name}`}
-											className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
-											onClick={(e) => {
-												e.stopPropagation();
-												openAgent(agent.id, agent.name);
-											}}
-											type="button"
-										>
-											<HugeiconsIcon icon={PencilEdit01Icon} size={14} />
-										</button>
-									}
-								/>
-								<TooltipContent>Edit agent</TooltipContent>
-							</Tooltip>
+							) : (
+								<>
+									<AgentAvatar
+										avatarUrl={agent.avatarUrl}
+										className="size-4 shrink-0 rounded-[3px] object-contain"
+										engine={engineForAgent(agent)}
+										size="16px"
+									/>
+									<OverflowTooltip
+										className="min-w-0 shrink overflow-hidden whitespace-nowrap text-sm"
+										fade
+										text={agent.name}
+									/>
+									{usageBarPrefs.sidebar ? (
+										<UsageBar
+											agentId={agent.id}
+											className="shrink-0"
+											visible={usageBarPrefs.sidebar}
+										/>
+									) : null}
+									<div aria-hidden="true" className="flex-1" />
+									<Tooltip>
+										<TooltipTrigger
+											render={
+												<button
+													aria-label={`Edit ${agent.name}`}
+													className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+													onClick={(e) => {
+														e.stopPropagation();
+														openAgent(agent.id, agent.name);
+													}}
+													type="button"
+												>
+													<HugeiconsIcon icon={PencilEdit01Icon} size={14} />
+												</button>
+											}
+										/>
+										<TooltipContent>Edit agent</TooltipContent>
+									</Tooltip>
+								</>
+							)}
 						</div>
 					</ContextMenuTrigger>
 					<ContextMenuContent>
@@ -5312,9 +5498,9 @@ interface DateBucket {
 /** Bucket loose chats by last-activity into the non-empty date buckets, each
  *  sorted most-recent-first, returned in chronological (Today → Older) order. */
 function bucketConversationsByDate(convs: Conversation[]): DateBucket[] {
-	const startOfToday = new Date();
-	startOfToday.setHours(0, 0, 0, 0);
-	const start = startOfToday.getTime();
+	// Midnight in the *display* zone, not the machine's — otherwise a chat that
+	// reads 09:00 in the chosen zone can land under "Yesterday".
+	const start = startOfTodayMs();
 	const byKey = new Map<string, Conversation[]>();
 	for (const conv of convs) {
 		const key = dateBucketKey(toEpoch(conv.updatedAt), start);
@@ -5659,12 +5845,17 @@ function ChatsSection({
 	onNew: () => void;
 }) {
 	const [groupByDate] = useChatDateGrouping();
+	// Which bucket a chat lands in depends on midnight in the display zone, so
+	// the revision has to be a dependency — not just a subscription.
+	const timezoneRevision = useTimezoneRevision();
 	const paged = usePaged(sortItems(loose, sort, CONV_SORT_ACCESSORS), pageSize);
 	// Hooks must run unconditionally, so compute the grouped view even when the
 	// flat list is shown — it's cheap and only rendered when the setting is on.
 	const dateBuckets = useMemo(
 		() => (groupByDate ? bucketConversationsByDate(loose) : []),
-		[groupByDate, loose]
+		// biome-ignore lint/correctness/useExhaustiveDependencies: bucketing reads
+		// the display zone at call time; the revision is what invalidates it.
+		[groupByDate, loose, timezoneRevision]
 	);
 	const bucketByKey = useMemo(
 		() => new Map(dateBuckets.map((b) => [b.key, b])),

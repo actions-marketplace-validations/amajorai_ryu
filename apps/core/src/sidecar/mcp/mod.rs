@@ -2927,8 +2927,19 @@ impl McpRegistry {
                         let invoker = std::sync::Arc::new(
                             crate::tool_exec::SandboxToolInvoker::bridge(bridge),
                         );
-                        let program =
-                            crate::tool_exec::build_inline_tool_program(&arguments, &code);
+                        // The CALLING agent + its host conversation, as this dispatch
+                        // already resolved them — never anything the model wrote into
+                        // `arguments`. A body that needs to attribute or address by
+                        // agent (the agent-to-agent mailbox) reads `caller`, so an
+                        // agent cannot post as another one by naming it in its own
+                        // arguments. Both are `null` for the agent-less callers.
+                        let caller = serde_json::json!({
+                            "agent_id": agent_id,
+                            "conversation_id": host_conversation_id,
+                        });
+                        let program = crate::tool_exec::build_inline_tool_program(
+                            &arguments, &caller, &code,
+                        );
                         // Lower the owning manifest's unified permission set to the
                         // Deno sandbox. `None` (no `permissions` block) keeps the
                         // historical deny-all posture; a declared set opens exactly

@@ -644,6 +644,15 @@ jobs:
       - name: Promote prerelease to stable
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job deliberately does NOT check out the repo — it only calls the
+          # releases API. Without a checkout `gh` has no git remote to infer the
+          # repo from and every call dies with "fatal: not a git repository", so
+          # GH_REPO is load-bearing, not a convenience. v0.1.10 built all 41
+          # assets green and then sat as a PRERELEASE because of exactly this:
+          # `/releases/latest` excludes prereleases, so install.sh, install.ps1
+          # and Core's stable updater all saw the previous release instead, and
+          # the only symptom was one red job at the end of an otherwise green run.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |

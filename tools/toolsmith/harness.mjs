@@ -291,7 +291,7 @@ function buildProvider(spec, allowlist, calls) {
  * Execute a tool body ONCE against a case fixture.
  *
  * `kind` picks the injected signature, matching Core:
- * - `"inline_tool"` → `input`, `host`   (`build_inline_tool_program`)
+ * - `"inline_tool"` → `input`, `caller`, `host`   (`build_inline_tool_program`)
  * - `"adapter"`     → `input`, `defaults`, `callTool`, `callNamed`
  *                     (`build_capability_adapter_program`)
  *
@@ -327,8 +327,18 @@ export async function runOnce({ kind, code, testCase, adapterTools }) {
 			buildHost(testCase.host, calls),
 		];
 	} else {
-		bindingNames = ["input", "host"];
-		bindingValues = [input, buildHost(testCase.host, calls)];
+		// `caller` is host-derived in Core (the dispatching agent + its host
+		// conversation), so a case seeds it separately from `input` — writing the
+		// same field into `input` must not change it. Absent fixture → the
+		// agent-less shape Core injects for workflows/monitors/recipes.
+		bindingNames = ["input", "caller", "host"];
+		bindingValues = [
+			input,
+			frozenCopy(
+				testCase.caller ?? { agent_id: null, conversation_id: null }
+			),
+			buildHost(testCase.host, calls),
+		];
 	}
 
 	// The splice. `"use strict"` matters: it turns an accidental implicit global

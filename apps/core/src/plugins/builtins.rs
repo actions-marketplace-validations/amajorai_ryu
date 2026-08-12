@@ -607,6 +607,12 @@ pub const CORE_PLUGINS: &[&str] = &[
     // `match` gate (every completed turn is the point), so it costs a sandbox spawn
     // per turn plus a sub-agent per answer that clears its prose floor.
     "@ryu/no-ai-slop",
+    // Agent-to-agent mailbox: every agent gets `agents__directory` / `agents__send` /
+    // `agents__ask` / `agents__thread`, and a `pre_user_turn` hook delivers whatever
+    // arrived for it. Off by default — the delivery hook cannot be `match`-gated (the
+    // inbox is keyed by agent, `stateful` matches on the conversation) so it spawns a
+    // sandbox per turn, and one `agents__ask` is a full agent run on the user's budget.
+    "@ryu/agent-comms",
     // Pre-turn prompt-improver: rewrites the outgoing message via a configurable
     // model before it is sent. Reverse-DNS id (matches its manifest + composer flag).
     "@ryu/auto-expand",

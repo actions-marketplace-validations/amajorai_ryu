@@ -54,6 +54,7 @@ import {
 } from "@/src/components/chat/BtwOverlay.tsx";
 import { DiffReviewPane } from "@/src/components/chat/DiffReviewPane.tsx";
 import { MentionMenu } from "@/src/components/chat/MentionMenu.tsx";
+import { MergedThreadPicker } from "@/src/components/chat/MergedThreadPicker.tsx";
 import {
 	type ActivePermission,
 	PermissionPrompt,
@@ -93,6 +94,10 @@ import { useComposerDraftAutosave } from "@/src/hooks/useComposerDraftAutosave.t
 import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
+import {
+	isMergedHistoryId,
+	useMergedAgentThreads,
+} from "@/src/hooks/useMergedAgentThreads.ts";
 import { useMessageQueue } from "@/src/hooks/useMessageQueue.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
@@ -604,8 +609,17 @@ export default function ChatPage({
 	initialAgent,
 	initialGhost,
 	initialProject,
+	mergedAgentId,
 }: {
 	tabConversationId?: string;
+	/**
+	 * Messaging-style "one thread per agent" view (`/chat/agent/:agentId`): every
+	 * earlier thread with this agent is rendered read-only above the live one, so
+	 * the page reads as a single WhatsApp-shaped scroll. Purely a view — the
+	 * threads stay separate rows in Core, and the composer's thread picker chooses
+	 * which one a send lands in.
+	 */
+	mergedAgentId?: string;
 	/** One-shot composer seeds from a `ryu://chat/new` deep link. The prompt
 	 * pre-fills the composer (NEVER auto-sent — it is attacker-controllable);
 	 * agent/project pre-select. Consumed once on mount. */
@@ -635,7 +649,10 @@ export default function ChatPage({
 
 	const { folder, setFolder } = useWorkspaceStore();
 	const [agentId, setAgentId] = useState<string | null>(
-		() => initialAgent ?? localStorage.getItem("ryu_default_agent")
+		// The merged view is *about* one agent, so it pins the target: opening it
+		// must never inherit whichever agent happened to be the global default.
+		() =>
+			mergedAgentId ?? initialAgent ?? localStorage.getItem("ryu_default_agent")
 	);
 	// Persistent team selection from the composer target picker. When set, every
 	// turn fans out to the team's members (Core's `team_id` takes precedence over
@@ -1003,6 +1020,36 @@ export default function ChatPage({
 	const [convId, setConvId] = useState<string | null>(
 		tabConversationId ?? null
 	);
+
+	// ── Merged agent view ────────────────────────────────────────────────────
+	// Older threads with this agent, rendered read-only above the live one. The
+	// live thread is still a single conversation driven by `useChat`; only the
+	// transcript above it is stitched, so streaming, editing and branching keep
+	// working unchanged on the thread the composer is pointed at.
+	const merged = useMergedAgentThreads({
+		agentId: mergedAgentId ?? null,
+		enabled: Boolean(mergedAgentId),
+		liveConversationId: convId,
+	});
+	// Opening the view lands on the newest thread — the messaging-app default of
+	// "continue where we left off".
+	//
+	// The latch trips the first time a thread list EXISTS, not the first time a
+	// thread is selected. The conversation list is empty until Core's first fetch
+	// resolves, so a latch that only trips on success would still be armed if the
+	// user hit "New thread" in that window (or on a later reconnect refresh) — and
+	// would then yank them out of their empty thread into the newest one.
+	const mergedSeeded = useRef(false);
+	useEffect(() => {
+		if (!mergedAgentId || mergedSeeded.current || merged.threads.length === 0) {
+			return;
+		}
+		mergedSeeded.current = true;
+		if (convId) {
+			return;
+		}
+		setConvId(merged.threads[0].id);
+	}, [mergedAgentId, convId, merged.threads]);
 
 	// Mirror THIS tab's conversation into the shared context whenever it is the
 	// focused tab, so the sidebar highlight + goal/fork/double-check target the
@@ -2735,6 +2782,9 @@ export default function ChatPage({
 	// thread must not inherit a persisted one.
 	const startFreshThread = useCallback(() => {
 		draftConvId.current = `conv-${Date.now()}`;
+		// An explicit "new thread" outranks the merged view's open-on-newest seed
+		// for the rest of this tab's life — see the latch above.
+		mergedSeeded.current = true;
 		setConvId(null);
 		setActiveConversationId(null);
 		setMessages([]);
@@ -2892,6 +2942,12 @@ export default function ChatPage({
 	// new tab. Core persists the copy, so the new tab hydrates from the server.
 	const handleBranch = useCallback(
 		(messageId: string) => {
+			// Prepended history from another thread in the merged agent view: every
+			// action below writes into the LIVE conversation, so a foreign id must
+			// bounce rather than branch the wrong thread.
+			if (isMergedHistoryId(messageId)) {
+				return;
+			}
 			if (!activeConversationId) {
 				return;
 			}
@@ -2929,6 +2985,9 @@ export default function ChatPage({
 	// On a server rejection, revert to the prior state so the UI never lies.
 	const handleFeedback = useCallback(
 		(messageId: string, rating: "up" | "down" | null, isLatest: boolean) => {
+			if (isMergedHistoryId(messageId)) {
+				return;
+			}
 			const conv = convIdRef.current ?? activeConversationId;
 			if (!conv) {
 				return;
@@ -2993,6 +3052,9 @@ export default function ChatPage({
 	// reply (skip_user_append: the sibling is already persisted).
 	const handleEditMessage = useCallback(
 		async (messageId: string, newText: string) => {
+			if (isMergedHistoryId(messageId)) {
+				return;
+			}
 			const conv = convIdRef.current ?? activeConversationId;
 			if (!(conv && newText.trim())) {
 				return;
@@ -3037,6 +3099,9 @@ export default function ChatPage({
 	// and streams a fresh sibling reply.
 	const handleRegenerateMessage = useCallback(
 		async (messageId: string) => {
+			if (isMergedHistoryId(messageId)) {
+				return;
+			}
 			const conv = convIdRef.current ?? activeConversationId;
 			if (!conv) {
 				return;
@@ -3070,6 +3135,9 @@ export default function ChatPage({
 	// path to re-render the selected branch (no generation).
 	const handleSelectVersion = useCallback(
 		async (versionId: string) => {
+			if (isMergedHistoryId(versionId)) {
+				return;
+			}
 			const conv = convIdRef.current ?? activeConversationId;
 			if (!conv) {
 				return;
@@ -3526,6 +3594,22 @@ export default function ChatPage({
 		});
 	}, [visibleMessages, participants, agentId, agents]);
 
+	// What the transcript actually renders. In the merged agent view the older
+	// threads sit above the live one; everything else in this page — the context
+	// meter, "does this thread have messages", the transcript copy — deliberately
+	// keeps reading `processedMessages`, because those messages are NOT in the
+	// model's context and do not belong to the live conversation.
+	const renderedMessages = useMemo(
+		() =>
+			merged.messages.length > 0
+				? [
+						...(merged.messages as unknown as typeof processedMessages),
+						...processedMessages,
+					]
+				: processedMessages,
+		[merged.messages, processedMessages]
+	);
+
 	// #415: Stable slot reference for the custom InputBar. Using useMemo with an
 	// empty dep array so the component identity is stable across renders, avoiding
 	// textarea focus loss on every keystroke. Agents are accessed from state
@@ -3738,7 +3822,22 @@ export default function ChatPage({
 		// low"). Rides the same ref as the other composer controls so the memoized
 		// InputBar picks it up without re-rendering on every advice refetch.
 		infoBar: composerInfoBar,
-		left: composerLeft,
+		// In the merged agent view the composer must say which thread a send joins
+		// — the transcript above it spans several. Sits ahead of the shared
+		// agent/model controls so it reads as the destination, not a setting.
+		left: mergedAgentId ? (
+			<>
+				<MergedThreadPicker
+					activeConversationId={convId}
+					onNewThread={startFreshThread}
+					onSelectThread={setConvId}
+					threads={merged.threads}
+				/>
+				{composerLeft}
+			</>
+		) : (
+			composerLeft
+		),
 		// Contributed bar controls sit after the shell's own right-hand controls,
 		// in the one slot the memoized InputBar reads from this ref.
 		right: pluginComposerBar ? (
@@ -4099,7 +4198,7 @@ export default function ChatPage({
 							}}
 							key={`${activeNode.url}-${chatId}`}
 							messageActions={contributedMessageActions}
-							messages={processedMessages}
+							messages={renderedMessages}
 							onBranch={activeConversationId ? handleBranch : undefined}
 							onClearQuote={() => setQuote(null)}
 							onContributedMessageAction={

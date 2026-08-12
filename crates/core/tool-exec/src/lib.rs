@@ -538,10 +538,28 @@ pub const GRANT_TOOL_EXECUTE: &str = "tool:execute";
 /// grants. `code` is the SDK-serialized body — it references `input` + `host`
 /// and `return`s the tool result, which the sandbox reports as the program's
 /// final value.
-pub fn build_inline_tool_program(input: &Value, code: &str) -> String {
+///
+/// # Why `caller` is a third binding and not an argument
+///
+/// `input` is the MODEL's map: every field in it is a claim the model wrote, so a
+/// tool that needs to know *who is calling* cannot read it from there — a model
+/// naming a different agent is indistinguishable from one naming itself. `caller`
+/// carries what the dispatch path already resolved server-side (`{agent_id,
+/// conversation_id}`, the same values the turn-hook `ctx` gets) so the answer is
+/// host-derived, never model-supplied. Both fields are `null` for the agent-less
+/// callers (workflows, monitors, recipes, the approval engine), which is why a
+/// body must treat them as optional rather than assume an agent is present.
+///
+/// It is deliberately the *identity* only, not a capability: nothing here lets a
+/// tool act as that agent. It exists so a body can attribute, address, or scope
+/// its own state by the caller — an agent-to-agent mailbox keyed by agent id
+/// being the case it was added for.
+pub fn build_inline_tool_program(input: &Value, caller: &Value, code: &str) -> String {
     let input_json = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    let caller_json = serde_json::to_string(caller).unwrap_or_else(|_| "{}".to_string());
     format!(
         r#"const input = {input};
+const caller = {caller};
 const host = {{
   sideModel: (a) => tools.host.sideModel(a ?? {{}}),
   runAgent: (a) => tools.host.runAgent(a ?? {{}}),
@@ -556,8 +574,49 @@ const host = {{
 {code}
 "#,
         input = input_json,
+        caller = caller_json,
         code = code,
     )
+}
+
+#[cfg(test)]
+mod inline_tool_program_tests {
+    use super::build_inline_tool_program;
+    use serde_json::json;
+
+    // The three bindings a body may rely on, and the one property that makes
+    // `caller` worth having: it is injected separately from `input`, so a model
+    // cannot write it by naming the field in its arguments.
+    #[test]
+    fn binds_input_caller_and_host() {
+        let program = build_inline_tool_program(
+            &json!({ "to": "scout", "agent_id": "impostor" }),
+            &json!({ "agent_id": "ryu", "conversation_id": "conv_1" }),
+            "return caller.agent_id;",
+        );
+        // Field order follows serde_json's map, so assert on the bindings rather
+        // than a whole-object literal.
+        assert!(program.contains("const input = {"));
+        assert!(program.contains(r#""agent_id":"impostor""#));
+        assert!(program.contains(r#"const caller = {"agent_id":"ryu","conversation_id":"conv_1"}"#));
+        assert!(program.contains("const host ="));
+        // The body is the tail of the program, so a bare `return` is its value.
+        assert!(program.trim_end().ends_with("return caller.agent_id;"));
+    }
+
+    // The agent-less callers (workflows, monitors, recipes, the approval engine)
+    // dispatch with no agent and no conversation. That must still be a bound
+    // object with null fields — a body reading `caller.agent_id` gets `null`,
+    // never a ReferenceError on an unbound global.
+    #[test]
+    fn agentless_caller_still_binds_an_object() {
+        let program = build_inline_tool_program(
+            &json!({}),
+            &json!({ "agent_id": null, "conversation_id": null }),
+            "return null;",
+        );
+        assert!(program.contains(r#"const caller = {"agent_id":null,"conversation_id":null}"#));
+    }
 }
 
 /// The sandbox path bound to a capability adapter's PRIMARY tool — the binding's

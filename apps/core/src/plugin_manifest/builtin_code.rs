@@ -70,6 +70,17 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "hooks/review.js",
         include_str!("../../../../plugins-store/advisor/hooks/review.js"),
     ),
+    // agent-comms
+    (
+        "@ryu/agent-comms",
+        "hooks/deliver.js",
+        include_str!("../../../../plugins-store/agent-comms/hooks/deliver.js"),
+    ),
+    (
+        "@ryu/agent-comms",
+        "hooks/directory.js",
+        include_str!("../../../../plugins-store/agent-comms/hooks/directory.js"),
+    ),
     // agentbrowser
     (
         "@ryu/agentbrowser",

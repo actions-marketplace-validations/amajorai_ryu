@@ -8,6 +8,10 @@
 // Theme mode (next-themes) needs a React setter; call
 // `bindAppearanceThemeMode(setTheme)` from AppearanceTab so reset can update it.
 
+import {
+	DEFAULT_AGENT_ROW_STYLE,
+	setAgentRowStyle,
+} from "@/src/hooks/useAgentRowStyle.ts";
 import { resetBackgroundCustomization } from "@/src/hooks/useBackgroundCustomization.ts";
 import {
 	DEFAULT_CHAT_DATE_GROUPING,
@@ -95,6 +99,7 @@ export const APPEARANCE_DEFAULTS = {
 	invertedBackgrounds: false,
 	sidebarMode: DEFAULT_SIDEBAR_MODE,
 	sidebarVariant: DEFAULT_SIDEBAR_VARIANT,
+	agentRowStyle: DEFAULT_AGENT_ROW_STYLE,
 	groupChatsByDate: DEFAULT_CHAT_DATE_GROUPING,
 	sidebarOverflowPopover: false,
 	groupToolUses: true,
@@ -266,6 +271,13 @@ function registerAppearanceSettings(): void {
 		category: "appearance",
 		label: "Sidebar variant",
 		reset: () => setSidebarVariant(APPEARANCE_DEFAULTS.sidebarVariant),
+	});
+
+	registerSetting({
+		id: "appearance.agent-row-style",
+		category: "appearance",
+		label: "Agent row style",
+		reset: () => setAgentRowStyle(APPEARANCE_DEFAULTS.agentRowStyle),
 	});
 
 	registerSetting({
