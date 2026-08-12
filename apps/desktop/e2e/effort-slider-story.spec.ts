@@ -95,3 +95,67 @@ test("dragging the track to the far end commits the last level", async ({
 	// A drag that ends inside the menu must not dismiss it either.
 	await expect(page.getByRole("slider", { name: "Thinking" })).toBeVisible();
 });
+
+/**
+ * The fill's own computed colour, read back after the cross-fade settles. It is
+ * built from `color-mix` over theme vars, and an invalid mix does not fall back
+ * to something duller — the declaration is dropped and the fill goes colourless,
+ * which is exactly the failure a class-name assertion would sail past.
+ */
+async function fillColor(page: Page, testId: string): Promise<string> {
+	await page.waitForTimeout(500);
+	return await page
+		.getByTestId(testId)
+		.locator("[data-slot='slider'] > div")
+		.first()
+		.evaluate((el) => getComputedStyle(el).backgroundColor);
+}
+
+/** oklab components of a computed colour, or null when it is not painted. */
+function oklab(color: string): { a: number; alpha: number; b: number } | null {
+	const m = color.match(
+		/^oklab\(\s*[\d.]+\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\/\s*([\d.]+)\s*\)$/
+	);
+	return m
+		? { a: Number(m[1]), b: Number(m[2]), alpha: Number(m[3]) }
+		: null;
+}
+
+test("the fill ramps green → orange → red → purple with the level", async ({
+	page,
+}) => {
+	await openMenu(page);
+	const slider = page.getByRole("slider", { name: "Thinking" });
+	await slider.focus();
+
+	// Green at the bottom of the ladder: negative a is the green side of oklab.
+	await page.keyboard.press("Home");
+	await page.keyboard.press("ArrowRight");
+	const low = oklab(await fillColor(page, "five"));
+	expect(low?.a).toBeLessThan(0);
+
+	// Warm through the middle — a turns positive while b stays yellow-side.
+	await page.keyboard.press("ArrowRight");
+	const medium = oklab(await fillColor(page, "five"));
+	expect(medium?.a).toBeGreaterThan(0);
+	expect(medium?.b).toBeGreaterThan(0);
+
+	// Purple at the top: b crosses to the blue side, which no other stop does.
+	await page.keyboard.press("End");
+	const max = oklab(await fillColor(page, "five"));
+	expect(max?.b).toBeLessThan(0);
+});
+
+test("a level count the ramp does not divide still paints its middle", async ({
+	page,
+}) => {
+	await openMenu(page);
+	// The four-level row's middle detent falls BETWEEN two ramp stops, so its
+	// colour is a nested `color-mix`. If that nesting were invalid the fill would
+	// have no background at all — assert it is painted, and warm rather than
+	// either end.
+	const mid = oklab(await fillColor(page, "four"));
+	expect(mid).not.toBeNull();
+	expect(mid?.alpha).toBeGreaterThan(0);
+	expect(mid?.a).toBeGreaterThan(0);
+});

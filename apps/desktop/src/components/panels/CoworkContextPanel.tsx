@@ -18,8 +18,10 @@
 // per-run worktree diff and survive reload.
 
 import {
+	ArrowDown01Icon,
 	BrowserIcon,
 	CheckmarkCircle02Icon,
+	ComputerTerminal01Icon,
 	Delete01Icon,
 	File01Icon,
 	Flowchart01Icon,
@@ -27,25 +29,30 @@ import {
 	GitBranchIcon,
 	Globe02Icon,
 	Image02Icon,
+	Link01Icon,
 	Mail01Icon,
 	MessageQuestionIcon,
 	PlusSignIcon,
 	Robot01Icon,
+	Search01Icon,
 	SourceCodeIcon,
 	Target02Icon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { extractCitations } from "@ryu/blocks/desktop/agent-elements/utils/citations.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { UIMessage } from "ai";
 import {
 	type ReactNode,
 	useCallback,
 	useEffect,
+	useId,
 	useMemo,
 	useRef,
 	useState,
 } from "react";
+import { openExternal } from "@/lib/tauri-bridge.ts";
 import { DiffReviewPane } from "@/src/components/chat/DiffReviewPane.tsx";
 import {
 	SubagentAvatar,
@@ -62,6 +69,11 @@ import type { FileSummary } from "@/src/lib/api/git.ts";
 import { fetchWorktreeDiff } from "@/src/lib/api/git.ts";
 import type { Artifact, ArtifactKind } from "@/src/lib/artifacts.ts";
 import { extractArtifacts } from "@/src/lib/artifacts.ts";
+import {
+	firstString,
+	PATH_KEYS,
+	toolNameOf,
+} from "@/src/lib/mission-control/turn-groups.ts";
 import { compactAge } from "@/src/lib/time.ts";
 
 // ── Message-stream shapes (loose, mirroring the AI SDK parts we read) ──────────
@@ -72,6 +84,8 @@ interface StreamPart {
 	/** Present on tool parts. Nested (subagent) tools carry `<parentTaskId>:<id>`. */
 	state?: string;
 	toolCallId?: string;
+	/** Present on `dynamic-tool` parts, where the name isn't in `type`. */
+	toolName?: string;
 	type?: string;
 }
 
@@ -149,37 +163,90 @@ function extractLatestTodos(messages: StreamMessage[]): CoworkPlanTodo[] {
 	return [];
 }
 
-interface DerivedSource {
+/** One thing a source was actually used ON — a file, a link, a command. */
+export interface SourceItem {
+	/** Secondary line: the full path, the URL, the search root. */
+	detail?: string;
+	icon: IconSvgElement;
+	/** Dedupe key within its group. */
+	id: string;
+	label: string;
+	/** Set only for real links, which open in the OS browser. */
+	url?: string;
+}
+
+export interface DerivedSource {
 	icon: IconSvgElement;
 	id: string;
+	/** What the run touched through this source, first-seen order. */
+	items: SourceItem[];
 	label: string;
 }
 
+/** Beyond this the list stops being a summary; the rest collapse to "+N more". */
+const MAX_SOURCE_ITEMS = 40;
+const MAX_ITEM_CHARS = 160;
+const FIRST_LINE_RE = /\r?\n[\s\S]*$/;
+
+// Tool-name sets, not part types: a tool arrives either as `tool-<Name>` or as a
+// `dynamic-tool` carrying `toolName`, and ACP bridges use their own names for
+// the same operations. `toolNameOf` normalises both shapes.
+const FILE_TOOLS = new Set([
+	"Read",
+	"Write",
+	"Edit",
+	"MultiEdit",
+	"NotebookEdit",
+	"NotebookRead",
+	"apply_patch",
+	"create_file",
+	"str_replace_editor",
+	"view_file",
+]);
+const SEARCH_TOOLS = new Set([
+	"Grep",
+	"Glob",
+	"codebase_search",
+	"file_search",
+]);
+const SHELL_TOOLS = new Set([
+	"Bash",
+	"BashOutput",
+	"run_terminal_cmd",
+	"shell",
+]);
+const WEB_TOOLS = new Set(["WebFetch", "WebSearch", "web_search"]);
+const MCP_TOOL_RE = /^mcp__([^_]+(?:_[^_]+)*?)__(.*)$/;
+
+function baseName(path: string): string {
+	const segments = path.split(/[\\/]/).filter(Boolean);
+	return segments.at(-1) ?? path;
+}
+
+function clampItem(text: string): string {
+	const oneLine = text.replace(FIRST_LINE_RE, "").trim();
+	return oneLine.length > MAX_ITEM_CHARS
+		? `${oneLine.slice(0, MAX_ITEM_CHARS - 1).trimEnd()}…`
+		: oneLine;
+}
+
 /**
- * Map a tool part type to the connector/source it represents. Returns null for
- * tool parts that aren't a recognisable external source (so a run that only
- * thinks/writes shows just "Local files", not noise).
+ * Map a tool NAME to the connector/source it represents. Returns null for tools
+ * that aren't a recognisable external source (so a run that only thinks/writes
+ * shows just "Local files", not noise).
  */
-function sourceForToolType(type: string): DerivedSource | null {
-	if (type === "tool-WebSearch" || type === "tool-WebFetch") {
+function sourceForTool(tool: string): Omit<DerivedSource, "items"> | null {
+	if (WEB_TOOLS.has(tool)) {
 		return { id: "web", label: "Web search", icon: Globe02Icon };
 	}
-	if (type === "tool-cloning") {
+	if (tool === "cloning") {
 		return { id: "github", label: "GitHub", icon: SourceCodeIcon };
 	}
-	if (
-		type === "tool-Read" ||
-		type === "tool-Write" ||
-		type === "tool-Edit" ||
-		type === "tool-Grep" ||
-		type === "tool-Glob" ||
-		type === "tool-Bash" ||
-		type === "tool-NotebookEdit"
-	) {
+	if (FILE_TOOLS.has(tool) || SEARCH_TOOLS.has(tool) || SHELL_TOOLS.has(tool)) {
 		return { id: "local", label: "Local files", icon: FolderOpenIcon };
 	}
-	// MCP tools carry the server name: tool-mcp__<server>__<tool>.
-	const mcpMatch = /^tool-mcp__([^_]+(?:_[^_]+)*?)__/.exec(type);
+	// MCP tools carry the server name: mcp__<server>__<tool>.
+	const mcpMatch = MCP_TOOL_RE.exec(tool);
 	if (mcpMatch) {
 		const server = mcpMatch[1].toLowerCase();
 		if (server.includes("gmail") || server.includes("mail")) {
@@ -194,21 +261,145 @@ function sourceForToolType(type: string): DerivedSource | null {
 	return null;
 }
 
-/** Distinct sources used across the whole conversation, first-seen order. */
-function extractSources(messages: StreamMessage[]): DerivedSource[] {
+/**
+ * The concrete thing one tool call touched, read out of its input. Every field
+ * is best-effort: a call whose input hasn't streamed in yet (or whose bridge
+ * names things differently) contributes no item rather than an empty row.
+ */
+function itemForTool(tool: string, part: StreamPart): SourceItem | null {
+	if (FILE_TOOLS.has(tool)) {
+		const path = firstString(part.input, PATH_KEYS);
+		return path
+			? {
+					id: `file:${path}`,
+					label: baseName(path),
+					detail: path,
+					icon: File01Icon,
+				}
+			: null;
+	}
+	if (SEARCH_TOOLS.has(tool)) {
+		const pattern = firstString(part.input, ["pattern", "query", "glob"]);
+		if (!pattern) {
+			return null;
+		}
+		const where = firstString(part.input, PATH_KEYS);
+		return {
+			id: `search:${pattern}:${where ?? ""}`,
+			label: clampItem(pattern),
+			detail: where,
+			icon: Search01Icon,
+		};
+	}
+	if (SHELL_TOOLS.has(tool)) {
+		const command = firstString(part.input, ["command", "cmd"]);
+		return command
+			? {
+					id: `cmd:${command}`,
+					label: clampItem(command),
+					detail: firstString(part.input, ["description"]),
+					icon: ComputerTerminal01Icon,
+				}
+			: null;
+	}
+	const url = firstString(part.input, ["url", "link", "uri"]);
+	if (url) {
+		return { id: `url:${url}`, label: url, url, icon: Link01Icon };
+	}
+	if (WEB_TOOLS.has(tool)) {
+		const query = firstString(part.input, ["query", "q", "prompt"]);
+		return query
+			? {
+					id: `query:${query}`,
+					label: clampItem(query),
+					detail: "Search query",
+					icon: Search01Icon,
+				}
+			: null;
+	}
+	// An MCP call: name the verb, and show whatever argument identifies it.
+	const verb = MCP_TOOL_RE.exec(tool)?.[2];
+	if (!verb) {
+		return null;
+	}
+	const argument = firstString(part.input, [
+		"query",
+		"name",
+		"id",
+		"subject",
+		...PATH_KEYS,
+	]);
+	return {
+		id: `mcp:${verb}:${argument ?? ""}`,
+		label: verb.replace(/_/g, " "),
+		detail: argument ? clampItem(argument) : undefined,
+		icon: Globe02Icon,
+	};
+}
+
+/**
+ * Append an item to its group, keeping first-seen order. A repeat of the same id
+ * is dropped — EXCEPT when the newcomer carries a real title for a link the
+ * input-derived row could only name by its URL, which upgrades the row in place
+ * (the fetch's own `<title>` beats `https://…` as a label).
+ */
+function pushItem(source: DerivedSource, item: SourceItem | null) {
+	if (!item) {
+		return;
+	}
+	const at = source.items.findIndex((existing) => existing.id === item.id);
+	if (at === -1) {
+		source.items.push(item);
+		return;
+	}
+	const existing = source.items[at];
+	if (existing.label === existing.url && item.label !== item.url) {
+		source.items[at] = item;
+	}
+}
+
+/**
+ * Distinct sources used across the whole conversation, first-seen order, each
+ * carrying the files / links / commands it was used on. Web results come from
+ * `extractCitations` (the same derivation the transcript's citation chips use),
+ * so a search's result links show up, not just the query that found them.
+ */
+export function extractSources(messages: StreamMessage[]): DerivedSource[] {
 	const byId = new Map<string, DerivedSource>();
+	const allParts: StreamPart[] = [];
 	for (const message of messages) {
 		if (!message.parts) {
 			continue;
 		}
 		for (const part of message.parts) {
-			if (!(isToolPart(part) && typeof part.type === "string")) {
+			allParts.push(part);
+			if (!isToolPart(part)) {
 				continue;
 			}
-			const source = sourceForToolType(part.type);
-			if (source && !byId.has(source.id)) {
-				byId.set(source.id, source);
+			const tool = toolNameOf(part);
+			const meta = sourceForTool(tool);
+			if (!meta) {
+				continue;
 			}
+			let source = byId.get(meta.id);
+			if (!source) {
+				source = { ...meta, items: [] };
+				byId.set(meta.id, source);
+			}
+			pushItem(source, itemForTool(tool, part));
+		}
+	}
+
+	const web = byId.get("web");
+	if (web) {
+		for (const citation of extractCitations(allParts)) {
+			pushItem(web, {
+				id: `url:${citation.url}`,
+				label: citation.title,
+				detail: citation.url,
+				url: citation.url,
+				icon: Link01Icon,
+			});
 		}
 	}
 	return [...byId.values()];
@@ -646,6 +837,141 @@ function FileRow({ file }: { file: FileSummary }) {
 	);
 }
 
+// ── Sources (connectors + what each one touched) ───────────────────────────────
+
+// Each connector row expands in place to the files it read/wrote, the links it
+// fetched or found, and the commands it ran. A nested BouncyAccordion would put
+// a second card (28px radii, `bg-card` on `bg-card`) inside the section, so this
+// is the plain disclosure the rest of the rail uses — same row idiom as
+// SubagentsList. The outer accordion measures its content with a ResizeObserver,
+// so expanding a group grows the section; that also means the item list must not
+// live in a fixed-height scroller (a pinned `offsetHeight` never grows), hence
+// the `+N more` cap by count.
+
+function SourceItemRow({ item }: { item: SourceItem }) {
+	const body = (
+		<>
+			<HugeiconsIcon
+				aria-hidden
+				className="size-3.5 shrink-0 text-muted-foreground"
+				icon={item.icon}
+			/>
+			<span className="flex min-w-0 flex-1 flex-col">
+				<span className="truncate text-foreground text-sm">{item.label}</span>
+				{item.detail && item.detail !== item.label && (
+					<span className="truncate text-muted-foreground text-xs">
+						{item.detail}
+					</span>
+				)}
+			</span>
+		</>
+	);
+	if (!item.url) {
+		return (
+			<li
+				className="flex min-w-0 items-center gap-2 px-1.5 py-1"
+				title={item.detail ?? item.label}
+			>
+				{body}
+			</li>
+		);
+	}
+	const url = item.url;
+	return (
+		<li>
+			<button
+				className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/50"
+				onClick={() => {
+					Promise.resolve(openExternal(url)).catch(() => {
+						/* the link stays visible; nothing else to do */
+					});
+				}}
+				title={url}
+				type="button"
+			>
+				{body}
+			</button>
+		</li>
+	);
+}
+
+function SourceGroup({ source }: { source: DerivedSource }) {
+	const [open, setOpen] = useState(false);
+	const contentId = useId();
+	const shown = source.items.slice(0, MAX_SOURCE_ITEMS);
+	const overflow = source.items.length - shown.length;
+
+	if (source.items.length === 0) {
+		return (
+			<li className="flex items-center gap-2 px-1.5 py-1 text-sm">
+				<HugeiconsIcon
+					aria-hidden
+					className="size-3.5 shrink-0 text-muted-foreground"
+					icon={source.icon}
+				/>
+				<span className="text-foreground">{source.label}</span>
+			</li>
+		);
+	}
+
+	return (
+		<li>
+			<button
+				aria-controls={contentId}
+				aria-expanded={open}
+				className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/50"
+				onClick={() => setOpen((prev) => !prev)}
+				type="button"
+			>
+				<HugeiconsIcon
+					aria-hidden
+					className="size-3.5 shrink-0 text-muted-foreground"
+					icon={source.icon}
+				/>
+				<span className="min-w-0 flex-1 truncate text-foreground text-sm">
+					{source.label}
+				</span>
+				<span className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground tabular-nums">
+					{source.items.length}
+				</span>
+				<HugeiconsIcon
+					aria-hidden
+					className={cn(
+						"size-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
+						open && "rotate-180"
+					)}
+					icon={ArrowDown01Icon}
+				/>
+			</button>
+			{open && (
+				<ul
+					className="mt-0.5 mb-1 ml-3 flex flex-col gap-0.5 border-border/60 border-l pl-2"
+					id={contentId}
+				>
+					{shown.map((item) => (
+						<SourceItemRow item={item} key={item.id} />
+					))}
+					{overflow > 0 && (
+						<li className="px-1.5 py-1 text-muted-foreground text-xs">
+							+{overflow} more
+						</li>
+					)}
+				</ul>
+			)}
+		</li>
+	);
+}
+
+function SourcesList({ sources }: { sources: DerivedSource[] }) {
+	return (
+		<ul className="flex flex-col gap-0.5">
+			{sources.map((source) => (
+				<SourceGroup key={source.id} source={source} />
+			))}
+		</ul>
+	);
+}
+
 // ── Side chats (persisted /btw asides) ─────────────────────────────────────────
 
 function SideChatsList({
@@ -828,23 +1154,7 @@ export function CoworkContextPanel({
 			id: "sources",
 			icon: <SectionIcon icon={Globe02Icon} />,
 			title: <SectionTitle count={sources.length} title="Sources" />,
-			description: (
-				<div className="flex flex-col">
-					{sources.map((source) => (
-						<div
-							className="flex items-center gap-2 py-1 text-sm"
-							key={source.id}
-						>
-							<HugeiconsIcon
-								aria-hidden
-								className="size-3.5 shrink-0 text-muted-foreground"
-								icon={source.icon}
-							/>
-							<span className="text-foreground">{source.label}</span>
-						</div>
-					))}
-				</div>
-			),
+			description: <SourcesList sources={sources} />,
 		});
 	}
 

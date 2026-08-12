@@ -1,5 +1,6 @@
 import { AuthorizedAppsTab, ReferralsTab } from "@ryu/settings";
 import { Dialog, DialogContent } from "@ryu/ui/components/dialog.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
 import {
 	SidebarGroup,
 	SidebarGroupLabel,
@@ -23,7 +24,10 @@ import {
 	type ScopedNavEntity,
 	useScopedSettingsNav,
 } from "@/src/hooks/useScopedSettingsNav.ts";
+import { useSettingReveal } from "@/src/hooks/useSettingReveal.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
+import { requestSettingReveal } from "@/src/lib/settings-focus.ts";
+import type { SettingsEntry } from "@/src/lib/settings-index.ts";
 import { openFeedbackWidget } from "@/src/lib/userjot.ts";
 import CreditsTab from "@/src/pages/CreditsPage.tsx";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
@@ -39,6 +43,8 @@ import { GeneralTab } from "./GeneralTab.tsx";
 import { KeyboardShortcutsTab } from "./KeyboardShortcutsTab.tsx";
 import { ServicesOrgSwitcher } from "./ServicesOrgSwitcher.tsx";
 import { SessionsTab } from "./SessionsTab.tsx";
+import { SettingsSearchResults } from "./SettingsSearchResults.tsx";
+import { SettingsSyncTab } from "./SettingsSyncTab.tsx";
 import { TeamsBillingTab } from "./TeamsBillingTab.tsx";
 import { TtsEngineSettings } from "./TtsEngineSettings.tsx";
 import { VoiceInputSettings } from "./VoiceInputSettings.tsx";
@@ -96,6 +102,7 @@ const NAV_GROUPS: NavGroup[] = [
 			{ value: "general", label: "General" },
 			{ value: "appearance", label: "Appearance" },
 			{ value: "keyboard", label: "Keyboard shortcuts" },
+			{ value: "sync", label: "Settings sync" },
 			{ value: "updates", label: "Updates" },
 			{ value: "voice", label: "Voice" },
 			{ value: "developer", label: "Developer" },
@@ -159,6 +166,8 @@ function SectionContent({ value }: { value: SectionValue }) {
 			return <AppearanceTab />;
 		case "keyboard":
 			return <KeyboardShortcutsTab />;
+		case "sync":
+			return <SettingsSyncTab />;
 		case "updates":
 			return <AppUpdatesSettings />;
 		case "billing":
@@ -202,6 +211,10 @@ export function SettingsDialog({
 	const [activeSection, setActiveSection] = useState<string>(
 		defaultSection ?? "general"
 	);
+	// The sidebar filter. Non-empty swaps the nav for search results — individual
+	// SETTINGS, not just tabs — from the shared index.
+	const [search, setSearch] = useState("");
+	const contentRef = useSettingReveal(activeSection);
 	const openGateway = useGatewayDialog((s) => s.openGateway);
 	const { resolvedTheme } = useTheme();
 	const target = toTarget(useActiveNode());
@@ -241,6 +254,30 @@ export function SettingsDialog({
 		onOpenChange(false);
 		openGateway();
 	};
+
+	// A search result may name a setting that lives in the OTHER dialog. Same
+	// rule as the manual cross-link above: close this modal before opening that
+	// one, so two focus traps never stack. The reveal request survives the swap —
+	// it is module state, not component state.
+	const handleSelectResult = (entry: SettingsEntry) => {
+		requestSettingReveal(entry);
+		setSearch("");
+		if (entry.dialog === "gateway") {
+			onOpenChange(false);
+			openGateway(entry.section);
+			return;
+		}
+		setActiveSection(entry.section);
+	};
+
+	// Tab-level matches, kept alongside the row-level results: typing "billing"
+	// should still offer the Billing tab even though no single row is called that.
+	const query = search.trim().toLowerCase();
+	const matchedSections = query
+		? navGroups
+				.flatMap((g) => g.items)
+				.filter((item) => item.label.toLowerCase().includes(query))
+		: [];
 
 	// Open the feedback widget, matched to the current appearance. If it can't
 	// be loaded, tell the user and point them at email instead of failing silently.
@@ -283,7 +320,7 @@ export function SettingsDialog({
 				<DialogContent className="!w-[85vw] !max-w-7xl max-md:!w-screen max-md:!max-w-none [&>[data-slot=dialog-close]]:!top-5 [&>[data-slot=dialog-close]]:!right-5 h-[85vh] gap-0 overflow-hidden p-0 max-md:h-[100dvh] max-md:rounded-none">
 					<ResizableSettingsLayout
 						content={
-							<div className="px-4 py-4 md:px-8 md:py-6">
+							<div className="px-4 py-4 md:px-8 md:py-6" ref={contentRef}>
 								<h2 className="mb-6 font-semibold text-base">{activeLabel}</h2>
 								{activeEntity ? (
 									<EntitySettings entity={activeEntity} target={target} />
@@ -294,27 +331,68 @@ export function SettingsDialog({
 						}
 						sidebar={
 							<>
-								{navGroups.map((group, gi) => (
-									// biome-ignore lint/suspicious/noArrayIndexKey: static nav groups with no stable key
-									<SidebarGroup className="py-1" key={group.title ?? gi}>
-										{group.title && (
-											<SidebarGroupLabel>{group.title}</SidebarGroupLabel>
-										)}
-										{group.header}
-										<SidebarMenu>
-											{group.items.map((item) => (
-												<SidebarMenuItem key={item.value}>
-													<SidebarMenuButton
-														isActive={activeSection === item.value}
-														onClick={() => setActiveSection(item.value)}
-													>
-														{item.label}
-													</SidebarMenuButton>
-												</SidebarMenuItem>
-											))}
-										</SidebarMenu>
-									</SidebarGroup>
-								))}
+								<SidebarGroup className="py-1">
+									<Input
+										aria-label="Search settings"
+										className="h-8 text-sm"
+										onChange={(e) => setSearch(e.target.value)}
+										placeholder="Search settings…"
+										value={search}
+									/>
+								</SidebarGroup>
+								{query ? (
+									<>
+										{matchedSections.length > 0 ? (
+											<SidebarGroup className="py-1">
+												<SidebarGroupLabel>Sections</SidebarGroupLabel>
+												<SidebarMenu>
+													{matchedSections.map((item) => (
+														<SidebarMenuItem key={item.value}>
+															<SidebarMenuButton
+																isActive={activeSection === item.value}
+																onClick={() => {
+																	setActiveSection(item.value);
+																	setSearch("");
+																}}
+															>
+																{item.label}
+															</SidebarMenuButton>
+														</SidebarMenuItem>
+													))}
+												</SidebarMenu>
+											</SidebarGroup>
+										) : null}
+										<SettingsSearchResults
+											currentDialog="app"
+											onSelect={handleSelectResult}
+											query={search}
+											showEmptyState={matchedSections.length === 0}
+										/>
+									</>
+								) : null}
+								{query
+									? null
+									: navGroups.map((group, gi) => (
+											// biome-ignore lint/suspicious/noArrayIndexKey: static nav groups with no stable key
+											<SidebarGroup className="py-1" key={group.title ?? gi}>
+												{group.title && (
+													<SidebarGroupLabel>{group.title}</SidebarGroupLabel>
+												)}
+												{group.header}
+												<SidebarMenu>
+													{group.items.map((item) => (
+														<SidebarMenuItem key={item.value}>
+															<SidebarMenuButton
+																isActive={activeSection === item.value}
+																onClick={() => setActiveSection(item.value)}
+															>
+																{item.label}
+															</SidebarMenuButton>
+														</SidebarMenuItem>
+													))}
+												</SidebarMenu>
+											</SidebarGroup>
+										))}
 								<SidebarGroup className="mt-auto py-1">
 									<SidebarMenu>
 										<SidebarMenuItem>

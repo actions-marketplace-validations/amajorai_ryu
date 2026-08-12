@@ -7,9 +7,9 @@
 // actions are gated behind the master switch — flipping it off hides everything
 // immediately.
 
-import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
-import { Switch } from "@ryu/ui/components/switch";
+import { Switch } from "@ryu/ui/components/switch.tsx";
 import { useCallback, useEffect, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
@@ -19,12 +19,14 @@ import {
 	installConsoleCapture,
 	isConsoleCaptureActive,
 } from "@/src/lib/console-buffer.ts";
+import { refreshDevMetricsGate } from "@/src/lib/dev-metrics.ts";
 import {
 	getMcpBridgeStatus,
 	type McpBridgeStatus,
 	mcpBridgeConfigSnippet,
 } from "@/src/lib/mcp-bridge.ts";
 import { copyDiagnostics } from "@/src/lib/preflight.ts";
+import { DevMetricsPanel } from "./DevMetricsPanel.tsx";
 import {
 	SettingsGroup,
 	SettingsItem,
@@ -47,6 +49,10 @@ export function DeveloperTab() {
 	const handleToggleDevMode = useCallback(
 		(next: boolean) => {
 			setDevMode(next);
+			// Same reason console capture is installed here: the metrics gate caches
+			// its answer so a disabled recorder costs one branch, which means the flip
+			// has to invalidate it or recording would not start until a reload.
+			refreshDevMetricsGate();
 			if (next && !isConsoleCaptureActive()) {
 				installConsoleCapture(true);
 				setConsoleActive(true);
@@ -163,6 +169,8 @@ export function DeveloperTab() {
 							/>
 						</SettingsGroup>
 					</SettingsSection>
+
+					<DevMetricsPanel />
 
 					<SettingsSection
 						caption="One-click actions for collecting debug information."

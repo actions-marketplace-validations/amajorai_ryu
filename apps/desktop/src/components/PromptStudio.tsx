@@ -56,6 +56,8 @@ import {
 	type ModelEvalResult,
 	runGatewayEvals,
 } from "@/src/lib/api/gateway.ts";
+import { instrumentedFetch } from "@/src/lib/dev-metrics.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 
 // ── Variable placeholder detection ────────────────────────────────────────────
 // Named placeholders in {{variable_name}} syntax. A top-level regex (not created
@@ -534,7 +536,7 @@ function PromptHistory({
 											v{snap.version}
 										</Badge>
 										<span className="text-muted-foreground text-xs">
-											{new Date(snap.ts).toLocaleString()}
+											{formatDateTime(snap.ts)}
 										</span>
 										<div className="ml-auto flex items-center gap-1">
 											<Button
@@ -1362,6 +1364,8 @@ function PreviewPanel({ prompt, agentId, target, convId }: PreviewPanelProps) {
 		],
 		transport: new DefaultChatTransport({
 			api: chatStreamUrl(target),
+			// Developer-mode turn timing; a plain `fetch` when metrics are off.
+			fetch: instrumentedFetch,
 			headers: (): Record<string, string> => chatHeaders(target),
 			body: () => ({
 				agent_id: agentId,

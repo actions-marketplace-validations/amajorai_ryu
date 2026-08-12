@@ -1,7 +1,7 @@
 import { ditherAvatarSeed } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { Logo as OrbLogo } from "@ryu/ui/components/logo.tsx";
 import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
-import { DEFAULT_THEME_MODE } from "@ryu/ui/theme/prefs";
+import { DEFAULT_THEME_MODE } from "@ryu/ui/theme/prefs.ts";
 import { listen } from "@tauri-apps/api/event";
 import { ThemeProvider } from "next-themes";
 import { useEffect, useState } from "react";
@@ -26,6 +26,7 @@ import { initAnalytics } from "@/src/lib/analytics.ts";
 import { fetchWaitlistMe } from "@/src/lib/api/waitlist.ts";
 import { initCrashReporting } from "@/src/lib/crash.ts";
 import { applyDecorumChrome } from "@/src/lib/decorumTitlebar.ts";
+import { startSettingsSync } from "@/src/lib/settings-sync/engine.ts";
 import { AgentationToolbar } from "./components/AgentationToolbar.tsx";
 import { CrashBoundary } from "./components/CrashBoundary.tsx";
 import Layout from "./components/layout/Layout.tsx";
@@ -183,12 +184,17 @@ function MainApp() {
 		// from the localStorage mirror of `crash-reports-enabled`) is on. The
 		// Privacy tab seeds the live gate from Core's canonical pref when opened.
 		initCrashReporting();
+		// Settings sync. Starts the local-change observer unconditionally (so
+		// per-key timestamps stay accurate for the moment sync is switched on) and
+		// only uploads when the user has opted in.
+		const stopSettingsSync = startSettingsSync();
 		let unlisten: (() => void) | undefined;
 		initNodes().then((fn) => {
 			unlisten = fn;
 		});
 		return () => {
 			unlisten?.();
+			stopSettingsSync();
 		};
 	}, [initNodes]);
 

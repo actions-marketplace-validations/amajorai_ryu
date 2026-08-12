@@ -156,6 +156,15 @@ interface SettingsItemProps {
 	 * caption below the card this row closes.
 	 */
 	description?: ReactNode;
+	/**
+	 * Optional stable id from the desktop settings search index. Emitted as
+	 * `data-setting-id`, which is the authoritative anchor a search result jumps
+	 * to. Rows without one are still reachable — the reveal falls back to
+	 * matching this row's `title` text — so this is an opt-in precision upgrade
+	 * for rows whose title is ambiguous (several "Light theme"s, say), not
+	 * something every row must carry.
+	 */
+	settingsId?: string;
 	title: ReactNode;
 }
 
@@ -169,6 +178,7 @@ export const SettingsItem = ({
 	actions,
 	children,
 	className,
+	settingsId,
 	title,
 }: SettingsItemProps) => (
 	<Item
@@ -176,6 +186,7 @@ export const SettingsItem = ({
 			"flex-col items-stretch gap-2 rounded-none border-0 px-3.5 py-2.5",
 			className
 		)}
+		data-setting-id={settingsId}
 		size="sm"
 	>
 		<div className="flex w-full items-center justify-between gap-3">

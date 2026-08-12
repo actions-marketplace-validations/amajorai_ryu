@@ -2115,6 +2115,7 @@ export function AppearanceTab() {
 							</Select>
 						}
 						description="Syntax-highlight theme used while diffs render in light mode."
+						settingsId="appearance.diff-viewer.light-theme"
 						title="Light theme"
 					/>
 					<SettingsItem
@@ -2141,6 +2142,7 @@ export function AppearanceTab() {
 							</Select>
 						}
 						description="Syntax-highlight theme used while diffs render in dark mode."
+						settingsId="appearance.diff-viewer.dark-theme"
 						title="Dark theme"
 					/>
 					<SettingsItem
@@ -2345,6 +2347,7 @@ export function AppearanceTab() {
 							</Select>
 						}
 						description="Colors used while the app is in light mode. Match app theme keeps the tree on the app's own surface colors."
+						settingsId="appearance.file-tree.light-theme"
 						title="Light theme"
 					/>
 					<SettingsItem
@@ -2371,6 +2374,7 @@ export function AppearanceTab() {
 							</Select>
 						}
 						description="Colors used while the app is in dark mode. The same theme list as the diff viewer, set independently."
+						settingsId="appearance.file-tree.dark-theme"
 						title="Dark theme"
 					/>
 					<SettingsItem

@@ -19,6 +19,7 @@ export type SettingsSectionValue =
 	| "account"
 	| "appearance"
 	| "keyboard"
+	| "sync"
 	| "updates"
 	| "integrations"
 	| "sessions"

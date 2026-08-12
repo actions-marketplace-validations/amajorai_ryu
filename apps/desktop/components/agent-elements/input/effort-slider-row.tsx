@@ -30,14 +30,18 @@ const MAX_CAPTIONED_LEVELS = 5;
 
 // The fill ramps with the level: more effort reads hotter. Three of the four
 // stops are theme tokens, so a customized theme (packages/ui/src/theme/apply.ts
-// rewrites --success/--warning/--destructive) carries them; the top stop has no
-// semantic token to borrow — the set is success/warning/destructive/info — so it
-// is a literal, picked to sit legibly on both the light and the dark track.
+// rewrites --success/--warning/--destructive) carries them, and all three
+// brighten in dark mode. The top stop has no semantic token to borrow — the set
+// is success/warning/destructive/info — so it is declared on the row itself,
+// with a dark value that brightens alongside the other three. A single literal
+// would leave the hottest end reading DARKER than red on a dark track.
+const EFFORT_TOP_STOP =
+	"[--effort-top:oklch(0.6_0.21_305)] dark:[--effort-top:oklch(0.72_0.19_305)]";
 const EFFORT_RAMP = [
 	"var(--success)",
 	"var(--warning)",
 	"var(--destructive)",
-	"oklch(0.6 0.21 305)",
+	"var(--effort-top)",
 ] as const;
 
 /** Fraction of the ramp colour left in the fill; the rest is track showing through. */
@@ -104,7 +108,7 @@ export function EffortSliderRow({
 		// Arrow/Home/End handling has to stop here or a nudge would move the
 		// highlight instead of the value.
 		<div
-			className="flex flex-col gap-1.5 px-2 py-1.5"
+			className={cn("flex flex-col gap-1.5 px-2 py-1.5", EFFORT_TOP_STOP)}
 			onKeyDown={(e) => e.stopPropagation()}
 		>
 			<div className="flex items-center justify-between gap-2">

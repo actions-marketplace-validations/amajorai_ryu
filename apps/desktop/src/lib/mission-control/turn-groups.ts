@@ -155,8 +155,16 @@ const SEARCH_TOOLS = new Set([
 const WEB_TOOLS = new Set(["WebFetch", "WebSearch", "web_search"]);
 const DELEGATE_TOOLS = new Set(["Task", "Agent", "Workflow"]);
 
-/** Input keys that name a file, in the order tools tend to use them. */
-const PATH_KEYS = ["file_path", "filePath", "notebook_path", "path", "target"];
+/** Input keys that name a file, in the order tools tend to use them. Exported
+ *  so the Cowork rail's Sources list reads paths out of the same field names
+ *  rather than growing a second, drifting guess at the tool schemas. */
+export const PATH_KEYS = [
+	"file_path",
+	"filePath",
+	"notebook_path",
+	"path",
+	"target",
+];
 
 // ── Small readers over untyped tool input ─────────────────────────────────────
 
@@ -177,7 +185,10 @@ function readString(source: unknown, key: string): string | undefined {
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function firstString(source: unknown, keys: string[]): string | undefined {
+export function firstString(
+	source: unknown,
+	keys: string[]
+): string | undefined {
 	for (const key of keys) {
 		const found = readString(source, key);
 		if (found !== undefined) {

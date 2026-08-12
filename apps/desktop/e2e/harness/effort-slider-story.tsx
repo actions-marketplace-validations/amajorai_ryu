@@ -29,6 +29,11 @@ import "../../src/index.css";
 
 const PI_LEVELS = ["off", "low", "medium", "high", "max"];
 const SHORT_LEVELS = ["low", "medium", "high"];
+// A count the four-stop fill ramp does NOT divide evenly, so its middle detents
+// land between stops and take the interpolating branch of `effortFillColor`.
+// Pi's five and the three above both land on whole stops and would never reach
+// it — an invalid mix there drops the fill's colour entirely.
+const OFF_RAMP_LEVELS = ["off", "low", "medium", "high"];
 
 function titled(level: string) {
 	return level.charAt(0).toUpperCase() + level.slice(1);
@@ -82,6 +87,12 @@ function Story() {
 						label="Reasoning effort"
 						levels={SHORT_LEVELS}
 						testId="three"
+					/>
+					<Scale
+						initial="medium"
+						label="Depth"
+						levels={OFF_RAMP_LEVELS}
+						testId="four"
 					/>
 				</DropdownMenuContent>
 			</DropdownMenu>

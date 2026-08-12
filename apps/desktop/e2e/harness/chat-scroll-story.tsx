@@ -128,8 +128,21 @@ function Story() {
 					    message list rather than filling one that was already there. */}
 					<AgentChat
 						conversationKey={thread}
+						// ChatPage always passes an object literal here, so a user turn
+						// ALWAYS carries an avatar in the real app. Without it the story
+						// lays out a one-child row the product never renders, and the
+						// row's right edge is not the one the user sees.
+						currentUser={{ id: "me", name: "You" }}
 						emptyStatePosition="center"
 						messages={messages}
+						// Present purely so the hover toolbar has buttons to align; the
+						// story never branches or edits.
+						onBranch={() => {
+							// no-op
+						}}
+						onEditMessage={() => {
+							// no-op
+						}}
 						onSend={() => {
 							// The story never sends; the composer is here because the real
 							// surface always carries one.

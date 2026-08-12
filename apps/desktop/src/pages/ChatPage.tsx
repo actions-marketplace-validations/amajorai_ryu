@@ -145,6 +145,7 @@ import {
 	widgetSetState,
 } from "@/src/lib/api/widgets.ts";
 import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
+import { instrumentedFetch } from "@/src/lib/dev-metrics.ts";
 import {
 	applyMention,
 	buildMentionGroups,
@@ -1269,6 +1270,9 @@ export default function ChatPage({
 		id: chatId,
 		transport: new DefaultChatTransport({
 			api: chatStreamUrl(chatTarget),
+			// Developer-mode turn timing (time-to-first-token, stream duration,
+			// bytes). A plain `fetch` when metrics are off — see lib/dev-metrics.ts.
+			fetch: instrumentedFetch,
 			// Forward the user-identity JWT alongside the node token so Core can
 			// verify WHO sent this turn and stamp `author_user_id` on the persisted
 			// message — the value the realtime fan-out uses to attribute it to a

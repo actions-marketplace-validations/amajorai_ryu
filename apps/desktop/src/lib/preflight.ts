@@ -15,6 +15,7 @@ import { fetchHealth, fetchSystemStatus } from "@/src/lib/api/system.ts";
 import { getVersionInfo } from "@/src/lib/api/update.ts";
 import { getConsoleBufferText } from "@/src/lib/console-buffer.ts";
 import { reportError } from "@/src/lib/crash.ts";
+import { getDevMetricsText } from "@/src/lib/dev-metrics.ts";
 import { fetchCatalog } from "@/src/lib/services-api.ts";
 
 /** Run a labelled probe, degrading a failure to a note instead of throwing. */
@@ -59,10 +60,15 @@ export async function collectDiagnostics(target: ApiTarget): Promise<string> {
 		}),
 	]);
 	const consoleText = getConsoleBufferText();
+	// Timings only exist when the same gate that fills the console buffer is on,
+	// so an empty string here means "not recording", not "everything was fast".
+	// Omit the section rather than print a table of zeroes that reads as a result.
+	const metricsText = getDevMetricsText();
 	return [
 		`# Ryu diagnostics — ${new Date().toISOString()}`,
 		`node ${target.url}`,
 		...sections,
+		...(metricsText ? [`## Performance\n${metricsText}`] : []),
 		`## Recent console\n${consoleText || "(empty — console capture is DEV-only)"}`,
 	].join("\n\n");
 }

@@ -101,6 +101,7 @@ import {
 import { NodeAccessSettings } from "@/src/components/settings/NodeAccessSettings.tsx";
 import { NodePermissionsSettings } from "@/src/components/settings/NodePermissionsSettings.tsx";
 import { PrivacySettings } from "@/src/components/settings/PrivacySettings.tsx";
+import { SettingsSearchResults } from "@/src/components/settings/SettingsSearchResults.tsx";
 import { StorageSettings } from "@/src/components/settings/StorageSettings.tsx";
 import {
 	SettingsCard,
@@ -121,6 +122,7 @@ import {
 	type ScopedNavEntity,
 	useScopedSettingsNav,
 } from "@/src/hooks/useScopedSettingsNav.ts";
+import { useSettingReveal } from "@/src/hooks/useSettingReveal.ts";
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -208,6 +210,9 @@ import {
 } from "@/src/lib/api/preferences.ts";
 import { deleteProviderKey, setProviderKey } from "@/src/lib/api/secrets.ts";
 import { fetchSidecarStatus } from "@/src/lib/api/system.ts";
+import { requestSettingReveal } from "@/src/lib/settings-focus.ts";
+import type { SettingsEntry } from "@/src/lib/settings-index.ts";
+import { formatTime } from "@/src/lib/timezone.ts";
 import { PreflightPage } from "@/src/pages/PreflightPage.tsx";
 import type { GatewaySection } from "@/src/store/useGatewayDialog.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
@@ -5346,7 +5351,7 @@ function AuditTable({ entries }: { entries: AuditEntry[] }) {
 						const ts = new Date(entry.timestamp);
 						const timeStr = Number.isNaN(ts.getTime())
 							? entry.timestamp
-							: ts.toLocaleTimeString();
+							: formatTime(ts);
 						return (
 							<tr className="border-b last:border-0" key={entry.id}>
 								<Tooltip>
@@ -6252,6 +6257,7 @@ export function GatewayDialog({
 	const [search, setSearch] = useState("");
 	const [advanced, setAdvanced] = useAdvancedSettings();
 	const openSettings = useSettingsDialog((s) => s.openSettings);
+	const contentRef = useSettingReveal(section);
 
 	// Node-scoped app/plugin settings tabs (user-scoped ones render in the App
 	// Settings dialog instead). Each becomes its own nav item under Apps / Plugins.
@@ -6274,6 +6280,21 @@ export function GatewayDialog({
 	const handleOpenSettings = () => {
 		onOpenChange(false);
 		openSettings();
+	};
+
+	// A search result may name a setting owned by the App Settings dialog. Same
+	// rule as the manual cross-link above: close this modal before opening that
+	// one so two focus traps never stack. The reveal request is module state, so
+	// it survives the swap.
+	const handleSelectResult = (entry: SettingsEntry) => {
+		requestSettingReveal(entry);
+		setSearch("");
+		if (entry.dialog === "app") {
+			onOpenChange(false);
+			openSettings(entry.section);
+			return;
+		}
+		setSection(entry.section);
 	};
 
 	useEffect(() => {
@@ -6534,7 +6555,7 @@ export function GatewayDialog({
 			<DialogContent className="!w-[85vw] !max-w-7xl max-md:!w-screen max-md:!max-w-none [&>[data-slot=dialog-close]]:!top-5 [&>[data-slot=dialog-close]]:!right-5 h-[85vh] gap-0 overflow-hidden p-0 max-md:h-[100dvh] max-md:rounded-none">
 				<ResizableSettingsLayout
 					content={
-						<div className="px-4 py-4 md:px-8 md:py-6">
+						<div className="px-4 py-4 md:px-8 md:py-6" ref={contentRef}>
 							<div className="mb-6 flex flex-col gap-1">
 								<h2 className="font-semibold text-base">{activeLabel}</h2>
 								{/* One plain sentence saying what this pane is for. Cheap, and
@@ -6578,12 +6599,16 @@ export function GatewayDialog({
 									</SidebarMenu>
 								</SidebarGroup>
 							))}
-							{search.trim() && navGroups.length === 0 ? (
-								<SidebarGroup className="py-1">
-									<p className="px-2 text-muted-foreground text-xs">
-										Nothing matches “{search.trim()}”.
-									</p>
-								</SidebarGroup>
+							{/* Individual SETTINGS, from the shared index. The nav filter above
+							    only ever finds tabs; this is what answers "where is the row that
+							    does X", including rows that live in the App Settings dialog. */}
+							{search.trim() ? (
+								<SettingsSearchResults
+									currentDialog="gateway"
+									onSelect={handleSelectResult}
+									query={search}
+									showEmptyState={navGroups.length === 0}
+								/>
 							) : null}
 							<SidebarGroup className="mt-auto py-1">
 								<SidebarGroupLabel>App</SidebarGroupLabel>

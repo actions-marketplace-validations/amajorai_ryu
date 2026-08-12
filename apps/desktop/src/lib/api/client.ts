@@ -7,6 +7,11 @@
 // hardcoded — Core listens on :7980 but the active node may be remote.
 
 import { TOKEN_KEY } from "@/lib/auth-client.ts";
+import {
+	isDevMetricsEnabled,
+	normalizePath,
+	recordHttpSample,
+} from "@/src/lib/dev-metrics.ts";
 import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
 import type { Node } from "@/src/store/useNodeStore.ts";
 
@@ -286,12 +291,43 @@ export async function request<T>(
 	path: string,
 	options: RequestOptions = {}
 ): Promise<T> {
-	const resp = await fetch(apiUrl(target, path), {
-		method: options.method ?? "GET",
-		headers: await requestHeaders(target, options.headers),
-		body: options.body === undefined ? undefined : JSON.stringify(options.body),
-		signal: options.signal,
-	});
+	// Developer-mode timing. The gate is checked before anything is allocated, so
+	// a release build without Developer Mode pays one boolean read per call and
+	// keeps `started`/`at` unset. This is the ONE choke point every Core API call
+	// goes through, which is why the probe lives here and nowhere else.
+	const metering = isDevMetricsEnabled();
+	const started = metering ? performance.now() : 0;
+	const at = metering ? Date.now() : 0;
+	const method = options.method ?? "GET";
+	const meter = (status: number): void => {
+		if (metering) {
+			recordHttpSample({
+				at,
+				method,
+				path: normalizePath(path),
+				status,
+				ms: performance.now() - started,
+			});
+		}
+	};
+
+	let resp: Response;
+	try {
+		resp = await fetch(apiUrl(target, path), {
+			method,
+			headers: await requestHeaders(target, options.headers),
+			body:
+				options.body === undefined ? undefined : JSON.stringify(options.body),
+			signal: options.signal,
+		});
+	} catch (error) {
+		// Status 0 = never reached the node (offline, DNS, abort). Recording it is
+		// the point: "the call took 30s and returned nothing" is the shape of the
+		// problem people report as "it hung".
+		meter(0);
+		throw error;
+	}
+	meter(resp.status);
 	if (!resp.ok) {
 		const text = await resp.text().catch(() => "");
 		const disabled = appDisabledFromBody(resp.status, text);

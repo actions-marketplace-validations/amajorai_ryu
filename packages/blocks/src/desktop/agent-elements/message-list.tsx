@@ -1272,7 +1272,7 @@ export const MessageList = memo(function MessageList({
 					<MessageScrollerViewport>
 						{pinUserMessage && !isCompact && pinnedMessage ? (
 							<div className="sticky top-0 z-20 -mb-1">
-								<div className="mx-auto w-full max-w-[720px] px-4 pt-2 pb-1">
+								<div className="mx-auto w-full max-w-[744px] px-3 pt-2 pb-1">
 									<PinnedUserMessageBar
 										message={pinnedMessage}
 										onScrollTo={scrollToPinned}
@@ -1280,10 +1280,17 @@ export const MessageList = memo(function MessageList({
 								</div>
 							</div>
 						) : null}
+						{/* 744 = the composer's own 720px column PLUS its `px-3` gutter
+						    (input-bar.tsx wraps `mx-auto max-w-[720px]` in `px-3`).
+						    Matching both numbers — not just the 720 — is what puts a
+						    message's content edges on the composer's card edges at every
+						    width. With `max-w-[720px] px-4` the transcript sat 16px inside
+						    the composer on each side, which reads as a gap to the right of
+						    the user avatar. */}
 						<MessageScrollerContent
 							className={cn(
 								"w-full gap-2",
-								isCompact ? "px-0.5 py-1" : "mx-auto max-w-[720px] px-4 py-6"
+								isCompact ? "px-0.5 py-1" : "mx-auto max-w-[744px] px-3 py-6"
 							)}
 						>
 							{turns.map((turn, turnIndex) => {
@@ -1342,7 +1349,10 @@ export const MessageList = memo(function MessageList({
 														/>
 														{!isEditingThis && showUserToolbar && (
 															<MessageToolbar
-																alignClass="justify-end"
+																// Left-aligned even though the bubble sits on the right:
+																// the actions then share a column edge with the assistant
+																// toolbar below rather than hugging the opposite margin.
+																alignClass="justify-start"
 																heightClass="h-[28px]"
 																hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
 																isVisible={userCopyVisible}
