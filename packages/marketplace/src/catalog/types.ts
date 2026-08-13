@@ -408,10 +408,31 @@ export interface CatalogEntry {
 
 /** A catalog entry joined with its live lifecycle state (installed/enabled). */
 export interface AppCatalogItem {
+	/** The release train this INSTALLED listing follows (`stable`, `beta`,
+	 *  `nightly`, …). Absent for a listing that is not installed, and for a host
+	 *  whose lifecycle read predates channels. */
+	channel?: string | null;
 	enabled: boolean;
 	entry: CatalogEntry;
 	grants: string[];
 	installed: boolean;
+	/** The version actually ON THIS MACHINE, from the lifecycle record — not the
+	 *  catalog entry's `version`, which is the newest PUBLISHED one and is exactly
+	 *  what an out-of-date install differs from. Absent when not installed. */
+	installedVersion?: string | null;
+}
+
+/** One release train a listing publishes, and the version it currently resolves
+ *  to.
+ *
+ *  `installable` is the load-bearing field: a train read from a repository's git
+ *  tags describes what an author TAGGED and can be browsed, while only a train the
+ *  marketplace serves can actually be installed. Rendering both as selectable
+ *  would produce a picker whose choice silently does nothing. */
+export interface CatalogChannel {
+	channel: string;
+	installable?: boolean;
+	version?: string | null;
 }
 
 /** Registry detail for a browse-only integration descriptor. */
@@ -656,8 +677,15 @@ export interface AppsCatalogState {
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
 	/** Add a listing. A card passes its own id; the detail panel may omit it and
-	 *  act on the current selection. */
-	install: (id?: string) => Promise<void>;
+	 *  act on the current selection.
+	 *
+	 *  `options.channel` installs from a prerelease train instead of the stable
+	 *  release, and the node PERSISTS that choice — the listing keeps following the
+	 *  train on later updates rather than being pulled back to stable. */
+	install: (
+		id?: string,
+		options?: { channel?: string | null }
+	) => Promise<void>;
 	installFromUrl: (url: string) => Promise<void>;
 	/** The id whose add is in flight, or null. Carries identity on purpose: as a
 	 *  bare boolean it followed the SELECTION, so the spinner moved to whatever
@@ -676,6 +704,15 @@ export interface AppsCatalogState {
 	setEnabled: (enabled: boolean) => Promise<void>;
 	setQuery: (q: string) => void;
 	sources: PluginCatalogSource[];
+	/** Move an INSTALLED listing onto another release train, and to that train's
+	 *  current build. `null` returns it to stable.
+	 *
+	 *  A distinct verb from `install` on purpose: switching is an update of
+	 *  something already present, and it can move the install BACKWARDS (every
+	 *  prerelease sorts below its stable release), which an install path has no
+	 *  business doing silently. Optional — a host with no update seam omits it and
+	 *  the switch control never renders. */
+	switchChannel?: (id: string, channel: string | null) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

@@ -87,22 +87,23 @@ function TabsTrigger({ className, ...props }: TabsPrimitive.Tab.Props) {
 				"group-data-[variant=stepper]/tabs-list:h-auto group-data-[variant=stepper]/tabs-list:flex-col group-data-[variant=stepper]/tabs-list:items-start group-data-[variant=stepper]/tabs-list:gap-2 group-data-[variant=stepper]/tabs-list:whitespace-normal group-data-[variant=stepper]/tabs-list:rounded-sm group-data-[variant=stepper]/tabs-list:px-0 group-data-[variant=stepper]/tabs-list:py-0 group-data-[variant=stepper]/tabs-list:text-left group-data-[variant=stepper]/tabs-list:text-muted-foreground/60 group-data-[variant=stepper]/tabs-list:text-xs",
 				"group-data-[variant=stepper]/tabs-list:before:h-1 group-data-[variant=stepper]/tabs-list:before:w-full group-data-[variant=stepper]/tabs-list:before:rounded-full group-data-[variant=stepper]/tabs-list:before:bg-border group-data-[variant=stepper]/tabs-list:before:transition-colors group-data-[variant=stepper]/tabs-list:before:content-['']",
 				"group-data-[variant=stepper]/tabs-list:data-active:bg-transparent! group-data-[variant=stepper]/tabs-list:data-active:text-foreground group-data-[variant=stepper]/tabs-list:data-active:after:opacity-0 group-data-[variant=stepper]/tabs-list:data-active:before:bg-foreground",
-				"group-data-[variant^=pills]/tabs-list:h-auto group-data-[variant^=pills]/tabs-list:flex-initial group-data-[variant^=pills]/tabs-list:rounded-full group-data-[variant^=pills]/tabs-list:px-3 group-data-[variant^=pills]/tabs-list:py-1 group-data-[variant^=pills]/tabs-list:text-foreground/60 group-data-[variant^=pills]/tabs-list:hover:bg-black/5 group-data-[variant^=pills]/tabs-list:hover:text-foreground dark:group-data-[variant^=pills]/tabs-list:text-foreground/60 dark:group-data-[variant^=pills]/tabs-list:hover:bg-white/10",
-				// The `pills-lg` override: the only rule the two pill variants do not
-				// share. Deliberately the exact metrics of `Button size="lg"`
-				// (`h-14 gap-2 px-6`) rather than a padding bump of its own — where
-				// this variant is used the tab strip and the dialog's action row are
-				// the two controls the eye compares, and a pill that is nearly but not
-				// quite the button's size reads as a mistake. `!` on the height because
-				// the prefix-matched `h-auto` above is the same utility, and which of
-				// the two wins is otherwise down to Tailwind's output order.
-				"group-data-[variant=pills-lg]/tabs-list:h-14! group-data-[variant=pills-lg]/tabs-list:gap-2 group-data-[variant=pills-lg]/tabs-list:px-6 group-data-[variant=pills-lg]/tabs-list:text-sm",
+				// Copied from the original repo's `pills` trigger, minus the outline:
+				// `rounded-full px-4 py-2 text-sm`, a hover wash, and a filled black
+				// pill for the active tab. An inactive pill is a label and its padding,
+				// nothing else — the base trigger above pins `border-transparent!`, so
+				// leaving the border undeclared here is what keeps it invisible.
+				//
+				// `pills-lg` deliberately resolves to the SAME box. It used to fork the
+				// size (`h-14!`, then wider sides), and every attempt to make the large
+				// one look right made it look like a blob instead. The prefix match
+				// covers both names so the two cannot drift again.
+				"group-data-[variant^=pills]/tabs-list:h-auto group-data-[variant^=pills]/tabs-list:flex-initial group-data-[variant^=pills]/tabs-list:gap-2 group-data-[variant^=pills]/tabs-list:rounded-full group-data-[variant^=pills]/tabs-list:px-4 group-data-[variant^=pills]/tabs-list:py-2 group-data-[variant^=pills]/tabs-list:text-foreground group-data-[variant^=pills]/tabs-list:text-sm group-data-[variant^=pills]/tabs-list:hover:bg-black/5 group-data-[variant^=pills]/tabs-list:hover:text-foreground dark:group-data-[variant^=pills]/tabs-list:text-foreground dark:group-data-[variant^=pills]/tabs-list:hover:bg-white/10",
 				// `text-white!` / `text-black!` rather than plain: the unguarded
 				// `data-active:text-foreground` on the line below outranks them in
 				// Tailwind's output order, which painted a pills list's active label
 				// near-black on its own black pill — unreadable. The neighbouring
 				// background rules already carry `!` for the same reason.
-				"group-data-[variant^=pills]/tabs-list:data-active:border-transparent! group-data-[variant^=pills]/tabs-list:data-active:bg-black! group-data-[variant^=pills]/tabs-list:data-active:text-white! group-data-[variant^=pills]/tabs-list:data-active:hover:bg-black/80! dark:group-data-[variant^=pills]/tabs-list:data-active:bg-white! dark:group-data-[variant^=pills]/tabs-list:data-active:text-black! dark:group-data-[variant^=pills]/tabs-list:data-active:hover:bg-white/80!",
+				"group-data-[variant^=pills]/tabs-list:data-active:border-transparent! group-data-[variant^=pills]/tabs-list:data-active:bg-black! group-data-[variant^=pills]/tabs-list:data-active:text-white! dark:group-data-[variant^=pills]/tabs-list:data-active:bg-white! dark:group-data-[variant^=pills]/tabs-list:data-active:text-black!",
 				"data-active:bg-background data-active:text-foreground dark:data-active:border-input dark:data-active:bg-input/30 dark:data-active:text-foreground",
 				// Segmented: the sliding TabsIndicator owns the active background, so the
 				// trigger itself stays transparent and only animates its text colour. It

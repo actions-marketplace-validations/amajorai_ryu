@@ -28,9 +28,9 @@
  * visible — one island on screen at a time.
  */
 
-import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
+import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ChatStatus, UIMessage } from "ai";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -618,13 +618,6 @@ const DONE_BEAT_INDEX = beatIndexOf("done");
 const HANDOFF_BEAT_INDEX = beatIndexOf("handoff");
 const REST_BEAT_INDEX = beatIndexOf("rest");
 
-const PHASES: { id: Phase; label: string }[] = [
-	{ id: "notice", label: "Island notices" },
-	{ id: "accept", label: "You accept" },
-	{ id: "run", label: "Desktop runs it" },
-	{ id: "done", label: "Work is done" },
-];
-
 /**
  * The pills are real buttons under an animated pointer, so they have to do what
  * they say: a visitor who beats the script to the click runs the same handoff.
@@ -801,54 +794,6 @@ function DemoIsland({
 	);
 }
 
-/* ── the annotations that name each surface ────────────────────────────────── */
-
-/**
- * The two-surface legend. It rides BELOW the window rather than floating inside
- * it: labels dropped on the app chrome cover the very UI they are naming, and
- * the space above the window belongs to the island.
- */
-function SurfaceLegend({ focus }: { focus: Beat["focus"] }) {
-	const surfaces = [
-		{
-			id: "island" as const,
-			title: "Island",
-			subtitle: "Always on top · one glance, one click",
-		},
-		{
-			id: "desktop" as const,
-			title: "Desktop app",
-			subtitle: "Tools, permissions, history · the full run",
-		},
-	];
-	return (
-		<div className="flex flex-wrap items-center gap-2">
-			{surfaces.map((surface) => (
-				<div
-					className={cn(
-						"flex items-center gap-2 rounded-full border px-3 py-1.5 transition-colors duration-500",
-						focus === surface.id
-							? "border-foreground/25 bg-background text-foreground shadow-sm"
-							: "border-border/60 bg-background/60 text-muted-foreground"
-					)}
-					key={surface.id}
-				>
-					<span
-						className={cn(
-							"size-1.5 rounded-full transition-colors duration-500",
-							focus === surface.id ? "bg-emerald-500" : "bg-muted-foreground/40"
-						)}
-					/>
-					<span className="font-medium text-xs">{surface.title}</span>
-					<span className="hidden text-[11px] text-muted-foreground lg:inline">
-						{surface.subtitle}
-					</span>
-				</div>
-			))}
-		</div>
-	);
-}
-
 /**
  * The three dots that travel from the island to the window on the handoff. It
  * spans the island band AND the window, so the dots cross the wallpaper gap the
@@ -878,90 +823,17 @@ function HandoffTrail({ shown }: { shown: boolean }) {
 
 /* ── the desktop half ──────────────────────────────────────────────────────── */
 
-function Selector({ label, value }: { label: string; value: string }) {
-	return (
-		<button
-			className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-sm hover:bg-accent"
-			type="button"
-		>
-			<span className="text-muted-foreground text-xs">{label}</span>
-			<span className="font-medium">{value}</span>
-			<span className="text-muted-foreground">⌄</span>
-		</button>
-	);
-}
-
-function ChatTopBar({
-	space,
-	thread,
-}: {
-	space: string;
-	thread: Beat["thread"];
-}) {
-	return (
-		<header className="flex items-center gap-2 border-border border-b px-4 py-2.5">
-			<Selector label="Agent" value="Ryu" />
-			<Selector label="Model" value="claude-opus-4-8" />
-			<Selector label="Space" value={space} />
-			<div className="ml-auto flex items-center gap-2">
-				<AnimatePresence initial={false} mode="wait">
-					<motion.div
-						animate={{ opacity: 1, y: 0 }}
-						exit={{ opacity: 0, y: -4 }}
-						initial={{ opacity: 0, y: 4 }}
-						key={thread}
-						transition={{ duration: 0.25 }}
-					>
-						<Badge variant={thread === "task" ? "default" : "outline"}>
-							{thread === "task" ? "From the Island" : "Local"}
-						</Badge>
-					</motion.div>
-				</AnimatePresence>
-				<Button size="icon-sm" variant="ghost">
-					⋯
-				</Button>
-			</div>
-		</header>
-	);
-}
-
-/* ── the phase strip + caption ─────────────────────────────────────────────── */
-
-function PhaseStrip({ phase }: { phase: Phase }) {
-	return (
-		<div className="flex flex-wrap items-center gap-x-1 gap-y-1 rounded-full border border-border/60 bg-background/80 px-1.5 py-1.5 backdrop-blur-md">
-			{PHASES.map((item, index) => (
-				<span className="flex items-center gap-1" key={item.id}>
-					{index > 0 ? (
-						<span
-							aria-hidden="true"
-							className="text-muted-foreground/50 text-xs"
-						>
-							›
-						</span>
-					) : null}
-					<span
-						className={cn(
-							"rounded-full px-2.5 py-1 text-xs transition-colors duration-500",
-							phase === item.id
-								? "bg-foreground font-medium text-background"
-								: "text-muted-foreground"
-						)}
-					>
-						{item.label}
-					</span>
-				</span>
-			))}
-		</div>
-	);
-}
-
 /**
- * The use-case switcher. The loop rotates on its own — this is here so the point
- * lands ("it is not one canned demo") without waiting three minutes for the
- * rotation to prove it, and so a visitor can jump to the job that is theirs.
+ * The use-case pills. Rendered by `hero.tsx` ABOVE the wallpaper, not inside the
+ * stage: sitting on the desktop background they read as chrome belonging to the
+ * mock app, and the point of them is the opposite — that the loop is not one
+ * canned demo, and a visitor can jump straight to the job that is theirs.
+ *
+ * Stock `TabsList variant="pills-lg"`, styled by nothing here. This was briefly
+ * a hand-rolled button row carrying its own border, shadow and colour rules,
+ * which is how a surface drifts out of the design system one override at a time.
  */
-function UseCaseSwitcher({
+export function HeroUseCaseSwitcher({
 	current,
 	onPick,
 }: {
@@ -969,25 +841,18 @@ function UseCaseSwitcher({
 	onPick: (index: number) => void;
 }) {
 	return (
-		<div className="flex flex-wrap items-center gap-1.5">
-			<span className="pr-1 text-muted-foreground text-xs">Also runs</span>
-			{SCENARIOS.map((scenario, index) => (
-				<button
-					aria-current={index === current ? "true" : undefined}
-					className={cn(
-						"rounded-full border px-2.5 py-1 text-xs transition-colors duration-300",
-						index === current
-							? "border-foreground/25 bg-background font-medium text-foreground shadow-sm"
-							: "border-border/60 bg-background/60 text-muted-foreground hover:bg-background/90 hover:text-foreground"
-					)}
-					key={scenario.id}
-					onClick={() => onPick(index)}
-					type="button"
-				>
-					{scenario.label}
-				</button>
-			))}
-		</div>
+		<Tabs
+			onValueChange={(value) => onPick(Number(value))}
+			value={String(current)}
+		>
+			<TabsList className="mx-auto" variant="pills-lg">
+				{SCENARIOS.map((scenario, index) => (
+					<TabsTrigger key={scenario.id} value={String(index)}>
+						{scenario.label}
+					</TabsTrigger>
+				))}
+			</TabsList>
+		</Tabs>
 	);
 }
 
@@ -1040,16 +905,20 @@ const PROMO_CHANCE = 0.1;
 const TAKEOVER_REPLY =
 	"Happy to. On the desktop I can run that end to end — tools, files and all — and the Island will ping you when it's done.";
 
-function useBeatLoop(paused: boolean) {
+function useBeatLoop(
+	paused: boolean,
+	scenarioIndex: number,
+	setScenarioIndex: (next: number) => void
+) {
 	const reduceMotion = useReducedMotion();
 	const [index, setIndex] = useState(0);
-	// Which use case is running. The loop steps to the next one every time it
-	// wraps, so a visitor who watches for a minute sees four different jobs
-	// rather than the same one four times.
-	const [scenarioIndex, setScenarioIndex] = useState(0);
 	const [visible, setVisible] = useState(true);
 	const stageRef = useRef<HTMLDivElement>(null);
 	const scenario = SCENARIOS[scenarioIndex] ?? (SCENARIOS[0] as Scenario);
+	// Read inside the beat timer so a lap wrap advances from the CURRENT use
+	// case without the timer having to re-arm every time one is picked.
+	const scenarioIndexRef = useRef(scenarioIndex);
+	scenarioIndexRef.current = scenarioIndex;
 	const beats = useMemo(() => buildBeats(scenario), [scenario]);
 
 	// Reduced motion: skip straight to the finished run and never advance.
@@ -1086,17 +955,20 @@ function useBeatLoop(paused: boolean) {
 				setIndex(next);
 				return;
 			}
-			setScenarioIndex((s) => (s + 1) % SCENARIOS.length);
+			setScenarioIndex((scenarioIndexRef.current + 1) % SCENARIOS.length);
 			setIndex(0);
 		}, beats[index]?.hold ?? 1500);
 		return () => window.clearTimeout(timer);
-	}, [index, paused, visible, reduceMotion, beats]);
+	}, [index, paused, visible, reduceMotion, beats, setScenarioIndex]);
 
 	/** Jump straight to a use case — from the switcher chips. */
-	const pickScenario = useCallback((next: number) => {
-		setScenarioIndex(next);
-		setIndex(0);
-	}, []);
+	const pickScenario = useCallback(
+		(next: number) => {
+			setScenarioIndex(next);
+			setIndex(0);
+		},
+		[setScenarioIndex]
+	);
 
 	return {
 		beat: beats[index] ?? (beats[0] as Beat),
@@ -1110,7 +982,13 @@ function useBeatLoop(paused: boolean) {
 	};
 }
 
-export function HeroWorkflowLoop() {
+export function HeroWorkflowLoop({
+	scenarioIndex,
+	onScenarioChange,
+}: {
+	onScenarioChange: (next: number) => void;
+	scenarioIndex: number;
+}) {
 	// Rolled once on mount (client-only) so SSR/hydration stay in sync. Seeds the
 	// persistent GlobalIsland (root layout) with whether the promo is available.
 	useEffect(() => {
@@ -1121,15 +999,8 @@ export function HeroWorkflowLoop() {
 	// theirs — the same "take it over" affordance the old showcase had.
 	const [takeover, setTakeover] = useState<UIMessage[] | null>(null);
 	const [takeoverStatus, setTakeoverStatus] = useState<ChatStatus>("ready");
-	const {
-		beat,
-		pickScenario,
-		scenario,
-		scenarioIndex,
-		setIndex,
-		stageRef,
-		visible,
-	} = useBeatLoop(takeover !== null);
+	const { beat, pickScenario, scenario, setIndex, stageRef, visible } =
+		useBeatLoop(takeover !== null, scenarioIndex, onScenarioChange);
 	const { frameRef, scale } = useStageScale();
 
 	// One island on screen: stand the persistent site island down while the stage
@@ -1203,16 +1074,14 @@ export function HeroWorkflowLoop() {
 		setIndex(0);
 	}, [setIndex]);
 
-	// Picking a use case also ends a takeover: the visitor asked to see that job
-	// run, and the script cannot run while their own chat is on screen.
-	const chooseScenario = useCallback(
-		(next: number) => {
-			setTakeover(null);
-			setTakeoverStatus("ready");
-			pickScenario(next);
-		},
-		[pickScenario]
-	);
+	// The switcher now lives outside this component, so the takeover is cleared
+	// on the scenario CHANGE rather than in the click handler.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the
+	// scenario changing, which is the whole trigger — the setters are stable.
+	useEffect(() => {
+		setTakeover(null);
+		setTakeoverStatus("ready");
+	}, [scenarioIndex]);
 
 	const status: ChatStatus = takeover
 		? takeoverStatus
@@ -1272,10 +1141,11 @@ export function HeroWorkflowLoop() {
 						}}
 					>
 						<DesktopShell>
-							<ChatTopBar
-								space={scenario.space}
-								thread={takeover ? "task" : beat.thread}
-							/>
+							{/* No fabricated "Agent / Model / Space" top bar. The real app
+							    has no such row — those controls live in the composer
+							    (`useComposerAgentControls`), so a mock that invents one is
+							    showing a product we do not ship. What is left is AgentChat,
+							    which IS the shipped component. */}
 							<AgentChat
 								messages={messages}
 								onSend={onSend}
@@ -1289,38 +1159,19 @@ export function HeroWorkflowLoop() {
 				<HandoffTrail shown={Boolean(beat.trail) && !takeover} />
 			</div>
 
-			<div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-				<PhaseStrip phase={beat.phase} />
-				<div className="flex flex-wrap items-center gap-2">
-					<SurfaceLegend focus={takeover ? "desktop" : beat.focus} />
-					{takeover ? (
-						<Button onClick={restart} size="sm" variant="secondary">
-							Replay the workflow
-						</Button>
-					) : null}
+			{/* No phase strip, surface legend or step caption. They narrated the
+			    demo for the reader — "Island notices › You accept", "Always on top ·
+			    one glance, one click", "Step 3 — it logs the outcome" — which is a
+			    description of how we built it rather than anything about their work.
+			    The stage shows the job running; that is the whole point of showing it.
+			    The use-case pills now live in `hero.tsx`, above the wallpaper. */}
+			{takeover ? (
+				<div className="mt-4 flex justify-center">
+					<Button onClick={restart} size="sm" variant="secondary">
+						Replay the workflow
+					</Button>
 				</div>
-			</div>
-
-			<div className="mt-3 min-h-[3.5rem] md:min-h-[3rem]">
-				<AnimatePresence initial={false} mode="wait">
-					<motion.p
-						animate={{ opacity: 1, y: 0 }}
-						className="inline-block max-w-3xl rounded-xl border border-border/60 bg-background/85 px-3 py-2 text-foreground text-sm leading-snug backdrop-blur-md"
-						exit={{ opacity: 0, y: -4 }}
-						initial={{ opacity: 0, y: 4 }}
-						key={takeover ? "takeover" : `${scenario.id}-${beat.id}`}
-						transition={{ duration: 0.28 }}
-					>
-						{takeover
-							? "It's your chat now — the demo is live, not a video. Replay the workflow whenever you like."
-							: beat.caption}
-					</motion.p>
-				</AnimatePresence>
-			</div>
-
-			<div className="mt-1">
-				<UseCaseSwitcher current={scenarioIndex} onPick={chooseScenario} />
-			</div>
+			) : null}
 		</div>
 	);
 }

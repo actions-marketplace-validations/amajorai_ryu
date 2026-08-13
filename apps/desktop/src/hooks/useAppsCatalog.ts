@@ -41,6 +41,7 @@ import {
 	type PluginCatalogDetail,
 	type PluginCatalogSource,
 	searchPluginCatalog,
+	updateInstalledPlugin,
 } from "@/src/lib/api/plugins.ts";
 import { beginInstall, endInstall } from "@/src/store/useInstallStore.ts";
 import { useDebouncedValue } from "./use-debounced-value.ts";
@@ -59,6 +60,9 @@ function readBuyerToken(): string | null {
 
 /** A catalog entry joined with its live lifecycle record (if any). */
 export interface AppCatalogItem {
+	/** The release train this install follows (`stable`, `beta`, …); null when the
+	 *  listing is not installed. */
+	channel: string | null;
 	enabled: boolean;
 	entry: CatalogEntry;
 	/** Grants to confirm at enable time — authoritative from AppInfo, else the
@@ -67,6 +71,8 @@ export interface AppCatalogItem {
 	/** Live record from `/api/apps`; null when the app isn't installed. */
 	info: AppInfo | null;
 	installed: boolean;
+	/** The version the lifecycle record holds; null when not installed. */
+	installedVersion: string | null;
 }
 
 export interface UseAppsCatalogResult {
@@ -82,8 +88,14 @@ export interface UseAppsCatalogResult {
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
 	/** Add a listing. Pass the id explicitly from a card (the selection is a
-	 *  PREVIEW concern); omit it to act on the current selection. */
-	install: (id?: string) => Promise<void>;
+	 *  PREVIEW concern); omit it to act on the current selection.
+	 *
+	 *  `options.channel` adds from a prerelease train and PINS the install to it,
+	 *  so later updates follow that train rather than reverting to stable. */
+	install: (
+		id?: string,
+		options?: { channel?: string | null }
+	) => Promise<void>;
 	installFromUrl: (url: string) => Promise<void>;
 	/** The id whose add is in flight for THIS hook instance, else null.
 	 *
@@ -107,6 +119,9 @@ export interface UseAppsCatalogResult {
 	setEnabled: (enabled: boolean) => Promise<void>;
 	setQuery: (q: string) => void;
 	sources: PluginCatalogSource[];
+	/** Move an installed plugin onto another release train (`null` ⇒ stable) and
+	 *  update it to that train's current build. */
+	switchChannel: (id: string, channel: string | null) => Promise<void>;
 }
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -269,6 +284,13 @@ export function useAppsCatalog(
 				info,
 				installed: info?.installed ?? false,
 				enabled: info?.enabled ?? false,
+				// The train this install follows, so the detail bar can say "Beta
+				// channel" instead of leaving the user to infer it from a version
+				// suffix that a channel pin does not always show.
+				channel: info?.channel ?? null,
+				// What is on the machine, which is what a channel switch is compared
+				// against — the entry's own `version` is the newest published one.
+				installedVersion: info?.installedVersion ?? null,
 				grants: info?.permissionGrants ?? entry.permission_grants ?? [],
 			};
 		});
@@ -353,7 +375,13 @@ export function useAppsCatalog(
 	}, [qc, url]);
 
 	const installMutation = useMutation({
-		mutationFn: async (item: AppCatalogItem): Promise<void> => {
+		mutationFn: async ({
+			item,
+			channel,
+		}: {
+			channel?: string | null;
+			item: AppCatalogItem;
+		}): Promise<void> => {
 			// Community listings are unsigned and unreviewed, so Core's
 			// install-by-id path is fail-closed for them by design (its descriptor
 			// carries no manifest). Refuse here too, with copy that says why —
@@ -372,17 +400,21 @@ export function useAppsCatalog(
 				await installPluginFromCatalog(
 					{ url, token },
 					item.entry.id,
-					readBuyerToken()
+					readBuyerToken(),
+					channel
 				);
 				return;
 			}
+			// A built-in is shipped with Core, so its version IS Core's version and
+			// there is no separate train to follow — a channel is meaningless here
+			// and is deliberately not forwarded rather than quietly ignored downstream.
 			await installApp({ url, token }, item.entry.id);
 		},
 		// Both halves of the shared flag live on the mutation lifecycle, never in a
 		// component effect: a card that unmounts mid-add (scrolled out of a
 		// virtualized grid, or the section switched) must not strand its id as busy.
-		onMutate: (item) => beginInstall(item.entry.id),
-		onSettled: async (_data, _error, item) => {
+		onMutate: ({ item }) => beginInstall(item.entry.id),
+		onSettled: async (_data, _error, { item }) => {
 			revalidateBrowse();
 			await revalidateInstalledState();
 			endInstall(item.entry.id);
@@ -415,7 +447,7 @@ export function useAppsCatalog(
 	const select = useCallback((id: string) => setSelectedId(id), []);
 
 	const install = useCallback(
-		async (id?: string) => {
+		async (id?: string, options?: { channel?: string | null }) => {
 			// An explicit id is what a CARD passes: the card knows which row was
 			// clicked, and making it round-trip through the selection is how a
 			// mis-timed selection change could send the add to the wrong listing.
@@ -424,7 +456,10 @@ export function useAppsCatalog(
 			if (!item) {
 				return;
 			}
-			await installMutation.mutateAsync(item);
+			await installMutation.mutateAsync({
+				channel: options?.channel ?? null,
+				item,
+			});
 		},
 		[items, selectedId, installMutation]
 	);
@@ -446,6 +481,33 @@ export function useAppsCatalog(
 		[installUrlMutation]
 	);
 
+	// Switching trains is an UPDATE of something already installed, which is why it
+	// goes through the update endpoint rather than install: Core re-resolves the
+	// listing on the requested channel, re-runs the signature + bundle-integrity +
+	// entitlement gates, moves the install to that train's current build and
+	// persists the new pin. It can move the version BACKWARDS — every prerelease
+	// sorts below its stable release — and Core allows that for an explicit switch
+	// without a `force`, because the request itself is the authority.
+	const switchChannelMutation = useMutation({
+		mutationFn: ({ id, channel }: { channel: string | null; id: string }) =>
+			updateInstalledPlugin({ url, token }, id, channel),
+		// Shares the per-listing busy flag with add/enable: it is the same row, and
+		// it is equally un-clickable while Core is re-resolving it.
+		onMutate: ({ id }) => beginInstall(id),
+		onSettled: async (_data, _error, { id }) => {
+			revalidateBrowse();
+			await revalidateInstalledState();
+			endInstall(id);
+		},
+	});
+
+	const switchChannel = useCallback(
+		async (id: string, channel: string | null) => {
+			await switchChannelMutation.mutateAsync({ channel, id });
+		},
+		[switchChannelMutation]
+	);
+
 	const errorOf = (e: unknown): string | null =>
 		e instanceof Error ? e.message : null;
 	const loadError = errorOf(listQuery.error) ?? errorOf(appsQuery.error);
@@ -453,6 +515,7 @@ export function useAppsCatalog(
 	const actionError =
 		errorOf(lifecycleMutation.error) ??
 		errorOf(installUrlMutation.error) ??
+		errorOf(switchChannelMutation.error) ??
 		errorOf(installMutation.error);
 
 	return {
@@ -473,11 +536,12 @@ export function useAppsCatalog(
 			detailQuery.error instanceof Error ? detailQuery.error.message : null,
 		install,
 		installing: installMutation.isPending
-			? (installMutation.variables?.entry.id ?? null)
+			? (installMutation.variables?.item.entry.id ?? null)
 			: null,
 		setEnabled,
 		lifecyclePending: lifecycleMutation.isPending,
 		installFromUrl,
+		switchChannel,
 		sources,
 		activeSource,
 		selectSource,

@@ -513,6 +513,24 @@ function authToken(): string {
 // uninstallable. Model / mcp items are published through their own tools.
 const SDK_PUBLISH_KIND = "plugin" as const;
 
+/** Leading `x.y.z`, then the prerelease identifiers, then build metadata. */
+const VERSION_SHAPE =
+	/^v?\d+(?:\.\d+){0,2}(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * The release channel a version publishes to: its first prerelease identifier
+ * lowercased, else `stable`.
+ *
+ * Mirrors the control plane's `deriveChannel` and Core's `channel_of` — the rule
+ * is that a version is self-describing, so this can only ever REPORT what the
+ * server will decide, never influence it. Anything unparseable reads as `stable`
+ * here; the server is the one that refuses it.
+ */
+function channelOfVersion(version: string): string {
+	const first = VERSION_SHAPE.exec(version.trim())?.[1]?.split(".")[0];
+	return first ? first.toLowerCase() : "stable";
+}
+
 async function commandPublish(rawDir: string): Promise<void> {
 	const dir = resolve(rawDir);
 	const manifest = loadManifest(dir);
@@ -616,8 +634,17 @@ async function commandPublish(rawDir: string): Promise<void> {
 	if (!resp.ok) {
 		exitError(`publish failed (${resp.status}): ${text}`);
 	}
+	// Name the release channel the version landed on. It is DERIVED from the
+	// version (`1.5.0-beta.1` publishes to `beta`) and there is no flag to set it,
+	// so an author who did not mean to cut a prerelease finds out here rather than
+	// from a stable listing that never moved.
+	const channel = channelOfVersion(manifest.version);
+	const trainNote =
+		channel === "stable"
+			? ""
+			: ` on the \`${channel}\` channel (a prerelease train — users must select it)`;
 	process.stdout.write(
-		`published ${manifest.id}@${manifest.version} (${kind}) → pending moderation\n${text}\n`
+		`published ${manifest.id}@${manifest.version} (${kind})${trainNote} → pending moderation\n${text}\n`
 	);
 }
 

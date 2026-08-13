@@ -69,7 +69,7 @@ const RYU_PATH_ITEMS: BentoItem[] = [
 		action: (
 			<Link
 				className={cn(buttonVariants({ variant: "ghost" }), "inline-flex")}
-				href="https://cal.com/jiaweing/ryu-demo"
+				href="https://cal.com/amajor/ryu-demo"
 				rel="noopener noreferrer"
 				target="_blank"
 			>

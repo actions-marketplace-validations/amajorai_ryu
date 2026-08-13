@@ -35,12 +35,12 @@ const COLUMNS: Column[] = [
 		icon: Wallet,
 		tone: "teal",
 		eyebrow: "Know the bill first",
-		title: "Cost is a setting, not a surprise.",
+		title: "You know the bill before the work starts.",
 		body: "You set the ceiling. Routine work runs on your own machines at no per-job cost, and the expensive models get used only when the job earns it.",
 		points: [
 			"A monthly ceiling per person and per team",
 			"See what a job cost before you quote the client",
-			"Routine work runs on your machines instead of billing per request",
+			"Routine work runs on your machines instead of billing per job",
 			"Keep the subscriptions you already pay for",
 		],
 	},
@@ -55,10 +55,10 @@ export default function SaveTimeMoney() {
 						suffix={
 							<span className="text-muted-foreground">
 								{" "}
-								You get the work done and the receipts, not another project.
+								The paperwork gets done and you get the receipts.
 							</span>
 						}
-						title="You are buying output, not software."
+						title="You are buying the work getting done."
 					/>
 				</div>
 

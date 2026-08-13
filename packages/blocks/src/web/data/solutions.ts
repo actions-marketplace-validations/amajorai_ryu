@@ -70,7 +70,7 @@ export const EARLY_ACCESS: CtaLink = {
 };
 export const BOOK_DEMO: CtaLink = {
 	label: "Book a Demo",
-	href: "https://cal.com/jiaweing/ryu-demo",
+	href: "https://cal.com/amajor/ryu-demo",
 	external: true,
 };
 export const DOWNLOAD: CtaLink = { label: "Download", href: "/download" };

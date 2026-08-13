@@ -2320,8 +2320,30 @@ impl RyuMarketplaceSource {
     /// org's install succeeds. A 402 is surfaced as a clear "requires purchase"
     /// error (never a generic not-found), carrying the server's actionable reason.
     async fn fetch_detail(&self, client: &reqwest::Client, id: &str) -> Result<Value> {
+        self.fetch_detail_on_channel(client, id, None).await
+    }
+
+    /// [`Self::fetch_detail`] for ONE release channel.
+    ///
+    /// `channel: None` asks for the listing's default train, which the control
+    /// plane defines as `stable` — the same meaning `pick_version_for_channel`
+    /// gives an empty channel. A named channel is sent verbatim and the server
+    /// answers 404 when that train has no build, which the caller must surface
+    /// rather than retrying without it: falling back is how someone on `canary`
+    /// silently ends up installing stable.
+    async fn fetch_detail_on_channel(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        channel: Option<&str>,
+    ) -> Result<Value> {
+        let channel_param = channel
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(|c| format!("&channel={}", urlencode_component(c)))
+            .unwrap_or_default();
         let url = format!(
-            "{}/api/marketplace/catalog/detail?kind={}&id={}",
+            "{}/api/marketplace/catalog/detail?kind={}&id={}{channel_param}",
             self.resolve_base(),
             self.kind.as_str(),
             urlencode_path(id.trim()),
@@ -2346,6 +2368,16 @@ impl RyuMarketplaceSource {
             bail!("cannot install `{id}`: {reason}");
         }
         if !resp.status().is_success() {
+            // A channelled request that 404s means that TRAIN has no build — a
+            // materially different fact from "no such item", and the one the user
+            // needs to read when they picked `canary` on a listing that only ships
+            // stable. Say which was asked for; never retry without it.
+            if let Some(channel) = channel.map(str::trim).filter(|c| !c.is_empty()) {
+                bail!(
+                    "Ryu Marketplace item `{id}` has nothing published on the `{channel}` channel ({} from {url})",
+                    resp.status()
+                );
+            }
             bail!(
                 "Ryu Marketplace item `{id}` not found ({} from {url})",
                 resp.status()
@@ -2354,6 +2386,50 @@ impl RyuMarketplaceSource {
         resp.json()
             .await
             .map_err(|e| anyhow::anyhow!("parsing Ryu Marketplace detail {url}: {e}"))
+    }
+
+    /// The release channels this listing publishes, each with the version that
+    /// channel currently resolves to — read from the control plane, the same shape
+    /// [`crate::catalog_source::github_listing_channels`] returns for a
+    /// repo-published listing.
+    ///
+    /// Empty (never an error) when the server is unreachable or predates the
+    /// endpoint, so a caller renders no picker rather than a broken one. An EMPTY
+    /// list must never be read as "stable is fine": it means "unknown", and the
+    /// install path keeps whatever channel it was told to use.
+    pub async fn fetch_channels(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+    ) -> Vec<(String, String)> {
+        let url = format!(
+            "{}/api/marketplace/catalog/channels?kind={}&id={}",
+            self.resolve_base(),
+            self.kind.as_str(),
+            urlencode_path(id.trim()),
+        );
+        let Ok(resp) = client.get(&url).send().await else {
+            return Vec::new();
+        };
+        if !resp.status().is_success() {
+            return Vec::new();
+        }
+        let Ok(body) = resp.json::<Value>().await else {
+            return Vec::new();
+        };
+        body.get("channels")
+            .and_then(|c| c.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let channel = row.get("channel")?.as_str()?.trim();
+                        let version = row.get("version").and_then(|v| v.as_str()).unwrap_or("");
+                        (!channel.is_empty())
+                            .then(|| (channel.to_ascii_lowercase(), version.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Verify-on-install (#468): reject a tampered manifest before any install
@@ -2852,7 +2928,24 @@ impl CatalogSource for RyuMarketplaceSource {
         client: &reqwest::Client,
         id: &str,
     ) -> Result<InstallDescriptor> {
-        let detail = self.fetch_detail(client, id).await?;
+        self.install_descriptor_on_channel(client, id, None).await
+    }
+}
+
+impl RyuMarketplaceSource {
+    /// [`CatalogSource::install_descriptor`] for ONE release channel.
+    ///
+    /// The channel changes only WHICH published version is resolved; every trust
+    /// gate below is unchanged and runs identically on a prerelease. A nightly is
+    /// signature-verified, ui_code-hash-gated and entitlement-checked exactly like
+    /// a stable build — the channel is a selection, never a relaxation.
+    pub async fn install_descriptor_on_channel(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        channel: Option<&str>,
+    ) -> Result<InstallDescriptor> {
+        let detail = self.fetch_detail_on_channel(client, id, channel).await?;
         // Verify-on-install (#468): reject a tampered manifest before mapping it
         // onto an install descriptor. `signed` is true only when a signature was
         // present AND verified valid.
@@ -3967,6 +4060,37 @@ impl Source {
         }
     }
 
+    /// [`Self::install_descriptor`] restricted to ONE release channel.
+    ///
+    /// `None` (or `stable`) is the ordinary install and every source serves it.
+    /// A named prerelease channel is served ONLY by a source that actually
+    /// publishes trains — today the Ryu Marketplace, whose control plane keys a
+    /// listing by `(kind, id, channel)`. Any other source ERRORS rather than
+    /// falling through to its channel-blind descriptor, because that fallthrough
+    /// is precisely the silent cross-channel downgrade the whole resolution rule
+    /// exists to prevent: a user who asked for `beta` would be handed stable and
+    /// told it succeeded.
+    pub async fn install_descriptor_at(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        channel: Option<&str>,
+    ) -> Result<InstallDescriptor> {
+        let wanted = channel
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case(crate::update::STABLE_CHANNEL));
+        let Some(wanted) = wanted else {
+            return self.install_descriptor(client, id).await;
+        };
+        match self {
+            Source::RyuMarketplace(s) => s.install_descriptor_on_channel(client, id, Some(wanted)).await,
+            other => bail!(
+                "source `{}` does not publish release channels, so `{id}` has no `{wanted}` build to install",
+                other.id()
+            ),
+        }
+    }
+
     /// Source-aware MCP install (#464). An MCP install is not a file download; it
     /// resolves a validated launch command (stdio) or remote URL and writes a
     /// `~/.ryu/mcp.json` entry the [`crate::sidecar::mcp::McpRegistry`] then
@@ -4125,6 +4249,49 @@ fn envelope_key(kind: CatalogKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source that does not publish release trains must REFUSE a named channel,
+    /// not quietly serve its ordinary build under that name.
+    ///
+    /// This is the fail-closed half of the whole feature: the resolution rule
+    /// everywhere else is "a channel selects only its own builds, never a
+    /// fallback", and a trait default that fell through to `install_descriptor`
+    /// would break exactly that — a user who asked for `beta` would be handed
+    /// stable and told the install succeeded.
+    #[tokio::test]
+    async fn a_named_channel_is_refused_by_a_source_that_publishes_no_trains() {
+        let source = Source::Stub(StubSource {
+            id: "stub-plugins".to_string(),
+            display_name: "Stub".to_string(),
+            kind: CatalogKind::Plugin,
+        });
+        let client = reqwest::Client::new();
+
+        let err = source
+            .install_descriptor_at(&client, "com.acme.thing", Some("beta"))
+            .await
+            .expect_err("a stub source cannot serve a beta train");
+        let message = err.to_string();
+        assert!(
+            message.contains("beta") && message.contains("release channels"),
+            "the refusal must name the train that is unavailable: {message}"
+        );
+
+        // `stable`, an empty string and `None` are the SAME request — the ordinary
+        // install — so none of them may take the refusal path. (They still fail
+        // here, because a stub source serves nothing at all; the point is that they
+        // fail with the source's own note rather than the channel refusal.)
+        for channel in [None, Some(""), Some("stable"), Some("  STABLE ")] {
+            let err = source
+                .install_descriptor_at(&client, "com.acme.thing", channel)
+                .await
+                .expect_err("a stub source serves nothing");
+            assert!(
+                err.to_string().contains("no upstream configured"),
+                "`{channel:?}` must take the ordinary install path, not the channel refusal"
+            );
+        }
+    }
 
     /// A plugin marketplace whose plugin declares skill paths must resolve to ONE
     /// plugin item at the repo root (Plugin kind), not per-skill leaves — while the

@@ -3,6 +3,7 @@ import { cn } from "@ryu/ui/lib/utils";
 import type { LucideIcon } from "lucide-react";
 import { CalendarX, Clock4, UserRoundPlus } from "lucide-react";
 import Link from "next/link";
+import { DEMO_HREF } from "./data/resources.tsx";
 import {
 	LANDING_CARD_TONES,
 	type LandingCardTone,
@@ -12,8 +13,6 @@ import { PRO_MONTHLY_USD } from "./pricing.tsx";
 import { Reveal } from "./reveal.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
-
-const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
 
 /**
  * The pricing objection is not the number, it is the comparison the buyer makes
@@ -54,8 +53,8 @@ export default function PriceVsHeadcount() {
 				<StaggerLines className="max-w-2xl">
 					<SectionTitle title="Compare us to the hire, not to a chat subscription." />
 					<p className={sectionSubtitleClass}>
-						You are not buying AI. You are buying the paperwork getting done and
-						a record you can show a client.
+						You are buying the paperwork getting done, and a record you can show
+						a client.
 					</p>
 				</StaggerLines>
 
@@ -107,8 +106,7 @@ export default function PriceVsHeadcount() {
 							<p className="mt-2 max-w-md text-muted-foreground text-sm leading-relaxed">
 								A monthly price with a spending ceiling on top of it. A workflow
 								we set up around your firm is quoted on the first call, as a
-								monthly figure — not a scoping exercise, and not a six month
-								rollout.
+								monthly figure, not a scoping exercise or a six month rollout.
 							</p>
 						</div>
 						<div className="flex shrink-0 flex-col gap-3 sm:flex-row">

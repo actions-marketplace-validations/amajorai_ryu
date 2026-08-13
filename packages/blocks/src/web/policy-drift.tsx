@@ -38,7 +38,7 @@ const FIXES = [
 	"One current copy of how your firm does the work",
 	"Every change kept, so you can see what was true on the day a job ran",
 	"A correction someone makes today is what the work follows tomorrow",
-	"The same copy for the people and for the agents",
+	"One copy, whether a person or the software does the job",
 ] as const;
 
 function VersionStack() {
@@ -76,7 +76,7 @@ export default function PolicyDrift() {
 					<SectionTitle title="Set it up right today, out of policy by March." />
 					<p className={sectionSubtitleClass}>
 						Your rules move whether or not anyone writes them down. That is
-						already true of your team. It is fatal for an agent.
+						already true of your team. It quietly makes the work wrong.
 					</p>
 				</StaggerLines>
 
@@ -154,9 +154,8 @@ export default function PolicyDrift() {
 				</div>
 
 				<p className="mt-10 max-w-2xl text-muted-foreground text-sm leading-relaxed md:text-base">
-					A one-off check on day one is the wrong shape for a problem that keeps
-					moving. Every correction your team makes is kept, so the work gets
-					more accurate the longer you run it.
+					Every correction your team makes is kept, so the work gets more
+					accurate the longer you run it.
 				</p>
 			</div>
 		</section>

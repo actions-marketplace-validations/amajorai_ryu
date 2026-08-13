@@ -26,6 +26,16 @@ export type ResourceCategory = "Learn" | "Explore" | "Support";
 export const DOCS_URL =
 	process.env.NEXT_PUBLIC_DOCS_URL ?? "http://localhost:4000";
 
+/**
+ * The booking link behind every "book a demo" / "free consultation" CTA.
+ *
+ * It lives here as ONE constant because it used to be a `const DEMO_HREF`
+ * copy-pasted into eight blocks plus two data files, so changing the Cal
+ * handle meant a ten-file sweep and any file missed kept pointing at a dead
+ * link. Import this instead of re-declaring it.
+ */
+export const DEMO_HREF = "https://cal.com/amajor/ryu-demo";
+
 export interface Resource {
 	category: ResourceCategory;
 	description: string;

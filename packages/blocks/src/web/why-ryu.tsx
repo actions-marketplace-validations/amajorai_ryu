@@ -8,7 +8,7 @@ import { StaggerLines } from "./stagger-lines.tsx";
 
 const steps = [
 	{
-		title: "We start with the job, not the software.",
+		title: "We start with one job your team is drowning in.",
 		body: "A free session where we look at one workflow your team is drowning in, and say plainly whether we can take it off them.",
 	},
 	{
@@ -43,7 +43,7 @@ export default function WhyRyu() {
 					<div className="mt-8 flex flex-col gap-3 sm:flex-row">
 						<Link
 							className={cn(buttonVariants({ variant: "default" }))}
-							href="https://cal.com/jiaweing/ryu-demo"
+							href="https://cal.com/amajor/ryu-demo"
 							rel="noopener noreferrer"
 							target="_blank"
 						>

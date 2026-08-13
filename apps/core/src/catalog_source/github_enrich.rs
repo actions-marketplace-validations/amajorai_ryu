@@ -278,26 +278,80 @@ async fn fetch_releases(
 /// [`crate::update::pick_version_for_channel`], the SAME rule Core applies to its
 /// own builds — channel read off the tag, semver maximum within the channel, and
 /// never a cross-channel fallback.
+/// Cached for [`ENRICH_TTL_SECS`] against the same rate limit the enrichment read
+/// protects itself from, and for a sharper reason: this drives a PICKER, so it is
+/// read every time a listing's detail opens, not only when someone expands a tab.
+/// Unauthenticated GitHub allows 60 requests an hour, and a failed read here
+/// renders as "no channels" — so re-hammering a rate-limited API would make the
+/// picker flicker in and out of existence as the limit was hit and released.
+/// A failed result is cached too, exactly as `enrich_repo` caches an empty one.
 pub async fn listing_channels(
     api_base: &str,
     headers: &[(String, String)],
     owner: &str,
     repo: &str,
 ) -> Vec<(String, String)> {
-    let Some(releases) = fetch_releases(api_base, headers, owner, repo).await else {
-        return Vec::new();
+    let cache_key = format!("channels:{owner}/{repo}");
+    let lock = ENRICH_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    {
+        let guard = lock.lock().await;
+        if let Some(entry) = guard.get(&cache_key) {
+            if entry.fetched_at.elapsed() < std::time::Duration::from_secs(ENRICH_TTL_SECS) {
+                return channels_from_cache(&entry.value);
+            }
+        }
+    }
+
+    let channels = match fetch_releases(api_base, headers, owner, repo).await {
+        Some(releases) => {
+            let tags: Vec<&str> = releases
+                .iter()
+                .filter_map(|r| r.tag_name.as_deref())
+                .collect();
+            crate::update::channels_available(&tags)
+                .into_iter()
+                .filter_map(|channel| {
+                    crate::update::pick_version_for_channel(&tags, &channel)
+                        .map(|tag| (channel, tag.to_string()))
+                })
+                .collect()
+        }
+        None => Vec::new(),
     };
-    let tags: Vec<&str> = releases
-        .iter()
-        .filter_map(|r| r.tag_name.as_deref())
-        .collect();
-    crate::update::channels_available(&tags)
-        .into_iter()
-        .filter_map(|channel| {
-            crate::update::pick_version_for_channel(&tags, &channel)
-                .map(|tag| (channel, tag.to_string()))
+
+    let mut guard = lock.lock().await;
+    guard.insert(
+        cache_key,
+        CacheEntry {
+            fetched_at: std::time::Instant::now(),
+            value: Value::Array(
+                channels
+                    .iter()
+                    .map(|(channel, tag)| serde_json::json!({ "channel": channel, "tag": tag }))
+                    .collect(),
+            ),
+        },
+    );
+    channels
+}
+
+/// Read back the cached channel rows. Shape errors resolve to "no channels" —
+/// the same thing an unreachable GitHub produces — rather than a partial list
+/// that would read as authoritative.
+fn channels_from_cache(value: &Value) -> Vec<(String, String)> {
+    value
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some((
+                        row.get("channel")?.as_str()?.to_string(),
+                        row.get("tag")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
         })
-        .collect()
+        .unwrap_or_default()
 }
 
 /// Fetch git tags — the Versions fallback for a repo that tags but never

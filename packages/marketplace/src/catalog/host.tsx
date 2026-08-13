@@ -25,6 +25,7 @@ import {
 } from "react";
 import type {
 	AppsCatalogState,
+	CatalogChannel,
 	InstalledModelEntry,
 	LlmFitEstimate,
 	ModelCatalogState,
@@ -149,6 +150,21 @@ export interface CatalogHost {
 	canAuthorSkills?: boolean;
 	/** On-demand llmfit hardware fit + tok/s estimate for one repo. */
 	estimateLlmfit: (node: CatalogNode, repo: string) => Promise<LlmFitEstimate>;
+	/** Read the release trains a listing publishes (`stable`, `beta`, `nightly`,
+	 *  …), each with the version it resolves to right now.
+	 *
+	 *  Optional, and its absence is meaningful rather than cosmetic: a host that
+	 *  cannot resolve channels renders no picker at all, which is the honest
+	 *  outcome — offering a channel the surface cannot install from would be a
+	 *  control that does nothing. A host that CAN resolve them still returns an
+	 *  empty array when nothing is known (an unreachable registry, a listing with
+	 *  no prereleases), and an empty array must never be read as "stable only":
+	 *  it means "no trains to choose between", which renders the same as no
+	 *  picker. */
+	fetchListingChannels?: (
+		id: string,
+		repo?: string | null
+	) => Promise<CatalogChannel[]>;
 	/** Read a listing as it stood at one published version's tag.
 	 *
 	 *  Optional because it is genuinely host-specific: the desktop asks its node,

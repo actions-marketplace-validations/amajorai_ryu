@@ -38,7 +38,10 @@ import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts"
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
 import type { DownloadKind } from "@/src/lib/api/downloads.ts";
 import { estimateLlmfit, listInstalledModels } from "@/src/lib/api/models.ts";
-import { fetchPluginVersionDetail } from "@/src/lib/api/plugins.ts";
+import {
+	fetchPluginChannels,
+	fetchPluginVersionDetail,
+} from "@/src/lib/api/plugins.ts";
 import { installSidecar } from "@/src/lib/services-api.ts";
 import { useInstallProgress } from "@/src/store/useDownloadsStore.ts";
 import { useInstallingLookup } from "@/src/store/useInstallStore.ts";
@@ -138,6 +141,16 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 					{ url: activeNode.url, token: activeNode.token },
 					repo,
 					tag
+				),
+			// The release trains a listing publishes. Bound to the active node for the
+			// same reason as `fetchVersionDetail`: the node resolves them (from the
+			// marketplace for an installable train, from the repository's tags for a
+			// browse-only one), so switching nodes must switch the answer.
+			fetchListingChannels: (id: string, repo?: string | null) =>
+				fetchPluginChannels(
+					{ url: activeNode.url, token: activeNode.token },
+					id,
+					repo
 				),
 			navigate,
 			openExternal,

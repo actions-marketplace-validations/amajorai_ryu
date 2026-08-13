@@ -56,6 +56,9 @@ interface AppManifestWire {
 	built_in: boolean;
 	/** Free-text store category (`category`), e.g. "Productivity". */
 	category?: string | null;
+	// Injected by list_apps handler
+	/** The release train this install follows; null when not installed. */
+	channel?: string | null;
 	companion?: {
 		label: string;
 		icon?: string | null;
@@ -73,7 +76,6 @@ interface AppManifestWire {
 	/** Raster logo (contract key `iconUrl`). */
 	iconUrl?: string | null;
 	id: string;
-	// Injected by list_apps handler
 	installed: boolean;
 	installed_version: string | null;
 	local_only: boolean;
@@ -182,6 +184,11 @@ export interface AppInfo extends AppPresentation {
 	 *  manifest's declaration, which is only what the app asked for. */
 	approvedGrants: string[];
 	builtIn: boolean;
+	/** The release train this install FOLLOWS — `stable`, `beta`, `nightly`, … —
+	 *  which is what the next update resolves on. Not derivable from the version:
+	 *  a plugin pinned to `canary` whose canary train has no build yet still sits
+	 *  on a stable version. `null` when the plugin is not installed. */
+	channel: string | null;
 	companion: {
 		label: string;
 		icon: string | null;
@@ -362,6 +369,7 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 		iconDither: w.iconDither ?? null,
 		iconUrl: w.iconUrl ?? null,
 		id: w.id,
+		channel: w.channel ?? null,
 		installed: w.installed,
 		installedVersion: w.installed_version,
 		localOnly: w.local_only ?? false,
@@ -1272,11 +1280,19 @@ export async function installApp(
  *  "Available updates" section when the installed version trails the catalog. */
 export async function updateInstalledPlugin(
 	target: ApiTarget,
-	id: string
+	id: string,
+	/** Switch the install onto another release train and move it to that train's
+	 *  current build. Omit to update along the channel the plugin already follows.
+	 *
+	 *  A switch does not need `force`, even though every prerelease sorts BELOW its
+	 *  stable release: Core treats an explicit switch as its own authority and
+	 *  reports the version delta back on `channel_switch`. */
+	channel?: string | null
 ): Promise<AppRecord> {
 	const resp = await fetch(apiUrl(target, `/api/plugins/${id}/update`), {
 		method: "POST",
 		headers: makeHeaders(target.token),
+		body: JSON.stringify(channel ? { channel } : {}),
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, `/api/plugins/${id}/update`);
@@ -1735,6 +1751,36 @@ export async function fetchPluginVersionDetail(
 	}
 }
 
+/** `GET /api/plugins/catalog/channels` — the release trains a listing publishes,
+ *  each with the version it currently resolves to.
+ *
+ *  Both lookups in one call: `id` asks the marketplace (trains that can actually
+ *  be installed), `repo` derives them from the repository's release tags (what an
+ *  author tagged — browse-only). Core prefers the marketplace answer when it has
+ *  one, and flags each row with `installable` so a picker never offers a
+ *  selection it cannot act on.
+ *
+ *  Resolves to `[]` on any failure. That is "no trains known", NOT "stable only":
+ *  the caller renders no picker rather than inventing one. */
+export async function fetchPluginChannels(
+	target: ApiTarget,
+	id: string,
+	repo?: string | null
+): Promise<import("@ryu/marketplace/catalog/types").CatalogChannel[]> {
+	const q = new URLSearchParams({ id });
+	if (repo) {
+		q.set("repo", repo);
+	}
+	try {
+		const body = await request<{
+			channels?: import("@ryu/marketplace/catalog/types").CatalogChannel[];
+		}>(target, `/api/plugins/catalog/channels?${q.toString()}`);
+		return body.channels ?? [];
+	} catch {
+		return [];
+	}
+}
+
 /** `POST /api/plugins/install` — install a plugin from an `https://` manifest.json URL.
  *  Core records it installed+disabled (enable is a separate, grant-gated step). */
 export async function installAppFromUrl(
@@ -1767,7 +1813,11 @@ export async function installAppFromUrl(
 export async function installPluginFromCatalog(
 	target: ApiTarget,
 	id: string,
-	buyerToken?: string | null
+	buyerToken?: string | null,
+	/** The release train to install from — omit (or pass `stable`) for the ordinary
+	 *  published version. Core PERSISTS the choice, so the plugin keeps following
+	 *  this train on every later update instead of being pulled back to stable. */
+	channel?: string | null
 ): Promise<void> {
 	const headers = makeHeaders(target.token);
 	if (buyerToken) {
@@ -1776,7 +1826,7 @@ export async function installPluginFromCatalog(
 	const resp = await fetch(apiUrl(target, "/api/plugins/catalog/install"), {
 		method: "POST",
 		headers,
-		body: JSON.stringify({ id }),
+		body: JSON.stringify(channel ? { id, channel } : { id }),
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, "/api/plugins/catalog/install");

@@ -52,10 +52,29 @@ pub struct PluginRecord {
     /// failed.
     #[serde(default)]
     pub approved_grants: Vec<String>,
+    /// The release channel this install FOLLOWS — `stable`, `beta`, `nightly`,
+    /// `canary`, … — i.e. the train `POST /api/plugins/:id/update` re-resolves on.
+    ///
+    /// Absent in the column ⇒ derived from the installed version's own prerelease
+    /// identifier ([`crate::update::channel_of`]), the same self-describing rule
+    /// Core applies to its own builds: a record sitting on `1.2.0-beta.3` follows
+    /// `beta` without anyone having stored a preference. The column exists for the
+    /// intent the version string cannot express — someone who picks `canary` on a
+    /// listing whose canary train has no build yet still stays on `canary` rather
+    /// than being silently re-pinned to whatever they happen to have installed.
+    #[serde(default = "default_channel")]
+    pub channel: String,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+}
+
+/// The channel a record follows when nothing else says otherwise. Serde's default
+/// for [`PluginRecord::channel`], so a record persisted before the column existed
+/// deserializes onto the stable train rather than an empty string.
+fn default_channel() -> String {
+    crate::update::STABLE_CHANNEL.to_owned()
 }
 
 /// Result of a grant-validation call to the Gateway.
@@ -139,6 +158,18 @@ impl PluginStore {
             let msg = e.to_string();
             if !msg.contains("duplicate column name") {
                 return Err(e).context("adding apps.ui_code column");
+            }
+        }
+
+        // Additive column for release channels: the train this install follows.
+        // Deliberately NULLable with no default backfill — a NULL reads as "derive
+        // it from the installed version" ([`row_to_record`]), so every pre-existing
+        // row keeps describing itself correctly (a record on `1.2.0-beta.3` follows
+        // `beta`) instead of being force-written onto `stable`.
+        if let Err(e) = conn.execute("ALTER TABLE apps ADD COLUMN channel TEXT", []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e).context("adding apps.channel column");
             }
         }
         Ok(())
@@ -242,9 +273,39 @@ impl PluginStore {
             version: version.to_owned(),
             enabled: false,
             approved_grants: vec![],
+            channel: crate::update::channel_of(version),
             created_at: Some(now.clone()),
             updated_at: Some(now),
         })
+    }
+
+    /// Pin the release channel this install follows (`stable`, `beta`, `nightly`,
+    /// `canary`, …). Written at install when the user chose a channel, and by the
+    /// channel-switch half of the update handler.
+    ///
+    /// Stores the channel LOWERCASED and trimmed, matching
+    /// [`crate::update::pick_version_for_channel`]'s comparison, so `Beta` and
+    /// `beta` can never become two trains. Passing `None` clears the pin, which
+    /// returns the record to deriving its channel from the installed version.
+    ///
+    /// Does NOT touch `version`: pinning a channel expresses which train to follow
+    /// from now on, and the move onto that train is a separate, explicit update.
+    pub async fn set_channel(&self, id: &str, channel: Option<&str>) -> Result<Option<PluginRecord>> {
+        let normalized = channel
+            .map(|c| c.trim().to_ascii_lowercase())
+            .filter(|c| !c.is_empty());
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = self.conn.lock().await;
+            let rows_affected = conn.execute(
+                "UPDATE apps SET channel = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, normalized, now],
+            )?;
+            if rows_affected == 0 {
+                return Ok(None);
+            }
+        }
+        self.get(id).await
     }
 
     /// Fetch a single app record by id, **as it should run right now**.
@@ -266,7 +327,7 @@ impl PluginStore {
         let conn = self.conn.lock().await;
         let record = conn
             .query_row(
-                "SELECT id, version, enabled, approved_grants, created_at, updated_at
+                "SELECT id, version, enabled, approved_grants, created_at, updated_at, channel
                  FROM apps WHERE id = ?1",
                 params![id],
                 row_to_record,
@@ -306,7 +367,7 @@ impl PluginStore {
     pub async fn list_all_records(&self) -> Result<Vec<PluginRecord>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, version, enabled, approved_grants, created_at, updated_at
+            "SELECT id, version, enabled, approved_grants, created_at, updated_at, channel
              FROM apps ORDER BY created_at ASC",
         )?;
         let rows = stmt
@@ -450,11 +511,22 @@ fn apply_safe_mode_mask(records: Vec<PluginRecord>, active: bool) -> Vec<PluginR
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRecord> {
     let grants_json: String = row.get(3)?;
     let approved_grants = serde_json::from_str(&grants_json).unwrap_or_default();
+    let version: String = row.get(1)?;
+    // A NULL/blank column means nobody pinned a channel: read it off the installed
+    // version, which is self-describing. Never defaulted to `stable` here — that
+    // would report a record sitting on `1.2.0-nightly.4` as a stable install and
+    // then quietly move it to the stable train on its next update.
+    let channel = row
+        .get::<_, Option<String>>(6)?
+        .map(|c| c.trim().to_ascii_lowercase())
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| crate::update::channel_of(&version));
     Ok(PluginRecord {
         id: row.get(0)?,
-        version: row.get(1)?,
+        version,
         enabled: row.get::<_, i64>(2)? != 0,
         approved_grants,
+        channel,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
     })
@@ -593,6 +665,53 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(rec.version, "2.0.0");
+    }
+
+    /// An unpinned record describes its OWN channel, read off the installed
+    /// version. This is what keeps a plugin installed at `1.2.0-nightly.4` on the
+    /// nightly train after an upgrade that predates the column, instead of being
+    /// silently moved to stable the next time it checks for an update.
+    #[tokio::test]
+    async fn channel_is_derived_from_the_installed_version_when_unpinned() {
+        let s = store();
+        s.insert("com.test.stable", "1.2.0").await.unwrap();
+        s.insert("com.test.nightly", "1.2.0-nightly.4")
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get("com.test.stable").await.unwrap().unwrap().channel,
+            "stable"
+        );
+        assert_eq!(
+            s.get("com.test.nightly").await.unwrap().unwrap().channel,
+            "nightly"
+        );
+    }
+
+    /// A pin outlives the version, which is the whole reason the column exists:
+    /// someone who chose `canary` on a listing with no canary build yet is still
+    /// on canary, however stable the version they are sitting on looks.
+    #[tokio::test]
+    async fn a_pinned_channel_survives_a_version_that_disagrees_with_it() {
+        let s = store();
+        s.insert("com.test.app", "1.2.0").await.unwrap();
+        let pinned = s
+            .set_channel("com.test.app", Some("  CANARY "))
+            .await
+            .unwrap()
+            .unwrap();
+        // Normalized on write, so `Canary` and `canary` are never two trains.
+        assert_eq!(pinned.channel, "canary");
+        // Pinning does not move the install; that is a separate, explicit update.
+        assert_eq!(pinned.version, "1.2.0");
+        assert_eq!(
+            s.get("com.test.app").await.unwrap().unwrap().channel,
+            "canary"
+        );
+
+        // Clearing the pin returns the record to describing itself.
+        let cleared = s.set_channel("com.test.app", None).await.unwrap().unwrap();
+        assert_eq!(cleared.channel, "stable");
     }
 
     #[tokio::test]

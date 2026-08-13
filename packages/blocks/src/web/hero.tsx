@@ -6,18 +6,20 @@ import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { cn } from "@ryu/ui/lib/utils";
 import { Library } from "lucide-react";
+import type { Route } from "next";
 import Link from "next/link";
+import { useState } from "react";
 import { HeroAvatarSocialProof } from "./c-avatar-20.tsx";
-import { DownloadMenu } from "./download-menu.tsx";
-import HeroWorkflowLoop from "./hero-workflow-loop.tsx";
+import { DEMO_HREF, DOCS_URL } from "./data/resources.tsx";
+import HeroWorkflowLoop, {
+	HeroUseCaseSwitcher,
+} from "./hero-workflow-loop.tsx";
 import { landingHeadlineClass } from "./landing-typography.ts";
 
 const DECOSMIC_HREF = "https://decosmic.com";
 const AMAJOR_HREF = "https://amajor.ai";
 /** Placeholder — swap for the real Product Hunt post URL before flipping the flag. */
 const PRODUCT_HUNT_HREF = "https://www.producthunt.com/products/ryu";
-
-const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
 
 /**
  * The Product Hunt badge is staged, not live: flip this to `true` on the day the
@@ -37,9 +39,14 @@ const SHOW_AWARD_BADGE = false;
  * Two lines. Anything longer stops reading as a claim and starts reading as
  * a paragraph.
  */
-const HERO_TITLE = "We take the paperwork off your team, so they can sell";
+const HERO_TITLE =
+	"Secure and reliable AI agents automating critical business work 24/7";
 
 export default function Hero() {
+	// Owned here, not inside the stage, so the pills can sit above the wallpaper
+	// while the loop they drive sits inside it.
+	const [scenarioIndex, setScenarioIndex] = useState(0);
+
 	return (
 		<div className="flex flex-col items-center gap-8 pt-14 pb-0 md:pt-20">
 			<div className="flex min-h-[80vh] w-screen flex-col px-4 md:flex md:items-center md:justify-center md:px-0">
@@ -98,8 +105,11 @@ export default function Hero() {
 								titleClassName={landingHeadlineClass}
 							/>
 
-							{/* Demo leads: the sale starts with a free consultation, and the
-							    download is for the person who wants to poke at it first. */}
+							{/* The two doors, stated as intents rather than as a toggle: the
+							    default reader of this page is the firm, and the developer
+							    gets one exit to the docs. Download deliberately is NOT here —
+							    a partner never downloads anything, and it already sits in the
+							    site header for the reader who wants it. */}
 							<div className="flex flex-col gap-3 sm:flex-row">
 								<Link
 									className={cn(buttonVariants({ variant: "default" }))}
@@ -107,9 +117,16 @@ export default function Hero() {
 									rel="noopener noreferrer"
 									target="_blank"
 								>
-									Book a free consultation
+									I want to hire AI
 								</Link>
-								<DownloadMenu variant="ghost" />
+								<Link
+									className={cn(buttonVariants({ variant: "ghost" }))}
+									href={DOCS_URL as Route}
+									rel="noopener noreferrer"
+									target="_blank"
+								>
+									I want to build AI
+								</Link>
 							</div>
 
 							<HeroAvatarSocialProof />
@@ -121,14 +138,29 @@ export default function Hero() {
 				    The background image is read as the DESKTOP WALLPAPER: the window is
 				    inset in it and the Island floats on it, above the window — so the
 				    padding here is the wallpaper margin, not decoration. */}
-				<div className="relative z-0 w-full px-4 py-6 md:px-8 md:py-8">
+				{/* Use-case pills ride ABOVE the wallpaper, centered. Inside the
+				    background image they read as chrome belonging to the mock app;
+				    out here they read as what they are — a menu of jobs it runs. */}
+				<div className="w-full px-4 pt-2 pb-0 md:px-8">
+					<div className="mx-auto max-w-6xl">
+						<HeroUseCaseSwitcher
+							current={scenarioIndex}
+							onPick={setScenarioIndex}
+						/>
+					</div>
+				</div>
+
+				<div className="relative z-0 w-full px-4 pt-3 pb-6 md:px-8 md:pt-4 md:pb-8">
 					<div className="relative mx-auto flex min-h-[28rem] w-full max-w-7xl items-center justify-center md:min-h-[34rem]">
 						<div
 							aria-hidden="true"
 							className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl bg-[url('/background.png')] bg-center bg-cover opacity-80"
 						/>
 						<div className="relative z-10 w-full max-w-6xl py-8 md:py-12">
-							<HeroWorkflowLoop />
+							<HeroWorkflowLoop
+								onScenarioChange={setScenarioIndex}
+								scenarioIndex={scenarioIndex}
+							/>
 						</div>
 					</div>
 				</div>

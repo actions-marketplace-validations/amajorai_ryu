@@ -3,12 +3,11 @@
 import { buttonVariants } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
 import Link from "next/link";
+import { DEMO_HREF } from "./data/resources.tsx";
 import { DownloadMenu } from "./download-menu.tsx";
 import { landingSubheadlineClass } from "./landing-typography.ts";
 import { SectionTitle } from "./section-title.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
-
-const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
 
 /**
  * Six other pages close with this block (`/products`, `/compare`, `/for`,

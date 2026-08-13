@@ -2,12 +2,11 @@ import { buttonVariants } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
 import { ArrowUpRight, Landmark } from "lucide-react";
 import Link from "next/link";
+import { DEMO_HREF } from "./data/resources.tsx";
 import { landingSurfaceCardXlClass } from "./landing-card-tones.ts";
 import { Reveal } from "./reveal.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
-
-const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
 
 /**
  * Co-funding is the closing lever for a Singapore SME, so it belongs early in

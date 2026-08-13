@@ -4,6 +4,7 @@ import type { LucideIcon } from "lucide-react";
 import { ArrowRight, Blocks, Check, UserRoundSearch } from "lucide-react";
 import type { Route } from "next";
 import Link from "next/link";
+import { DEMO_HREF } from "./data/resources.tsx";
 import { DOWNLOAD_CTA_HREF } from "./download-cta.ts";
 import { DownloadMenu } from "./download-menu.tsx";
 import type { LandingCardTone } from "./landing-card-tones.ts";
@@ -13,8 +14,6 @@ import {
 } from "./landing-card-tones.ts";
 import { Reveal } from "./reveal.tsx";
 import { SectionHeading } from "./sections.tsx";
-
-const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
 
 interface PathCard {
 	bullets: string[];
@@ -34,46 +33,50 @@ const PATHS: PathCard[] = [
 	{
 		icon: UserRoundSearch,
 		tone: "orange",
-		title: "Bring or install",
+		title: "Start from a pack",
 		description:
-			"Use the agents you already have, or install one for a real business workflow without wiring the stack yourself.",
+			"Pick the one shaped like your work. It arrives already knowing the documents, the steps and the checks that job involves.",
 		bullets: [
-			"Claude Code, Codex, Gemini, OpenClaw, Ollama, and more",
-			"Ready-made agents for sales, support, ops, and other roles",
-			"Budgets, permissions, and governance already in place",
-			"Rollout support when your team wants help",
+			"Translation jobs, claims files, working paper prep, and more",
+			"Your reviewers and approval steps built in from the start",
+			"A spending ceiling and a full record already switched on",
+			"Running on real work in days",
 		],
 		ctaHref: "/for",
-		ctaLabel: "Browse agents",
+		ctaLabel: "See the packs",
 		secondaryCtaHref: DEMO_HREF,
 		secondaryCtaExternal: true,
-		secondaryCtaLabel: "Plan a rollout",
+		secondaryCtaLabel: "Book a consultation",
 	},
 	{
 		icon: Blocks,
 		tone: "purple",
-		title: "Compose",
+		title: "Or we shape one",
 		description:
-			"Compose an agent for your exact workflow. Model, tools, memory, and policy stay swappable as the work changes.",
+			"If your work does not look like anyone else's, we sit down with you and build the pack around it. Nothing for your team to configure.",
 		bullets: [
-			"Custom tools, MCP, skills, and memory per agent",
-			"Routing and governance applied to every run",
-			"Git-native workspace, workflows, and parallel runs",
-			"SDK and open core when you want to go deeper",
+			"We map the workflow with the people who do it today",
+			"Your glossary, your templates, your house rules",
+			"Corrections your reviewers make are kept and reused",
+			"It stays yours to change as the work changes",
 		],
-		ctaHref: DOWNLOAD_CTA_HREF,
-		ctaLabel: "Download",
-		secondaryCtaHref: "/products/agents",
-		secondaryCtaLabel: "How building works",
+		ctaHref: DEMO_HREF,
+		ctaExternal: true,
+		ctaLabel: "Talk it through",
+		secondaryCtaHref: "/for",
+		secondaryCtaLabel: "See what we cover",
 	},
 ];
 
 function PathCardBlock({ card }: { card: PathCard }) {
 	const Icon = card.icon;
 	const tone = LANDING_CARD_TONES[card.tone];
-	const secondaryProps = card.secondaryCtaExternal
-		? { rel: "noopener noreferrer" as const, target: "_blank" as const }
-		: {};
+	const externalProps = {
+		rel: "noopener noreferrer" as const,
+		target: "_blank" as const,
+	};
+	const primaryProps = card.ctaExternal ? externalProps : {};
+	const secondaryProps = card.secondaryCtaExternal ? externalProps : {};
 
 	return (
 		<div className={cn("flex flex-col", landingCardSurfaceClass(card.tone))}>
@@ -110,6 +113,7 @@ function PathCardBlock({ card }: { card: PathCard }) {
 							tone.cta
 						)}
 						href={card.ctaHref as Route}
+						{...primaryProps}
 					>
 						{card.ctaLabel}
 						<ArrowRight className="size-4" />
@@ -138,8 +142,8 @@ export default function HireBuild() {
 		<section className="container mx-auto px-4">
 			<div className="mx-auto max-w-6xl">
 				<SectionHeading
-					subtitle="Bring an agent, install one from the catalog, or build exactly what your workflow needs."
-					title="Start with the agent your company needs"
+					subtitle="Nobody starts from a blank page. You pick the one shaped like your work, or we shape one around it."
+					title="You never configure anything"
 				/>
 				<div className="grid gap-6 md:grid-cols-2">
 					{PATHS.map((card, i) => (

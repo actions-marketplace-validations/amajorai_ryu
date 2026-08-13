@@ -255,6 +255,11 @@ fn default_grant_allowlist() -> Vec<String> {
         // is denied with GrantsDenied.
         "mcp:news",
         "mcp:tuition",
+        // `@ryu/rlm` (the Automated Reasoning app) is the same case again: it declares
+        // its own `rlm` server in `mcp_servers` and grants itself `mcp:rlm`. Reserved
+        // namespace, so owning the server buys nothing — the exact entry is what keeps
+        // its disable→re-enable from failing with GrantsDenied.
+        "mcp:rlm",
         // `exa` is a declarative `http` plugin (fixtures/exa.manifest.json), so it
         // declares an egress grant, not an `mcp:<name>` server grant — its enable
         // path validates this exact scope instead.
@@ -418,6 +423,14 @@ fn default_grant_allowlist() -> Vec<String> {
         "chat.sendFollowUp",
         "hook:run-agent",
         "hook:side-model",
+        // `host.runHook` — a plugin re-running one of its OWN declared turn hooks on
+        // demand (`GRANT_RUN_SELF_HOOK`, `apps/core/src/plugin_host/bridge.rs`).
+        // Declared by the seeded `@ryu/chat-title` plugin, which renames a
+        // conversation from a message action rather than only on the turn boundary.
+        // `hook` is RESERVED, so owning the hook does not owner-scope the grant — the
+        // exact string has to be here or a disable→re-enable is denied with
+        // GrantsDenied.
+        "hook:run-self",
         // Ghost record→replay: the `@ryu/workflows` RecordToWorkflow flow captures
         // a native-desktop action sequence into a recipe. Cross-namespace (the
         // `ghost` capture plane is a host primitive, not the Workflows app's own

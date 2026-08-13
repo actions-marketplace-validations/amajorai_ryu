@@ -61,6 +61,7 @@ import {
 } from "@ryu/ui/components/tooltip.tsx";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMarketplaceHostOptional } from "../host.tsx";
+import ItemLikeButton from "../likes/like-button.tsx";
 import { useOptionalReport } from "../report/report-provider.tsx";
 import { StarRating } from "../star-rating.tsx";
 import { formatPrice } from "../types.ts";
@@ -68,7 +69,6 @@ import { groupByCategory } from "./categories.ts";
 import BrandOrCoverImage from "./chrome/brand-image.tsx";
 import CommunityTrustNotice from "./chrome/community-trust-notice.tsx";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
-import ItemLikeButton from "../likes/like-button.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
@@ -79,6 +79,13 @@ import StoreItemAction, {
 } from "./chrome/store-item-action.tsx";
 import StoreShelfHeading from "./chrome/store-shelf-heading.tsx";
 import VerifiedBadge from "./chrome/verified-badge.tsx";
+import {
+	ChannelPicker,
+	ChannelSwitchSummary,
+	channelLabel,
+	STABLE_CHANNEL,
+	useListingChannels,
+} from "./detail/channel-picker.tsx";
 import { formatCount, formatDate } from "./detail/detail-panels.tsx";
 import {
 	ListingAsideCard,
@@ -259,6 +266,7 @@ export default function AppsCatalogSection({
 		setEnabled,
 		lifecyclePending,
 		installFromUrl,
+		switchChannel,
 		sources,
 		activeSource,
 		selectSource,
@@ -410,6 +418,7 @@ export default function AppsCatalogSection({
 					selectedId={active ? active.selectedId : selectedId}
 					setEnabled={active ? active.setEnabled : setEnabled}
 					settingsOpener={settingsOpener}
+					switchChannel={active ? active.switchChannel : switchChannel}
 				/>
 			}
 			detailTitle={
@@ -1135,9 +1144,13 @@ function AppActions({
 	renderAffordance,
 	onOpenSettings,
 	status,
+	switchChannel,
 }: {
 	item: AppCatalogItem;
-	install: (id?: string) => Promise<void>;
+	install: (
+		id?: string,
+		options?: { channel?: string | null }
+	) => Promise<void>;
 	installing: boolean;
 	/** Download-center task id this listing's add reports progress on, so the
 	 *  button fills from the real transfer instead of guessing by label. */
@@ -1153,11 +1166,43 @@ function AppActions({
 	 *  They belong beside the verb they qualify ("Enable" — because it is already
 	 *  Installed), not up in the hero where they competed with the app's name. */
 	status?: ReactNode;
+	/** Move this INSTALLED listing onto another release train. Absent ⇒ the host
+	 *  cannot update, so no switch is offered. */
+	switchChannel?: (id: string, channel: string | null) => Promise<void>;
 }) {
 	const host = useCatalogHost();
 	const node = host.useActiveNode();
 	const [confirmOpen, setConfirmOpen] = useState(false);
 	const { entry, grants, installed, enabled } = item;
+
+	// Release trains. Resolved for any listing whose channel can still be chosen:
+	// before install (which train to add) and after (which train to follow). An
+	// installed listing that the host cannot update is the one case with no choice
+	// to make, so it does not pay for the read.
+	const canSwitch = installed && Boolean(switchChannel);
+	const { channels } = useListingChannels(
+		entry.id,
+		entry.repo_url,
+		installed && !canSwitch ? undefined : host.fetchListingChannels
+	);
+	const [channel, setChannel] = useState<string | null>(null);
+	// The train a switch is WAITING ON confirmation for. A switch re-resolves and
+	// re-installs a different build, can move the version backwards, and is not
+	// undone by picking the old train again (that resolves whatever THAT train
+	// holds now, not the build you had) — so it is confirmed, like enabling is.
+	const [pendingChannel, setPendingChannel] = useState<string | null>(null);
+	const [switchOpen, setSwitchOpen] = useState(false);
+
+	// The train this install follows may have no PROMOTED build — that is exactly
+	// the case the pin exists for (someone on `canary` while the canary train is
+	// empty). The resolved list only carries trains with a build, so the pinned one
+	// is added back; without it the selector would render a value matching no
+	// option and show blank for a plugin that is very much on a channel.
+	const followed = item.channel ?? null;
+	const switchOptions =
+		followed && !channels.some((c) => c.channel === followed)
+			? [...channels, { channel: followed, installable: true, version: null }]
+			: channels;
 
 	// Rejections are captured into the hook's `error` state (rendered below), so
 	// these fire-and-forget handlers swallow them to avoid a floating promise.
@@ -1168,7 +1213,7 @@ function AppActions({
 		setEnabled(false).catch(noop);
 	};
 	const runInstall = () => {
-		install(entry.id).catch(noop);
+		install(entry.id, channel ? { channel } : undefined).catch(noop);
 	};
 	const confirmEnable = () => {
 		setConfirmOpen(false);
@@ -1253,23 +1298,30 @@ function AppActions({
 	} else if (!installed) {
 		const InstallButton = installLayer.InstallButton;
 		action = (
-			<InstallButton
-				busyLabel="Adding…"
-				idleVariant="ghost"
-				installing={installing}
-				onClick={runInstall}
-				// The exact task id, not just the display name: Core labels a plugin
-				// download row with the plugin ID, so a name hint never matched and the
-				// button showed whichever single download happened to be running.
-				progress={{
-					kinds: ["tool", "other"],
-					name: entry.id,
-					taskId: installTaskId,
-				}}
-			>
-				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-				Add
-			</InstallButton>
+			<>
+				<ChannelPicker
+					channels={channels}
+					onChange={setChannel}
+					value={channel}
+				/>
+				<InstallButton
+					busyLabel="Adding…"
+					idleVariant="ghost"
+					installing={installing}
+					onClick={runInstall}
+					// The exact task id, not just the display name: Core labels a plugin
+					// download row with the plugin ID, so a name hint never matched and the
+					// button showed whichever single download happened to be running.
+					progress={{
+						kinds: ["tool", "other"],
+						name: entry.id,
+						taskId: installTaskId,
+					}}
+				>
+					<HugeiconsIcon className="size-4" icon={Download01Icon} />
+					Add
+				</InstallButton>
+			</>
 		);
 	} else if (enabled) {
 		action = (
@@ -1309,6 +1361,28 @@ function AppActions({
 						Settings
 					</Button>
 				) : null}
+				{/* Which train an INSTALLED listing follows, and how to change it.
+				    Rendered as a live control where the host can update, and as a
+				    plain badge where it cannot — a picker that could not act on its
+				    own selection would be worse than no picker.
+
+				    The badge is skipped for a stable install: that is the
+				    unremarkable case, and labelling it would put a chip on every row
+				    to say nothing. */}
+				{canSwitch && switchOptions.length > 1 ? (
+					<ChannelPicker
+						channels={switchOptions}
+						onChange={(next) => {
+							setPendingChannel(next);
+							setSwitchOpen(true);
+						}}
+						value={followed}
+					/>
+				) : installed && item.channel && item.channel !== STABLE_CHANNEL ? (
+					<Badge className="text-xs" variant="outline">
+						{channelLabel(item.channel)} channel
+					</Badge>
+				) : null}
 				{status ? (
 					<span className="ml-auto flex shrink-0 items-center gap-2">
 						{status}
@@ -1316,6 +1390,42 @@ function AppActions({
 				) : null}
 			</div>
 			{error && <p className="text-destructive text-sm">{error}</p>}
+
+			{/* Channel-switch confirmation. The version delta is the whole point of
+			    asking: every prerelease sorts BELOW its stable release, so moving
+			    onto a beta routinely installs an OLDER build, and a one-click
+			    dropdown would do that silently and unrepeatably (switching back
+			    resolves whatever stable holds now, not the build you had). */}
+			{canSwitch ? (
+				<AlertDialog onOpenChange={setSwitchOpen} open={switchOpen}>
+					<AlertDialogContent>
+						<AlertDialogHeader>
+							<AlertDialogTitle>
+								Follow the {channelLabel(pendingChannel ?? STABLE_CHANNEL)}{" "}
+								channel?
+							</AlertDialogTitle>
+							<AlertDialogDescription>
+								<ChannelSwitchSummary
+									channels={switchOptions}
+									installedVersion={item.installedVersion ?? entry.version}
+									target={pendingChannel}
+								/>
+							</AlertDialogDescription>
+						</AlertDialogHeader>
+						<AlertDialogFooter>
+							<AlertDialogCancel>Cancel</AlertDialogCancel>
+							<AlertDialogAction
+								onClick={() => {
+									setSwitchOpen(false);
+									switchChannel?.(entry.id, pendingChannel).catch(noop);
+								}}
+							>
+								Switch
+							</AlertDialogAction>
+						</AlertDialogFooter>
+					</AlertDialogContent>
+				</AlertDialog>
+			) : null}
 
 			{/* Enable confirmation: list grants before enabling. Install-only. */}
 			{installLayer ? (
@@ -1390,15 +1500,22 @@ function AppDetailPanel({
 	noun,
 	renderAffordance,
 	settingsOpener,
+	switchChannel,
 }: {
 	selectedId: string | null;
 	item: AppCatalogItem | null;
 	detail: PluginCatalogDetail | null;
 	detailLoading: boolean;
 	detailError: string | null;
-	install: (id?: string) => Promise<void>;
+	install: (
+		id?: string,
+		options?: { channel?: string | null }
+	) => Promise<void>;
 	/** Shared busy predicate — the same one the list rows read. */
 	isInstalling: (id: string) => boolean;
+	/** Move an installed listing onto another release train; absent when the host
+	 *  has no update seam, and the switch control then never renders. */
+	switchChannel?: (id: string, channel: string | null) => Promise<void>;
 	setEnabled: (enabled: boolean) => Promise<void>;
 	lifecyclePending: boolean;
 	error: string | null;
@@ -1548,10 +1665,7 @@ function AppDetailPanel({
 						<>
 							{/* Same control, same namespace key as the card it was opened
 							    from, so the two can never disagree about the total. */}
-							<ItemLikeButton
-								namespace={entry.id}
-								stopPropagation={false}
-							/>
+							<ItemLikeButton namespace={entry.id} stopPropagation={false} />
 							<PriceBadge entry={entry} />
 							{entry.descriptor_only ? (
 								<Badge variant="outline">
@@ -1562,6 +1676,7 @@ function AppDetailPanel({
 							)}
 						</>
 					}
+					switchChannel={switchChannel}
 				/>
 			}
 			aside={

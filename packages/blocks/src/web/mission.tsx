@@ -90,9 +90,9 @@ function InfraViz() {
 		"Records",
 		"Spending limits",
 		"Approvals",
-		"Redaction",
+		"Client details",
 		"Access",
-		"Retries",
+		"Retries when it fails",
 	];
 
 	return (
@@ -204,7 +204,7 @@ const panels = [
 		viz: <InfraViz />,
 		title: "None of the plumbing is your problem.",
 		description:
-			"Limits, records, retries and redaction are already built. You do not hire anyone to keep it running.",
+			"The limits, the records and the checks are already built. You do not hire anyone to keep it running.",
 	},
 	{
 		viz: <ScaleViz />,
@@ -221,7 +221,7 @@ export default function Mission() {
 				<StaggerLines className="mb-10">
 					<SectionTitle
 						className="max-w-xl"
-						title="The part nobody sells you, and the part that decides it."
+						title="Nothing here is your job to build."
 					/>
 					<p className={sectionSubtitleClass}>
 						Your team, your rules, and your files in one place, with the work

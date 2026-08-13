@@ -4,25 +4,29 @@ import { HardDrive, ScrollText, Wallet } from "lucide-react";
 import { Reveal } from "./reveal.tsx";
 
 /**
- * The three sentences a partner needs before they will read anything else on
- * the page. Deliberately plain language: this sits directly under the hero and
- * is read by the person who has to sign off on client work, not by an engineer.
+ * The PROOF beat: the three facts that answer "I cannot send client files to an
+ * AI". It runs after the objection has been named, never before it.
+ *
+ * Every line is written from the reader's side, not ours. "We run on your
+ * machines" is a fact about how we built it; "your files never leave your
+ * office" is the same fact about their world, which is the one they act on.
+ * Keep the grammatical subject as the buyer.
  */
 const POINTS: { detail: string; icon: LucideIcon; label: string }[] = [
 	{
 		icon: HardDrive,
-		label: "We run on your machines",
-		detail: "Client files stay inside the firm unless you say otherwise.",
+		label: "Your files never leave your office",
+		detail: "The work runs on your own computers, not somewhere else.",
 	},
 	{
 		icon: ScrollText,
-		label: "We log every action",
-		detail: "A plain record of what was done, readable by a partner.",
+		label: "You can see exactly what it did",
+		detail: "Step by step, in plain words a partner can read.",
 	},
 	{
 		icon: Wallet,
-		label: "We cap your monthly cost",
-		detail: "A ceiling you set. You know the bill before the work starts.",
+		label: "You set a monthly limit",
+		detail: "It cannot go over. You know the bill before the work starts.",
 	},
 ];
 

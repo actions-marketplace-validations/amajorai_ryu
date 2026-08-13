@@ -8575,6 +8575,17 @@ async fn list_apps(
                         serde_json::Value::String(r.version.clone())
                     }),
                 );
+                // The release train this install FOLLOWS, which is not derivable
+                // from the manifest: a plugin sitting on `1.2.0` may still be
+                // pinned to `canary` and simply have no canary build yet. Null when
+                // not installed, so a client renders a channel only where one is
+                // actually being followed.
+                obj.insert(
+                    "channel".to_owned(),
+                    lc.map_or(serde_json::Value::Null, |r| {
+                        serde_json::Value::String(r.channel.clone())
+                    }),
+                );
                 // Safe Mode is a READ mask, so `enabled` above stays the user's own
                 // choice. This is the second half of that truth: enabled, but not
                 // running this boot. Only ever true for a record safe mode actually
@@ -9188,11 +9199,29 @@ async fn plugin_catalog_version_detail(
     }
 }
 
-/// `GET /api/plugins/catalog/channels?repo=<owner/repo>` — the release channels a
-/// listing publishes, each with the tag it currently resolves to.
+/// `GET /api/plugins/catalog/channels?repo=<owner/repo>` / `?id=<listing-id>` — the
+/// release channels a listing publishes, each with the version that channel
+/// currently resolves to.
 ///
 /// Drives a per-listing channel picker. Only channels with an actual build are
 /// returned, so nobody selects one and is then told there is nothing there.
+///
+/// Two lookups, because a listing is published one of two ways:
+///
+///   - `repo=` reads the repository's own releases and derives each channel from
+///     the tag ([`crate::update::channel_of`]) — the community path, where the git
+///     tags ARE the publication.
+///   - `id=` asks the marketplace control plane, which keys a listing by
+///     `(kind, id, channel)` and knows the trains it holds.
+///
+/// `installable` distinguishes them, and it matters: a repo-derived channel is a
+/// browsing fact (it describes what the author tagged), while only a marketplace
+/// channel can be handed to `POST /api/plugins/catalog/install`. Presenting them
+/// identically would produce a picker whose selection silently does nothing.
+///
+/// An EMPTY list means "no channels known" — including the case where the upstream
+/// read failed — and never "stable is the only option". A client renders no picker
+/// rather than a picker with one entry it invented.
 #[utoipa::path(
     get,
     path = "/api/plugins/catalog/channels",
@@ -9201,13 +9230,45 @@ async fn plugin_catalog_version_detail(
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn plugin_catalog_channels(
+    State(state): State<ServerState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(repo) = params.get("repo").filter(|s| !s.is_empty()) else {
+    let repo = params.get("repo").filter(|s| !s.is_empty());
+    let listing_id = params.get("id").filter(|s| !s.is_empty());
+    if repo.is_none() && listing_id.is_none() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "missing required `repo` query parameter" })),
+            Json(json!({ "error": "missing required `repo` or `id` query parameter" })),
         );
+    }
+
+    // Marketplace-published channels first: they are the installable ones, so when a
+    // listing is on the marketplace AND names a repo, the marketplace answer is the
+    // one a picker must drive installs from.
+    if let Some(id) = listing_id {
+        let source = crate::catalog_source::RyuMarketplaceSource::builtin(
+            crate::catalog_source::CatalogKind::Plugin,
+        );
+        let channels = source.fetch_channels(&state.client, id).await;
+        if !channels.is_empty() {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "channels": channels
+                        .into_iter()
+                        .map(|(channel, version)| json!({
+                            "channel": channel,
+                            "version": version,
+                            "installable": true,
+                        }))
+                        .collect::<Vec<_>>(),
+                })),
+            );
+        }
+    }
+
+    let Some(repo) = repo else {
+        return (StatusCode::OK, Json(json!({ "channels": [] })));
     };
     let channels = crate::catalog_source::github_listing_channels(repo, None).await;
     (
@@ -9215,7 +9276,12 @@ async fn plugin_catalog_channels(
         Json(json!({
             "channels": channels
                 .into_iter()
-                .map(|(channel, tag)| json!({ "channel": channel, "tag": tag }))
+                .map(|(channel, tag)| json!({
+                    "channel": channel,
+                    "tag": tag,
+                    "version": tag,
+                    "installable": false,
+                }))
                 .collect::<Vec<_>>(),
         })),
     )
@@ -10527,6 +10593,16 @@ const MAX_BACKEND_CODE_BYTES: usize = 4 * 1024 * 1024;
 #[derive(serde::Deserialize)]
 struct PluginCatalogInstallBody {
     id: String,
+    /// The release train to install from — `stable` (the default), or a prerelease
+    /// channel the listing actually publishes (`beta`, `rc`, `nightly`, `canary`,
+    /// … — whatever the first identifier of its published prerelease versions
+    /// spells). Absent means stable.
+    ///
+    /// The chosen channel is PERSISTED on the lifecycle record, so the update path
+    /// keeps re-resolving on the same train instead of pulling the install back to
+    /// stable on its next check.
+    #[serde(default)]
+    channel: Option<String>,
 }
 
 /// Shared sink that persists a validated plugin manifest (+ optional
@@ -10693,6 +10769,14 @@ async fn install_plugin_from_catalog(
     if id.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "`id` must not be empty".to_owned());
     }
+    // Normalized once: `stable` and an absent channel are the same request, and a
+    // channel is compared case-insensitively everywhere else.
+    let channel: Option<String> = body
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case(crate::update::STABLE_CHANNEL))
+        .map(str::to_ascii_lowercase);
 
     // Forward the caller's bearer to the marketplace install handoff (#491) so a
     // PAID plugin is denied unless the buyer org holds a license. EVERY dependency
@@ -10746,7 +10830,12 @@ async fn install_plugin_from_catalog(
         let manifest = if let Some(m) = installed.iter().find(|m| m.id == next) {
             m.clone()
         } else {
-            match resolve_plugin_from_catalog(&state, &next, buyer_token.clone()).await {
+            // The requested channel applies to the plugin the user actually chose.
+            // Its dependencies resolve on their own default train — see the note on
+            // `resolve_plugin_from_catalog`.
+            let dep_channel = (next == id).then_some(channel.as_deref()).flatten();
+            match resolve_plugin_from_catalog(&state, &next, buyer_token.clone(), dep_channel).await
+            {
                 Ok((m, ui_code)) => {
                     // A source that answers a request for `next` with a manifest for
                     // some OTHER id would let a dependency name be swapped for an
@@ -10844,8 +10933,31 @@ async fn install_plugin_from_catalog(
                 .find(|(pid, _)| *pid == id)
                 .map(|(_, value)| value.clone())
                 .unwrap_or_else(|| json!({ "success": true }));
+            // Pin the train the user chose so `POST /api/plugins/:id/update`
+            // re-resolves on it. Only the TARGET is pinned — a dependency was
+            // resolved on its own default channel, so recording anything else on it
+            // would be a lie the update path would then act on.
+            //
+            // Best-effort: the plugin IS installed at this point, and failing the
+            // whole install over the preference write would be worse than an install
+            // that follows stable. The channel is still reported below, from the
+            // record, so a client never renders a pin that was not stored.
+            if let Some(channel) = channel.as_deref() {
+                if let Err(e) = state.app_store.set_channel(&id, Some(channel)).await {
+                    tracing::warn!(plugin = %id, "installed on `{channel}` but could not persist the channel pin: {e}");
+                }
+            }
+            let pinned = state
+                .app_store
+                .get(&id)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.channel)
+                .unwrap_or_else(|| crate::update::STABLE_CHANNEL.to_owned());
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("installed_dependencies".to_owned(), json!(dependencies));
+                obj.insert("channel".to_owned(), json!(pinned));
             }
             Json(body).into_response()
         }
@@ -10901,10 +11013,20 @@ async fn install_plugin_from_catalog(
 /// shows four rows instead of one opaque stall.
 ///
 /// One row per plugin id (`plugin:<id>`), so a retry dedups onto the same row.
+///
+/// `channel` names the release train to resolve on (`None`/`stable` = the ordinary
+/// published version). It is honoured only by a source that actually publishes
+/// trains; anything else REFUSES a named prerelease channel rather than serving
+/// its stable build under a beta label ([`crate::catalog_source::Source::install_descriptor_at`]).
+/// Note that it applies to the id being resolved and is deliberately NOT inherited
+/// by that plugin's dependencies: a dependency is its own listing with its own
+/// trains, and pulling every dependency onto `nightly` because the target is there
+/// would put a user on prereleases they never chose.
 async fn resolve_plugin_from_catalog(
     state: &ServerState,
     id: &str,
     buyer_token: Option<String>,
+    channel: Option<&str>,
 ) -> Result<(crate::plugin_manifest::PluginManifest, Option<String>), (StatusCode, String)> {
     let tracked = state
         .downloads
@@ -10914,7 +11036,7 @@ async fn resolve_plugin_from_catalog(
             crate::downloads::DownloadRole::Plugin,
             id.to_string(),
             async {
-                resolve_plugin_from_catalog_inner(state, id, buyer_token)
+                resolve_plugin_from_catalog_inner(state, id, buyer_token, channel)
                     .await
                     .map_err(|(status, message)| {
                         anyhow::Error::new(CatalogResolveFailed { status, message })
@@ -10950,6 +11072,7 @@ async fn resolve_plugin_from_catalog_inner(
     state: &ServerState,
     id: &str,
     buyer_token: Option<String>,
+    channel: Option<&str>,
 ) -> Result<(crate::plugin_manifest::PluginManifest, Option<String>), (StatusCode, String)> {
     use crate::catalog_source::CatalogKind;
 
@@ -10991,7 +11114,7 @@ async fn resolve_plugin_from_catalog_inner(
         // inside `install_descriptor`).
         let descriptor = match crate::catalog_source::with_buyer_token(
             buyer_token.clone(),
-            source.install_descriptor(&state.client, id),
+            source.install_descriptor_at(&state.client, id, channel),
         )
         .await
         {
@@ -14050,6 +14173,13 @@ struct UpdateAppBody {
     /// When `true`, allow downgrading to an older version.
     #[serde(default)]
     force: bool,
+    /// Switch the install onto a different release train (`stable`, `beta`, `rc`,
+    /// `nightly`, `canary`, …) and update to that train's current build.
+    ///
+    /// Absent means "stay on the pinned channel", which is what makes a routine
+    /// update keep following the train the user chose at install.
+    #[serde(default)]
+    channel: Option<String>,
 }
 
 /// `POST /api/apps/:id/update` — update an installed plugin by **re-installing the
@@ -14086,6 +14216,22 @@ struct UpdateAppBody {
 /// side-loaded via `install-bundle` with no marketplace listing) can no longer be
 /// updated through this endpoint — the catalog re-pull is the trust boundary and is
 /// mandatory.
+///
+/// # Release channels
+///
+/// The re-resolve in step 2 runs on the record's PINNED channel, so an install that
+/// followed `beta` keeps getting betas instead of being pulled back to stable the
+/// first time it checks for an update.
+///
+/// A body `channel` switches trains. That is deliberately a different operation
+/// from an update, because semver ranks every prerelease BELOW its stable release
+/// (`1.2.0-beta.1 < 1.2.0`): moving a stable install onto `beta` is a downgrade by
+/// precedence and step 3 would refuse it. An explicit switch therefore carries its
+/// own authority — it does not need `force`, the request already said what to do —
+/// and the response reports `channel_switch` plus the version delta so the client
+/// can show that the new train is behind the old one. The pin is persisted whether
+/// or not the version actually moved, so a switch onto a train that happens to be
+/// at the same version still changes what the NEXT update follows.
 #[utoipa::path(
     post,
     path = "/api/plugins/{id}/update",
@@ -14120,16 +14266,38 @@ async fn update_app_handler(
     };
     let old_manifest = find_manifest(&state, &id).await;
 
+    // Which train to re-resolve on: the body's explicit switch, else the pin the
+    // record already carries. Normalized the same way the store normalizes it, so
+    // `Beta` and `beta` can never read as a switch.
+    let requested_channel: Option<String> = body
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_ascii_lowercase);
+    let target_channel = requested_channel
+        .clone()
+        .unwrap_or_else(|| record.channel.clone());
+    let switching_channel = target_channel != record.channel;
+
     // 2. RE-VERIFY: re-resolve the target from the catalog. This runs the ed25519
     //    signature verify + the fail-closed ui_code integrity gate + the paid
     //    entitlement check (buyer bearer forwarded), all inside `install_descriptor`.
     //    Nothing is mutated yet — a verify failure leaves the OLD version intact.
+    //    Resolution is channel-scoped: a train with no build errors out here (the
+    //    resolve reports which channel was asked for) rather than falling back.
     let buyer_token = buyer_bearer_from_headers(&headers);
-    let (manifest, ui_code) =
-        match resolve_plugin_from_catalog(&state, &id, buyer_token.clone()).await {
-            Ok(pair) => pair,
-            Err((status, msg)) => return json_error(status, msg),
-        };
+    let (manifest, ui_code) = match resolve_plugin_from_catalog(
+        &state,
+        &id,
+        buyer_token.clone(),
+        Some(target_channel.as_str()),
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err((status, msg)) => return json_error(status, msg),
+    };
     if manifest.id != id {
         return json_error(
             StatusCode::BAD_GATEWAY,
@@ -14138,11 +14306,35 @@ async fn update_app_handler(
     }
 
     // 3. Downgrade / no-op gate BEFORE any mutation (one definition: `plan_update`).
-    match plan_update(&record.version, &manifest.version, body.force) {
+    //    An explicit channel switch carries its own authority: every prerelease
+    //    ranks below its stable release, so `stable 1.2.0` → `beta 1.2.0-beta.3` is
+    //    a semver downgrade and would otherwise 409 asking for a `force` the request
+    //    already implied. The delta is reported in the response instead of hidden.
+    match plan_update(
+        &record.version,
+        &manifest.version,
+        body.force || switching_channel,
+    ) {
         Ok(UpdatePlan::NoOp) => {
+            // The version did not move, but the pin still may have: a switch onto a
+            // train that currently sits at the same build is a real change to what
+            // the NEXT update follows, so persist it before answering.
+            let mut app = record.clone();
+            if switching_channel {
+                match state
+                    .app_store
+                    .set_channel(&id, Some(target_channel.as_str()))
+                    .await
+                {
+                    Ok(Some(updated)) => app = updated,
+                    Ok(None) => {}
+                    Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+                }
+            }
             return Json(json!({
                 "success": true,
-                "app": record,
+                "app": app,
+                "channel": target_channel,
                 "installed_dependencies": Vec::<String>::new(),
             }))
             .into_response();
@@ -14182,8 +14374,30 @@ async fn update_app_handler(
     if let Err((status, msg)) = write_plugin_manifest_to_disk(&manifest).await {
         return json_error(status, msg);
     }
-    match update_app(&state.app_store, &manifest, ui_code.as_deref(), body.force).await {
+    match update_app(
+        &state.app_store,
+        &manifest,
+        ui_code.as_deref(),
+        body.force || switching_channel,
+    )
+    .await
+    {
         Ok(updated) => {
+            // Persist the pin BEFORE reporting success: the record now carries a
+            // version off the new train, and leaving the old pin would send the very
+            // next update back to the train the user just left.
+            let updated = if switching_channel {
+                match state
+                    .app_store
+                    .set_channel(&id, Some(target_channel.as_str()))
+                    .await
+                {
+                    Ok(Some(record)) => record,
+                    Ok(None) | Err(_) => updated,
+                }
+            } else {
+                updated
+            };
             reload_manifests_inner(&state).await;
             // Live contributions refresh — same lossy `system:plugins` nudge as
             // the enable/disable handlers, so an updated plugin's new contributions
@@ -14193,12 +14407,24 @@ async fn update_app_handler(
                 "plugin.contributions.changed",
                 json!({"type": "contributions_changed"}),
             );
-            Json(json!({
+            let mut payload = json!({
                 "success": true,
                 "app": updated,
+                "channel": target_channel,
                 "installed_dependencies": installed_dependencies,
-            }))
-            .into_response()
+            });
+            if switching_channel {
+                // Named explicitly so a client can say "moved to beta, which is
+                // currently 1.2.0-beta.3 — older than the 1.2.0 you had" instead of
+                // rendering a version that silently went backwards.
+                payload["channel_switch"] = json!({
+                    "from": record.channel,
+                    "to": target_channel,
+                    "from_version": record.version,
+                    "to_version": manifest.version,
+                });
+            }
+            Json(payload).into_response()
         }
         Err(e) => {
             if let Some(old) = &old_manifest {
@@ -14272,7 +14498,9 @@ async fn install_new_dependencies_for_update(
             continue;
         }
 
-        match resolve_plugin_from_catalog(state, &next, buyer_token.clone()).await {
+        // A dependency resolves on its own default train, never the target's — see
+        // the note on `resolve_plugin_from_catalog`.
+        match resolve_plugin_from_catalog(state, &next, buyer_token.clone(), None).await {
             Ok((m, ui_code)) => {
                 if m.id != next {
                     return Err((
@@ -30704,6 +30932,7 @@ mod app_tool_filter_tests {
             version: "1.0.0".to_owned(),
             enabled,
             approved_grants: vec![],
+            channel: crate::update::STABLE_CHANNEL.to_owned(),
             created_at: None,
             updated_at: None,
         }
